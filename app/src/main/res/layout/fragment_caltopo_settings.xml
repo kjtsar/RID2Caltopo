@@ -1,0 +1,421 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:orientation="vertical">
+
+<HorizontalScrollView
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:fillViewport="true"
+    android:scrollbarAlwaysDrawHorizontalTrack="true">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="4dp">
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView
+                android:id="@+id/CtConfigTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:inputType="none"
+                android:text="CaltopoCfg: "
+                android:textAlignment="textStart"
+                android:textSize="20sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintHorizontal_bias="0.5"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent"/>
+
+
+            <ToggleButton
+                android:id="@+id/ct_directToggle"
+                android:layout_width="80dp"
+                android:layout_height="match_parent"
+                android:layout_gravity="center"
+                android:checked="false"
+                android:enabled="true"
+                android:textAlignment="center"
+                android:textOff="Live"
+                android:textOn="@string/ct_directButton"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/CtConfigTitle"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <Button
+                android:id="@+id/ct_saveButton"
+                android:layout_width="65dp"
+                android:layout_height="match_parent"
+                android:layout_gravity="center"
+                android:enabled="false"
+                android:text="@string/ct_SaveButton"
+                android:textAlignment="center"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ct_directToggle"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <Button
+                android:id="@+id/ct_closeButton"
+                android:layout_width="70dp"
+                android:layout_height="match_parent"
+                android:text="@string/ct_closeButton"
+                android:textAlignment="center"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ct_saveButton"
+                app:layout_constraintTop_toTopOf="parent" />
+
+
+            <TextView
+                android:id="@+id/CtInfo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:inputType="none"
+                android:text=""
+                android:textAlignment="textStart"
+                android:textSize="14sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ct_closeButton"
+                app:layout_constraintTop_toTopOf="parent"/>
+
+
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:visibility="visible">
+
+            <TextView
+                android:id="@+id/groupLabelText"
+                android:layout_width="170dp"
+                android:layout_height="50dp"
+                android:inputType="none"
+                android:linksClickable="false"
+                android:longClickable="false"
+                android:singleLine="true"
+                android:text="@string/ct_groupid"
+                android:textAlignment="textEnd"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <EditText
+                android:id="@+id/groupIdText"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_weight="0"
+                android:inputType="text|textNoSuggestions"
+                android:singleLine="true"
+                android:text="initial text content"
+                android:textAlignment="viewStart"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintHorizontal_bias="0"
+                app:layout_constraintStart_toEndOf="@+id/groupLabelText"
+                app:layout_constraintTop_toTopOf="parent" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:visibility="visible">
+
+            <TextView
+                android:id="@+id/mapIdLabelText"
+                android:layout_width="170dp"
+                android:layout_height="50dp"
+                android:inputType="none"
+                android:linksClickable="false"
+                android:longClickable="false"
+                android:singleLine="true"
+                android:text="Map Id:"
+                android:textAlignment="textEnd"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <EditText
+                android:id="@+id/mapIdEditText"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_weight="0"
+                android:inputType="text|textNoSuggestions"
+                android:singleLine="true"
+                android:text="initial text content"
+                android:textAlignment="viewStart"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintHorizontal_bias="0"
+                app:layout_constraintStart_toEndOf="@+id/mapIdLabelText"
+                app:layout_constraintTop_toTopOf="parent" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="60dp">
+
+            <TextView
+                android:id="@+id/minChangeLabel"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="false"
+                android:text="minimum change in feet between waypoints:"
+                android:textAlignment="textEnd"
+                android:textSize="14sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <EditText
+                android:id="@+id/minChangedText"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:inputType="text|textNoSuggestions"
+                android:singleLine="true"
+                android:text="@string/ct_minChgFtVal"
+                android:textAlignment="viewStart"
+                android:textSize="18sp"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintHorizontal_bias="0"
+                app:layout_constraintStart_toEndOf="@+id/minChangeLabel"
+                tools:layout_editor_absoluteY="4dp" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="60dp">
+
+            <TextView
+                android:id="@+id/newTrackDelayInSeconds"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="false"
+                android:text="New Track Delay between waypoints (in seconds):"
+                android:textAlignment="textEnd"
+                android:textSize="14sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <EditText
+                android:id="@+id/newTrackDelayInSecEditText"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:inputType="text|textNoSuggestions"
+                android:singleLine="true"
+                android:text="30"
+                android:textAlignment="viewStart"
+                android:textSize="18sp"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintHorizontal_bias="0"
+                app:layout_constraintStart_toEndOf="@+id/newTrackDelayInSeconds"
+                tools:layout_editor_absoluteY="4dp" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="60dp">
+
+            <TextView
+                android:id="@+id/maxAgeInSecondsLabel"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="false"
+                android:text="Max age of drones (in seconds) or 0 to display all."
+                android:textAlignment="textEnd"
+                android:textSize="14sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <EditText
+                android:id="@+id/maxAgeInSecEditText"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:inputType="text|textNoSuggestions"
+                android:singleLine="true"
+                android:text="30"
+                android:textAlignment="viewStart"
+                android:textSize="18sp"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintHorizontal_bias="0"
+                app:layout_constraintStart_toEndOf="@+id/maxAgeInSecondsLabel"
+                tools:layout_editor_absoluteY="4dp" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            tools:layout_editor_absoluteX="4dp"
+            tools:layout_editor_absoluteY="102dp">
+
+            <Button
+                android:id="@+id/archiveDirButton"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:clickable="true"
+                android:inputType="none"
+                android:singleLine="true"
+                android:text="@string/ct_archiveDirDesc"
+                android:textAlignment="textEnd"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <TextView
+                android:id="@+id/archiveDirVal"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:clickable="true"
+                android:inputType="none"
+                android:text="@string/ct_archivePath"
+                android:textAlignment="viewStart"
+                android:textSize="14sp"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintHorizontal_bias="0"
+                app:layout_constraintStart_toEndOf="@+id/archiveDirButton" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:background="#00BCD4"
+            tools:layout_editor_absoluteX="4dp"
+            tools:layout_editor_absoluteY="102dp">
+
+            <TextView
+                android:id="@+id/ctRidlabel"
+                android:layout_width="200dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="true"
+                android:text="Remote Id"
+                android:textAlignment="center"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <TextView
+                android:id="@+id/ctMidlabel"
+                android:layout_width="180dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="true"
+                android:text="Mapped Id"
+                android:textAlignment="center"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ctRidlabel"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <TextView
+                android:id="@+id/ctUSMsgCountLabel"
+                android:layout_width="75dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="false"
+                android:text="unsaved\nmsg cnt"
+                android:textAlignment="center"
+                android:textSize="14sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ctMidlabel"
+                app:layout_constraintTop_toTopOf="parent" />
+
+
+            <TextView
+                android:id="@+id/ctOrgLabel"
+                android:layout_width="100dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="false"
+                android:text="Org"
+                android:textAlignment="center"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ctUSMsgCountLabel"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <TextView
+                android:id="@+id/ctModelLabel"
+                android:layout_width="250dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="false"
+                android:text="Model"
+                android:textAlignment="center"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ctOrgLabel"
+                app:layout_constraintTop_toTopOf="parent" />
+
+
+            <TextView
+                android:id="@+id/ctOwnerLabel"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:inputType="none"
+                android:singleLine="false"
+                android:text="Owner"
+                android:textAlignment="center"
+                android:textSize="18sp"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/ctModelLabel"
+                app:layout_constraintTop_toTopOf="parent" />
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="250dp"
+            android:fillViewport="true"
+            android:scrollbarAlwaysDrawVerticalTrack="true"
+            android:scrollbars="vertical">
+
+            <ListView
+                android:id="@+id/ct_mapListview"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:layout_marginBottom="4dp"
+                android:background="#E4E4E4" />
+        </ScrollView>
+    </LinearLayout>
+</HorizontalScrollView>
+</ScrollView>

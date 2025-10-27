@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.RID2Caltopo" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.RID2Caltopo.AppBarOverlay" parent="ThemeOverlay.AppCompat.Dark.ActionBar" />
+    <style name="Theme.RID2Caltopo.PopupOverlay" parent="ThemeOverlay.AppCompat.Light" />
+
+
+    <!-- <style name="Theme.RID2Caltopo" parent="android:Theme.Material.Light.NoActionBar">
+         <item name="windowActionBar">false</item>
+        - This is a Compose theme, and its parent is NOT an AppCompat theme -->
+
+    </resources>

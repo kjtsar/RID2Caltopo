@@ -9,13 +9,11 @@ This functionality closes the previously open loop between search assignments an
 [Caltopo](https://www.caltopo.com) is the preferred search management platform for many SAR agencies, including the Nevada County Sheriff's Search And Rescue organization from which this project originates.
 This project is very thankful for and leverages the network sniffing and decoding work of the [OpenDroneId](https://github.com/opendroneid/receiver_android) project.
 
-[comment]: <> (![](images/Screenshot.jpg)
-
 Android phones and tablets have limited sensitivity to the Remote ID signalling.   To make this tool work for SAR applications, where drone search segments can span many
 thousands of feet, it is recommended that you pair you app with a [Dronescout Bridge](https://www.gearfocus.com/products/new-bluemark-ds100-dronescout-retail-bridge-faa-remote-id-re-rEBYx)
 Just power-up the bridge and raise it up a fair bit to optimize coverage:
 
-<img alt="Dronescout Bridge on antenna mast" src="images/DronescoutBridge.jpg" width="257" height="362")
+<img alt="Dronescout Bridge on antenna mast" src="images/DronescoutBridge.jpg" width="257" height="360">
 
 Please note: The user of this receiver application must always visually verify that the received Open Drone ID signal corresponds to an actual drone seen flying in the air, at the position the signal claims it to be.
 

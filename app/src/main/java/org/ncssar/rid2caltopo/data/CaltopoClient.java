@@ -57,7 +57,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.*;
 import java.util.function.Function;
-import java.util.function.Predicate;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -66,12 +65,6 @@ import org.json.JSONObject;
 import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.R2CActivity;
-import org.ncssar.rid2caltopo.data.CtDroneSpec;
-import org.ncssar.rid2caltopo.data.CtAlertDialog;
-import org.ncssar.rid2caltopo.data.DelayedExec;
-import org.ncssar.rid2caltopo.data.CaltopoClientMap;
-import org.ncssar.rid2caltopo.data.CaltopoLiveTrack;
-import org.ncssar.rid2caltopo.data.CaltopoSessionConfig;
 
 
 
@@ -79,11 +72,10 @@ import org.ncssar.rid2caltopo.data.CaltopoSessionConfig;
  * Persistent state management for CaltopoClient
  */
 class ClientClassState implements Serializable {
-    private static final long SerialVersionUID = 17L; // Serializable version.
+    private static final long SerialVersionUID = 18L; // Serializable version.
     public long minDistanceInFeet;
     public String groupId;
     public String archivePath;
-    public Hashtable<String, CtDroneSpec> droneSpecTable;  // Table to map remoteIDs to their data
     public String caltopoTrackFolder;
     public CaltopoSessionConfig caltopoSessionConfig;
     public String mapId;
@@ -91,6 +83,7 @@ class ClientClassState implements Serializable {
     public long newTrackDelayInSeconds;
     public long maxDisplayAgeInSeconds;
     public int debugLevel;
+    public Hashtable<String, CtDroneSpec> droneSpecTable;  // Table to map remoteIDs to their data
 
     // Default/initial state for the caltopo client:
     ClientClassState() {
@@ -102,7 +95,7 @@ class ClientClassState implements Serializable {
         mapId = "";
         useDirectFlag = false;
         newTrackDelayInSeconds = 20;
-        maxDisplayAgeInSeconds = 0 ;
+        maxDisplayAgeInSeconds = 60 ;
         debugLevel = -1; // undefined.
         droneSpecTable = new Hashtable<>(16);
     }
@@ -171,7 +164,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static ClientClassState Ccstate = null;
     private static AppCompatActivity AppActivity = null;
     private static Context AppContext = null;
-    private static final String MyStateFileName = TAG + BuildConfig.BUILD_TIME + ".ser";
+//    private static final String MyStateFileName = TAG + BuildConfig.BUILD_TIME + ".ser";
+    private static final String MyStateFileName = TAG + ".ser";
     private static String LogFilePath;
     private static ActivityResultLauncher<Intent> QueryArchivePath;
     private static ActivityResultLauncher<Intent> LoadConfigFileLauncher;

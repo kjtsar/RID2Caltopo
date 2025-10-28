@@ -42,9 +42,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient SimpleTimer flightSimpleTimer;
 
     public void bumpTransportCount(TransportTypeEnum tt) {
+        if (null == transportCount) transportCount = new int[TransportTypeEnum.values().length];
         transportCount[tt.ordinal()]+=1; totalCount++;
     }
     public int getTransportCount(TransportTypeEnum tt) {
+        if (null == transportCount) transportCount = new int[TransportTypeEnum.values().length];
         return transportCount[tt.ordinal()];
     }
     public void startTimer() {
@@ -58,6 +60,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public int getTotalCount() {
         return totalCount;
+    }
+
+    @Nullable
+    public R2CRest getR2COwner() {
+        return ownerR2c;
     }
 
     public CtDroneSpec() throws RuntimeException {

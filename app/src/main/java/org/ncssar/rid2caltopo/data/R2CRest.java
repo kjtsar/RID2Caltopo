@@ -301,6 +301,14 @@ public class R2CRest implements WsPipe.WsMsgListener {
         liveTrack.updateStatus(R2CRespEnum.forwardToClient);
     }
 
+    public String getRttString() {
+        if (null != localR2cRttAvgMsec) {
+            return String.format(Locale.US, "%.3f",
+                    (double)(localR2cRttAvgMsec.get())/1000.0);
+        } else {
+            return "N/A";
+        }
+    }
 
     private static int IncrementAckCountForRid(@NonNull String remoteId) {
         Integer currentVal = OutstandingAcksByRid.get(remoteId);

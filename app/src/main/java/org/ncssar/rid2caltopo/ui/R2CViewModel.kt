@@ -39,4 +39,8 @@ class R2CViewModel : ViewModel(), CaltopoClient.CtDroneSpecArrayMonitor {
         CaltopoClient.SetDroneSpecMonitor(null)
         super.onCleared()
     }
+
+    fun updateMappedId(aircraft: CtDroneSpec, newMappedId: String) {
+        aircraft.setMappedId(newMappedId)
+    }
 }

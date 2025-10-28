@@ -2,9 +2,12 @@ package org.ncssar.rid2caltopo.ui
 
 import android.view.View
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
@@ -16,7 +19,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CtDroneSpec
@@ -37,6 +39,7 @@ fun R2CView(
     onLoadConfigFile: () -> Unit,
     onShowVersion: () -> Unit,
     onShowSettings: () -> Unit,
+    onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     rootView = LocalView.current
@@ -78,13 +81,23 @@ fun R2CView(
             )
         }
     ) { paddingValues ->
-        Column(modifier = Modifier.padding(paddingValues)) {
-            AppHeader(appUptime)
-            RidmapHeader()
-            LazyColumn {
-                CTDebug("R2CView", "LazyColumn")
-                items(aircrafts) { aircraft ->
-                    AircraftItem(aircraft = aircraft)
+        Box(
+            modifier = Modifier
+                .padding(paddingValues)
+                .fillMaxSize()
+                .horizontalScroll(rememberScrollState())
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                AppHeader(appUptime)
+                RidmapHeader()
+                aircrafts.forEach { aircraft ->
+                    AircraftItem(aircraft = aircraft) { newMappedId ->
+                        onMappedIdChange(aircraft, newMappedId)
+                    }
                 }
             }
         }
@@ -103,7 +116,7 @@ fun AppHeader(appUptime: String) {
             modifier = Modifier.width(300.dp)
         ) {
             Text(
-                text = R2CActivity.MyDeviceName?:"<unknown>",
+                text = R2CActivity.MyDeviceName ?: "<unknown>",
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp)
@@ -115,7 +128,7 @@ fun AppHeader(appUptime: String) {
                 text = R2CActivity.GetMyAppVersion(),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
@@ -135,7 +148,7 @@ fun AppHeader(appUptime: String) {
                 text = "Up Time:",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(29.dp)
+                    .height(30.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 16.sp
@@ -144,7 +157,7 @@ fun AppHeader(appUptime: String) {
                 text = appUptime,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
@@ -164,7 +177,7 @@ fun AppHeader(appUptime: String) {
                 text = "ct rtt",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(29.dp)
+                    .height(30.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
@@ -173,7 +186,7 @@ fun AppHeader(appUptime: String) {
                 text = "0.000 sec",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
@@ -191,7 +204,7 @@ fun RidmapHeader() {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(250.dp)
         ) {
             Text(
                 text = "",
@@ -204,14 +217,14 @@ fun RidmapHeader() {
                 text = "Remote ID:",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                fontSize = 18.sp
             )
         }
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(250.dp)
         ) {
             Text(
                 text = "",
@@ -224,22 +237,21 @@ fun RidmapHeader() {
                 text = "Track Label:",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                fontSize = 18.sp
             )
         }
         Column(
-            modifier = Modifier.width(300.dp)
+            modifier = Modifier.width(500.dp)
         ) {
             Text(
                 text = "Waypoints Received",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(24.dp)
-                    .background(Color.White)
-                    .padding(bottom = 1.dp),
+                    .height(25.dp)
+                    .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
             )
@@ -250,75 +262,70 @@ fun RidmapHeader() {
                 Text(
                     text = "BT4:",
                     modifier = Modifier
-                        .width(60.dp)
-                        .height(23.dp)
-                        .background(Color.White)
-                        .padding(end = 1.dp),
+                        .width(100.dp)
+                        .height(25.dp)
+                        .background(Color.White),
                     textAlign = TextAlign.Center,
-                    fontSize = 14.sp
+                    fontSize = 18.sp
                 )
                 Text(
                     text = "BT5:",
                     modifier = Modifier
-                        .width(60.dp)
-                        .height(23.dp)
-                        .background(Color.White)
-                        .padding(end = 1.dp),
+                        .width(100.dp)
+                        .height(25.dp)
+                        .background(Color.White),
                     textAlign = TextAlign.Center,
-                    fontSize = 14.sp
+                    fontSize = 18.sp
                 )
                 Text(
                     text = "WiFi:",
                     modifier = Modifier
-                        .width(60.dp)
-                        .height(23.dp)
-                        .background(Color.White)
-                        .padding(end = 1.dp),
+                        .width(100.dp)
+                        .height(25.dp)
+                        .background(Color.White),
                     textAlign = TextAlign.Center,
-                    fontSize = 14.sp
+                    fontSize = 18.sp
                 )
                 Text(
                     text = "NaN:",
                     modifier = Modifier
-                        .width(60.dp)
-                        .height(23.dp)
-                        .background(Color.White)
-                        .padding(end = 1.dp),
+                        .width(100.dp)
+                        .height(25.dp)
+                        .background(Color.White),
                     textAlign = TextAlign.Center,
-                    fontSize = 14.sp
+                    fontSize = 18.sp
                 )
                 Text(
                     text = "Total:",
                     modifier = Modifier
-                        .width(60.dp)
-                        .height(23.dp)
+                        .width(100.dp)
+                        .height(25.dp)
                         .background(Color.White),
                     textAlign = TextAlign.Center,
-                    fontSize = 14.sp
+                    fontSize = 18.sp
                 )
             }
         }
         Column(
-            modifier = Modifier.width(100.dp)
+            modifier = Modifier.width(150.dp)
         ) {
             Text(
                 text = "Flight",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                fontSize = 18.sp
             )
             Text(
                 text = "Duration:",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
-                    .background(Color.White)
-                    .padding(top = 1.dp),
+                    .height(25.dp)
+                    .background(Color.White),
                 textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                fontSize = 18.sp
             )
         }
         Column(
@@ -328,18 +335,17 @@ fun RidmapHeader() {
                 text = "",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
+                    .height(25.dp)
                     .background(Color.White)
             )
             Text(
-                text = "r2c rtt:",
+                text = "R2C RTT:",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(23.dp)
-                    .background(Color.White)
-                    .padding(top = 1.dp),
+                    .height(25.dp)
+                    .background(Color.White),
                 textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                fontSize = 18.sp
             )
         }
     }
@@ -350,6 +356,6 @@ fun RidmapHeader() {
 @Composable
 fun R2CViewPreview() {
     RID2CaltopoTheme {
-        R2CView(emptyList(), "", {}, {}, {}, {}, {})
+        R2CView(emptyList(), "", {}, {}, {}, {}, {}, { _, _ -> })
     }
 }

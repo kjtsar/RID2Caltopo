@@ -95,7 +95,8 @@ class R2CActivity : AppCompatActivity() {
                     onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(), "text/plain") },
                     onLoadConfigFile = { CaltopoClient.RequestLoadConfigFile() },
                     onShowVersion = { showToast(BuildConfig.BUILD_TIME) },
-                    onShowSettings = { showCaltopoConfigPanel() }
+                    onShowSettings = { showCaltopoConfigPanel() },
+                    onMappedIdChange = { aircraft, newId -> viewModel.updateMappedId(aircraft, newId) }
                 )
             }
         }

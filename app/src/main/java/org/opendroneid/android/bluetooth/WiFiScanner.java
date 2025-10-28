@@ -44,6 +44,7 @@ import java.util.List;
 import java.util.Locale;
 
 import org.ncssar.rid2caltopo.data.CaltopoClient;
+import org.ncssar.rid2caltopo.data.CtDroneSpec;
 
 public class WiFiScanner {
     private static final int CIDLen = 3;
@@ -128,7 +129,7 @@ public class WiFiScanner {
             buf.position(DriStartByteOffset);
             buf.get(arr, 0, buf.remaining());
             long timeNano = SystemClock.elapsedRealtimeNanos();
-            String transportType = "Beacon";
+            CtDroneSpec.TransportTypeEnum transportType = CtDroneSpec.TransportTypeEnum.WIFI;
             dataManager.receiveDataWiFiBeacon(arr, scanResult.BSSID, scanResult.BSSID.hashCode(),
                     scanResult.level, timeNano, transportType);
         }
@@ -249,7 +250,7 @@ public class WiFiScanner {
                 public void onServiceDiscovered(PeerHandle peerHandle, byte[] serviceSpecificInfo, List<byte[]> matchFilter) {
                     CaltopoClient.CTInfo(TAG, "onServiceDiscovered: " + serviceSpecificInfo.length + ": " + Arrays.toString(serviceSpecificInfo));
 
-                    String transportType = "NAN";
+                    CtDroneSpec.TransportTypeEnum transportType = CtDroneSpec.TransportTypeEnum.WNAN;
                     long timeNano = SystemClock.elapsedRealtimeNanos();
                     dataManager.receiveDataNaN(serviceSpecificInfo, peerHandle.hashCode(), timeNano, transportType);
                 }

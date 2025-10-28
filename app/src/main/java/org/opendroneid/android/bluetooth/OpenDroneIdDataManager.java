@@ -9,6 +9,7 @@ package org.opendroneid.android.bluetooth;
 import android.bluetooth.le.ScanResult;
 import android.util.Log;
 
+import org.ncssar.rid2caltopo.data.CtDroneSpec;
 import org.opendroneid.android.Constants;
 import org.opendroneid.android.data.AircraftObject;
 import org.opendroneid.android.data.Connection;
@@ -46,7 +47,7 @@ public class OpenDroneIdDataManager {
         return aircraft;
     }
 
-    void receiveDataBluetooth(byte[] data, ScanResult result, String transportType) {
+    void receiveDataBluetooth(byte[] data, ScanResult result, CtDroneSpec.TransportTypeEnum transportType) {
         String macAddress = result.getDevice().getAddress();
         String macAddressCleaned = macAddress.replace(":", "");
         long macAddressLong = Long.parseLong(macAddressCleaned,16);
@@ -59,7 +60,7 @@ public class OpenDroneIdDataManager {
                     message, transportType);
     }
 
-    void receiveDataNaN(byte[] data, int peerHash, long timeNano, String transportType) {
+    void receiveDataNaN(byte[] data, int peerHash, long timeNano, CtDroneSpec.TransportTypeEnum transportType) {
         OpenDroneIdParser.Message<?> message =
                 OpenDroneIdParser.parseData(data, 1, timeNano, receiverLocation);
         if (message == null) {
@@ -71,14 +72,14 @@ public class OpenDroneIdDataManager {
     }
 
     void receiveDataWiFiBeacon(byte[] data, String mac, long macLong, int rssi, long timeNano,
-                               String transportType) {
+                               CtDroneSpec.TransportTypeEnum transportType) {
         OpenDroneIdParser.Message<?> message =
                 OpenDroneIdParser.parseData(data, 1, timeNano, receiverLocation);
         if (message == null)
             return;
         receiveData(timeNano, mac, macLong, rssi, message, transportType);
     }
-    void updateCaltopo(AircraftObject ac, String transportType) {
+    void updateCaltopo(AircraftObject ac, CtDroneSpec.TransportTypeEnum transportType) {
         Identification acId = ac.getIdentification1();
 
         if (null == acId) return;
@@ -146,7 +147,7 @@ public class OpenDroneIdDataManager {
 
     @SuppressWarnings("unchecked")
     void receiveData(long timeNano, String macAddress, long macAddressLong, int rssi,
-                     OpenDroneIdParser.Message<?> message, String transportType) {
+                     OpenDroneIdParser.Message<?> message, CtDroneSpec.TransportTypeEnum transportType) {
 
         // Handle connection
         boolean newAircraft = false;
@@ -175,7 +176,7 @@ public class OpenDroneIdDataManager {
 
         if (newAircraft) {
             aircraft.put(macAddressLong, ac);
-            callback.onNewAircraft(ac);
+            if (null != callback) callback.onNewAircraft(ac);
         }
 
         if (message.header.type == OpenDroneIdParser.Type.MESSAGE_PACK)

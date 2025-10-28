@@ -4,18 +4,23 @@
  */
 package org.ncssar.rid2caltopo.data;
 
-import org.ncssar.rid2caltopo.data.CaltopoLiveTrack;
-import org.ncssar.rid2caltopo.data.R2CRest;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-
 import java.io.Serializable;
 import java.util.Locale;
 
 public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
+    public enum TransportTypeEnum {
+        BT4,
+        BT5,
+        WIFI,
+        WNAN,
+        R2C,
+        UNKNOWN
+    }
     public interface CtDroneSpecListener {
         void mappedIdChanged(@NonNull CtDroneSpec droneSpec, @NonNull String oldVal, @NonNull String newVal);
     }
@@ -28,10 +33,32 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String org;
     private String owner;
     private String model; /* This is the concise text description of the drone. */
-    public long mostRecentTimeInSeconds; /* timestamp of most recent packet received */
+    public transient long mostRecentTimeInSeconds; /* timestamp of most recent packet received */
     private transient R2CRest ownerR2c;
     private transient CtDroneSpecListener myListener;
     private transient CaltopoLiveTrack myLiveTrack;
+    private transient int[] transportCount = new int[TransportTypeEnum.values().length];
+    private transient int totalCount;
+    private transient SimpleTimer flightSimpleTimer;
+
+    public void bumpTransportCount(TransportTypeEnum tt) {
+        transportCount[tt.ordinal()]+=1; totalCount++;
+    }
+    public int getTransportCount(TransportTypeEnum tt) {
+        return transportCount[tt.ordinal()];
+    }
+    public void startTimer() {
+        if (null == flightSimpleTimer) flightSimpleTimer = new SimpleTimer();
+        else flightSimpleTimer.restartTimer();
+    }
+
+    public String getDurationInSecAsString() {
+        return flightSimpleTimer.durationAsString();
+    }
+
+    public int getTotalCount() {
+        return totalCount;
+    }
 
     public CtDroneSpec() throws RuntimeException {
         throw new RuntimeException("Use one of the other constructor methods.");

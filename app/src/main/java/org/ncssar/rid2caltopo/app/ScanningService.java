@@ -15,6 +15,7 @@ import androidx.core.app.ServiceCompat;
 
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.CaltopoClient;
+import org.ncssar.rid2caltopo.data.SimpleTimer;
 import org.opendroneid.android.bluetooth.BluetoothScanner;
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager;
 import org.opendroneid.android.bluetooth.WiFiScanner;
@@ -32,6 +33,7 @@ public class ScanningService extends Service {
     private static final String CHANNEL_ID = "OpenDroneIdScanner";
     private static final String CHANNEL_NAME = "OpenDroneId Scanner Service";
     private static final int NOTIFICATION_ID = 1;
+    private static SimpleTimer ScannerUptime;
     private BluetoothScanner btScanner;
     private WiFiScanner wiFiScanner;
     private boolean scanning = false;
@@ -72,11 +74,11 @@ public class ScanningService extends Service {
         CaltopoClient.CTDebug(TAG, String.format(Locale.US,
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
-
+        if (null == ScannerUptime) ScannerUptime = new SimpleTimer();
         mAppActivity = R2CActivity.getR2CActivity();
 
         if (null == mAppActivity) {
-            CaltopoClient.CTError(TAG, "onCreate() with null DebugActivity.");
+            CaltopoClient.CTError(TAG, "onCreate() with null R2CActivity.");
             return;
         }
         mDataManager = mAppActivity.getDataManager();
@@ -91,6 +93,10 @@ public class ScanningService extends Service {
         NotificationManager notManager = getSystemService(NotificationManager.class);
         notManager.createNotificationChannel(serviceChannel);
     }
+    public static String UpTime() {
+        if (null != ScannerUptime) return ScannerUptime.durationAsString();
+        return "<unknown>";
+    }
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -103,6 +109,7 @@ public class ScanningService extends Service {
                 "onDestroy(): ScanningService 0x%x", this.hashCode()));
         stopScanning();
         super.onDestroy();
+        // FIXME: This shouldn't be necessary if we release all references...
         Process.killProcess(Process.myPid());
     }
 

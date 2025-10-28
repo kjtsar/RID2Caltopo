@@ -433,7 +433,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         long ts = payload.optLong("ts");
         double lat = payload.optDouble("lat");
         double lng = payload.optDouble("lng");
-        boolean archived = ctClient.newWaypoint(lat, lng, 0, ts, "R2C");
+        boolean archived = ctClient.newWaypoint(lat, lng, 0, ts, CtDroneSpec.TransportTypeEnum.R2C);
         long remoteCtRtt = payload.optLong("ct_rtt");
         if (remoteCtRtt > 0) remoteCtRttAvgMsec.next(remoteCtRtt);
         long remoteR2cRtt = payload.optLong("r2c_rtt");

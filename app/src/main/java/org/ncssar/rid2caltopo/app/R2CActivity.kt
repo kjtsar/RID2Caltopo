@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.app
 
+import androidx.activity.viewModels
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
@@ -14,6 +15,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -34,6 +37,8 @@ import org.opendroneid.android.bluetooth.BluetoothScanner
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
 import java.util.Locale
 import androidx.core.net.toUri
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.ui.R2CViewModel
 
 class R2CActivity : AppCompatActivity() {
     var locationRequest: LocationRequest? = null
@@ -42,6 +47,8 @@ class R2CActivity : AppCompatActivity() {
     var nanSupported: Boolean = false
     var wifiSupported: Boolean = false
     var locationCallback: LocationCallback? = null
+    private val viewModel : R2CViewModel by viewModels()
+
 
     private val outstandingPermissionsList = ArrayList<String?>()
 
@@ -78,10 +85,14 @@ class R2CActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+            val aircrafts by viewModel.aircrafts.collectAsState()
+            val appUptime by viewModel.appUpTime.collectAsState()
             RID2CaltopoTheme {
                 R2CView(
+                    aircrafts = aircrafts,
+                    appUptime = appUptime,
                     onShowHelp = { showHelpMenu() },
-                    onShowLog = { openUri("file://" + CaltopoClient.GetDebugLogPath().toString()) },
+                    onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(), "text/plain") },
                     onLoadConfigFile = { CaltopoClient.RequestLoadConfigFile() },
                     onShowVersion = { showToast(BuildConfig.BUILD_TIME) },
                     onShowSettings = { showCaltopoConfigPanel() }
@@ -133,7 +144,9 @@ class R2CActivity : AppCompatActivity() {
         val intent = Intent(Intent.ACTION_VIEW, uri)
         mimeType?.let {
             intent.setDataAndType(uri, it)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
+
         if (intent.resolveActivity(packageManager) != null) {
             startActivity(intent)
         } else {
@@ -143,11 +156,18 @@ class R2CActivity : AppCompatActivity() {
 
     private fun checkBluetoothSupport() {
         if (checkSelfPermission(Manifest.permission.BLUETOOTH) !=
-            PackageManager.PERMISSION_GRANTED) return
+            PackageManager.PERMISSION_GRANTED) {
+            CTError(TAG, "checkBluetoothSupport(): Did not get access to bluetooth!")
+            return
+        }
 
         val bluetoothAdapter: BluetoothAdapter? = BluetoothScanner.getBluetoothAdapter(this)
-        if (null == bluetoothAdapter) return
+        if (null == bluetoothAdapter) {
+            CTError(TAG, "Not able to access bluetooth adapter.")
+            return
+        }
         MyDeviceName = bluetoothAdapter.name
+        CTDebug(TAG, "Setting MyDeviceName to: " + MyDeviceName)
         if (bluetoothAdapter.isLeCodedPhySupported) {
             codedPhySupported = true
         }
@@ -184,30 +204,26 @@ class R2CActivity : AppCompatActivity() {
         requestCode: Int, permissions: Array<String>,
         grantResults: IntArray
     ) {
-        CaltopoClient.CTDebug(TAG, "In onRequestPermissionsResult()")
+        CTDebug(TAG,String.format(Locale.US,
+            "onRequestPermissionsResult(%d)", requestCode))
         super.onRequestPermissionsResult(requestCode, permissions as Array<out String>, grantResults)
         if (requestCode == Constants.REQUEST_BULK_PERMISSIONS) {
             for (i in permissions.indices) {
                 outstandingPermissionsList.remove(permissions[i])
                 if (grantResults[i] != PackageManager.PERMISSION_GRANTED) {
-                    CaltopoClient.CTError(
+                    CTError(
                         TAG,
                         "onRequestPermissionsResult: Did not get " + permissions[i]
                     )
                 } else {
-                    CaltopoClient.CTDebug(
+                    CTDebug(
                         TAG,
                         "onRequestPermissionsResult(): Received " + permissions[i]
                     )
                 }
             }
-            initialize()
-            return
         }
-        CaltopoClient.CTDebug(
-            TAG,
-            String.format(Locale.US, "onRequestPermissionsResult(%d)", requestCode)
-        )
+        if (outstandingPermissionsList.isEmpty()) initialize()
     }
 
 
@@ -216,7 +232,7 @@ class R2CActivity : AppCompatActivity() {
         checkBluetoothSupport()
         checkNaNSupport()
         checkWiFiSupport()
-        CaltopoClient.CTDebug(TAG, "initialize()")
+        CTDebug(TAG, "initialize()")
         CaltopoClient.PermissionsGrantedWeShouldBeGoodToGo()
         InitializedCalled = true
 
@@ -327,6 +343,11 @@ class R2CActivity : AppCompatActivity() {
         @JvmStatic
         fun getDataManager(): OpenDroneIdDataManager? {
             return DataManager
+        }
+        @JvmStatic
+        fun GetMyAppVersion(): String {
+            return String.format(Locale.US,
+                "%s(%s)",BuildConfig.BUILD_VERSION, BuildConfig.BUILD_TIME);
         }
     }
 }

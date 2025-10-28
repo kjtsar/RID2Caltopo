@@ -23,6 +23,7 @@ import android.os.ParcelUuid;
 import androidx.core.app.ActivityCompat;
 
 import org.ncssar.rid2caltopo.data.CaltopoClient;
+import org.ncssar.rid2caltopo.data.CtDroneSpec;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -64,10 +65,10 @@ public class BluetoothScanner {
             String string = String.format(Locale.US, "scan: addr=%s flags=0x%02X rssi=% d, len=%d",
                     addr, advertiseFlags, rssi, bytes != null ? bytes.length : -1);
 
-            String transportType = "BT4";
+            CtDroneSpec.TransportTypeEnum transportType = CtDroneSpec.TransportTypeEnum.BT4;
             if (bluetoothAdapter.isLeCodedPhySupported()) {
                 if (result.getPrimaryPhy() == BluetoothDevice.PHY_LE_CODED)
-                    transportType = "BT5";
+                    transportType = CtDroneSpec.TransportTypeEnum.BT5;
             }
 
             dataManager.receiveDataBluetooth(bytes, result, transportType);

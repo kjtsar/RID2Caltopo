@@ -6,20 +6,25 @@ plugins {
 android {
     namespace "org.ncssar.rid2caltopo"
     compileSdk 34
+    def versionMajor= 1
+    def versionMinor = 0
+    def versionPatch = 0
 
     defaultConfig {
         applicationId "org.ncssar.rid2caltopo"
         minSdk 29
         targetSdk 34
         versionCode 1
-        versionName "1.0"
+        versionName "${versionMajor}.${versionMinor}.${versionPatch}"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
         manifestPlaceholders = [
                 'appAuthRedirectScheme': 'org.ncssar.rid2caltopo'
         ]
         resValue "string", "app_version", "${defaultConfig.versionName}${versionNameSuffix}"
+
         android.buildFeatures.buildConfig true
+        buildConfigField "String", "BUILD_VERSION", "\"${defaultConfig.versionName}\""
         def buildTime = new Date()
         buildConfigField "String", "BUILD_TIME", "\"${buildTime.format('ddLLLyyyy:HHmmss')}\""
     }

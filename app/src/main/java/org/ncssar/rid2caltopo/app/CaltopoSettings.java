@@ -456,7 +456,7 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
     }
     public void droneSpecArrayChanged() {
         long ageInSec = CaltopoClient.GetMaxDisplayAgeInSeconds();
-        currentDroneSpecs = CaltopoClient.GetSortedCurrentDroneSpecArray(ageInSec);
+        currentDroneSpecs = CaltopoClient.GetSortedCurrentDroneSpecArray();
         if (null != mapListView) mapListView.invalidate();
     }
 

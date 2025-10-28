@@ -119,7 +119,7 @@ public class WaypointTrack {
 	// returns true if waypoint meets requirements and is added to track.
 	public static boolean AddWaypointForTrack(@NonNull String trackLabel, double lat, double lng,
 											  long altAboveLaunchInMeters, long timestampInMillisec,
-											  String transportType) {
+											  CtDroneSpec.TransportTypeEnum transportType) {
 		WaypointTrack track = TrackMap.get(trackLabel);
 		if (null == track) {
 			track = new WaypointTrack(trackLabel);
@@ -200,7 +200,7 @@ public class WaypointTrack {
 
 	// returns true if waypoint added
 	public boolean addWaypoint(double lat, double lng,
-							   long altInMeters, long timestampInMillisec, String transportType) {
+							   long altInMeters, long timestampInMillisec, CtDroneSpec.TransportTypeEnum transportType) {
 		long distanceInFeet = 0;
 
 		if ((lastTimestampInMillisec != 0) && (timestampInMillisec <= lastTimestampInMillisec)) {

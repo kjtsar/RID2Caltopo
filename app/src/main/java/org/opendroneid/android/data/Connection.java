@@ -6,11 +6,13 @@
  */
 package org.opendroneid.android.data;
 
+import org.ncssar.rid2caltopo.data.CtDroneSpec;
+
 import java.util.Locale;
 
 public class Connection extends MessageData {
     public int rssi;
-    public String transportType;
+    public CtDroneSpec.TransportTypeEnum transportType;
     public String macAddress;
     public long lastSeen;
     public long firstSeen;

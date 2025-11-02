@@ -125,11 +125,11 @@ class ClientClassState implements Serializable {
         }
 
         return String.format(Locale.US,
-                "vers:'%d', minDist:'%d' ft, groupId:'%s', mapId:'%s',\n" +
+                "vers:'%d', minDist:'%d' ft, groupId:'%s', mapId:'%s', useDirectFlag:'%s'\n" +
                         "newTrackDelayInSec:%d, maxDisplayAgeInSec:%d, debugLevel:%d, " +
                         "archivePath: '%s', \n caltopoTrackFolder: '%s', caltopoDomainAndPort:%s, \n" +
                         "teamId: '%s', credId: '%s' credSecret: '%s', ht: %s",
-                SerialVersionUID, minDistanceInFeet, groupId, mapId,
+                SerialVersionUID, minDistanceInFeet, groupId, mapId, useDirectFlag,
                 newTrackDelayInSeconds, maxDisplayAgeInSeconds, debugLevel,
                 (archivePath == null) ? "" : archivePath,
                 caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
@@ -172,7 +172,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static OutputStream DebugOutputStream;
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
-    private static CtDroneSpecArrayMonitor DroneSpecArrayMonitor;
+    private static CtDroneSpec.DroneSpecsChangedListener DroneSpecsChangedListener;
     private boolean currentTracksUseDirectFlag;
     private String trackLabel;
     private static CaltopoClientMap MyCaltopoClientMap;
@@ -187,7 +187,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static DelayedExec UiUpdatePoll;
     private static boolean DroneSpecArrayChanged = false;
     private static long PreviousEarliestAgeOutInSeconds = 0;
-    private static ArrayList <CtDroneSpec>DsArray = new ArrayList<>(16);
+    private static final ArrayList <CtDroneSpec>DsArray = new ArrayList<>(16);
 
 
     public CaltopoClient(String rid) throws RuntimeException {
@@ -202,16 +202,22 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             droneSpec = new CtDroneSpec(rid);
             ccs.droneSpecTable.put(rid, droneSpec);
             ArchiveState("dronespec changed for " + rid);
-            DroneSpecArrayChanged = true;
         }
+        DroneSpecArrayChanged = true;
         droneSpec.setDroneSpecListener(this);
         idleTimeoutPoll = new DelayedExec();
     }
-    public static void SetDroneSpecMonitor(CtDroneSpecArrayMonitor newMonitor) {
-        DroneSpecArrayMonitor = newMonitor;
+    public static void SetDroneSpecsChangedListener(CtDroneSpec.DroneSpecsChangedListener newListener) {
+        DroneSpecsChangedListener = newListener;
     }
 
     public static int GetDebugLevel() {return DebugLevel;}
+
+    @Nullable
+    public static CtDroneSpec GetDroneSpec(@NonNull String remoteId) {
+        ClientClassState ccs = GetState();
+        return (ccs.droneSpecTable.get(remoteId));
+    }
 
     public void mappedIdChanged(@NonNull CtDroneSpec ds, @NonNull String oldval, @NonNull String newval) {
         CTDebug(TAG, String.format(Locale.US,
@@ -517,10 +523,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String trackFolder = json.optString("track_folder");
         String mapid = json.optString("map_id");
         String groupid = json.optString("group_id");
+        String useDirectString = json.optString("use_direct_flag");
+        CTDebug(TAG, "readCredentialsFileContent(): read useDirectFlag as: " + useDirectString);
+        boolean useDirectFlag = useDirectString.equalsIgnoreCase("true");
+        CTDebug(TAG, "readCredentialsFileContent(): setting useDirectFlag to: " + useDirectFlag);
+        SetUseDirect(useDirectFlag);
         if (!trackFolder.isEmpty()) SetTrackFolderName(trackFolder);
         if (!mapid.isEmpty()) SetMapId(mapid);
         if (!groupid.isEmpty()) SetGroupId(groupid);
-
         SetCaltopoSessionConfig(new CaltopoSessionConfig(teamId, credentialId, credentialSecret));
     }
     public static void readRidmapFileContent(JSONObject json) throws JSONException {
@@ -593,9 +603,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (0 != changeCount) {
             ccs.droneSpecTable = mergedTable;
             ArchiveState("merged ridmap with updates/changes.");
-            if (null != DroneSpecArrayMonitor) {
+            if (null != DroneSpecsChangedListener) {
                 DroneSpecArrayChanged = true;
-                DroneSpecArrayMonitor.droneSpecArrayChanged();
+                DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray());
             }
         }
     }
@@ -877,7 +887,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CheckBringUpMap() {
-        if (GetUseDirectFlag() && null != DebugOutputStream && null != GetGroupId() || null != GetMapId()) {
+        if (GetUseDirectFlag() && null != MyCaltopoClientMap &&
+                null != DebugOutputStream && null != GetGroupId() || null != GetMapId()) {
             CTDebug(TAG, "CheckBringUpMap()...");
             ConnectToMap();
         }
@@ -959,7 +970,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             } catch (IOException e) {
                 Log.e(TAG, "CTError: Shutdown raised: " + e);
             }
-            UiUpdatePoll.stop();
+            if (null != UiUpdatePoll) UiUpdatePoll.stop();
         }
     }
 
@@ -1195,11 +1206,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
         }
         droneSpec.mostRecentTimeInSeconds = System.currentTimeMillis() / 1000;
-        if (null != DroneSpecArrayMonitor) {
+        if (null != DroneSpecsChangedListener) {
             if (null == UiUpdatePoll) {
                 UiUpdatePoll = new DelayedExec();
-                DroneSpecArrayMonitor.droneSpecArrayChanged();
-                UiUpdatePoll.start(DroneSpecArrayMonitor::droneSpecArrayChanged, 1000, 1000);
+                DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray());
+                UiUpdatePoll.start(() -> {
+                    DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray());
+                }, 1000, 1000);
             }
         }
         return true;

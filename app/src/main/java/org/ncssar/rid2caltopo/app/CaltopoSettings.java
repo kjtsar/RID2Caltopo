@@ -551,7 +551,6 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
             updateViewMaps();
         });
 
-        CaltopoClient.SetDroneSpecMonitor(this);
         return settingsView;
     }
 }

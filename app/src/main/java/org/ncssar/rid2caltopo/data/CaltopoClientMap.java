@@ -302,8 +302,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                 CTError(TAG, "parseMap(): feature missing title: " + feature.toString(4));
 // This happened a few times during trial and error with Caltopo's v1 API.  No way to delete
 //                these runt features w/in the GUI, so...
-//                String id = feature.optString("id");
-//                if (!id.isEmpty()) Csp.deleteShapeWithId(id, null);
+                String id = feature.optString("id");
+                if (!id.isEmpty()) Csp.deleteShapeWithId(id, null);
                 continue;
             }
             String classProp = prop.optString("class", "");
@@ -461,7 +461,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
      * stopped responding or it sent a message saying it was going away.
      * Hopefully it will remove it's marker from the map
      */
-    public static void RemoveClient(R2CRest client) {
+    public static void RemoveClient(@NonNull R2CRest client) {
         for (CaltopoClientMap map : Maps) {  // remove the specified client from all our maps:
             R2CRest mappedClient = map.clientIdMap.remove(client.getRemoteUUID());
             if (null != mappedClient) {
@@ -470,7 +470,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         }
     }
 
-    public static void AddClient(R2CRest client) {
+    public static void AddClient(@NonNull R2CRest client) {
         if (null != CurrentMap) CurrentMap.addClient(client);
     }
 

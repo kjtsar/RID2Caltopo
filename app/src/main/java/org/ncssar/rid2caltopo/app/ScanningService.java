@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo;
 import android.os.IBinder;
 import android.os.Process;
 
+import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.ServiceCompat;
 
@@ -33,7 +34,7 @@ public class ScanningService extends Service {
     private static final String CHANNEL_ID = "OpenDroneIdScanner";
     private static final String CHANNEL_NAME = "OpenDroneId Scanner Service";
     private static final int NOTIFICATION_ID = 1;
-    private static SimpleTimer ScannerUptime;
+    public static final SimpleTimer ScannerUptime = new SimpleTimer();;
     private BluetoothScanner btScanner;
     private WiFiScanner wiFiScanner;
     private boolean scanning = false;
@@ -74,7 +75,6 @@ public class ScanningService extends Service {
         CaltopoClient.CTDebug(TAG, String.format(Locale.US,
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
-        if (null == ScannerUptime) ScannerUptime = new SimpleTimer();
         mAppActivity = R2CActivity.getR2CActivity();
 
         if (null == mAppActivity) {
@@ -93,9 +93,9 @@ public class ScanningService extends Service {
         NotificationManager notManager = getSystemService(NotificationManager.class);
         notManager.createNotificationChannel(serviceChannel);
     }
+    @NonNull
     public static String UpTime() {
-        if (null != ScannerUptime) return ScannerUptime.durationAsString();
-        return "<unknown>";
+        return ScannerUptime.durationAsString();
     }
 
     @Override

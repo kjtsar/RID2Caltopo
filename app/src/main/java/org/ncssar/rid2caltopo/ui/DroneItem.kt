@@ -26,9 +26,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+
+
 @Composable
-fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
-    var text by remember { mutableStateOf(aircraft.mappedId) }
+fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
+    var text by remember { mutableStateOf(drone.mappedId) }
     val focusManager = LocalFocusManager.current
 
     Card(
@@ -43,7 +45,7 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                 modifier = Modifier.width(250.dp).background(Color.White).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
-                Text(text = aircraft.remoteId, textAlign = TextAlign.End)
+                Text(text = drone.remoteId, textAlign = TextAlign.End)
             }
             Column(
                 modifier = Modifier.width(250.dp).background(Color.White).padding(1.dp)
@@ -76,7 +78,7 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${aircraft.getTransportCount(CtDroneSpec.TransportTypeEnum.BT4)}", textAlign = TextAlign.Center)
+                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT4)}", textAlign = TextAlign.Center)
             }
             Column(
                 modifier = Modifier
@@ -86,7 +88,7 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${aircraft.getTransportCount(CtDroneSpec.TransportTypeEnum.BT5)}", textAlign = TextAlign.Right)
+                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT5)}", textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
@@ -96,7 +98,7 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${aircraft.getTransportCount(CtDroneSpec.TransportTypeEnum.WIFI)}", textAlign = TextAlign.Right)
+                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WIFI)}", textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
@@ -106,7 +108,7 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${aircraft.getTransportCount(CtDroneSpec.TransportTypeEnum.WNAN)}", textAlign = TextAlign.Right)
+                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WNAN)}", textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
@@ -116,7 +118,7 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${aircraft.totalCount}", textAlign = TextAlign.Right)
+                Text(text = "${drone.totalCount}", textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
@@ -126,7 +128,7 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = aircraft.getDurationInSecAsString(), fontSize=14.sp, textAlign = TextAlign.Right)
+                Text(text = drone.getDurationInSecAsString(), fontSize=14.sp, textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
@@ -136,10 +138,10 @@ fun AircraftItem(aircraft: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                val r2cClient = aircraft.myR2cOwner
+                val r2cClient = drone.myR2cOwner
                 val str : String
                 if (null != r2cClient) {
-                    str = aircraft.myR2cOwner!!.getRttString()
+                    str = drone.myR2cOwner!!.getRttString()
                 } else {
                     str = "n/a"
                 }

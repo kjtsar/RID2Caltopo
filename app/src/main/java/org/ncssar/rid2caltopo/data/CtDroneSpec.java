@@ -9,7 +9,12 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.json.JSONObject;
+import org.opendroneid.android.data.Util;
+
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
@@ -21,8 +26,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         R2C,
         UNKNOWN
     }
+
     public interface CtDroneSpecListener {
         void mappedIdChanged(@NonNull CtDroneSpec droneSpec, @NonNull String oldVal, @NonNull String newVal);
+    }
+
+    public interface DroneSpecsChangedListener {
+        // listener applies to receive bulk notification whenever one or more dronespecs change.
+        public void onDroneSpecsChanged(@NonNull List<CtDroneSpec> droneSpecs);
     }
     private static final long Version = 1L;
     private static final String TAG = "CtDroneSpec";
@@ -40,6 +51,24 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
     private transient int totalCount;
     private transient SimpleTimer flightSimpleTimer;
+
+
+
+    public JSONObject asJSONObject() {
+        Util.SafeJSONObject retval = new Util.SafeJSONObject();
+        retval.put("remoteId", remoteId);
+        retval.put("mappedId", mappedId);
+        retval.put("org", org);
+        retval.put("owner", owner);
+        retval.put("model", model);
+        retval.put("startTimeInMsec", flightSimpleTimer.getStartTimeInMsec());
+        retval.put(TransportTypeEnum.BT4.name(), transportCount[TransportTypeEnum.BT4.ordinal()]);
+        retval.put(TransportTypeEnum.BT5.name(), transportCount[TransportTypeEnum.BT5.ordinal()]);
+        retval.put(TransportTypeEnum.WIFI.name(), transportCount[TransportTypeEnum.WIFI.ordinal()]);
+        retval.put(TransportTypeEnum.WNAN.name(), transportCount[TransportTypeEnum.WNAN.ordinal()]);
+        retval.put(TransportTypeEnum.R2C.name(), transportCount[TransportTypeEnum.R2C.ordinal()]);
+        return retval;
+    }
 
     public void bumpTransportCount(TransportTypeEnum tt) {
         if (null == transportCount) transportCount = new int[TransportTypeEnum.values().length];
@@ -79,6 +108,22 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         this.org = "";
         this.model = "";
         this.owner = "";
+    }
+
+    public CtDroneSpec(JSONObject jo) {
+        remoteId = jo.optString("remoteId");
+        mappedId = jo.optString("mappedId");
+        org = jo.optString("org");
+        owner = jo.optString("owner");
+        model = jo.optString("model");
+        transportCount[TransportTypeEnum.BT4.ordinal()] = jo.optInt(TransportTypeEnum.BT4.name(), 0);
+        transportCount[TransportTypeEnum.BT5.ordinal()] = jo.optInt(TransportTypeEnum.BT5.name(), 0);
+        transportCount[TransportTypeEnum.WIFI.ordinal()] = jo.optInt(TransportTypeEnum.WIFI.name(), 0);
+        transportCount[TransportTypeEnum.WNAN.ordinal()] = jo.optInt(TransportTypeEnum.WNAN.name(), 0);
+        transportCount[TransportTypeEnum.R2C.ordinal()] = jo.optInt(TransportTypeEnum.R2C.name(), 0);
+        totalCount = transportCount[TransportTypeEnum.BT4.ordinal()] + transportCount[TransportTypeEnum.BT5.ordinal()] +
+                transportCount[TransportTypeEnum.WIFI.ordinal()] + transportCount[TransportTypeEnum.WNAN.ordinal()] +
+                transportCount[TransportTypeEnum.R2C.ordinal()];
     }
 
     public CtDroneSpec(String remoteIdIn, String mappedIdIn, String orgIn, String modelIn, String ownerIn)

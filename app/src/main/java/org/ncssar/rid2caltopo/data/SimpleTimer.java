@@ -4,9 +4,11 @@ import java.util.Locale;
 public class SimpleTimer {
     private long  startTimeInMsec;
     public SimpleTimer() { restartTimer();}
+    public SimpleTimer(long startTimeInMsec) {this.startTimeInMsec = startTimeInMsec;}
     public void restartTimer() {startTimeInMsec = System.currentTimeMillis();}
     public long durationInMilliseconds() {return System.currentTimeMillis() - startTimeInMsec;}
     public double durationInSeconds() {return (double)(System.currentTimeMillis() - startTimeInMsec) / 1000.0;}
+    public long getStartTimeInMsec() {return startTimeInMsec;}
 
     public String durationAsString() {
         long hours=0, minutes=0, seconds=0, msecs;

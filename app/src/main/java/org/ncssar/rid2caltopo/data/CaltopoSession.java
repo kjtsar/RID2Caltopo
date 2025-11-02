@@ -2,7 +2,6 @@ package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
-import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static java.lang.Thread.sleep;
 
@@ -11,9 +10,6 @@ import android.os.Build;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
-import org.ncssar.rid2caltopo.data.CaltopoOp;
-import org.ncssar.rid2caltopo.data.CaltopoSessionConfig;
-import org.ncssar.rid2caltopo.data.CtLineProperty;
 
 import java.io.BufferedReader;
 import java.io.DataOutputStream;

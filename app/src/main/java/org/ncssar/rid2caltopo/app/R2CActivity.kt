@@ -1,6 +1,8 @@
 package org.ncssar.rid2caltopo.app
 
 import androidx.activity.viewModels
+import androidx.compose.runtime.mutableStateListOf
+import androidx.lifecycle.ViewModelProvider
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
@@ -9,14 +11,12 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
+import android.os.Looper
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -28,8 +28,6 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClientMap
 import org.ncssar.rid2caltopo.data.WaypointTrack
-import org.ncssar.rid2caltopo.ui.R2CView
-import org.ncssar.rid2caltopo.ui.getRootView
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.opendroneid.android.Constants
 
@@ -37,19 +35,25 @@ import org.opendroneid.android.bluetooth.BluetoothScanner
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
 import java.util.Locale
 import androidx.core.net.toUri
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.R2CRest
+import org.ncssar.rid2caltopo.ui.MainScreen
+import org.ncssar.rid2caltopo.ui.R2CRestViewModel
+import org.ncssar.rid2caltopo.ui.R2CRestViewModelFactory
 import org.ncssar.rid2caltopo.ui.R2CViewModel
+import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 
-class R2CActivity : AppCompatActivity() {
+class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     var locationRequest: LocationRequest? = null
     var codedPhySupported: Boolean = false
     var extendedAdvertisingSupported: Boolean = false
     var nanSupported: Boolean = false
     var wifiSupported: Boolean = false
     var locationCallback: LocationCallback? = null
-    private val viewModel : R2CViewModel by viewModels()
-
-
+    var mFusedLocationClient: FusedLocationProviderClient? = null
+    private val remoteViewModels = mutableStateListOf<R2CRestViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
 
     private fun checkPermission(permission: String) {
@@ -78,34 +82,51 @@ class R2CActivity : AppCompatActivity() {
         try {
             WaypointTrack.ArchiveTracks(this)
         } catch (e: Exception) {
-            CaltopoClient.CTError(TAG, "archiveTracks() raised:", e)
+            CTError(TAG, "archiveTracks() raised:", e)
         }
+    }
+
+    override fun onClientListChanged(clients: MutableList<R2CRest>) {
+        remoteViewModels.addAll(clients.map { client ->
+            ViewModelProvider(this, R2CRestViewModelFactory(client))[R2CRestViewModel::class.java]
+        })
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val remoteClients = R2CRest.GetClientList()
+        R2CRest.SetClientListChangedListener(this)
+        appContext = applicationContext
+        val localViewModel = ViewModelProvider(
+            this,
+            R2CViewModelFactory(
+                MyDeviceName,
+                ScanningService.ScannerUptime
+            ))[R2CViewModel::class.java]
+        CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
+        remoteViewModels.clear()
+        remoteViewModels.addAll(remoteClients.map { client ->
+            ViewModelProvider(this, R2CRestViewModelFactory(client))[R2CRestViewModel::class.java]
+        })
         setContent {
-            val aircrafts by viewModel.aircrafts.collectAsState()
-            val appUptime by viewModel.appUpTime.collectAsState()
             RID2CaltopoTheme {
-                R2CView(
-                    aircrafts = aircrafts,
-                    appUptime = appUptime,
+                MainScreen(
+                    localViewModel = localViewModel,
+                    remoteViewModels = remoteViewModels,
                     onShowHelp = { showHelpMenu() },
                     onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(), "text/plain") },
                     onLoadConfigFile = { CaltopoClient.RequestLoadConfigFile() },
                     onShowVersion = { showToast(BuildConfig.BUILD_TIME) },
                     onShowSettings = { showCaltopoConfigPanel() },
-                    onMappedIdChange = { aircraft, newId -> viewModel.updateMappedId(aircraft, newId) }
                 )
             }
         }
         if (AppActivity != null) {
-            CaltopoClient.CTDebug(TAG, "onCreate() with an existing activity.")
+            CTDebug(TAG, "onCreate() with an existing activity.")
             if (AppActivity !== this) {
                 RestartingFlag = true
                 /* prevent ScanningService's PendingIntent tap from starting a new instance. */
-                CaltopoClient.CTDebug(TAG, "onCreate() restarting with new activity.")
+                CTDebug(TAG, "onCreate() restarting with new activity.")
             }
         }
         AppActivity = this
@@ -113,7 +134,7 @@ class R2CActivity : AppCompatActivity() {
         CaltopoClient.InitializeForActivityAndContext(this, applicationContext)
         val archivePathVal: String? = CaltopoClient.GetArchivePath()
         if (null == archivePathVal) {
-            Log.d(TAG, "Querying user for archiveDir()")
+            CTDebug(TAG, "Querying user for archiveDir()")
             CaltopoClient.QueryUserForArchiveDir()
         }
 
@@ -242,6 +263,7 @@ class R2CActivity : AppCompatActivity() {
             .setMinUpdateIntervalMillis((5 * 1000).toLong()) // 5 seconds
             .build()
 
+        mFusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(locationResult: LocationResult) {
                 for (location in locationResult.locations) {
@@ -250,6 +272,18 @@ class R2CActivity : AppCompatActivity() {
                         CaltopoClientMap.UpdateMyLocation(location)
                     }
                 }
+            }
+        }
+        if ((ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED) &&
+                (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                        PackageManager.PERMISSION_GRANTED)) {
+            if (mFusedLocationClient != null && locationRequest != null && locationCallback != null) {
+                mFusedLocationClient?.requestLocationUpdates(
+                    locationRequest!!,
+                    locationCallback!!,
+                    Looper.getMainLooper()
+                )
             }
         }
         if (!RestartingFlag) {
@@ -266,7 +300,6 @@ class R2CActivity : AppCompatActivity() {
         }
     }
 
-
     fun showToast(message: String) {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) Toast.makeText(
             baseContext,
@@ -274,8 +307,7 @@ class R2CActivity : AppCompatActivity() {
             Toast.LENGTH_LONG
         ).show()
         else {
-            val view : View = if (getRootView() == null) View(null)
-            else getRootView()!!
+            val view : View = findViewById<View>(android.R.id.content).rootView
 
             val snackbar: Snackbar = Snackbar.make(
                 view,
@@ -309,7 +341,6 @@ class R2CActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-
     fun forceStopApp() {
         Thread(Runnable {
             try {
@@ -332,7 +363,7 @@ class R2CActivity : AppCompatActivity() {
         private var RestartingFlag = false
         private var InitializedCalled = false
         @JvmField
-        var MyDeviceName: String? = "<unknown>"
+        var MyDeviceName:String = "<unknown>"
 
         private var appContext: Context? = null
 
@@ -345,11 +376,13 @@ class R2CActivity : AppCompatActivity() {
         fun getDataManager(): OpenDroneIdDataManager? {
             return DataManager
         }
+
         @JvmStatic
         fun GetMyAppVersion(): String {
             return String.format(Locale.US,
                 "%s(%s)",BuildConfig.BUILD_VERSION, BuildConfig.BUILD_TIME);
         }
+
     }
 }
 

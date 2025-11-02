@@ -1,7 +1,10 @@
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -12,18 +15,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.data.R2CRest
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 
-
 @Composable
-fun R2CView(
-    hostName: String,
+fun R2CRestView(
+    peerName: String,
+    appVersion: String,
     drones : List<CtDroneSpec>,
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
-    AppHeader(appUptime, hostName)
-    RidmapHeader()
+    RestHeader(appUptime, appVersion, peerName)
+    RestRidmapHeader()
     drones.forEach { drone ->
         DroneItem(drone = drone) { newMappedId ->
             onMappedIdChange(drone, newMappedId)
@@ -32,7 +36,7 @@ fun R2CView(
 }
 
 @Composable
-fun AppHeader(appUptime: String, hostName: String) {
+fun RestHeader(appUptime: String, appVersion: String, peerName: String) {
     Row(
         modifier = Modifier
             .background(Color.Black)
@@ -43,7 +47,7 @@ fun AppHeader(appUptime: String, hostName: String) {
             modifier = Modifier.width(300.dp)
         ) {
             Text(
-                text = hostName,
+                text = peerName,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp)
@@ -52,7 +56,7 @@ fun AppHeader(appUptime: String, hostName: String) {
                 fontSize = 18.sp
             )
             Text(
-                text = R2CActivity.GetMyAppVersion(),
+                text = appVersion,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
@@ -123,7 +127,7 @@ fun AppHeader(appUptime: String, hostName: String) {
 }
 
 @Composable
-fun RidmapHeader() {
+fun RestRidmapHeader() {
     Row(
         modifier = Modifier
             .background(Color.Black)
@@ -281,8 +285,8 @@ fun RidmapHeader() {
 
 @Preview(showBackground = true)
 @Composable
-fun R2CViewPreview() {
+fun R2CRestViewPreview() {
     RID2CaltopoTheme {
-        R2CView("", emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
+        R2CRestView("", "", emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
     }
 }

@@ -136,7 +136,7 @@ public class ScanningService extends Service {
 
 
         /* FIXME: No matter what I've tried here, Android will fire up a new instance of the
-            DebugActivity class - rather than just bring the existing instance to the front.
+            R2C/DebugActivity class - rather than just bring the existing instance to the front.
             As a result, DebugActivity.onCreate() checks the instance id to see if it is the
             original, and if it isn't it just exits.
          */

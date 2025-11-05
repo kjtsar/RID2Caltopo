@@ -7,12 +7,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.R2CRest
-import java.util.ArrayList
+import org.ncssar.rid2caltopo.data.SimpleTimer
 
 /**
  * ViewModel for a single remote R2CRest client.
  */
-class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), CtDroneSpec.DroneSpecsChangedListener {
+class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpdateListener, CtDroneSpec.DroneSpecsChangedListener {
 
     private val _drones = MutableStateFlow<List<CtDroneSpec>>(emptyList())
     val drones: StateFlow<List<CtDroneSpec>> = _drones.asStateFlow()
@@ -20,9 +20,25 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), CtDroneSpec.DroneS
     // Simple StateFlow for uptime, can be enhanced later
     private val _remoteUptime = MutableStateFlow("00:00:00")
     val remoteUptime: StateFlow<String> = _remoteUptime.asStateFlow()
+    private val remoteTimer : SimpleTimer = SimpleTimer()
+
+    private val _appVersion = MutableStateFlow("")
+    val appVersion: StateFlow<String> = _appVersion.asStateFlow()
+
+    private val _remoteCtRtt = MutableStateFlow("")
+    val remoteCtRtt : StateFlow<String> = _remoteCtRtt.asStateFlow()
+
+    override fun onRemoteAppVersion(version: String) {
+        _appVersion.value = version
+    }
+
+    override fun onRemoteStartTime(startTimeInMsec : Long) {
+        remoteTimer.setStartTimeInMsec(startTimeInMsec)
+    }
 
     init {
         r2cClient.setRemoteDroneSpecMonitor(this)
+        r2cClient.setRemoteUpdateListener(this)
         loadRemoteDrones()
     }
 
@@ -46,6 +62,7 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), CtDroneSpec.DroneS
 
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         _drones.value = droneSpecs
+        _remoteCtRtt.value = r2cClient.getRemoteCtRttString()
     }
 }
 

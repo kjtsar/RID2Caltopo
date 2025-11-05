@@ -287,7 +287,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             }
         }
         if (!RestartingFlag) {
-            CaltopoClient.CTDebug(
+            CTDebug(
                 TAG,
                 String.format(
                     Locale.US,

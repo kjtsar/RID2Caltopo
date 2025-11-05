@@ -182,11 +182,13 @@ public class WiFiScanner {
         if (wifiAwareManager != null && wifiAwareManager.isAvailable()) {
             try {
                 CaltopoClient.CTDebug(TAG, "Starting WiFi NaN scanning");
+/*
                 if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
                         ActivityCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
                     CTError(TAG, "startScan(): Missing ACCESS_FINE_LOCATION or NEARBY_WIFI_DEVICES permission");
                     return;
                 }
+*/
                 wifiAwareManager.attach(attachCallback, identityChangedListener, null);
             } catch (Exception e) {
                 CTError(TAG, "wifiAwareManager().attach() raised:\n", e);

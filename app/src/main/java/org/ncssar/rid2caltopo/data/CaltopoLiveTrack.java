@@ -51,6 +51,7 @@ public class CaltopoLiveTrack {
     private String myRemoteId;
     private CaltopoClient caltopoClient;
     private CtDroneSpec droneSpec;
+    private boolean shuttingDown = false;
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
 
     public CaltopoLiveTrack(@NonNull CaltopoClient ctClient, @NonNull CaltopoClientMap map, @NonNull String trackLabel, @NonNull String groupId,
@@ -81,6 +82,7 @@ public class CaltopoLiveTrack {
                 } else {
                     r2cClient.reportSeen(droneSpec, lat, lng, droneTimestampInMsec);
                 }
+                break;
             }
             case okToPublishLocally: startNewTrack();
         }
@@ -100,6 +102,7 @@ public class CaltopoLiveTrack {
         startLiveTrackOp = null;
         liveTrackOp = null;
         myTrackLabel = trackLabel;
+        if (shuttingDown) return;
 
         switch (r2cStatus) {
             case forwardToClient: {
@@ -109,6 +112,7 @@ public class CaltopoLiveTrack {
                 } else {
                     r2cClient.reportSeen(droneSpec, lat, lng, droneTimestampInMsec);
                 }
+                break;
             }
             case okToPublishLocally: {
                 startNewTrack();
@@ -134,6 +138,10 @@ public class CaltopoLiveTrack {
         return myTrackLabel;
     }
 
+    public void shutdown() {
+        shuttingDown = true;
+        archiveTrackOnCaltopo();
+    }
     /**  Archive this track segment on Caltopo if we're the owner.
      */
     public void archiveTrackOnCaltopo() {
@@ -271,6 +279,7 @@ public class CaltopoLiveTrack {
     public boolean isActive() {return active; }
 
     public void updateStatus(R2CRest.R2CRespEnum status) {
+        if (shuttingDown) return;
         CTDebug(TAG, "updateStatus() - changing to: " + status.toString());
         if (status == R2CRest.R2CRespEnum.reevaluate && r2cStatus == R2CRest.R2CRespEnum.pending) return;
         r2cStatus = status;
@@ -279,8 +288,8 @@ public class CaltopoLiveTrack {
             CTDebug(TAG, "updateStatus() - reevaluate changed status to: " + r2cStatus.toString());
         }
         switch (r2cStatus) {
-            case forwardToClient: r2cClient = R2CRest.ClientForRemoteId(myRemoteId);
-            case okToPublishLocally: startNewTrack();
+            case forwardToClient: r2cClient = R2CRest.ClientForRemoteId(myRemoteId); break;
+            case okToPublishLocally: startNewTrack(); break;
         }
     }
 
@@ -341,6 +350,7 @@ public class CaltopoLiveTrack {
                 myTrackLabel, linePoints.size()));
         switch (r2cStatus) {
             case forwardToClient: {
+                if (null == r2cClient) r2cClient = R2CRest.ClientForRemoteId(myRemoteId);
                 if (null != r2cClient) {
                     r2cClient.reportSeen(droneSpec, lat, lng, droneTimestampInMillisec);
                 } else {
@@ -349,7 +359,9 @@ public class CaltopoLiveTrack {
                 return;
             }
             case pending:
-            case unknown: {return;}
+            case unknown:
+                return;
+            default: break;
         }
         if (null == liveTrackId) {
             startNewTrack();

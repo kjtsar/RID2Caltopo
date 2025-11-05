@@ -258,7 +258,7 @@ public class WsPipe extends WebSocketListener {
                                 for (List<?> san : cert.getSubjectAlternativeNames()) {
                                     //CTDebug(TAG, "okHttpClient.Builder(): Checking rfc822Name: " + san.get(1));
                                     if (san.get(1).equals("kjtsar@gmail.com")) {
-                                    //    CTDebug(TAG, "okHttpClient.Builder(): accepting rfc822Name: " + san.get(1));
+                                        CTDebug(TAG, "okHttpClient.Builder(): accepting rfc822Name: " + san.get(1));
                                         return true;  // FIXME: Until we can agree on underlying trust cert, this is better than nothing.
                                     } else {
                                         CTError(TAG, "okHttpClient.Builder(): rejecting: " + san.get(1));

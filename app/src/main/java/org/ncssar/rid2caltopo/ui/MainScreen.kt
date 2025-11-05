@@ -81,11 +81,13 @@ fun MainScreen(
             items(remoteViewModels) { remoteViewModel ->
                 val remoteDrones by remoteViewModel.drones.collectAsState()
                 val remoteUptime by remoteViewModel.remoteUptime.collectAsState()
-
-                R2CView(
-                    hostName = remoteViewModel.r2cClient.peerName,
+                val remoteCtRttString by remoteViewModel.remoteCtRtt.collectAsState()
+                R2CRestView(
+                    peerName = remoteViewModel.r2cClient.peerName,
                     drones = remoteDrones,
                     appUptime = remoteUptime,
+                    appVersion = remoteViewModel.r2cClient.remoteAppVersion,
+                    ctRttString = remoteCtRttString,
                     onMappedIdChange = { drone, newId ->
                         remoteViewModel.updateMappedId(drone, newId)
                     }

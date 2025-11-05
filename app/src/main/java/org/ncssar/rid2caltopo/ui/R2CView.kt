@@ -1,7 +1,9 @@
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -11,9 +13,10 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.ncssar.rid2caltopo.app.R2CActivity
+import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
-
+import java.util.Locale
 
 @Composable
 fun R2CView(
@@ -22,11 +25,15 @@ fun R2CView(
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
-    AppHeader(appUptime, hostName)
-    RidmapHeader()
-    drones.forEach { drone ->
-        DroneItem(drone = drone) { newMappedId ->
-            onMappedIdChange(drone, newMappedId)
+    Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+        Column {
+            AppHeader(appUptime, hostName)
+            RidmapHeader()
+            drones.forEach { drone ->
+                DroneItem(drone = drone) { newMappedId ->
+                    onMappedIdChange(drone, newMappedId)
+                }
+            }
         }
     }
 }
@@ -35,9 +42,9 @@ fun R2CView(
 fun AppHeader(appUptime: String, hostName: String) {
     Row(
         modifier = Modifier
-            .background(Color.Black)
-            .padding(2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+            .background(Color.Blue)
+            .padding(3.dp),
+//        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(
             modifier = Modifier.width(300.dp)
@@ -46,7 +53,7 @@ fun AppHeader(appUptime: String, hostName: String) {
                 text = hostName,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(50.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 18.sp
@@ -65,17 +72,10 @@ fun AppHeader(appUptime: String, hostName: String) {
             modifier = Modifier.width(200.dp)
         ) {
             Text(
-                text = "",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(20.dp)
-                    .background(Color.White)
-            )
-            Text(
                 text = "Up Time:",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(30.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 16.sp
@@ -94,23 +94,19 @@ fun AppHeader(appUptime: String, hostName: String) {
             modifier = Modifier.width(100.dp)
         ) {
             Text(
-                text = "",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(20.dp)
-                    .background(Color.White)
-            )
-            Text(
                 text = "ct rtt",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(30.dp)
+                    .height(25.dp)
                     .background(Color.White),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
             )
             Text(
-                text = "0.000 sec",
+                text = String.format(
+                    Locale.US, "%.3f sec",
+                    CaltopoLiveTrack.GetCaltopoRttInMsec().toDouble() / 1000.0
+                ),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
@@ -126,30 +122,10 @@ fun AppHeader(appUptime: String, hostName: String) {
 fun RidmapHeader() {
     Row(
         modifier = Modifier
-            .background(Color.Black)
+            .background(Color.Blue)
             .padding(2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+//        horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Column(
-            modifier = Modifier.width(250.dp)
-        ) {
-            Text(
-                text = "",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(Color.White)
-            )
-            Text(
-                text = "Remote ID:",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(Color.White),
-                textAlign = TextAlign.Center,
-                fontSize = 18.sp
-            )
-        }
         Column(
             modifier = Modifier.width(250.dp)
         ) {
@@ -171,7 +147,27 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(500.dp)
+            modifier = Modifier.width(250.dp)
+        ) {
+            Text(
+                text = "",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(25.dp)
+                    .background(Color.White)
+            )
+            Text(
+                text = "Remote ID:",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(25.dp)
+                    .background(Color.White),
+                textAlign = TextAlign.Center,
+                fontSize = 18.sp
+            )
+        }
+        Column(
+            modifier = Modifier.width(480.dp)
         ) {
             Text(
                 text = "Waypoints Received",
@@ -183,13 +179,12 @@ fun RidmapHeader() {
                 fontSize = 14.sp
             )
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
                     text = "BT4:",
                     modifier = Modifier
-                        .width(100.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(Color.White),
                     textAlign = TextAlign.Center,
@@ -198,7 +193,7 @@ fun RidmapHeader() {
                 Text(
                     text = "BT5:",
                     modifier = Modifier
-                        .width(100.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(Color.White),
                     textAlign = TextAlign.Center,
@@ -207,7 +202,7 @@ fun RidmapHeader() {
                 Text(
                     text = "WiFi:",
                     modifier = Modifier
-                        .width(100.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(Color.White),
                     textAlign = TextAlign.Center,
@@ -216,7 +211,16 @@ fun RidmapHeader() {
                 Text(
                     text = "NaN:",
                     modifier = Modifier
-                        .width(100.dp)
+                        .width(80.dp)
+                        .height(25.dp)
+                        .background(Color.White),
+                    textAlign = TextAlign.Center,
+                    fontSize = 18.sp
+                )
+                Text(
+                    text = "R2C:",
+                    modifier = Modifier
+                        .width(80.dp)
                         .height(25.dp)
                         .background(Color.White),
                     textAlign = TextAlign.Center,
@@ -225,7 +229,7 @@ fun RidmapHeader() {
                 Text(
                     text = "Total:",
                     modifier = Modifier
-                        .width(100.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(Color.White),
                     textAlign = TextAlign.Center,

@@ -161,6 +161,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
 
             mapId = newMapId;
             startMapConnection();
+        } else {
+            CTDebug(TAG, "setMapId(): ignoring attempt to change to existing map.");
         }
     }
 
@@ -539,11 +541,13 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                     "Didn't find our existing marker in %d peers, so adding a new one:", r2cPeers.length()));
             JSONObject prop = new JSONObject();
             try {
+                String myAddrs = myIpAddresses.toString();
                 prop.put("updated", timeString);
                 prop.put("-updated-on", timeString);
-                prop.put("r2c-ipaddrs", myIpAddresses.toString());
+                prop.put("r2c-ipaddrs", myAddrs);
                 prop.put("r2c-name", R2CActivity.MyDeviceName);
                 prop.put("marker-color", "#0000FF");
+                if (!myAddrs.contains("tun")) prop.put("description", myAddrs);
             } catch (Exception e) {
                 CTError(TAG, "put() raised.", e);
             }
@@ -619,16 +623,15 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     @NonNull
     public String r2cPeerConnectionStats() {
         StringBuilder builder = new StringBuilder();
-        for (Map.Entry<String,R2CRest>map : R2CRest.GetCloneOfPeerHashtable().entrySet()) {
-            String uuid = map.getKey();
-            R2CRest r2cClient = map.getValue();
+        for (R2CRest r2cClient : R2CRest.GetCloneOfPeerHashtable().values()) {
             String peerName = r2cClient.getPeerName();
             builder.append(peerName)
                     .append(":")
                     .append(r2cClient.stats())
                     .append("\n");
         }
-        return builder.toString();
+        if (builder.length() > 0) return builder.toString();
+        return R2CRest.GetMyIpAddresses().toString();
     }
 
     private void lookForExistingLiveTracks() {
@@ -728,6 +731,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
 
     /* Use with caution.
      * With great power comes great responsibility...
+     * FIXME: Consider moving user functionality directly into the map or the session.
      */
     public  CaltopoSession session() {return Csp;}
 
@@ -737,7 +741,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                 map.mapCheckerDelay.stop();
                 for (CaltopoLiveTrack track : map.liveTracks) {
                     CTDebug(TAG, "ShutDown() - shutting down track: " + track.getTrackLabel());
-                    track.archiveTrackOnCaltopo();
+                    track.shutdown();
                 }
             }
             CaltopoOp op = Csp.deleteMarkerWithId(MyUUID, null);

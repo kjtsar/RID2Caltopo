@@ -1,7 +1,9 @@
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -9,10 +11,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.magnifier
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,24 +42,21 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             .padding(vertical = 4.dp, horizontal = 4.dp)
     ) {
         Row(
-            modifier = Modifier.background(Color.Black).padding(1.dp).height(65.dp),
+            modifier = Modifier.background(Color.Black).padding(1.dp).height(32.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(
                 modifier = Modifier.width(250.dp).background(Color.White).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
-                Text(text = drone.remoteId, textAlign = TextAlign.End)
-            }
-            Column(
-                modifier = Modifier.width(250.dp).background(Color.White).padding(1.dp)
-                    .fillMaxWidth().fillMaxHeight()
-            ) {
-                OutlinedTextField(
+                var fontWeight = FontWeight.Normal
+                if (!drone.hasR2cOwner()) fontWeight = FontWeight.Bold
+
+                BasicTextField(
                     value = text,
                     onValueChange = { text = it },
                     singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(fontWeight = FontWeight.Bold),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontWeight = fontWeight, fontSize = 14.sp, textAlign = TextAlign.Center),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(
                         onDone = {
@@ -63,16 +64,37 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                             focusManager.clearFocus()
                         }
                     ),
-                    modifier = Modifier.onFocusChanged {
-                        if (!it.isFocused) {
-                            onMappedIdChange(text)
+                    decorationBox = { innerTextField ->
+                        Box(
+                            modifier = Modifier
+                                .border(width = 1.dp, color = Color.Gray, shape = RoundedCornerShape(4.dp))
+                                .padding(2.dp)
+                        ) {
+                            innerTextField()
                         }
-                    }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+//                        .background(Color.LightGray)
+                        .padding(2.dp)
+                        .height(26.dp)
+                        .onFocusChanged {
+                            if (!it.isFocused) {
+                                onMappedIdChange(text)
+                            }
+                        },
                 )
+            }
+
+            Column(
+                modifier = Modifier.width(250.dp).background(Color.White).padding(1.dp)
+                    .fillMaxWidth().fillMaxHeight()
+            ) {
+                Text(text = drone.remoteId, textAlign = TextAlign.End)
             }
             Column(
                 modifier = Modifier
-                    .width(100.dp)
+                    .width(80.dp)
                     .background(Color.White)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -82,7 +104,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 100.dp)
+                    .width( 80.dp)
                     .background(Color.White)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -92,7 +114,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 100.dp)
+                    .width( 80.dp)
                     .background(Color.White)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -102,7 +124,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 100.dp)
+                    .width( 80.dp)
                     .background(Color.White)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -112,7 +134,17 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 100.dp)
+                    .width( 80.dp)
+                    .background(Color.White)
+                    .padding(1.dp)
+                    .fillMaxHeight(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.R2C)}", textAlign = TextAlign.Right)
+            }
+            Column(
+                modifier = Modifier
+                    .width( 80.dp)
                     .background(Color.White)
                     .padding(1.dp)
                     .fillMaxHeight(),

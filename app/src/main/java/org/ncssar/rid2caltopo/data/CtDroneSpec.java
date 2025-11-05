@@ -13,7 +13,6 @@ import org.json.JSONObject;
 import org.opendroneid.android.data.Util;
 
 import java.io.Serializable;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -38,7 +37,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final long Version = 1L;
     private static final String TAG = "CtDroneSpec";
 
-    private String remoteId;
+    @NonNull private String remoteId = "";
     private String mappedId;   /* The track label prefix assigned to drone */
 
     private String org;
@@ -50,7 +49,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient CaltopoLiveTrack myLiveTrack;
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
     private transient int totalCount;
-    private transient SimpleTimer flightSimpleTimer;
+    private transient SimpleTimer flightSimpleTimer = new SimpleTimer();
 
 
 
@@ -91,17 +90,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return totalCount;
     }
 
-    @Nullable
-    public R2CRest getR2COwner() {
-        return ownerR2c;
-    }
-
     public CtDroneSpec() throws RuntimeException {
         throw new RuntimeException("Use one of the other constructor methods.");
     }
-    public CtDroneSpec(String remoteId) throws RuntimeException {
-        if (null == remoteId || remoteId.isEmpty()) {
-            throw new RuntimeException("missing/invalid required remoteId spec.");
+    public CtDroneSpec(@NonNull String remoteId) throws RuntimeException {
+        if (remoteId.isEmpty()) {
+            throw new RuntimeException("Invalid required remoteId spec.");
         }
         this.remoteId = remoteId;
         this.mappedId = remoteId;
@@ -116,6 +110,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         org = jo.optString("org");
         owner = jo.optString("owner");
         model = jo.optString("model");
+        flightSimpleTimer = new SimpleTimer(jo.optLong("startTimeInMsec"));
         transportCount[TransportTypeEnum.BT4.ordinal()] = jo.optInt(TransportTypeEnum.BT4.name(), 0);
         transportCount[TransportTypeEnum.BT5.ordinal()] = jo.optInt(TransportTypeEnum.BT5.name(), 0);
         transportCount[TransportTypeEnum.WIFI.ordinal()] = jo.optInt(TransportTypeEnum.WIFI.name(), 0);
@@ -151,8 +146,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
 
     public void setMyR2cOwner(@Nullable R2CRest newOwnerR2c) {ownerR2c = newOwnerR2c;}
+    public void removeMyR2cOwner() {ownerR2c = null;}
+
     @Nullable
     public R2CRest getMyR2cOwner() {return ownerR2c;}
+
+    public boolean hasR2cOwner() {return (null != ownerR2c); }
 
     public String setMappedId(@NonNull String newMappedId) {
         String oldString= mappedId;
@@ -168,6 +167,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return mappedId;
     }
 
+    @NonNull
     public String getRemoteId() { return remoteId;}
     public String getMappedId() { return mappedId;}
     public String getOrg() { return org;}

@@ -71,7 +71,7 @@ public class BluetoothScanner {
                     transportType = CtDroneSpec.TransportTypeEnum.BT5;
             }
 
-            dataManager.receiveDataBluetooth(bytes, result, transportType);
+            if (null != dataManager) dataManager.receiveDataBluetooth(bytes, result, transportType);
         }
 
         @Override

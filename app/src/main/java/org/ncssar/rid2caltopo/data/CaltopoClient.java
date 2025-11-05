@@ -219,12 +219,47 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return (ccs.droneSpecTable.get(remoteId));
     }
 
+    /**  SetDroneSpecOwner()
+     * @param dsIn This is the dronespec received from our peer who has assumed ownership of said drone.
+     *             if there is no entry in our table for it, we'll create an entry with the peer's
+     *             supplied rid and mappedId, but ignore everything else about it.  If there is
+     *             already an existing dronespec, we only update the local dronespec's mappedId with
+     *             the peer's mappedId if the peer's mappedId != remoteId.
+     * @param owner This is the peer that has assumed ownership of the specified drone.
+     * @return     returns our dronespec.
+     */
+    public static CtDroneSpec SetDroneSpecOwner(@NonNull CtDroneSpec dsIn, @NonNull R2CRest owner) {
+        ClientClassState ccs = GetState();
+        String rid = dsIn.getRemoteId();
+        String mid = dsIn.getMappedId();
+        CtDroneSpec ds = ccs.droneSpecTable.get(rid);
+        if (null == ds) {
+            ds = new CtDroneSpec(rid, dsIn.getMappedId(), dsIn.getOrg(), dsIn.getModel(), dsIn.getOwner());
+            ccs.droneSpecTable.put(rid, ds);
+            ArchiveState("received new dronespec from our peer.");
+        } else if (!mid.isEmpty() && !mid.equals(rid)) {
+            ds.setMappedId(mid);
+        }
+        ds.setMyR2cOwner(owner);
+        return ds;
+    }
+    public static void RemoveDroneSpecOwner(@NonNull CtDroneSpec dsIn) {
+        ClientClassState ccs = GetState();
+        String rid = dsIn.getRemoteId();
+        CtDroneSpec ds = ccs.droneSpecTable.get(rid);
+        if (null != ds) ds.removeMyR2cOwner();
+    }
+
     public void mappedIdChanged(@NonNull CtDroneSpec ds, @NonNull String oldval, @NonNull String newval) {
         CTDebug(TAG, String.format(Locale.US,
                 "mappedIdChanged(%s): change from '%s' to '%s'", trackLabel, oldval, newval));
         trackLabel = newTrackLabel();
         if (null != liveTrack) liveTrack.renameTrack(trackLabel);
         ArchiveState(String.format(Locale.US, "mappedIdChanged from '%s' to '%s'", oldval, newval));
+        if (null != DroneSpecsChangedListener) {
+            DroneSpecArrayChanged = true;
+            DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray());
+        }
     }
 
     public static String BumpLoggingLevel() {
@@ -523,15 +558,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String trackFolder = json.optString("track_folder");
         String mapid = json.optString("map_id");
         String groupid = json.optString("group_id");
-        String useDirectString = json.optString("use_direct_flag");
-        CTDebug(TAG, "readCredentialsFileContent(): read useDirectFlag as: " + useDirectString);
-        boolean useDirectFlag = useDirectString.equalsIgnoreCase("true");
-        CTDebug(TAG, "readCredentialsFileContent(): setting useDirectFlag to: " + useDirectFlag);
-        SetUseDirect(useDirectFlag);
         if (!trackFolder.isEmpty()) SetTrackFolderName(trackFolder);
         if (!mapid.isEmpty()) SetMapId(mapid);
         if (!groupid.isEmpty()) SetGroupId(groupid);
         SetCaltopoSessionConfig(new CaltopoSessionConfig(teamId, credentialId, credentialSecret));
+        boolean useDirectFlag = json.optBoolean("use_direct_flag");
+        CTDebug(TAG, "readCredentialsFileContent(): read useDirectFlag as: " + useDirectFlag);
+        SetUseDirect(useDirectFlag);
     }
     public static void readRidmapFileContent(JSONObject json) throws JSONException {
         JSONArray mapJson;
@@ -563,10 +596,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             String owner = entry.optString("owner");
             ds = new CtDroneSpec(rid, mid, org, model, owner);
             CtDroneSpec existingDs = ccs.droneSpecTable.get(rid);
-            CTDebug(TAG, "readRidmapFileContent(): Found existing droneSpec for spec: " + existingDs);
             if (null == existingDs) {
                 changeCount++;
             } else {
+                CTDebug(TAG, "readRidmapFileContent(): Found existing droneSpec for spec: " + existingDs);
                 if (replaceFlag) {
                     if (existingDs.isDifferentFrom(ds)) {
                         changeCount++;
@@ -709,10 +742,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String mapId = GetMapId();
         if (!GetUseDirectFlag()) return;
         if (null != MyCaltopoClientMap) {
-            CTDebug(TAG, "ConnectToMap() changing map...");
+            CTDebug(TAG, "ConnectToMap() changing to map " + mapId);
             MyCaltopoClientMap.setMapId(mapId);
         } else try {
-
+            CTDebug(TAG, "connectToMap(): connecting to map " + mapId);
             MyCaltopoClientMap = new CaltopoClientMap(GetCaltopoConfig(), mapId, GetTrackFolderName());
         } catch (RuntimeException e) {
             ShowToast("could not open map: ", e);
@@ -826,7 +859,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray() {
         ClientClassState ccs = GetState();
         long retirementAgeInSeconds = GetMaxDisplayAgeInSeconds();
-        CTDebug(TAG, "GetSortedCurrentDroneSpecArray(): retirementAgeInSeconds: " + retirementAgeInSeconds);
+        CTInfo(TAG, "GetSortedCurrentDroneSpecArray(): retirementAgeInSeconds: " + retirementAgeInSeconds);
         if (retirementAgeInSeconds > 0) {
             long currentTimeInSeconds = (System.currentTimeMillis() / 1000);
             long nextAgeOutInSecondsFromNow = retirementAgeInSeconds;
@@ -834,18 +867,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             if (currentTimeInSeconds >= PreviousEarliestAgeOutInSeconds) {
                 CTDebug(TAG, "GetSortedCurrentDroneSpecArray(): current time > previousEarliestAgeOut");
                 DsArray.clear();
-                for (Map.Entry<String, CtDroneSpec> map : ccs.droneSpecTable.entrySet()) {
-                    CtDroneSpec ds = map.getValue();
-                    long currentAgeInSeconds = currentTimeInSeconds - ds.mostRecentTimeInSeconds;
-                    long currentAgeOutInSeconds = retirementAgeInSeconds - currentAgeInSeconds;
-                    if (currentAgeOutInSeconds > 0) {
-                        if (currentAgeOutInSeconds < nextAgeOutInSecondsFromNow) nextAgeOutInSecondsFromNow = currentAgeOutInSeconds;
-                        DsArray.add(ds);
+                for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+                    if (0 != ds.mostRecentTimeInSeconds) {
+                        long currentAgeInSeconds = currentTimeInSeconds - ds.mostRecentTimeInSeconds;
+                        long currentAgeOutInSeconds = retirementAgeInSeconds - currentAgeInSeconds;
+                        if (currentAgeOutInSeconds > 0) {
+                            if (currentAgeOutInSeconds < nextAgeOutInSecondsFromNow)
+                                nextAgeOutInSecondsFromNow = currentAgeOutInSeconds;
+                            DsArray.add(ds);
+                        }
+                        CTDebug(TAG, String.format(Locale.US,
+                                "  current age for %s is %d, age out in %d seconds. next age out in %d seconds", ds.getMappedId(),
+                                currentAgeInSeconds, currentAgeOutInSeconds, nextAgeOutInSecondsFromNow));
                     }
-                    CTDebug(TAG, String.format(Locale.US,
-                            "  current age for %s is %d, age out in %d seconds. next age out in %d seconds", ds.getMappedId(),
-                            currentAgeInSeconds, currentAgeOutInSeconds, nextAgeOutInSecondsFromNow));
-
                 }
                 PreviousEarliestAgeOutInSeconds = currentTimeInSeconds + nextAgeOutInSecondsFromNow;
             }

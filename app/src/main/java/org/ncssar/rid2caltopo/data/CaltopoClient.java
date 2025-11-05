@@ -226,9 +226,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      *             already an existing dronespec, we only update the local dronespec's mappedId with
      *             the peer's mappedId if the peer's mappedId != remoteId.
      * @param owner This is the peer that has assumed ownership of the specified drone.
-     * @return     returns our dronespec.
      */
-    public static CtDroneSpec SetDroneSpecOwner(@NonNull CtDroneSpec dsIn, @NonNull R2CRest owner) {
+    public static void SetDroneSpecOwner(@NonNull CtDroneSpec dsIn, @NonNull R2CRest owner) {
         ClientClassState ccs = GetState();
         String rid = dsIn.getRemoteId();
         String mid = dsIn.getMappedId();
@@ -241,7 +240,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ds.setMappedId(mid);
         }
         ds.setMyR2cOwner(owner);
-        return ds;
+        dsIn.setMyR2cOwner(owner);
     }
     public static void RemoveDroneSpecOwner(@NonNull CtDroneSpec dsIn) {
         ClientClassState ccs = GetState();
@@ -859,7 +858,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray() {
         ClientClassState ccs = GetState();
         long retirementAgeInSeconds = GetMaxDisplayAgeInSeconds();
+        return GetSortedCurrentDroneSpecArray(retirementAgeInSeconds);
+    }
+
+    @NonNull
+    public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray(long retirementAgeInSeconds) {
+        ClientClassState ccs = GetState();
         CTInfo(TAG, "GetSortedCurrentDroneSpecArray(): retirementAgeInSeconds: " + retirementAgeInSeconds);
+        if (retirementAgeInSeconds == 0) DroneSpecArrayChanged = true;
         if (retirementAgeInSeconds > 0) {
             long currentTimeInSeconds = (System.currentTimeMillis() / 1000);
             long nextAgeOutInSecondsFromNow = retirementAgeInSeconds;
@@ -886,6 +892,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             DsArray.sort(null);
         } else if (DroneSpecArrayChanged) {
             DroneSpecArrayChanged = false;
+            DsArray.clear();
             for (Map.Entry<String, CtDroneSpec> map : ccs.droneSpecTable.entrySet()) {
                 CtDroneSpec ds = map.getValue();
                 CTDebug(TAG, String.format(Locale.US,

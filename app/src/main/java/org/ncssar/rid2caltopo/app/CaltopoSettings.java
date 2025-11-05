@@ -9,6 +9,7 @@ import android.database.DataSetObserver;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -29,6 +30,7 @@ import androidx.fragment.app.FragmentTransaction;
 
 import org.ncssar.rid2caltopo.data.CaltopoClient;
 import org.ncssar.rid2caltopo.R;
+import org.ncssar.rid2caltopo.data.CaltopoSessionConfig;
 import org.ncssar.rid2caltopo.data.CtDroneSpec;
 import org.ncssar.rid2caltopo.data.DelayedExec;
 
@@ -188,7 +190,7 @@ class MyEditTextWatcher implements TextWatcher, View.OnFocusChangeListener, Text
 
 /**
  */
-public class CaltopoSettings extends DialogFragment implements TextWatcher, CaltopoClient.CtDroneSpecArrayMonitor, ListAdapter, View.OnClickListener {
+public class CaltopoSettings extends DialogFragment implements TextWatcher, ListAdapter, View.OnClickListener {
     private static final String TAG = "CaltopoSettings";
     private static final String GROUP_ID_LABEL = "Group Id";
     private static final String MAP_ID_LABEL = "Map Id";
@@ -216,6 +218,13 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
     ArrayList<DroneSpecViewHolder>droneSpecViewHolders;
     private DelayedExec viewUpdater;
     ArrayList<CtDroneSpec>currentDroneSpecs;
+
+    private EditText teamIdText;
+    private EditText credIdText;
+    private EditText credSecretText;
+    private EditText folderText;
+    static final String UNSPEC_VAL_STR = "<unspecified>";
+    static final String HIDDEN_VAL_STR = "############";
 
     public static CaltopoSettings newInstance() {
         return new CaltopoSettings();
@@ -309,6 +318,45 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
             }
         }
     }
+    private void checkCredentials() {
+        String newVal;
+        CaltopoSessionConfig newCfg = new CaltopoSessionConfig(CaltopoClient.GetCaltopoSessionConfig());
+        boolean newCfgUpdated = false;
+
+        saveChanges.setEnabled(false);
+        // walk thru each of the values and forward any changes to caltopo:
+        newVal = teamIdText.getText().toString();
+        if (!newVal.isEmpty() && !newVal.equals(UNSPEC_VAL_STR) && !newVal.equals(HIDDEN_VAL_STR)) {
+            newCfg.teamId = newVal;
+            newCfgUpdated = true;
+            Log.i(TAG, "checkCredentials(): teamId updated:" + newVal);
+        }
+
+        newVal = credIdText.getText().toString();
+        if (!newVal.isEmpty() && !newVal.equals(UNSPEC_VAL_STR) && !newVal.equals(HIDDEN_VAL_STR)) {
+            newCfg.credentialId = newVal;
+            newCfgUpdated = true;
+            Log.i(TAG, "checkCredentials(): credentialId updated:" + newVal);
+        }
+
+        newVal = credSecretText.getText().toString();
+        if (!newVal.isEmpty() && !newVal.equals(UNSPEC_VAL_STR) && !newVal.equals(HIDDEN_VAL_STR)) {
+            newCfg.credentialSecret = newVal;
+            newCfgUpdated = true;
+            Log.i(TAG, "checkCredentials(): credentialSecret updated:" + newVal);
+        }
+
+        newVal = folderText.getText().toString();
+        if (!newVal.isEmpty() && !newVal.equals(UNSPEC_VAL_STR)) {
+            CaltopoClient.SetTrackFolderName(newVal);
+            Log.i(TAG, "checkCredentials(): trackFolder updated:" + newVal);
+        }
+
+        if (newCfgUpdated) {
+            CaltopoClient.SetCaltopoSessionConfig(newCfg);
+        }
+    }
+
     private void checkMaxDisplayAgeInSec() {
         String rawInput = maxAgeInSecEditText.getText().toString().trim();
         long inputVal;
@@ -329,7 +377,7 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
         }
     }
 
-    // User pushed the "save" or "close" button - check 4 && save any changes:
+    // User pushed a button - check 4 && save any changes:
     public void onClick(View v){
         if (v == saveChanges) {
             CTInfo(TAG, "Received onClick() for saveChanges.");
@@ -342,6 +390,7 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
             checkMinDistance();
             checkNewTrackDelay();
             checkMaxDisplayAgeInSec();
+            checkCredentials();
             ((R2CActivity)requireActivity()).archiveTracks();
             CTInfo(TAG, "Disabling saveChanges.");
             saveChanges.setEnabled(false);
@@ -456,21 +505,19 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
     }
     public void droneSpecArrayChanged() {
         long ageInSec = CaltopoClient.GetMaxDisplayAgeInSeconds();
-        currentDroneSpecs = CaltopoClient.GetSortedCurrentDroneSpecArray();
-        if (null != mapListView) mapListView.invalidate();
+        currentDroneSpecs = CaltopoClient.GetSortedCurrentDroneSpecArray(0);
+        CTDebug(TAG, "droneSpecArrayChanged(): " + currentDroneSpecs.size());
+        updateViewMaps();
     }
 
     @Override public Object getItem(int pos) {
         return currentDroneSpecs.get(pos);
     }
 
-    /** Build viewMap for the gridview using remoteIds that have been seen in the past day.
-     *
-     */
     public void updateViewMaps() {
-        mapListView.invalidateViews();
+        if (null != mapListView) mapListView.invalidateViews();
     }
-
+/*
     public void runCaltopoDirectConfigPanel() {
         org.ncssar.rid2caltopo.app.CaltopoDirectSettings configPanel = new org.ncssar.rid2caltopo.app.CaltopoDirectSettings();
         FragmentManager mgr = requireActivity().getSupportFragmentManager();
@@ -478,7 +525,7 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
         CTDebug(TAG, "runCaltopoDirectConfigPanel(): starting CaltopoDirectSettings...");
         configPanel.show(transaction, "CaltopoDirectSettings");
     }
-
+*/
     @Override @Nullable
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container,
                              @Nullable Bundle savedInstanceState) {
@@ -493,6 +540,7 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
         saveChanges.setEnabled(false);
         closeButton = settingsView.findViewById(R.id.ct_closeButton);
         closeButton.setOnClickListener(this);
+
 
         groupIdText = settingsView.findViewById(R.id.groupIdText);
         groupIdText.setText(CaltopoClient.GetGroupId());
@@ -543,13 +591,62 @@ public class CaltopoSettings extends DialogFragment implements TextWatcher, Calt
             // This block of code will be executed when the checked state changes
             CTDebug(TAG, "directToggle is " + isChecked);
             if (isChecked) {
-                runCaltopoDirectConfigPanel();
+//                runCaltopoDirectConfigPanel();
                 mapIdText.setText(CaltopoClient.GetMapId());
             }
             mapIdText.setEnabled(isChecked);
             CaltopoClient.SetUseDirect(isChecked);
             updateViewMaps();
         });
+
+        Button loadRidConfigButton = settingsView.findViewById(R.id.ct_LoadRidConfig);
+        loadRidConfigButton.setOnClickListener((view) -> {
+            CaltopoClient.RequestLoadConfigFile();
+            droneSpecArrayChanged();
+            updateViewMaps();
+        });
+
+        Button loadCredentialsButton = settingsView.findViewById(R.id.ct_LoadCredentials);
+        loadCredentialsButton.setOnClickListener((view) -> {
+            CaltopoClient.RequestLoadConfigFile();
+            updateViewMaps();
+        });
+        CaltopoSessionConfig cfg = CaltopoClient.GetCaltopoConfig();
+
+        teamIdText = settingsView.findViewById(R.id.teamIdEditText);
+        teamIdText.addTextChangedListener(this);
+        if (null == cfg || null == cfg.teamId || cfg.teamId.isEmpty()) {
+            teamIdText.setText(UNSPEC_VAL_STR);
+        } else {
+            teamIdText.setText(HIDDEN_VAL_STR);
+//            teamIdText.setText(cfg.teamId);
+        }
+
+        credIdText = settingsView.findViewById(R.id.teamCredIdEditText);
+        credIdText.addTextChangedListener(this);
+        if (null == cfg || null == cfg.credentialId|| cfg.credentialId.isEmpty()) {
+            credIdText.setText(UNSPEC_VAL_STR);
+        } else {
+            credIdText.setText(HIDDEN_VAL_STR);
+//            credIdText.setText(cfg.credentialId);
+        }
+
+        credSecretText = settingsView.findViewById(R.id.teamCredSecretEditText);
+        credSecretText.addTextChangedListener(this);
+        if (null == cfg || null == cfg.credentialSecret|| cfg.credentialSecret.isEmpty()) {
+            credSecretText.setText(UNSPEC_VAL_STR);
+        } else {
+            credSecretText.setText(HIDDEN_VAL_STR);
+//            credSecretText.setText(cfg.credentialSecret);
+        }
+
+        folderText = settingsView.findViewById(R.id.ctFolderEditText);
+        folderText.addTextChangedListener(this);
+        String folder = CaltopoClient.GetTrackFolderName();
+        if (null == folder || folder.isEmpty()) {
+            folder = UNSPEC_VAL_STR;
+        }
+        folderText.setText(folder);
 
         return settingsView;
     }

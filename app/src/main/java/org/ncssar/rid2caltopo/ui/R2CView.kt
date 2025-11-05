@@ -1,9 +1,7 @@
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -25,14 +23,12 @@ fun R2CView(
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
-    Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-        Column {
-            AppHeader(appUptime, hostName)
-            RidmapHeader()
-            drones.forEach { drone ->
-                DroneItem(drone = drone) { newMappedId ->
-                    onMappedIdChange(drone, newMappedId)
-                }
+    Column {
+        AppHeader(appUptime, hostName)
+        RidmapHeader()
+        drones.forEach { drone ->
+            DroneItem(drone = drone) { newMappedId ->
+                onMappedIdChange(drone, newMappedId)
             }
         }
     }
@@ -44,7 +40,6 @@ fun AppHeader(appUptime: String, hostName: String) {
         modifier = Modifier
             .background(Color.Blue)
             .padding(3.dp),
-//        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(
             modifier = Modifier.width(300.dp)
@@ -124,7 +119,6 @@ fun RidmapHeader() {
         modifier = Modifier
             .background(Color.Blue)
             .padding(2.dp),
-//        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(
             modifier = Modifier.width(250.dp)

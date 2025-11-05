@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
 
@@ -17,10 +18,10 @@ class R2CViewModel(hostName: String, uptimeTimer: SimpleTimer) : ViewModel(), Ct
     val appUpTime = _appUptime.asStateFlow()
     val uptimeTimer = uptimeTimer
     val hostName = hostName
+    private val uptimePoll : DelayedExec = DelayedExec()
 
     init {
-        // Register this ViewModel to listen for changes from CaltopoClient
-        // Load the initial list of drones
+        uptimePoll.start(this::uptimePoll, 1000, 1000)
     }
 
     // Clean up the listener when the ViewModel is no longer in use.
@@ -34,6 +35,16 @@ class R2CViewModel(hostName: String, uptimeTimer: SimpleTimer) : ViewModel(), Ct
 
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         _drones.value = droneSpecs
+        _appUptime.value = uptimeTimer.durationAsString()
+        if (droneSpecs.isEmpty()) {
+            if (!uptimePoll.isRunning) {
+                uptimePoll.start(this::uptimePoll, 1000, 1000)
+            }
+        } else if (uptimePoll.isRunning) {
+            uptimePoll.stop()
+        }
+    }
+    fun uptimePoll() {
         _appUptime.value = uptimeTimer.durationAsString()
     }
 }

@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.R2CRest
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
@@ -24,9 +26,11 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
 
     private val _appVersion = MutableStateFlow("")
     val appVersion: StateFlow<String> = _appVersion.asStateFlow()
-
+    private val uptimePoll : DelayedExec = DelayedExec()
     private val _remoteCtRtt = MutableStateFlow("")
     val remoteCtRtt : StateFlow<String> = _remoteCtRtt.asStateFlow()
+
+
 
     override fun onRemoteAppVersion(version: String) {
         _appVersion.value = version
@@ -40,6 +44,8 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
         r2cClient.setRemoteDroneSpecMonitor(this)
         r2cClient.setRemoteUpdateListener(this)
         loadRemoteDrones()
+        uptimePoll.start(this::uptimePollFun, 1000, 1000)
+
     }
 
     private fun loadRemoteDrones() {
@@ -51,18 +57,26 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
         r2cClient.updateMappedId(drone, newMappedId)
     }
 
-    fun onDroneSpecsChanged() {
-        loadRemoteDrones()
-    }
-
     override fun onCleared() {
         r2cClient.setRemoteDroneSpecMonitor(null)
         super.onCleared()
     }
 
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
+        CTDebug("R2CRestViewModel","onDroneSpecsChanged(): " + droneSpecs)
         _drones.value = droneSpecs
         _remoteCtRtt.value = r2cClient.getRemoteCtRttString()
+        if (droneSpecs.isEmpty()) {
+            if (!uptimePoll.isRunning) {
+                uptimePoll.start(this::uptimePollFun, 1000, 1000)
+            }
+        } else if (uptimePoll.isRunning) {
+            uptimePoll.stop()
+        }
+    }
+
+    fun uptimePollFun() {
+        _remoteUptime.value = remoteTimer.durationAsString()
     }
 }
 

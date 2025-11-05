@@ -87,6 +87,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     }
 
     override fun onClientListChanged(clients: MutableList<R2CRest>) {
+        remoteViewModels.clear()
         remoteViewModels.addAll(clients.map { client ->
             ViewModelProvider(this, R2CRestViewModelFactory(client))[R2CRestViewModel::class.java]
         })
@@ -115,7 +116,6 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                     remoteViewModels = remoteViewModels,
                     onShowHelp = { showHelpMenu() },
                     onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(), "text/plain") },
-                    onLoadConfigFile = { CaltopoClient.RequestLoadConfigFile() },
                     onShowVersion = { showToast(BuildConfig.BUILD_TIME) },
                     onShowSettings = { showCaltopoConfigPanel() },
                 )

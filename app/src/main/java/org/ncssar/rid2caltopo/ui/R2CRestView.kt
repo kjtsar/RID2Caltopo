@@ -1,9 +1,7 @@
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -20,30 +18,27 @@ fun R2CRestView(
     peerName: String,
     appVersion: String,
     drones : List<CtDroneSpec>,
-    appUptime : String,
+    remoteUptime : String,
     ctRttString : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
-    Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-        Column {
-            RestHeader(appUptime, appVersion, peerName, ctRttString)
-            RestRidmapHeader()
-            drones.forEach { drone ->
-                DroneItem(drone = drone) { newMappedId ->
-                    onMappedIdChange(drone, newMappedId)
-                }
+    Column {
+        RestHeader(remoteUptime, appVersion, peerName, ctRttString)
+        RestRidmapHeader()
+        drones.forEach { drone ->
+            DroneItem(drone = drone) { newMappedId ->
+                onMappedIdChange(drone, newMappedId)
             }
         }
     }
 }
 
 @Composable
-fun RestHeader(appUptime: String, appVersion: String, peerName: String, ctRttString: String) {
+fun RestHeader(remoteUptime: String, appVersion: String, peerName: String, ctRttString: String) {
     Row(
         modifier = Modifier
             .background(Color.Red)
             .padding(2.dp),
-//        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(
             modifier = Modifier.width(300.dp)
@@ -80,7 +75,7 @@ fun RestHeader(appUptime: String, appVersion: String, peerName: String, ctRttStr
                 fontSize = 16.sp
             )
             Text(
-                text = appUptime,
+                text = remoteUptime,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
@@ -120,7 +115,6 @@ fun RestRidmapHeader() {
         modifier = Modifier
             .background(Color.Red)
             .padding(2.dp),
-//        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(
             modifier = Modifier.width(250.dp)
@@ -176,7 +170,6 @@ fun RestRidmapHeader() {
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),
-//                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
                     text = "BT4:",

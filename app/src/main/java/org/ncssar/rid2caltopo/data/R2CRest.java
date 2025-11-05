@@ -125,8 +125,12 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     public void setRemoteUpdateListener(@NonNull remoteUpdateListener remoteUpdateListener) {
         this.remoteUpdateListener = remoteUpdateListener;
-        remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
-        remoteUpdateListener.onRemoteStartTime(remoteUptimeTimer.getStartTimeInMsec());
+        if (null != remoteUptimeTimer) {
+            remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
+            remoteUpdateListener.onRemoteStartTime(remoteUptimeTimer.getStartTimeInMsec());
+        } else {
+            CTDebug(TAG, "setRemoteUpdateListener(): no remoteUptimeTimer.");
+        }
     }
 
     public interface ClientListChangedListener {
@@ -217,9 +221,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     @NonNull
     public ArrayList<CtDroneSpec> getRemoteDroneSpecs() {
         ArrayList<CtDroneSpec>droneSpecs = new ArrayList<>(droneSpecTable.size());
-        for (Map.Entry<String, CtDroneSpec>map : droneSpecTable.entrySet()) {
-            droneSpecs.add(map.getValue());
-        }
+        droneSpecs.addAll(droneSpecTable.values());
         return droneSpecs;
     }
 
@@ -297,7 +299,11 @@ public class R2CRest implements WsPipe.WsMsgListener {
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
             remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
-            remoteUpdateListener.onRemoteStartTime(remoteUptimeTimer.getStartTimeInMsec());
+            long startTime = remoteUptimeTimer.getStartTimeInMsec();
+            remoteUpdateListener.onRemoteStartTime(startTime);
+            CTDebug(TAG, String.format(Locale.US, "handleHelloAck(): startTime:%d, runTime:%s", startTime, remoteUptimeTimer.durationAsString()));
+        } else {
+            CTDebug(TAG, "handleHello(): no remoteUpdateListener.");
         }
 
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
@@ -436,7 +442,11 @@ public class R2CRest implements WsPipe.WsMsgListener {
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
             remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
-            remoteUpdateListener.onRemoteStartTime(remoteUptimeTimer.getStartTimeInMsec());
+            long startTime = remoteUptimeTimer.getStartTimeInMsec();
+            remoteUpdateListener.onRemoteStartTime(startTime);
+            CTDebug(TAG, String.format(Locale.US, "handleHelloAck(): startTime:%d, runTime:%s", startTime, remoteUptimeTimer.durationAsString()));
+        } else {
+            CTDebug(TAG, "handleHelloAck(): no remoteUpdateListener.");
         }
         if (null != clientListener) clientListener.clientStatusChange(this, true);
     }
@@ -449,7 +459,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     public void addDroneSpecForOurPeer(@NonNull CtDroneSpec dsIn) {
         String rid = dsIn.getRemoteId();
-        CtDroneSpec ds = CaltopoClient.SetDroneSpecOwner(dsIn, this);
+        CaltopoClient.SetDroneSpecOwner(dsIn, this);
         droneSpecTable.put(rid, dsIn);
         ClientRidMap.put(rid, this);
         updateDroneSpecListener();

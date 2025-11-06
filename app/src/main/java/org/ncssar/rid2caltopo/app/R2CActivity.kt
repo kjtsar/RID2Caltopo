@@ -102,6 +102,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             this,
             R2CViewModelFactory(
                 MyDeviceName,
+                CaltopoClient.GetMapId(),
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
         CaltopoClient.SetDroneSpecsChangedListener(localViewModel)

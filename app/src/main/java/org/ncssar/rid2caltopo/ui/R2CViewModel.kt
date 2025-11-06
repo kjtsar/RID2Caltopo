@@ -11,13 +11,11 @@ import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
 
-class R2CViewModel(hostName: String, uptimeTimer: SimpleTimer) : ViewModel(), CtDroneSpec.DroneSpecsChangedListener {
+class R2CViewModel(val hostName: String, val mapId : String, val uptimeTimer: SimpleTimer) : ViewModel(), CtDroneSpec.DroneSpecsChangedListener {
     private val _drones = MutableStateFlow<List<CtDroneSpec>>(emptyList())
     private val _appUptime = MutableStateFlow(ScanningService.UpTime())
     val drones: StateFlow<List<CtDroneSpec>> = _drones.asStateFlow()
     val appUpTime = _appUptime.asStateFlow()
-    val uptimeTimer = uptimeTimer
-    val hostName = hostName
     private val uptimePoll : DelayedExec = DelayedExec()
 
     init {
@@ -49,11 +47,11 @@ class R2CViewModel(hostName: String, uptimeTimer: SimpleTimer) : ViewModel(), Ct
     }
 }
 
-class R2CViewModelFactory(private val hostname: String, private val uptimeTimer: SimpleTimer) : ViewModelProvider.Factory {
+class R2CViewModelFactory(private val hostname: String, private val mapId : String, private val uptimeTimer: SimpleTimer) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(R2CViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return R2CViewModel(hostname, uptimeTimer) as T
+            return R2CViewModel(hostname, mapId, uptimeTimer) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

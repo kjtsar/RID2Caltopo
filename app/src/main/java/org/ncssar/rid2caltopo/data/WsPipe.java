@@ -223,7 +223,7 @@ public class WsPipe extends WebSocketListener {
                                         CTDebug(TAG, "checkServerTrusted() Found our CA.");
                                         return;
                                     } else {
-                                        CTDebug(TAG, String.format(Locale.US, "checkServerTrusted() Rejecting %s authType for serverCert:'%s', looking for '%s'", authType, serverCert, CaCert));
+                                        // CTDebug(TAG, String.format(Locale.US, "checkServerTrusted() Rejecting %s authType for serverCert:'%s', looking for '%s'", authType, serverCert, CaCert));
                                         return;
                                     }
                                 }

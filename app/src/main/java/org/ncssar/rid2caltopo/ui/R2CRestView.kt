@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -34,21 +33,21 @@ fun R2CRestView(
 }
 
 @Composable
-fun RestHeader(remoteUptime: String, appVersion: String, peerName: String, ctRttString: String) {
+fun RestHeader(appUptime: String, appVersion: String, peerName: String, ctRttString: String) {
     Row(
         modifier = Modifier
-            .background(Color.Red)
-            .padding(2.dp),
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(3.dp),
     ) {
         Column(
             modifier = Modifier.width(300.dp)
         ) {
             Text(
-                text = "Peer: " + peerName,
+                text = peerName,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 18.sp
             )
@@ -57,7 +56,7 @@ fun RestHeader(remoteUptime: String, appVersion: String, peerName: String, ctRtt
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
             )
@@ -70,16 +69,16 @@ fun RestHeader(remoteUptime: String, appVersion: String, peerName: String, ctRtt
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 16.sp
             )
             Text(
-                text = remoteUptime,
+                text = appUptime,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
             )
@@ -92,7 +91,7 @@ fun RestHeader(remoteUptime: String, appVersion: String, peerName: String, ctRtt
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
             )
@@ -101,7 +100,7 @@ fun RestHeader(remoteUptime: String, appVersion: String, peerName: String, ctRtt
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
             )
@@ -113,7 +112,7 @@ fun RestHeader(remoteUptime: String, appVersion: String, peerName: String, ctRtt
 fun RestRidmapHeader() {
     Row(
         modifier = Modifier
-            .background(Color.Red)
+            .background(MaterialTheme.colorScheme.secondaryContainer)
             .padding(2.dp),
     ) {
         Column(
@@ -124,14 +123,14 @@ fun RestRidmapHeader() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White)
+                    .background(MaterialTheme.colorScheme.surface)
             )
             Text(
                 text = "Track Label:",
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 18.sp
             )
@@ -144,14 +143,14 @@ fun RestRidmapHeader() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White)
+                    .background(MaterialTheme.colorScheme.surface)
             )
             Text(
                 text = "Remote ID:",
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 18.sp
             )
@@ -164,19 +163,19 @@ fun RestRidmapHeader() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 14.sp
             )
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
                     text = "BT4:",
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)
-                        .background(Color.White),
+                        .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
                     fontSize = 18.sp
                 )
@@ -185,7 +184,7 @@ fun RestRidmapHeader() {
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)
-                        .background(Color.White),
+                        .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
                     fontSize = 18.sp
                 )
@@ -194,7 +193,7 @@ fun RestRidmapHeader() {
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)
-                        .background(Color.White),
+                        .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
                     fontSize = 18.sp
                 )
@@ -203,7 +202,7 @@ fun RestRidmapHeader() {
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)
-                        .background(Color.White),
+                        .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
                     fontSize = 18.sp
                 )
@@ -212,7 +211,7 @@ fun RestRidmapHeader() {
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)
-                        .background(Color.White),
+                        .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
                     fontSize = 18.sp
                 )
@@ -221,7 +220,7 @@ fun RestRidmapHeader() {
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)
-                        .background(Color.White),
+                        .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
                     fontSize = 18.sp
                 )
@@ -235,7 +234,7 @@ fun RestRidmapHeader() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 18.sp
             )
@@ -244,7 +243,7 @@ fun RestRidmapHeader() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 18.sp
             )
@@ -257,14 +256,14 @@ fun RestRidmapHeader() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White)
+                    .background(MaterialTheme.colorScheme.surface)
             )
             Text(
                 text = "R2C RTT:",
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
-                    .background(Color.White),
+                    .background(MaterialTheme.colorScheme.surface),
                 textAlign = TextAlign.Center,
                 fontSize = 18.sp
             )
@@ -277,6 +276,6 @@ fun RestRidmapHeader() {
 @Composable
 fun R2CRestViewPreview() {
     RID2CaltopoTheme {
-        R2CRestView("", "", emptyList(), "", "0.000", {} as (CtDroneSpec, String) -> Unit)
+        R2CRestView("", "", emptyList(), "", "", {} as (CtDroneSpec, String) -> Unit)
     }
 }

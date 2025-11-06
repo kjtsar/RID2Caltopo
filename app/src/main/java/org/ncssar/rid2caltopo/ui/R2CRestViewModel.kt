@@ -24,20 +24,21 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
     val remoteUptime: StateFlow<String> = _remoteUptime.asStateFlow()
     private val remoteTimer : SimpleTimer = SimpleTimer()
 
-    private val _appVersion = MutableStateFlow("")
-    val appVersion: StateFlow<String> = _appVersion.asStateFlow()
+    private val _remoteAppVersion = MutableStateFlow("")
+    val remoteAppVersion: StateFlow<String> = _remoteAppVersion.asStateFlow()
     private val uptimePoll : DelayedExec = DelayedExec()
-    private val _remoteCtRtt = MutableStateFlow("")
+    private val _remoteCtRtt = MutableStateFlow("0.000 sec")
     val remoteCtRtt : StateFlow<String> = _remoteCtRtt.asStateFlow()
 
 
 
     override fun onRemoteAppVersion(version: String) {
-        _appVersion.value = version
+        _remoteAppVersion.value = version
     }
 
     override fun onRemoteStartTime(startTimeInMsec : Long) {
         remoteTimer.setStartTimeInMsec(startTimeInMsec)
+        _remoteUptime.value = remoteTimer.durationAsString()
     }
 
     init {
@@ -45,7 +46,6 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
         r2cClient.setRemoteUpdateListener(this)
         loadRemoteDrones()
         uptimePoll.start(this::uptimePollFun, 1000, 1000)
-
     }
 
     private fun loadRemoteDrones() {
@@ -63,7 +63,10 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
     }
 
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
-        CTDebug("R2CRestViewModel","onDroneSpecsChanged(): " + droneSpecs)
+        for (ds in droneSpecs) {
+            CTDebug("R2CRestViewModel", "onDroneSpecsChanged(): $ds")
+        }
+
         _drones.value = droneSpecs
         _remoteCtRtt.value = r2cClient.getRemoteCtRttString()
         if (droneSpecs.isEmpty()) {

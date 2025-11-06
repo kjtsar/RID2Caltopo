@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import org.ncssar.rid2caltopo.app.R2CActivity
+import org.ncssar.rid2caltopo.data.CaltopoClient
 
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,6 +77,7 @@ fun MainScreen(
 
                 R2CView(
                     hostName = R2CActivity.MyDeviceName,
+                    mapId = CaltopoClient.GetMapId(),
                     drones = localDrones,
                     appUptime = appUptime,
                     onMappedIdChange = { drone, newId ->
@@ -87,12 +89,14 @@ fun MainScreen(
                     val remoteDrones by remoteViewModel.drones.collectAsState()
                     val remoteUptime by remoteViewModel.remoteUptime.collectAsState()
                     val remoteCtRttString by remoteViewModel.remoteCtRtt.collectAsState()
+                    val remoteAppVersion by remoteViewModel.remoteAppVersion.collectAsState()
+
                     Box(modifier = Modifier.fillMaxWidth().height(10.dp).background(Color.LightGray))
                     R2CRestView(
                         peerName = remoteViewModel.r2cClient.peerName,
                         drones = remoteDrones,
                         remoteUptime = remoteUptime,
-                        appVersion = remoteViewModel.r2cClient.remoteAppVersion,
+                        appVersion = remoteAppVersion,
                         ctRttString = remoteCtRttString,
                         onMappedIdChange = { drone, newId ->
                             remoteViewModel.updateMappedId(drone, newId)

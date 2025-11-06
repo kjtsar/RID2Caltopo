@@ -73,17 +73,27 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (null == transportCount) transportCount = new int[TransportTypeEnum.values().length];
         transportCount[tt.ordinal()]+=1; totalCount++;
     }
+
     public int getTransportCount(TransportTypeEnum tt) {
         if (null == transportCount) transportCount = new int[TransportTypeEnum.values().length];
         return transportCount[tt.ordinal()];
     }
+
     public void startTimer() {
         if (null == flightSimpleTimer) flightSimpleTimer = new SimpleTimer();
         else flightSimpleTimer.restartTimer();
     }
 
+    public void setMyLiveTrack(@Nullable CaltopoLiveTrack newTrack) {
+        myLiveTrack = newTrack;
+    }
+    @Nullable
+    public CaltopoLiveTrack getMyLiveTrack() {return myLiveTrack;}
+
+    public boolean droneIsLocallyOwned() {return (null != myLiveTrack);}
+
     public String getDurationInSecAsString() {
-        return flightSimpleTimer.durationAsString();
+        return (null != flightSimpleTimer) ? flightSimpleTimer.durationAsString() : "";
     }
 
     public int getTotalCount() {

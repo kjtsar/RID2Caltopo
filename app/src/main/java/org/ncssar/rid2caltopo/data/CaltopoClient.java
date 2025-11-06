@@ -236,10 +236,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ds = new CtDroneSpec(rid, dsIn.getMappedId(), dsIn.getOrg(), dsIn.getModel(), dsIn.getOwner());
             ccs.droneSpecTable.put(rid, ds);
             ArchiveState("received new dronespec from our peer.");
-        } else if (!mid.isEmpty() && !mid.equals(rid)) {
+        } else if (!mid.isEmpty() && !mid.equals(rid) && !mid.equals(ds.getMappedId())) {
+            CTDebug(TAG, "SetDroneSpecOwner(): changing mappedId for '" + rid + "' to '" + mid + "'");
             ds.setMappedId(mid);
         }
         ds.setMyR2cOwner(owner);
+        ds.setMyLiveTrack(null);
         dsIn.setMyR2cOwner(owner);
     }
     public static void RemoveDroneSpecOwner(@NonNull CtDroneSpec dsIn) {
@@ -473,6 +475,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.mapId;
     }
 
+    @NonNull
     public static String GetMapId() {
         ClientClassState ccs = GetState();
         return ccs.mapId;

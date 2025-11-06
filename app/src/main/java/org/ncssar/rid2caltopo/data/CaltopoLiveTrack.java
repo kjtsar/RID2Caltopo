@@ -254,6 +254,7 @@ public class CaltopoLiveTrack {
         folderId = myMap.getFolderId();
         CTDebug(TAG, String.format(Locale.US, "startNewTrack(%s-%s): Starting LiveTrack w/label:%s",
                 myGroupId, myRemoteId, myTrackLabel));
+        droneSpec.setMyLiveTrack(this);
         try {
             startLiveTrackOp = myMap.session().startLiveTrack(myGroupId, myRemoteId, myTrackLabel, folderId,
                     null, null, this::startLiveTrackComplete);

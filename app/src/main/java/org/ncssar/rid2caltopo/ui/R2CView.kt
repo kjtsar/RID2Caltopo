@@ -1,10 +1,13 @@
 package org.ncssar.rid2caltopo.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -13,36 +16,66 @@ import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
+import org.ncssar.rid2caltopo.R
 import java.util.Locale
 
 @Composable
 fun R2CView(
     hostName: String,
     mapId: String,
+    groupId: String,
+    mapIsUp: Boolean,
     drones : List<CtDroneSpec>,
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
     Column {
-        AppHeader(appUptime, hostName, mapId)
+        AppHeader(appUptime, hostName, mapId, groupId, mapIsUp)
         RidmapHeader()
         drones.forEach { drone ->
-            DroneItem(drone = drone) { newMappedId ->
-                onMappedIdChange(drone, newMappedId)
+            key(drone.remoteId) {
+                DroneItem(drone = drone) { newMappedId ->
+                    onMappedIdChange(drone, newMappedId)
+                }
             }
         }
     }
 }
 
 @Composable
-fun AppHeader(appUptime: String, hostName: String, mapId: String) {
+fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: String, mapIsUp: Boolean) {
     Row(
         modifier = Modifier
             .background(MaterialTheme.colorScheme.primaryContainer)
-            .padding(3.dp),
+            .padding(3.dp)
+            .height(IntrinsicSize.Min)
     ) {
+        if (!mapId.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .width(40.dp)
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.surface),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                if (mapIsUp) {
+                    Image(
+                        painter = painterResource(id = R.drawable.earth),
+                        contentDescription = "earth",
+                        modifier = Modifier.size(30.dp)
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 4.dp,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+        }
         Column(
-            modifier = Modifier.width(300.dp)
+            modifier = Modifier.width(200.dp)
         ) {
             Text(
                 text = hostName,
@@ -64,7 +97,7 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String) {
             )
         }
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(120.dp)
         ) {
             Text(
                 text = "Up Time:",
@@ -86,7 +119,7 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String) {
             )
         }
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(100.dp)
         ) {
             Text(
                 text = "Map Id:",
@@ -99,6 +132,28 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String) {
             )
             Text(
                 text = mapId,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(25.dp)
+                    .background(MaterialTheme.colorScheme.surface),
+                textAlign = TextAlign.Center,
+                fontSize = 14.sp
+            )
+        }
+        Column(
+            modifier = Modifier.width(100.dp)
+        ) {
+            Text(
+                text = "Group Id:",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(25.dp)
+                    .background(MaterialTheme.colorScheme.surface),
+                textAlign = TextAlign.Center,
+                fontSize = 16.sp
+            )
+            Text(
+                text = groupId,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
@@ -303,6 +358,6 @@ fun RidmapHeader() {
 @Composable
 fun R2CViewPreview() {
     RID2CaltopoTheme {
-        R2CView("", "", emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
+        R2CView("", "", "", false, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
     }
 }

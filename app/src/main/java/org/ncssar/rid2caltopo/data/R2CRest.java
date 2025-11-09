@@ -101,6 +101,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
     private CtDroneSpec.DroneSpecsChangedListener remoteDroneSpecMonitor;
     public SimpleTimer remoteUptimeTimer = new SimpleTimer();
     public String remoteAppVersion = "<unknown>";
+    public String mapId = "";
+    public String groupId = "";
     private remoteUpdateListener remoteUpdateListener;
     private final Hashtable<String, CtDroneSpec> droneSpecTable = new Hashtable<>(4);  // Table to map remoteIDs owned by this R2CRest client to their corresponding data.
 
@@ -296,6 +298,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
         remoteUUID = id;
         AddClient(this);
         remoteAppVersion = payload.optString("app-version");
+        mapId = payload.optString("map-id");
+        groupId = payload.optString("group-id");
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
             remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
@@ -345,7 +349,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
             return;
         }
         String peerName = wsPipe.getPeerName();
-        CTDebug(TAG, "handleStatus(): Parsing " + remoteDroneList);
         for (int i = 0; i < remoteDroneList.length(); i++) {
             try {
                 Object o = remoteDroneList.get(i);
@@ -355,11 +358,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
                 } else {
                     ds = new CtDroneSpec((String) o);
                 }
-                CTDebug(TAG, "handleStatus(): received dronespec: " + ds);
-                String rid = ds.getRemoteId();
                 addDroneSpecForOurPeer(ds);
-                CTDebug(TAG, String.format(Locale.US,
-                        "handleStatus(): Added '%s' to the list of drones owned by %s", rid, peerName));
             } catch (JSONException e) {
                 CTError(TAG, "get() raised.", e);
             }
@@ -454,15 +453,27 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public void removeDroneSpecForOurPeer(@NonNull String rid) {
         droneSpecTable.remove(rid);
         ClientRidMap.remove(rid);
+        CTDebug(TAG, String.format(Locale.US,
+                "removeDroneSpecForOurPeer(): Removed '%s' to the list of drones owned by %s", rid, peerName));
         updateDroneSpecListener();
     }
 
+    /* Peer has received ownership of this drone, so if it changes the MappedId, we
+     * will change our mappedId to match.
+     */
     public void addDroneSpecForOurPeer(@NonNull CtDroneSpec dsIn) {
         String rid = dsIn.getRemoteId();
-        CaltopoClient.SetDroneSpecOwner(dsIn, this);
-        droneSpecTable.put(rid, dsIn);
-        ClientRidMap.put(rid, this);
-        updateDroneSpecListener();
+        R2CRest aClient = ClientIdMap.get(rid);
+        String mid = dsIn.getMappedId();
+
+        if (aClient != this || !mid.equals(dsIn.getMappedId())) {
+            CaltopoClient.SetDroneSpecOwner(dsIn, this);
+            droneSpecTable.put(rid, dsIn);
+            ClientRidMap.put(rid, this);
+            CTDebug(TAG, String.format(Locale.US,
+                    "addDroneSpecForOurPeer(): Added '%s' to the list of drones owned by %s", rid, peerName));
+            updateDroneSpecListener();
+        }
     }
 
     public void updateDroneSpecListener() {
@@ -679,7 +690,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             sendMsgCount++;
             return;
         }
-        CaltopoClient ctClient = liveTrack.getCaltopoClient();
+        CaltopoClient ctClient = CaltopoClient.ClientForRemoteId(rid);
         long ts = payload.optLong("ts");
         double lat = payload.optDouble("lat");
         double lng = payload.optDouble("lng");
@@ -961,6 +972,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
             payload.put("my-id", CaltopoClientMap.GetMyUUID());
             payload.put("my-addrs", MyIpAddresses);
             payload.put("app-vers", R2CActivity.GetMyAppVersion());
+            payload.put("map-id", CaltopoClient.GetMapId());
+            payload.put("group-id", CaltopoClient.GetGroupId());
             payload.put("start-timestamp", ScanningService.ScannerUptime.getStartTimeInMsec());
             wsPipe.sendMessage(payload, 0, false);
             sendMsgCount++;

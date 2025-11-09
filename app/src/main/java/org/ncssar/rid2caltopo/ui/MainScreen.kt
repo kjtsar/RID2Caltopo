@@ -26,6 +26,7 @@ fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CRestViewModel>,
     onShowHelp: () -> Unit,
+    loadConfigFile: () -> Unit,
     onShowLog: () -> Unit,
     onShowVersion: () -> Unit,
     onShowSettings: () -> Unit
@@ -48,8 +49,17 @@ fun MainScreen(
                             onShowSettings()
                             menuExpanded = false
                         })
+                        DropdownMenuItem(text = { Text("Load Config File") }, onClick = {
+                            loadConfigFile()
+                            menuExpanded = false
+                        })
                         DropdownMenuItem(text = { Text("Show Log") }, onClick = {
                             onShowLog()
+                            menuExpanded = false
+                        })
+                        DropdownMenuItem(text = { Text("Logging Level: " +
+                                CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }, onClick = {
+                            CaltopoClient.BumpLoggingLevel();
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
@@ -74,10 +84,13 @@ fun MainScreen(
                 // The Local R2CView
                 val localDrones by localViewModel.drones.collectAsState()
                 val appUptime by localViewModel.appUpTime.collectAsState()
+                val mapIsUp by localViewModel.mapIsUp.collectAsState()
 
                 R2CView(
                     hostName = R2CActivity.MyDeviceName,
                     mapId = CaltopoClient.GetMapId(),
+                    groupId = CaltopoClient.GetGroupId(),
+                    mapIsUp = mapIsUp,
                     drones = localDrones,
                     appUptime = appUptime,
                     onMappedIdChange = { drone, newId ->
@@ -97,6 +110,8 @@ fun MainScreen(
                         drones = remoteDrones,
                         remoteUptime = remoteUptime,
                         appVersion = remoteAppVersion,
+                        mapId = remoteViewModel.r2cClient.mapId,
+                        groupId = remoteViewModel.r2cClient.groupId,
                         ctRttString = remoteCtRttString,
                         onMappedIdChange = { drone, newId ->
                             remoteViewModel.updateMappedId(drone, newId)

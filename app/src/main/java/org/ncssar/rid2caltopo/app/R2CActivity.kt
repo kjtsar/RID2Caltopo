@@ -17,6 +17,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.ActivityCompat
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -39,6 +40,7 @@ import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.R2CRest
+import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.R2CRestViewModel
 import org.ncssar.rid2caltopo.ui.R2CRestViewModelFactory
@@ -55,6 +57,8 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     var mFusedLocationClient: FusedLocationProviderClient? = null
     private val remoteViewModels = mutableStateListOf<R2CRestViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
+    private val showSettingsDialog = mutableStateOf(false)
+
 
     private fun checkPermission(permission: String) {
         if (ActivityCompat.checkSelfPermission(
@@ -101,8 +105,8 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         val localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
-                MyDeviceName,
                 CaltopoClient.GetMapId(),
+                CaltopoClient.GetGroupId(),
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
         CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
@@ -111,14 +115,18 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             ViewModelProvider(this, R2CRestViewModelFactory(client))[R2CRestViewModel::class.java]
         })
         setContent {
+            if (showSettingsDialog.value) {
+                CaltopoSettingsScreen(onDismiss = {showSettingsDialog.value = false})
+            }
             RID2CaltopoTheme {
                 MainScreen(
                     localViewModel = localViewModel,
                     remoteViewModels = remoteViewModels,
                     onShowHelp = { showHelpMenu() },
-                    onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(), "text/plain") },
+                    onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(),"text/plain") },
+                    loadConfigFile = {loadConfigFile()},
                     onShowVersion = { showToast(BuildConfig.BUILD_TIME) },
-                    onShowSettings = { showCaltopoConfigPanel() },
+                    onShowSettings = { showSettingsDialog.value = true},
                 )
             }
         }
@@ -177,6 +185,14 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         }
     }
 
+    fun loadConfigFile() {
+        try {
+            CaltopoClient.RequestLoadConfigFile()
+        } catch (e: Exception) {
+            showToast("Error loading config file: " + e.message)
+        }
+    }
+
     private fun checkBluetoothSupport() {
         if (checkSelfPermission(Manifest.permission.BLUETOOTH) !=
             PackageManager.PERMISSION_GRANTED) {
@@ -215,12 +231,6 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         val helpMenu: DeviceHelp = DeviceHelp.newInstance()
         val transaction = supportFragmentManager.beginTransaction()
         helpMenu.show(transaction, "Help")
-    }
-
-    private fun showCaltopoConfigPanel() {
-        val configPanel: CaltopoSettings = CaltopoSettings.newInstance()
-        val transaction = supportFragmentManager.beginTransaction()
-        configPanel.show(transaction, "CaltopoSettings")
     }
 
     override fun onRequestPermissionsResult(

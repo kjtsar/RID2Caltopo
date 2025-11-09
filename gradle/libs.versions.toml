@@ -7,6 +7,7 @@ composeCompiler = "1.5.10"
 
 coreKtx = "1.12.0"
 appcompat = "1.6.1"
+lifecycleViewmodelCompose = "2.9.4"
 material = "1.11.0"
 activityCompose = "1.8.2"
 lifecycleRuntimeKtx = "2.7.0"
@@ -27,6 +28,7 @@ documentfile = "1.0.1"
 # AndroidX & Google
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycleViewmodelCompose" }
 google-material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
 androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }

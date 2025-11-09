@@ -215,27 +215,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      }
 
     /** Default sort
-     *   First compares age of dronespecs.
-     *   If ages same, then compares mappedIds.   If mappedIds same (shouldn't be),
-     *   then compares remoteIds, which are guaranteed to be unique.
+     *   Compares remoteIds which are guaranteed to be unique.
      *
      * @param  other to be compared against.
      * @return returns most recently seen towards end.
      */
     @Override
     public int compareTo(@NonNull CtDroneSpec other) {
-        int retval;
-        if (other.mostRecentTimeInSeconds == this.mostRecentTimeInSeconds) {
-            retval = this.mappedId.compareTo(other.mappedId);
-            if (0 == retval) {
-                retval = this.remoteId.compareTo(other.remoteId);
-            }
-        } else if (other.mostRecentTimeInSeconds < this.mostRecentTimeInSeconds) {
-            retval = -1;
-        } else {
-            retval = 1;
-        }
-        return retval;
+        return this.remoteId.compareTo(other.remoteId);
     }
 
     public boolean sameAs(@NonNull CtDroneSpec other) {

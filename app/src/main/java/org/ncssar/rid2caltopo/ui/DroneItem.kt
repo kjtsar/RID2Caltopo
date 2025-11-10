@@ -1,14 +1,18 @@
 package org.ncssar.rid2caltopo.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -22,12 +26,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 
 
@@ -44,8 +50,32 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             .padding(vertical = 4.dp, horizontal = 4.dp)
     ) {
         Row(
-            modifier = Modifier.background(MaterialTheme.colorScheme.tertiary).padding(1.dp).height(32.dp),
+            modifier = Modifier
+                .background(MaterialTheme.colorScheme.secondary)
+                .padding(1.dp)
+                .height(32.dp)
+                .height(IntrinsicSize.Min)
         ) {
+            Column(
+                modifier = Modifier
+                    .width(28.dp)
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.surface),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                if (drone.droneIsLocallyOwned()) {
+                    Image(
+                        painter = painterResource(id = R.drawable.earth),
+                        contentDescription = "earth",
+                        modifier = Modifier.size(20.dp)
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().fillMaxHeight()
+                    )
+                }
+            }
             Column(
                 modifier = Modifier.width(250.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
@@ -78,7 +108,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     decorationBox = { innerTextField ->
                         Box(
                             modifier = Modifier
-                                .border(width = 1.dp, color = MaterialTheme.colorScheme.tertiary, shape = RoundedCornerShape(4.dp))
+                                .border(width = 1.dp, color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(4.dp))
                                 .padding(2.dp)
                         ) {
                             innerTextField()

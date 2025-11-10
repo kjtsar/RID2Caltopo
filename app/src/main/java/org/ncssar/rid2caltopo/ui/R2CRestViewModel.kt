@@ -53,6 +53,7 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
     }
 
     fun updateMappedId(drone: CtDroneSpec, newMappedId: String) {
+        // FIXME: Should we even allow the view to update a mappedid that we don't own?
         // This logic will need to be a request to the remote client
         r2cClient.updateMappedId(drone, newMappedId)
     }

@@ -20,16 +20,12 @@ class CaltopoSettingsViewModel : ViewModel() {
     private val _newTrackDelay = MutableStateFlow(CaltopoClient.GetNewTrackDelayInSeconds().toString())
     val newTrackDelay = _newTrackDelay.asStateFlow()
 
-    private val _maxDisplayAge = MutableStateFlow(CaltopoClient.GetMaxDisplayAgeInSeconds().toString())
-    val maxDisplayAge = _maxDisplayAge.asStateFlow()
-
     private val _useDirect = MutableStateFlow(CaltopoClient.GetUseDirectFlag())
     val useDirect = _useDirect.asStateFlow()
 
     init {
         _groupId.value = CaltopoClient.GetGroupId()
         _useDirect.value = CaltopoClient.GetUseDirectFlag()
-        _maxDisplayAge.value = CaltopoClient.GetMaxDisplayAgeInSeconds().toString()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _mapId.value = CaltopoClient.GetMapId()
@@ -53,9 +49,6 @@ class CaltopoSettingsViewModel : ViewModel() {
         _newTrackDelay.value = newDelay
     }
 
-    fun onMaxDisplayAgeChanged(newMaxAge: String) {
-        _maxDisplayAge.value = newMaxAge
-    }
 
     fun onUseDirectChanged(isDirect: Boolean) {
         _useDirect.value = isDirect
@@ -66,7 +59,6 @@ class CaltopoSettingsViewModel : ViewModel() {
         CaltopoClient.SetMapId(_mapId.value)
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }
-        _maxDisplayAge.value.toLongOrNull()?.let { CaltopoClient.SetMaxDisplayAgeInSeconds(it) }
         CaltopoClient.SetUseDirect(_useDirect.value)
     }
 }

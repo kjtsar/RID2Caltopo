@@ -105,6 +105,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public String groupId = "";
     private remoteUpdateListener remoteUpdateListener;
     private final Hashtable<String, CtDroneSpec> droneSpecTable = new Hashtable<>(4);  // Table to map remoteIDs owned by this R2CRest client to their corresponding data.
+    private boolean outstandingSeen;
+    private JSONArray pendingSeenWaypoints = new JSONArray();
 
     public interface remoteUpdateListener {
         void onRemoteAppVersion(String remoteAppVers);
@@ -206,18 +208,11 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public void updateMappedId(@NonNull CtDroneSpec droneSpec, String newId) {
-        // FIXME: We need to treat this as a request - because we don't "own" this drone,
-        // but user clearly wants to change the name of it.  Send a message to the remote
-        // requesting the name change
+        // FIXME: not sure where we want to go with this.
     }
 
     public void setRemoteDroneSpecMonitor(CtDroneSpec.DroneSpecsChangedListener remoteDroneSpecMonitor) {
         this.remoteDroneSpecMonitor = remoteDroneSpecMonitor;
-    }
-
-    @NonNull
-    public String remoteUptime() {
-        return remoteUptimeTimer.durationAsString();
     }
 
     @NonNull
@@ -230,10 +225,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     @NonNull
     public String getRemoteUUID() { return remoteUUID;}
-
-    public void setClientListener(@Nullable R2CListener listener) {
-        this.clientListener = listener;
-    }
 
     @NonNull
     public static Hashtable<String, R2CRest>GetCloneOfPeerHashtable() {
@@ -348,7 +339,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
             CTError(TAG, "handleStatus() missing required 'my-active-dronelist' parameter");
             return;
         }
-        String peerName = wsPipe.getPeerName();
         for (int i = 0; i < remoteDroneList.length(); i++) {
             try {
                 Object o = remoteDroneList.get(i);
@@ -388,8 +378,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public void handleSeenAck(JSONObject payload) {
+        outstandingSeen = false;
         long r2cRtt = payload.optLong("r2c-rtt");
         if (r2cRtt != 0) remoteR2cRttAvgMsec.next(r2cRtt);
+        sendOutstandingWaypoints();
     }
 
     /* When I'm client connecting to remote:
@@ -451,10 +443,11 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public void removeDroneSpecForOurPeer(@NonNull String rid) {
-        droneSpecTable.remove(rid);
+        CtDroneSpec ds = droneSpecTable.remove(rid);
+        if (null != ds) CaltopoClient.RemoveDroneSpecOwner(ds);
         ClientRidMap.remove(rid);
         CTDebug(TAG, String.format(Locale.US,
-                "removeDroneSpecForOurPeer(): Removed '%s' to the list of drones owned by %s", rid, peerName));
+                "removeDroneSpecForOurPeer(): Removed '%s' from the list of drones owned by %s", rid, peerName));
         updateDroneSpecListener();
     }
 
@@ -675,30 +668,41 @@ public class R2CRest implements WsPipe.WsMsgListener {
      * reporting for this drone.
      */
     private void handleSeen(@NonNull Integer seqnum, @NonNull JSONObject payload) {
-        String rid = payload.optString("rid");
-        if (rid.isEmpty()) {
+        JSONArray waypoints = payload.optJSONArray("waypoints");
+        if (null == waypoints) {
             wsPipe.sendResponse(seqnum, errorResponsePayload(
-                    "handleSeen(): missing required 'rid' parameter.", payload));
+                    "handleSeen(): missing required 'waypoints' parameter.", payload));
             sendMsgCount++;
             return;
-        }
 
-        CaltopoLiveTrack liveTrack = OurDroneLiveTracks.get(rid);
-        if (null == liveTrack) {
-            wsPipe.sendResponse(seqnum, errorResponsePayload(
-                    "handleSeen(): not my drone.", payload));
-            sendMsgCount++;
-            return;
         }
-        CaltopoClient ctClient = CaltopoClient.ClientForRemoteId(rid);
-        long ts = payload.optLong("ts");
-        double lat = payload.optDouble("lat");
-        double lng = payload.optDouble("lng");
-        boolean archived = ctClient.newWaypoint(lat, lng, 0, ts, CtDroneSpec.TransportTypeEnum.R2C);
         long remoteCtRtt = payload.optLong("ct_rtt");
         if (remoteCtRtt > 0) remoteCtRttAvgMsec.next(remoteCtRtt);
         long remoteR2cRtt = payload.optLong("r2c_rtt");
         if (remoteR2cRtt > 0) remoteR2cRttAvgMsec.next(remoteR2cRtt);
+        boolean archived = false;
+        while (waypoints.length() > 0) {
+            JSONObject waypoint = (JSONObject)waypoints.remove(0);
+            String rid = waypoint.optString("rid");
+            if (rid.isEmpty()) {
+                wsPipe.sendResponse(seqnum, errorResponsePayload(
+                        "handleSeen(): missing required 'rid' parameter.", payload));
+                sendMsgCount++;
+                return;
+            }
+            CaltopoLiveTrack liveTrack = OurDroneLiveTracks.get(rid);
+            if (null == liveTrack) {
+                wsPipe.sendResponse(seqnum, errorResponsePayload(
+                        "handleSeen(): not my drone.", payload));
+                sendMsgCount++;
+                return;
+            }
+            CaltopoClient ctClient = CaltopoClient.ClientForRemoteId(rid);
+            long ts = waypoint.optLong("ts");
+            double lat = waypoint.optDouble("lat");
+            double lng = waypoint.optDouble("lng");
+            archived = archived || ctClient.newWaypoint(lat, lng, 0, ts, CtDroneSpec.TransportTypeEnum.R2C);
+        }
         JSONObject retPayload = new JSONObject();
         try {
             retPayload.put("type", "seen-ack");
@@ -829,18 +833,27 @@ public class R2CRest implements WsPipe.WsMsgListener {
             if (null != liveTrack) liveTrack.updateStatus(R2CRespEnum.reevaluate);
             return;
         }
+        Util.SafeJSONObject waypoint = new Util.SafeJSONObject();
+        waypoint.put("rid", droneSpec.getRemoteId());
+        waypoint.put("lat", lat);
+        waypoint.put("lng", lng);
+        waypoint.put("ts", droneTimestampInMsec);
+        pendingSeenWaypoints.put(waypoint);
+        sendOutstandingWaypoints();
+    }
+
+    private void sendOutstandingWaypoints() {
+        if (outstandingSeen) return;
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "seen");
-        jo.put("rid", droneSpec.getRemoteId());
-        jo.put("lat", lat);
-        jo.put("lng", lng);
-        jo.put("ts", droneTimestampInMsec);
+        jo.put("waypoints", pendingSeenWaypoints);
+        pendingSeenWaypoints = new JSONArray();
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
         jo.put("r2c-rtt", localR2cRttAvgMsec.get());
         wsPipe.sendMessage(jo, 0, false);
+        outstandingSeen = true;
         sendMsgCount++;
     }
-
 
     /** ClientForRemoteR2c() - invoked from CaltopoClientMap to establish
      * connection with a peer specified by a Marker in Caltopo.
@@ -927,10 +940,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
         return R2CRespEnum.pending;
     }
 
-    @Nullable public static R2CRest ClientForUUID(@Nullable String UUID) {
-        if (null != UUID) return ActiveClients.get(UUID);
-        return null;
-    }
 
     private void sendAddWithPayload(JSONObject payload) {
         if (null == wsPipe && null != ActiveClients.get(remoteUUID)) {
@@ -941,14 +950,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
         } else if (null == wsPipe) shutdown();
         wsPipe.sendMessage(payload, 0, false);
         sendMsgCount++;
-    }
-
-    private void handleAddResponse(@NonNull JSONObject payload) {
-        R2CRest client;
-        CaltopoLiveTrack liveTrack;
-        for (Map.Entry<String,R2CRest> map : ClientIdMap.entrySet()) {
-            client = map.getValue();
-        }
     }
 
     /** Find client for specified remote id.  This only returns a client

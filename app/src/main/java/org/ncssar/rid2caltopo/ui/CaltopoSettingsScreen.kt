@@ -18,7 +18,6 @@ fun CaltopoSettingsScreen(
     val mapId by settingsViewModel.mapId.collectAsState()
     val minDistance by settingsViewModel.minDistance.collectAsState()
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
-    val maxDisplayAge by settingsViewModel.maxDisplayAge.collectAsState()
     val useDirect by settingsViewModel.useDirect.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
@@ -58,11 +57,6 @@ fun CaltopoSettingsScreen(
                     value = newTrackDelay,
                     onValueChange = { settingsViewModel.onNewTrackDelayChanged(it) },
                     label = { Text("New Track Delay (s)") }
-                )
-                OutlinedTextField(
-                    value = maxDisplayAge,
-                    onValueChange = { settingsViewModel.onMaxDisplayAgeChanged(it) },
-                    label = { Text("Max Drone Age (s)") }
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))

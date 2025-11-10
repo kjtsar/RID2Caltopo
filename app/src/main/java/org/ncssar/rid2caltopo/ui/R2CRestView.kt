@@ -40,7 +40,7 @@ fun R2CRestView(
 fun RestHeader(appUptime: String, appVersion: String, peerName: String, mapId: String, groupId: String,ctRttString: String) {
     Row(
         modifier = Modifier
-            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .background(MaterialTheme.colorScheme.tertiary)
             .padding(3.dp),
     ) {
         Column(

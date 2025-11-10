@@ -198,6 +198,16 @@ fun RidmapHeader() {
             .padding(2.dp),
     ) {
         Column(
+            modifier = Modifier.width(28.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+            )
+        }
+        Column(
             modifier = Modifier.width(250.dp)
         ) {
             Text(

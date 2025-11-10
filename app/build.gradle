@@ -21,7 +21,7 @@ android {
         manifestPlaceholders = [
                 'appAuthRedirectScheme': 'org.ncssar.rid2caltopo'
         ]
-        resValue "string", "app_version", "${defaultConfig.versionName}${versionNameSuffix}"
+        resValue "string", "app_version", "${defaultConfig.versionName}"
 
         android.buildFeatures.buildConfig true
         buildConfigField "String", "BUILD_VERSION", "\"${defaultConfig.versionName}\""

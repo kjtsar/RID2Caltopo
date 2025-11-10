@@ -42,6 +42,7 @@ public class ScanningService extends Service {
     private R2CActivity mAppActivity;
     private OpenDroneIdDataManager mDataManager;
 
+    public static long GetStartTimeInMsec() {return ScannerUptime.getStartTimeInMsec();}
     public void startScanning() {
         if (null == mAppActivity) mAppActivity = R2CActivity.getR2CActivity();
         if (scanning) {

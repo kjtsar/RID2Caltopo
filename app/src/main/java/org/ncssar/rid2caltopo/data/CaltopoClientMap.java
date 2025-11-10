@@ -3,7 +3,6 @@ package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
-import static org.ncssar.rid2caltopo.data.CaltopoClient.PermissionsGrantedWeShouldBeGoodToGo;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.ShowToast;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import android.content.ContentResolver;
@@ -78,7 +77,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     private CaltopoOp archiveFolderIdOp;
     private boolean mapDumpedToLog;
     private final CaltopoSessionConfig sessionConfig;
-    private String  mapId = "";
+    private String  mapId;
     private final String folderName;
     private String openMapFailedMsg;
     private boolean mapIsUp;
@@ -134,7 +133,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     }
 
     public void clientStatusChange(R2CRest client, boolean isNowUpFlag) {
-        CTDebug(TAG, String.format(Locale.US,"" +
+        CTDebug(TAG, String.format(Locale.US,
                 "Received clientStatusChange(%s) from %s.", isNowUpFlag,client.getPeerName()));
         if (isNowUpFlag) {
             AddClient(client);
@@ -183,7 +182,6 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
             } catch (Exception e) {
                 CTError(TAG, "setMapId(): deleteMarkerWithId() raised:", e);
             }
-
             mapId = newMapId;
             startMapConnection();
         } else {
@@ -192,6 +190,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     }
 
     private void resetMapConnection() {
+        setMapState(false);
         openMapOp = null;
         updateMapOp = null;
         folderIdOp = null;
@@ -272,16 +271,22 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         if (state == null) throw new RuntimeException("parseMapUpdate(): response missing required state.");
         JSONArray features = state.getJSONArray("features");
         int count = features.length();
+        CTDebug(TAG, String.format(Locale.US, "parseMapUpdate(): found %d features", count));
         int newCount = 0;
         for (int i = 0; i < count; i++) {
             JSONObject feature = features.getJSONObject(i);
-            String thisFolderId = feature.optString("folderId");
-            if (!folderId.equals(thisFolderId)) continue;
             JSONObject prop = feature.optJSONObject("properties");
             if (null == prop) {
-                CTError(TAG, "parseMapUpdate(): feature missing 'properties' - skipping:" + feature);
+                CTDebug(TAG, "parseMapUpdate(): Feature missing required properties parameter.");
                 continue;
             }
+            String thisFolderId = prop.optString("folderId");
+            if (!folderId.equals(thisFolderId)) {
+                CTDebug(TAG, String.format(Locale.US, "parseMapUpdate(): feature folder id '%s' doesn't match our folder id '%s': %s",
+                        thisFolderId, folderId, feature));
+                continue;
+            }
+            CTDebug(TAG, "parseMapUpdate(): found feature in our folder: " + feature);
             String classString = prop.optString("class");
             String idString = feature.optString("id");
             if ("LiveTrack".equals(classString)) {
@@ -394,7 +399,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     private void updateMapFinished() {
         if (updateMapOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to update map '%s':\n  %s",
-                    mapId, updateMapOp.responseString()));
+                    mapId, updateMapOp));
             return;
         }
 
@@ -418,7 +423,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         if (mapIsUp != this.mapIsUp) {
             this.mapIsUp = mapIsUp;
             if (null != MapStatusListener) MapStatusListener.mapStatusUpdate(this, mapIsUp);
-            CTDebug(TAG, "updateMapFinished(): map is " + (mapIsUp ? "up." : "down."));
+            CTDebug(TAG, "setMapState(): map is " + (mapIsUp ? "up." : "down."));
             if (mapIsUp) {
                 while (!rogueFeaturesPendingDeletes.isEmpty()) {
                     JSONObject feature = rogueFeaturesPendingDeletes.remove(0);

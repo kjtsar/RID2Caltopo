@@ -1,6 +1,5 @@
 package org.ncssar.rid2caltopo.app
 
-import androidx.activity.viewModels
 import androidx.compose.runtime.mutableStateListOf
 import androidx.lifecycle.ViewModelProvider
 import android.Manifest
@@ -341,13 +340,13 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                 val serviceIntent = Intent(this, ScanningService::class.java)
                 stopService(serviceIntent)
                 CaltopoClient.Shutdown()
+                CTDebug(TAG, "onDestroy() archiving tracks...")
+                archiveTracks()
                 AppActivity = null
                 forceStopApp()
                 super.onDestroy()
                 return
             }
-            CTDebug(TAG, "onDestroy() archiving tracks...")
-            archiveTracks()
         }
         super.onDestroy()
     }

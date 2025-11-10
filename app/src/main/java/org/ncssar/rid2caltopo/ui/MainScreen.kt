@@ -59,7 +59,7 @@ fun MainScreen(
                         })
                         DropdownMenuItem(text = { Text("Logging Level: " +
                                 CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }, onClick = {
-                            CaltopoClient.BumpLoggingLevel();
+                            CaltopoClient.BumpLoggingLevel()
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {

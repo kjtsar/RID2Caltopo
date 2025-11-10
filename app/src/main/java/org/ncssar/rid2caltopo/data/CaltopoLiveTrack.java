@@ -32,18 +32,16 @@ import java.util.LinkedList;
 
 public class CaltopoLiveTrack {
     private static final String TAG = "CaltopoLiveTrack";
-    private static Util.SimpleMovingAverage CaltopoRttInMsec = new Util.SimpleMovingAverage(10);
-    private static Hashtable<String, CaltopoLiveTrack> LiveTrackByRemoteId = new Hashtable<>(16);
+    private static final Util.SimpleMovingAverage CaltopoRttInMsec = new Util.SimpleMovingAverage(10);
+    private static final Hashtable<String, CaltopoLiveTrack> LiveTrackByRemoteId = new Hashtable<>(16);
     private CaltopoOp startLiveTrackOp;
     private CaltopoOp renameTrackOp;
-    private String renamedTrackLabel;
     private CaltopoOp liveTrackOp;
     private String liveTrackId;
     private final LinkedList<double[]> linePoints = new LinkedList<>(); // array of arrays of [lat,lng] pairs
     private int linePointsSentCount;
     private String folderId;
     private final CaltopoClientMap myMap;
-    private String myTrackLabel;
     private boolean active;
     private R2CRest r2cClient;
     private R2CRest.R2CRespEnum r2cStatus;
@@ -53,14 +51,13 @@ public class CaltopoLiveTrack {
     private boolean shuttingDown = false;
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
 
-    public CaltopoLiveTrack(@NonNull CaltopoClientMap map, @NonNull String trackLabel, @NonNull String groupId,
+    public CaltopoLiveTrack(@NonNull CaltopoClientMap map, @NonNull String groupId,
                             @NonNull CtDroneSpec droneSpec, double lat, double lng,long droneTimestampInMsec) throws RuntimeException {
-        if (trackLabel.isEmpty() || groupId.isEmpty()) {
+        if (droneSpec.trackLabel().isEmpty() || groupId.isEmpty()) {
             throw new RuntimeException("CaltopoLiveTrack(): trackLabel and groupId are both required.");
         }
         myMap = map;
         myMap.addLiveTrack(this);
-        myTrackLabel = trackLabel;
         myGroupId = groupId;
         myRemoteId = droneSpec.getRemoteId();
         LiveTrackByRemoteId.put(myRemoteId, this);
@@ -89,14 +86,13 @@ public class CaltopoLiveTrack {
     /* called when caltopoclient times-out, finishes track, then gets another waypoint
      *
      */
-    public void startNewTrack(String trackLabel, double lat, double lng, long droneTimestampInMsec) {
+    public void startNewTrack(double lat, double lng, long droneTimestampInMsec) {
         r2cStatus = R2CRest.StatusForNewRemoteId(this, droneSpec,  lat, lng, droneTimestampInMsec);
         double[] point = {lat, lng, (double)droneTimestampInMsec};
         linePoints.add(point);
         linePointsSentCount = 0;
         startLiveTrackOp = null;
         liveTrackOp = null;
-        myTrackLabel = trackLabel;
         if (shuttingDown) return;
 
         switch (r2cStatus) {
@@ -128,11 +124,6 @@ public class CaltopoLiveTrack {
         return LiveTrackByRemoteId.get(remoteId);
     }
 
-    private String finalTrackLabel() {
-        if (null != renamedTrackLabel) return renamedTrackLabel;
-        return myTrackLabel;
-    }
-
     public void shutdown() {
         shuttingDown = true;
         archiveTrackOnCaltopo();
@@ -146,7 +137,8 @@ public class CaltopoLiveTrack {
      *                          so look at everything before the '_'.
      */
     public void checkCaltopoTrackLabel(@NonNull String caltopoTrackLabel) {
-        if (myTrackLabel.equals(caltopoTrackLabel)) return; // no change.
+        String trackLabel = droneSpec.trackLabel();
+        if (trackLabel.equals(caltopoTrackLabel)) return; // no change.
         String newLabel = caltopoTrackLabel;
         int indexOfChar = caltopoTrackLabel.indexOf('_');
         if (indexOfChar < 0) indexOfChar = caltopoTrackLabel.indexOf('-');
@@ -156,7 +148,7 @@ public class CaltopoLiveTrack {
         String dsMappedId = droneSpec.setMappedId(newLabel);
         CTDebug(TAG, String.format(Locale.US,
                         "checkCaltopoTrackLabel(): Changing track name from '%s' to '%s', ds returned: '%s'",
-                myTrackLabel, newLabel, dsMappedId));
+                trackLabel, newLabel, dsMappedId));
     }
 
     /**  Archive this track segment on Caltopo if we're the owner.
@@ -168,7 +160,7 @@ public class CaltopoLiveTrack {
             resetLiveTrack();
             return;
         }
-        String trackLabel = finalTrackLabel();
+        String trackLabel = droneSpec.trackLabel();
         int size = linePoints.size();
         if (0 == size || null == liveTrackId) {
             CTDebug(TAG, String.format(Locale.US,
@@ -218,7 +210,7 @@ public class CaltopoLiveTrack {
     }
 
     public String getTrackLabel() {
-        if (isActive()) return finalTrackLabel();
+        if (isActive()) return droneSpec.trackLabel();
         return "<not active>";
     }
 
@@ -228,21 +220,16 @@ public class CaltopoLiveTrack {
         } else {
             CTDebug(TAG, "renameTrackCompleted(): succeeded: " + renameTrackOp.responseString());
         }
-        myTrackLabel = renamedTrackLabel;
-        renamedTrackLabel = null;
     }
 
-    public void renameTrack(@NonNull String newTrackLabel) {
+    public void renameTrack() {
         // Just edit the current live track - replacing the title.
         // N.B. must continue to use the original track name when publishing tracks...
         if (!active || null == startLiveTrackOp) {
             CTError(TAG, "renameTrack(): received on inactive track.");
             return;
         }
-        if (!startLiveTrackOp.isDone()) {
-            renamedTrackLabel = newTrackLabel;
-            return;
-        }
+        if (!startLiveTrackOp.isDone()) return;
         try {
             long timeNowInMilliseconds = System.currentTimeMillis();
             String timeString = String.valueOf(timeNowInMilliseconds);
@@ -252,7 +239,7 @@ public class CaltopoLiveTrack {
                 prop = new JSONObject();
                 feature.put("properties", prop);
             }
-            prop.put("title", newTrackLabel);
+            prop.put("title", droneSpec.trackLabel());
             prop.put("updated", timeString);
             prop.put("-updated-on", timeString);
             renameTrackOp = myMap.session().editObjectWithId("LiveTrack", liveTrackId, feature, this::renameTrackCompleted);
@@ -274,11 +261,12 @@ public class CaltopoLiveTrack {
             return;
         }
         folderId = myMap.getFolderId();
+        String trackLabel = droneSpec.trackLabel();
         CTDebug(TAG, String.format(Locale.US, "startNewTrack(%s-%s): Starting LiveTrack w/label:%s",
-                myGroupId, myRemoteId, myTrackLabel));
+                myGroupId, myRemoteId, trackLabel));
         droneSpec.setMyLiveTrack(this);
         try {
-            startLiveTrackOp = myMap.session().startLiveTrack(myGroupId, myRemoteId, myTrackLabel, folderId,
+            startLiveTrackOp = myMap.session().startLiveTrack(myGroupId, myRemoteId, trackLabel, folderId,
                     null, null, this::startLiveTrackComplete);
             processNextWaypoint(); // We've got at least one waypoint - get it on it's way.
         } catch (Exception e) {
@@ -289,11 +277,11 @@ public class CaltopoLiveTrack {
     public void finishTrack(@NonNull String reason) {
         if (r2cStatus == R2CRest.R2CRespEnum.okToPublishLocally) R2CRest.SendDropDrone(myRemoteId);
         CTDebug(TAG, "finishTrack(): " + reason);
-        if (active) try {
+        if (active && null != liveTrackId) try {
             myMap.removeLiveTrack(liveTrackId);
             archiveTrackOnCaltopo();
         } catch (Exception e) {
-            CTError(TAG, String.format(Locale.US, "finishTrack(%s) '%s' failed:", myTrackLabel, reason), e);
+            CTError(TAG, String.format(Locale.US, "finishTrack(%s) '%s' failed:", droneSpec.trackLabel(), reason), e);
         }
     }
 
@@ -348,15 +336,15 @@ public class CaltopoLiveTrack {
         CTDebug(TAG, "startLiveTrackComplete():\n  " + startLiveTrackOp);
         if (null == startLiveTrackOp || !startLiveTrackOp.isDone()) return;
 
+        String trackLabel = droneSpec.trackLabel();
         if (startLiveTrackOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to open LiveTrack for:'%s-%s':\n  %s",
-                    myGroupId, myTrackLabel, startLiveTrackOp.responseString()));
+                    myGroupId, trackLabel, startLiveTrackOp.responseString()));
             finishTrack("Not able to open/write LiveTrack");
         } else try {
             liveTrackId = startLiveTrackOp.id();
             CTDebug(TAG, String.format(Locale.US, "startLiveTrackComplete(%s): liveTrackId: '%s'",
-                    myTrackLabel, liveTrackId));
-            if (null != renamedTrackLabel) renameTrack(renamedTrackLabel);
+                    trackLabel, liveTrackId));
             myMap.addLiveTrack(liveTrackId, this);
         } catch (Exception e) {
             CTError(TAG, "startLiveTrackComplete(): id() raised:", e);
@@ -369,7 +357,7 @@ public class CaltopoLiveTrack {
         linePoints.add(point);
         CTDebug(TAG, String.format(Locale.US,
                 "publishDirect(%s): added waypoint to queue. size is %d",
-                myTrackLabel, linePoints.size()));
+                droneSpec.trackLabel(), linePoints.size()));
         switch (r2cStatus) {
             case forwardToClient: {
                 if (null == r2cClient) r2cClient = R2CRest.ClientForRemoteId(myRemoteId);

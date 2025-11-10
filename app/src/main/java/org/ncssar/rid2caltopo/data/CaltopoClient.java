@@ -46,7 +46,9 @@ import java.net.URL;
 import javax.net.ssl.HttpsURLConnection;
 
 import java.text.SimpleDateFormat;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
@@ -65,14 +67,14 @@ import org.json.JSONObject;
 import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.R2CActivity;
-
+import org.ncssar.rid2caltopo.app.ScanningService;
 
 
 /*
  * Persistent state management for CaltopoClient
  */
 class ClientClassState implements Serializable {
-    private static final long SerialVersionUID = 18L; // Serializable version.
+    private static final long SerialVersionUID = 19L; // Serializable version.
     public long minDistanceInFeet;
     public String groupId;
     public String archivePath;
@@ -81,7 +83,6 @@ class ClientClassState implements Serializable {
     public String mapId;
     public boolean useDirectFlag;
     public long newTrackDelayInSeconds;
-    public long maxDisplayAgeInSeconds;
     public int debugLevel;
     public Hashtable<String, CtDroneSpec> droneSpecTable;  // Table to map remoteIDs to their data
 
@@ -95,7 +96,6 @@ class ClientClassState implements Serializable {
         mapId = "";
         useDirectFlag = false;
         newTrackDelayInSeconds = 20;
-        maxDisplayAgeInSeconds = 60 ;
         debugLevel = -1; // undefined.
         droneSpecTable = new Hashtable<>(16);
     }
@@ -126,11 +126,11 @@ class ClientClassState implements Serializable {
 
         return String.format(Locale.US,
                 "vers:'%d', minDist:'%d' ft, groupId:'%s', mapId:'%s', useDirectFlag:'%s'\n" +
-                        "newTrackDelayInSec:%d, maxDisplayAgeInSec:%d, debugLevel:%d, " +
+                        "newTrackDelayInSec:%d, debugLevel:%d, " +
                         "archivePath: '%s', \n caltopoTrackFolder: '%s', caltopoDomainAndPort:%s, \n" +
                         "teamId: '%s', credId: '%s' credSecret: '%s', ht: %s",
                 SerialVersionUID, minDistanceInFeet, groupId, mapId, useDirectFlag,
-                newTrackDelayInSeconds, maxDisplayAgeInSeconds, debugLevel,
+                newTrackDelayInSeconds, debugLevel,
                 (archivePath == null) ? "" : archivePath,
                 caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
                 CaltopoClient.DroneSpecStringRep(droneSpecTable));
@@ -138,10 +138,6 @@ class ClientClassState implements Serializable {
 }
 
 public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
-    public interface CtDroneSpecArrayMonitor {
-        void droneSpecArrayChanged();
-    }
-
 
     // CaltopoClient CLASS VARS:
     static final long MIN_DISTANCE_IN_FEET = 2;
@@ -174,7 +170,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
     private static CtDroneSpec.DroneSpecsChangedListener DroneSpecsChangedListener;
     private boolean recordingToMap;
-    private String trackLabel;
     private static CaltopoClientMap MyCaltopoClientMap = null;
     private static Uri DebugLogPath = null;
 
@@ -185,7 +180,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     private final DelayedExec idleTimeoutPoll;
     private static DelayedExec UiUpdatePoll;
-    private static long PreviousEarliestAgeOutInSeconds = 0;
+    private static long PreviousEarliestAgeOutInMsec = 0;
     private static final ArrayList <CtDroneSpec>DsArray = new ArrayList<>(16);
     private static long DroneSpecsArraySize = DsArray.size();
 
@@ -209,8 +204,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void SetDroneSpecsChangedListener(CtDroneSpec.DroneSpecsChangedListener newListener) {
         DroneSpecsChangedListener = newListener;
     }
-
-    public static int GetDebugLevel() {return DebugLevel;}
 
     @Nullable
     public static CtDroneSpec GetDroneSpec(@NonNull String remoteId) {
@@ -252,11 +245,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void UpdateDroneSpecs() {
         if (null != DroneSpecsChangedListener) {
-            ArrayList<CtDroneSpec> droneSpecArray = GetSortedCurrentDroneSpecArray();
-            DroneSpecsChangedListener.onDroneSpecsChanged(droneSpecArray);
+            DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray(true));
             if (null == UiUpdatePoll) {
                 UiUpdatePoll = new DelayedExec();
-                DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray());
                 UiUpdatePoll.start(() -> {
                     DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray());
                 }, 1000, 1000);
@@ -265,9 +256,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
     public void mappedIdChanged(@NonNull CtDroneSpec ds, @NonNull String oldval, @NonNull String newval) {
         CTDebug(TAG, String.format(Locale.US,
-                "mappedIdChanged(%s): change from '%s' to '%s'", trackLabel, oldval, newval));
-        trackLabel = newTrackLabel();
-        if (null != liveTrack) liveTrack.renameTrack(trackLabel);
+                "mappedIdChanged(%s): change from '%s' to '%s'", ds.trackLabel(), oldval, newval));
         ArchiveState(String.format(Locale.US, "mappedIdChanged from '%s' to '%s'", oldval, newval));
         UpdateDroneSpecs();
     }
@@ -278,7 +267,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             case DebugLevelDebug: retval = "Debugs"; break;
             case DebugLevelInfo: retval = "Info"; break;
             default: retval = "<undefined>";
-        };
+        }
         return retval;
     }
     public static String BumpLoggingLevel() {
@@ -505,12 +494,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static boolean GetUseDirectFlag() {
         ClientClassState ccs = GetState();
         return ccs.useDirectFlag;
-    }
-
-    @NonNull
-    public static CaltopoSessionConfig GetCaltopoSessionConfig() {
-        ClientClassState ccs = GetState();
-        return ccs.caltopoSessionConfig;
     }
 
     public static void SetCaltopoSessionConfig(@NonNull CaltopoSessionConfig cfg)
@@ -867,59 +850,47 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
-    /**
-     * @return Return an array of CtDroneSpecs for drones that have been seen
-     * * within the previous ageInSeconds (or all if ageInSeconds == 0).
-     */
-    @NonNull
-    public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray() {
-        ClientClassState ccs = GetState();
-        long retirementAgeInSeconds = GetMaxDisplayAgeInSeconds();
-        return GetSortedCurrentDroneSpecArray(retirementAgeInSeconds);
+    // This gets run by periodic timer.
+    public static ArrayList<CtDroneSpec>GetSortedCurrentDroneSpecArray() {
+        return GetSortedCurrentDroneSpecArray(false);
     }
 
+    /** GetSortedCurrentDroneSpecArray()
+     *
+     * @param changedFlag   True if something has changed and we need to refresh the list.
+     * @return Returns the current sorted list of dronespecs that are still active.
+     */
     @NonNull
-    public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray(long retirementAgeInSeconds) {
+    public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray(boolean changedFlag) {
         ClientClassState ccs = GetState();
+        long newTrackDelayInMsec = ccs.newTrackDelayInSeconds * 1000;
         long newSize = ccs.droneSpecTable.size();
-        boolean arrayChangedFlag = newSize != DroneSpecsArraySize;
+        if (newSize != DroneSpecsArraySize) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "GetSortedCurrentDroneSpecArray(): arraySize changed from:%d to :%d", DroneSpecsArraySize, newSize));
+            changedFlag = true;
+            DroneSpecsArraySize = newSize;
+        }
 
-        DroneSpecsArraySize = newSize;
-        if (retirementAgeInSeconds > 0) {
-            long currentTimeInSeconds = (System.currentTimeMillis() / 1000);
-            long nextAgeOutInSecondsFromNow = retirementAgeInSeconds;
+        long currentTimeInMsec = System.currentTimeMillis();
+        long nextAgeOutInMsec = newTrackDelayInMsec;
 
-            if (arrayChangedFlag || currentTimeInSeconds >= PreviousEarliestAgeOutInSeconds) {
-                CTDebug(TAG, "GetSortedCurrentDroneSpecArray(): rebuilding array.");
-                DsArray.clear();
-                for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
-                    if (0 != ds.mostRecentTimeInSeconds) {
-                        long currentAgeInSeconds = currentTimeInSeconds - ds.mostRecentTimeInSeconds;
-                        long currentAgeOutInSeconds = retirementAgeInSeconds - currentAgeInSeconds;
-                        if (currentAgeOutInSeconds > 0) {
-                            if (currentAgeOutInSeconds < nextAgeOutInSecondsFromNow) nextAgeOutInSecondsFromNow = currentAgeOutInSeconds;
-                            CTDebug(TAG, String.format(Locale.US,
-                                    "  current age for %s is %d, age out in %d seconds. next age out in %d seconds", ds.getMappedId(),
-                                    currentAgeInSeconds, currentAgeOutInSeconds, nextAgeOutInSecondsFromNow));
-                            DsArray.add(ds);
-                        }
-                    }
-                }
-                PreviousEarliestAgeOutInSeconds = currentTimeInSeconds + nextAgeOutInSecondsFromNow;
-            }
-            DsArray.sort(null);
-        } else if (arrayChangedFlag) {
-            CTDebug(TAG, "GetSortedCurrentDroneSpecArray() Adding all drones to the list");
+        if (changedFlag || currentTimeInMsec >= PreviousEarliestAgeOutInMsec) {
             DsArray.clear();
-            for (Map.Entry<String, CtDroneSpec> map : ccs.droneSpecTable.entrySet()) {
-                CtDroneSpec ds = map.getValue();
-                CTDebug(TAG, String.format(Locale.US,
-                        "  Adding %s to list", ds.getMappedId()));
-                DsArray.add(ds);
+            for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+                long droneSpecIdleInMsec = ds.idleTimeInMsec(currentTimeInMsec);
+                long currentAgeOutInMsec = newTrackDelayInMsec - droneSpecIdleInMsec;
+                if (currentAgeOutInMsec <= 0) continue;
+                if (currentAgeOutInMsec < nextAgeOutInMsec) {
+                    nextAgeOutInMsec = currentAgeOutInMsec;
+                    CTDebug(TAG, String.format(Locale.US,
+                            "GetSortedCurrentDroneSpecArray(): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
+                            ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
+                    DsArray.add(ds);
+                }
+                PreviousEarliestAgeOutInMsec = currentTimeInMsec + nextAgeOutInMsec;
             }
             DsArray.sort(null);
-        } else {
-            CTDebug(TAG, "GetSortedCurrentDroneSpecArray() resubmitting: " + DsArray);
         }
         return (ArrayList<CtDroneSpec>) DsArray.clone();
     }
@@ -934,10 +905,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.newTrackDelayInSeconds;
     }
 
-    public static long GetMaxDisplayAgeInSeconds() {
-        ClientClassState ccs = GetState();
-        return ccs.maxDisplayAgeInSeconds;
-    }
     public static long GetMinDistanceInFeet() {
         ClientClassState ccs = GetState();
         return ccs.minDistanceInFeet;
@@ -960,7 +927,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void InitArchiveDir() {
         if (null == DebugOutputStream && null != GetArchivePath()) try {
             DocumentFile todaysArchiveDir = GetTodaysTrackDir();
-            String filepath = "Log_" + TimeDatestampString();
+            String filepath = "Log_" + TimeDatestampString(ScanningService.GetStartTimeInMsec());
             if (null != todaysArchiveDir) try {
                 DocumentFile dataFilepath = todaysArchiveDir.createFile("text/plain", filepath);
                 ContentResolver resolver = AppContext.getContentResolver();
@@ -1052,19 +1019,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (ccs.newTrackDelayInSeconds != delayInSeconds) {
             ccs.newTrackDelayInSeconds = delayInSeconds;
             ArchiveState("newTrackDelayInSeconds changed");
+            UpdateDroneSpecs();
         }
         return ccs.newTrackDelayInSeconds;
     }
 
-    /* FIXME: Is this necessary/useful?
-     */
-    public static void SetMaxDisplayAgeInSeconds(long delayInSeconds) {
-        ClientClassState ccs = GetState();
-        if (ccs.maxDisplayAgeInSeconds != delayInSeconds) {
-            ccs.maxDisplayAgeInSeconds = delayInSeconds;
-            ArchiveState("maxDisplayAgeInSeconds changed.");
-        }
-    }
 
     /* minimum distance in feet between waypoints necessary to
      * record a new waypoint.
@@ -1081,11 +1040,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.minDistanceInFeet;
     }
 
-    public static String TimeDatestampString() {
+    public static String TimeDatestampString(long epochMsec) {
         // Yes, we really want the timestamp first to make it easier to spot
         // the latest track in caltopo's tiny feature window.
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HHmmssLLLdd");
-        return LocalDateTime.now().format(formatter);
+        Instant instant = Instant.ofEpochMilli(epochMsec);
+        LocalDateTime localDateTime = instant.atZone(ZoneId.systemDefault()).toLocalDateTime();
+        return localDateTime.format(formatter);
     }
 
     // CaltopoClient instance methods:
@@ -1095,12 +1056,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public String toString() {
         return String.format(Locale.US,
                 "  rid:%s, mapped:%s", remoteId, droneSpec.getMappedId());
-    }
-
-
-    @NonNull
-    public String newTrackLabel() {
-        return droneSpec.getMappedId() + "_" + TimeDatestampString();
     }
 
     /* this is used when Caltopo Session is not used, requiring user to set up the
@@ -1129,11 +1084,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
-    public long unsavedMsgCount() {
-        if (null == trackLabel) return 0;
-        return WaypointTrack.UnsavedMsgCountForTrack(trackLabel);
-    }
-
     public void publishLive(double lat, double lng, String groupId) {
         try {
             if (null == ExecutorPool) {
@@ -1150,34 +1100,31 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public void terminateTrack(String msg) {
-        if (null != trackLabel) {
+        if (droneSpec.isActive()) {
+            String trackLabel = droneSpec.trackLabel();
+            WaypointTrack.ArchiveTrack(trackLabel, R2CActivity.getAppContext());
             if (null != liveTrack && liveTrack.isActive()) {
                 CTDebug(TAG, msg);
                 liveTrack.finishTrack(msg);
             }
-            trackLabel = null; // this tells us this track is done.
+            droneSpec.reset();
             idleTimeoutPoll.stop();
+        } else {
+            CTDebug(TAG, "terminateTrack(): Ignoring inactive track.");
         }
     }
 
     // Make sure we catch idle drone tracks and archive them as soon as they are declared dormant.
     public void checkIdleTime() {
         if ( null != liveTrack && liveTrack.isActive() ) {
-            long idleDurationInMilliseconds;
-            long maxIdleDelayInMilliseconds = 1000 * GetNewTrackDelayInSeconds();
-            long currentTimeInMilliseconds = System.currentTimeMillis();
-
-            if (0 == droneSpec.mostRecentTimeInSeconds) {
-                idleDurationInMilliseconds = 0;
-            } else {
-                idleDurationInMilliseconds = currentTimeInMilliseconds - (droneSpec.mostRecentTimeInSeconds * 1000);
-            }
-            if (null != trackLabel) {
+            long maxIdleDelayInMilliseconds = GetNewTrackDelayInSeconds() * 1000;
+            if (droneSpec.isActive()) {
+                String trackLabel = droneSpec.trackLabel();
+                long idleDurationInMilliseconds = droneSpec.idleTimeInMsec(System.currentTimeMillis());
                 String msg = String.format(Locale.US,
                         "checkIdleTime(%s) has been idle for %.3f/%.3f seconds.", trackLabel,
                         (double) idleDurationInMilliseconds / 1000.0, (double) maxIdleDelayInMilliseconds / 1000.0);
                 CTInfo(TAG, msg);
-
                 if (idleDurationInMilliseconds > maxIdleDelayInMilliseconds) {
                     msg = msg + "  Finishing track...";
                     terminateTrack(msg);
@@ -1190,8 +1137,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
         }
     }
+
     private boolean recordingToMapStatusChanged() {
-        return (null != trackLabel && (recordingToMap != (null != MyCaltopoClientMap && MyCaltopoClientMap.getMapIsUp())));
+        return (droneSpec.isActive() && (recordingToMap != (null != MyCaltopoClientMap && MyCaltopoClientMap.getMapIsUp())));
     }
 
     /** newWaypoint() - process a new waypoint from OpenDroneIdDataManager().
@@ -1202,6 +1150,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
     public boolean newWaypoint(double lat, double lng, long altitudeInMeters, long droneTimestampInMilliseconds, CtDroneSpec.TransportTypeEnum transportType) {
         boolean useDirectFlag = GetUseDirectFlag();
+        if (null == droneSpec) {
+            CTError(TAG, "newWaypoint(): dronespec is null - this shouldn't be possible.");
+            return false;
+        }
 
         if (recordingToMapStatusChanged()) {
             // We're currently in the middle of recording a track and user changed configuration on us...
@@ -1209,21 +1161,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             recordingToMap = !recordingToMap;
             if (recordingToMap) ConnectToMap();
         }
-        if (null == trackLabel) {
-            trackLabel = newTrackLabel();
-            droneSpec.startTimer();
-            UpdateDroneSpecs();
-        }
-        if (null != droneSpec) droneSpec.bumpTransportCount(transportType);
-        if (-1000 == altitudeInMeters || (0.0 == lat && 0.0 == lng)) {
-            CTInfo(TAG, String.format(Locale.US,
-                    "newWaypoint(%s/%s) w/Invalid altitude %d and/or coordinates %.7f, %.7f - ignoring.",
-                    trackLabel, transportType, altitudeInMeters, lat, lng));
-            return false; // only interested in recording real waypoints thank-you very much
-        }
-        boolean archived = WaypointTrack.AddWaypointForTrack(trackLabel, lat, lng, altitudeInMeters, droneTimestampInMilliseconds, transportType);
-        if (archived) {
-            if (null != droneSpec) droneSpec.mostRecentTimeInSeconds = System.currentTimeMillis() / 1000;
+
+        if (droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) {
+            WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
             String groupId = GetGroupId();
             if (groupId.isEmpty()) {
                 if (!WarnMissingGroupId) {
@@ -1253,9 +1193,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 } else WarnConnectingToMapFlag = false;
                 recordingToMap = true;
                 if (null == liveTrack) {
-                    liveTrack = new CaltopoLiveTrack(MyCaltopoClientMap, trackLabel, GetGroupId(), droneSpec, lat, lng, droneTimestampInMilliseconds);
+                    liveTrack = new CaltopoLiveTrack(MyCaltopoClientMap, GetGroupId(), droneSpec, lat, lng, droneTimestampInMilliseconds);
                 } else if (!liveTrack.isActive()) {
-                    liveTrack.startNewTrack(trackLabel, lat, lng, droneTimestampInMilliseconds);
+                    liveTrack.startNewTrack(lat, lng, droneTimestampInMilliseconds);
                 }
                 liveTrack.publishDirect(lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
 
@@ -1272,6 +1212,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 }
             }
         }
-        return archived;
+        return true;
     }
 }

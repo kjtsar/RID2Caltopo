@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.ncssar.rid2caltopo.R
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 
 
@@ -64,7 +65,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                if (drone.droneIsLocallyOwned()) {
+                if (drone.publishingLocally()) {
                     Image(
                         painter = painterResource(id = R.drawable.earth),
                         contentDescription = "earth",
@@ -77,24 +78,15 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                 }
             }
             Column(
-                modifier = Modifier.width(250.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
+                modifier = Modifier.width(200.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
-                var fontWeight = FontWeight.Normal
-                var fontStyle = FontStyle.Normal
-                if (drone.droneIsLocallyOwned()) {
-                    fontStyle = FontStyle.Italic
-                    fontWeight = FontWeight.Bold
-                }
-
                 BasicTextField(
                     value = text,
                     onValueChange = { text = it },
                     singleLine = true,
                     textStyle = androidx.compose.ui.text.TextStyle(
                         color = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = fontWeight,
-                        fontStyle = fontStyle,
                         fontSize = 14.sp,
                         textAlign = TextAlign.Center
                     ),
@@ -108,7 +100,11 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     decorationBox = { innerTextField ->
                         Box(
                             modifier = Modifier
-                                .border(width = 1.dp, color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(4.dp))
+                                .border(
+                                    width = 1.dp,
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = RoundedCornerShape(4.dp)
+                                )
                                 .padding(2.dp)
                         ) {
                             innerTextField()
@@ -127,14 +123,14 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
 
             Column(
-                modifier = Modifier.width(250.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
+                modifier = Modifier.width(200.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
                 Text(text = drone.remoteId, textAlign = TextAlign.End)
             }
             Column(
                 modifier = Modifier
-                    .width(80.dp)
+                    .width(70.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -144,7 +140,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width( 70.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -154,7 +150,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width( 70.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -164,7 +160,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width( 70.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -174,7 +170,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width( 70.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -184,7 +180,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width( 70.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -194,7 +190,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 150.dp)
+                    .width( 100.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -204,7 +200,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width( 150.dp)
+                    .width( 100.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),

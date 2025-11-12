@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
@@ -53,9 +54,13 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
     }
 
     fun updateMappedId(drone: CtDroneSpec, newMappedId: String) {
-        // FIXME: Should we even allow the view to update a mappedid that we don't own?
-        // This logic will need to be a request to the remote client
-        r2cClient.updateMappedId(drone, newMappedId)
+        CTDebug("R2CRestViewModel", "updateMappedId(${drone.remoteId}, ${newMappedId})")
+        val droneSpec: CtDroneSpec ?= CaltopoClient.GetDroneSpec(drone.remoteId)
+        if (null != droneSpec) {
+            droneSpec.setMappedId(newMappedId)
+        } else {
+            r2cClient.updateMappedId(drone, newMappedId)
+        }
     }
 
     override fun onCleared() {

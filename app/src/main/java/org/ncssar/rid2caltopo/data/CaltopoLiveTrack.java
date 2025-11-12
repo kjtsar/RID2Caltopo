@@ -11,6 +11,7 @@ import java.util.Locale;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
+import static org.ncssar.rid2caltopo.data.R2CRest.R2CRespEnum.okToPublishLocally;
 import androidx.annotation.NonNull;
 
 import java.util.LinkedList;
@@ -62,6 +63,7 @@ public class CaltopoLiveTrack {
         myRemoteId = droneSpec.getRemoteId();
         LiveTrackByRemoteId.put(myRemoteId, this);
         active = true;
+        droneSpec.setMyLiveTrack(this);
         this.droneSpec = droneSpec;
         this.r2cStatus = R2CRest.StatusForNewRemoteId(this, droneSpec,  lat, lng, droneTimestampInMsec);
         double[] point = {lat, lng, (double)droneTimestampInMsec};
@@ -112,6 +114,7 @@ public class CaltopoLiveTrack {
         }
     }
 
+    public boolean publishingLocally() {return (r2cStatus == okToPublishLocally);}
 
     /* Return -1 if no corresponding point */
     public long getFirstTimestamp() {
@@ -154,7 +157,7 @@ public class CaltopoLiveTrack {
     /**  Archive this track segment on Caltopo if we're the owner.
      */
     public void archiveTrackOnCaltopo() {
-        if (r2cStatus != R2CRest.R2CRespEnum.okToPublishLocally) {
+        if (r2cStatus != okToPublishLocally) {
             // We aren't responsible for writing this drone's tracks to caltopo
             CTDebug(TAG, "archiveTrackOnCaltopo(): attempt to archive a track that is owned by a remote R2C ignored.");
             resetLiveTrack();
@@ -264,7 +267,6 @@ public class CaltopoLiveTrack {
         String trackLabel = droneSpec.trackLabel();
         CTDebug(TAG, String.format(Locale.US, "startNewTrack(%s-%s): Starting LiveTrack w/label:%s",
                 myGroupId, myRemoteId, trackLabel));
-        droneSpec.setMyLiveTrack(this);
         try {
             startLiveTrackOp = myMap.session().startLiveTrack(myGroupId, myRemoteId, trackLabel, folderId,
                     null, null, this::startLiveTrackComplete);
@@ -275,7 +277,7 @@ public class CaltopoLiveTrack {
     }
 
     public void finishTrack(@NonNull String reason) {
-        if (r2cStatus == R2CRest.R2CRespEnum.okToPublishLocally) R2CRest.SendDropDrone(myRemoteId);
+        if (r2cStatus == okToPublishLocally) R2CRest.SendDropDrone(myRemoteId);
         CTDebug(TAG, "finishTrack(): " + reason);
         if (active && null != liveTrackId) try {
             myMap.removeLiveTrack(liveTrackId);

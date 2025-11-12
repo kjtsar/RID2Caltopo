@@ -77,15 +77,14 @@ public class ScanningService extends Service {
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
         mAppActivity = R2CActivity.getR2CActivity();
+        mDataManager = R2CActivity.getDataManager();
 
-        if (null == mAppActivity) {
-            CaltopoClient.CTError(TAG, "onCreate() with null R2CActivity.");
+        if (null == mAppActivity || null == mDataManager) {
+            CaltopoClient.CTError(TAG, "onCreate() missing required app context - terminating.");
+            System.exit(3);
             return;
         }
-        mDataManager = mAppActivity.getDataManager();
-        if (null == mDataManager) {
-            CaltopoClient.CTError(TAG, "onCreate() with null DataManager.");
-        }
+
         CaltopoClient.CTDebug(TAG, String.format(Locale.US, "onCreate(): appActivity:0x%x dataManager: 0x%x",
                 mAppActivity.hashCode(), mDataManager.hashCode()));
 

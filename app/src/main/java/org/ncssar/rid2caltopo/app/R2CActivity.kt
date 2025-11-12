@@ -65,13 +65,13 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                 permission
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            CaltopoClient.CTDebug(
+            CTDebug(
                 TAG,
                 String.format(Locale.US, "checkPermission(): Requesting '%s'.", permission)
             )
             outstandingPermissionsList.add(permission)
         } else {
-            CaltopoClient.CTDebug(
+            CTDebug(
                 TAG, String.format(
                     Locale.US, "checkPermission(): '%s' granted.",
                     permission
@@ -83,7 +83,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
 
     fun archiveTracks() {
         try {
-            WaypointTrack.ArchiveTracks(this)
+            WaypointTrack.ArchiveTracks()
         } catch (e: Exception) {
             CTError(TAG, "archiveTracks() raised:", e)
         }
@@ -205,7 +205,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             return
         }
         MyDeviceName = bluetoothAdapter.name
-        CTDebug(TAG, "Setting MyDeviceName to: " + MyDeviceName)
+        CTDebug(TAG, "Setting MyDeviceName to:${MyDeviceName}")
         if (bluetoothAdapter.isLeCodedPhySupported) {
             codedPhySupported = true
         }
@@ -352,13 +352,13 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     }
 
     fun forceStopApp() {
-        Thread(Runnable {
+        Thread {
             try {
                 Thread.sleep(3000)
             } catch (ignored: java.lang.Exception) {
             }
             finish()
-        }).start()
+        }.start()
     }
 
     companion object {
@@ -388,12 +388,9 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         }
 
         @JvmStatic
-        fun GetMyAppVersion(): String {
+        fun getMyAppVersion(): String {
             return String.format(Locale.US,
-                "%s(%s)",BuildConfig.BUILD_VERSION, BuildConfig.BUILD_TIME);
+                "%s(%s)",BuildConfig.BUILD_VERSION, BuildConfig.BUILD_TIME)
         }
-
     }
 }
-
-annotation class HelpMenu

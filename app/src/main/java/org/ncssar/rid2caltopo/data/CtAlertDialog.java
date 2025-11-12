@@ -24,8 +24,8 @@ public class CtAlertDialog {
             @Override
             public void onClick(DialogInterface dialog, int which) {
                 responseValid = response = true;
-                if (null != responseRunnable) responseRunnable.run();
                 CaltopoClient.CTDebug(TAG, "User responded affirmative to question: " + question);
+                if (null != responseRunnable) responseRunnable.run();
             }
         });
 

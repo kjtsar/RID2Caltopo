@@ -87,7 +87,7 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: Strin
                 fontSize = 18.sp
             )
             Text(
-                text = R2CActivity.GetMyAppVersion(),
+                text = R2CActivity.getMyAppVersion(),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
@@ -208,7 +208,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(250.dp)
+            modifier = Modifier.width(200.dp)
         ) {
             Text(
                 text = "",
@@ -228,7 +228,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(250.dp)
+            modifier = Modifier.width(200.dp)
         ) {
             Text(
                 text = "",
@@ -248,7 +248,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(480.dp)
+            modifier = Modifier.width(420.dp)
         ) {
             Text(
                 text = "Waypoints Received",
@@ -265,7 +265,7 @@ fun RidmapHeader() {
                 Text(
                     text = "BT4:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -274,7 +274,7 @@ fun RidmapHeader() {
                 Text(
                     text = "BT5:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -283,7 +283,7 @@ fun RidmapHeader() {
                 Text(
                     text = "WiFi:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -292,7 +292,7 @@ fun RidmapHeader() {
                 Text(
                     text = "NaN:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -301,7 +301,7 @@ fun RidmapHeader() {
                 Text(
                     text = "R2C:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -310,7 +310,7 @@ fun RidmapHeader() {
                 Text(
                     text = "Total:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -319,7 +319,7 @@ fun RidmapHeader() {
             }
         }
         Column(
-            modifier = Modifier.width(150.dp)
+            modifier = Modifier.width(100.dp)
         ) {
             Text(
                 text = "Flight",
@@ -341,7 +341,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(150.dp)
+            modifier = Modifier.width(100.dp)
         ) {
             Text(
                 text = "",

@@ -97,17 +97,16 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     private JSONArray myLiveTracksInThisMap;   // Actual 'LiveTrack' objects in the current map
     public CaltopoClientMap(@NonNull CaltopoSessionConfig config, @NonNull String mapId, @NonNull String folderName)
             throws RuntimeException {
-        R2CRest.Init();
+        R2CRest.Init();  // start server.
         sessionConfig = config;
         if (mapId.isEmpty())
             throw new RuntimeException("CaltopoClientMap(): mapId must be specified.");
-        this.mapId = mapId;
         if (folderName.isEmpty()) folderName = "DroneTracks";
         this.folderName = folderName;
         if (null == MyUUID) GetMyUUID();
         Maps.add(this);
         CurrentMap = this;
-        startMapConnection();
+        startMapConnection(mapId);
     }
 
     public static void SetMapStatusListener(@Nullable MapStatusListener listener) {MapStatusListener = listener;}
@@ -165,7 +164,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
             // user wants to shut down the map connection;
             resetMapConnection();
 
-        } else if (!newMapId.equals(mapId)) {
+        } else if (!mapId.isEmpty() && !newMapId.equals(mapId)) {
+            // archive tracks on existing map before switching:
             CTDebug(TAG, String.format(Locale.US, "setMapId() changing from '%s' to '%s'.",
                     mapId, newMapId));
             for (CaltopoLiveTrack track : liveTracks) {
@@ -182,25 +182,16 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
             } catch (Exception e) {
                 CTError(TAG, "setMapId(): deleteMarkerWithId() raised:", e);
             }
-            mapId = newMapId;
-            startMapConnection();
-        } else {
+        } else if (!mapId.isEmpty()) {
             CTDebug(TAG, "setMapId(): ignoring attempt to change to existing map.");
+            return;
         }
+        startMapConnection(newMapId);
     }
 
     private void resetMapConnection() {
         setMapState(false);
-        openMapOp = null;
-        updateMapOp = null;
-        folderIdOp = null;
-        folderId = null;
-        archiveFolderIdOp = null;
-        archiveFolderId = null;
-        mapDumpedToLog = false;
-        openMapFailedMsg = null;
-        if (null != MapStatusListener) MapStatusListener.mapStatusUpdate(this, false);
-        mapIsUp = false;
+        mapCheckerDelay.stop();
         if (!clientIdMap.isEmpty()) {
             ArrayList<String> uuidList = new ArrayList<>(clientIdMap.size());
             for (Map.Entry<String,R2CRest>map : clientIdMap.entrySet()) {
@@ -212,10 +203,20 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
             }
             for (String uuid : uuidList) clientIdMap.remove(uuid);
         }
+        openMapOp = null;
+        updateMapOp = null;
+        folderIdOp = null;
+        folderId = null;
+        archiveFolderIdOp = null;
+        archiveFolderId = null;
+        mapDumpedToLog = false;
+        openMapFailedMsg = null;
     }
 
-    private void startMapConnection() {
+    private void startMapConnection(@NonNull String newMapId) {
         resetMapConnection();
+        mapId = newMapId;
+
         if (null == Csp) {
             Csp = new CaltopoSession(sessionConfig);
             CTInfo(TAG, "startMapConnection() created session.");
@@ -452,7 +453,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         if (mapId.isEmpty()) return;
         if (openMapOp.fail()) {
             openMapFailedMsg = String.format(Locale.US, "Not able to open map '%s':\n  %s",
-                    mapId, openMapOp.responseString());
+                    mapId, openMapOp);
             ShowToast(openMapFailedMsg);
             mapId = "";
             return;
@@ -818,12 +819,12 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                 }
             }
             CaltopoOp op = Csp.deleteMarkerWithId(MyUUID, null);
+            R2CRest.Shutdown();
             op.syncOpJSONObject(MAX_CALTOPO_OP_DURATION_IN_SECONDS);
             if (op.success()) {
                 CTDebug(TAG, String.format(Locale.US, "Marker removed in %.3f seconds",
                         (double)op.roundTripTimeInMsec() / 1000.0));
             }
-            R2CRest.Shutdown();
         } catch (Exception e) {
             CTError(TAG, "Attempting to remove my Marker from caltopo raised: ", e);
         }

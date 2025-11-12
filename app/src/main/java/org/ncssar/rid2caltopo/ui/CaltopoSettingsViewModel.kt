@@ -4,8 +4,9 @@ import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 
-class CaltopoSettingsViewModel : ViewModel() {
+class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
 
     // --- Live Data for UI --- //
     private val _groupId = MutableStateFlow(CaltopoClient.GetGroupId())
@@ -24,6 +25,11 @@ class CaltopoSettingsViewModel : ViewModel() {
     val useDirect = _useDirect.asStateFlow()
 
     init {
+        CaltopoClient.SetSettingsListener(this);
+        settingsChanged(); // load initial values.
+    }
+
+    override fun settingsChanged() {
         _groupId.value = CaltopoClient.GetGroupId()
         _useDirect.value = CaltopoClient.GetUseDirectFlag()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()

@@ -4,10 +4,12 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.GetTodaysTrackDir;
 
 import org.json.*;
+import org.ncssar.rid2caltopo.app.R2CActivity;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Date;
 import java.util.Locale;
@@ -70,20 +72,22 @@ public class WaypointTrack {
 	public static HashMap<String, WaypointTrack> TrackMap = new HashMap<>();
 
 	public JSONArray coordinates;
-	public long lastArchiveLength;
 	public String trackLabel;
 	// startTimeStr is the time the track was started - used in track archive.
 	public String startTimeStr;
+	private DocumentFile dataFilepath;
+	OutputStream outputStream = null;
 
 	public WaypointTrack(@NonNull String trackLabel) {
 		SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy-HHmmss", Locale.US);
 		startTimeStr = sdf.format(new Date());
 		this.trackLabel = trackLabel;
 		this.coordinates = new JSONArray();
+		setupOutputStream();
 		CTDebug(TAG, String.format("AddWaypointForTrack(%s): Starting new track.", trackLabel));
 	}
 
-	// returns true if waypoint meets requirements and is added to track.
+
 	public static void AddWaypointForTrack(@NonNull CtDroneSpec droneSpec, double lat, double lng,
 										   long altAboveLaunchInMeters, long timestampInMillisec) {
 		String trackLabel = droneSpec.trackLabel();
@@ -95,36 +99,48 @@ public class WaypointTrack {
 		track.addWaypoint(lat, lng, altAboveLaunchInMeters, timestampInMillisec);
 	}
 
-	public static void ArchiveTrack(@NonNull String trackLabel, Context ctxt) {
-		WaypointTrack track = TrackMap.get(trackLabel);
-		if (null != track && track.coordinates.length() > 0) {
-			DocumentFile todaysArchiveDir = GetTodaysTrackDir();
-			if (null != todaysArchiveDir) track.archive(ctxt, todaysArchiveDir);
-		}
+	public static void ArchiveTrack(@NonNull String trackLabel) {
+		WaypointTrack track = TrackMap.remove(trackLabel);
+		if (null != track) track.archive();
 	}
 
-	public static void ArchiveTracks(Context ctxt) {
+	public static void ArchiveTracks() {
 		if (0 == WaypointCount) {
 			CTDebug(TAG, "ArchiveTracks(): no waypoints recorded");
 			return;
 		}
-		DocumentFile todaysArchiveDir = GetTodaysTrackDir();
-		if (null == todaysArchiveDir) return;
-		for (Map.Entry<String, WaypointTrack> map : TrackMap.entrySet()) {
-			WaypointTrack track = map.getValue();
-			track.archive(ctxt, todaysArchiveDir);
+		ArrayList<String> keys = new ArrayList<>(TrackMap.size());
+        keys.addAll(TrackMap.keySet());
+		for (String key : keys) {
+			WaypointTrack track = TrackMap.remove(key);
+			if (null != track) track.archive();
 		}
 	}
 
-	public void archive(Context ctxt, DocumentFile archiveDir) {
+	private void setupOutputStream() {
+		Context ctxt = R2CActivity.getAppContext();
+		DocumentFile todaysArchiveDir = GetTodaysTrackDir();
+		if (null == ctxt || null == todaysArchiveDir) return;
+		try {
+			String filename = trackLabel + ".json";
+			dataFilepath = todaysArchiveDir.createFile("application/geo+json", filename);
+			ContentResolver resolver = ctxt.getContentResolver();
+			outputStream = resolver.openOutputStream(dataFilepath.getUri());
+			CTDebug(TAG, "setupOutputStream(): stream opened for " + dataFilepath.getUri());
+		} catch (Exception e) {
+			CTError(TAG, "setupOutputStream() raised.", e);
+		}
+	}
+
+	public void archive() {
 		long numCoords = coordinates.length();
-		if (0 == numCoords || numCoords == lastArchiveLength) {
-			CTDebug(TAG, String.format(Locale.US, "archive(%s): No new coordinates to archive.", trackLabel));
+		if (numCoords > 0 && null == outputStream) {
+			CTDebug(TAG, "archive(): outputStream already archived.");
 			return;
 		}
-		CTDebug(TAG, String.format(Locale.US, "archive(%s): writing %d coordinates.",
-				trackLabel, numCoords));
 
+		CTDebug(TAG, String.format(Locale.US, "archive(): writing %d coordinates to %s",
+				numCoords, dataFilepath.getUri()));
 		try {
 			JSONObject jo = new JSONObject();
 			jo.put("type", "Feature");
@@ -145,31 +161,19 @@ public class WaypointTrack {
 			JSONObject joTop = new JSONObject();
 			joTop.put("type", "FeatureCollection");
 			joTop.put("features", jaFeatures);
-			if (0 != lastArchiveLength) {
-				// FIXME: better to rename/move, then delete after the new file is written
-				DocumentFile dataFilepath = archiveDir.findFile(trackLabel);
-				if (null != dataFilepath) {
-					dataFilepath.delete();
-				}
-			}
-			DocumentFile dataFilepath = archiveDir.createFile("application/geo+json",	trackLabel);
 
 			try {
-				CTDebug(TAG, "archiving track to file: " + dataFilepath);
-				ContentResolver resolver = ctxt.getContentResolver();
-				OutputStream os = resolver.openOutputStream(dataFilepath.getUri());
-				os.write(joTop.toString(4).getBytes());
-				os.flush();
-				os.close();
-				lastArchiveLength = numCoords;
+				outputStream.write(joTop.toString().getBytes());
+				outputStream.flush();
+				outputStream.close();
+				outputStream = null;
 			} catch (IOException e) {
-				CTError(TAG, String.format("archive(%s):%s raised:\n%s.", dataFilepath,
-						trackLabel, e));
+				CTError(TAG, String.format(Locale.US, "archive(%s): raised.",
+						dataFilepath.getUri()), e);
 			}
-			CTDebug(TAG, String.format("archive(%s):%s.", archiveDir, trackLabel));
+			CTDebug(TAG, String.format("archive(): %s written.", dataFilepath.getUri()));
 		} catch (JSONException e) {
-			CTError(TAG, String.format("archive(%s):%s raised:\n%s.", archiveDir,
-					trackLabel, e));
+			CTError(TAG, String.format("archive(%s): raised.", dataFilepath.getUri()), e);
 		}
 	}
 
@@ -184,5 +188,6 @@ public class WaypointTrack {
 		ja.put(String.format(Locale.US, "%d", timestampInMillisec));
 		coordinates.put(ja);
 		WaypointCount++;
+		if (null == outputStream) setupOutputStream();
 	}
 }

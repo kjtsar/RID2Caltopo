@@ -138,8 +138,13 @@ class ClientClassState implements Serializable {
 }
 
 public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
+    public interface ClientSettingsListener {
+        void settingsChanged();
+    }
 
     // CaltopoClient CLASS VARS:
+    static ClientSettingsListener settingsListener = null;
+
     static final long MIN_DISTANCE_IN_FEET = 2;
     static final long MIN_NEW_TRACK_DELAY_IN_SECONDS = 15;
     static final long MainThreadId = android.os.Process.myTid();
@@ -211,6 +216,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return (ccs.droneSpecTable.get(remoteId));
     }
 
+    public static void SetSettingsListener(@Nullable ClientSettingsListener listener) {
+        settingsListener = listener;
+    }
+
     /**  SetDroneSpecOwner()
      * @param dsIn This is the dronespec received from our peer who has assumed ownership of said drone.
      *             if there is no entry in our table for it, we'll create an entry with the peer's
@@ -233,7 +242,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ds.setMappedId(mid);
         }
         ds.setMyR2cOwner(owner);
-        ds.setMyLiveTrack(null);
         dsIn.setMyR2cOwner(owner);
     }
     public static void RemoveDroneSpecOwner(@NonNull CtDroneSpec dsIn) {
@@ -384,7 +392,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                         Log.d(TAG, String.format(Locale.US, "CTDebug: GetTodaysTrackDir(): Created '%s'", archiveDir));
                     }
                 } else {
-                    Log.i(TAG, String.format(Locale.US, "CTDebug: GetTodaysTrackDir(): found existing '%s'", archiveDir));
+                    Log.d(TAG, String.format(Locale.US, "CTDebug: GetTodaysTrackDir(): found existing '%s'", archiveDir));
                 }
             }
         } catch (Exception e) {
@@ -432,7 +440,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ClientClassState ccs = GetState();
             ccs.mapId = newMapId;
             ArchiveState("user changed mapId");
-            CheckBringUpMap();
+            if (null != MyCaltopoClientMap) {
+                ConnectToMap();
+            } else {
+                CheckBringUpMap();
+            }
         }
     }
 
@@ -657,6 +669,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             } else if (type.equals("ct_credentials")) {
                 readCredentialsFileContent(json);
             }
+            if (null != settingsListener) settingsListener.settingsChanged();
         } catch (JSONException e) {
             CTError(TAG, String.format(Locale.US,"Error processing '%s':", uri), e);
         }
@@ -736,13 +749,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void ConnectToMap() {
         String mapId = GetMapId();
         if (!GetUseDirectFlag()) return;
+        CTDebug(TAG, "ConnectToMap() mapId: " + mapId);
         if (null != MyCaltopoClientMap) {
             String existingMapId = MyCaltopoClientMap.getMapId();
-            if (!existingMapId.equals(mapId)) {
-                CTDebug(TAG, String.format(Locale.US,
-                        "ConnectToMap() changing from '%s' map to '%s' map.", existingMapId, mapId));
-                MyCaltopoClientMap.setMapId(mapId);
-            }
+            if (!existingMapId.equals(mapId)) MyCaltopoClientMap.setMapId(mapId);
         } else try {
             CTDebug(TAG, "connectToMap(): connecting to map " + mapId);
             MyCaltopoClientMap = new CaltopoClientMap(GetCaltopoConfig(), mapId, GetTrackFolderName());
@@ -1075,6 +1085,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             httpsConn.setRequestProperty("User-Agent", "RID2Caltopo/0.1");
             responseCode = httpsConn.getResponseCode();
             if (HttpsURLConnection.HTTP_OK != responseCode) {
+                // FIXME: Examine response.  If we get multiple failures and no successes,
+                //        we should stop publishing updates.
                 CTError(TAG, "https bad response: " + responseCode);
             }
         } catch (IOException e) {
@@ -1102,7 +1114,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public void terminateTrack(String msg) {
         if (droneSpec.isActive()) {
             String trackLabel = droneSpec.trackLabel();
-            WaypointTrack.ArchiveTrack(trackLabel, R2CActivity.getAppContext());
+            WaypointTrack.ArchiveTrack(trackLabel);
             if (null != liveTrack && liveTrack.isActive()) {
                 CTDebug(TAG, msg);
                 liveTrack.finishTrack(msg);

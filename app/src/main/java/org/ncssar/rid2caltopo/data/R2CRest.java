@@ -105,7 +105,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public String groupId = "";
     private remoteUpdateListener remoteUpdateListener;
     private final Hashtable<String, CtDroneSpec> droneSpecTable = new Hashtable<>(4);  // Table to map remoteIDs owned by this R2CRest client to their corresponding data.
-    private boolean outstandingSeen;
+    private boolean outstandingSeen = false;
     private JSONArray pendingSeenWaypoints = new JSONArray();
 
     public interface remoteUpdateListener {
@@ -207,10 +207,32 @@ public class R2CRest implements WsPipe.WsMsgListener {
         return r2cClients;
     }
 
-    public void updateMappedId(@NonNull CtDroneSpec droneSpec, String newId) {
-        // FIXME: not sure where we want to go with this.
+    public void updateMappedId(@NonNull CtDroneSpec droneSpec, @NonNull String newId) {
+        Util.SafeJSONObject jo = new Util.SafeJSONObject();
+        jo.put("remoteId", droneSpec.getRemoteId());
+        jo.put("mappedId", newId);
+        jo.put("type", "name-change");
+        wsPipe.sendMessage(jo, 0, true);
     }
 
+    public void handleNameChange(int seqnum, @NonNull JSONObject payload) {
+        String rid = payload.optString("remoteId");
+        String mid = payload.optString("mappedId");
+        if (rid.isEmpty() || mid.isEmpty()) {
+            wsPipe.sendResponse(seqnum, errorResponsePayload(
+                    "handleNameChange(): missing required 'remoteId' or 'mappedId' parameter.", payload));
+            sendMsgCount++;
+            return;
+        }
+        CtDroneSpec ds = CaltopoClient.GetDroneSpec(rid);
+        if (null != ds) ds.setMappedId(mid);
+        try {
+            payload.put("type", "name-change-ack");
+        } catch (Exception e) {
+            CTError(TAG, "put() raised", e);
+        }
+        wsPipe.sendResponse(seqnum, payload);
+    }
     public void setRemoteDroneSpecMonitor(CtDroneSpec.DroneSpecsChangedListener remoteDroneSpecMonitor) {
         this.remoteDroneSpecMonitor = remoteDroneSpecMonitor;
     }
@@ -298,7 +320,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             remoteUpdateListener.onRemoteStartTime(startTime);
             CTDebug(TAG, String.format(Locale.US, "handleHelloAck(): startTime:%d, runTime:%s", startTime, remoteUptimeTimer.durationAsString()));
         } else {
-            CTDebug(TAG, "handleHello(): no remoteUpdateListener.");
+            CTDebug(TAG, "handleHelloAck(): no remoteUpdateListener.");
         }
 
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
@@ -306,7 +328,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         jo.put("my-active-dronelist", MyActiveDronelist());
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
         jo.put("my-id", CaltopoClientMap.GetMyUUID());
-        jo.put("app-vers", R2CActivity.GetMyAppVersion());
+        jo.put("app-vers", R2CActivity.getMyAppVersion());
         jo.put("start-timestamp", ScanningService.ScannerUptime.getStartTimeInMsec());
 
         wsPipe.sendResponse(seqnum, jo);
@@ -725,7 +747,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public void pipeIsClosing(@NonNull WsPipe wsPipe) {
         if (null != remoteIpAddr) {  // then this is an established connection closing:
             CTError(TAG, "R2CRest: received pipeIsClosing().  Shutting down connection to " + wsPipe.getPeerName());
-            this.wsPipe = null;
             shutdown();
         } else { // else we're just trying to establish a connection - see if we have another addr to try:
             tryConnect();
@@ -758,6 +779,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             case "leaving": handleLeaving(seqnum); break;
             case "add-drone": handleAddDrone(seqnum, payload); break;
             case "drop-drone": handleDropDrone(seqnum, payload); break;
+            case "name-change": handleNameChange(seqnum, payload); break;
             case "seen": handleSeen(seqnum, payload); break;
             case "drone-status": handleStatus(seqnum, payload); break;
             default: {
@@ -783,6 +805,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             case "seen-ack":  handleSeenAck(payload); break;
             case "add-drone-ack": handleAddDroneAck(payload); break;
             case "add-drone-nack": handleAddDroneNack(payload); break;
+            case "name-change-ack":
             case "drone-status-ack":
             case "drop-drone-ack": break; /* ok to just ignore */
             default: CTError(TAG, "received unexpected response from remote: " + payload);
@@ -809,11 +832,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         }
         if (null == remoteIpAddrs || 0 == remoteIpAddrs.length()) {
             CTError(TAG, "tryConnect(): Not able to connect via any supplied address.");
-            if (null != clientListener) {
-                clientListener.clientStatusChange(this, false);
-            } else {
-                CaltopoClientMap.RemoveClient(this);
-            }
+            this.shutdown();
         }
     }
 
@@ -826,13 +845,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
      * @param droneTimestampInMsec timestamp of last update received.
      */
     public void reportSeen(CtDroneSpec droneSpec, double lat, double lng, long droneTimestampInMsec) throws RuntimeException {
-        if (null == wsPipe) {
-            CaltopoLiveTrack liveTrack = CaltopoLiveTrack.GetLiveTrackForRemoteId(droneSpec.getRemoteId());
-            CTError(TAG, String.format(Locale.US, "reportSeen(): ignoring attempt to write on a closed pipe to %s.  Shutting down client connection.", peerName));
-            shutdown();
-            if (null != liveTrack) liveTrack.updateStatus(R2CRespEnum.reevaluate);
-            return;
-        }
         Util.SafeJSONObject waypoint = new Util.SafeJSONObject();
         waypoint.put("rid", droneSpec.getRemoteId());
         waypoint.put("lat", lat);
@@ -843,7 +855,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     private void sendOutstandingWaypoints() {
-        if (outstandingSeen) return;
+        if (outstandingSeen || 0 == pendingSeenWaypoints.length()) return;
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "seen");
         jo.put("waypoints", pendingSeenWaypoints);
@@ -880,6 +892,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public static void SendDropDrone(String remoteId) {
+
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         OurDroneLiveTracks.remove(remoteId);
         jo.put("type","drop-drone");
@@ -947,7 +960,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             CTDebug(TAG, "sendAddWithPayload() pending: " + payload);
             DelayedExec.RunAfterDelayInMsec(() -> sendAddWithPayload(payload), 1000);
             return;
-        } else if (null == wsPipe) shutdown();
+        }
         wsPipe.sendMessage(payload, 0, false);
         sendMsgCount++;
     }
@@ -972,7 +985,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             payload.put("type", "hello");
             payload.put("my-id", CaltopoClientMap.GetMyUUID());
             payload.put("my-addrs", MyIpAddresses);
-            payload.put("app-vers", R2CActivity.GetMyAppVersion());
+            payload.put("app-vers", R2CActivity.getMyAppVersion());
             payload.put("map-id", CaltopoClient.GetMapId());
             payload.put("group-id", CaltopoClient.GetGroupId());
             payload.put("start-timestamp", ScanningService.ScannerUptime.getStartTimeInMsec());
@@ -998,7 +1011,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
         public void pipeIsClosing(@NonNull WsPipe wsPipe) {
             CTError(TAG, "pipeIsClosing() in server template.");
-            this.wsPipe = null;
         }
 
         public void inboundMessage(@NonNull WsPipe wsPipe, @NonNull Integer seqnum, @NonNull JSONObject payload) {
@@ -1108,12 +1120,15 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public void shutdown() {
+        CTDebug(TAG, "Shutting down connection to " + peerName);
         if (null != clientListener) {
             clientListener.clientStatusChange(this, false);
             clientListener = null;
         }
-        if (null != wsPipe) {
-            // then handling shutdown from this end - be polite and say goodbye.
+        R2CRest r2cClient = ClientIdMap.get(remoteUUID);
+        if (null != r2cClient) {
+            // then we have a connection to leave.
+            // be polite and say goodbye.
             JSONObject jo = new JSONObject();
             try {
                 jo.put("type", "leaving");
@@ -1122,13 +1137,9 @@ public class R2CRest implements WsPipe.WsMsgListener {
             }
             wsPipe.sendMessage(jo, 0, true);
             sendMsgCount++;
-            wsPipe = null;  // this indicates we're done with the pipe.
+            wsPipe.closeSocket(1000, "'leaving'.");
         }
-        R2CRest r2cClient = ClientIdMap.get(remoteUUID);
-        if (null != r2cClient && this != r2cClient) {
-            CTError(TAG, "shutdown(): This shouldn't happen.");
-            return;
-        }
+
         /** FIXME: now the idea is to remove all references to this R2CRest instance
          *         so it can go away quietly and others can take over reporting.
          */

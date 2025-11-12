@@ -106,7 +106,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
     public boolean isActive() {return !trackLabel.isEmpty();}
 
-    public boolean droneIsLocallyOwned() {return (null != myLiveTrack);}
+    public boolean publishingLocally() {return (null != myLiveTrack && myLiveTrack.publishingLocally());}
+
+    public boolean notPublishing() {return (null == myLiveTrack);}
 
     public String getDurationInSecAsString() {
         return (null != flightSimpleTimer) ? flightSimpleTimer.durationAsString() : "";
@@ -171,7 +173,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         this.myListener = myListener;
     }
 
-    public void setMyR2cOwner(@Nullable R2CRest newOwnerR2c) {ownerR2c = newOwnerR2c;}
+    public void setMyR2cOwner(@NonNull R2CRest newOwnerR2c) {ownerR2c = newOwnerR2c;}
     public void removeMyR2cOwner() {ownerR2c = null;}
 
     @Nullable
@@ -221,10 +223,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         String newStr = newMappedId.replaceAll("[^a-zA-Z0-9]", "");
         if (!newStr.isEmpty() && !newStr.equals(oldString)) {
             mappedId = newStr;
-            CTDebug(TAG, String.format(Locale.US, "setMappedId() changed from '%s' to '%s', listener:0x%x",
-                    oldString, newStr, System.identityHashCode(myListener)));
-            updateTrackLabel();
-            if (null != myLiveTrack) myLiveTrack.renameTrack();
+            if (null != ownerR2c) {
+                CTDebug(TAG, "Forwarding name change to owner R2C to handle...");
+                ownerR2c.updateMappedId(this, newStr);
+            } else {
+                CTDebug(TAG, String.format(Locale.US, "setMappedId() changed from '%s' to '%s', listener:0x%x",
+                        oldString, newStr, System.identityHashCode(myListener)));
+                updateTrackLabel();
+                if (null != myLiveTrack) myLiveTrack.renameTrack();
+            }
             if (null != myListener) {
                 myListener.mappedIdChanged(this, oldString, newStr);
             }

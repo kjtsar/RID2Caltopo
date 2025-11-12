@@ -7,8 +7,6 @@ public class SimpleTimer {
     public SimpleTimer(long startTimeInMsec) {this.startTimeInMsec = startTimeInMsec;}
     public void restartTimer() {startTimeInMsec = System.currentTimeMillis();}
     public void setStartTimeInMsec(long startTimeInMsec) {this.startTimeInMsec = startTimeInMsec;}
-    public long durationInMilliseconds() {return System.currentTimeMillis() - startTimeInMsec;}
-    public double durationInSeconds() {return (double)(System.currentTimeMillis() - startTimeInMsec) / 1000.0;}
     public long getStartTimeInMsec() {return startTimeInMsec;}
 
     public String durationAsString() {

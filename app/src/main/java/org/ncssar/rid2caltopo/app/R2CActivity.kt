@@ -40,6 +40,7 @@ import com.google.android.gms.location.LocationServices
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.R2CRest
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
+import org.ncssar.rid2caltopo.ui.CtAlertDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.R2CRestViewModel
 import org.ncssar.rid2caltopo.ui.R2CRestViewModelFactory
@@ -57,6 +58,8 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     private val remoteViewModels = mutableStateListOf<R2CRestViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
     private val showSettingsDialog = mutableStateOf(false)
+    private val showMapIdDialog = mutableStateOf(false)
+    private var newMapIdForDialog = ""
 
 
     private fun checkPermission(permission: String) {
@@ -117,6 +120,17 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             if (showSettingsDialog.value) {
                 CaltopoSettingsScreen(onDismiss = {showSettingsDialog.value = false})
             }
+            if (showMapIdDialog.value) {
+                CtAlertDialog(
+                    onDismissRequest = {showMapIdDialog.value = false},
+                    onConfirmation = {
+                        CaltopoClient.ConfirmMapIdChange(newMapIdForDialog)
+                        showMapIdDialog.value = false
+                    },
+                    title = "Terminate map connection",
+                    text = "Do you want to terminate the existing map connection?"
+                )
+            }
             RID2CaltopoTheme {
                 MainScreen(
                     localViewModel = localViewModel,
@@ -167,6 +181,10 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         } else {
             initialize()
         }
+    }
+    fun showMapIdChangeDialog(newMapId: String) {
+        newMapIdForDialog = newMapId
+        showMapIdDialog.value = true
     }
 
     fun openUri(uriString : String?, mimeType: String? = null) {

@@ -159,7 +159,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static boolean WarnMissingGroupId = false;
     private static boolean WarnMissingMapFlag = false;
     private static boolean WarnConnectingToMapFlag = false;
-    private static CtAlertDialog MapIdChangeDialog;
     private static Hashtable<String, CaltopoClient> ClientMap;
     private static ExecutorService ExecutorPool = null;
     private static ClientClassState Ccstate = null;
@@ -435,16 +434,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.caltopoSessionConfig;
     }
 
-    static void confirmMapIdChange(@NonNull String newMapId) {
-        if (MapIdChangeDialog.getResponse()) {
-            ClientClassState ccs = GetState();
-            ccs.mapId = newMapId;
-            ArchiveState("user changed mapId");
-            if (null != MyCaltopoClientMap) {
-                ConnectToMap();
-            } else {
-                CheckBringUpMap();
-            }
+    public static void ConfirmMapIdChange(@NonNull String newMapId) {
+        ClientClassState ccs = GetState();
+        ccs.mapId = newMapId;
+        ArchiveState("user changed mapId");
+        if (null != MyCaltopoClientMap) {
+            ConnectToMap();
+        } else {
+            CheckBringUpMap();
         }
     }
 
@@ -474,9 +471,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         final String trimmedMapId = newMapId.trim().replaceAll("[^a-zA-Z0-9]", "");
         if (!trimmedMapId.equals(ccs.mapId)) {
             if (null != MyCaltopoClientMap) {
-                MapIdChangeDialog = new CtAlertDialog("Terminate map connection",
-                        "Do you want to terminate the existing map connection?",
-                        () -> confirmMapIdChange(trimmedMapId));
+                ((R2CActivity) AppActivity).showMapIdChangeDialog(trimmedMapId);
             } else {
                 String msg = String.format(Locale.US, "mapId changed from '%s' to '%s'",
                         ccs.mapId, trimmedMapId);

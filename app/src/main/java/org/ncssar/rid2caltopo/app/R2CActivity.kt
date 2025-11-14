@@ -95,13 +95,12 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     override fun onClientListChanged(clients: MutableList<R2CRest>) {
         remoteViewModels.clear()
         remoteViewModels.addAll(clients.map { client ->
-            ViewModelProvider(this, R2CRestViewModelFactory(client))[R2CRestViewModel::class.java]
+            ViewModelProvider(this, R2CRestViewModelFactory(client)).get(client.peerName, R2CRestViewModel::class.java)
         })
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val remoteClients = R2CRest.GetClientList()
         R2CRest.SetClientListChangedListener(this)
         appContext = applicationContext
         val localViewModel = ViewModelProvider(
@@ -113,9 +112,6 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             ))[R2CViewModel::class.java]
         CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
         remoteViewModels.clear()
-        remoteViewModels.addAll(remoteClients.map { client ->
-            ViewModelProvider(this, R2CRestViewModelFactory(client))[R2CRestViewModel::class.java]
-        })
         setContent {
             if (showSettingsDialog.value) {
                 CaltopoSettingsScreen(onDismiss = {showSettingsDialog.value = false})

@@ -65,6 +65,7 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
 
     override fun onCleared() {
         r2cClient.setRemoteDroneSpecMonitor(null)
+        r2cClient.setRemoteUpdateListener(null)
         super.onCleared()
     }
 

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.data.CaltopoClientMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
@@ -12,15 +13,22 @@ import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
 
-class R2CViewModel(val mapId : String, val groupId : String, val uptimeTimer: SimpleTimer) : ViewModel(),
+class R2CViewModel(val mapIdIn : String, val groupIdIn : String, val uptimeTimer: SimpleTimer) : ViewModel(),
     CtDroneSpec.DroneSpecsChangedListener, CaltopoClientMap.MapStatusListener {
     private val _drones = MutableStateFlow<List<CtDroneSpec>>(emptyList())
     private val _appUptime = MutableStateFlow(ScanningService.UpTime())
     private val uptimePoll : DelayedExec = DelayedExec()
     private val _mapIsUp = MutableStateFlow(false)
+
+    private val _mapId = MutableStateFlow(mapIdIn)
+    private val _groupId = MutableStateFlow(groupIdIn)
+    val mapId = _mapId.asStateFlow()
+    val groupId = _groupId.asStateFlow()
     val drones: StateFlow<List<CtDroneSpec>> = _drones.asStateFlow()
     val appUpTime = _appUptime.asStateFlow()
     val mapIsUp = _mapIsUp.asStateFlow()
+    private val _hostname = MutableStateFlow(R2CActivity.MyDeviceName)
+    val hostname = _hostname.asStateFlow()
 
 
     init {
@@ -54,6 +62,7 @@ class R2CViewModel(val mapId : String, val groupId : String, val uptimeTimer: Si
     }
     fun uptimePoll() {
         _appUptime.value = uptimeTimer.durationAsString()
+        _hostname.value = R2CActivity.MyDeviceName
     }
 }
 

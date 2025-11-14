@@ -1,24 +1,21 @@
 package org.ncssar.rid2caltopo.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
-import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import androidx.compose.runtime.collectAsState
 
+// 1. Define a sealed interface to represent the different types of items in our list.
+sealed interface MainScreenItem {
+    data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
+    data class RemoteView(val viewModel: R2CRestViewModel) : MainScreenItem
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -33,10 +30,18 @@ fun MainScreen(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
+    // 2. Build the unified list of display items.
+    val screenItems = buildList {
+        add(MainScreenItem.LocalView(localViewModel))
+        remoteViewModels.forEach {
+            add(MainScreenItem.RemoteView(it))
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("RID2Caltopo") },
+                title = { Text("RID-2-Caltopo") },
                 actions = {
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More options")
@@ -75,48 +80,60 @@ fun MainScreen(
             )
         }
     ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .padding(paddingValues)
-                .horizontalScroll(rememberScrollState())
-        ) {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                // The Local R2CView
-                val localDrones by localViewModel.drones.collectAsState()
-                val appUptime by localViewModel.appUpTime.collectAsState()
-                val mapIsUp by localViewModel.mapIsUp.collectAsState()
-
-                R2CView(
-                    hostName = R2CActivity.MyDeviceName,
-                    mapId = CaltopoClient.GetMapId(),
-                    groupId = CaltopoClient.GetGroupId(),
-                    mapIsUp = mapIsUp,
-                    drones = localDrones,
-                    appUptime = appUptime,
-                    onMappedIdChange = { drone, newId ->
-                        localViewModel.updateMappedId(drone, newId)
+        // 3. Use a single LazyColumn with the robust `items` DSL and a stable key.
+        LazyColumn(modifier = Modifier.padding(paddingValues)) {
+            items(
+                items = screenItems,
+                key = { item ->
+                    // This key is now guaranteed to be unique and stable
+                    when (item) {
+                        is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
+                        is MainScreenItem.RemoteView -> item.viewModel.r2cClient.peerName
                     }
-                )
-                // The Remote R2CViews
-                remoteViewModels.forEach { remoteViewModel ->
-                    val remoteDrones by remoteViewModel.drones.collectAsState()
-                    val remoteUptime by remoteViewModel.remoteUptime.collectAsState()
-                    val remoteCtRttString by remoteViewModel.remoteCtRtt.collectAsState()
-                    val remoteAppVersion by remoteViewModel.remoteAppVersion.collectAsState()
+                }
+            ) { item ->
+                // 4. Use a `when` statement to render the correct composable.
+                when (item) {
+                    is MainScreenItem.LocalView -> {
+                        val localDrones by item.viewModel.drones.collectAsState()
+                        val appUptime by item.viewModel.appUpTime.collectAsState()
+                        val mapIsUp by item.viewModel.mapIsUp.collectAsState()
+                        val mapId by item.viewModel.mapId.collectAsState()
+                        val groupId by item.viewModel.groupId.collectAsState()
+                        val hostname by item.viewModel.hostname.collectAsState()
 
-                    Box(modifier = Modifier.fillMaxWidth().height(10.dp).background(Color.LightGray))
-                    R2CRestView(
-                        peerName = remoteViewModel.r2cClient.peerName,
-                        drones = remoteDrones,
-                        remoteUptime = remoteUptime,
-                        appVersion = remoteAppVersion,
-                        mapId = remoteViewModel.r2cClient.mapId,
-                        groupId = remoteViewModel.r2cClient.groupId,
-                        ctRttString = remoteCtRttString,
-                        onMappedIdChange = { drone, newId ->
-                            remoteViewModel.updateMappedId(drone, newId)
-                        }
-                    )
+                        R2CView(
+                            hostName = hostname,
+                            drones = localDrones,
+                            appUptime = appUptime,
+                            mapIsUp = mapIsUp,
+                            mapId = mapId,
+                            groupId = groupId,
+                            onMappedIdChange = { drone, newId ->
+                                item.viewModel.updateMappedId(drone, newId)
+                            }
+                        )
+                    }
+
+                    is MainScreenItem.RemoteView -> {
+                        val remoteDrones by item.viewModel.drones.collectAsState()
+                        val remoteUptime by item.viewModel.remoteUptime.collectAsState()
+                        val remoteCtRttString by item.viewModel.remoteCtRtt.collectAsState()
+                        val remoteAppVersion by item.viewModel.remoteAppVersion.collectAsState()
+
+                        R2CRestView(
+                            peerName = item.viewModel.r2cClient.peerName,
+                            drones = remoteDrones,
+                            remoteUptime = remoteUptime,
+                            appVersion = remoteAppVersion,
+                            mapId = item.viewModel.r2cClient.mapId,
+                            groupId = item.viewModel.r2cClient.groupId,
+                            ctRttString = remoteCtRttString,
+                            onMappedIdChange = { drone, newId ->
+                                item.viewModel.updateMappedId(drone, newId)
+                            }
+                        )
+                    }
                 }
             }
         }

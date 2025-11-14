@@ -97,7 +97,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     private int recvMsgCount = 0;
     private R2CListener clientListener;
     private String peerName;
-    private WsPipe wsPipe;
+    public WsPipe wsPipe;
     private CtDroneSpec.DroneSpecsChangedListener remoteDroneSpecMonitor;
     public SimpleTimer remoteUptimeTimer = new SimpleTimer();
     public String remoteAppVersion = "<unknown>";
@@ -127,8 +127,9 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
 
-    public void setRemoteUpdateListener(@NonNull remoteUpdateListener remoteUpdateListener) {
+    public void setRemoteUpdateListener(remoteUpdateListener remoteUpdateListener) {
         this.remoteUpdateListener = remoteUpdateListener;
+        if (null == remoteUpdateListener) return;
         if (null != remoteUptimeTimer) {
             remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
             remoteUpdateListener.onRemoteStartTime(remoteUptimeTimer.getStartTimeInMsec());
@@ -201,9 +202,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     public static ArrayList<R2CRest>GetClientList() {
         ArrayList<R2CRest> r2cClients = new ArrayList<>(ClientIdMap.size());
-        for (Map.Entry<String, R2CRest> map : ClientIdMap.entrySet()) {
-            r2cClients.add(map.getValue());
-        }
+        r2cClients.addAll(ClientIdMap.values());
         return r2cClients;
     }
 
@@ -1154,6 +1153,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
         for (CaltopoLiveTrack liveTrack : liveTracksUsingThisPeer) {
             liveTrack.updateStatus(R2CRespEnum.reevaluate);
         }
+        this.remoteUpdateListener = null;
+        this.remoteDroneSpecMonitor = null;
     }
 
     public static void Shutdown() {

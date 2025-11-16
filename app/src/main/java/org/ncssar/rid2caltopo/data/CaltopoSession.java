@@ -5,6 +5,7 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static java.lang.Thread.sleep;
 
+import android.net.Uri;
 import android.os.Build;
 
 import org.json.JSONArray;
@@ -183,24 +184,22 @@ public class CaltopoSession {
 
 	@NonNull
 	public static String EncodeParm(@NonNull String key, @NonNull String val) {
-		Charset charset = StandardCharsets.UTF_8;
-		ByteBuffer bytes = charset.encode(val);
-		return key + "=" + bytes.toString();
+		return key + "=" + Uri.encode(val);
 	}
 
 	@NonNull
     public static String EncodeParams(@NonNull Map<String,String> params) {
 		StringBuilder paramString = new StringBuilder();
-		Charset charset = StandardCharsets.UTF_8;
 		for (Map.Entry<String,String> entry : params.entrySet()) {
-			ByteBuffer bytes = charset.encode(entry.getValue());
-			paramString
+            paramString
 					.append(entry.getKey())
 					.append("=")
-					.append(bytes.toString())
+					.append(Uri.encode(entry.getValue()))
 					.append("&");
 		}
-		return paramString.substring(0, paramString.length()-1);
+		String retval = paramString.substring(0, paramString.length()-1);
+		CTDebug(TAG, "Return String: " + retval);
+		return retval;
     }
 
 	// this needs to be run in background thread to prevent blocking the app thread.

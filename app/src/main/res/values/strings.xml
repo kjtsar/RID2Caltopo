@@ -21,7 +21,7 @@
     <string name="Caltopo">Caltopo</string>
     <string name="Caltopo_Configuration">CaltopoCfg</string>
     <string name="ct_groupid">Group Id:</string>
-    <string name="ct_groupidVal"></string>
+    <string name="ct_groupidVal">groupid</string>
     <string name="ct_minChgFt">Min Chg In Feet:</string>
     <string name="ct_minChgFtVal">10</string>
     <string name="ct_remoteid">Remote Id:</string>
@@ -52,6 +52,7 @@
 
     <string name="drone_icon_content_description">Drone icon</string>
 
+    <string name="general_help_heading">Overview</string>
     <string name="bluetooth_help_heading">Bluetooth</string>
     <string name="bluetooth_help_text">Sample</string>
     <string name="beacon_help_heading">Wi-Fi Beacon</string>
@@ -118,6 +119,20 @@
     <string name="Auth_Timestamp">Timestamp</string>
     <string name="Auth_Data">Authentication</string>
 
+
+    <string name="general_help_text">Remote ID signals are very weak and Android devices have limited reception range.
+        This app must be paired with an external Bluetooth/Wifi repeater such as the <a href="https://dronescout.co/bridge"> Bluemark DroneScout Bridge - both ds100 and ds110 models verified</a>
+
+        <p>This app requires <a href="https://training.caltopo.com/all_users/team-accounts/teamapi">Caltopo Teams Credentials</a> to write
+           to your team's maps. You can write tracks from this app using the <a href="https://training.caltopo.com/all_users/share/live-tracking">
+                Caltopo Live Tracking U/I</a>, but this requires you manage the LiveTrack using the Caltopo User Interface before and after each flight.</p>
+
+        <p>The developer of this app very much appreciates the <a href="https://www.caltopo.com">Caltopo product</a> and the app uses the Caltopo API,
+            but is not a product of or supported by the Caltopo team.   Similarly, the developer appreciates the work of the opendronid consortium and
+            makes use of their remote ID parser code in this app which is covered by the SPDX-License-Identifier: Apache-2.0.</p>
+
+        <p>For more detailed information about the RID2Caltopo app, it's configuration and use, please consult the README at <a href="http://github.com/kjtsar/RID2Caltopo"> http://github.com/kjtsar/RID2Caltopo</a></p>
+    </string>
     <string name="bluetoothHelp">All devices should be able to receive Bluetooth 4 Legacy Advertising remote ID signals.&lt;br&gt;&lt;br&gt;
         To receive Bluetooth 5 Long Range remote ID signals, the device must support the &quot;Coded Phy&quot; feature and also the &quot;Extended Advertising&quot; feature.&lt;br&gt;&lt;br&gt;
         See the claimed support for this device for these features in the options menu.&lt;br&gt;&lt;br&gt;

@@ -17,16 +17,61 @@ Just power-up the bridge and raise it up a fair bit to optimize coverage:
 
 Please note: The user of this receiver application must always visually verify that the received Open Drone ID signal corresponds to an actual drone seen flying in the air, at the position the signal claims it to be.
 
+The settings menu option allows the user to quickly change options that are likely to vary from one invocation to the next.  Support for
+more involved or sensitive configuration information, the app's "load config file" menu option currently supports two .json configuration
+file formats:
+
+## ridmap.json:
+Use the ridmap file to map remoteIDs to more friendly track labels:
+`
+    {
+        "type" : "ct_ridmap",
+        "file_version" : "1.0",
+        "editor" : "admin <admin@kjt.us>",
+        "updated" : "Wed Sep 17 12:42:41 PDT 2025",
+        "map" : [
+        	{
+                "remoteId" : "1581F6Z9C24BH0036EJL",
+                "mappedId" : "1SAR7mm4p",
+                "org" : "NCSSAR",
+                "owner" : "NCSSAR",
+                "model" : "Mavic Mini 4 Pro"
+	        },
+            {
+                "remoteId" : "1581F67QE239L00A00DE",
+                "mappedId" : "1SAR7m3p",
+                "org" : "NCSSAR",
+                "owner" : "NCSSAR",
+                "model" : "Mavic 3 Pro"
+            },
+        ]
+    }
+`
+
+## credentials.json:
+Use the credentials file to map specify your team's <a href="https://training.caltopo.com/all_users/team-accounts/teamapi#keysids">Caltopo credentials</a>:
+`
+    {
+    "type" : "ct_credentials",
+    "file_version" : "1.0",
+    "editor" : "admin <admin@kjt.us>",
+    "updated" : "Fri Sep 19 08:07:01 PDT 2025",
+    "team_id" : "team_id value",
+    "credential_id" : "credential id value",
+    "credential_secret" : "this is where you enter your credential secret",
+    "map_id" : "AH2JKLM",
+    "group_id" : "NCSSAR"
+    }
+`
 ## How to build
 To build the application, use Android Studio.
 Import the project (File -> New -> Import Project, or just Open on newer versions of Android Studio) and point to the root folder.
 Then Build -> Make Project.
 
 ## Supported interfaces and protocols
-Bluetooth 4 (legacy bluetooth), Bluetooth 5 (long range/coded phy), WiFi Beacon, and WiFi Nan are all 
+Bluetooth 4 (legacy bluetooth), Bluetooth 5 (long range/coded phy), WiFi Beacon, and WiFi NaN are all 
 supported by the app. While bluetooth 4 seems to be universally supported, some phones/tablets may not 
-support one or more of these capabilities.  Click on the "Supported Interfaces" option in the hamburger
-get a list of the capabilities supported by your device.
+support one or more of the other capabilities.
 
 ## High level SW Architecture
 A KenDraw(tm) view of the class structure can be seen in the figure below:

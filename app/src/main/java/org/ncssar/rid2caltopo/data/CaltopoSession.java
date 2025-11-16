@@ -19,6 +19,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
@@ -179,23 +181,24 @@ public class CaltopoSession {
 		}
     }
 
-	public static String EncodeParm(String key, String val) {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-			return key + "=" + URLEncoder.encode(val, StandardCharsets.UTF_8);
-		}
-		return key + "=" + URLEncoder.encode(val);
+	@NonNull
+	public static String EncodeParm(@NonNull String key, @NonNull String val) {
+		Charset charset = StandardCharsets.UTF_8;
+		ByteBuffer bytes = charset.encode(val);
+		return key + "=" + bytes.toString();
 	}
-    public static String EncodeParams(Map<String,String> params) {
-		StringBuilder paramString = new StringBuilder();
-		for (Map.Entry<String,String> entry : params.entrySet()) {
-			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-				paramString.append(entry.getKey()).append("=").append(URLEncoder.
-						encode(entry.getValue(), StandardCharsets.UTF_8)).append("&");
-			} else {
-				paramString.append(entry.getKey()).append("=").
-						append(URLEncoder.encode(entry.getValue())).append("&");
 
-			}
+	@NonNull
+    public static String EncodeParams(@NonNull Map<String,String> params) {
+		StringBuilder paramString = new StringBuilder();
+		Charset charset = StandardCharsets.UTF_8;
+		for (Map.Entry<String,String> entry : params.entrySet()) {
+			ByteBuffer bytes = charset.encode(entry.getValue());
+			paramString
+					.append(entry.getKey())
+					.append("=")
+					.append(bytes.toString())
+					.append("&");
 		}
 		return paramString.substring(0, paramString.length()-1);
     }

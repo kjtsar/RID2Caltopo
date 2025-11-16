@@ -25,7 +25,6 @@ fun MainScreen(
     onShowHelp: () -> Unit,
     loadConfigFile: () -> Unit,
     onShowLog: () -> Unit,
-    onShowVersion: () -> Unit,
     onShowSettings: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -69,10 +68,6 @@ fun MainScreen(
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
                             onShowHelp()
-                            menuExpanded = false
-                        })
-                        DropdownMenuItem(text = { Text("Version") }, onClick = {
-                            onShowVersion()
                             menuExpanded = false
                         })
                     }

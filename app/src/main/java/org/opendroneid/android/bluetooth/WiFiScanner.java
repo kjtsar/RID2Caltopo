@@ -1,13 +1,15 @@
 /*
- * Copyright (C) 2021 Skydio Inc
+ * Copyright (C) 2025 Ken Taylor
+ * Copyright (C) 2021 Skydio
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *  http://www.apache.org/licenses/LICENSE-2.0
  *
- * Replacing the WiFiBeaconScanner and WiFiNaNScanner modules that
- * relied on depreciated API.
+ * This file replaces the WiFiBeaconScanner and WiFiNaNScanner modules from
+ * the opendroneid/receiver-android project that relied on depreciated
+ * API.
  */
 
 package org.opendroneid.android.bluetooth;
@@ -182,13 +184,6 @@ public class WiFiScanner {
         if (wifiAwareManager != null && wifiAwareManager.isAvailable()) {
             try {
                 CaltopoClient.CTDebug(TAG, "Starting WiFi NaN scanning");
-/*
-                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
-                        ActivityCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
-                    CTError(TAG, "startScan(): Missing ACCESS_FINE_LOCATION or NEARBY_WIFI_DEVICES permission");
-                    return;
-                }
-*/
                 wifiAwareManager.attach(attachCallback, identityChangedListener, null);
             } catch (Exception e) {
                 CTError(TAG, "wifiAwareManager().attach() raised:\n", e);

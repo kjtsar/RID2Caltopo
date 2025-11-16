@@ -162,8 +162,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static Hashtable<String, CaltopoClient> ClientMap;
     private static ExecutorService ExecutorPool = null;
     private static ClientClassState Ccstate = null;
-    private static AppCompatActivity AppActivity = null;
-    private static Context AppContext = null;
 //    private static final String MyStateFileName = TAG + BuildConfig.BUILD_TIME + ".ser";
     private static final String MyStateFileName = TAG + ".ser";
     private static String LogFilePath;
@@ -255,9 +253,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray(true));
             if (null == UiUpdatePoll) {
                 UiUpdatePoll = new DelayedExec();
-                UiUpdatePoll.start(() -> {
-                    DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray());
-                }, 1000, 1000);
+                UiUpdatePoll.start(() -> DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray()), 1000, 1000);
             }
         }
     }
@@ -268,13 +264,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         UpdateDroneSpecs();
     }
     public static String LoggingLevelName(int loggingLevel) {
-        String retval;
-        switch (loggingLevel) {
-            case DebugLevelError: retval = "Errors only"; break;
-            case DebugLevelDebug: retval = "Debugs"; break;
-            case DebugLevelInfo: retval = "Info"; break;
-            default: retval = "<undefined>";
-        }
+        String retval = switch (loggingLevel) {
+            case DebugLevelError -> "Errors only";
+            case DebugLevelDebug -> "Debugs";
+            case DebugLevelInfo -> "Info";
+            default -> "<undefined>";
+        };
         return retval;
     }
     public static String BumpLoggingLevel() {
@@ -289,11 +284,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static Uri GetDebugLogPath() {return DebugLogPath;}
 
     public static void CTLog(String type, String tag, String msg) {
-        if (null == AppActivity || null == AppContext || null == DebugOutputStream) {
-            // attempt no logging to file without app context (caused by
-            // logging from ScanningService during screen rotate).
-            return;
-        }
+        if (null == DebugOutputStream) return;
         if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) return;
 
         try {
@@ -374,11 +365,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static DocumentFile GetTodaysTrackDir() {
         String archivePath = GetArchivePath();
         DocumentFile todaysDir = null;
-        if (null != archivePath && null != AppContext) try {
-            ContentResolver contentResolver = AppContext.getContentResolver();
+        Context ctxt = R2CActivity.getAppContext();
+        if (null != archivePath && null != ctxt) try {
+            ContentResolver contentResolver = ctxt.getContentResolver();
             Uri treeUri = Uri.parse(archivePath);
             contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-            DocumentFile archiveDir = DocumentFile.fromTreeUri(AppContext, treeUri);
+            DocumentFile archiveDir = DocumentFile.fromTreeUri(ctxt, treeUri);
             if (null != archiveDir) {
                 SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy", Locale.US);
                 String dirpath = "tracks-" + sdf.format(new Date());
@@ -471,7 +463,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         final String trimmedMapId = newMapId.trim().replaceAll("[^a-zA-Z0-9]", "");
         if (!trimmedMapId.equals(ccs.mapId)) {
             if (null != MyCaltopoClientMap) {
-                ((R2CActivity) AppActivity).showMapIdChangeDialog(trimmedMapId);
+                R2CActivity activity = R2CActivity.getR2CActivity();
+                if (null != activity) activity.showMapIdChangeDialog(trimmedMapId);
             } else {
                 String msg = String.format(Locale.US, "mapId changed from '%s' to '%s'",
                         ccs.mapId, trimmedMapId);
@@ -524,7 +517,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         JSONObject retval;
 
         try {
-            is = AppActivity.getContentResolver().openInputStream(uri);
+            R2CActivity activity = R2CActivity.getR2CActivity();
+            is = activity.getContentResolver().openInputStream(uri);
             isr = new InputStreamReader(is);
             bufferedReader = new BufferedReader(isr);
             String line;
@@ -546,12 +540,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
     public static void ShowToast(String msg) {
         CTError(TAG, "showToast():" + msg);
-        ((R2CActivity)AppActivity).showToast(msg);
+        R2CActivity activity = R2CActivity.getR2CActivity();
+        if (null != activity) activity.showToast(msg);
     }
     public static void ShowToast(String msg, Exception e) {
         CTError(TAG, "showToast():" + msg, e);
         msg = msg + "\n" + ExceptionToString(e);
-        ((R2CActivity)AppActivity).showToast(msg);
+        R2CActivity activity = R2CActivity.getR2CActivity();
+        if (null != activity) activity.showToast(msg);
     }
 
     public static void readCredentialsFileContent(JSONObject json)
@@ -701,26 +697,34 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTError(TAG, "queryUserForArchiveDir() raised:", e);
         }
     }
+
+    @Nullable
     private static ActivityResultLauncher<Intent> InitLauncherForConfigFile(String requestMessage, Function<Uri, String> fileProcessor) {
-        return AppActivity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
-                result -> {
-                    CTDebug(TAG, String.format(Locale.US, "In InitLauncherForConfigFile(%s):onActivityResult(%s)",
-                            requestMessage, result.toString()));
-                    if (result.getResultCode() == Activity.RESULT_OK) {
-                        Intent data = result.getData();
-                        if (null != data) {
-                            Uri jsonUri = data.getData();
-                            // Persist the URI for later use (e.g., in SharedPreferences)
-                            // Now you have a Uri representing the selected file:
-                            fileProcessor.apply(jsonUri);
+        R2CActivity activity = R2CActivity.getR2CActivity();
+        if (null != activity) {
+            return activity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+                    result -> {
+                        CTDebug(TAG, String.format(Locale.US, "In InitLauncherForConfigFile(%s):onActivityResult(%s)",
+                                requestMessage, result.toString()));
+                        if (result.getResultCode() == Activity.RESULT_OK) {
+                            Intent data = result.getData();
+                            if (null != data) {
+                                Uri jsonUri = data.getData();
+                                // Persist the URI for later use (e.g., in SharedPreferences)
+                                // Now you have a Uri representing the selected file:
+                                fileProcessor.apply(jsonUri);
+                            }
                         }
-                    }
-                });
+                    });
+        }
+        return null;
     }
 
 
+    @Nullable
     public static ActivityResultLauncher<Intent> InitLauncherForArchiveDir() {
-        return AppActivity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+        R2CActivity activity = R2CActivity.getR2CActivity();
+        if (null != activity) return activity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
                 result -> {
                     CTDebug(TAG, String.format(Locale.US, "In queryArchivePath:onActivityResult(%s)", result.toString()));
                     if (result.getResultCode() == Activity.RESULT_OK) {
@@ -729,7 +733,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                             Uri treeUri = data.getData();
                             if (null != treeUri) {
                                 // Persist the URI for later use (e.g., in SharedPreferences)
-                                AppActivity.getContentResolver().takePersistableUriPermission(treeUri,
+                                activity.getContentResolver().takePersistableUriPermission(treeUri,
                                         Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
 
                                 // Now you have a Uri representing the selected directory tree, which likely includes Downloads
@@ -739,6 +743,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                         }
                     }
                 });
+        return null;
     }
 
     public static void ConnectToMap() {
@@ -761,8 +766,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CheckBringUpMap();
     }
     public static void InitializeForActivityAndContext(AppCompatActivity activity, Context ctxt) {
-        AppActivity = activity;
-        AppContext = ctxt;
         GetState();
         CTDebug(TAG, "InitializeForActivityAndContext()");
         try {
@@ -803,24 +806,26 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return retval.toString();
     }
 
-    // can return null if no stored state available.
+    // can return null if no stored state available or the app isn't initialized yet.
     @Nullable
     private static ClientClassState RestoreState() {
         ClientClassState ccs;
-        if (null == AppContext) return null;
+        Context ctxt = R2CActivity.getAppContext();
+        if (null == ctxt) return null;
         try {
-            FileInputStream fis = AppContext.openFileInput(MyStateFileName);
+            Log.d(TAG, "CTDebug: RestoreState() Opening " + MyStateFileName);
+            FileInputStream fis = ctxt.openFileInput(MyStateFileName);
             ObjectInputStream ois = new ObjectInputStream(fis);
             ccs = (ClientClassState) ois.readObject();
             ois.close();
         } catch (FileNotFoundException e) {
-            Log.e(TAG, "CTError: restoreState() no archive to restore from:", e);
+            Log.e(TAG, "CTError: RestoreState() no archive to restore from:", e);
             ccs = null;
         } catch (InvalidClassException e) {
-            Log.e(TAG, "CTError: restoreState() not able to restore incompatible version of state:", e);
+            Log.e(TAG, "CTError: RestoreState() not able to restore incompatible version of state:", e);
             ccs = null;
         } catch (Exception e) {
-            Log.e(TAG, "CTError: restoreState() raised:", e);
+            Log.e(TAG, "CTError: RestoreState() raised:", e);
             ccs = null;
         }
         if (null != ccs && ccs.debugLevel >= 0) DebugLevel = ccs.debugLevel;
@@ -840,9 +845,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     private static void ArchiveState(@NonNull String reason) {
         if (null != Ccstate) try {
-            if (null == AppContext) return;
+            Context ctxt = R2CActivity.getAppContext();
+            if (null == ctxt) return;
             Ccstate.debugLevel = DebugLevel;
-            FileOutputStream fos = AppContext.openFileOutput(MyStateFileName, 0);
+            FileOutputStream fos = ctxt.openFileOutput(MyStateFileName, Context.MODE_PRIVATE);
             ObjectOutputStream oos = new ObjectOutputStream(fos);
             oos.writeObject(Ccstate);
             oos.flush();
@@ -933,9 +939,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (null == DebugOutputStream && null != GetArchivePath()) try {
             DocumentFile todaysArchiveDir = GetTodaysTrackDir();
             String filepath = "Log_" + TimeDatestampString(ScanningService.GetStartTimeInMsec());
-            if (null != todaysArchiveDir) try {
+            Context ctxt = R2CActivity.getAppContext();
+            if (null != todaysArchiveDir && null != ctxt) try {
                 DocumentFile dataFilepath = todaysArchiveDir.createFile("text/plain", filepath);
-                ContentResolver resolver = AppContext.getContentResolver();
+                ContentResolver resolver = ctxt.getContentResolver();
                 if (null != dataFilepath) {
                     DebugLogPath = dataFilepath.getUri();
                     DebugOutputStream = (resolver.openOutputStream(DebugLogPath));
@@ -946,8 +953,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
             if (null != DebugOutputStream) {
                 LogFilePath = todaysArchiveDir + "/" + filepath;
-                Resources resources = AppActivity.getResources();
-                String appVers = resources.getString(R.string.app_version);
+                R2CActivity activity = R2CActivity.getR2CActivity();
+                String appVers = "-";
+                if (null != activity) {
+                    Resources resources = activity.getResources();
+                    appVers = resources.getString(R.string.app_version);
+                }
                 final String header = "########################################################################\n";
                 CTDebug(TAG, String.format(Locale.US,
                         "Logfile is up on %s @%s\n%s#  RID2Caltopo %s(%s) running on Android OS v%s(%d)\n#  Writing logs to: %s\n%s",

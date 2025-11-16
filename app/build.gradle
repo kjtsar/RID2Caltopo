@@ -1,19 +1,37 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
+// Read the keystore properties
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(keystorePropertiesFile.newReader())
+}
+
 android {
-    namespace "org.ncssar.rid2caltopo"
-    compileSdk 35
+    namespace = "org.ncssar.rid2caltopo"
+    compileSdk =35
     def versionMajor= 1
-    def versionMinor = 0
-    def versionPatch = 0
+    def versionMinor= 0
+    def versionPatch= 0
+
+    signingConfigs {
+        register("release") {
+            keyAlias = keystoreProperties["keyAlias"] as String
+            keyPassword = keystoreProperties["keyPassword"] as String
+            storeFile = file(keystoreProperties["storeFile"] as String)
+            storePassword = keystoreProperties["storePassword"] as String
+        }
+    }
 
     defaultConfig {
         applicationId "org.ncssar.rid2caltopo"
-        minSdk 29
-        targetSdk 35
+        minSdk = 29
+        targetSdk = 35
         versionCode 1
         versionName "${versionMajor}.${versionMinor}.${versionPatch}"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -23,7 +41,7 @@ android {
         ]
         resValue "string", "app_version", "${defaultConfig.versionName}"
 
-        android.buildFeatures.buildConfig true
+        android.buildFeatures.buildConfig = true
         buildConfigField "String", "BUILD_VERSION", "\"${defaultConfig.versionName}\""
         def buildTime = new Date()
         buildConfigField "String", "BUILD_TIME", "\"${buildTime.format('ddLLLyyyy:HHmmss')}\""
@@ -32,19 +50,20 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            proguardFiles(getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = '1.8'
+        jvmTarget = '17'
     }
     buildFeatures {
-        compose true
-        viewBinding true
+        compose = true
+        viewBinding = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = libs.versions.composeCompiler.get()
@@ -57,34 +76,34 @@ android {
 }
 
 dependencies {
-    implementation libs.androidx.core.ktx
-    implementation libs.androidx.appcompat
-    implementation libs.google.material
-    implementation libs.androidx.constraintlayout
-    implementation libs.androidx.documentfile
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.google.material)
+    implementation(libs.androidx.constraintlayout)
+    implementation(libs.androidx.documentfile)
 
-    implementation platform(libs.androidx.compose.bom)
-    implementation libs.androidx.compose.ui
-    implementation libs.androidx.compose.ui.graphics
-    implementation libs.androidx.compose.ui.tooling.preview
-    implementation libs.androidx.compose.material3
-    implementation libs.androidx.activity.compose
-    implementation libs.androidx.lifecycle.runtime.ktx
-    implementation libs.androidx.lifecycle.viewmodel.compose
-    implementation libs.appauth
-    implementation libs.google.play.services.auth
-    implementation libs.google.play.services.location
-    implementation libs.squareup.okhttp
-    implementation libs.squareup.okhttp.mockwebserver
-    implementation libs.squareup.okhttp.tls
-    implementation libs.bouncycastle.prov
-    implementation libs.bouncycastle.pkix
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.appauth)
+    implementation(libs.google.play.services.auth)
+    implementation(libs.google.play.services.location)
+    implementation(libs.squareup.okhttp)
+    implementation(libs.squareup.okhttp.mockwebserver)
+    implementation(libs.squareup.okhttp.tls)
+    implementation(libs.bouncycastle.prov)
+    implementation(libs.bouncycastle.pkix)
 
-    testImplementation libs.junit
-    androidTestImplementation libs.androidx.junit
-    androidTestImplementation libs.androidx.espresso.core
-    androidTestImplementation platform(libs.androidx.compose.bom)
-    androidTestImplementation libs.androidx.compose.ui.test.junit4
-    debugImplementation libs.androidx.compose.ui.tooling
-    debugImplementation libs.androidx.compose.ui.test.manifest
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

@@ -134,7 +134,6 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                     onShowHelp = { showHelpMenu() },
                     onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(),"text/plain") },
                     loadConfigFile = {loadConfigFile()},
-                    onShowVersion = { showToast(BuildConfig.BUILD_TIME) },
                     onShowSettings = { showSettingsDialog.value = true},
                 )
             }

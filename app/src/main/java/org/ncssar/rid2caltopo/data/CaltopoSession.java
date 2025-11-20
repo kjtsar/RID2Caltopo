@@ -197,9 +197,7 @@ public class CaltopoSession {
 					.append(Uri.encode(entry.getValue()))
 					.append("&");
 		}
-		String retval = paramString.substring(0, paramString.length()-1);
-		CTDebug(TAG, "Return String: " + retval);
-		return retval;
+		return paramString.substring(0, paramString.length()-1);
     }
 
 	// this needs to be run in background thread to prevent blocking the app thread.

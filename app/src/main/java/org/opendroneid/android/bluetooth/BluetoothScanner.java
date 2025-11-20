@@ -6,9 +6,14 @@
  */
 package org.opendroneid.android.bluetooth;
 
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
+
 import android.Manifest;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanFilter;
@@ -20,9 +25,10 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.ParcelUuid;
 
+import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 
-import org.ncssar.rid2caltopo.data.CaltopoClient;
+import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.data.CtDroneSpec;
 
 import java.util.ArrayList;
@@ -34,20 +40,32 @@ public class BluetoothScanner {
     private static final String TAG = "BluetoothScanner";
 
     private final OpenDroneIdDataManager dataManager;
-    private BluetoothAdapter bluetoothAdapter;
+    private final BluetoothAdapter bluetoothAdapter = getBluetoothAdapter();
     private BluetoothLeScanner bluetoothLeScanner;
     private final Context context;
 
-    public BluetoothScanner(Context context, OpenDroneIdDataManager dataManager) {
+    public BluetoothScanner(@NonNull Context context, @NonNull OpenDroneIdDataManager dataManager) {
         this.context = context;
         this.dataManager = dataManager;
-        bluetoothAdapter = getBluetoothAdapter(context);
     }
 
-    public static BluetoothAdapter getBluetoothAdapter(Context context) {
-        Object object = context.getSystemService(Context.BLUETOOTH_SERVICE);
-        if (object == null) return null;
-        return ((android.bluetooth.BluetoothManager) object).getAdapter();
+    public static BluetoothAdapter getBluetoothAdapter() {
+
+        Context appContext = R2CActivity.getAppContext();
+        BluetoothAdapter adapter = null;
+        if (null != appContext) {
+            BluetoothManager btManager = (BluetoothManager) appContext.getSystemService(Context.BLUETOOTH_SERVICE);
+            adapter = btManager.getAdapter();
+            if (null == adapter) {
+                CTError(TAG, "getBluetoothAdapter(): Can't get the default bluetooth adapter.");
+            } else if (adapter.isEnabled()) {
+                // not sure what is going on.  Adapter frequently says it's not available, though it seems to be working.
+                CTError(TAG, "getBluetoothAdapter(): Default bluetooth adapter not enabled.");
+            } else {
+                CTDebug(TAG, "getBluetoothAdapter(): Default bluetooth adapter is enabled.");
+            }
+        }
+        return adapter;
     }
 
     private final ScanCallback scanCallback = new ScanCallback() {
@@ -58,12 +76,6 @@ public class BluetoothScanner {
             if (scanRecord == null)
                 return;
             byte[] bytes = scanRecord.getBytes();
-
-            String addr = result.getDevice().getAddress().substring(0, 8);
-            int advertiseFlags = scanRecord.getAdvertiseFlags();
-            int rssi = result.getRssi();
-            String string = String.format(Locale.US, "scan: addr=%s flags=0x%02X rssi=% d, len=%d",
-                    addr, advertiseFlags, rssi, bytes != null ? bytes.length : -1);
 
             CtDroneSpec.TransportTypeEnum transportType = CtDroneSpec.TransportTypeEnum.BT4;
             if (bluetoothAdapter.isLeCodedPhySupported()) {
@@ -76,12 +88,12 @@ public class BluetoothScanner {
 
         @Override
         public void onBatchScanResults(List<ScanResult> results) {
-            CaltopoClient.CTInfo(TAG, "onBatchScanResults: " + results);
+            CTInfo(TAG, "onBatchScanResults: " + results);
         }
 
         @Override
         public void onScanFailed(int errorCode) {
-            CaltopoClient.CTError(TAG, "onScanFailed: errorCode is " + errorCode);
+            CTError(TAG, "onScanFailed: errorCode is " + errorCode);
         }
     };
 
@@ -97,11 +109,10 @@ public class BluetoothScanner {
     private static final byte[] OPEN_DRONE_ID_AD_CODE = new byte[]{(byte) 0x0D};
 
     public void startScan() {
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
-            CaltopoClient.CTError(TAG, "Bluetooth scan not supported.");
+        if (null == bluetoothAdapter) {
+            CTError(TAG, "startScan(): bluetooth adapter missing.");
             return;
         }
-        CaltopoClient.CTDebug(TAG, "Basic Bluetooth scan supported.");
         bluetoothLeScanner = bluetoothAdapter.getBluetoothLeScanner();
 
         ScanFilter.Builder builder = new ScanFilter.Builder();
@@ -114,7 +125,7 @@ public class BluetoothScanner {
                 .build();
         if (bluetoothAdapter.isLeCodedPhySupported() &&
                 bluetoothAdapter.isLeExtendedAdvertisingSupported()) {
-            CaltopoClient.CTDebug(TAG, "startScan: Enable scanning also for devices advertising on an LE Coded PHY S2 or S8");
+            CTDebug(TAG, "startScan: Enable scanning also for devices advertising on an LE Coded PHY S2 or S8");
             scanSettings = new ScanSettings.Builder()
                     .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                     .setLegacy(false)
@@ -125,24 +136,24 @@ public class BluetoothScanner {
         if (bluetoothLeScanner != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 if (ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                    CaltopoClient.CTError(TAG, "startScan: Did not get BLUETOOTH_SCAN permission");
+                    CTError(TAG, "startScan: Did not get BLUETOOTH_SCAN permission");
                     return;
                 }
             }
-            CaltopoClient.CTDebug(TAG, "startScan: Calling bluetoothLeScanner.startScan");
+            CTDebug(TAG, "startScan: Calling bluetoothLeScanner.startScan");
             bluetoothLeScanner.startScan(scanFilters, scanSettings, scanCallback);
         }
     }
 
     public void stopScan() {
-        if (bluetoothLeScanner != null && bluetoothAdapter.isEnabled()) {
+        if (bluetoothLeScanner != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 if (ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                    CaltopoClient.CTError(TAG, "stopScan: Did not get BLUETOOTH_SCAN permission");
+                    CTError(TAG, "stopScan: Did not get BLUETOOTH_SCAN permission");
                     return;
                 }
             }
-            CaltopoClient.CTDebug(TAG, "Calling bluetoothLeScanner.stopScan().");
+            CTDebug(TAG, "Calling bluetoothLeScanner.stopScan().");
             bluetoothLeScanner.stopScan(scanCallback);
         }
     }

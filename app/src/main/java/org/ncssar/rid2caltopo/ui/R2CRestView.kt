@@ -25,11 +25,13 @@ fun R2CRestView(
 ) {
     Column {
         RestHeader(remoteUptime, appVersion, peerName, mapId, groupId, ctRttString)
-        RestRidmapHeader()
-        drones.forEach { drone ->
-            key(drone.remoteId, drone.mappedId) {
-                DroneItem(drone = drone) { newMappedId ->
-                    onMappedIdChange(drone, newMappedId)
+        if (!drones.isEmpty()) {
+            RestRidmapHeader()
+            drones.forEach { drone ->
+                key(drone.remoteId, drone.mappedId) {
+                    DroneItem(drone = drone) { newMappedId ->
+                        onMappedIdChange(drone, newMappedId)
+                    }
                 }
             }
         }
@@ -40,7 +42,7 @@ fun R2CRestView(
 fun RestHeader(appUptime: String, appVersion: String, peerName: String, mapId: String, groupId: String,ctRttString: String) {
     Row(
         modifier = Modifier
-            .background(MaterialTheme.colorScheme.tertiary)
+            .background(MaterialTheme.colorScheme.secondaryContainer)
             .padding(3.dp),
     ) {
         Column(
@@ -160,7 +162,7 @@ fun RestHeader(appUptime: String, appVersion: String, peerName: String, mapId: S
 fun RestRidmapHeader() {
     Row(
         modifier = Modifier
-            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .background(MaterialTheme.colorScheme.tertiaryContainer)
             .padding(2.dp),
     ) {
         Column(
@@ -184,7 +186,7 @@ fun RestRidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(250.dp)
+            modifier = Modifier.width(200.dp)
         ) {
             Text(
                 text = "",
@@ -204,7 +206,7 @@ fun RestRidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(480.dp)
+            modifier = Modifier.width(420.dp)
         ) {
             Text(
                 text = "Waypoints Received",
@@ -221,7 +223,7 @@ fun RestRidmapHeader() {
                 Text(
                     text = "BT4:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -230,7 +232,7 @@ fun RestRidmapHeader() {
                 Text(
                     text = "BT5:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -239,7 +241,7 @@ fun RestRidmapHeader() {
                 Text(
                     text = "WiFi:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -248,7 +250,7 @@ fun RestRidmapHeader() {
                 Text(
                     text = "NaN:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -257,7 +259,7 @@ fun RestRidmapHeader() {
                 Text(
                     text = "R2C:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -266,7 +268,7 @@ fun RestRidmapHeader() {
                 Text(
                     text = "Total:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(70.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Center,
@@ -275,7 +277,7 @@ fun RestRidmapHeader() {
             }
         }
         Column(
-            modifier = Modifier.width(150.dp)
+            modifier = Modifier.width(100.dp)
         ) {
             Text(
                 text = "Flight",
@@ -297,7 +299,7 @@ fun RestRidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(150.dp)
+            modifier = Modifier.width(100.dp)
         ) {
             Text(
                 text = "",

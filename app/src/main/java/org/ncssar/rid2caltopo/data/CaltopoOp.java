@@ -132,6 +132,10 @@ public class CaltopoOp implements Future <CaltopoOp> {
 	public void syncOp(double timeoutInSeconds)	throws ExecutionException, InterruptedException, TimeoutException {
 		this.get((long)(timeoutInSeconds * 1000), TimeUnit.MILLISECONDS);
 	}
+	@Nullable
+	public void syncOp(long timeoutInMilliseconds)	throws ExecutionException, InterruptedException, TimeoutException {
+		this.get(timeoutInMilliseconds, TimeUnit.MILLISECONDS);
+	}
 
 	@NonNull
 	public String responseString() {

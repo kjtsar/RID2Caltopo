@@ -1,10 +1,13 @@
 package org.ncssar.rid2caltopo.app;
 
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.IBinder;
@@ -40,33 +43,32 @@ public class ScanningService extends Service {
     private boolean scanning = false;
 
     private R2CActivity mAppActivity;
+    private Context mAppContext;
     private OpenDroneIdDataManager mDataManager;
 
     public static long GetStartTimeInMsec() {return ScannerUptime.getStartTimeInMsec();}
     public void startScanning() {
-        if (null == mAppActivity) mAppActivity = R2CActivity.getR2CActivity();
         if (scanning) {
-            CaltopoClient.CTError(TAG, "startScanning(): ignoring start request while running.");
+            CTError(TAG, "startScanning(): ignoring start request while running.");
             return;
         }
         scanning = true;
         CaltopoClient.CTDebug(TAG, String.format(Locale.US, "startScanning(): ScanningService 0x%x", this.hashCode()));
-        wiFiScanner = new WiFiScanner(getApplicationContext(), mDataManager);
+        wiFiScanner = new WiFiScanner(mAppContext, mDataManager);
         wiFiScanner.startScan();
 
-        btScanner = new BluetoothScanner(getApplicationContext(), mDataManager);
+        btScanner = new BluetoothScanner(mAppContext, mDataManager);
         btScanner.startScan();
     }
 
     public void stopScanning() {
         if (!scanning) {
-            CaltopoClient.CTError(TAG, "stopScanning(): Ignoring request to stop when idle");
+            CTError(TAG, "stopScanning(): Ignoring request to stop when idle");
             return;
         }
         CaltopoClient.CTDebug(TAG, String.format(Locale.US, "stopScanning(): ScanningService 0x%x", this.hashCode()));
         wiFiScanner.stopScan();
         btScanner.stopScan();
-        mDataManager = null;
         scanning = false;
     }
 
@@ -77,10 +79,11 @@ public class ScanningService extends Service {
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
         mAppActivity = R2CActivity.getR2CActivity();
+        mAppContext = getApplicationContext();
         mDataManager = R2CActivity.getDataManager();
 
-        if (null == mAppActivity || null == mDataManager) {
-            CaltopoClient.CTError(TAG, "onCreate() missing required app context - terminating.");
+        if (null == mAppActivity || null == mAppContext || null == mDataManager) {
+            CTError(TAG, "onCreate() missing required app context - terminating.");
             System.exit(3);
             return;
         }

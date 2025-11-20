@@ -138,9 +138,6 @@ public class WaypointTrack {
 			CTDebug(TAG, "archive(): outputStream already archived.");
 			return;
 		}
-
-		CTDebug(TAG, String.format(Locale.US, "archive(): writing %d coordinates to %s",
-				numCoords, dataFilepath.getUri()));
 		try {
 			JSONObject jo = new JSONObject();
 			jo.put("type", "Feature");
@@ -167,11 +164,12 @@ public class WaypointTrack {
 				outputStream.flush();
 				outputStream.close();
 				outputStream = null;
+				CTDebug(TAG, String.format(Locale.US, "archive(): wrote %d coordinates to %s",
+						numCoords, dataFilepath.getUri()));
 			} catch (IOException e) {
 				CTError(TAG, String.format(Locale.US, "archive(%s): raised.",
 						dataFilepath.getUri()), e);
 			}
-			CTDebug(TAG, String.format("archive(): %s written.", dataFilepath.getUri()));
 		} catch (JSONException e) {
 			CTError(TAG, String.format("archive(%s): raised.", dataFilepath.getUri()), e);
 		}

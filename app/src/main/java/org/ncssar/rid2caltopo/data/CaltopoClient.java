@@ -39,7 +39,6 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AppCompatActivity;
 import androidx.documentfile.provider.DocumentFile;
 
 import java.net.URL;
@@ -137,13 +136,13 @@ class ClientClassState implements Serializable {
     }
 }
 
-public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
+public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoClientMap.MapStatusListener {
     public interface ClientSettingsListener {
         void settingsChanged();
     }
 
     // CaltopoClient CLASS VARS:
-    static ClientSettingsListener settingsListener = null;
+    private static ClientSettingsListener SettingsListener = null;
 
     static final long MIN_DISTANCE_IN_FEET = 2;
     static final long MIN_NEW_TRACK_DELAY_IN_SECONDS = 15;
@@ -171,7 +170,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
     private static CtDroneSpec.DroneSpecsChangedListener DroneSpecsChangedListener;
-    private boolean recordingToMap;
+    private static CaltopoClientMap.MapStatusListener.mapStatus MapStatus;
+    private static boolean MapStatusChangedFlag;
     private static CaltopoClientMap MyCaltopoClientMap = null;
     private static Uri DebugLogPath = null;
 
@@ -185,7 +185,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static long PreviousEarliestAgeOutInMsec = 0;
     private static final ArrayList <CtDroneSpec>DsArray = new ArrayList<>(16);
     private static long DroneSpecsArraySize = DsArray.size();
-
+    private static boolean NotifySettingsChangedFlag;
 
     public CaltopoClient(String rid) throws RuntimeException {
         ClientClassState ccs = GetState();
@@ -214,7 +214,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void SetSettingsListener(@Nullable ClientSettingsListener listener) {
-        settingsListener = listener;
+        SettingsListener = listener;
     }
 
     /**  SetDroneSpecOwner()
@@ -264,13 +264,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         UpdateDroneSpecs();
     }
     public static String LoggingLevelName(int loggingLevel) {
-        String retval = switch (loggingLevel) {
+       return switch (loggingLevel) {
             case DebugLevelError -> "Errors only";
             case DebugLevelDebug -> "Debugs";
             case DebugLevelInfo -> "Info";
             default -> "<undefined>";
         };
-        return retval;
     }
     public static String BumpLoggingLevel() {
         DebugLevel++;
@@ -430,10 +429,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         ccs.mapId = newMapId;
         ArchiveState("user changed mapId");
-        if (null != MyCaltopoClientMap) {
-            ConnectToMap();
+        if (ccs.mapId.isEmpty()) {
+            if (null != MyCaltopoClientMap) MyCaltopoClientMap.setMapId(ccs.mapId);
         } else {
-            CheckBringUpMap();
+            ConnectToMap();
         }
     }
 
@@ -460,7 +459,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @NonNull
     public static String SetMapId(@NonNull String newMapId) throws RuntimeException {
         ClientClassState ccs = GetState();
-        final String trimmedMapId = newMapId.trim().replaceAll("[^a-zA-Z0-9]", "");
+        String trimmedMapId = newMapId.trim().replaceAll("[^a-zA-Z0-9]", "");
         if (!trimmedMapId.equals(ccs.mapId)) {
             if (null != MyCaltopoClientMap) {
                 R2CActivity activity = R2CActivity.getR2CActivity();
@@ -469,8 +468,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 String msg = String.format(Locale.US, "mapId changed from '%s' to '%s'",
                         ccs.mapId, trimmedMapId);
                 ccs.mapId = trimmedMapId;
+                NotifySettingsChanged();
                 ArchiveState(msg);
-                CheckBringUpMap();
+                ConnectToMap();
             }
         }
         return ccs.mapId;
@@ -486,8 +486,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         if (ccs.useDirectFlag != flag) {
             ccs.useDirectFlag = flag;
+            NotifySettingsChanged();
             ArchiveState("useDirect changed to " + flag);
-            CheckBringUpMap();
+            if (!flag &&
+                    null != MyCaltopoClientMap &&
+                    MapStatus != CaltopoClientMap.MapStatusListener.mapStatus.down) {
+                MyCaltopoClientMap.resetMapConnection(0);
+            } else {
+                ConnectToMap();
+            }
         }
     }
 
@@ -565,7 +572,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         boolean useDirectFlag = json.optBoolean("use_direct_flag");
         CTDebug(TAG, "readCredentialsFileContent(): read useDirectFlag as: " + useDirectFlag);
         SetUseDirect(useDirectFlag);
-        CheckBringUpMap();
+        NotifySettingsChanged();
+        if (useDirectFlag) ConnectToMap();
     }
     public static void readRidmapFileContent(JSONObject json) throws JSONException {
         JSONArray mapJson;
@@ -660,7 +668,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             } else if (type.equals("ct_credentials")) {
                 readCredentialsFileContent(json);
             }
-            if (null != settingsListener) settingsListener.settingsChanged();
+            NotifySettingsChanged();
         } catch (JSONException e) {
             CTError(TAG, String.format(Locale.US,"Error processing '%s':", uri), e);
         }
@@ -747,15 +755,27 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void ConnectToMap() {
+        String groupId = GetGroupId();
         String mapId = GetMapId();
-        if (!GetUseDirectFlag()) return;
-        CTDebug(TAG, "ConnectToMap() mapId: " + mapId);
+        if (!GetUseDirectFlag() || null == DebugOutputStream || groupId.isEmpty() || mapId.isEmpty()) return;
+
         if (null != MyCaltopoClientMap) {
             String existingMapId = MyCaltopoClientMap.getMapId();
-            if (!existingMapId.equals(mapId)) MyCaltopoClientMap.setMapId(mapId);
+            CaltopoClientMap.MapStatusListener.mapStatus mapStatus = MyCaltopoClientMap.getMapStatus();
+            if (existingMapId.equals(mapId) &&
+                    (mapStatus == CaltopoClientMap.MapStatusListener.mapStatus.connecting) ||
+                    (mapStatus == CaltopoClientMap.MapStatusListener.mapStatus.up)) return;
+            CTDebug(TAG, String.format(Locale.US,
+                    "ConnectToMap(): changing mapId from %s to %s...", existingMapId, mapId));
+            MyCaltopoClientMap.setMapId(mapId);
         } else try {
-            CTDebug(TAG, "connectToMap(): connecting to map " + mapId);
-            MyCaltopoClientMap = new CaltopoClientMap(GetCaltopoConfig(), mapId, GetTrackFolderName());
+            CaltopoSessionConfig config = GetCaltopoConfig();
+            if (!CaltopoSessionConfig.sniffTest(config)) {
+                ShowToast("ConnectToMap(): Missing Caltopo Team credentials.");
+                return;
+            }
+            CTDebug(TAG, "ConnectToMap(): connecting to map " + mapId);
+            MyCaltopoClientMap = new CaltopoClientMap(config, mapId, GetTrackFolderName());
         } catch (RuntimeException e) {
             ShowToast("could not open map: ", e);
         }
@@ -763,16 +783,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void PermissionsGrantedWeShouldBeGoodToGo() {
         InitArchiveDir();
-        CheckBringUpMap();
+        ConnectToMap();
     }
-    public static void InitializeForActivityAndContext(AppCompatActivity activity, Context ctxt) {
+    public static void Initialize() {
         GetState();
-        CTDebug(TAG, "InitializeForActivityAndContext()");
+        CTDebug(TAG, "Initialize()");
         try {
             QueryArchivePath = InitLauncherForArchiveDir();
             LoadConfigFileLauncher = InitLauncherForConfigFile(LoadConfigFileMessage, CaltopoClient::LoadConfigFile);
         } catch (Exception e) {
-            CTError(TAG, "InitializeForActivityAndContext() raised:", e);
+            CTError(TAG, "Initialize() raised:", e);
         }
     }
 
@@ -926,15 +946,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.archivePath;
     }
 
-    public static void CheckBringUpMap() {
-        String groupId = GetGroupId();
-        String mapId = GetMapId();
-        if (!GetUseDirectFlag() || null != MyCaltopoClientMap ||
-                null == DebugOutputStream || null == groupId || groupId.isEmpty() || mapId.isEmpty()) return;
-        CTDebug(TAG, "CheckBringUpMap()...");
-        ConnectToMap();
-    }
-
     public static void InitArchiveDir() {
         if (null == DebugOutputStream && null != GetArchivePath()) try {
             DocumentFile todaysArchiveDir = GetTodaysTrackDir();
@@ -964,7 +975,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                         "Logfile is up on %s @%s\n%s#  RID2Caltopo %s(%s) running on Android OS v%s(%d)\n#  Writing logs to: %s\n%s",
                         R2CActivity.MyDeviceName, R2CRest.GetMyIpAddresses().toString(), header, appVers,
                         BuildConfig.BUILD_TIME, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, LogFilePath, header));
-                CheckBringUpMap();
+                ConnectToMap();
             }
 
         } catch (Exception e) {
@@ -982,6 +993,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         InitArchiveDir();
     }
 
+    private static void NotifySettingsChanged() {
+        CTDebug(TAG, "notifySettingsChanged()");
+        if (!NotifySettingsChangedFlag && null != SettingsListener) {
+            NotifySettingsChangedFlag = true;
+            SettingsListener.settingsChanged();
+            NotifySettingsChangedFlag = false;
+        }
+    }
+
     /* SetGroupId():
      * Changing groupId only affects legacy LiveTracks (specified w/Caltopo web GUI).
      * Caltopo Direct LiveTracks only look at the groupId when they begin, so any
@@ -995,9 +1015,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (oldGid.equals(trimmedGid)) return ccs.groupId;
 
         ccs.groupId = trimmedGid;
+        NotifySettingsChanged();
         WarnMissingGroupId = false;
         ArchiveState("groupId changed."); // save any time there is a chg.
-        CheckBringUpMap();
+        ConnectToMap();
         return ccs.groupId;
     }
 
@@ -1005,8 +1026,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (ExecutorPool != null) {
             ExecutorPool.shutdownNow();
         }
-        if (null != MyCaltopoClientMap) {
+        try {
             CaltopoClientMap.Shutdown();
+        } catch (Exception e) {
+            CTError(TAG, "CaltopoClientMap.Shutdown() raised: ", e);
         }
         if (null != DebugOutputStream) {
             try {
@@ -1076,6 +1099,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     /* this is used when Caltopo Session is not used, requiring user to set up the
      * LiveTrack in Caltopo web interface.
+     *
+     * FIXME: Should we move this to CaltopoLiveTrack and have LiveTrack support
+     *  the track writing without a map, but possibly with R2CRest peers?  That
+     *  would make sense if we can get broadcast/rendezvous working.
      */
     public void bgPublishLive(String groupId, String deviceId, double lat, double lng) {
         String https_url = String.format(Locale.US, "%s%s?id=%s&lat=%.6f&lng=%.6f",
@@ -1117,6 +1144,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+    public void mapStatusUpdate(CaltopoClientMap map, CaltopoClientMap.MapStatusListener.mapStatus mapStatus) {
+        if (MyCaltopoClientMap == map) {
+            if (MapStatus != mapStatus) {
+                MapStatus = mapStatus;
+                MapStatusChangedFlag = true;
+            }
+        }
+    }
     public void terminateTrack(String msg) {
         if (droneSpec.isActive()) {
             String trackLabel = droneSpec.trackLabel();
@@ -1156,10 +1191,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
-    private boolean recordingToMapStatusChanged() {
-        return (droneSpec.isActive() && (recordingToMap != (null != MyCaltopoClientMap && MyCaltopoClientMap.getMapIsUp())));
-    }
-
     /** newWaypoint() - process a new waypoint from OpenDroneIdDataManager().
      *  Note that lat, lng, altitudeInMeters, and droneTimestampInSeconds are all values
      *  provided by the drone's remote id module and quality of measurement is going to
@@ -1168,24 +1199,23 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
     public boolean newWaypoint(double lat, double lng, long altitudeInMeters, long droneTimestampInMilliseconds, CtDroneSpec.TransportTypeEnum transportType) {
         boolean useDirectFlag = GetUseDirectFlag();
-        if (null == droneSpec) {
-            CTError(TAG, "newWaypoint(): dronespec is null - this shouldn't be possible.");
-            return false;
-        }
 
-        if (recordingToMapStatusChanged()) {
-            // We're currently in the middle of recording a track and user changed configuration on us...
-            terminateTrack("recordingToMapStatusChanged()");
-            recordingToMap = !recordingToMap;
-            if (recordingToMap) ConnectToMap();
+        if (droneSpec.isActive() && MapStatusChangedFlag) {
+            // We're currently in the middle of recording a track and map status changed.
+            if (MapStatus == CaltopoClientMap.MapStatusListener.mapStatus.down) {
+                terminateTrack("recordingToMapStatusChanged() to " + MapStatus);
+            }
+            MapStatusChangedFlag = false;
         }
 
         if (droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) {
+            CTDebug(TAG, String.format(Locale.US, "newWaypoint(): adding %.7f, %.7f to %s via %s...",
+                    lat, lng, droneSpec.trackLabel(), transportType));
             WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
             String groupId = GetGroupId();
             if (groupId.isEmpty()) {
                 if (!WarnMissingGroupId) {
-                    ShowToast("Can't forward waypoint to caltopo - 'groupId' not specified in Caltopo Config panel.");
+                    ShowToast("Can't forward waypoint to caltopo - 'groupId' not specified in Settings panel.");
                     WarnMissingGroupId = true;
                 }
                 return true;
@@ -1195,13 +1225,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 String mapId = GetMapId();
                 if (mapId.isEmpty()) {
                     if (!WarnMissingMapFlag) {
-                        ShowToast("Can't forward waypoint to caltopo - 'mapId' not specified in Caltopo Config panel.");
+                        ShowToast("Can't forward waypoint to caltopo - 'mapId' not specified in Settings panel.");
                         WarnMissingMapFlag = true;
                     }
                     return true;
                 } else WarnMissingMapFlag = false;
 
-                if (null == MyCaltopoClientMap || !MyCaltopoClientMap.getMapIsUp()) {
+                if (null == MyCaltopoClientMap || MapStatus == CaltopoClientMap.MapStatusListener.mapStatus.down) {
                     if (!WarnConnectingToMapFlag) {
                         ConnectToMap();
                         ShowToast("Connecting to map...");
@@ -1209,13 +1239,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     }
                     return true;
                 } else WarnConnectingToMapFlag = false;
-                recordingToMap = true;
+
+
+                // Map is up, so get a track going and start publishing waypoints.
                 if (null == liveTrack) {
+                    CTDebug(TAG, "newWaypoint(): starting new liveTrack");
                     liveTrack = new CaltopoLiveTrack(MyCaltopoClientMap, GetGroupId(), droneSpec, lat, lng, droneTimestampInMilliseconds);
-                } else if (!liveTrack.isActive()) {
+                } else if (liveTrack.isActive()) {
+                    liveTrack.publishDirect(lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
+                } else {
+                    CTDebug(TAG, "newWaypoint(): restarting liveTrack");
                     liveTrack.startNewTrack(lat, lng, droneTimestampInMilliseconds);
                 }
-                liveTrack.publishDirect(lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
 
                 // Use the idleTimeoutPoll to identify dead tracks.
                 if (!idleTimeoutPoll.isRunning()) {
@@ -1223,6 +1258,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                             GetNewTrackDelayInSeconds() * 1000, 0);
                 }
             } else {
+                // FIXME: This tries to publish to a LiveTrack created in Caltopo by someone...
                 try {
                     publishLive(lat, lng, groupId);
                 } catch (Exception e) {

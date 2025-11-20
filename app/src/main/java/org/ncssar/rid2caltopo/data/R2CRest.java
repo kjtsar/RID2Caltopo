@@ -104,9 +104,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public String mapId = "";
     public String groupId = "";
     private remoteUpdateListener remoteUpdateListener;
-    private final Hashtable<String, CtDroneSpec> droneSpecTable = new Hashtable<>(4);  // Table to map remoteIDs owned by this R2CRest client to their corresponding data.
+
+    // Table to map remoteIDs owned by this peer to their corresponding data.
+    private final Hashtable<String, CtDroneSpec> droneSpecTable = new Hashtable<>(4);
     private boolean outstandingSeen = false;
-    private JSONArray pendingSeenWaypoints = new JSONArray();
 
     public interface remoteUpdateListener {
         void onRemoteAppVersion(String remoteAppVers);
@@ -114,16 +115,21 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public interface R2CListener {
+        enum r2cState {
+            down,   // connection closing - for whatever reason.
+            up,     // connection established - all is well.
+            failed, // connection couldn't be established.
+        }
+
         /** clientStatusChange()
          * Delivered when the R2C client instance establishes or looses
-         * connectivity per the isNowUpFlag.   Note that when isNowUpFlag
-         * is false, recipient should break all ties with this client as
-         * it is closing for business.
-         *
-         * @param client
-         * @param isNowUpFlag
+         * connectivity per the state parameter.   Note that when state is down or failed
+         * recipient should break all ties with this client as it is closing for business.
+         * If status is failed, then client connection couldn't be established.
+         * @param client affected r2cclient.
+         * @param state new state.
          */
-        void clientStatusChange(R2CRest client, boolean isNowUpFlag);
+        void clientStatusChange(R2CRest client, r2cState state);
     }
 
 
@@ -181,7 +187,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         if (null != client) {
             CTDebug(TAG, "R2CRest(): already found this client in my map - This can happen if remote connected to us first.");
             // In either case, this new instance is redundant and needs to shutdown.
-            shutdown();
+            shutdown(R2CListener.r2cState.down);
         } else {
             try {
                 CTDebug(TAG, "Trying to connect to remote: " + remoteR2cSpec.toString(4));
@@ -195,9 +201,14 @@ public class R2CRest implements WsPipe.WsMsgListener {
     // Returns a concise summary of this client's status:
     @NonNull
     public String stats() {
-        return String.format(Locale.US, "tx:%d rx:%d rtt:%.3fs crtt:%.3fs",
+        StringBuilder builder = new StringBuilder();
+        for (CaltopoLiveTrack myTrack : OurDroneLiveTracks.values()) {
+            builder.append("\n  ");
+            builder.append(myTrack.getTrackLabel());
+        }
+        return String.format(Locale.US, "tx:%d rx:%d rtt:%.3fs crtt:%.3fs%s",
                 sendMsgCount, recvMsgCount, (double)localR2cRttAvgMsec.get() / 1000.0,
-                (double)CaltopoLiveTrack.GetCaltopoRttInMsec() / 1000.0);
+                (double)CaltopoLiveTrack.GetCaltopoRttInMsec() / 1000.0, builder);
     }
 
     public static ArrayList<R2CRest>GetClientList() {
@@ -252,6 +263,21 @@ public class R2CRest implements WsPipe.WsMsgListener {
         return (Hashtable<String, R2CRest>)ClientIdMap.clone();
     }
 
+    /** kvStringResponsePayload()
+     *    For the simple case where all we want to send is key/value pair strings.
+     * @param keyValuePairs Array of string pairs.
+     * @return Returns JSONObject as payload.
+     */
+    private JSONObject kvStringResponsePayload(@NonNull String[] keyValuePairs) {
+        Util.SafeJSONObject jo = new Util.SafeJSONObject();
+        for (int i=0; i < keyValuePairs.length; i+=2) {
+            String key = keyValuePairs[i];
+            String value = keyValuePairs[i+1];
+            jo.put(key, value);
+        }
+        return jo;
+    }
+
     public JSONObject errorResponsePayload(@NonNull String emsg, @NonNull JSONObject payload) {
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "error");
@@ -275,7 +301,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         String uuid = client.getRemoteUUID();
         ClientIdMap.remove(uuid);
         ActiveClients.remove(uuid);
-        CaltopoClientMap.RemoveClient(client);
+        CaltopoClientMap.RemoveClient(client, R2CListener.r2cState.down);
         if (null != clientListChangedListener) {
             clientListChangedListener.onClientListChanged(GetClientList());
         }
@@ -302,14 +328,14 @@ public class R2CRest implements WsPipe.WsMsgListener {
                 wsPipe.sendResponse(seqnum, errorResponsePayload(
                         "handleHello(): We already have a connection. Bye.", payload));
                 sendMsgCount++;
-                shutdown();
+                shutdown(R2CListener.r2cState.down);
                 return;
             }
         }
         peerName = wsPipe.getPeerName();
         remoteUUID = id;
         AddClient(this);
-        remoteAppVersion = payload.optString("app-version");
+        remoteAppVersion = payload.optString("app-vers");
         mapId = payload.optString("map-id");
         groupId = payload.optString("group-id");
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
@@ -376,6 +402,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         }
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "drone-status-ack");
+        updateDroneSpecListener();
         wsPipe.sendResponse(seqnum, jo);
         sendMsgCount++;
     }
@@ -402,7 +429,24 @@ public class R2CRest implements WsPipe.WsMsgListener {
         outstandingSeen = false;
         long r2cRtt = payload.optLong("r2c-rtt");
         if (r2cRtt != 0) remoteR2cRttAvgMsec.next(r2cRtt);
-        sendOutstandingWaypoints();
+    }
+
+    /** handleSeenNack()
+     *  This could happen when the peer we previously thought of as owner is not actually
+     *  the owner of the drone.  That could mean there is another owner that we didn't
+     *  see or network delay prevented us from seeing the "drop-drone" before we had
+     *  already sent the corresponding "seen".   In either case, we need to stop sending
+     *  "seen" updates and treat this like a "drop-drone" to remove this peer as the
+     *  owner and permit the discovery process to restart.
+     * @param payload
+     */
+    public void handleSeenNack(JSONObject payload) {
+        String ridString = payload.optString("rid");
+        if (ridString.isEmpty()) {
+            CTError(TAG, "handleSeenNack(): Missing/invalid 'rid'");
+            return;
+        }
+        removeDroneSpecFromOurPeer(ridString);
     }
 
     /* When I'm client connecting to remote:
@@ -450,7 +494,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
                 CTError(TAG, "get() raised.", e);
             }
         }
-        remoteAppVersion = payload.optString("app-version");
+        remoteAppVersion = payload.optString("app-vers");
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
             remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
@@ -460,16 +504,27 @@ public class R2CRest implements WsPipe.WsMsgListener {
         } else {
             CTDebug(TAG, "handleHelloAck(): no remoteUpdateListener.");
         }
-        if (null != clientListener) clientListener.clientStatusChange(this, true);
+        if (null != clientListener) clientListener.clientStatusChange(this, R2CListener.r2cState.up);
+        updateDroneSpecListener();
     }
 
-    public void removeDroneSpecForOurPeer(@NonNull String rid) {
+    public void removeDroneSpecFromOurPeer(@NonNull String rid) {
         CtDroneSpec ds = droneSpecTable.remove(rid);
         if (null != ds) CaltopoClient.RemoveDroneSpecOwner(ds);
         ClientRidMap.remove(rid);
         CTDebug(TAG, String.format(Locale.US,
                 "removeDroneSpecForOurPeer(): Removed '%s' from the list of drones owned by %s", rid, peerName));
         updateDroneSpecListener();
+        CaltopoLiveTrack liveTrack = CaltopoLiveTrack.GetLiveTrackForRemoteId(rid);
+        if (null != liveTrack) {
+            // We are tracking this drone as well, so now that it is back on the market,
+            // we should reevaluate ownership.
+            // FIXME: if NewTrackDelays are different between this R2C and our peer, then
+            //        we could be more lenient with our time between waypoints... Otherwise
+            //        this path shouldn't be very easy to hit as we should probably time-
+            //        out about the same time or earlier.
+            liveTrack.updateStatus(R2CRespEnum.reevaluate);
+        }
     }
 
     /* Peer has received ownership of this drone, so if it changes the MappedId, we
@@ -477,17 +532,18 @@ public class R2CRest implements WsPipe.WsMsgListener {
      */
     public void addDroneSpecForOurPeer(@NonNull CtDroneSpec dsIn) {
         String rid = dsIn.getRemoteId();
-        R2CRest aClient = ClientIdMap.get(rid);
-        String mid = dsIn.getMappedId();
-
-        if (aClient != this || !mid.equals(dsIn.getMappedId())) {
-            CaltopoClient.SetDroneSpecOwner(dsIn, this);
-            droneSpecTable.put(rid, dsIn);
-            ClientRidMap.put(rid, this);
+        R2CRest peer = ClientRidMap.get(rid);
+        if (null == peer) {
             CTDebug(TAG, String.format(Locale.US,
                     "addDroneSpecForOurPeer(): Added '%s' to the list of drones owned by %s", rid, peerName));
-            updateDroneSpecListener();
+            CaltopoClient.SetDroneSpecOwner(dsIn, this);
+            ClientRidMap.put(rid, this);
         }
+        if (dsIn.getMappedId().equals(dsIn.getRemoteId())) {
+            CtDroneSpec ds = CaltopoClient.GetDroneSpec(rid);
+            if (null != ds && !ds.getMappedId().equals(ds.getRemoteId())) dsIn = ds;
+        }
+        droneSpecTable.put(rid, dsIn);
     }
 
     public void updateDroneSpecListener() {
@@ -499,11 +555,12 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public void handleAddDroneAck(@NonNull JSONObject payload) {
-        String rid = payload.optString("rid");
-        if (rid.isEmpty()) {
-            CTError(TAG, "handleAddDroneAck(): missing required 'rid' parameter." + payload);
+        CtDroneSpec ds = droneSpecFromRidString(payload.optString("rid"));
+        if (null == ds) {
+            CTError(TAG, "handleAddDroneAck(): missing/invalid required 'rid' parameter." + payload);
             return;
         }
+        String rid = ds.getRemoteId();
         int count = DecrementAckCountForRid(rid);
         CTDebug(TAG, String.format(Locale.US, "handleAddDroneAck(): Received ack for %s. Count is %d", rid, count));
         if (count <= 0) {
@@ -526,17 +583,44 @@ public class R2CRest implements WsPipe.WsMsgListener {
         }
     }
 
+    /** droneSpecFromRidString():
+     *   With the latest release, the "rid" parameter of a message can either contain
+     *   the plain Remote Identifier or it can contain a JSON dronespec archive.
+     *   Handle either.
+     *
+     * @param ridString Either a JSON archive of a dronespec or just a remote id.
+     * @return  Returns a dronespec on success and null on failure.
+     */
+    @Nullable
+    private CtDroneSpec droneSpecFromRidString(@NonNull String ridString) {
+        CtDroneSpec ds = null;
+        if (ridString.startsWith("{")) {
+            try {
+                ds = new CtDroneSpec(new JSONObject(ridString));
+            } catch (Exception e) {
+                CTError(TAG, "Not able to parse " + ridString, e);
+                ds = null;
+            }
+        } else {
+            ds = new CtDroneSpec(ridString);
+        }
+        return ds;
+    }
+
     public void handleAddDroneNack(@NonNull JSONObject payload) {
-        String rid = payload.optString("rid");
-        if (rid.isEmpty()) {
-            CTError(TAG, "handleAddDroneNack(): missing required 'rid' parameter." + payload);
+        CtDroneSpec ds = droneSpecFromRidString(payload.optString("rid"));
+        if (null == ds) {
+            CTError(TAG, "handleAddDroneNack(): missing/invalid required 'rid' parameter." + payload);
             return;
         }
-        DecrementAckCountForRid(rid);
+
+        String remoteId = ds.getRemoteId();
+        DecrementAckCountForRid(remoteId);
         // At least one other client claims the rid, so mark accordingly
-        ClientRidMap.putIfAbsent(rid, this);
-        CaltopoLiveTrack liveTrack = CaltopoLiveTrack.GetLiveTrackForRemoteId(rid);
+        addDroneSpecForOurPeer(ds);
+        CaltopoLiveTrack liveTrack = CaltopoLiveTrack.GetLiveTrackForRemoteId(remoteId);
         if (null != liveTrack) liveTrack.updateStatus(R2CRespEnum.forwardToClient);
+        updateDroneSpecListener();
     }
 
     public String getRttString() {
@@ -573,14 +657,21 @@ public class R2CRest implements WsPipe.WsMsgListener {
         return currentVal;
     }
 
-
+    /** We receive this message when a peer that currently owns a drone
+     *  determines that the drone has stopped transmitting waypoints or,
+     *  if super generous, is disconnecting from the hive and shutting
+     *  down.
+     *
+     * @param seqnum  // inelegant at best, this is required to identify the response.
+     * @param payload // incoming message payload.
+     */
     public void handleDropDrone(@NonNull Integer seqnum, @NonNull JSONObject payload) {
-        String rid = payload.optString("rid");
-        removeDroneSpecForOurPeer(rid);
-        CaltopoLiveTrack liveTrack = CaltopoLiveTrack.GetLiveTrackForRemoteId(rid);
-        if (null != liveTrack) {
-            liveTrack.updateStatus(R2CRespEnum.reevaluate);
+        String remoteId = payload.optString("rid");
+        if (remoteId.isEmpty()) {
+            CTError(TAG, "handleAddDroneNack(): missing/invalid required 'rid' parameter." + payload);
+            return;
         }
+        removeDroneSpecFromOurPeer(remoteId);
 
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "drop-drone-ack");
@@ -589,35 +680,20 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     private void handleAddDrone(@NonNull Integer seqnum, @NonNull JSONObject payload) {
-        String ridString = payload.optString("rid");
-        CtDroneSpec ds = null;
-        if (ridString.startsWith("{")) {
-            try {
-                ds = new CtDroneSpec(new JSONObject(ridString));
-            } catch (Exception e) {
-                CTError(TAG, "Not able to parse " + ridString, e);
-            }
-        } else {
-            ds = new CtDroneSpec(ridString);
-        }
+        CtDroneSpec ds = droneSpecFromRidString(payload.optString("rid"));
         if (null == ds) {
-            wsPipe.sendResponse(seqnum, errorResponsePayload(
-                    "handleAddDrone(): missing/invalid required 'rid' parameter.", payload));
-            sendMsgCount++;
+            CTError(TAG, "handleAddDrone(): missing/invalid required 'rid' parameter." + payload);
             return;
         }
-        Util.SafeJSONObject jo = new Util.SafeJSONObject();
         String rid = ds.getRemoteId();
+        String dsString = ds.asJSONObject().toString();
+        Util.SafeJSONObject jo = new Util.SafeJSONObject();
         CaltopoLiveTrack liveTrack = OurDroneLiveTracks.get(rid);
         if (null != liveTrack) {
+            // possibly due to a race condition on start or some sort of communications hickup.
             jo.put("type", "add-drone-nack");
             jo.put("note", "FIXME: This shouldn't happen: Already in my list of owned.");
-            ds = CaltopoClient.GetDroneSpec(rid);
-            if (null != ds) {
-                jo.put("rid", ds.asJSONObject());
-            } else {
-                jo.put("rid", rid);
-            }
+            jo.put("rid", dsString);
             wsPipe.sendResponse(seqnum, jo);
             sendMsgCount++;
             return;
@@ -627,7 +703,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         if (null == liveTrack) { // haven't seen it before.
             jo.put("type", "add-drone-ack");
             jo.put("note", "all yours bro.");
-            jo.put("rid", rid);
+            jo.put("rid", dsString);
             addDroneSpecForOurPeer(ds);
         } else { // then also one we've seen and probably already published our own "add-drone"
             double lat = payload.optDouble("lat");
@@ -637,14 +713,14 @@ public class R2CRest implements WsPipe.WsMsgListener {
             if (fts > 0 && fts < ts) {
                 jo.put("type", "add-drone-nack");
                 jo.put("note", String.format(Locale.US, "I have an earlier waypoint at %d vs your %d.", fts, ts));
-                jo.put("rid", ds.asJSONObject());
+                jo.put("rid", dsString);
                 addLocallyOwnedDrone(rid, liveTrack);
                 // FIXME: If there are more than two R2Cs involved in this process, then
                 //    we might end up with two instances "owning" & reporting the same drone- at least for a while.
             } else if (ts > 0 && ts < fts) {
                 jo.put("type", "add-drone-ack");
                 jo.put("note", String.format(Locale.US, "You have an earlier waypoint at %d vs mine %d.", ts, fts));
-                jo.put("rid", rid);
+                jo.put("rid", dsString);
                 liveTrack.updateStatus(R2CRespEnum.forwardToClient);
                 addDroneSpecForOurPeer(ds);
             } else {
@@ -659,28 +735,30 @@ public class R2CRest implements WsPipe.WsMsgListener {
                 } else if (dfm > dfy) {
                     jo.put("type", "add-drone-ack");
                     jo.put("note", "Not closer to me.");
-                    jo.put("rid", rid);
+                    jo.put("rid", dsString);
                     liveTrack.updateStatus(R2CRespEnum.forwardToClient);
                     addDroneSpecForOurPeer(ds);
                 } else { // tie-breaker - always guaranteed to be different:
                     if (CaltopoClientMap.GetMyUUID().compareTo(remoteUUID) < 0) {
                         jo.put("type", "add-drone-nack");
                         jo.put("note", "My uuid is less than yours.");
-                        jo.put("rid", ds.asJSONObject());
+                        jo.put("rid", dsString);
                         addLocallyOwnedDrone(rid, liveTrack);
                     } else {
                         jo.put("type", "add-drone-ack");
-                        jo.put("note", "My uuid is more than yours.");
-                        jo.put("rid", rid);
+                        jo.put("note", "My uuid is greater than yours.");
+                        jo.put("rid", dsString);
                         liveTrack.updateStatus(R2CRespEnum.forwardToClient);
                         addDroneSpecForOurPeer(ds);
                     }
                 }
             }
         }
+        updateDroneSpecListener();
         wsPipe.sendResponse(seqnum, jo);
         sendMsgCount++;
     }
+
     /** handleSeen()
      * FIXME: This is where we could make things really complicated.  Currently not doing
      * any reporting handoff to peers, but we could.  If one of our peers is consistently
@@ -689,41 +767,32 @@ public class R2CRest implements WsPipe.WsMsgListener {
      * reporting for this drone.
      */
     private void handleSeen(@NonNull Integer seqnum, @NonNull JSONObject payload) {
-        JSONArray waypoints = payload.optJSONArray("waypoints");
-        if (null == waypoints) {
+        CtDroneSpec ds = droneSpecFromRidString(payload.optString("rid"));
+        if (null == ds) {
             wsPipe.sendResponse(seqnum, errorResponsePayload(
-                    "handleSeen(): missing required 'waypoints' parameter.", payload));
+                    "handleSeen(): missing required 'rid' parameter.", payload));
             sendMsgCount++;
             return;
-
         }
         long remoteCtRtt = payload.optLong("ct_rtt");
         if (remoteCtRtt > 0) remoteCtRttAvgMsec.next(remoteCtRtt);
         long remoteR2cRtt = payload.optLong("r2c_rtt");
         if (remoteR2cRtt > 0) remoteR2cRttAvgMsec.next(remoteR2cRtt);
-        boolean archived = false;
-        while (waypoints.length() > 0) {
-            JSONObject waypoint = (JSONObject)waypoints.remove(0);
-            String rid = waypoint.optString("rid");
-            if (rid.isEmpty()) {
-                wsPipe.sendResponse(seqnum, errorResponsePayload(
-                        "handleSeen(): missing required 'rid' parameter.", payload));
-                sendMsgCount++;
-                return;
-            }
-            CaltopoLiveTrack liveTrack = OurDroneLiveTracks.get(rid);
-            if (null == liveTrack) {
-                wsPipe.sendResponse(seqnum, errorResponsePayload(
-                        "handleSeen(): not my drone.", payload));
-                sendMsgCount++;
-                return;
-            }
-            CaltopoClient ctClient = CaltopoClient.ClientForRemoteId(rid);
-            long ts = waypoint.optLong("ts");
-            double lat = waypoint.optDouble("lat");
-            double lng = waypoint.optDouble("lng");
-            archived = archived || ctClient.newWaypoint(lat, lng, 0, ts, CtDroneSpec.TransportTypeEnum.R2C);
+
+        String rid = ds.getRemoteId();
+        CaltopoLiveTrack liveTrack = OurDroneLiveTracks.get(rid);
+        if (null == liveTrack) {
+            String[] kvPayload =  {"type", "seen-nack", "msg", "not my drone", "rid", rid};
+            wsPipe.sendResponse(seqnum, kvStringResponsePayload(kvPayload));
+            sendMsgCount++;
+            return;
         }
+        CaltopoClient ctClient = CaltopoClient.ClientForRemoteId(rid);
+        long ts = payload.optLong("ts");
+        double lat = payload.optDouble("lat");
+        double lng = payload.optDouble("lng");
+        boolean archived = ctClient.newWaypoint(lat, lng, 0, ts, CtDroneSpec.TransportTypeEnum.R2C);
+
         JSONObject retPayload = new JSONObject();
         try {
             retPayload.put("type", "seen-ack");
@@ -746,7 +815,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public void pipeIsClosing(@NonNull WsPipe wsPipe) {
         if (null != remoteIpAddr) {  // then this is an established connection closing:
             CTError(TAG, "R2CRest: received pipeIsClosing().  Shutting down connection to " + wsPipe.getPeerName());
-            shutdown();
+            shutdown(R2CListener.r2cState.down);
         } else { // else we're just trying to establish a connection - see if we have another addr to try:
             tryConnect();
         }
@@ -767,7 +836,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
                     "handleLeaving(): Removing '%s' from the list of drones owned by %s", rid, peerName));
             ClientRidMap.remove(rid);
         }
-        this.shutdown();
+        this.shutdown(R2CListener.r2cState.down);
         // don't bother replying - remote is on it's way out and we're lucky to be notified.
     }
 
@@ -802,6 +871,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         switch (typeString) {
             case "hello-ack": handleHelloAck(payload); break;
             case "seen-ack":  handleSeenAck(payload); break;
+            case "seen-nack":  handleSeenNack(payload); break;
             case "add-drone-ack": handleAddDroneAck(payload); break;
             case "add-drone-nack": handleAddDroneNack(payload); break;
             case "name-change-ack":
@@ -831,39 +901,34 @@ public class R2CRest implements WsPipe.WsMsgListener {
         }
         if (null == remoteIpAddrs || 0 == remoteIpAddrs.length()) {
             CTError(TAG, "tryConnect(): Not able to connect via any supplied address.");
-            this.shutdown();
+            this.shutdown(R2CListener.r2cState.failed);
         }
     }
 
     /**
      * Allows CaltopoLiveTrack instance to report a position update to a peer when it
-     * sees one of it's drones.
+     * sees one of it's drones.   Timing is of the essence to be useful, so if we
+     * haven't received an ack for the last "seen", then discard this update.
+     *
      * @param droneSpec This is the data describing the drone that was seen.
      * @param lat Latitude of the last waypoint update received.
      * @param lng Longitude of the last waypoint update received.
      * @param droneTimestampInMsec timestamp of last update received.
      */
     public void reportSeen(CtDroneSpec droneSpec, double lat, double lng, long droneTimestampInMsec) throws RuntimeException {
-        Util.SafeJSONObject waypoint = new Util.SafeJSONObject();
-        waypoint.put("rid", droneSpec.getRemoteId());
-        waypoint.put("lat", lat);
-        waypoint.put("lng", lng);
-        waypoint.put("ts", droneTimestampInMsec);
-        pendingSeenWaypoints.put(waypoint);
-        sendOutstandingWaypoints();
-    }
-
-    private void sendOutstandingWaypoints() {
-        if (outstandingSeen || 0 == pendingSeenWaypoints.length()) return;
+        if (outstandingSeen) return;
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "seen");
-        jo.put("waypoints", pendingSeenWaypoints);
-        pendingSeenWaypoints = new JSONArray();
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
         jo.put("r2c-rtt", localR2cRttAvgMsec.get());
+        jo.put("rid", droneSpec.getRemoteId());
+        jo.put("lat", lat);
+        jo.put("lng", lng);
+        jo.put("ts", droneTimestampInMsec);
         wsPipe.sendMessage(jo, 0, false);
         outstandingSeen = true;
         sendMsgCount++;
+
     }
 
     /** ClientForRemoteR2c() - invoked from CaltopoClientMap to establish
@@ -905,8 +970,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     /** Start here for initial lookup of a new drone.
-     *  If the client isn't found in any of the maps, we need to make sure some other
-     *  R2C instance hasn't adopted it first.
+     *  Assumption is that all R2CInstances that are known have been instantiated,
+     *  though may not yet have established connectivity.
+     *  If the client isn't found in any of the existing maps, we need to make
+     *  sure some other R2C instance hasn't adopted it first.
      *
      * @param droneSpec our dronespec for the drone
      * @param lat latitude of the first reported waypoint
@@ -929,10 +996,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
             return R2CRespEnum.forwardToClient;
         }
 
-        // This one is a new drone or old drone going active again,
-        // so check with peers before claiming.  Note that we use current waypoint
-        // lat,lng in calculating distance from us, but for comparing timestamps, I
-        // want to compare the timestamps of the first waypoints each endpoint has
+        // This one is a new drone or old drone going active again, so check with
+        // peers before claiming.  Note that we use current waypoint lat,lng in
+        // calculating distance from us, but for comparing timestamps, we want to
+        // compare the timestamps of the first waypoints each endpoint has
         // managed to collect.
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "add-drone");
@@ -1001,7 +1068,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
          * if we've already established an outgoing connection to them or not, so
          * Go ahead and create a new R2CRest instance.   Once we get the
          * remoteUUID and try to add it to ClientIdMap, that's when we'll figure
-         * out the connection already exists and shutdown this one.
+         * out the connection already exists and shutdown this one if it does.
          */
         public void newInboundConnection(@NonNull WsPipe wsPipe) {
             CTDebug(TAG, "new inbound connection");
@@ -1118,10 +1185,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
         return MyIpAddresses;
     }
 
-    public void shutdown() {
+    public void shutdown(R2CListener.r2cState state) {
         CTDebug(TAG, "Shutting down connection to " + peerName);
         if (null != clientListener) {
-            clientListener.clientStatusChange(this, false);
+            clientListener.clientStatusChange(this, state);
             clientListener = null;
         }
         R2CRest r2cClient = ClientIdMap.get(remoteUUID);
@@ -1164,7 +1231,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         for (String key : keyArray) {
             // Try to notify each of my peers that I'm leaving the group.
             R2CRest client = ClientIdMap.get(key);
-            if (null != client) client.shutdown();
+            if (null != client) client.shutdown(R2CListener.r2cState.down);
         }
         WsPipe.Shutdown();
     }

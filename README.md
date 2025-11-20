@@ -1,9 +1,11 @@
 # RID2Caltopo (Remote ID to Caltopo):  Live Drone Tracking for SAR
 
-This android application sniffs Bluetooth and WiFi networks for [ASTM F3411](https://store.astm.org/f3411-22a.html) - compatible Remote ID location updates and records the 
+This android application monitors Bluetooth and WiFi networks for [ASTM F3411](https://store.astm.org/f3411-22a.html) - compatible Remote ID location updates and records the 
 updates as a sequence of track waypoints that are compatible with [Caltopo](https://www.caltopo.com)'s geo-json file format.   
+
 Additionally, if a you have configured caltopo teams credentials properly and your mapid points to an existing map that the credentials have write/update permissions for, 
-the app can plot real-time LiveTrack updates into the map. 
+the app can plot real-time LiveTrack updates into the map.
+
 This functionality closes the previously open loop between search assignments and actual drone coverage.  
 The real-time updates allow an air-boss to keep tabs on all airborne assets.
 
@@ -28,7 +30,7 @@ Use the ridmap configuration file format to map remoteIDs to more friendly track
 {
     "type" : "ct_ridmap",
     "file_version" : "1.0",
-    "editor" : "admin <admin@kjt.us>",
+    "editor" : "admin@kjt.us",
     "updated" : "Wed Sep 17 12:42:41 PDT 2025",
     "map" : [
         {
@@ -57,7 +59,7 @@ Use the credentials configuration file format to specify your team's map informa
 {
     "type" : "ct_credentials",
     "file_version" : "1.0",
-    "editor" : "admin <admin@kjt.us>",
+    "editor" : "admin@kjt.us",
     "updated" : "Fri Sep 19 08:07:01 PDT 2025",
     "team_id" : "team_id value",
     "credential_id" : "credential id value",

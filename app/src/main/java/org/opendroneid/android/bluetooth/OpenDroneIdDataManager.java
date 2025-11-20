@@ -86,7 +86,7 @@ public class OpenDroneIdDataManager {
         String rawStr = acId.getUasIdAsString();
         if (null == rawStr) return;
         // remove nulls and any other garbage from idstr:
-        String idStr = rawStr.replaceAll("[^\\.A-Z0-9]", "");
+        String idStr = rawStr.replaceAll("[^A-Z0-9]", "");
         if (idStr.isEmpty()) {
             if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
                 CaltopoClient.CTInfo(TAG, String.format(Locale.US,

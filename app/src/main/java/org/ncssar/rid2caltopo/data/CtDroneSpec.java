@@ -5,6 +5,7 @@
 package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.TimeDatestampString;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.UpdateDroneSpecs;
@@ -17,6 +18,8 @@ import androidx.annotation.Nullable;
 import org.json.JSONObject;
 import org.opendroneid.android.data.Util;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Locale;
@@ -39,8 +42,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // listener applies to receive bulk notification whenever one or more dronespecs change.
         void onDroneSpecsChanged(@NonNull List<CtDroneSpec> droneSpecs);
     }
-    private static final long Version = 1L;
+    private static final long serialVersionUID = 2L;
     private static final String TAG = "CtDroneSpec";
+    private static final String EMPTY_STRING = "";
 
     @NonNull private String remoteId;
     private String mappedId;   /* The track label prefix assigned to drone */
@@ -55,7 +59,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
     private transient int totalCount; // all waypoints, including those with bad coords and altitude.
     private transient SimpleTimer flightSimpleTimer = new SimpleTimer();
-    private transient String trackLabel = "";
+    private transient String trackLabel;
     public transient double lastLat;
     public transient double lastLng;
     private transient int goodCount; // only the number of good waypoints.
@@ -79,6 +83,13 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return retval;
     }
 
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        trackLabel = EMPTY_STRING;
+        flightSimpleTimer = new SimpleTimer();
+        transportCount = new int[TransportTypeEnum.values().length];
+    }
+
     public void bumpTransportCount(TransportTypeEnum tt) {
         if (null == transportCount) transportCount = new int[TransportTypeEnum.values().length];
         transportCount[tt.ordinal()]+=1; totalCount++;
@@ -89,7 +100,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return transportCount[tt.ordinal()];
     }
 
-    public void reset() { trackLabel = ""; }
+    public void reset() { trackLabel = EMPTY_STRING; }
 
     public void start() {
         if (null == flightSimpleTimer) flightSimpleTimer = new SimpleTimer();
@@ -108,8 +119,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public boolean publishingLocally() {return (null != myLiveTrack && myLiveTrack.publishingLocally());}
 
-    public boolean notPublishing() {return (null == myLiveTrack);}
-
     public String getDurationInSecAsString() {
         return (null != flightSimpleTimer) ? flightSimpleTimer.durationAsString() : "";
     }
@@ -121,12 +130,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public CtDroneSpec() throws RuntimeException {
         throw new RuntimeException("Use one of the other constructor methods.");
     }
+
     public CtDroneSpec(@NonNull String remoteId) throws RuntimeException {
-        if (remoteId.isEmpty()) {
+        String idStr = remoteId.replaceAll("[^A-Z0-9]", "");
+        if (idStr.isEmpty()) {
             throw new RuntimeException("Invalid required remoteId spec.");
         }
-        this.remoteId = remoteId;
-        this.mappedId = remoteId;
+        this.trackLabel = EMPTY_STRING;
+        this.remoteId = idStr;
+        this.mappedId = idStr;
         this.org = "";
         this.model = "";
         this.owner = "";
@@ -138,6 +150,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         org = jo.optString("org");
         owner = jo.optString("owner");
         model = jo.optString("model");
+        trackLabel = EMPTY_STRING;
         flightSimpleTimer = new SimpleTimer(jo.optLong("startTimeInMsec"));
         transportCount[TransportTypeEnum.BT4.ordinal()] = jo.optInt(TransportTypeEnum.BT4.name(), 0);
         transportCount[TransportTypeEnum.BT5.ordinal()] = jo.optInt(TransportTypeEnum.BT5.name(), 0);
@@ -154,6 +167,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (remoteIdIn.isEmpty()) {
             throw new RuntimeException("missing/invalid required remoteId spec.");
         }
+        this.trackLabel = EMPTY_STRING;
         this.remoteId = remoteIdIn;
         if (mappedIdIn.isEmpty()) {
             this.mappedId = remoteIdIn;
@@ -192,6 +206,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             UpdateDroneSpecs();
         }
         bumpTransportCount(transportType);
+        mostRecentMsecTimestamp = System.currentTimeMillis();
         if (-1000 == altitudeInMeters || (0.0 == lat && 0.0 == lng)) {
             CTInfo(TAG, String.format(Locale.US,
                     "checkNewWaypoint(%s/%s) w/Invalid altitude %d and/or coordinates %.7f, %.7f - ignoring.",
@@ -205,7 +220,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         double distanceInFeet = dbResult[0] * feetPerMeter;
         if (distanceInFeet < CaltopoClient.GetMinDistanceInFeet()) return false;
         lastLat = lat; lastLng = lng; goodCount++;
-        mostRecentMsecTimestamp = System.currentTimeMillis();
+        CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f", distanceInFeet));
         return true;
     }
 
@@ -272,8 +287,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      @NonNull
      public String toString() {
         return String.format(Locale.US,
-                "rid:'%s', mid:'%s', org:'%s', model:'%s', owner:'%s'",
-                remoteId, mappedId, org, model, owner);
+                "rid:'%s', mid:'%s', org:'%s', model:'%s', owner:'%s' trackLabel:%s",
+                remoteId, mappedId, org, model, owner, null == trackLabel ? "":trackLabel);
      }
 
     /** Default sort
@@ -313,4 +328,3 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return !other.model.equals(this.model);
     }
  }
-

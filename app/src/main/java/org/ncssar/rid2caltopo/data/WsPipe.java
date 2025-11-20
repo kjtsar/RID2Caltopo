@@ -104,6 +104,8 @@ public class WsPipe extends WebSocketListener {
     private static X509Certificate CaCert;
     private static KeyPair CaKeyPair;
 
+    public int pendingResponseCount() { return outboundMessages.size(); }
+
 /*
         // --- CLIENT-SIDE "TRUST ALL" SETUP ---
         if (null == Client) {
@@ -440,6 +442,17 @@ public class WsPipe extends WebSocketListener {
             CTError(TAG, "sendMessage(): Can't publish on a closed socket. Message ignored: " + jsonPayload);
             return;
         }
+        if (pendingResponseCount() > 3) {
+            // FIXME: Either we or our peer are suffering network connectivity problems.
+            //        U/I should already make clear that no updates are coming in/going out
+            //        of affected devices.
+            CTDebug(TAG, String.format(Locale.US,
+                    "Blocking further messages to %s due to outstanding responses.",
+                    peerName));
+            return;
+        }
+
+
         WsOutboundMessage msg = new WsOutboundMessage(jsonPayload, this, tag, bgResponseOk);
         if (msg.seqnum == 1) {
             msg.msgOut.put("my-name", R2CActivity.MyDeviceName);

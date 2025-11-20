@@ -106,8 +106,6 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         val localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
-                CaltopoClient.GetMapId(),
-                CaltopoClient.GetGroupId(),
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
         CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
@@ -148,7 +146,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         }
         AppActivity = this
         InitializedCalled = false
-        CaltopoClient.InitializeForActivityAndContext(this, applicationContext)
+        CaltopoClient.Initialize()
         val archivePathVal: String? = CaltopoClient.GetArchivePath()
         if (null == archivePathVal) {
             CTDebug(TAG, "Querying user for archiveDir()")
@@ -212,7 +210,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             return
         }
 
-        val bluetoothAdapter: BluetoothAdapter? = BluetoothScanner.getBluetoothAdapter(this)
+        val bluetoothAdapter: BluetoothAdapter? = BluetoothScanner.getBluetoothAdapter()
         if (null == bluetoothAdapter) {
             CTError(TAG, "Not able to access bluetooth adapter.")
             return

@@ -4,6 +4,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.opendroneid.android.data.Util;
 
 import java.util.Hashtable;
@@ -12,6 +13,8 @@ import java.util.Locale;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.R2CRest.R2CRespEnum.okToPublishLocally;
+import static org.ncssar.rid2caltopo.data.R2CRest.R2CRespEnum.unknown;
+
 import androidx.annotation.NonNull;
 
 import java.util.LinkedList;
@@ -31,7 +34,7 @@ import java.util.LinkedList;
  *
  */
 
-public class CaltopoLiveTrack {
+public class CaltopoLiveTrack implements CaltopoClientMap.MapStatusListener {
     private static final String TAG = "CaltopoLiveTrack";
     private static final Util.SimpleMovingAverage CaltopoRttInMsec = new Util.SimpleMovingAverage(10);
     private static final Hashtable<String, CaltopoLiveTrack> LiveTrackByRemoteId = new Hashtable<>(16);
@@ -44,77 +47,82 @@ public class CaltopoLiveTrack {
     private String folderId;
     private final CaltopoClientMap myMap;
     private boolean active;
-    private R2CRest r2cClient;
+    private R2CRest r2cClient;  // if we're forwarding to a remote, this is not null
     private R2CRest.R2CRespEnum r2cStatus;
     private String myGroupId;
     private String myRemoteId;
     private CtDroneSpec droneSpec;
     private boolean shuttingDown = false;
+    private int consecutiveUpdateFails = 0;
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
-
+    private CaltopoClientMap.MapStatusListener.mapStatus mapStatus;
     public CaltopoLiveTrack(@NonNull CaltopoClientMap map, @NonNull String groupId,
                             @NonNull CtDroneSpec droneSpec, double lat, double lng,long droneTimestampInMsec) throws RuntimeException {
         if (droneSpec.trackLabel().isEmpty() || groupId.isEmpty()) {
             throw new RuntimeException("CaltopoLiveTrack(): trackLabel and groupId are both required.");
         }
         myMap = map;
+        mapStatus = map.getMapStatus();
+        CaltopoClientMap.SetMapStatusListener(this);
         myMap.addLiveTrack(this);
         myGroupId = groupId;
         myRemoteId = droneSpec.getRemoteId();
         LiveTrackByRemoteId.put(myRemoteId, this);
         active = true;
-        droneSpec.setMyLiveTrack(this);
         this.droneSpec = droneSpec;
-        this.r2cStatus = R2CRest.StatusForNewRemoteId(this, droneSpec,  lat, lng, droneTimestampInMsec);
+        droneSpec.setMyLiveTrack(this);
+        this.r2cStatus = unknown;
+
         double[] point = {lat, lng, (double)droneTimestampInMsec};
         linePoints.add(point);
         linePointsSentCount = 0;
-        CTDebug(TAG, "CaltopoLiveTrack: " + r2cStatus.toString());
 
-        switch (r2cStatus) {
-            case forwardToClient: {
-                r2cClient = R2CRest.ClientForRemoteId(myRemoteId);
-                if (null == r2cClient) {
-                    CTError(TAG, "CaltopoLiveTrack(): no client to forward to - ignoring.");
-                } else {
-                    r2cClient.reportSeen(droneSpec, lat, lng, droneTimestampInMsec);
-                }
-                break;
-            }
-            case okToPublishLocally: startNewTrack();
-        }
+        if (mapStatus != CaltopoClientMap.MapStatusListener.mapStatus.up) return;
+        this.r2cStatus = R2CRest.StatusForNewRemoteId(this, droneSpec, point[1], point[0], (long)point[2]);
+        startNewTrack();
     }
 
-    /* called when caltopoclient times-out, finishes track, then gets another waypoint
-     *
+    /*
      */
     public void startNewTrack(double lat, double lng, long droneTimestampInMsec) {
-        r2cStatus = R2CRest.StatusForNewRemoteId(this, droneSpec,  lat, lng, droneTimestampInMsec);
+        if (shuttingDown) return;
+
         double[] point = {lat, lng, (double)droneTimestampInMsec};
         linePoints.add(point);
         linePointsSentCount = 0;
         startLiveTrackOp = null;
         liveTrackOp = null;
-        if (shuttingDown) return;
-
+        if (mapStatus != CaltopoClientMap.MapStatusListener.mapStatus.up) {
+            r2cStatus = unknown;
+            return;
+        }
+        r2cStatus = R2CRest.StatusForNewRemoteId(this, droneSpec,  lat, lng, droneTimestampInMsec);
         switch (r2cStatus) {
             case forwardToClient: {
                 r2cClient = R2CRest.ClientForRemoteId(myRemoteId);
                 if (null == r2cClient) {
-                    CTError(TAG, "CaltopoLiveTrack(): no client to forward to - ignoring.");
-                } else {
-                    r2cClient.reportSeen(droneSpec, lat, lng, droneTimestampInMsec);
+                    CTError(TAG, "startNewTrack(): no client to forward to - ignoring.");
                 }
                 break;
             }
             case okToPublishLocally: {
                 startNewTrack();
-                CTDebug(TAG, "(re)startNewTrack: " + r2cStatus.toString());
             }
         }
     }
 
-    public boolean publishingLocally() {return (r2cStatus == okToPublishLocally);}
+    public void mapStatusUpdate(CaltopoClientMap map, CaltopoClientMap.MapStatusListener.mapStatus mapStatusIn) {
+        if (map == myMap) {
+            mapStatus = mapStatusIn;
+            if (mapStatusIn == CaltopoClientMap.MapStatusListener.mapStatus.up) {
+                folderId = myMap.getFolderId();
+            }
+        }
+    }
+
+    public boolean publishingLocally() {
+        return (mapStatus == CaltopoClientMap.MapStatusListener.mapStatus.up && r2cStatus == okToPublishLocally);
+    }
 
     /* Return -1 if no corresponding point */
     public long getFirstTimestamp() {
@@ -127,9 +135,10 @@ public class CaltopoLiveTrack {
         return LiveTrackByRemoteId.get(remoteId);
     }
 
-    public void shutdown() {
+    public void shutdown(long maxWaitInMilliseconds) {
         shuttingDown = true;
-        archiveTrackOnCaltopo();
+        active = false;
+        archiveTrackOnCaltopo(maxWaitInMilliseconds);
     }
 
     /** CaltopoClientMap periodically checks for updates to map features
@@ -156,7 +165,7 @@ public class CaltopoLiveTrack {
 
     /**  Archive this track segment on Caltopo if we're the owner.
      */
-    public void archiveTrackOnCaltopo() {
+    public void archiveTrackOnCaltopo( long maxWaitInMilliseconds) {
         if (r2cStatus != okToPublishLocally) {
             // We aren't responsible for writing this drone's tracks to caltopo
             CTDebug(TAG, "archiveTrackOnCaltopo(): attempt to archive a track that is owned by a remote R2C ignored.");
@@ -192,7 +201,7 @@ public class CaltopoLiveTrack {
             } catch (JSONException e) {
                 CTError(TAG, "archiveTrackCaltopo() JSONObject.put() raised - for no apparent reason.", e);
             }
-            myMap.archiveFeature(feature, "LiveTrack", System.currentTimeMillis());
+            myMap.archiveFeature(feature, "LiveTrack", System.currentTimeMillis(), maxWaitInMilliseconds);
         } else {
             // for some reason, we weren't able to start the live track, so this will likely block as well
             try {
@@ -252,27 +261,20 @@ public class CaltopoLiveTrack {
     }
 
     private void startNewTrack() {
-        if (null != startLiveTrackOp) return;
-        liveTrackId = null;
-        liveTrackOp = null;
-        linePointsSentCount = 0;
-        active = true;
-
-        if (!myMap.getMapIsUp()) {
-            CTDebug(TAG, "startNewTrack(): waiting for map - delaying...");
-            DelayedExec.RunAfterDelayInMsec(this::startNewTrack, 1000);
-            return;
-        }
-        folderId = myMap.getFolderId();
-        String trackLabel = droneSpec.trackLabel();
-        CTDebug(TAG, String.format(Locale.US, "startNewTrack(%s-%s): Starting LiveTrack w/label:%s",
-                myGroupId, myRemoteId, trackLabel));
-        try {
-            startLiveTrackOp = myMap.session().startLiveTrack(myGroupId, myRemoteId, trackLabel, folderId,
-                    null, null, this::startLiveTrackComplete);
-            processNextWaypoint(); // We've got at least one waypoint - get it on it's way.
-        } catch (Exception e) {
-            CTError(TAG, "startNewTrack(): startLiveTrack() raised: ", e);
+        if (null == startLiveTrackOp && okToPublishLocally == r2cStatus) {
+            liveTrackId = null;
+            liveTrackOp = null;
+            linePointsSentCount = 0;
+            String trackLabel = droneSpec.trackLabel();
+            CTDebug(TAG, String.format(Locale.US, "startNewTrack(%s-%s): Starting LiveTrack w/label:%s in folder:%s",
+                    myGroupId, myRemoteId, trackLabel, folderId));
+            try {
+                startLiveTrackOp = myMap.session().startLiveTrack(myGroupId, myRemoteId, trackLabel, folderId,
+                        null, null, this::startLiveTrackComplete);
+                forwardNextWaypoint(); // We've got at least one waypoint - get it on it's way.
+            } catch (Exception e) {
+                CTError(TAG, "startNewTrack(): startLiveTrack() raised: ", e);
+            }
         }
     }
 
@@ -281,7 +283,7 @@ public class CaltopoLiveTrack {
         CTDebug(TAG, "finishTrack(): " + reason);
         if (active && null != liveTrackId) try {
             myMap.removeLiveTrack(liveTrackId);
-            archiveTrackOnCaltopo();
+            archiveTrackOnCaltopo(0);
         } catch (Exception e) {
             CTError(TAG, String.format(Locale.US, "finishTrack(%s) '%s' failed:", droneSpec.trackLabel(), reason), e);
         }
@@ -291,8 +293,8 @@ public class CaltopoLiveTrack {
 
     public void updateStatus(R2CRest.R2CRespEnum status) {
         if (shuttingDown) return;
-        CTDebug(TAG, "updateStatus() - changing to: " + status.toString());
-        if (status == R2CRest.R2CRespEnum.reevaluate && r2cStatus == R2CRest.R2CRespEnum.pending) return;
+        CTDebug(TAG, String.format(Locale.US,
+                "updateStatus() - changing from '%s' to '%s'", r2cStatus.toString(), status.toString()));
         r2cStatus = status;
         if (status == R2CRest.R2CRespEnum.reevaluate) {
             reevaluate();
@@ -331,13 +333,10 @@ public class CaltopoLiveTrack {
             }
             active = false; // no current waypoints
         }
-        r2cStatus = R2CRest.R2CRespEnum.unknown;
+        r2cStatus = unknown;
     }
 
     private void startLiveTrackComplete() {
-        CTDebug(TAG, "startLiveTrackComplete():\n  " + startLiveTrackOp);
-        if (null == startLiveTrackOp || !startLiveTrackOp.isDone()) return;
-
         String trackLabel = droneSpec.trackLabel();
         if (startLiveTrackOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to open LiveTrack for:'%s-%s':\n  %s",
@@ -349,17 +348,18 @@ public class CaltopoLiveTrack {
                     trackLabel, liveTrackId));
             myMap.addLiveTrack(liveTrackId, this);
         } catch (Exception e) {
-            CTError(TAG, "startLiveTrackComplete(): id() raised:", e);
+            CTError(TAG, "startLiveTrackComplete(): raised:", e);
         }
-        processNextWaypoint();
+        forwardNextWaypoint();
     }
 
     public void publishDirect(double lat, double lng, long altitudeInMeters, long droneTimestampInMillisec) {
         double[] point = {lat, lng, (double)droneTimestampInMillisec};
         linePoints.add(point);
         CTDebug(TAG, String.format(Locale.US,
-                "publishDirect(%s): added waypoint to queue. size is %d",
-                droneSpec.trackLabel(), linePoints.size()));
+                "publishDirect(%s/%s): added waypoint to queue. size is %d",
+                droneSpec.trackLabel(), r2cStatus.toString(), linePoints.size()));
+        if (mapStatus != CaltopoClientMap.MapStatusListener.mapStatus.up) return;
         switch (r2cStatus) {
             case forwardToClient: {
                 if (null == r2cClient) r2cClient = R2CRest.ClientForRemoteId(myRemoteId);
@@ -370,42 +370,52 @@ public class CaltopoLiveTrack {
                 }
                 return;
             }
-            case pending:
-            case unknown:
-                return;
-            default: break;
+            case pending:break;
+            case unknown: {
+                this.r2cStatus = R2CRest.StatusForNewRemoteId(this, droneSpec, point[1], point[0], (long)point[2]);
+                break;
+            }
+            case okToPublishLocally: {
+                if (null != liveTrackId) forwardNextWaypoint();
+                else if (null == startLiveTrackOp) startNewTrack();
+            }
         }
-        if (null == liveTrackId) {
-            startNewTrack();
-            return;
-        }
-        processNextWaypoint();
     }
 
-    public void processNextWaypoint() {
-        if (!active) {
-            CTDebug(TAG, "processNextWaypoint(): no longer active - stopping.");
+    /** forwardNextWaypoint():
+     *  Pull waypoints off the queue and forward to Caltopo
+     */
+    public void forwardNextWaypoint() {
+        if (shuttingDown || !active) {
+            CTDebug(TAG, "forwardNextWaypoint(): no longer active - stopping.");
             return; // signals for send no more waypoints.
         }
         if (null == liveTrackOp || liveTrackOp.isDone()) {
             if (null != liveTrackOp && liveTrackOp.isDone()) {
                 CaltopoRttInMsec.next(liveTrackOp.roundTripTimeInMsec());
+                if (liveTrackOp.fail()) {
+                    consecutiveUpdateFails++;
+                    CTError(TAG, "forwardNextWaypoint(): addLiveTrackPoint failed: " + liveTrackOp.response);
+                    if (consecutiveUpdateFails > 2) {
+                        CTError(TAG, "forwardNextWaypoint(): shutting down after several consecutive update failures. ");
+                        active = false;
+                        return;
+                    }
+                } else {
+                    consecutiveUpdateFails = 0;
+                }
             }
             try {
                 int pointCount = linePoints.size();
                 if (linePointsSentCount < pointCount) {
                     double[] point = linePoints.get(linePointsSentCount++);
-                    CTDebug(TAG, String.format(Locale.US, "processNextWaypoint(%s-%s#%d): adding %.7f,%.7f to LiveTrack.  Avg rtt is %.3f seconds.",
+                    CTDebug(TAG, String.format(Locale.US, "forwardNextWaypoint(%s-%s#%d): adding %.7f,%.7f to LiveTrack.  Avg rtt is %.3f seconds.",
                             myGroupId, myRemoteId, linePointsSentCount, point[0], point[1], (double)CaltopoRttInMsec.get() / 1000.0));
-                    liveTrackOp = myMap.session().addLiveTrackPoint(myGroupId, myRemoteId, point[0], point[1], this::processNextWaypoint);
+                    liveTrackOp = myMap.session().addLiveTrackPoint(myGroupId, myRemoteId, point[0], point[1], this::forwardNextWaypoint);
                 }
             } catch (Exception e) {
-                CTError(TAG, "processNextWaypoint(): addLiveTrackPoint() raised: ", e);
+                CTError(TAG, "forwardNextWaypoint(): addLiveTrackPoint() raised: ", e);
             }
-        } else if (null != liveTrackOp && liveTrackOp.fail()) {
-            CTError(TAG, "processNextWaypoint(): addLiveTrackPoint failed: " + liveTrackOp.response);
-            active = false;
         }
     }
-
 }

@@ -38,6 +38,7 @@ configuration file formats:
 
 ## ridmap.json:
 Use the ridmap configuration file format to map remoteIDs to more friendly track labels:
+
 <blockquote><code>
 {
     "type" : "ct_ridmap",
@@ -62,6 +63,7 @@ Use the ridmap configuration file format to map remoteIDs to more friendly track
     ]
 }
 </code></blockquote>
+
 The remoteId is the actual identifier broadcast by the drone.   The default value of the mappedId 
 is the same as the remoteId, but can be changed in the .json file or the app's user interface.  
 Try to pick values for mappedId that identify the Remote Pilot In Command (RPIC), the type of drone, 
@@ -87,6 +89,7 @@ Use the credentials configuration file format to specify your team's map informa
     "track_folder" : "DroneTracks"
 }
 </code></blockquote>
+
 The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the Caltopo Teams
 APIs credentials.  These are the only required fields for this file.    The _map_id_, 
 _group_id_, and _use_direct_flag_ may all be configured separately in the apps Settings 
@@ -97,23 +100,28 @@ If you don't have a valid Teams account, you can still go into the Caltopo User 
 and manually configure [Fleet Live Tracking](https://training.caltopo.com/all_users/share/live-tracking#set-up), 
 by specifying the GroupId and Remote Id for each drone you want to track.  
 
-This is considered live tracking mode, where the _use_direct_flag_
-is false.  If you've specified a non-empty groupId in RID2Caltopo settings and configured the
-LiveTrack in Caltopo correctly, incoming RID2Caltopo waypoints will be attached to the
-corresponding live tracks.   You'll need to stop the LiveTracks and restart them manually in 
+This is considered live tracking mode, where the _use_direct_flag_ settings toggle is false.  If 
+you've specified a non-empty groupId in RID2Caltopo settings and configured the
+LiveTrack in Caltopo correctly, incoming RID2Caltopo waypoints will be forwarded to the
+corresponding Caltopo live tracks.   You'll need to stop the LiveTracks and restart them manually in 
 Caltopo when the drone lands and before it takes off again respectively.  Fortunately the Caltopo 
 U/I thoughtfully supplies the GroupId-RemoteId pairing as an option, so you don't need to retype 
 each time.  Remember to give each new LiveTrack a unique label to differentiate your flights.
 
-The _track_folder_ is the name of the folder to create in the map to receive drone tracks.
+The _track_folder_ is the name of the folder to create in the map to receive drone tracks when the 
+_use_direct_flag_ is set to true.   To recap, you must specify _map_id_, _group_id_, 
+_use_direct_flag_ = true, and the credentials tuple in order for RID2Caltopo to programmatically 
+configure, start, stop, and archive tracks directly.   For LiveTrack mode, just configure a 
+non-empty _group_id_ field and set _use_direct_flag_ = false in which case you'll need to manually
+configure, start, stop, and archive the track with the Caltopo application.
 
 ## Support for multiple apps writing to same map at the same time:
 Each DroneScout Bridge has a limited detection range.  Many factors contribute to the maximum
 detection range, including location and height of the bridge, terrain, foliage, and weather 
-conditions.   Our first major test of the bridge revealed that line of sight is probably the best 
-determinate for coverage, so we added support for multiple DroneScout Bridge + 
-RID2Caltopo pairings, which we'll call "R2C Zones" or more simply "R2C" instances going 
-forward.
+conditions.   Our first major test of an earlier experimental release of RID2Caltopo and the 
+bridge revealed that line of sight is probably the best determinate for coverage, so we added 
+support for multiple DroneScout Bridge + RID2Caltopo pairings, which we'll call "R2C Zones" or 
+more simply "R2C" instances going forward.
 
 Each R2C instance needs to have network connectivity to write to the map and to connect with it's 
 peers.  Networks can be cellular data or wireless.  In the Sierras, we may end up setting up 

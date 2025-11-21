@@ -87,17 +87,17 @@ Use the credentials configuration file format to specify your team's map informa
     "track_folder" : "DroneTracks"
 }
 </code></blockquote>
-The __team_id__, __credential_id__, and __credential_secret__ tuple comprise the Caltopo Teams
-APIs credentials.  These are the only required fields for this file.    The __map_id__, 
-__group_id__, and __use_direct_flag__ may all be configured separately in the apps Settings 
-menu. The __map_id__ specifies the caltopo map while the __group_id__ paired with the drone's
-RemoteId are used to report the drone's Live Track.   
+The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the Caltopo Teams
+APIs credentials.  These are the only required fields for this file.    The _map_id_, 
+_group_id_, and _use_direct_flag_ may all be configured separately in the apps Settings 
+menu. The _map_id_ specifies the caltopo map while the _group_id_ paired with the drone's
+RemoteId are used to report the drone's Live Track.
 
 If you don't have a valid Teams account, you can still go into the Caltopo User Interface 
 and manually configure [Fleet Live Tracking](https://training.caltopo.com/all_users/share/live-tracking#set-up), 
 by specifying the GroupId and Remote Id for each drone you want to track.  
 
-This is considered live tracking mode, where the __use_direct_flag__
+This is considered live tracking mode, where the _use_direct_flag_
 is false.  If you've specified a non-empty groupId in RID2Caltopo settings and configured the
 LiveTrack in Caltopo correctly, incoming RID2Caltopo waypoints will be attached to the
 corresponding live tracks.   You'll need to stop the LiveTracks and restart them manually in 
@@ -105,7 +105,7 @@ Caltopo when the drone lands and before it takes off again respectively.  Fortun
 U/I thoughtfully supplies the GroupId-RemoteId pairing as an option, so you don't need to retype 
 each time.  Remember to give each new LiveTrack a unique label to differentiate your flights.
 
-The __track_folder__ is the name of the folder to create in the map to receive drone tracks.
+The _track_folder_ is the name of the folder to create in the map to receive drone tracks.
 
 ## Support for multiple apps writing to same map at the same time:
 Each DroneScout Bridge has a limited detection range.  Many factors contribute to the maximum

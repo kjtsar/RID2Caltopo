@@ -8,15 +8,16 @@ Additionally, if a you have configured caltopo teams credentials properly and yo
 to an existing map that the credentials have write/update permissions for, the app can plot 
 real-time LiveTrack updates into the map.
 
-This drone and manufacturer-agnostic functionality closes the previously open loop between 
-search assignments and actual drone coverage.  The real-time updates allow an air-boss or 
+As all drones in service of a SAR organization are required by law to emit Remote ID signalling,
+this drone and manufacturer-agnostic functionality permits closing the previously open loop between 
+search assignments and actual drone coverage.  The ~real-time updates allow an air-boss or 
 supplemental Visual Observers to keep tabs on all airborne assets.
 
 The [Caltopo](https://www.caltopo.com) platform is the preferred search management platform for many SAR agencies, 
 including the [Nevada County Sheriff's Search And Rescue](https://nevadacountysar.org/) 
 organization from which this project originates.  This project is very thankful to the 
 developers of Caltopo for exposing their Teams API to developers.   We are also thankful 
-for the network sniffing and decoding code developed by the [OpenDroneId](https://github.com/opendroneid/receiver_android) project.
+for the network sniffing and decoding code developed by the [OpenDroneId](https://github.com/opendroneid/receiver-android) project.
 
 Android phones and tablets have limited sensitivity to the Remote ID signalling.  They should
 be able to work fine when the drone is within a few dozen feet of the device.  To make 
@@ -86,16 +87,31 @@ Use the credentials configuration file format to specify your team's map informa
     "track_folder" : "DroneTracks"
 }
 </code></blockquote>
-The **team_id**, **credential_id**, and **credential_secret** tuple comprise the Caltopo Teams
-APIs credentials.  These are the only required fields for this file.    The **map_id**, 
-**group_id**, and **use_direct_flag** may all be configured separately in the apps Settings 
-menu.  The **track_folder** is the name of the folder to create in the map to receive drone tracks.
+The __team_id__, __credential_id__, and __credential_secret__ tuple comprise the Caltopo Teams
+APIs credentials.  These are the only required fields for this file.    The __map_id__, 
+__group_id__, and __use_direct_flag__ may all be configured separately in the apps Settings 
+menu. The __map_id__ specifies the caltopo map while the __group_id__ paired with the drone's
+RemoteId are used to report the drone's Live Track.   
+
+If you don't have a valid Teams account, you can still go into the Caltopo User Interface 
+and manually configure [Fleet Live Tracking](https://training.caltopo.com/all_users/share/live-tracking#set-up), 
+by specifying the GroupId and Remote Id for each drone you want to track.  
+
+This is considered live tracking mode, where the __use_direct_flag__
+is false.  If you've specified a non-empty groupId in RID2Caltopo settings and configured the
+LiveTrack in Caltopo correctly, incoming RID2Caltopo waypoints will be attached to the
+corresponding live tracks.   You'll need to stop the LiveTracks and restart them manually in 
+Caltopo when the drone lands and before it takes off again respectively.  Fortunately the Caltopo 
+U/I thoughtfully supplies the GroupId-RemoteId pairing as an option, so you don't need to retype 
+each time.  Remember to give each new LiveTrack a unique label to differentiate your flights.
+
+The __track_folder__ is the name of the folder to create in the map to receive drone tracks.
 
 ## Support for multiple apps writing to same map at the same time:
 Each DroneScout Bridge has a limited detection range.  Many factors contribute to the maximum
 detection range, including location and height of the bridge, terrain, foliage, and weather 
-conditions.   Our first major test of the bridge revealed that line of sight is the best 
-determinate for the coverage, so we added support for multiple DroneScout Bridge + 
+conditions.   Our first major test of the bridge revealed that line of sight is probably the best 
+determinate for coverage, so we added support for multiple DroneScout Bridge + 
 RID2Caltopo pairings, which we'll call "R2C Zones" or more simply "R2C" instances going 
 forward.
 
@@ -106,15 +122,15 @@ coverage.
 
 You’ll most likely need to run ZeroTier on all your R2C devices if they aren’t already connected to 
 the same subnet. ZeroTier provides the ability for networked devices to rendezvous across the
-network boundary's created by network access providers and cellphone carriers.  To do this, log 
-in to [ZeroTier.com](https://www.ZeroTier.com) and create a free account, then create a network 
+network boundary's created by network access providers and cellphone carriers.  To make this work,
+log in to [ZeroTier.com](https://www.ZeroTier.com) and create a free account, then create a network 
 and copy the 16 digit network ID. Then download the free ZeroTier app from the PlayStore and 
 connect to the network ID copied above.  If you mark that ZeroTier network as a 'public' network, 
-then a bad actor could guess or otherwise learn about your network ID and then have direct network 
-access to your devices, so consider carefully.  The default is to configure a private network, 
-where you'll need to use the ZeroTier web interface to approve each new device that connects.   
-After jumping thru those hoops once, you just need to make sure that the ZeroTier app is up and 
-running and connected to your ZeroTier network _prior_ to starting the RID2Caltopo app.  
+then a bad actor could theoretically guess or otherwise learn about your network ID and then have 
+direct network access to your devices, so consider carefully.  The default is to configure a 
+private network, where you'll need to use the ZeroTier web interface to approve each new device that 
+connects.  After jumping thru those hoops once, you just need to make sure that the ZeroTier app is 
+up and running and connected to your ZeroTier network _prior_ to starting the RID2Caltopo app.  
 
 When RID2Caltopo connects to a map, it creates a marker at the device's current location in the 
 "track_folder" specified above.  The marker contains a private field listing all the network 

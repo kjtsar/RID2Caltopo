@@ -32,6 +32,7 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 
 import android.os.Handler;
 import android.os.Looper;
@@ -92,10 +93,10 @@ public class WsPipe extends WebSocketListener {
     private static ServerSocket MyServerSocket;
     private static X509TrustManager ClientTrustManager;
     private final Util.SimpleMovingAverage peerSmaRtt = new Util.SimpleMovingAverage(20);
+    private int pipeId;
     private int sendMsgCount = 0;
     private String peerName;
     private WebSocket webSocket;
-    private String wsHexStr; // hex representation of the socket identifier
     private WsMsgListener msgListener;
 
     // mutex to protect access by multiple threads.
@@ -141,20 +142,20 @@ public class WsPipe extends WebSocketListener {
         }
  */
 
-    private WsPipe(WsMsgListener listener) {
+    private WsPipe(@NonNull WsMsgListener listener) {
         WsPipeCount++;
-        CTDebug(TAG, "XYZZY: WsPipeCount: " + WsPipeCount);
-        CTDebug(TAG, "WsPipe(): setting listener to: " + listener.toString());
+        pipeId = WsPipeCount;
+        CTDebug(TAG, String.format(Locale.US, "WsPipe(%d) Setting server listener to '%s'", pipeId, listener));
         msgListener = listener;
     }  // constructor used only by the server.
 
     // outbound pipe constructor
     public WsPipe(String ipaddr, WsMsgListener msgListener) {
         WsPipeCount++;
-        CTDebug(TAG, "XYZZY: WsPipeCount: " + WsPipeCount);
+        pipeId = WsPipeCount;
         this.msgListener = msgListener;
         String url = String.format(Locale.US, "%s://%s:%d/R2CRestV1", WS_PROTOCOL, ipaddr, WS_PORT);
-        CTDebug(TAG, "Trying to connect to: " + url);
+        CTDebug(TAG, String.format(Locale.US, "WsPipe(%d) Trying to connect to: '%s'", pipeId, url));
         Request request = new Request.Builder()
                 .url(url)
                 .build();
@@ -171,10 +172,7 @@ public class WsPipe extends WebSocketListener {
     }
 
     private void setSocket(WebSocket socket) {
-        synchronized (bgLock) {
-            webSocket = socket;
-            wsHexStr = String.format(Locale.US, "0x%x", System.identityHashCode(socket));
-        }
+        synchronized (bgLock) {webSocket = socket;}
     }
 
     public static void Shutdown() {
@@ -199,8 +197,7 @@ public class WsPipe extends WebSocketListener {
     }
 
     protected void finalize() {
-        WsPipeCount--;
-        CTDebug(TAG, "XYZZY: WsPipeCount: " + WsPipeCount);
+        CTDebug(TAG, String.format(Locale.US, "WsPipe(%d) Closing.", pipeId));
     }
 
     /** N.B. Must be called before any other interaction with this class.
@@ -388,11 +385,11 @@ public class WsPipe extends WebSocketListener {
 
     private static void BgStartServer(WsMsgListener msgListener) {
         if (null != Server) {
-            CTError(TAG, "BgStartServer(): Only one server supported today.");
+            CTWarn(TAG, "BgStartServer(): Only one server supported today.");
             return;
         }
         if (null == Client) {
-            CTError(TAG, "Can't start the server without first calling Init.");
+            CTWarn(TAG, "Can't start the server without first calling Init.");
             return;
         }
 
@@ -439,7 +436,9 @@ public class WsPipe extends WebSocketListener {
      */
     public void sendMessage(@NonNull JSONObject jsonPayload, int tag, boolean bgResponseOk) {
         if (null == webSocket) {
-            CTError(TAG, "sendMessage(): Can't publish on a closed socket. Message ignored: " + jsonPayload);
+            CTWarn(TAG, String.format(Locale.US,
+                    "WsPipe(%d).sendMessage(): Can't publish on a closed socket. Message ignored: %s",
+                    pipeId, jsonPayload));
             return;
         }
         if (pendingResponseCount() > 3) {
@@ -447,8 +446,8 @@ public class WsPipe extends WebSocketListener {
             //        U/I should already make clear that no updates are coming in/going out
             //        of affected devices.
             CTDebug(TAG, String.format(Locale.US,
-                    "Blocking further messages to %s due to outstanding responses.",
-                    peerName));
+                    "WsPipe(%d).sendMessage(): Blocking further messages to %s due to outstanding responses.",
+                    pipeId, peerName));
             return;
         }
 
@@ -457,8 +456,8 @@ public class WsPipe extends WebSocketListener {
         if (msg.seqnum == 1) {
             msg.msgOut.put("my-name", R2CActivity.MyDeviceName);
         }
-        CTDebug(TAG, String.format(Locale.US, "[%s]%s-->%s: %s", wsHexStr, R2CActivity.MyDeviceName,
-                (null != peerName) ? peerName : "<unknown>", msg.msgOut));
+        CTDebug(TAG, String.format(Locale.US, "WsPipe(%d).sendMessage(%s-->%s): %s",
+                pipeId, R2CActivity.MyDeviceName, (null != peerName) ? peerName : "<unknown>", msg.msgOut));
         webSocket.send(msg.msgOut.toString());
     }
 
@@ -494,7 +493,8 @@ public class WsPipe extends WebSocketListener {
                     peerSmaRtt.next(msg.recvTimestampMsec - msg.sentTimestampMsec);
             }
         }
-        if (null == msg) CTError(TAG, "Not able to find outbound message w/seq # " + seqnum.toString());
+        if (null == msg) CTWarn(TAG, String.format(Locale.US,
+                "WsPipe(%d): Not able to find outbound message w/seq # %d", pipeId, seqnum));
         return msg;
     }
 
@@ -512,7 +512,9 @@ public class WsPipe extends WebSocketListener {
 
     public void sendResponse(@NonNull Integer seqnum, @NonNull JSONObject responseJson) {
         if (null == webSocket) {
-            CTError(TAG, "sendResponse(): Can't publish on a closed socket.  Message ignored: " + responseJson);
+            CTWarn(TAG, String.format(Locale.US,
+                    "WsPipe(%d).sendResponse(): Can't publish on a closed socket.  Message ignored:\n  %s",
+                    pipeId, responseJson));
             return;
         }
 
@@ -521,8 +523,8 @@ public class WsPipe extends WebSocketListener {
         jo.put("response", true);
         jo.put("payload", responseJson);
         if (seqnum == 1) jo.put("my-name", R2CActivity.MyDeviceName);
-        CTDebug(TAG, String.format(Locale.US, "[%s]%s-->%s: %s", wsHexStr, R2CActivity.MyDeviceName,
-                (null != peerName) ? peerName : "<unknown>", jo));
+        CTDebug(TAG, String.format(Locale.US, "WsPipe(%d).sendResponse(%s-->%s): %s",
+                pipeId, R2CActivity.MyDeviceName, (null != peerName) ? peerName : "<unknown>", jo));
         webSocket.send(jo.toString());
     }
 
@@ -531,10 +533,11 @@ public class WsPipe extends WebSocketListener {
         setSocket(webSocket);
         // Called when the connection is successfully established.
         if (null == msgListener) {
-            CTError(TAG, "onOpen(): Connection opened on server - no listener configured.");
+            CTWarn(TAG, String.format(Locale.US,
+                    "WsPipe(%d).onOpen(): Connection opened on server - no listener configured.", pipeId));
             return;
         }
-        CTDebug(TAG, "onOpen(" + wsHexStr + ")");
+        CTDebug(TAG, String.format(Locale.US, "WsPipe(%d).onOpen()", pipeId));
         MainThreadHandler.post(() -> msgListener.newInboundConnection(this));
     }
 
@@ -550,18 +553,18 @@ public class WsPipe extends WebSocketListener {
             responseFlag = jo.optBoolean("response");
             seqnum = jo.optInt("seq");
             if (null == peerName) peerName = jo.optString("my-name", null);
-            CTDebug(TAG, String.format(Locale.US, "[%s]%s<--%s: %s", wsHexStr,
-                    R2CActivity.MyDeviceName, (null != peerName) ? peerName : "<unknown>", jo));
+            CTDebug(TAG, String.format(Locale.US, "WsPipe(%d).onMessage(%s<--%s): %s", pipeId,
+                    R2CActivity.MyDeviceName, peerName, jo));
         } catch (Exception e) {
-            CTError(TAG, "onMessage(); Error parsing incoming message: " + text, e);
+            CTWarn(TAG, String.format(Locale.US, "WsPipe(%d).onMessage(); Error parsing incoming message: %s", pipeId, text), e);
             return;
         }
         if (null == msgListener) {
-            CTError(TAG, "onMessage() no listener for message - ignoring: " + text);
+            CTWarn(TAG, String.format(Locale.US, "WsPipe(%d).onMessage() no listener for message - ignoring: %s", pipeId, text));
             return;
         }
         if (null == payload) {
-            CTError(TAG, "onMessage(): missing required payload");
+            CTWarn(TAG, String.format(Locale.US, "WsPipe(%d).onMessage() missing required payload", pipeId));
             return;
         }
         JSONObject finalPayload = payload;
@@ -573,7 +576,7 @@ public class WsPipe extends WebSocketListener {
         }
         WsOutboundMessage msg = removeOutboundMessage(seqnum);
         if (null == msg) {
-            CTError(TAG, "received response to outbound message w/invalid seqnum: " + seqnum);
+            CTWarn(TAG, String.format(Locale.US, "WsPipe(%d).onMessage() response w/invalid seqnum: %d", pipeId, seqnum));
             return;
         }
         long rttInMsec = msg.rttInMsec();
@@ -587,13 +590,15 @@ public class WsPipe extends WebSocketListener {
     @Override
     public void onMessage(@NonNull WebSocket webSocket, @NonNull ByteString bytes) {
         // Called when a binary message is received.
-        CTError(TAG, "Received bytes not implemented -yet: " + bytes.hex());
+        CTWarn(TAG, String.format(Locale.US, "WsPipe(%d).onMessage() received bytes not implemented - yet", pipeId));
     }
 
     @Override
     public void onClosing(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
         // Called when the server is about to close the connection.
-        CTDebug(TAG, String.format(Locale.US, "Connection to %s closing: %d/%s",peerName, code, reason));
+        CTWarn(TAG, String.format(Locale.US,
+                "WsPipe(%d).onClosing() connection to '%s' closing. Reason:%d/%s",
+                pipeId, peerName != null? peerName:"<unknown>", code, reason));
         MainThreadHandler.post(() -> msgListener.pipeIsClosing(this));
         MainThreadHandler.post(() -> this.closeSocket(1000, "Received onClosing()."));
 
@@ -602,13 +607,17 @@ public class WsPipe extends WebSocketListener {
     @Override
     public void onClosed(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
         // Called when the connection is fully closed.
-        CTDebug(TAG, String.format(Locale.US, "Connection to %s closed: %d/%s",peerName, code, reason));
+        CTDebug(TAG, String.format(Locale.US,
+                "WsPipe(%d).onClosed() connection to '%s' closed.  Reason:%d/%s",
+                pipeId, peerName != null? peerName:"<unknown>", code, reason));
     }
 
     @Override
     public void onFailure(@NonNull WebSocket webSocket, @NonNull Throwable t, @Nullable Response response) {
         // Called when the connection fails (e.g., network error).
-        CTError(TAG, "Network Error: " + t.getMessage());
+        CTWarn(TAG, String.format(Locale.US,
+                "WsPipe(%d).onFailure() connection to '%s' closing. Reason: %s",
+                pipeId, peerName != null? peerName:"<unknown>",  t));
         MainThreadHandler.post(() -> msgListener.pipeIsClosing(this));
     }
 }

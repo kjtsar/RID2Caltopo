@@ -30,11 +30,16 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
     private val uptimePoll : DelayedExec = DelayedExec()
     private val _remoteCtRtt = MutableStateFlow("0.000 sec")
     val remoteCtRtt : StateFlow<String> = _remoteCtRtt.asStateFlow()
+    private val _remoteMapId = MutableStateFlow("")
+    private val _remoteGroupId = MutableStateFlow("")
+    val remoteMapId : StateFlow<String> = _remoteMapId.asStateFlow()
+    val remoteGroupId : StateFlow<String> = _remoteGroupId.asStateFlow()
 
 
-
-    override fun onRemoteAppVersion(version: String) {
+    override fun onRemoteAppConfig(version: String, mapId: String, groupId: String) {
         _remoteAppVersion.value = version
+        _remoteMapId.value = mapId
+        _remoteGroupId.value = groupId
     }
 
     override fun onRemoteStartTime(startTimeInMsec : Long) {
@@ -76,6 +81,7 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
 
         _drones.value = droneSpecs
         _remoteCtRtt.value = r2cClient.getRemoteCtRttString()
+        _remoteUptime.value = remoteTimer.durationAsString()
         if (droneSpecs.isEmpty()) {
             if (!uptimePoll.isRunning) {
                 uptimePoll.start(this::uptimePollFun, 1000, 1000)
@@ -87,6 +93,7 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
 
     fun uptimePollFun() {
         _remoteUptime.value = remoteTimer.durationAsString()
+        _remoteCtRtt.value = r2cClient.getRemoteCtRttString()
     }
 }
 

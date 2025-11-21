@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import androidx.compose.runtime.collectAsState
+import org.ncssar.rid2caltopo.app.R2CActivity
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
@@ -26,6 +27,7 @@ fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CRestViewModel>,
     onShowHelp: () -> Unit,
+    onShowScanners: () -> Unit,
     loadConfigFile: () -> Unit,
     onShowLog: () -> Unit,
     onShowSettings: () -> Unit
@@ -64,9 +66,14 @@ fun MainScreen(
                             onShowLog()
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Logging Level: " +
-                                CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }, onClick = {
+                        DropdownMenuItem(text = {
+                            val level: String = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
+                            Text("Logging:${level}") }, onClick = {
                             CaltopoClient.BumpLoggingLevel()
+                            menuExpanded = false
+                        })
+                        DropdownMenuItem(text = { Text("Scanners")}, onClick = {
+                            onShowScanners()
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
@@ -121,14 +128,16 @@ fun MainScreen(
                             val remoteUptime by item.viewModel.remoteUptime.collectAsState()
                             val remoteCtRttString by item.viewModel.remoteCtRtt.collectAsState()
                             val remoteAppVersion by item.viewModel.remoteAppVersion.collectAsState()
+                            val remoteMapId by item.viewModel.remoteMapId.collectAsState()
+                            val remoteGroupId by item.viewModel.remoteGroupId.collectAsState()
 
                             R2CRestView(
                                 peerName = item.viewModel.r2cClient.peerName,
                                 drones = remoteDrones,
                                 remoteUptime = remoteUptime,
                                 appVersion = remoteAppVersion,
-                                mapId = item.viewModel.r2cClient.mapId,
-                                groupId = item.viewModel.r2cClient.groupId,
+                                mapId = remoteMapId,
+                                groupId = remoteGroupId,
                                 ctRttString = remoteCtRttString,
                                 onMappedIdChange = { drone, newId ->
                                     item.viewModel.updateMappedId(drone, newId)

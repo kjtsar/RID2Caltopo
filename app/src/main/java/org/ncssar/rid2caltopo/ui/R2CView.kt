@@ -78,7 +78,7 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: Strin
             }
         }
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(300.dp)
         ) {
             Text(
                 text = hostName,
@@ -251,7 +251,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(420.dp)
+            modifier = Modifier.width(480.dp)
         ) {
             Text(
                 text = "Waypoints Received",
@@ -268,61 +268,61 @@ fun RidmapHeader() {
                 Text(
                     text = "BT4:",
                     modifier = Modifier
-                        .width(70.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
                 Text(
                     text = "BT5:",
                     modifier = Modifier
-                        .width(70.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
                 Text(
                     text = "WiFi:",
                     modifier = Modifier
-                        .width(70.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
                 Text(
                     text = "NaN:",
                     modifier = Modifier
-                        .width(70.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
                 Text(
                     text = "R2C:",
                     modifier = Modifier
-                        .width(70.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
                 Text(
                     text = "Total:",
                     modifier = Modifier
-                        .width(70.dp)
+                        .width(80.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
             }
         }
         Column(
-            modifier = Modifier.width(100.dp)
+            modifier = Modifier.width(125.dp)
         ) {
             Text(
                 text = "Flight",
@@ -330,7 +330,7 @@ fun RidmapHeader() {
                     .fillMaxWidth()
                     .height(25.dp)
                     .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
+                textAlign = TextAlign.Right,
                 fontSize = 18.sp
             )
             Text(
@@ -339,12 +339,12 @@ fun RidmapHeader() {
                     .fillMaxWidth()
                     .height(25.dp)
                     .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
+                textAlign = TextAlign.Right,
                 fontSize = 18.sp
             )
         }
         Column(
-            modifier = Modifier.width(100.dp)
+            modifier = Modifier.width(125.dp)
         ) {
             Text(
                 text = "",
@@ -359,7 +359,7 @@ fun RidmapHeader() {
                     .fillMaxWidth()
                     .height(25.dp)
                     .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
+                textAlign = TextAlign.Right,
                 fontSize = 18.sp
             )
         }

@@ -561,7 +561,9 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
 
     public static void UpdateMyLocation(@NonNull android.location.Location location) {
         if ( null == MyLocation || !MyLocation.hasAccuracy() ||
-                (location.hasAccuracy() && location.getAccuracy() < MyLocation.getAccuracy())) {
+                (location.hasAccuracy() &&
+                        ((location.getAccuracy() < MyLocation.getAccuracy()) ||
+                        ((location.getAccuracy() < DistanceFromMeInMeters(location.getLatitude(), location.getLongitude())))))) {
             CTDebug(TAG, String.format(Locale.US, "UpdateMyLocation(): lat:%.7f, lng:%.7f, accuracy:%.3fm",
                     location.getLatitude(), location.getLongitude(), location.getAccuracy()));
             MyLocation = location;
@@ -746,10 +748,13 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     public String r2cPeerConnectionStats() {
         StringBuilder builder = new StringBuilder();
         for (R2CRest r2cClient : R2CRest.GetCloneOfPeerHashtable().values()) {
+            String stats = "";
+            if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelDebug)
+                stats = r2cClient.stats();
             String peerName = r2cClient.getPeerName();
             builder.append(peerName)
                     .append(":")
-                    .append(r2cClient.stats())
+                    .append(stats)
                     .append("\n");
         }
         if (builder.length() > 0) return builder.toString();

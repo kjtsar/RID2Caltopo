@@ -46,18 +46,16 @@ import org.ncssar.rid2caltopo.ui.R2CRestViewModel
 import org.ncssar.rid2caltopo.ui.R2CRestViewModelFactory
 import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
+import org.ncssar.rid2caltopo.ui.ScannerScreen
 
 class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     var locationRequest: LocationRequest? = null
-    var codedPhySupported: Boolean = false
-    var extendedAdvertisingSupported: Boolean = false
-    var nanSupported: Boolean = false
-    var wifiSupported: Boolean = false
     var locationCallback: LocationCallback? = null
     var mFusedLocationClient: FusedLocationProviderClient? = null
     private val remoteViewModels = mutableStateListOf<R2CRestViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
     private val showSettingsDialog = mutableStateOf(false)
+    private val showScannerDialog = mutableStateOf(false)
     private val showMapIdDialog = mutableStateOf(false)
     private var newMapIdForDialog = ""
 
@@ -114,6 +112,9 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             if (showSettingsDialog.value) {
                 CaltopoSettingsScreen(onDismiss = {showSettingsDialog.value = false})
             }
+            if (showScannerDialog.value) {
+                ScannerScreen(onDismiss = {showScannerDialog.value = false})
+            }
             if (showMapIdDialog.value) {
                 CtAlertDialog(
                     onDismissRequest = {showMapIdDialog.value = false},
@@ -130,6 +131,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                     localViewModel = localViewModel,
                     remoteViewModels = remoteViewModels,
                     onShowHelp = { showHelpMenu() },
+                    onShowScanners = {showScannerDialog.value = true },
                     onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(),"text/plain") },
                     loadConfigFile = {loadConfigFile()},
                     onShowSettings = { showSettingsDialog.value = true},
@@ -215,6 +217,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             CTError(TAG, "Not able to access bluetooth adapter.")
             return
         }
+        legacyBluetoothSupported = bluetoothAdapter.isEnabled
         MyDeviceName = bluetoothAdapter.name
         CTDebug(TAG, "Setting MyDeviceName to:${MyDeviceName}")
         if (bluetoothAdapter.isLeCodedPhySupported) {
@@ -385,6 +388,11 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         private var InitializedCalled = false
         @JvmField
         var MyDeviceName:String = "<unknown>"
+        var legacyBluetoothSupported: Boolean = false
+        var codedPhySupported: Boolean = false
+        var extendedAdvertisingSupported: Boolean = false
+        var nanSupported: Boolean = false
+        var wifiSupported: Boolean = false
 
         private var appContext: Context? = null
 

@@ -25,6 +25,8 @@
 */
 package org.ncssar.rid2caltopo.data;
 
+import static org.ncssar.rid2caltopo.data.CaltopoClient.LoggingLevelName;
+
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -125,11 +127,11 @@ class ClientClassState implements Serializable {
 
         return String.format(Locale.US,
                 "vers:'%d', minDist:'%d' ft, groupId:'%s', mapId:'%s', useDirectFlag:'%s'\n" +
-                        "newTrackDelayInSec:%d, debugLevel:%d, " +
+                        "newTrackDelayInSec:%d, debugLevel:%s, " +
                         "archivePath: '%s', \n caltopoTrackFolder: '%s', caltopoDomainAndPort:%s, \n" +
                         "teamId: '%s', credId: '%s' credSecret: '%s', ht: %s",
                 SerialVersionUID, minDistanceInFeet, groupId, mapId, useDirectFlag,
-                newTrackDelayInSeconds, debugLevel,
+                newTrackDelayInSeconds, LoggingLevelName(debugLevel),
                 (archivePath == null) ? "" : archivePath,
                 caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
                 CaltopoClient.DroneSpecStringRep(droneSpecTable));
@@ -151,8 +153,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
     private static final String TAG = "CaltopoClient";
     public static final String LoadConfigFileMessage = "Open Caltopo Configuration File";
     public static final int DebugLevelError = 0;
-    public static final int DebugLevelDebug = 1;
-    public static final int DebugLevelInfo = 2;
+    public static final int DebugLevelWarn = 1;
+    public static final int DebugLevelDebug = 2;
+    public static final int DebugLevelInfo = 3;
     public static int DebugLevel = DebugLevelDebug;
     private static final int ThreadPoolSize = 1;
     private static boolean WarnMissingGroupId = false;
@@ -265,10 +268,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
     }
     public static String LoggingLevelName(int loggingLevel) {
        return switch (loggingLevel) {
-            case DebugLevelError -> "Errors only";
-            case DebugLevelDebug -> "Debugs";
-            case DebugLevelInfo -> "Info";
-            default -> "<undefined>";
+           case DebugLevelError -> "Errors only";
+           case DebugLevelWarn -> "Warnings";
+           case DebugLevelDebug -> "Debugs";
+           case DebugLevelInfo -> "Info";
+           default -> "<undefined>";
         };
     }
     public static String BumpLoggingLevel() {
@@ -344,14 +348,40 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
     }
 
     public static void CTError(String tag, String msg, Exception e) {
+        long myTid = android.os.Process.myTid();
+        String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
         StringBuilder str = new StringBuilder();
 
         str.append(msg);
         str.append("\n  ");
         str.append(ExceptionToString(e));
-        CTLog("ERROR", tag, str.toString());
+        CTLog("ERROR" + tidString, tag, str.toString());
         str.insert(0, "CTError: ");
         Log.e(tag, str.toString());
+    }
+
+    public static void CTWarn(String tag, String msg){
+        if ( DebugLevel >= DebugLevelWarn) {
+            long myTid = android.os.Process.myTid();
+            String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+            CTLog("WARN" + tidString, tag, msg);
+            msg = "CTWarn" + tidString +  ": " + msg;
+            Log.w(tag, msg);
+        }
+    }
+
+    public static void CTWarn(String tag, String msg, Exception e){
+        if ( DebugLevel >= DebugLevelWarn) {
+            long myTid = android.os.Process.myTid();
+            String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+            StringBuilder str = new StringBuilder();
+            str.append(msg);
+            str.append("\n  ");
+            str.append(ExceptionToString(e));
+            CTLog("WARN" + tidString, tag, str.toString());
+            str.insert(0, "CTWarn" + tidString + ": ");
+            Log.w(tag, msg);
+        }
     }
 
     /**
@@ -377,12 +407,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
                 if (null == todaysDir) {
                     todaysDir = archiveDir.createDirectory(dirpath);
                     if (null == todaysDir) {
-                        Log.e(TAG, String.format(Locale.US, "CTError: GetTodaysTrackDir(): Not able to create '%s'", archiveDir));
+                        CTError(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Not able to create '%s'", archiveDir));
                     } else {
-                        Log.d(TAG, String.format(Locale.US, "CTDebug: GetTodaysTrackDir(): Created '%s'", archiveDir));
+                        CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Created '%s'", archiveDir));
                     }
                 } else {
-                    Log.d(TAG, String.format(Locale.US, "CTDebug: GetTodaysTrackDir(): found existing '%s'", archiveDir));
+                    CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): found existing '%s'", archiveDir));
                 }
             }
         } catch (Exception e) {
@@ -546,12 +576,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
         return retval;
     }
     public static void ShowToast(String msg) {
-        CTError(TAG, "showToast():" + msg);
+        CTWarn(TAG, "showToast():" + msg);
         R2CActivity activity = R2CActivity.getR2CActivity();
         if (null != activity) activity.showToast(msg);
     }
     public static void ShowToast(String msg, Exception e) {
-        CTError(TAG, "showToast():" + msg, e);
+        CTWarn(TAG, "showToast():" + msg, e);
         msg = msg + "\n" + ExceptionToString(e);
         R2CActivity activity = R2CActivity.getR2CActivity();
         if (null != activity) activity.showToast(msg);
@@ -833,19 +863,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
         Context ctxt = R2CActivity.getAppContext();
         if (null == ctxt) return null;
         try {
-            Log.d(TAG, "CTDebug: RestoreState() Opening " + MyStateFileName);
+            CTDebug(TAG, "RestoreState() Opening " + MyStateFileName);
             FileInputStream fis = ctxt.openFileInput(MyStateFileName);
             ObjectInputStream ois = new ObjectInputStream(fis);
             ccs = (ClientClassState) ois.readObject();
             ois.close();
         } catch (FileNotFoundException e) {
-            Log.e(TAG, "CTError: RestoreState() no archive to restore from:", e);
+            CTWarn(TAG, "RestoreState() no archive to restore from:", e);
             ccs = null;
         } catch (InvalidClassException e) {
-            Log.e(TAG, "CTError: RestoreState() not able to restore incompatible version of state:", e);
+            CTError(TAG, "RestoreState() not able to restore incompatible version of state:", e);
             ccs = null;
         } catch (Exception e) {
-            Log.e(TAG, "CTError: RestoreState() raised:", e);
+            CTError(TAG, "RestoreState() raised:", e);
             ccs = null;
         }
         if (null != ccs && ccs.debugLevel >= 0) DebugLevel = ccs.debugLevel;
@@ -858,7 +888,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
             ClientClassState ccs = RestoreState();
             if (null == ccs) ccs = new ClientClassState();
             Ccstate = ccs;
-            Log.d(TAG, "CTDebug: GetState(): " + Ccstate);
+            CTDebug(TAG, "GetState(): " + Ccstate);
         }
         return Ccstate;
     }

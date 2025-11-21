@@ -130,81 +130,102 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width(70.dp)
+                    .width(80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT4)}", textAlign = TextAlign.Center)
+                Text(
+                    modifier = Modifier.align(Alignment.End),
+                    text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT4)}",
+                    textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
-                    .width( 70.dp)
+                    .width( 80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT5)}", textAlign = TextAlign.Right)
+                Text(
+                    modifier = Modifier.align(Alignment.End),
+                    text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT5)}",
+                    textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
-                    .width( 70.dp)
+                    .width( 80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WIFI)}", textAlign = TextAlign.Right)
+                Text(
+                    modifier = Modifier.align(Alignment.End),
+                    text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WIFI)}",
+                    textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
-                    .width( 70.dp)
+                    .width( 80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WNAN)}", textAlign = TextAlign.Right)
+                Text(
+                    modifier = Modifier.align(Alignment.End),
+                    text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WNAN)}",
+                    textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
-                    .width( 70.dp)
+                    .width( 80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.R2C)}", textAlign = TextAlign.Right)
+                Text(
+                    modifier = Modifier.align(Alignment.End),
+                    text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.R2C)}",
+                    textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
-                    .width( 70.dp)
+                    .width( 80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = "${drone.totalCount}", textAlign = TextAlign.Right)
+                Text(
+                    modifier = Modifier.align(Alignment.End),
+                    text = "${drone.totalCount}",
+                    textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
-                    .width( 100.dp)
+                    .width( 125.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(text = drone.getDurationInSecAsString(), fontSize=14.sp, textAlign = TextAlign.Right)
+                Text(
+                    modifier = Modifier.align(Alignment.End),
+                    text = drone.getDurationInSecAsString(),
+                    fontSize=14.sp,
+                    textAlign = TextAlign.Right)
             }
             Column(
                 modifier = Modifier
-                    .width( 100.dp)
+                    .width( 125.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
-                    .fillMaxHeight(),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .fillMaxHeight()
             ) {
                 val r2cClient = drone.myR2cOwner
                 val str : String
@@ -213,7 +234,8 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                 } else {
                     str = "n/a"
                 }
-                Text(text = str, fontSize = 14.sp, textAlign = TextAlign.Right)
+                Text(text = str, modifier=Modifier.align(Alignment.End),
+                    fontSize = 14.sp)
             }
         }
     }

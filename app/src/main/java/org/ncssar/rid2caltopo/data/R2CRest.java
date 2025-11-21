@@ -110,7 +110,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     private boolean outstandingSeen = false;
 
     public interface remoteUpdateListener {
-        void onRemoteAppVersion(String remoteAppVers);
+        void onRemoteAppConfig(String remoteAppVers, String remoteMapId, String remoteGroupId);
         void onRemoteStartTime(long remoteStartTimeInMsec);
     }
 
@@ -137,7 +137,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         this.remoteUpdateListener = remoteUpdateListener;
         if (null == remoteUpdateListener) return;
         if (null != remoteUptimeTimer) {
-            remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
+            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion, mapId, groupId);
             remoteUpdateListener.onRemoteStartTime(remoteUptimeTimer.getStartTimeInMsec());
         } else {
             CTDebug(TAG, "setRemoteUpdateListener(): no remoteUptimeTimer.");
@@ -156,7 +156,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
      */
     public R2CRest(@NonNull WsPipe wsPipe) {
         R2CRestCount++;
-        CTDebug(TAG, "XYZZY: R2CRestCount: " + R2CRestCount);
+        CTDebug(TAG, String.format(Locale.US, "R2CRest(inbound) up to %d instances.", R2CRestCount));
         this.wsPipe = wsPipe;
         wsPipe.setNewMsgListener(this);
         // New pipe, but no other remote info - yet.  Need to wait for
@@ -177,7 +177,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
      */
     public R2CRest(@NonNull JSONObject remoteR2cSpec, @Nullable R2CListener listener)  {
         R2CRestCount++;
-        CTDebug(TAG, "XYZZY: R2CRestCount: " + R2CRestCount);
+        CTDebug(TAG, String.format(Locale.US, "R2CRest(outbound) up to %d instances.", R2CRestCount));
         remoteIpAddrs = remoteR2cSpec.optJSONArray("ipaddrs");
         peerName = remoteR2cSpec.optString("name");
         remoteUUID = remoteR2cSpec.optString("id");
@@ -340,7 +340,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         groupId = payload.optString("group-id");
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
-            remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
+            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion, mapId, groupId);
             long startTime = remoteUptimeTimer.getStartTimeInMsec();
             remoteUpdateListener.onRemoteStartTime(startTime);
             CTDebug(TAG, String.format(Locale.US, "handleHelloAck(): startTime:%d, runTime:%s", startTime, remoteUptimeTimer.durationAsString()));
@@ -353,6 +353,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
         jo.put("my-active-dronelist", MyActiveDronelist());
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
         jo.put("my-id", CaltopoClientMap.GetMyUUID());
+        jo.put("map-id", CaltopoClient.GetMapId());
+        jo.put("group-id", CaltopoClient.GetGroupId());
         jo.put("app-vers", R2CActivity.getMyAppVersion());
         jo.put("start-timestamp", ScanningService.ScannerUptime.getStartTimeInMsec());
 
@@ -495,9 +497,11 @@ public class R2CRest implements WsPipe.WsMsgListener {
             }
         }
         remoteAppVersion = payload.optString("app-vers");
+        mapId = payload.optString("map-id");
+        groupId = payload.optString("group-id");
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
-            remoteUpdateListener.onRemoteAppVersion(remoteAppVersion);
+            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion, mapId, groupId);
             long startTime = remoteUptimeTimer.getStartTimeInMsec();
             remoteUpdateListener.onRemoteStartTime(startTime);
             CTDebug(TAG, String.format(Locale.US, "handleHelloAck(): startTime:%d, runTime:%s", startTime, remoteUptimeTimer.durationAsString()));
@@ -891,7 +895,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             if (null != obj) {
                 String ipaddr = obj.optString("ipaddr");
                 if (!ipaddr.isEmpty()) {
-                    CTDebug(TAG, "tryConnect(): Trying to connect to: " + obj);
+                    CTDebug(TAG, String.format(Locale.US, "tryConnect(%s): Trying to connect via: '%s'", peerName, obj));
                     wsPipe = new WsPipe(ipaddr, this);
                     currentAttemptIpAddr = ipaddr;
                     sayHello();
@@ -900,7 +904,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
             }
         }
         if (null == remoteIpAddrs || 0 == remoteIpAddrs.length()) {
-            CTError(TAG, "tryConnect(): Not able to connect via any supplied address.");
+            CTError(TAG, String.format(Locale.US,
+                    "tryConnect(%s): Not able to connect via any supplied address.", peerName));
             this.shutdown(R2CListener.r2cState.failed);
         }
     }
@@ -1238,6 +1243,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     protected void finalize() {
         R2CRestCount--;
-        CTDebug(TAG, "XYZZY: R2CRestCount: " + R2CRestCount);
+        CTDebug(TAG, String.format(Locale.US, "finalize() down to %d instances.", R2CRestCount));
     }
 }

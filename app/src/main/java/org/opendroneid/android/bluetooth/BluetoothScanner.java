@@ -9,6 +9,7 @@ package org.opendroneid.android.bluetooth;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 
 import android.Manifest;
 import android.bluetooth.BluetoothAdapter;
@@ -57,12 +58,12 @@ public class BluetoothScanner {
             BluetoothManager btManager = (BluetoothManager) appContext.getSystemService(Context.BLUETOOTH_SERVICE);
             adapter = btManager.getAdapter();
             if (null == adapter) {
-                CTError(TAG, "getBluetoothAdapter(): Can't get the default bluetooth adapter.");
+                CTWarn(TAG, "getBluetoothAdapter(): Can't get the default bluetooth adapter.");
             } else if (adapter.isEnabled()) {
                 // not sure what is going on.  Adapter frequently says it's not available, though it seems to be working.
-                CTError(TAG, "getBluetoothAdapter(): Default bluetooth adapter not enabled.");
+                CTWarn(TAG, "getBluetoothAdapter(): Default bluetooth adapter not enabled.");
             } else {
-                CTDebug(TAG, "getBluetoothAdapter(): Default bluetooth adapter is enabled.");
+                CTWarn(TAG, "getBluetoothAdapter(): Default bluetooth adapter is enabled.");
             }
         }
         return adapter;

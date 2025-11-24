@@ -1,9 +1,8 @@
 package org.ncssar.rid2caltopo.app
 
-import androidx.compose.runtime.mutableStateListOf
-import androidx.lifecycle.ViewModelProvider
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -16,29 +15,26 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.ActivityCompat
+import androidx.core.net.toUri
+import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.ViewModelProvider
+import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.material.snackbar.Snackbar
 import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-import org.ncssar.rid2caltopo.data.CaltopoClientMap
-import org.ncssar.rid2caltopo.data.WaypointTrack
-import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
-import org.opendroneid.android.Constants
-
-import org.opendroneid.android.bluetooth.BluetoothScanner
-import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
-import java.util.Locale
-import androidx.core.net.toUri
-import com.google.android.gms.location.FusedLocationProviderClient
-import com.google.android.gms.location.LocationServices
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.CaltopoClientMap
 import org.ncssar.rid2caltopo.data.R2CRest
+import org.ncssar.rid2caltopo.data.WaypointTrack
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.CtAlertDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
@@ -47,6 +43,11 @@ import org.ncssar.rid2caltopo.ui.R2CRestViewModelFactory
 import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
+import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
+import org.opendroneid.android.Constants
+import org.opendroneid.android.bluetooth.BluetoothScanner
+import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
+import java.util.Locale
 
 class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
     var locationRequest: LocationRequest? = null
@@ -133,7 +134,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                     onShowHelp = { showHelpMenu() },
                     onShowScanners = {showScannerDialog.value = true },
                     onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(),"text/plain") },
-                    loadConfigFile = {loadConfigFile()},
+                    loadConfigFile = {loadConfigFile() },
                     onShowSettings = { showSettingsDialog.value = true},
                 )
             }
@@ -149,11 +150,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         AppActivity = this
         InitializedCalled = false
         CaltopoClient.Initialize()
-        val archivePathVal: String? = CaltopoClient.GetArchivePath()
-        if (null == archivePathVal) {
-            CTDebug(TAG, "Querying user for archiveDir()")
-            CaltopoClient.QueryUserForArchiveDir()
-        }
+        CaltopoClient.VerifyArchiveDir()
 
         DataManager = OpenDroneIdDataManager(null)
 
@@ -292,7 +289,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
             override fun onLocationResult(locationResult: LocationResult) {
                 for (location in locationResult.locations) {
                     if (location != null) {
-                        DataManager?.receiverLocation = location
+//                        DataManager?.receiverLocation = location
                         CaltopoClientMap.UpdateMyLocation(location)
                     }
                 }
@@ -349,7 +346,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
 
     public override fun onDestroy() {
         if (this === AppActivity) {
-            if (isFinishing()) {
+            if (isFinishing()) try {
                 CTDebug(TAG,"onDestroy() shutting down scanning service..." )
                 val serviceIntent = Intent(this, ScanningService::class.java)
                 stopService(serviceIntent)
@@ -360,6 +357,8 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                 forceStopApp()
                 super.onDestroy()
                 return
+            } catch (e: Exception) {
+                CTError(TAG, "onDestroy() raised:", e)
             }
         }
         super.onDestroy()

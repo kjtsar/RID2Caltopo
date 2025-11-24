@@ -3,7 +3,10 @@ package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.ShowToast;
+import static org.ncssar.rid2caltopo.data.SimpleTimer.DurationAsString;
+
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -62,7 +65,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     private static CaltopoSession Csp;
     private static String MyUUID = null;
     private static android.location.Location MyLocation;
-    private static final ArrayList<CaltopoClientMap> Maps = new ArrayList<>(16);
+
+    private static final HashSet<CaltopoClientMap> Maps = new HashSet<>(16);
     private static final long FirstMapUpdateTimeInSeconds = 15;
     private static final long RepeatMapUpdateTimeInSeconds = 45;
 
@@ -146,14 +150,27 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         return dbResult[0];
     }
 
+    /**
+     *  Asynch feedback from client that the connection to a peer was either successful or failed.
+     *
+     */
     public void clientStatusChange(R2CRest client, r2cState state) {
         CTDebug(TAG, String.format(Locale.US,
                 "Received clientStatusChange(%s) from %s.", state, client.getPeerName()));
+
         if (state == r2cState.up) {
             AddClient(client);
+            // FIXME: need to resend "add-drone" for any unknown LiveTracks that were started
+            //    while the map was starting.
         } else {
             RemoveClient(client, state);
+            if (r2cState.failed == state) {
+                // FIXME: Couldn't make contact with specified client.   If it's marker hasn't
+                //  been updated in a while, we should probably archive/remove it.
+            }
         }
+        //  any LiveTracks that might have popped up while we were bringing up the map.
+        CaltopoLiveTrack.ReevalUnknownAndPendingTracks();
     }
 
     @NonNull
@@ -202,7 +219,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         long startTime = System.currentTimeMillis();
         if (null != Csp) Csp.deleteMarkerWithId(MyUUID, null);
         for (CaltopoLiveTrack track : liveTracks) {
-            CTDebug(TAG, "ShutDown() - shutting down track: " + track.getTrackLabel());
+            CTDebug(TAG, "resetMapConnection() - shutting down track: " + track.getTrackLabel());
             track.shutdown(maxWaitInMilliseconds);
             maxWaitInMilliseconds = (maxWaitInMilliseconds - (System.currentTimeMillis() - startTime));
         }
@@ -213,7 +230,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         clients.addAll(clientIdMap.values());
         for (R2CRest client : clients) {
             CTDebug(TAG, String.format(Locale.US,
-                    "Shutting down connection to %s due to map closure.", client.getPeerName()));
+                    "resetMapConnection() shutting down connection to %s due to map closure.",
+                    client.getPeerName()));
             client.shutdown(R2CRest.R2CListener.r2cState.down);
         }
         clientIdMap.clear();
@@ -278,9 +296,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
      * the DroneTracks directory to see if there are any new Markers for R2C instances we
      * don't know about yet that haven't initiated contact with us.   This can happen if
      * there was a race condition at start-up and we both looked at the map and determined
-     * that there were no other R2C instances out there.
-     * FIXME: Check to see if any of our LiveTracks have had a Caltopo user change their
-     *        track labels.
+     * that there were no other R2C instances out there when we started.
      * @param state  This contains all the map changes since our last visit.
      */
     private void parseMapUpdate(JSONObject state) {
@@ -299,7 +315,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                 continue;
             }
             String thisFolderId = prop.optString("folderId");
-            if (!folderId.equals(thisFolderId)) {
+            String classStr = prop.optString("class");
+            if (!folderId.equals(thisFolderId) && !classStr.equals("Folder")) {
                 CTDebug(TAG, String.format(Locale.US, "parseMapUpdate(): feature folder id '%s' doesn't match our folder id '%s': %s",
                         thisFolderId, folderId, feature));
                 continue;
@@ -318,12 +335,10 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                 }
             } else if ("Marker".equals(classString)) {
                 if (MyUUID.equals(idString) || clientIdMap.containsKey(idString)) continue;
-                newCount++;
                 String ipAddrsString = prop.optString("r2c-ipaddrs");
                 if (!ipAddrsString.isEmpty()) {
-                    if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
-                        CTInfo(TAG, "parseMapUpdate(): found new peer: " + feature);
-                    }
+                    newCount++;
+                    CTDebug(TAG, "parseMapUpdate(): found new peer: " + feature);
                     JSONObject peerMarkerSpec;
                     try {
                         JSONArray ipAddrsObj = new JSONArray(ipAddrsString);
@@ -349,9 +364,6 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
      * tracks in need of archival.
      * FIXME: It seems like this could take a long time on a multi-op period search, so
      *  we might want to hand this off to a background thread.
-     *
-     * FIXME: If we find markers for R2CPeers that we can't connect to, need to remove
-     *  them from the map and proceed as if that peer doesn't exist.
      */
     private void parseMap(JSONObject state)
             throws RuntimeException, JSONException {
@@ -434,7 +446,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         }
 
         if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
-            CTInfo(TAG, "updateMapFinished() dumping map to logfile...");
+            CTInfo(TAG, "updateMapFinished() dumping map updates to logfile...");
             CTInfo(TAG, updateMapOp.responseString());
         }
         if (null != updateMapOp.responseJson) {
@@ -445,7 +457,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                 CTError(TAG, "updateMapFinished(): parseMapUpdate() raised. ", e);
             }
         }
-        this.updateMapOp = null;
+// TODO: Uncomment the following to keep checking the map:
+//         this.updateMapOp = null;
         setMapStatus(MapStatusListener.mapStatus.up);
     }
 
@@ -544,6 +557,17 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
                 if (featureFolderId.equals(folderId)) {
                     String ipAddrsString = prop.optString("r2c-ipaddrs");
                     if (!ipAddrsString.isEmpty()) {
+                        long peerUpdateTimestamp = prop.optLong("updated", 0);
+                        if (peerUpdateTimestamp > 0) {
+                            long ageInMsecs = System.currentTimeMillis() - peerUpdateTimestamp;
+                            if (ageInMsecs > 2.0*RepeatMapUpdateTimeInSeconds*1000) {
+                                CTWarn(TAG, String.format(Locale.US,
+                                        "Found %s old stale peer marker in our folder - removing: %s",
+                                        DurationAsString(ageInMsecs), feature));
+                                Csp.deleteMarkerWithId(feature.optString("id"), null);
+                                continue;
+                            }
+                        }
                         JSONArray ipAddrsObj = new JSONArray(ipAddrsString);
                         r2cPeers.put(parseR2cMarker(ipAddrsObj, feature, prop));
                     } else {
@@ -558,12 +582,23 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         processPeerList();
     }
 
-
+    /** UpdateMyLocation()
+     *  Pay attention to ongoing periodic location updates.  If the accuracy of measurement
+     *  has improved, then update our marker's location.   If the distance between our
+     *  previous marker location and this new location is greater than the combined
+     *  accuracy of our respective markers, then a good chance that we have moved, so
+     *  update our marker.
+     * @param location  The latest location update from the GPS system.
+     */
     public static void UpdateMyLocation(@NonNull android.location.Location location) {
-        if ( null == MyLocation || !MyLocation.hasAccuracy() ||
-                (location.hasAccuracy() &&
-                        ((location.getAccuracy() < MyLocation.getAccuracy()) ||
-                        ((location.getAccuracy() < DistanceFromMeInMeters(location.getLatitude(), location.getLongitude())))))) {
+        boolean updateNeeded = ( null == MyLocation || !MyLocation.hasAccuracy() );
+        if (null != MyLocation && MyLocation.hasAccuracy() && location.hasAccuracy()) {
+            double distanceInMeters = DistanceFromMeInMeters(location.getLatitude(), location.getLongitude());
+            if ((location.getAccuracy() < MyLocation.getAccuracy()) ||
+                    (distanceInMeters > (location.getAccuracy() + MyLocation.getAccuracy()))
+            ) updateNeeded = true;
+        }
+        if (updateNeeded) {
             CTDebug(TAG, String.format(Locale.US, "UpdateMyLocation(): lat:%.7f, lng:%.7f, accuracy:%.3fm",
                     location.getLatitude(), location.getLongitude(), location.getAccuracy()));
             MyLocation = location;
@@ -578,9 +613,10 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
     public static void RemoveClient(@NonNull R2CRest client, r2cState state) {
         for (CaltopoClientMap map : Maps) {  // remove the specified client from all our maps:
             String idString = client.getRemoteUUID();
-            CTDebug(TAG, "Removing R2C client from our map: " + idString);
             R2CRest mappedClient = map.clientIdMap.remove(idString);
             if (null != mappedClient) {
+                CTDebug(TAG, String.format(Locale.US, "Removed R2C client '%s' from map '%s'",
+                        client.getPeerName(), map.mapId));
                 if (state == r2cState.failed) {
                     // FIXME: is this just a networking problem?   Maybe we should check the age of the artifacts
                     // in our directory and use that to decide if the peer is really not home or if we just have
@@ -627,16 +663,8 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         }
         if (null != MyLocation) {
             accuracyInMeters = MyLocation.getAccuracy();
-            if ((!MyLocation.hasAccuracy() || accuracyInMeters > 30.0) && waitForGpsAccuracy++ < MAX_MAP_STARTUP_DELAY_IN_SECONDS) {
-                ShowToast(String.format(Locale.US, "Location accuracy of %.3f meters isn't great - waiting for better accuracy.",
-                        accuracyInMeters));
-                DelayedExec.RunAfterDelayInMsec(this::processPeerList, 1000);
-                waitForGpsAccuracy++;
-                return;
-            }
-
             CTDebug(TAG, String.format(Locale.US, "My location is %.7f,%.7f w/in %.3f meters. My UUID is %s",
-                    MyLocation.getLatitude(), MyLocation.getLongitude(), accuracyInMeters, MyUUID));
+                    MyLocation.getLatitude(), MyLocation.getLongitude(), accuracyInMeters, null == MyUUID ? "unknown":"good"));
         } else {
             CTError(TAG, "processPeerList(): bad/no gps - I have no idea where I am.");
         }
@@ -693,19 +721,29 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         }
     }
 
+    /**  updateMyMarker()
+     *    Called whenever our location has changed as well as periodically, just to
+     *    update our marker's timestamp to make sure peers know we're "not dead yet".
+     * @param feature if non-null, then we are in startup and found our
+     *                existing marker on the map.  In this case, just update.
+     *                if null, then called during periodic poll to see if
+     *                we need to update our marker location.
+     */
     private void updateMyMarker(@Nullable JSONObject feature) {
         if (null == feature) {
             if (null == myMarkerOp || !myMarkerOp.isDone() || !myMarkerOp.success()) return;
             feature = myMarkerOp.getResponse();
             if (null == feature) return;
         }
+
+        // Our marker feature s/b/ valid at this point, so start polling for updates...
         if (null == updateMapOp) {
             CTInfo(TAG, "updating map connection()");
             updateMapOp = Csp.openMap(mapId, this::updateMapFinished);
         }
 
         JSONObject geometry = feature.optJSONObject("geometry");
-        if (null != MyLocation && MyLocation.hasAccuracy()) try {
+        if (null != MyLocation) try {
             JSONArray coordinates;
             if (null == geometry) {
                 geometry = new JSONObject();
@@ -749,8 +787,7 @@ public class CaltopoClientMap implements R2CRest.R2CListener {
         StringBuilder builder = new StringBuilder();
         for (R2CRest r2cClient : R2CRest.GetCloneOfPeerHashtable().values()) {
             String stats = "";
-            if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelDebug)
-                stats = r2cClient.stats();
+            if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelDebug) stats = r2cClient.stats();
             String peerName = r2cClient.getPeerName();
             builder.append(peerName)
                     .append(":")

@@ -13,12 +13,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import androidx.compose.runtime.collectAsState
-import org.ncssar.rid2caltopo.app.R2CActivity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
     data class RemoteView(val viewModel: R2CRestViewModel) : MainScreenItem
+    data class SpacerView(val height: Dp) : MainScreenItem
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -37,6 +39,7 @@ fun MainScreen(
     // 2. Build the unified list of display items.
     val screenItems = buildList {
         add(MainScreenItem.LocalView(localViewModel))
+        if (remoteViewModels.isNotEmpty()) add(MainScreenItem.SpacerView(52.dp))
         remoteViewModels.forEach {
             add(MainScreenItem.RemoteView(it))
         }
@@ -47,6 +50,7 @@ fun MainScreen(
             TopAppBar(
                 title = { Text("RID-2-Caltopo") },
                 actions = {
+                    var level by remember {mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel))}
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More options")
                     }
@@ -67,10 +71,10 @@ fun MainScreen(
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = {
-                            val level: String = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
-                            Text("Logging:${level}") }, onClick = {
+                            Text("LogLevel:${level}") }, onClick = {
                             CaltopoClient.BumpLoggingLevel()
-                            menuExpanded = false
+                            level = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
+                            menuExpanded = true
                         })
                         DropdownMenuItem(text = { Text("Scanners")}, onClick = {
                             onShowScanners()
@@ -97,6 +101,7 @@ fun MainScreen(
                         when (item) {
                             is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
                             is MainScreenItem.RemoteView -> item.viewModel.r2cClient.peerName
+                            is MainScreenItem.SpacerView -> "spacer_view"
                         }
                     }
                 ) { item ->
@@ -122,7 +127,9 @@ fun MainScreen(
                                 }
                             )
                         }
-
+                        is MainScreenItem.SpacerView -> {
+                            HorizontalDivider(thickness = item.height)
+                        }
                         is MainScreenItem.RemoteView -> {
                             val remoteDrones by item.viewModel.drones.collectAsState()
                             val remoteUptime by item.viewModel.remoteUptime.collectAsState()

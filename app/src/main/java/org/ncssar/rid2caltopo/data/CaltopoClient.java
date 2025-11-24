@@ -170,6 +170,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
     private static ActivityResultLauncher<Intent> QueryArchivePath;
     private static ActivityResultLauncher<Intent> LoadConfigFileLauncher;
     private static OutputStream DebugOutputStream;
+    private static DocumentFile ArchiveDir;
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
     private static CtDroneSpec.DroneSpecsChangedListener DroneSpecsChangedListener;
@@ -266,13 +267,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
         ArchiveState(String.format(Locale.US, "mappedIdChanged from '%s' to '%s'", oldval, newval));
         UpdateDroneSpecs();
     }
+    public static void SetLoggingLevel(int newLoggingLevel) {
+        if (newLoggingLevel >= 0 && newLoggingLevel <= DebugLevelInfo) {
+            DebugLevel = newLoggingLevel;
+        }
+    }
+
     public static String LoggingLevelName(int loggingLevel) {
        return switch (loggingLevel) {
            case DebugLevelError -> "Errors only";
            case DebugLevelWarn -> "Warnings";
            case DebugLevelDebug -> "Debugs";
            case DebugLevelInfo -> "Info";
-           default -> "<undefined>";
+           default -> "";
         };
     }
     public static String BumpLoggingLevel() {
@@ -396,23 +403,20 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
         DocumentFile todaysDir = null;
         Context ctxt = R2CActivity.getAppContext();
         if (null != archivePath && null != ctxt) try {
-            ContentResolver contentResolver = ctxt.getContentResolver();
-            Uri treeUri = Uri.parse(archivePath);
-            contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-            DocumentFile archiveDir = DocumentFile.fromTreeUri(ctxt, treeUri);
-            if (null != archiveDir) {
+            VerifyArchiveDir();
+            if (null != ArchiveDir) {
                 SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy", Locale.US);
                 String dirpath = "tracks-" + sdf.format(new Date());
-                todaysDir = archiveDir.findFile(dirpath);
+                todaysDir = ArchiveDir.findFile(dirpath);
                 if (null == todaysDir) {
-                    todaysDir = archiveDir.createDirectory(dirpath);
+                    todaysDir = ArchiveDir.createDirectory(dirpath);
                     if (null == todaysDir) {
-                        CTError(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Not able to create '%s'", archiveDir));
+                        CTError(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Not able to create '%s'", ArchiveDir));
                     } else {
-                        CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Created '%s'", archiveDir));
+                        CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Created '%s'", ArchiveDir));
                     }
                 } else {
-                    CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): found existing '%s'", archiveDir));
+                    CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): found existing '%s'", ArchiveDir));
                 }
             }
         } catch (Exception e) {
@@ -736,6 +740,36 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
         }
     }
 
+    /* Make sure the archiveDir has been specified and that we have
+     * all the necessary permissions to write files into it.
+     */
+    public static void VerifyArchiveDir() {
+        if (null != ArchiveDir) return;
+        boolean requested = false;
+
+        String archivePath = GetArchivePath();
+        if (null == archivePath || archivePath.isEmpty()) {
+            CTDebug(TAG, "VerifyArchiveDir(): Querying user for archiveDir()");
+            CaltopoClient.QueryUserForArchiveDir();
+            requested = true;
+        }
+        Context context = R2CActivity.getAppContext();
+        if (null != archivePath && !archivePath.isEmpty() && null != context) try {
+            ContentResolver contentResolver = context.getContentResolver();
+            Uri treeUri = Uri.parse(archivePath);
+            contentResolver.takePersistableUriPermission(treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            );
+            ArchiveDir = DocumentFile.fromTreeUri(context, treeUri);
+        } catch (SecurityException e) {
+            if (!requested) {
+                CTWarn(TAG, "VerifyArchiveDir(): re-requesting persistable Uri Permission", e);
+                CaltopoClient.QueryUserForArchiveDir();
+            }
+        }
+    }
+
+
     @Nullable
     private static ActivityResultLauncher<Intent> InitLauncherForConfigFile(String requestMessage, Function<Uri, String> fileProcessor) {
         R2CActivity activity = R2CActivity.getR2CActivity();
@@ -762,7 +796,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
     @Nullable
     public static ActivityResultLauncher<Intent> InitLauncherForArchiveDir() {
         R2CActivity activity = R2CActivity.getR2CActivity();
-        if (null != activity) return activity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+        if (null == activity) {
+            CTError(TAG, "InitLauncherForArchiveDir(): R2CActivity is null");
+            return null;
+        }
+        return activity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
                 result -> {
                     CTDebug(TAG, String.format(Locale.US, "In queryArchivePath:onActivityResult(%s)", result.toString()));
                     if (result.getResultCode() == Activity.RESULT_OK) {
@@ -781,7 +819,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
                         }
                     }
                 });
-        return null;
     }
 
     public static void ConnectToMap() {

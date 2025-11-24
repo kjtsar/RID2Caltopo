@@ -14,6 +14,7 @@ import java.net.ServerSocket;
 
 
 import java.net.NetworkInterface;
+import java.security.KeyStore;
 import java.security.cert.CertificateException;
 import java.util.Collections;
 import java.util.List;
@@ -27,13 +28,16 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import java.math.BigInteger;
 import java.security.cert.X509Certificate;
 
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -41,15 +45,16 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import org.json.JSONObject;
+import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.opendroneid.android.data.Util;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLSocketFactory;
 
@@ -89,8 +94,6 @@ public class WsPipe extends WebSocketListener {
     private static Handler MainThreadHandler;
     private static int WsPipeCount = 0;
     private static SSLSocketFactory ClientSslSocketFactory;
-    private static SSLSocketFactory ServerSslSocketFactory;
-    private static ServerSocket MyServerSocket;
     private static X509TrustManager ClientTrustManager;
     private final Util.SimpleMovingAverage peerSmaRtt = new Util.SimpleMovingAverage(20);
     private int pipeId;
@@ -106,41 +109,6 @@ public class WsPipe extends WebSocketListener {
     private static KeyPair CaKeyPair;
 
     public int pendingResponseCount() { return outboundMessages.size(); }
-
-/*
-        // --- CLIENT-SIDE "TRUST ALL" SETUP ---
-        if (null == Client) {
-            try {
-                // Create a trust manager that does not validate certificate chains
-                final TrustManager[] trustAllCerts = new TrustManager[]{
-                        new X509TrustManager() {
-                            @Override
-                            public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) {}
-                            @Override
-                            public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) {}
-                            @Override
-                            public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-                                return new java.security.cert.X509Certificate[]{};
-                            }
-                        }
-                };
-
-                // Install the all-trusting trust manager
-                final SSLContext sslContext = SSLContext.getInstance("SSL");
-                sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
-                final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
-
-                Client = new OkHttpClient.Builder()
-                        .sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0])
-                        .hostnameVerifier((hostname, session) -> true)
-                        .build();
-
-            } catch (Exception e) {
-                CTError(TAG, "FATAL: Failed to create 'trust-all' OkHttpClient.", e);
-            }
-        }
-        }
- */
 
     private WsPipe(@NonNull WsMsgListener listener) {
         WsPipeCount++;
@@ -204,74 +172,37 @@ public class WsPipe extends WebSocketListener {
      *
      */
     public static void Init () {
-        CreateCerts();
         if (null == Client) {
             try {
-                final TrustManager[] myTrustManager = new TrustManager[]{
-                        new X509TrustManager() {
-                            @Override
-                            public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) {
-                                CTDebug(TAG, "In myTrustManager() checkClientTrusted()");
-                            }
+                // Load the keystore from the app's resources
+                Context context = R2CActivity.getAppContext();
+                InputStream keystoreInputStream = context.getResources().openRawResource(R.raw.keystore);
+                KeyStore keyStore = KeyStore.getInstance("PKCS12");
+                char[] password = "rid2caltopo".toCharArray(); // Replace with your actual password
+                keyStore.load(keystoreInputStream, password);
 
-                            @Override
-                            public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
-                                CTDebug(TAG, "In myTrustManager() checkServerTrusted()");
-                                for (java.security.cert.X509Certificate serverCert : chain) {
-                                    if (serverCert.equals(CaCert)) {
-                                        CTDebug(TAG, "checkServerTrusted() Found our CA.");
-                                        return;
-                                    } else {
-                                        // CTDebug(TAG, String.format(Locale.US, "checkServerTrusted() Rejecting %s authType for serverCert:'%s', looking for '%s'", authType, serverCert, CaCert));
-                                        return;
-                                    }
-                                }
-                                throw new CertificateException("checkServerTrusted() Did not find our CA.");
-                            }
+                // Create a KeyManagerFactory to manage our private key
+                KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+                keyManagerFactory.init(keyStore, password);
 
-                            @Override
-                            public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-                                CTDebug(TAG, "In myTrustManager() getAcceptedIssuers()");
-                                return new java.security.cert.X509Certificate[]{CaCert};
-                            }
-                        }
-                };
-                final SSLContext sslContext = SSLContext.getInstance("SSL");
-                sslContext.init(null, myTrustManager, new java.security.SecureRandom());
-                final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+                // Create a TrustManagerFactory to trust the certificates in our keystore
+                TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                trustManagerFactory.init(keyStore);
 
-                // clientHandshake.sslSocketFactory()
+                // Create an SSLContext that uses our KeyManager and TrustManager
+                SSLContext sslContext = SSLContext.getInstance("TLS");
+                sslContext.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), null);
+
+                ClientSslSocketFactory = sslContext.getSocketFactory();
+                ClientTrustManager = (X509TrustManager) trustManagerFactory.getTrustManagers()[0];
+
                 Client = new OkHttpClient.Builder()
-                        .callTimeout(60, TimeUnit.SECONDS)
-                        .connectTimeout(60, TimeUnit.SECONDS)
-                        .readTimeout(60, TimeUnit.SECONDS)
-                        .writeTimeout(60, TimeUnit.SECONDS)
-                        .sslSocketFactory(sslSocketFactory, (X509TrustManager) myTrustManager[0])
-                        .hostnameVerifier((hostname, session) -> {
-                            // The hostname should be the IP address from the certificate
-                            // This check is now meaningful.
-                            try {
-                                // CTDebug(TAG, "okHttpClient.Builder(): made it to serverVerifier().");
-                                X509Certificate cert = (X509Certificate) session.getPeerCertificates()[0];
-                                // Check if the hostname (the IP we connected to) is in the cert's SAN list.
-                                for (List<?> san : cert.getSubjectAlternativeNames()) {
-                                    //CTDebug(TAG, "okHttpClient.Builder(): Checking rfc822Name: " + san.get(1));
-                                    if (san.get(1).equals("kjtsar@gmail.com")) {
-                                        CTDebug(TAG, "okHttpClient.Builder(): accepting rfc822Name: " + san.get(1));
-                                        return true;  // FIXME: Until we can agree on underlying trust cert, this is better than nothing.
-                                    } else {
-                                        CTError(TAG, "okHttpClient.Builder(): rejecting: " + san.get(1));
-                                    }
-                                }
-                            } catch (Exception e) {
-                                CTError(TAG, "Server verification failed");
-                            }
-                            return false;
-                        })
+                        .sslSocketFactory(ClientSslSocketFactory, ClientTrustManager)
+                        .hostnameVerifier((hostname, session) -> true) // For development, we can bypass hostname verification
                         .build();
 
             } catch (Exception e) {
-                CTError(TAG, "FATAL: Failed to create CA-trusting OkHttpClient.", e);
+                CTError(TAG, "FATAL: Failed to create OkHttpClient with custom keystore.", e);
             }
         }
     }
@@ -283,104 +214,6 @@ public class WsPipe extends WebSocketListener {
             return;
         }
         ExecutorPool.submit(() -> BgStartServer(msgListener));
-    }
-
-    @Nullable
-    private static String getLocalIpAddress() {
-        try {
-            List<NetworkInterface> allNetworkInterfaces = Collections.list(NetworkInterface.getNetworkInterfaces());
-            for (NetworkInterface networkInterface : allNetworkInterfaces) {
-                // We are looking for a non-loopback, active network interface
-                if (!networkInterface.isUp() || networkInterface.isLoopback()) continue;
-
-                List<InetAddress> allInetAddresses = Collections.list(networkInterface.getInetAddresses());
-                for (InetAddress address : allInetAddresses) {
-                    // Find the first IPv4 address
-                    if (!address.isLoopbackAddress() && address.getAddress().length == 4) {
-                        return address.getHostAddress();
-                    }
-                }
-            }
-        } catch (Exception ex) {
-            CTError(TAG, "Failed to get IP address", ex);
-        }
-        return null;
-    }
-
-    /** FIXME:
-     * Gemini is truely a moron if this is the best idea it can come up with to build a trust relationship
-     * between two application instances.  This will never work.   This app needs to rely on something built
-     * external to the app for the trust relationship between the client and server.   Can we use an
-     * externally generated keystore that is bound at compile time with password protected access to
-     * maintain the fiction of security?
-     */
-    private static void CreateCaCert() {
-        try {
-            // 1. Generate a key pair for our new CA
-            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA");
-            keyPairGenerator.initialize(2048);
-            CaKeyPair = keyPairGenerator.generateKeyPair();
-            // 2. Define the CA's identity
-            X500Name caName = new X500Name("CN=WsPipePrivateCA");
-
-            // 3. Build the CA certificate
-            // It's valid for 10 years and signs itself.
-            X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                    caName, // Issuer (itself)
-                    BigInteger.valueOf(System.currentTimeMillis()), // Serial Number
-                    new java.util.Date(System.currentTimeMillis() - 1000L * 60 * 60 * 24), // Not Before
-                    new java.util.Date(System.currentTimeMillis() + 1000L * 3600 * 24 * 365 * 10), // Not After (10 years)
-                    caName, // Subject (itself)
-                    CaKeyPair.getPublic()); // Public Key
-            // Make it a CA certificate
-            certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.basicConstraints, true, new org.bouncycastle.asn1.x509.BasicConstraints(true));
-
-            ContentSigner contentSigner = new JcaContentSignerBuilder("SHA256WithRSA").build(CaKeyPair.getPrivate());
-            CaCert = new JcaX509CertificateConverter().getCertificate(certBuilder.build(contentSigner));
-
-        } catch (Exception e) {
-            CTError(TAG, "FATAL: Could not create private CA.", e);
-        }
-    }
-
-    private static void CreateCerts() {
-        try {
-            if (CaCert == null) {
-                // Ensure the CA is created first
-                CreateCaCert();
-            }
-
-            // --- SERVER-SIDE CERTIFICATE CREATION ---
-
-            // Generate a new key pair for the server
-            KeyPair serverKeyPair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
-
-            // Build the server certificate, signed by the CA
-            X509v3CertificateBuilder serverCertBuilder = new JcaX509v3CertificateBuilder(
-                    new X500Name("CN=WsPipePrivateCA"), // The ISSUER is our CA
-                    BigInteger.valueOf(System.currentTimeMillis()), // Serial Number
-                    new java.util.Date(System.currentTimeMillis() - 1000L * 60 * 60 * 24), // Not Before
-                    new java.util.Date(System.currentTimeMillis() + 1000L * 3600 * 24 * 365), // Not After (1 year)
-                    new X500Name("CN=kjtsar@gmail.com"), // The SUBJECT is the user assigned device name
-                    serverKeyPair.getPublic()); // Server's public key
-
-            serverCertBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.subjectAlternativeName,
-                    false, new org.bouncycastle.asn1.x509.GeneralNames(
-                            new org.bouncycastle.asn1.x509.GeneralName(
-                                    org.bouncycastle.asn1.x509.GeneralName.rfc822Name, "kjtsar@gmail.com")));
-
-            // Sign the new server cert with the CA's PRIVATE key
-            ContentSigner contentSigner = new JcaContentSignerBuilder("SHA256WithRSA").build(CaKeyPair.getPrivate());
-            X509Certificate serverCert = new JcaX509CertificateConverter().getCertificate(serverCertBuilder.build(contentSigner));
-            HeldCertificate heldCertificate = new HeldCertificate(serverKeyPair, serverCert);
-            HandshakeCertificates serverHandshake = new HandshakeCertificates.Builder()
-                    .heldCertificate(heldCertificate)
-                    .build();
-            ServerSslSocketFactory = serverHandshake.sslSocketFactory();
-
-        } catch (Exception e) {
-            CTError(TAG, "FATAL: Failed to create CA-signed server certificates.", e);
-        }
     }
 
     private static void BgStartServer(WsMsgListener msgListener) {
@@ -403,7 +236,7 @@ public class WsPipe extends WebSocketListener {
             }
         };
         Server = new MockWebServer();
-        Server.useHttps(ServerSslSocketFactory, false); // Use self-signed certs
+        Server.useHttps(ClientSslSocketFactory, false); // Use the same SSLSocketFactory as the client
         Server.setDispatcher(dispatcher);
         // Start the server on any address and specified port
         try {
@@ -480,7 +313,6 @@ public class WsPipe extends WebSocketListener {
             this.sentTimestampMsec = System.currentTimeMillis();
         }
         public long rttInMsec() {return recvTimestampMsec - sentTimestampMsec;}
-
     }
 
     private WsOutboundMessage removeOutboundMessage(Integer seqnum) {
@@ -607,8 +439,7 @@ public class WsPipe extends WebSocketListener {
     @Override
     public void onClosed(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
         // Called when the connection is fully closed.
-        CTDebug(TAG, String.format(Locale.US,
-                "WsPipe(%d).onClosed() connection to '%s' closed.  Reason:%d/%s",
+        CTDebug(TAG, String.format(Locale.US, "WsPipe(%d).onClosed() connection to '%s' closed.  Reason:%d/%s",
                 pipeId, peerName != null? peerName:"<unknown>", code, reason));
     }
 

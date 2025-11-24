@@ -9,15 +9,17 @@ public class SimpleTimer {
     public void setStartTimeInMsec(long startTimeInMsec) {this.startTimeInMsec = startTimeInMsec;}
     public long getStartTimeInMsec() {return startTimeInMsec;}
 
-    public String durationAsString() {
+    public static String DurationAsString(long msecDuration) {
         long hours=0, minutes=0, seconds=0, msecs;
-        msecs = System.currentTimeMillis() - startTimeInMsec;
-        seconds = msecs / 1000;
-        msecs = msecs % 1000;
+        seconds = msecDuration / 1000;
+        msecs = msecDuration % 1000;
         minutes = seconds / 60;
         seconds = seconds % 60;
         hours = minutes / 60;
         minutes = minutes % 60;
         return String.format(Locale.US, "%02d:%02d:%02d.%03d", hours, minutes, seconds, msecs);
+    }
+    public String durationAsString() {
+        return DurationAsString(System.currentTimeMillis() - startTimeInMsec);
     }
 }

@@ -116,8 +116,8 @@ public class CaltopoLiveTrack implements CaltopoClientMap.MapStatusListener {
     public void mapStatusUpdate(CaltopoClientMap map, CaltopoClientMap.MapStatusListener.mapStatus mapStatusIn) {
         if (map == myMap) {
             mapStatus = mapStatusIn;
-            CTDebug(TAG, String.format(Locale.US, "mapStatusUpdate(%s) %s is %s",
-                    getTrackLabel(), myMap.getMapId(), mapStatus));
+            CTDebug(TAG, String.format(Locale.US, "mapStatusUpdate(%s) %s is %s.  Status is:%s",
+                    getTrackLabel(), myMap.getMapId(), mapStatus, r2cStatus));
             if (mapStatusIn == CaltopoClientMap.MapStatusListener.mapStatus.up) {
                 folderId = myMap.getFolderId();
             }
@@ -388,9 +388,6 @@ public class CaltopoLiveTrack implements CaltopoClientMap.MapStatusListener {
                 break;
             }
             case okToPublishLocally: {
-                CTDebug(TAG, String.format(Locale.US,
-                        "publishDirect(): okToPublishLocally. trackId:%s, startTrackOp:%s",
-                        liveTrackId, startLiveTrackOp));
                 if (null != liveTrackId) forwardNextWaypoint();
                 else if (null == startLiveTrackOp) startNewTrack();
             }

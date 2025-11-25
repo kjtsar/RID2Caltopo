@@ -390,6 +390,9 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public void addLocallyOwnedDrone(@NonNull String rid, @NonNull CaltopoLiveTrack liveTrack) {
+        CTDebug(TAG, String.format(Locale.US,
+                "Adding locally owned drone '%s' with peer:'%s'", rid,
+                getPeerName()));
         OurDroneLiveTracks.put(rid, liveTrack);
         liveTrack.updateStatus(R2CRespEnum.okToPublishLocally);
         if (!StatusUpdatePoll.isRunning()) {
@@ -1031,9 +1034,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
         String remoteId = droneSpec.getRemoteId();
         R2CRespEnum status = R2CRespEnum.unknown;
 
-        CTDebug(TAG, String.format(Locale.US,
-                "StatusForNewRemoteId(): clientMap:%d, ActiveClients:%d",
-                ClientIdMap.size(), ActiveClients.size()));
         if (ClientIdMap.isEmpty() && ActiveClients.isEmpty()) {
             OurDroneLiveTracks.put(remoteId, liveTrack);
             status = R2CRespEnum.okToPublishLocally;

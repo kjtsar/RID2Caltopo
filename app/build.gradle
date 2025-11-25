@@ -32,7 +32,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 35
-        versionCode 3
+        versionCode 4
         versionName "${versionMajor}.${versionMinor}.${versionPatch}"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 

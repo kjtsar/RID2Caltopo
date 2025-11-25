@@ -24,9 +24,15 @@ public class DeviceHelp extends DialogFragment {
 
         View view = inflater.inflate(R.layout.help_text, container, true);
 
-        TextView helpView = view.findViewById(R.id.bluetoothHelpText);
-        String linkText = getString(R.string.bluetoothHelp);
+        TextView helpView = view.findViewById(R.id.generalHelpText);
+        String linkText = getString(R.string.generalHelpText);
         helpView.setText(HtmlCompat.fromHtml(linkText, HtmlCompat.FROM_HTML_MODE_LEGACY));
+        helpView.setMovementMethod(LinkMovementMethod.getInstance());
+
+        helpView = view.findViewById(R.id.bluetoothHelpText);
+        linkText = getString(R.string.bluetoothHelp);
+        helpView.setText(HtmlCompat.fromHtml(linkText, HtmlCompat.FROM_HTML_MODE_LEGACY));
+        helpView.setMovementMethod(LinkMovementMethod.getInstance());
 
         helpView = view.findViewById(R.id.beaconHelpText);
         linkText = getString(R.string.beaconHelp);

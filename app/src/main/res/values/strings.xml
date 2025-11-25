@@ -57,6 +57,7 @@
     <string name="bluetooth_help_text">Sample</string>
     <string name="beacon_help_heading">Wi-Fi Beacon</string>
     <string name="beacon_help_text">Sample</string>
+    <string name="general_help_text">Sample</string>
     <string name="nan_help_heading">Wi-Fi NaN</string>
     <string name="nan_help_text">Sample</string>
 
@@ -118,27 +119,22 @@
     <string name="Auth_Length">Length</string>
     <string name="Auth_Timestamp">Timestamp</string>
     <string name="Auth_Data">Authentication</string>
-
-
-    <string name="general_help_text">
-        Remote ID signals are very weak and Android devices have limited reception range.
-        This app must be paired with an external Bluetooth/Wifi repeater such as the
-        Bluemarks DroneScout Bridge(https://dronescout.co/bridge) - both ds100 and ds110
-        models have been verified to work with this app.
-
-        \n\nThis app requires Caltopo Teams Credentials(https://training.caltopo.com/all_users/team-accounts/teamapi) to write
-        to your team\'s maps. You can write tracks from this app using the Caltopo Live Tracking U/I (https://training.caltopo.com/all_users/share/live-tracking),
-         but this requires you manage the LiveTrack using the Caltopo User Interface before and after each flight.
-
-        \n\nThe developer of this app very much appreciates the Caltopo product(https://www.caltopo.com)
-            and the app uses the Caltopo API, but is not a product of or supported by the Caltopo team.   Similarly,
-            the developer appreciates the work of the opendronid consortium and makes use of their remote ID parser
-            code in this app which is covered by the SPDX-License-Identifier: Apache-2.0.
-
-        \n\nFor more detailed information about the RID2Caltopo app, it\'s configuration and use, please consult the README at
-            <a href="http://github.com/kjtsar/RID2Caltopo"> http://github.com/kjtsar/RID2Caltopo</a>
-
-    </string>
+    <string name="generalHelpText">Remote ID signals are very weak and Android devices have limited reception range.
+        This app should be paired with an external Bluetooth/Wifi bridge such as the
+        &lt;a href=&quot;https://dronescout.co/bridge&quot;&gt;Bluemark DroneScout Bridge&lt;/a&gt; - both ds100 and ds110
+        models have been verified to work with this app.&lt;br&gt;&lt;br&gt;
+	If you want to publish tracks in real-time, this app requires
+	&lt;a href=&quot;https://training.caltopo.com/all_users/team-accounts/teamapi&quot;&gt;Caltopo Teams Credentials&lt;/a&gt;
+        to write into your team maps.&lt;br&gt;&lt;br&gt;  You can also write tracks from this app using the
+        &lt;a href=&quot;https://training.caltopo.com/all_users/share/live-tracking&quot;&gt;Caltopo Live Tracking U/I&lt;/a&gt;,
+        but this requires you manage the LiveTrack using the Caltopo User Interface before and after each flight.&lt;br&gt;&lt;br&gt;
+        The developer of this app very much appreciates the &lt;a href=&quot;https://www.caltopo.com&quot;&gt;Caltopo&lt;/a&gt; product
+        and the app uses the Caltopo API, but is not a product of or supported by the Caltopo team.   Similarly,
+        the developer appreciates the work of the &lt;a href=&quot;https://github.com/opendroneid&quot;&gt;opendronid&lt;/a&gt;
+        consortium and makes use of their remote ID parser code in this app which is covered by the
+        SPDX-License-Identifier: Apache-2.0.&lt;br&gt;&lt;br&gt;
+	For more detailed information about the RID2Caltopo app configuration and use, please consult the README at
+        &lt;a href=&quot;https://github.com/kjtsar/RID2Caltopo/blob/main/README.md&quot;&gt;https://github.com/kjtsar/RID2Caltopo/blob/main/README.md&lt;/a&gt;</string>
     <string name="bluetoothHelp">All devices should be able to receive Bluetooth 4 Legacy Advertising remote ID signals.&lt;br&gt;&lt;br&gt;
         To receive Bluetooth 5 Long Range remote ID signals, the device must support the &quot;Coded Phy&quot; feature and also the &quot;Extended Advertising&quot; feature.&lt;br&gt;&lt;br&gt;
         See the claimed support for this device for these features in the options menu.&lt;br&gt;&lt;br&gt;

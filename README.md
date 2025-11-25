@@ -5,13 +5,14 @@ compatible Remote ID location updates and records the updates as a sequence of t
 that are compatible with [Caltopo](https://www.caltopo.com)'s geo-json file format.   
 
 Additionally, if a you have configured caltopo teams credentials properly and your mapid points 
-to an existing map that the credentials have write/update permissions for, the app can plot 
+to an existing map that the credentials have write/update permissions for, the app can plot near
 real-time LiveTrack updates into the map.
 
-As all drones in service of a SAR organization are required by law to emit Remote ID signalling,
-this drone and manufacturer-agnostic functionality permits closing the previously open loop between 
-search assignments and actual drone coverage.  The ~real-time updates allow an air-boss or 
-supplemental Visual Observers to keep tabs on all airborne assets.
+All drones in service of a SAR organization should be required to emit Remote ID signalling, 
+enabling this drone and manufacturer-agnostic app to close the previously open loop between 
+search assignments and actual drone coverage.  Together with Caltopo's "Aircraft" layer, the
+~real-time updates from this app allow an air-boss or supplemental Visual Observers to keep 
+track of all airborne assets.
 
 The [Caltopo](https://www.caltopo.com) platform is the preferred search management platform for many SAR agencies, 
 including the [Nevada County Sheriff's Search And Rescue](https://nevadacountysar.org/) 
@@ -94,7 +95,13 @@ The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the Calto
 APIs credentials.  These are the only required fields for this file.    The _map_id_, 
 _group_id_, and _use_direct_flag_ may all be configured separately in the apps Settings 
 menu. The _map_id_ specifies the caltopo map while the _group_id_ paired with the drone's
-RemoteId are used to report the drone's Live Track.
+RemoteId are used to report the drone's Live Track.  I recommend putting the ridmap.json and
+credentials.json files in your google drive account and sharing with team members as needed.
+You'll need to load the files once when you first start the app and the information is 
+encrypted and stored locally in your account afterwards.  In the app, select the hamburger
+menu and "Load Config File", then select the left-hand hamburger menu in the file selection
+option and scroll down to your Google Drive option to load the files securely from your
+Google Drive.
 
 If you don't have a valid Teams account, you can still go into the Caltopo User Interface 
 and manually configure [Fleet Live Tracking](https://training.caltopo.com/all_users/share/live-tracking#set-up), 
@@ -161,20 +168,36 @@ Your team's Remote Pilot In Command
 ([RPIC](https://www.ecfr.gov/current/title-14/chapter-I/subchapter-F/part-91#91.3)) 
 and search planning coordinators should ideally work together to identify the characteristics of 
 reasonable boundaries for drone search segments as well as potential sites for each R2C instance.
-It's best if you can do this first in training sessions, where you have the gift of extra time to 
+It's best if you can do this first in training sessions, where you have the gift of time to 
 discuss the tradeoffs involved.   The best search segment boundaries will generally all lie within 
-the range of the Visual Observers (VOs) at minimum.   If you have a required BVLOS (Beyond Visual 
+the range of the Visual Observers (VOs) at minimum.   If you have the necessary BVLOS (Beyond Visual 
 Line Of Sight) waiver, the other consideration is the effective range of your controllers telemetry 
 while staying within the required maximum AGL altitude.   Fortunately, factors affecting controller 
 telemetry are the same that affect the detection range of the DroneScout bridge (both operate on the 
 same frequencies).   
 
 Try to establish the site location for the Bridge and R2C as high as possible.  Amazon has [tall 
-tripods](https://www.amazon.com/s?k=tall+tripod) that you can use to place the bridge and a 
-corresponding power bank 15' or more above the ground.  If your tripod is tall enough, you may
+tripods](https://www.amazon.com/s?k=tall+tripod) that you can use to elevate the bridge and a 
+corresponding power bank 15' or more above the ground.  If your tripod is tall enough, you might
 consider placing the cell phone running RID2Caltopo on the same tripod.  It isn't necessary to
 place the device running RID2Caltopo right next to the bridge, but by placing the entire setup at 
 higher locations, you can improve your chance of getting cell coverage.
+
+## User Interface Summary
+Hopefully the user interface is self-explanatory, but I'll walk you thru a quick overview.
+
+The first thing you see when the app starts is the name of the device with the version of 
+the software directly below it.   To the right of that is the amount of time the app has
+been running.   Note that you may need to scroll the screen horizontally to see all the fields.
+To the right of the uptime are the current settings for the MapId and GroupId fields.  These
+fields can be specified in the _Settings_ menu item.  The final field on the right is the
+Caltopo Round-Trip_time.  The three fields on the right are blank/0 if a Caltopo map is not
+specified.  With valid settings for those values and authorized credentials, the app will try
+to connect to the map as will be indicated by a spinning icon to the left of the device name.
+When the device is connected to the map, the dynamic icon is replaced by a small globe.  If you
+check your caltopo map, you'll see a _Drone Tracks_ folder with an _Antenna_ symbol and 
+corresponding "R2C: _device_name_" label.  If you have debugs enabled (ref. Logging:_level_
+hamburger menu item), the available interfaces that your device has will be listed.
 
 ## How to build
 To build the application, use Android Studio.

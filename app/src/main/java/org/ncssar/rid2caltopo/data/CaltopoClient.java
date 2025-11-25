@@ -1310,12 +1310,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener, CaltopoCl
 
                 // Map is up, so get a track going and start publishing waypoints.
                 if (null == liveTrack) {
-                    CTDebug(TAG, "newWaypoint(): starting new liveTrack");
+                    CTDebug(TAG, "newWaypoint(): starting new liveTrack for: " + droneSpec.trackLabel());
                     liveTrack = new CaltopoLiveTrack(MyCaltopoClientMap, GetGroupId(), droneSpec, lat, lng, droneTimestampInMilliseconds);
                 } else if (liveTrack.isActive()) {
                     liveTrack.publishDirect(lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
                 } else {
-                    CTDebug(TAG, "newWaypoint(): restarting liveTrack");
+                    CTDebug(TAG, "newWaypoint(): restarting liveTrack: " + droneSpec.trackLabel());
                     liveTrack.startNewTrack(lat, lng, droneTimestampInMilliseconds);
                 }
 

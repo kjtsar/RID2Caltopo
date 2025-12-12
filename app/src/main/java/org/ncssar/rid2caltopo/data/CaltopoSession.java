@@ -1,3 +1,12 @@
+
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+
 package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
@@ -6,7 +15,6 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static java.lang.Thread.sleep;
 
 import android.net.Uri;
-import android.os.Build;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -18,10 +26,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLEncoder;
 import java.net.UnknownHostException;
-import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
@@ -134,14 +139,13 @@ public class CaltopoSession {
 	private final CtLineProperty CtLinePropertyDefault = new CtLineProperty();
 	private static final String CALTOPO_API_V1 = "/api/v1/map/";
 
-	private static CtLineProperty LiveTrackLineProp =
+	private static final CtLineProperty LiveTrackLineProp =
 			new CtLineProperty(2, 1F, "#0000ff", "solid");
 
 	// instance variables:
 	private static CaltopoSessionConfig Config;
 	private String mapId;
 	private CaltopoOp lastOpenMapOp;
-    private long lastSyncTimestamp;
 
     public CaltopoSession(@NonNull CaltopoSessionConfig cfg)  {Config = cfg; }
 
@@ -355,16 +359,16 @@ public class CaltopoSession {
 		if (null == mapId || mapId.isEmpty()) {
 			throw new RuntimeException("missing required mapId");
 		}
-		this.lastSyncTimestamp = 0;
+        long lastSyncTimestamp = 0;
 		if (!mapId.equals(this.mapId)) {
 			this.mapId = mapId;
 		} else if (null != lastOpenMapOp && lastOpenMapOp.isDone() && !lastOpenMapOp.fail()) {
-			this.lastSyncTimestamp = lastOpenMapOp.sentTimestampMsec;
+			lastSyncTimestamp = lastOpenMapOp.sentTimestampMsec;
 		}
 
         // remove any update key delimiter:
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/since/" +
-				Math.max(0, this.lastSyncTimestamp - 500);
+				Math.max(0, lastSyncTimestamp - 500);
 
 		lastOpenMapOp = new CaltopoOp(optRunnable);
 		return this.sendRequest(lastOpenMapOp, CtsMethod_t.GET, urlEnd, null, false);
@@ -409,7 +413,7 @@ public class CaltopoSession {
      * @param existingLineId - line ID - if already existing.
      * @param folderId - ID of the folder this line s/b created in.
      * @param description - Description text for line.
-     * @return CaltopoOp on success and null if configuring/sending msg
+     * @return CaltopoOp on success and null if configuring/sending msg failed.
      */
     @Nullable
 	CaltopoOp addLine(@NonNull JSONArray pointArray, @NonNull String lineLabel, @Nullable String description,

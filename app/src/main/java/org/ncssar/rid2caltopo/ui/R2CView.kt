@@ -1,3 +1,10 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.Image
@@ -17,7 +24,7 @@ import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.R
-import org.ncssar.rid2caltopo.data.CaltopoClientMap
+import org.ncssar.rid2caltopo.data.CaltopoMap
 import java.util.Locale
 
 @Composable
@@ -25,7 +32,7 @@ fun R2CView(
     hostName: String,
     mapId: String,
     groupId: String,
-    mapStatus: CaltopoClientMap.MapStatusListener.mapStatus,
+    mapStatus: CaltopoMap.MapStatusListener.mapStatus,
     drones : List<CtDroneSpec>,
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
@@ -46,14 +53,14 @@ fun R2CView(
 }
 
 @Composable
-fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: String, mapStatus: CaltopoClientMap.MapStatusListener.mapStatus) {
+fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: String, mapStatus: CaltopoMap.MapStatusListener.mapStatus) {
     Row(
         modifier = Modifier
             .background(MaterialTheme.colorScheme.primaryContainer)
             .padding(3.dp)
             .height(IntrinsicSize.Min)
     ) {
-        if (mapStatus != CaltopoClientMap.MapStatusListener.mapStatus.down) {
+        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.down) {
             Column(
                 modifier = Modifier
                     .width(40.dp)
@@ -62,13 +69,13 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: Strin
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                if (mapStatus == CaltopoClientMap.MapStatusListener.mapStatus.up) {
+                if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
                     Image(
                         painter = painterResource(id = R.drawable.earth),
                         contentDescription = "earth",
                         modifier = Modifier.size(30.dp)
                     )
-                } else if (mapStatus == CaltopoClientMap.MapStatusListener.mapStatus.connecting) {
+                } else if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.connecting) {
                     CircularProgressIndicator(
                         color = MaterialTheme.colorScheme.secondary,
                         strokeWidth = 4.dp,
@@ -370,6 +377,6 @@ fun RidmapHeader() {
 @Composable
 fun R2CViewPreview() {
     RID2CaltopoTheme {
-        R2CView("", "", "", CaltopoClientMap.MapStatusListener.mapStatus.down, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
+        R2CView("", "", "", CaltopoMap.MapStatusListener.mapStatus.down, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
     }
 }

@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.layout.*
@@ -18,7 +24,9 @@ fun CaltopoSettingsScreen(
     val mapId by settingsViewModel.mapId.collectAsState()
     val minDistance by settingsViewModel.minDistance.collectAsState()
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
+    val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val useDirect by settingsViewModel.useDirect.collectAsState()
+    val usePeers by settingsViewModel.usePeers.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
         Card {
@@ -36,6 +44,15 @@ fun CaltopoSettingsScreen(
                         onCheckedChange = { settingsViewModel.onUseDirectChanged(it) }
                     )
                     Text(if (useDirect) "Direct" else "Live")
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Use Peers:")
+                    Switch(
+                        checked = usePeers,
+                        onCheckedChange = { settingsViewModel.onUsePeersChanged(it) }
+                    )
+                    Text(if (usePeers) "Yes" else "No")
                 }
 
                 OutlinedTextField(
@@ -57,6 +74,11 @@ fun CaltopoSettingsScreen(
                     value = newTrackDelay,
                     onValueChange = { settingsViewModel.onNewTrackDelayChanged(it) },
                     label = { Text("New Track Delay (s)") }
+                )
+                OutlinedTextField(
+                    value = maxIdleTimeInMinutes,
+                    onValueChange = { settingsViewModel.onMaxIdleTimeInMinutesChanged(it) },
+                    label = { Text("Max App Idle Time (minutes)") }
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))

@@ -1,3 +1,11 @@
+
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.background
@@ -13,7 +21,7 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 
 @Composable
-fun R2CRestView(
+fun R2CPeerView(
     peerName: String,
     appVersion: String,
     mapId: String,
@@ -344,8 +352,8 @@ fun RestRidmapHeader() {
 
 @Preview(showBackground = true)
 @Composable
-fun R2CRestViewPreview() {
+fun R2CPeerViewPreview() {
     RID2CaltopoTheme {
-        R2CRestView("", "", "", "",emptyList(), "", "", {} as (CtDroneSpec, String) -> Unit)
+        R2CPeerView("", "", "", "",emptyList(), "", "", {} as (CtDroneSpec, String) -> Unit)
     }
 }

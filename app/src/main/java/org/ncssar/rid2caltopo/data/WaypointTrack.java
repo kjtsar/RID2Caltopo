@@ -1,3 +1,11 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+
 package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
@@ -13,7 +21,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Date;
 import java.util.Locale;
-import java.util.Map;
 
 import android.content.ContentResolver;
 import android.content.Context;
@@ -23,7 +30,7 @@ import androidx.documentfile.provider.DocumentFile;
 
 /*
  * Module for building waypoint-based Caltopo tracks on the fly as waypoints come in.
- * This is to support rapid archival to a geojson file on application termination.
+ * This is to support rapid archival to a geo-json file on application termination.
  *
  * Compare one waypoint to the next to determine if there is significant enough change
  * in location to warrant archiving the new point - per MinDistanceInFeet parameter.
@@ -110,7 +117,7 @@ public class WaypointTrack {
 			return;
 		}
 		ArrayList<String> keys = new ArrayList<>(TrackMap.size());
-        keys.addAll(TrackMap.keySet());
+		keys.addAll(TrackMap.keySet());
 		for (String key : keys) {
 			WaypointTrack track = TrackMap.remove(key);
 			if (null != track) track.archive();

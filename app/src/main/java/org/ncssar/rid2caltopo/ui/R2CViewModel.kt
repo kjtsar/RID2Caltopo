@@ -1,3 +1,10 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
 package org.ncssar.rid2caltopo.ui
 
 import androidx.lifecycle.ViewModel
@@ -8,19 +15,18 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.app.ScanningService
 import org.ncssar.rid2caltopo.data.CaltopoClient
-import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-import org.ncssar.rid2caltopo.data.CaltopoClientMap
+import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
 
 class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
-    CtDroneSpec.DroneSpecsChangedListener, CaltopoClientMap.MapStatusListener {
+    CtDroneSpec.DroneSpecsChangedListener, CaltopoMap.MapStatusListener {
     private val _drones = MutableStateFlow<List<CtDroneSpec>>(emptyList())
     private val _appUptime = MutableStateFlow(ScanningService.UpTime())
     private val delayedUptimePoll : DelayedExec = DelayedExec()
-    private val _mapStatus = MutableStateFlow(CaltopoClientMap.MapStatusListener.mapStatus.down)
+    private val _mapStatus = MutableStateFlow(CaltopoMap.MapStatusListener.mapStatus.down)
 
     private val _mapId = MutableStateFlow("")
     private val _groupId = MutableStateFlow("")
@@ -35,17 +41,17 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
 
     init {
         delayedUptimePoll.start(this::uptimePoll, 1000, 1000)
-        CaltopoClientMap.SetMapStatusListener(this)
+        CaltopoMap.SetMapStatusListener(this)
     }
 
-    override fun mapStatusUpdate(map: CaltopoClientMap, mapStatus: CaltopoClientMap.MapStatusListener.mapStatus) {
+    override fun mapStatusUpdate(map: CaltopoMap, mapStatus: CaltopoMap.MapStatusListener.mapStatus) {
         _mapStatus.value = mapStatus
     }
 
     // Clean up the listener when the ViewModel is no longer in use.
     override fun onCleared() {
         super.onCleared()
-        CaltopoClientMap.RemoveMapStatusListener(this);
+        CaltopoMap.RemoveMapStatusListener(this)
         delayedUptimePoll.stop()
     }
 

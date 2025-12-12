@@ -1,3 +1,10 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.horizontalScroll
@@ -19,7 +26,7 @@ import androidx.compose.ui.unit.dp
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
-    data class RemoteView(val viewModel: R2CRestViewModel) : MainScreenItem
+    data class RemoteView(val viewModel: R2CPeerViewModel) : MainScreenItem
     data class SpacerView(val height: Dp) : MainScreenItem
 }
 
@@ -27,7 +34,7 @@ sealed interface MainScreenItem {
 @Composable
 fun MainScreen(
     localViewModel: R2CViewModel,
-    remoteViewModels: List<R2CRestViewModel>,
+    remoteViewModels: List<R2CPeerViewModel>,
     onShowHelp: () -> Unit,
     onShowScanners: () -> Unit,
     loadConfigFile: () -> Unit,
@@ -100,7 +107,7 @@ fun MainScreen(
                         // This key is now guaranteed to be unique and stable
                         when (item) {
                             is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
-                            is MainScreenItem.RemoteView -> item.viewModel.r2cClient.peerName
+                            is MainScreenItem.RemoteView -> item.viewModel.r2cPeer.peerName
                             is MainScreenItem.SpacerView -> "spacer_view"
                         }
                     }
@@ -138,8 +145,8 @@ fun MainScreen(
                             val remoteMapId by item.viewModel.remoteMapId.collectAsState()
                             val remoteGroupId by item.viewModel.remoteGroupId.collectAsState()
 
-                            R2CRestView(
-                                peerName = item.viewModel.r2cClient.peerName,
+                            R2CPeerView(
+                                peerName = item.viewModel.r2cPeer.peerName,
                                 drones = remoteDrones,
                                 remoteUptime = remoteUptime,
                                 appVersion = remoteAppVersion,

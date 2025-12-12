@@ -1,8 +1,15 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+
 package org.ncssar.rid2caltopo.app
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -19,7 +26,6 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.ActivityCompat
 import androidx.core.net.toUri
-import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModelProvider
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -32,14 +38,14 @@ import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
-import org.ncssar.rid2caltopo.data.CaltopoClientMap
-import org.ncssar.rid2caltopo.data.R2CRest
+import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.data.WaypointTrack
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.CtAlertDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
-import org.ncssar.rid2caltopo.ui.R2CRestViewModel
-import org.ncssar.rid2caltopo.ui.R2CRestViewModelFactory
+import org.ncssar.rid2caltopo.ui.R2CPeerViewModel
+import org.ncssar.rid2caltopo.ui.R2CPeerViewModelFactory
 import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
@@ -49,11 +55,11 @@ import org.opendroneid.android.bluetooth.BluetoothScanner
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
 import java.util.Locale
 
-class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
+class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     var locationRequest: LocationRequest? = null
     var locationCallback: LocationCallback? = null
     var mFusedLocationClient: FusedLocationProviderClient? = null
-    private val remoteViewModels = mutableStateListOf<R2CRestViewModel>()
+    private val remoteViewModels = mutableStateListOf<R2CPeerViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
     private val showSettingsDialog = mutableStateOf(false)
     private val showScannerDialog = mutableStateOf(false)
@@ -91,22 +97,23 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
         }
     }
 
-    override fun onClientListChanged(clients: MutableList<R2CRest>) {
+    override fun onPeerListChanged(peers: MutableList<R2CPeer>) {
         remoteViewModels.clear()
-        remoteViewModels.addAll(clients.map { client ->
-            ViewModelProvider(this, R2CRestViewModelFactory(client)).get(client.peerName, R2CRestViewModel::class.java)
+        remoteViewModels.addAll(peers.map { peer ->
+            ViewModelProvider(this, R2CPeerViewModelFactory(peer)).get(peer.peerName, R2CPeerViewModel::class.java)
         })
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        R2CRest.SetClientListChangedListener(this)
+        R2CPeer.SetPeerListChangedListener(this)
         appContext = applicationContext
         val localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
+        CaltopoClient.CheckIdle()
         CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
         remoteViewModels.clear()
         setContent {
@@ -290,7 +297,7 @@ class R2CActivity : AppCompatActivity(), R2CRest.ClientListChangedListener  {
                 for (location in locationResult.locations) {
                     if (location != null) {
 //                        DataManager?.receiverLocation = location
-                        CaltopoClientMap.UpdateMyLocation(location)
+                        CaltopoMap.UpdateMyLocation(location)
                     }
                 }
             }

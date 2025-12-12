@@ -1,3 +1,10 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
 package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
@@ -6,7 +13,6 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -37,8 +43,6 @@ public class CaltopoOp implements Future <CaltopoOp> {
     // the actual message to be sent - in case it needs to be resent:
     public CaltopoSession.CtsMethod_t method;
     public String url;
-	public Map<String, String> getParams;
-	public String ipaddr;
     public JSONObject payload;
 	public static int lastOpNum;
 
@@ -74,9 +78,6 @@ public class CaltopoOp implements Future <CaltopoOp> {
 	return (asyncFuture.isDone() && !goodResponse);
     }
 
-    @Nullable
-	public String getErrorResponse() { return response; }
-	    
     @Nullable
 	public JSONObject getResponse() { return responseJson; }
 
@@ -128,11 +129,9 @@ public class CaltopoOp implements Future <CaltopoOp> {
 		}
 		return responseJson;
 	}
-	@Nullable
 	public void syncOp(double timeoutInSeconds)	throws ExecutionException, InterruptedException, TimeoutException {
 		this.get((long)(timeoutInSeconds * 1000), TimeUnit.MILLISECONDS);
 	}
-	@Nullable
 	public void syncOp(long timeoutInMilliseconds)	throws ExecutionException, InterruptedException, TimeoutException {
 		this.get(timeoutInMilliseconds, TimeUnit.MILLISECONDS);
 	}

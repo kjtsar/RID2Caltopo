@@ -1,3 +1,12 @@
+
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+
 package org.ncssar.rid2caltopo.ui
 
 import androidx.lifecycle.ViewModel
@@ -9,13 +18,13 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
-import org.ncssar.rid2caltopo.data.R2CRest
+import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
 /**
- * ViewModel for a single remote R2CRest client.
+ * ViewModel for a single remote R2CPeer client.
  */
-class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpdateListener, CtDroneSpec.DroneSpecsChangedListener {
+class R2CPeerViewModel(val r2cPeer: R2CPeer) : ViewModel(), R2CPeer.remoteUpdateListener, CtDroneSpec.DroneSpecsChangedListener {
 
     private val _drones = MutableStateFlow<List<CtDroneSpec>>(emptyList())
     val drones: StateFlow<List<CtDroneSpec>> = _drones.asStateFlow()
@@ -48,39 +57,39 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
     }
 
     init {
-        r2cClient.setRemoteDroneSpecMonitor(this)
-        r2cClient.setRemoteUpdateListener(this)
+        r2cPeer.setRemoteDroneSpecMonitor(this)
+        r2cPeer.setRemoteUpdateListener(this)
         loadRemoteDrones()
         uptimePoll.start(this::uptimePollFun, 1000, 1000)
     }
 
     private fun loadRemoteDrones() {
-        _drones.value = r2cClient.remoteDroneSpecs
+        _drones.value = r2cPeer.remoteDroneSpecs
     }
 
     fun updateMappedId(drone: CtDroneSpec, newMappedId: String) {
-        CTDebug("R2CRestViewModel", "updateMappedId(${drone.remoteId}, ${newMappedId})")
+        CTDebug("R2CPeerViewModel", "updateMappedId(${drone.remoteId}, ${newMappedId})")
         val droneSpec: CtDroneSpec ?= CaltopoClient.GetDroneSpec(drone.remoteId)
         if (null != droneSpec) {
             droneSpec.setMappedId(newMappedId)
         } else {
-            r2cClient.updateMappedId(drone, newMappedId)
+            r2cPeer.updateMappedId(drone, newMappedId)
         }
     }
 
     override fun onCleared() {
-        r2cClient.setRemoteDroneSpecMonitor(null)
-        r2cClient.setRemoteUpdateListener(null)
+        r2cPeer.setRemoteDroneSpecMonitor(null)
+        r2cPeer.setRemoteUpdateListener(null)
         super.onCleared()
     }
 
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         for (ds in droneSpecs) {
-            CTDebug("R2CRestViewModel", "onDroneSpecsChanged(): $ds")
+            CTDebug("R2CPeerViewModel", "onDroneSpecsChanged(): $ds")
         }
 
         _drones.value = droneSpecs
-        _remoteCtRtt.value = r2cClient.getRemoteCtRttString()
+        _remoteCtRtt.value = r2cPeer.getRemoteCtRttString()
         _remoteUptime.value = remoteTimer.durationAsString()
         if (droneSpecs.isEmpty()) {
             if (!uptimePoll.isRunning) {
@@ -93,18 +102,18 @@ class R2CRestViewModel(val r2cClient: R2CRest) : ViewModel(), R2CRest.remoteUpda
 
     fun uptimePollFun() {
         _remoteUptime.value = remoteTimer.durationAsString()
-        _remoteCtRtt.value = r2cClient.getRemoteCtRttString()
+        _remoteCtRtt.value = r2cPeer.getRemoteCtRttString()
     }
 }
 
 /**
- * Factory to create R2CRestViewModel instances, since it requires a constructor parameter.
+ * Factory to create R2CPeerViewModel instances, since it requires a constructor parameter.
  */
-class R2CRestViewModelFactory(private val r2cRest: R2CRest) : ViewModelProvider.Factory {
+class R2CPeerViewModelFactory(private val r2cPeer: R2CPeer) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        if (modelClass.isAssignableFrom(R2CRestViewModel::class.java)) {
+        if (modelClass.isAssignableFrom(R2CPeerViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return R2CRestViewModel(r2cRest) as T
+            return R2CPeerViewModel(r2cPeer) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

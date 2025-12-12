@@ -1,3 +1,10 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.material3.AlertDialog

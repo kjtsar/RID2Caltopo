@@ -1,3 +1,10 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
 package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
@@ -28,10 +35,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * R2CPeer or R2CClient would have been better names.  The purpose of this
- * class is to maintain the lifecycle of peer-to-peer network connectivity
- * between this R2C app and it's peers over the network.
- *
+ * The purpose of this class is to maintain the lifecycle of peer-to-peer
+ * network connectivity between this R2C app and it's peers over the network.
  * Test Cases:
  *  o For all test cases, need to track Round Trip Time (rtt) from when
  *    the waypoint is received until Caltopo confirms received.
@@ -43,14 +48,10 @@ import java.util.Set;
  *    instance.
  *  o Starting and shutting down multiple R2C instances at the same
  *    time.
- ** FIXME:  When an RTC instance doesn't respond or a connection timeout occurs the
- *          pipe we're talking to it on will fail and we'll either look for another
- *          address to try (if we haven't yet talked to it), or if it was an established
- *          connection, we'll shut down that link and release/reevaluate any drones it
- *          might have had ownership over.
+ *  o Networking delays/blackouts (ala starlink w/limited visibility).
  */
 
-public class R2CRest implements WsPipe.WsMsgListener {
+public class R2CPeer implements WsPipe.WsMsgListener {
     /** R2CRespEnum
      * The current status of a drone from shared R2C perspective.
      */
@@ -58,44 +59,45 @@ public class R2CRest implements WsPipe.WsMsgListener {
         unknown,             // idle or not yet evaluated.
         pending,             // discovering - reviewing status with peers.
         okToPublishLocally,  // Owned by the local instance - ref OurDroneLiveTracks.
-        forwardToClient,     // A peer instance owns it - ref. ClientRidMap.
+        forwardToPeer,       // A peer instance owns it - ref. PeerRidMap.
         reevaluate,          // Previous owner has given it up, so it's free game.
     }
-    private static final String TAG = "R2CRest";
+    private static final String TAG = "R2CPeer";
 
-    // similar to ClientIdMap, this maps remoteUUID to clients that are in the process of establishing their connections.
-    private static final Hashtable<String, R2CRest>ActiveClients = new Hashtable<>(16);
+    // similar to PeerIdMap, this maps remoteUUID to clients that are in the process of establishing their connections.
+    private static final Hashtable<String, R2CPeer>ActivePeers = new Hashtable<>(16);
 
     // maps remoteUUID to the client that we use to communicate with it.
-    private static final Hashtable<String, R2CRest> ClientIdMap = new Hashtable<>(16);
-    private static ClientListChangedListener clientListChangedListener;
+    private static final Hashtable<String, R2CPeer> PeerIdMap = new Hashtable<>(16);
+    private static PeerListChangedListener peerListChangedListener;
     // maps remote id to the client that owns it:
-    private static final Hashtable<String, R2CRest> ClientRidMap = new Hashtable<>(16);
+    private static final Hashtable<String, R2CPeer> PeerRidMap = new Hashtable<>(16);
 
     private static final Hashtable<String, Integer>OutstandingAcksByRid = new Hashtable<>(16);
 
     // maps the remote id of drones we own to their corresponding livetracks.
     private static final Hashtable<String, CaltopoLiveTrack> OurDroneLiveTracks = new Hashtable<>(16);
 
-    private static DelayedExec StatusUpdatePoll = new DelayedExec();
+    private static final DelayedExec StatusUpdatePoll = new DelayedExec();
 
     // instance variables:
     private final ArrayList <CaltopoLiveTrack> liveTracksUsingThisPeer = new ArrayList<>(16);
     private static final JSONArray MyIpAddresses = new JSONArray();
-    private static int R2CRestCount = 0; // track active instancess
+    private static int R2CPeerCount = 0; // track active instancess
+    private final int R2CPeerId;
     private JSONArray remoteIpAddrs; // may be more than one to choose from (cell, wireless)
 
     // Local RTTs are measurements of the rtt for messages that originate locally and are reported
     // from this endpoint.  Conversely, remote RTTs are measured and reported by our peer:
-    private Util.SimpleMovingAverage localR2cRttAvgMsec = new Util.SimpleMovingAverage(10);
-    private Util.SimpleMovingAverage remoteCtRttAvgMsec = new Util.SimpleMovingAverage(10);
-    private Util.SimpleMovingAverage remoteR2cRttAvgMsec = new Util.SimpleMovingAverage(10);
+    private final Util.SimpleMovingAverage localR2cRttAvgMsec = new Util.SimpleMovingAverage(10);
+    private final Util.SimpleMovingAverage remoteCtRttAvgMsec = new Util.SimpleMovingAverage(10);
+    private final Util.SimpleMovingAverage remoteR2cRttAvgMsec = new Util.SimpleMovingAverage(10);
     private String currentAttemptIpAddr;
     private String remoteIpAddr;     // null until we find one that works.
     private String remoteUUID;       // pulled from R2C Marker on Caltopo or from inbound conn.
     private int sendMsgCount = 0;
     private int recvMsgCount = 0;
-    private R2CListener clientListener;
+    private R2CListener peerListener;
     private String peerName;
     public WsPipe wsPipe;
     private CtDroneSpec.DroneSpecsChangedListener remoteDroneSpecMonitor;
@@ -114,7 +116,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         void onRemoteStartTime(long remoteStartTimeInMsec);
     }
 
-    // FIXME: Is this even necessary?  We're calling CaltopoClientMap.Add/RemoveClient()
+    // FIXME: Is this even necessary?  We're calling CaltopoMap.Add/RemovePeer()
     //  directly, so this seems redundant.
     public interface R2CListener {
         enum r2cState {
@@ -123,15 +125,15 @@ public class R2CRest implements WsPipe.WsMsgListener {
             failed, // connection couldn't be established.
         }
 
-        /** clientStatusChange()
-         * Delivered when the R2CRest client instance establishes or looses
+        /** peerStatusChange()
+         * Delivered when the R2CPeer instance establishes or looses
          * connectivity per the state parameter.   Note that when state is down or failed
-         * recipient should break all ties with this client as it is closing for business.
-         * If status is failed, then client connection couldn't be established.
-         * @param client affected r2cclient.
+         * recipient should break all ties with this peer as it is closing for business.
+         * If status is failed, then peer connection couldn't be established.
+         * @param peer affected r2cPeer.
          * @param state new state.
          */
-        void clientStatusChange(R2CRest client, r2cState state);
+        void peerStatusChange(R2CPeer peer, r2cState state);
     }
 
 
@@ -146,28 +148,28 @@ public class R2CRest implements WsPipe.WsMsgListener {
         }
     }
 
-    public interface ClientListChangedListener {
-        void onClientListChanged(@NonNull List<R2CRest> clientList);
+    public interface PeerListChangedListener {
+        void onPeerListChanged(@NonNull List<R2CPeer> peerList);
     }
 
-    public static void SetClientListChangedListener(@NonNull ClientListChangedListener listener) {
-        clientListChangedListener = listener;
+    public static void SetPeerListChangedListener(@NonNull PeerListChangedListener listener) {
+        peerListChangedListener = listener;
     }
 
     /** The constructor for new inbound connections from
      */
-    public R2CRest(@NonNull WsPipe wsPipe) {
-        R2CRestCount++;
-        CTDebug(TAG, String.format(Locale.US, "R2CRest(inbound) up to %d instances.", R2CRestCount));
+    public R2CPeer(@NonNull WsPipe wsPipe) {
+        R2CPeerCount++;
+        R2CPeerId = R2CPeerCount;
+        CTDebug(TAG, String.format(Locale.US, "R2CPeer(inbound) instance %d created.", R2CPeerId));
         this.wsPipe = wsPipe;
         wsPipe.setNewMsgListener(this);
         // New pipe, but no other remote info - yet.  Need to wait for
-        // hello before adding to ClientIdMap.
+        // hello before adding to PeerIdMap.
     }
 
-    /** R2CRest
+    /** R2CPeer
      * Local interface to a remote R2C Instance.
-     *
      * RemoteR2cSpec comes from Caltopo Marker info and is of the form:
      * {
      *      ipaddrs:[{"ipaddr":"<ipaddr1>","intf":"intf"},...],
@@ -177,17 +179,18 @@ public class R2CRest implements WsPipe.WsMsgListener {
      *      id: <marker_uuid>
      * }
      */
-    public R2CRest(@NonNull JSONObject remoteR2cSpec, @Nullable R2CListener listener)  {
-        R2CRestCount++;
-        CTDebug(TAG, String.format(Locale.US, "R2CRest(outbound) up to %d instances.", R2CRestCount));
+    public R2CPeer(@NonNull JSONObject remoteR2cSpec, @Nullable R2CListener listener)  {
+        R2CPeerCount++;
+        R2CPeerId = R2CPeerCount;
+        CTDebug(TAG, String.format(Locale.US, "R2CPeer(outbound) instance %d created.", R2CPeerId));
         remoteIpAddrs = remoteR2cSpec.optJSONArray("ipaddrs");
         peerName = remoteR2cSpec.optString("name");
         remoteUUID = remoteR2cSpec.optString("id");
-        ActiveClients.put(remoteUUID, this);
-        clientListener = listener;
-        R2CRest client = ClientIdMap.get(remoteUUID);
-        if (null != client) {
-            CTDebug(TAG, "R2CRest(): already found this client in my map - This can happen if remote connected to us first.");
+        ActivePeers.put(remoteUUID, this);
+        peerListener = listener;
+        R2CPeer peer = PeerIdMap.get(remoteUUID);
+        if (null != peer) {
+            CTDebug(TAG, "R2CPeer(): already found this peer in my map - This can happen if remote connected to us first.");
             // In either case, this new instance is redundant and needs to shutdown.
             shutdown(R2CListener.r2cState.down);
         } else {
@@ -200,7 +203,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         }
     }
 
-    // Returns a concise summary of this client's status:
+    // Returns a concise summary of this peer's status:
     @NonNull
     public String stats() {
         StringBuilder builder = new StringBuilder();
@@ -213,10 +216,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
                 (double)CaltopoLiveTrack.GetCaltopoRttInMsec() / 1000.0, builder);
     }
 
-    public static ArrayList<R2CRest>GetClientList() {
-        ArrayList<R2CRest> r2cClients = new ArrayList<>(ClientIdMap.size());
-        r2cClients.addAll(ClientIdMap.values());
-        return r2cClients;
+    public static ArrayList<R2CPeer>GetPeerList() {
+        ArrayList<R2CPeer> r2cPeers = new ArrayList<>(PeerIdMap.size());
+        r2cPeers.addAll(PeerIdMap.values());
+        return r2cPeers;
     }
 
     public void updateMappedId(@NonNull CtDroneSpec droneSpec, @NonNull String newId) {
@@ -261,8 +264,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public String getRemoteUUID() { return remoteUUID;}
 
     @NonNull
-    public static Hashtable<String, R2CRest>GetCloneOfPeerHashtable() {
-        return (Hashtable<String, R2CRest>)ClientIdMap.clone();
+    public static Hashtable<String, R2CPeer>GetCloneOfPeerHashtable() {
+        return (Hashtable<String, R2CPeer>)PeerIdMap.clone();
     }
 
     /** kvStringResponsePayload()
@@ -289,32 +292,32 @@ public class R2CRest implements WsPipe.WsMsgListener {
         return jo;
     }
 
-    private static void AddClient(@NonNull R2CRest client) {
-        ClientIdMap.put(client.getRemoteUUID(), client);
-        CaltopoClientMap.AddClient(client);
-        if (null != clientListChangedListener) {
-            clientListChangedListener.onClientListChanged(GetClientList());
+    private static void AddPeer(@NonNull R2CPeer peer) {
+        PeerIdMap.put(peer.getRemoteUUID(), peer);
+        CaltopoMap.AddPeer(peer);
+        if (null != peerListChangedListener) {
+            peerListChangedListener.onPeerListChanged(GetPeerList());
         }
         if (!StatusUpdatePoll.isRunning()) {
-            StatusUpdatePoll.start(R2CRest::PublishStatus, 15 * 1000, 15 * 1000);
+            StatusUpdatePoll.start(R2CPeer::PublishStatus, 15 * 1000, 15 * 1000);
         }
     }
-    private static void RemoveClient(@NonNull R2CRest client) {
-        String uuid = client.getRemoteUUID();
-        ClientIdMap.remove(uuid);
-        ActiveClients.remove(uuid);
+    private static void RemovePeer(@NonNull R2CPeer peer) {
+        String uuid = peer.getRemoteUUID();
+        PeerIdMap.remove(uuid);
+        ActivePeers.remove(uuid);
         CTDebug(TAG, String.format(Locale.US,
                 "RemoveClient(%s-%s): ClientIdMap:%d, ActiveClients:%d", uuid,
-                client.getPeerName(), ClientIdMap.size(), ActiveClients.size()));
-        for (R2CRest aClient : ActiveClients.values()) {
+                peer.getPeerName(), PeerIdMap.size(), ActivePeers.size()));
+        for (R2CPeer aClient : ActivePeers.values()) {
             CTDebug(TAG, "RemoveClient(): client: " +
                     aClient.getPeerName() + "uuid:" + aClient.remoteUUID);
         }
-        CaltopoClientMap.RemoveClient(client, R2CListener.r2cState.down);
-        if (null != clientListChangedListener) {
-            clientListChangedListener.onClientListChanged(GetClientList());
+        CaltopoMap.RemovePeer(peer, R2CListener.r2cState.down);
+        if (null != peerListChangedListener) {
+            peerListChangedListener.onPeerListChanged(GetPeerList());
         }
-        if (ClientIdMap.isEmpty()) StatusUpdatePoll.stop();
+        if (PeerIdMap.isEmpty()) StatusUpdatePoll.stop();
     }
 
     private void handleHello(@NonNull Integer seqnum, @NonNull JSONObject payload) {
@@ -332,8 +335,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
                         id, remoteUUID));
                 return;
             }
-            R2CRest client = ClientIdMap.get(remoteUUID);
-            if (null != client) {
+            R2CPeer peer = PeerIdMap.get(remoteUUID);
+            if (null != peer) {
                 wsPipe.sendResponse(seqnum, errorResponsePayload(
                         "handleHello(): We already have a connection. Bye.", payload));
                 sendMsgCount++;
@@ -343,7 +346,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         }
         peerName = wsPipe.getPeerName();
         remoteUUID = id;
-        AddClient(this);
+        AddPeer(this);
         remoteAppVersion = payload.optString("app-vers");
         remoteMapId = payload.optString("map-id");
         remoteGroupId = payload.optString("group-id");
@@ -357,17 +360,11 @@ public class R2CRest implements WsPipe.WsMsgListener {
             CTDebug(TAG, "handleHello(): no remoteUpdateListener.");
         }
         JSONArray activeDroneList = MyActiveDronelist();
-        if (0 == activeDroneList.length()) {
-            // don't have any we own outright, but see if we have any livetracks that were started
-            // while bringing-up the map...
-
-        }
-
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "hello-ack");
         jo.put("my-active-dronelist", activeDroneList);
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
-        jo.put("my-id", CaltopoClientMap.GetMyUUID());
+        jo.put("my-id", CaltopoMap.GetMyUUID());
         jo.put("map-id", CaltopoClient.GetMapId());
         jo.put("group-id", CaltopoClient.GetGroupId());
         jo.put("app-vers", R2CActivity.getMyAppVersion());
@@ -378,13 +375,13 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     public static void PublishStatus() {
-        if (ClientIdMap.isEmpty()) return;  // nobody to send to.
+        if (PeerIdMap.isEmpty()) return;  // nobody to send to.
         JSONArray myDroneArray = MyActiveDronelist();
-        for (R2CRest client : ClientIdMap.values()) {
+        for (R2CPeer peer : PeerIdMap.values()) {
             Util.SafeJSONObject jo = new Util.SafeJSONObject();
             jo.put("type", "drone-status");
             jo.put("my-active-dronelist", myDroneArray);
-            client.wsPipe.sendMessage(jo, 0, true);
+            peer.wsPipe.sendMessage(jo, 0, true);
         }
         if (myDroneArray.length() == 0) StatusUpdatePoll.stop();
     }
@@ -396,7 +393,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         OurDroneLiveTracks.put(rid, liveTrack);
         liveTrack.updateStatus(R2CRespEnum.okToPublishLocally);
         if (!StatusUpdatePoll.isRunning()) {
-            StatusUpdatePoll.start(R2CRest::PublishStatus, 15 * 1000, 15 * 1000);
+            StatusUpdatePoll.start(R2CPeer::PublishStatus, 15 * 1000, 15 * 1000);
         }
     }
 
@@ -458,7 +455,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
      *  already sent the corresponding "seen".   In either case, we need to stop sending
      *  "seen" updates and treat this like a "drop-drone" to remove this peer as the
      *  owner and permit the discovery process to restart.
-     * @param payload
+     * @param payload payload for "seen-ack".
      */
     public void handleSeenNack(JSONObject payload) {
         String ridString = payload.optString("rid");
@@ -469,7 +466,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         removeDroneSpecFromOurPeer(ridString);
     }
 
-    /* When I'm client connecting to remote:
+    /* When I'm connecting to remote:
      */
     public void handleHelloAck(JSONObject payload) {
         remoteIpAddr = currentAttemptIpAddr; // found a working address for remote - yipee!!
@@ -488,9 +485,9 @@ public class R2CRest implements WsPipe.WsMsgListener {
             }
         }
         remoteUUID = id;
-        AddClient(this);
+        AddPeer(this);
 
-        CaltopoClientMap.GetMyUUID();
+        CaltopoMap.GetMyUUID();
         JSONArray remoteDroneList = payload.optJSONArray("my-active-dronelist");
         if (null == remoteDroneList) {
             CTError(TAG, "handleHelloAck() missing required 'my-active-dronelist' parameter");
@@ -526,8 +523,8 @@ public class R2CRest implements WsPipe.WsMsgListener {
         } else {
             CTDebug(TAG, "handleHelloAck(): no remoteUpdateListener.");
         }
-        if (null != clientListener) {
-            clientListener.clientStatusChange(this, R2CListener.r2cState.up);
+        if (null != peerListener) {
+            peerListener.peerStatusChange(this, R2CListener.r2cState.up);
         } else {
             CaltopoLiveTrack.ReevalUnknownAndPendingTracks();
         }
@@ -537,7 +534,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public void removeDroneSpecFromOurPeer(@NonNull String rid) {
         CtDroneSpec ds = droneSpecTable.remove(rid);
         if (null != ds) CaltopoClient.RemoveDroneSpecOwner(ds);
-        ClientRidMap.remove(rid);
+        PeerRidMap.remove(rid);
         CTDebug(TAG, String.format(Locale.US,
                 "removeDroneSpecForOurPeer(): Removed '%s' from the list of drones owned by %s", rid, peerName));
         updateDroneSpecListener();
@@ -558,12 +555,12 @@ public class R2CRest implements WsPipe.WsMsgListener {
      */
     public void addDroneSpecForOurPeer(@NonNull CtDroneSpec dsIn) {
         String rid = dsIn.getRemoteId();
-        R2CRest peer = ClientRidMap.get(rid);
+        R2CPeer peer = PeerRidMap.get(rid);
         if (null == peer) {
             CTDebug(TAG, String.format(Locale.US,
                     "addDroneSpecForOurPeer(): Added '%s' to the list of drones owned by %s", rid, peerName));
             CaltopoClient.SetDroneSpecOwner(dsIn, this);
-            ClientRidMap.put(rid, this);
+            PeerRidMap.put(rid, this);
         }
         if (dsIn.getMappedId().equals(dsIn.getRemoteId())) {
             CtDroneSpec ds = CaltopoClient.GetDroneSpec(rid);
@@ -592,17 +589,17 @@ public class R2CRest implements WsPipe.WsMsgListener {
         if (count <= 0) {
             // The last ack is in.  If we didn't receive a nack, it's ours.
             CaltopoLiveTrack liveTrack = CaltopoLiveTrack.GetLiveTrackForRemoteId(rid);
-            R2CRest r2cClient = ClientRidMap.get(rid);
-            CTDebug(TAG, String.format(Locale.US, "handleAddDroneAck(): Received last ack. liveTrack:%x, r2cClient:%x.",
-                    System.identityHashCode(liveTrack), System.identityHashCode(r2cClient)));
-            if (null == r2cClient) {
+            R2CPeer r2cPeer = PeerRidMap.get(rid);
+            CTDebug(TAG, String.format(Locale.US, "handleAddDroneAck(): Received last ack. liveTrack:%x, r2cPeer:%x.",
+                    System.identityHashCode(liveTrack), System.identityHashCode(r2cPeer)));
+            if (null == r2cPeer) {
                 CTDebug(TAG, "handleAddDroneAck(): we have assumed ownership of " + rid);
                 addLocallyOwnedDrone(rid, liveTrack);
             } else {
-                liveTrack.updateStatus(R2CRespEnum.forwardToClient);
+                liveTrack.updateStatus(R2CRespEnum.forwardToPeer);
                 CTDebug(TAG, String.format(Locale.US,
                         "handleAddDroneAck(): ownership of %s transferred to %s",
-                        rid, r2cClient.getPeerName()));
+                        rid, r2cPeer.getPeerName()));
             }
         } else {
             CTDebug(TAG, String.format(Locale.US, "handleAddDroneAck(): waiting for %d more ack", count));
@@ -619,7 +616,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
      */
     @Nullable
     private CtDroneSpec droneSpecFromRidString(@NonNull String ridString) {
-        CtDroneSpec ds = null;
+        CtDroneSpec ds;
         if (ridString.startsWith("{")) {
             try {
                 ds = new CtDroneSpec(new JSONObject(ridString));
@@ -642,29 +639,21 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
         String remoteId = ds.getRemoteId();
         DecrementAckCountForRid(remoteId);
-        // At least one other client claims the rid, so mark accordingly
+        // At least one other peer claims the rid, so mark accordingly
         addDroneSpecForOurPeer(ds);
         CaltopoLiveTrack liveTrack = CaltopoLiveTrack.GetLiveTrackForRemoteId(remoteId);
-        if (null != liveTrack) liveTrack.updateStatus(R2CRespEnum.forwardToClient);
+        if (null != liveTrack) liveTrack.updateStatus(R2CRespEnum.forwardToPeer);
         updateDroneSpecListener();
     }
 
     public String getRttString() {
-        if (null != localR2cRttAvgMsec) {
-            return String.format(Locale.US, "%.3f",
-                    (double)(localR2cRttAvgMsec.get())/1000.0);
-        } else {
-            return "N/A";
-        }
+        return String.format(Locale.US, "%.3f",
+                (double)(localR2cRttAvgMsec.get())/1000.0);
     }
 
     public String getRemoteCtRttString() {
-        if (null != remoteCtRttAvgMsec) {
-            return String.format(Locale.US, "%.3f",
-                    (double)(remoteCtRttAvgMsec.get())/1000.0);
-        } else {
-            return "N/A";
-        }
+        return String.format(Locale.US, "%.3f",
+                (double)(remoteCtRttAvgMsec.get())/1000.0);
     }
 
     private static int IncrementAckCountForRid(@NonNull String remoteId) {
@@ -747,11 +736,11 @@ public class R2CRest implements WsPipe.WsMsgListener {
                 jo.put("type", "add-drone-ack");
                 jo.put("note", String.format(Locale.US, "You have an earlier waypoint at %d vs mine %d.", ts, fts));
                 jo.put("rid", dsString);
-                liveTrack.updateStatus(R2CRespEnum.forwardToClient);
+                liveTrack.updateStatus(R2CRespEnum.forwardToPeer);
                 addDroneSpecForOurPeer(ds);
             } else {
                 // on to the tie breaker:
-                double dfm = CaltopoClientMap.DistanceFromMeInMeters(lat, lng);
+                double dfm = CaltopoMap.DistanceFromMeInMeters(lat, lng);
                 double dfy = payload.optDouble("distance-from-me");
                 if (dfm < dfy) {
                     jo.put("type", "add-drone-nack");
@@ -762,10 +751,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
                     jo.put("type", "add-drone-ack");
                     jo.put("note", "Not closer to me.");
                     jo.put("rid", dsString);
-                    liveTrack.updateStatus(R2CRespEnum.forwardToClient);
+                    liveTrack.updateStatus(R2CRespEnum.forwardToPeer);
                     addDroneSpecForOurPeer(ds);
                 } else { // tie-breaker - always guaranteed to be different:
-                    if (CaltopoClientMap.GetMyUUID().compareTo(remoteUUID) < 0) {
+                    if (CaltopoMap.GetMyUUID().compareTo(remoteUUID) < 0) {
                         jo.put("type", "add-drone-nack");
                         jo.put("note", "My uuid is less than yours.");
                         jo.put("rid", dsString);
@@ -774,7 +763,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
                         jo.put("type", "add-drone-ack");
                         jo.put("note", "My uuid is greater than yours.");
                         jo.put("rid", dsString);
-                        liveTrack.updateStatus(R2CRespEnum.forwardToClient);
+                        liveTrack.updateStatus(R2CRespEnum.forwardToPeer);
                         addDroneSpecForOurPeer(ds);
                     }
                 }
@@ -834,13 +823,13 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
 
     public void newInboundConnection(@NonNull WsPipe wsPipe) {
-        CTDebug(TAG, "R2CRest: Received new inbound connection: " + System.identityHashCode(wsPipe));
+        CTDebug(TAG, "R2CPeer: Received new inbound connection: " + System.identityHashCode(wsPipe));
         this.wsPipe = wsPipe;
     }
 
     public void pipeIsClosing(@NonNull WsPipe wsPipe) {
         if (null != remoteIpAddr) {  // then this is an established connection closing:
-            CTError(TAG, "R2CRest: received pipeIsClosing().  Shutting down connection to " + wsPipe.getPeerName());
+            CTError(TAG, "R2CPeer: received pipeIsClosing().  Shutting down connection to " + wsPipe.getPeerName());
             shutdown(R2CListener.r2cState.down);
         } else { // else we're just trying to establish a connection - see if we have another addr to try:
             tryConnect();
@@ -851,7 +840,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         String peerName = wsPipe.getPeerName();
         ArrayList<String> ridList = new ArrayList<>();
 
-        for (Map.Entry<String, R2CRest>map : ClientRidMap.entrySet()) {
+        for (Map.Entry<String, R2CPeer>map : PeerRidMap.entrySet()) {
             if (this.equals(map.getValue())) {
                 ridList.add(map.getKey());
             }
@@ -860,7 +849,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         for (String rid : ridList) {
             CTDebug(TAG, String.format(Locale.US,
                     "handleLeaving(): Removing '%s' from the list of drones owned by %s", rid, peerName));
-            ClientRidMap.remove(rid);
+            PeerRidMap.remove(rid);
         }
         this.shutdown(R2CListener.r2cState.down);
         // don't bother replying - remote is on it's way out and we're lucky to be notified.
@@ -958,7 +947,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     }
 
-    /** ClientForRemoteR2c() - invoked from CaltopoClientMap to establish
+    /** PeerForRemoteR2c() - invoked from CaltopoMap to establish
      * connection with a peer specified by a Marker in Caltopo.
      * Use that info to look up an existing connection or establish a new one:
      *
@@ -976,10 +965,10 @@ public class R2CRest implements WsPipe.WsMsgListener {
      *          notification as they occure.
      */
     @NonNull
-    public static R2CRest ClientForRemoteR2c(@NonNull JSONObject remoteR2cSpec, @Nullable R2CListener listener) {
-        R2CRest r2cRest = ClientIdMap.get(remoteR2cSpec.optString("id"));
-        if (null == r2cRest) return new R2CRest(remoteR2cSpec, listener);
-        return r2cRest;
+    public static R2CPeer PeerForRemoteR2c(@NonNull JSONObject remoteR2cSpec, @Nullable R2CListener listener) {
+        R2CPeer R2CPeer = PeerIdMap.get(remoteR2cSpec.optString("id"));
+        if (null == R2CPeer) return new R2CPeer(remoteR2cSpec, listener);
+        return R2CPeer;
     }
 
     public static void SendDropDrone(String remoteId) {
@@ -989,10 +978,9 @@ public class R2CRest implements WsPipe.WsMsgListener {
         jo.put("type","drop-drone");
         jo.put("rid", remoteId);
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
-        for (Map.Entry<String,R2CRest> map : ClientIdMap.entrySet()) {
-            R2CRest client = map.getValue();
-            client.wsPipe.sendMessage(jo, 0, true);
-            client.sendMsgCount++;
+        for (R2CPeer peer : PeerIdMap.values()) {
+            peer.wsPipe.sendMessage(jo, 0, true);
+            peer.sendMsgCount++;
         }
     }
 
@@ -1010,21 +998,20 @@ public class R2CRest implements WsPipe.WsMsgListener {
         jo.put("drone-timestamp-ms", liveTrack.getFirstTimestamp());
         jo.put("lat", droneSpec.lastLat);
         jo.put("lng", droneSpec.lastLng);
-        jo.put("distance-from-me", CaltopoClientMap.DistanceFromMeInMeters(droneSpec.lastLat, droneSpec.lastLng));
+        jo.put("distance-from-me", CaltopoMap.DistanceFromMeInMeters(droneSpec.lastLat, droneSpec.lastLng));
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
 
         String rid = droneSpec.getRemoteId();
-        for (Map.Entry<String,R2CRest> map : ActiveClients.entrySet()) {
-            R2CRest client = map.getValue();
+        for (R2CPeer peer : ActivePeers.values()) {
             IncrementAckCountForRid(rid);
-            client.sendAddWithPayload(jo);
+            peer.sendAddWithPayload(jo);
         }
     }
 
     /** Start here for initial lookup of a new drone.
      *  Assumption is that all R2CInstances that are known have been instantiated,
      *  though may not yet have established connectivity.
-     *  If the client isn't found in any of the existing maps, we need to make
+     *  If the peer isn't found in any of the existing maps, we need to make
      *  sure some other R2C instance hasn't adopted it first.
      *
      * @param droneSpec our dronespec for the drone
@@ -1032,31 +1019,31 @@ public class R2CRest implements WsPipe.WsMsgListener {
      */
     public static R2CRespEnum StatusForNewRemoteId(@NonNull CaltopoLiveTrack liveTrack, @NonNull CtDroneSpec droneSpec) {
         String remoteId = droneSpec.getRemoteId();
-        R2CRespEnum status = R2CRespEnum.unknown;
+        R2CRespEnum status;
 
-        if (ClientIdMap.isEmpty() && ActiveClients.isEmpty()) {
+        if (PeerIdMap.isEmpty() && ActivePeers.isEmpty()) {
             OurDroneLiveTracks.put(remoteId, liveTrack);
             status = R2CRespEnum.okToPublishLocally;
         } else if (null != OurDroneLiveTracks.get(remoteId)) {
             status = R2CRespEnum.okToPublishLocally;
         } else {
-            R2CRest client = ClientRidMap.get(remoteId);
-            if (null != client) {
-                client.liveTracksUsingThisPeer.add(liveTrack);
-                status = R2CRespEnum.forwardToClient;
+            R2CPeer peer = PeerRidMap.get(remoteId);
+            if (null != peer) {
+                peer.liveTracksUsingThisPeer.add(liveTrack);
+                status = R2CRespEnum.forwardToPeer;
             } else {
                 AddDroneForLiveTrack(droneSpec, liveTrack);
                 status = R2CRespEnum.pending;
             }
         }
         CTDebug(TAG, String.format(Locale.US,
-                "StatusForNewRemoteId(): clientMap:%d, ActiveClients:%d, status:%s",
-                ClientIdMap.size(), ActiveClients.size(), status));
+                "StatusForNewRemoteId(): peerMap:%d, ActiveClients:%d, status:%s",
+                PeerIdMap.size(), ActivePeers.size(), status));
         return status;
     }
 
     private void sendAddWithPayload(JSONObject payload) {
-        if (null == wsPipe && null != ActiveClients.get(remoteUUID)) {
+        if (null == wsPipe && null != ActivePeers.get(remoteUUID)) {
             // We're still bringing up the connection.
             CTDebug(TAG, "sendAddWithPayload() pending: " + payload);
             DelayedExec.RunAfterDelayInMsec(() -> sendAddWithPayload(payload), 1000);
@@ -1066,25 +1053,24 @@ public class R2CRest implements WsPipe.WsMsgListener {
         sendMsgCount++;
     }
 
-    /** Find client for specified remote id.  This only returns a client
+    /** Find peer for specified remote id.  This only returns a peer
      *  if one has been assigned to the remote id.  This is not the way
-     *  to find out if a client has been assigned - use StatusForRemoteId
-     *  to find out if one has been assigned to a client first.
+     *  to find out if a peer has been assigned - use StatusForRemoteId
+     *  to find out if one has been assigned to a peer first.
      *
      * @param remoteId remote id string
-     * @return  Returns client handle if one exists, null otherwise.
+     * @return  Returns peer if one exists, null otherwise.
      */
     @Nullable
-    public static R2CRest ClientForRemoteId(@NonNull String remoteId) {
-        return ClientRidMap.get(remoteId);
+    public static R2CPeer PeerForRemoteId(@NonNull String remoteId) {
+        return PeerRidMap.get(remoteId);
     }
 
-    @Nullable
     public void sayHello() {
         if (0 != MyIpAddresses.length()) {
             Util.SafeJSONObject payload = new Util.SafeJSONObject();
             payload.put("type", "hello");
-            payload.put("my-id", CaltopoClientMap.GetMyUUID());
+            payload.put("my-id", CaltopoMap.GetMyUUID());
             payload.put("my-addrs", MyIpAddresses);
             payload.put("app-vers", R2CActivity.getMyAppVersion());
             payload.put("map-id", CaltopoClient.GetMapId());
@@ -1097,17 +1083,16 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     static class ServerTemplate implements WsPipe.WsMsgListener {
         private static final String TAG = "ServerTemplate";
-        private WsPipe wsPipe;
 
         /* N.B. We don't have the caller's remoteUUID yet, so we don't know
          * if we've already established an outgoing connection to them or not, so
-         * Go ahead and create a new R2CRest instance.   Once we get the
-         * remoteUUID and try to add it to ClientIdMap, that's when we'll figure
+         * Go ahead and create a new R2CPeer instance.   Once we get the
+         * remoteUUID and try to add it to PeerIdMap, that's when we'll figure
          * out the connection already exists and shutdown this one if it does.
          */
         public void newInboundConnection(@NonNull WsPipe wsPipe) {
             CTDebug(TAG, "new inbound connection");
-            new R2CRest(wsPipe);
+            new R2CPeer(wsPipe);
         }
 
         public void pipeIsClosing(@NonNull WsPipe wsPipe) {
@@ -1133,41 +1118,9 @@ public class R2CRest implements WsPipe.WsMsgListener {
         GetMyIpAddresses();
     }
 
-        /*
-            KeyManagerFactory keyManagerFactory = null;
-            KeyStore keyStore = null;
-            try {
-                SSLContext context = SSLContext.getDefault();
-                SSLParameters sslParameters = context.getSupportedSSLParameters();
-                CTDebug(TAG, "Supported TLS/SSL Application Protocols: " + Arrays.toString(sslParameters.getApplicationProtocols()));
-                CTDebug(TAG,"Enabled TLS/SSL Protocols: " + Arrays.toString(sslParameters.getProtocols()));
-
-                String storePassword = BuildConfig.STORE_PASSWORD;
-                InputStream inputStream;
-                Context appContext = DebugActivity.getAppContext();
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    inputStream = appContext.getResources().openRawResource(R.raw.keystore);
-                    keyStore = KeyStore.getInstance("PKCS12");
-                    keyStore.load(inputStream, storePassword.toCharArray());
-                    inputStream.close();
-                    keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-                    keyManagerFactory.init(keyStore, storePassword.toCharArray());
-                    port = R2CRest.Server.HTTPS_PORT;
-                    CTDebug(TAG, "HTTP.Server() listening for tls/ssl connections on port " + port);
-                } else {
-                    // Can't figure out how to get earlier versions of Android to load the keystore:
-                    CTDebug(TAG, "HTTP.Server() listening for cleartext connections on port " + port);
-                }
-            } catch (Exception e) {
-                CTError(TAG, "Init(): raised...", e);
-            }
-
-            Security.addProvider(new BouncyCastleProvider());
-         */
 
     public static JSONArray GetMyIpAddresses() {
         HashMap<String,JSONObject> map = new HashMap<>();
-        String key;
         boolean tunnelFound = false;
 
         if (0 != MyIpAddresses.length()) return MyIpAddresses;
@@ -1182,7 +1135,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
                     String ipaddr = inetAddress.getHostAddress();
                     // Check for valid, non-loopback IPv4 address
                     if (inetAddress.isLoopbackAddress() || !(inetAddress instanceof java.net.Inet4Address)) continue;
-                    key = netName + ":" + ipaddr;
+                    String key = netName + ":" + ipaddr;
                     JSONObject obj = new JSONObject();
                     obj.put("intf", netName);
                     obj.put("ipaddr", ipaddr);
@@ -1201,8 +1154,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
         String[] keyList = keySet.toArray(new String[0]);
         String[] remainderKeys = new String[keyList.length];
         int remainderCount = 0;
-        for (int i = 0; i < keyList.length; i++) {
-            key = keyList[i];
+        for (String key : keyList) {
             if (key.startsWith("tun")) {
                 tunnelFound = true;
                 MyIpAddresses.put(map.get(key));
@@ -1211,8 +1163,7 @@ public class R2CRest implements WsPipe.WsMsgListener {
             }
         }
         for (int i=0; i< remainderCount; i++) {
-            key = remainderKeys[i];
-            MyIpAddresses.put(map.get(key));
+            MyIpAddresses.put(map.get(remainderKeys[i]));
         }
         if (!tunnelFound) {
             ShowToast("No VPN tunnel found - ZeroTier network is down.");
@@ -1222,13 +1173,13 @@ public class R2CRest implements WsPipe.WsMsgListener {
 
     public void shutdown(R2CListener.r2cState state) {
         CTDebug(TAG, "Shutting down connection to " + peerName);
-        RemoveClient(this);
-        if (null != clientListener) {
-            clientListener.clientStatusChange(this, state);
-            clientListener = null;
+        RemovePeer(this);
+        if (null != peerListener) {
+            peerListener.peerStatusChange(this, state);
+            peerListener = null;
         }
-        R2CRest r2cClient = ClientIdMap.get(remoteUUID);
-        if (null != r2cClient) {
+        R2CPeer r2cPeer = PeerIdMap.get(remoteUUID);
+        if (null != r2cPeer) {
             // Then we have an established connection to leave. Be polite and say goodbye.
             JSONObject jo = new JSONObject();
             try {
@@ -1241,15 +1192,12 @@ public class R2CRest implements WsPipe.WsMsgListener {
             wsPipe.closeSocket(1000, "'leaving'.");
         }
 
-        /** FIXME: now the idea is to remove all references to this R2CRest instance
-         *         so it can go away quietly and others can take over reporting.
-         */
-        String[] ridKeyArray = new String[ClientRidMap.size()];
+        String[] ridKeyArray = new String[PeerRidMap.size()];
         int i = 0;
-        for (Map.Entry<String,R2CRest>ridEntry : ClientRidMap.entrySet()) {
+        for (Map.Entry<String,R2CPeer>ridEntry : PeerRidMap.entrySet()) {
             if (ridEntry.getValue() == this) ridKeyArray[i++] = ridEntry.getKey();
         }
-        for (int j=0; j<i; j++) ClientRidMap.remove(ridKeyArray[j]);
+        for (int j=0; j<i; j++) PeerRidMap.remove(ridKeyArray[j]);
 
         for (CaltopoLiveTrack liveTrack : liveTracksUsingThisPeer) {
             liveTrack.updateStatus(R2CRespEnum.reevaluate);
@@ -1261,12 +1209,12 @@ public class R2CRest implements WsPipe.WsMsgListener {
     public static void Shutdown() {
         try {
             StatusUpdatePoll.stop();
-            Set<String> keys = ClientIdMap.keySet();
+            Set<String> keys = PeerIdMap.keySet();
             String[] keyArray = keys.toArray(new String[0]);
             for (String key : keyArray) {
                 // Try to notify each of my peers that I'm leaving the group.
-                R2CRest client = ClientIdMap.get(key);
-                if (null != client) client.shutdown(R2CListener.r2cState.down);
+                R2CPeer peer = PeerIdMap.get(key);
+                if (null != peer) peer.shutdown(R2CListener.r2cState.down);
             }
             WsPipe.Shutdown();
         } catch (Exception e) {
@@ -1275,7 +1223,6 @@ public class R2CRest implements WsPipe.WsMsgListener {
     }
 
     protected void finalize() {
-        R2CRestCount--;
-        CTDebug(TAG, String.format(Locale.US, "finalize() down to %d instances.", R2CRestCount));
+        CTDebug(TAG, String.format(Locale.US, "finalize() instance %d releasing.", R2CPeerId));
     }
 }

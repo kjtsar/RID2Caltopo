@@ -1,10 +1,14 @@
-package org.ncssar.rid2caltopo.data;
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
 
-import org.jetbrains.annotations.Nullable;
+package org.ncssar.rid2caltopo.data;
 
 import java.io.Serial;
 import java.io.Serializable;
-import java.util.Locale;
 
 public class CaltopoSessionConfig implements Serializable {
 	@Serial
@@ -13,21 +17,9 @@ public class CaltopoSessionConfig implements Serializable {
     public String credentialId;
     public String credentialSecret; //
 	public String domainAndPort;    // "caltopo.com"
-	public static final String UNDEF_STR = "<undefined>";
 
 	public CaltopoSessionConfig() {
 		initialize();
-	}
-
-	public CaltopoSessionConfig(@Nullable CaltopoSessionConfig aConfig) {
-		if (null == aConfig) {
-			initialize();
-		} else {
-			domainAndPort = aConfig.domainAndPort;
-			teamId = aConfig.teamId;
-			credentialId = aConfig.credentialId;
-			credentialSecret = aConfig.credentialSecret;
-		}
 	}
 	private void initialize() {
 		domainAndPort = "caltopo.com";
@@ -42,20 +34,6 @@ public class CaltopoSessionConfig implements Serializable {
 		this.credentialId = credentialId;
 		this.credentialSecret = credentialSecret;
 	}
-    public void setCred(String teamId, String credentialId, String credentialSecret) {
-		this.teamId = teamId;
-		this.credentialId = credentialId;
-		this.credentialSecret = credentialSecret;
-    }
-
-    public String stringRep() {
-		return String.format(Locale.US,
-			     "teamId:%s, credentialId:%s, credentialSecret:%s, server:%s",
-			     null == teamId ? UNDEF_STR : teamId,
-			     null == credentialId ? UNDEF_STR : credentialId,
-			     null == credentialSecret ? UNDEF_STR : credentialSecret,
-			     null == domainAndPort ? UNDEF_STR : domainAndPort);
-    }
 
 	/**
 	 * Check supplied CaltopSessionConfig instance to see if it is legal.
@@ -66,11 +44,11 @@ public class CaltopoSessionConfig implements Serializable {
 	 * @return true if cfg not null and all the values are specified.
 	 */
 	public static boolean sniffTest(CaltopoSessionConfig cfg) {
-		if (null == cfg) return false;
-		if (null == cfg.teamId || cfg.teamId.isEmpty()) return false;
-		if (null == cfg.credentialId || cfg.credentialId.isEmpty()) return false;
-		if (null == cfg.credentialSecret || cfg.credentialSecret.isEmpty()) return false;
-        return null != cfg.domainAndPort && !cfg.domainAndPort.isEmpty();
+		if ((null == cfg) ||
+				(null == cfg.teamId || cfg.teamId.isEmpty()) ||
+				(null == cfg.credentialId || cfg.credentialId.isEmpty()) ||
+				(null == cfg.credentialSecret || cfg.credentialSecret.isEmpty())) return false;
+        return (null != cfg.domainAndPort && !cfg.domainAndPort.isEmpty());
     }
 
 	/**

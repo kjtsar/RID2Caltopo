@@ -1,11 +1,14 @@
 
 /*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
  *
  */
+
 package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
-import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.TimeDatestampString;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.UpdateDroneSpecs;
@@ -20,6 +23,7 @@ import org.opendroneid.android.data.Util;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.io.Serial;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Locale;
@@ -42,23 +46,25 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // listener applies to receive bulk notification whenever one or more dronespecs change.
         void onDroneSpecsChanged(@NonNull List<CtDroneSpec> droneSpecs);
     }
+    @Serial
     private static final long serialVersionUID = 2L;
     private static final String TAG = "CtDroneSpec";
     private static final String EMPTY_STRING = "";
+    private static long MostRecentWaypointTimestampInMsec = 0;
 
-    @NonNull private String remoteId;
+    @NonNull private final String remoteId;
     private String mappedId;   /* The track label prefix assigned to drone */
 
     private String org;
     private String owner;
     private String model; /* This is the concise text description of the drone. */
     private transient long mostRecentMsecTimestamp; /* timestamp of most recent packet received */
-    private transient R2CRest ownerR2c;
+    private transient long startMsecTimestamp;
+    private transient R2CPeer ownerR2c;
     private transient CtDroneSpecListener myListener;
     private transient CaltopoLiveTrack myLiveTrack;
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
     private transient int totalCount; // all waypoints, including those with bad coords and altitude.
-    private transient SimpleTimer flightSimpleTimer = new SimpleTimer();
     private transient String trackLabel;
     public transient double lastLat;
     public transient double lastLng;
@@ -74,7 +80,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         retval.put("org", org);
         retval.put("owner", owner);
         retval.put("model", model);
-        retval.put("startTimeInMsec", flightSimpleTimer.getStartTimeInMsec());
+        retval.put("startTimeInMsec", startMsecTimestamp);
+        retval.put("mostRecentTimeInMsec", mostRecentMsecTimestamp);
         retval.put(TransportTypeEnum.BT4.name(), transportCount[TransportTypeEnum.BT4.ordinal()]);
         retval.put(TransportTypeEnum.BT5.name(), transportCount[TransportTypeEnum.BT5.ordinal()]);
         retval.put(TransportTypeEnum.WIFI.name(), transportCount[TransportTypeEnum.WIFI.ordinal()]);
@@ -83,10 +90,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return retval;
     }
 
+    @Serial
     private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
         in.defaultReadObject();
         trackLabel = EMPTY_STRING;
-        flightSimpleTimer = new SimpleTimer();
+        startMsecTimestamp = 0;
         transportCount = new int[TransportTypeEnum.values().length];
     }
 
@@ -103,13 +111,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public void reset() { trackLabel = EMPTY_STRING; }
 
     public void start() {
-        if (null == flightSimpleTimer) flightSimpleTimer = new SimpleTimer();
-        else flightSimpleTimer.restartTimer();
+        startMsecTimestamp = System.currentTimeMillis();
         updateTrackLabel();
     }
 
     private void updateTrackLabel() {
-        trackLabel = mappedId + "_" + TimeDatestampString(flightSimpleTimer.getStartTimeInMsec());
+        trackLabel = mappedId + "_" + TimeDatestampString(startMsecTimestamp);
     }
 
     public void setMyLiveTrack(@Nullable CaltopoLiveTrack newTrack) {
@@ -120,7 +127,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public boolean publishingLocally() {return (null != myLiveTrack && myLiveTrack.publishingLocally());}
 
     public String getDurationInSecAsString() {
-        return (null != flightSimpleTimer) ? flightSimpleTimer.durationAsString() : "";
+        long durationInMsec = 0;
+        if (startMsecTimestamp < mostRecentMsecTimestamp) {
+            durationInMsec = mostRecentMsecTimestamp - startMsecTimestamp;
+        }
+        return SimpleTimer.DurationAsString(durationInMsec);
     }
 
     public int getTotalCount() {
@@ -151,7 +162,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         owner = jo.optString("owner");
         model = jo.optString("model");
         trackLabel = EMPTY_STRING;
-        flightSimpleTimer = new SimpleTimer(jo.optLong("startTimeInMsec"));
+        startMsecTimestamp = jo.optLong("startTimeInMsec");
+        mostRecentMsecTimestamp = jo.optLong("mostRecentTimeInMsec");
         transportCount[TransportTypeEnum.BT4.ordinal()] = jo.optInt(TransportTypeEnum.BT4.name(), 0);
         transportCount[TransportTypeEnum.BT5.ordinal()] = jo.optInt(TransportTypeEnum.BT5.name(), 0);
         transportCount[TransportTypeEnum.WIFI.ordinal()] = jo.optInt(TransportTypeEnum.WIFI.name(), 0);
@@ -187,11 +199,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         this.myListener = myListener;
     }
 
-    public void setMyR2cOwner(@NonNull R2CRest newOwnerR2c) {ownerR2c = newOwnerR2c;}
+    public void setMyR2cOwner(@NonNull R2CPeer newOwnerR2c) {ownerR2c = newOwnerR2c;}
     public void removeMyR2cOwner() {ownerR2c = null;}
 
     @Nullable
-    public R2CRest getMyR2cOwner() {return ownerR2c;}
+    public R2CPeer getMyR2cOwner() {return ownerR2c;}
 
     /** checkNewWaypoint()
      *
@@ -206,7 +218,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             UpdateDroneSpecs();
         }
         bumpTransportCount(transportType);
-        mostRecentMsecTimestamp = System.currentTimeMillis();
+        MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = System.currentTimeMillis();
         if (-1000 == altitudeInMeters || (0.0 == lat && 0.0 == lng)) {
             CTInfo(TAG, String.format(Locale.US,
                     "checkNewWaypoint(%s/%s) w/Invalid altitude %d and/or coordinates %.7f, %.7f - ignoring.",
@@ -231,6 +243,18 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      */
     public long idleTimeInMsec(long currentTimeInMsec) {
         return (currentTimeInMsec - mostRecentMsecTimestamp);
+    }
+
+    /** IdleTimeInMsec()
+     *
+     * @return Idle time since last waypoint was received - in Milliseconds.
+     */
+    public static long IdleTimeInMsec() {
+        if (0 == MostRecentWaypointTimestampInMsec) {
+            MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
+            return 0;
+        }
+        return System.currentTimeMillis() - MostRecentWaypointTimestampInMsec;
     }
 
     public String setMappedId(@NonNull String newMappedId) {
@@ -302,24 +326,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return this.remoteId.compareTo(other.remoteId);
     }
 
-    public boolean sameAs(@NonNull CtDroneSpec other) {
-        if (!other.remoteId.equals(this.remoteId)) return false;
-        if (!other.mappedId.equals(this.mappedId)) return false;
-        if (!other.org.equals(this.org)) return false;
-        if (!other.owner.equals(this.owner)) return false;
-        return other.model.equals(this.model);
-    }
-
-    @NonNull
-    public CtDroneSpec copy(@Nullable CtDroneSpec specToCopy) {
-        if (null == specToCopy) return new CtDroneSpec(remoteId, mappedId, org, model, owner);
-        specToCopy.remoteId = remoteId;
-        specToCopy.mappedId = mappedId;
-        specToCopy.org = org;
-        specToCopy.model = model;
-        specToCopy.owner = owner;
-        return specToCopy;
-    }
     public boolean isDifferentFrom(@NonNull CtDroneSpec other) {
         if (!other.remoteId.equals(this.remoteId)) return true;
         if (!other.mappedId.equals(this.mappedId)) return true;

@@ -1,3 +1,11 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.Image
@@ -27,14 +35,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.ncssar.rid2caltopo.R
-import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 
 
@@ -227,9 +232,9 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                     .padding(1.dp)
                     .fillMaxHeight()
             ) {
-                val r2cClient = drone.myR2cOwner
+                val r2cPeer = drone.myR2cOwner
                 val str : String
-                if (null != r2cClient) {
+                if (null != r2cPeer) {
                     str = drone.myR2cOwner!!.getRttString()
                 } else {
                     str = "n/a"

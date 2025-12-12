@@ -1,36 +1,29 @@
-package org.ncssar.rid2caltopo.data;
-// You will also need:
-import java.security.KeyPairGenerator;
-import java.security.KeyPair;
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
 
-import java.net.InetAddress;
+
+package org.ncssar.rid2caltopo.data;
+
+
 
 import okhttp3.Request;
 import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+import okhttp3.OkHttpClient;
+import okhttp3.mockwebserver.MockWebServer;
 
-import java.net.ServerSocket;
-
-
-import java.net.NetworkInterface;
 import java.security.KeyStore;
-import java.security.cert.CertificateException;
-import java.util.Collections;
-import java.util.List;
-import org.bouncycastle.asn1.x500.X500Name;
-import org.bouncycastle.cert.X509v3CertificateBuilder;
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
-import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
-
-import java.math.BigInteger;
-import java.security.cert.X509Certificate;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
@@ -56,17 +49,12 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import java.net.InetAddress;
 import javax.net.ssl.SSLSocketFactory;
 
-import okhttp3.Response;
-import okhttp3.WebSocket;
-import okhttp3.WebSocketListener;
-import okhttp3.OkHttpClient;
 
-import okhttp3.tls.HandshakeCertificates;
-import okhttp3.tls.HeldCertificate;
 import okio.ByteString;
-import okhttp3.mockwebserver.MockWebServer;
+
 
 
 /** Implement a bidirectional websockets connection.
@@ -85,18 +73,17 @@ import okhttp3.mockwebserver.MockWebServer;
   */
 public class WsPipe extends WebSocketListener {
     private static final String TAG = "WsPipe";
-    private static final String WS_PROTOCOL = "wss"; // FIXME: use "wss" for production and "ws" for test.
+    private static final String WS_PROTOCOL = "wss"; // use "wss" for production and "ws" for test.
     private static final int WS_PORT = 8443;
-    private static ExecutorService ExecutorPool = Executors.newFixedThreadPool(1);
+    private static final ExecutorService ExecutorPool = Executors.newFixedThreadPool(1);
     private static MockWebServer Server = null;
     private static OkHttpClient Client = null;
     private static final ArrayList<WsPipe> WsPipes = new ArrayList<>();
     private static Handler MainThreadHandler;
     private static int WsPipeCount = 0;
     private static SSLSocketFactory ClientSslSocketFactory;
-    private static X509TrustManager ClientTrustManager;
     private final Util.SimpleMovingAverage peerSmaRtt = new Util.SimpleMovingAverage(20);
-    private int pipeId;
+    private final int pipeId;
     private int sendMsgCount = 0;
     private String peerName;
     private WebSocket webSocket;
@@ -104,9 +91,7 @@ public class WsPipe extends WebSocketListener {
 
     // mutex to protect access by multiple threads.
     private final Object bgLock = new Object();
-    private HashMap<Integer, WsOutboundMessage> outboundMessages = new HashMap<>(10);
-    private static X509Certificate CaCert;
-    private static KeyPair CaKeyPair;
+    private final HashMap<Integer, WsOutboundMessage> outboundMessages = new HashMap<>(10);
 
     public int pendingResponseCount() { return outboundMessages.size(); }
 
@@ -122,7 +107,7 @@ public class WsPipe extends WebSocketListener {
         WsPipeCount++;
         pipeId = WsPipeCount;
         this.msgListener = msgListener;
-        String url = String.format(Locale.US, "%s://%s:%d/R2CRestV1", WS_PROTOCOL, ipaddr, WS_PORT);
+        String url = String.format(Locale.US, "%s://%s:%d/R2CPeerV1", WS_PROTOCOL, ipaddr, WS_PORT);
         CTDebug(TAG, String.format(Locale.US, "WsPipe(%d) Trying to connect to: '%s'", pipeId, url));
         Request request = new Request.Builder()
                 .url(url)
@@ -176,6 +161,7 @@ public class WsPipe extends WebSocketListener {
             try {
                 // Load the keystore from the app's resources
                 Context context = R2CActivity.getAppContext();
+                if (null == context) return;
                 InputStream keystoreInputStream = context.getResources().openRawResource(R.raw.keystore);
                 KeyStore keyStore = KeyStore.getInstance("PKCS12");
                 char[] password = "rid2caltopo".toCharArray(); // Replace with your actual password
@@ -194,10 +180,10 @@ public class WsPipe extends WebSocketListener {
                 sslContext.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), null);
 
                 ClientSslSocketFactory = sslContext.getSocketFactory();
-                ClientTrustManager = (X509TrustManager) trustManagerFactory.getTrustManagers()[0];
+                X509TrustManager clientTrustManager = (X509TrustManager) trustManagerFactory.getTrustManagers()[0];
 
                 Client = new OkHttpClient.Builder()
-                        .sslSocketFactory(ClientSslSocketFactory, ClientTrustManager)
+                        .sslSocketFactory(ClientSslSocketFactory, clientTrustManager)
                         .hostnameVerifier((hostname, session) -> true) // For development, we can bypass hostname verification
                         .build();
 
@@ -275,11 +261,8 @@ public class WsPipe extends WebSocketListener {
             return;
         }
         if (pendingResponseCount() > 3) {
-            // FIXME: Either we or our peer are suffering network connectivity problems.
-            //        U/I should already make clear that no updates are coming in/going out
-            //        of affected devices.
             CTDebug(TAG, String.format(Locale.US,
-                    "WsPipe(%d).sendMessage(): Blocking further messages to %s due to outstanding responses.",
+                    "WsPipe(%d).sendMessage(): Ignoring further messages to %s due to outstanding responses.",
                     pipeId, peerName));
             return;
         }
@@ -295,12 +278,12 @@ public class WsPipe extends WebSocketListener {
     }
 
     public static class WsOutboundMessage {
-        private Integer seqnum;
-        private Util.SafeJSONObject msgOut;
-        private long sentTimestampMsec;
+        private final Integer seqnum;
+        private final  Util.SafeJSONObject msgOut;
+        private final long sentTimestampMsec;
         private long recvTimestampMsec;
         int tag;
-        private boolean bgResponseOk;
+        private final boolean bgResponseOk;
         public WsOutboundMessage(@NonNull JSONObject msgPayload, WsPipe wsPipe, int tag, boolean bgResponseOk) {
             seqnum = ++wsPipe.sendMsgCount;
             wsPipe.addOutboundMessage(this);
@@ -363,7 +346,7 @@ public class WsPipe extends WebSocketListener {
     @Override
     public void onOpen(@NonNull WebSocket webSocket, @NonNull Response response) {
         setSocket(webSocket);
-        // Called when the connection is successfully established.
+        // Called when an inbound connection is successfully established.
         if (null == msgListener) {
             CTWarn(TAG, String.format(Locale.US,
                     "WsPipe(%d).onOpen(): Connection opened on server - no listener configured.", pipeId));

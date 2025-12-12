@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2025 Ken Taylor
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
 package org.ncssar.rid2caltopo.ui
 
 import androidx.lifecycle.ViewModel
@@ -24,6 +30,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _useDirect = MutableStateFlow(CaltopoClient.GetUseDirectFlag())
     val useDirect = _useDirect.asStateFlow()
 
+    private val _usePeers = MutableStateFlow(CaltopoClient.GetUsePeersFlag())
+    val usePeers = _usePeers.asStateFlow()
+
+    private val _maxIdleTimeInMinutes = MutableStateFlow(CaltopoClient.GetMaxIdleTimeInMinutes().toString())
+    val maxIdleTimeInMinutes = _maxIdleTimeInMinutes.asStateFlow()
+
     init {
         CaltopoClient.SetSettingsListener(this);
         settingsChanged(); // load initial values.
@@ -32,8 +44,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     override fun settingsChanged() {
         _groupId.value = CaltopoClient.GetGroupId()
         _useDirect.value = CaltopoClient.GetUseDirectFlag()
+        _usePeers.value = CaltopoClient.GetUsePeersFlag()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
+        _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
         _mapId.value = CaltopoClient.GetMapId()
     }
 
@@ -55,9 +69,15 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _newTrackDelay.value = newDelay
     }
 
+    fun onMaxIdleTimeInMinutesChanged(newVal: String) {
+        _maxIdleTimeInMinutes.value = newVal
+    }
 
     fun onUseDirectChanged(isDirect: Boolean) {
         _useDirect.value = isDirect
+    }
+    fun onUsePeersChanged(usePeers: Boolean) {
+        _usePeers.value = usePeers
     }
 
     fun saveSettings() {
@@ -65,6 +85,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetMapId(_mapId.value)
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }
+        _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetUseDirect(_useDirect.value)
+        CaltopoClient.SetUsePeers(_usePeers.value)
     }
 }

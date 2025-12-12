@@ -120,14 +120,22 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     public void mapStatusUpdate(CaltopoMap map, CaltopoMap.MapStatusListener.mapStatus mapStatusIn) {
         if (map == myMap) {
             mapStatus = mapStatusIn;
-            if (mapStatusIn == CaltopoMap.MapStatusListener.mapStatus.connecting) {
-                shuttingDown = false;
-                active = true;
-            }
-            CTDebug(TAG, String.format(Locale.US, "mapStatusUpdate(%s) %s is %s.  Status is:%s",
-                    getTrackLabel(), myMap.getMapId(), mapStatus, r2cStatus));
-            if (mapStatusIn == CaltopoMap.MapStatusListener.mapStatus.up) {
-                folderId = myMap.getFolderId();
+            CTDebug(TAG, String.format(Locale.US, "mapStatusUpdate(%s) %s is %s.  LiveTrack status is:%s",
+                    droneSpec.trackLabel(), myMap.getMapId(), mapStatus, r2cStatus));
+            switch (mapStatusIn) {
+                case connecting:  {
+                    shuttingDown = false;
+                    active = true;
+                    break;
+                }
+                case up: {
+                    folderId = myMap.getFolderId();
+                    break; // FIXME: proactively find out if it's ok to start publishing
+                           //        instead of waiting for next waypoint to come in.
+                }
+                case down: {
+                    break;
+                }
             }
         }
     }
@@ -149,8 +157,16 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     public void shutdown(long maxWaitInMilliseconds) {
         shuttingDown = true;
+        CTDebug(TAG, String.format(Locale.US, "shutdown(%d).", maxWaitInMilliseconds));
+        if (active && null != liveTrackId) try {
+            if (r2cStatus == okToPublishLocally) R2CPeer.SendDropDrone(myRemoteId);
+            myMap.removeLiveTrack(liveTrackId);
+            archiveTrackOnCaltopo(maxWaitInMilliseconds);
+        } catch (Exception e) {
+            CTError(TAG, String.format(Locale.US, "shutdown(%s) failed:", droneSpec.trackLabel()), e);
+        }
+        r2cStatus = unknown;
         active = false;
-        archiveTrackOnCaltopo(maxWaitInMilliseconds);
     }
 
     /** CaltopoMap periodically checks for updates to map features

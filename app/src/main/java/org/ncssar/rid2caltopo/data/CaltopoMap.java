@@ -228,7 +228,6 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             if (0 != maxWaitInMilliseconds)
                 maxWaitInMilliseconds = (maxWaitInMilliseconds - (System.currentTimeMillis() - startTime));
         }
-        liveTracks.clear();
         liveTracksById.clear();
 
         ArrayList<R2CPeer> peers = new ArrayList<>(peerIdMap.size());
@@ -913,7 +912,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     public static void Shutdown() {
         if (null != Csp) try {
-            for (CaltopoMap map : Maps) map.resetMapConnection(10 * 1000);
+            for (CaltopoMap map : Maps) map.resetMapConnection(15 * 1000);
             if (CaltopoClient.GetUsePeersFlag()) R2CPeer.Shutdown();
         } catch (Exception e) {
             CTError(TAG, "Shutdown() raised: ", e);

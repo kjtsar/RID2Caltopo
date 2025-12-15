@@ -133,7 +133,10 @@
         the developer appreciates the work of the &lt;a href=&quot;https://github.com/opendroneid&quot;&gt;opendronid&lt;/a&gt;
         consortium and makes use of their remote ID parser code in this app which is covered by the
         SPDX-License-Identifier: Apache-2.0.&lt;br&gt;&lt;br&gt;
-	For more detailed information about the RID2Caltopo app configuration and use, please consult the README at
+        For Disclaimer and Licensing, please refer to &lt;a href=&quot;https://github.com/kjtsar/RID2Caltopo/blob/main/DisclaimerLicense.md&quot;&gt;
+        https://github.com/kjtsar/RID2Caltopo/blob/main/DisclaimerLicense.md&lt;/a&gt;
+        &lt;br&gt;&lt;br&gt;
+        For more detailed information about the RID2Caltopo app configuration and use, please consult the README at
         &lt;a href=&quot;https://github.com/kjtsar/RID2Caltopo/blob/main/README.md&quot;&gt;https://github.com/kjtsar/RID2Caltopo/blob/main/README.md&lt;/a&gt;</string>
     <string name="bluetoothHelp">All devices should be able to receive Bluetooth 4 Legacy Advertising remote ID signals.&lt;br&gt;&lt;br&gt;
         To receive Bluetooth 5 Long Range remote ID signals, the device must support the &quot;Coded Phy&quot; feature and also the &quot;Extended Advertising&quot; feature.&lt;br&gt;&lt;br&gt;

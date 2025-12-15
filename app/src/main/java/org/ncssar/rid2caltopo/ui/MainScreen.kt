@@ -75,6 +75,7 @@ fun MainScreen(
                         })
                         DropdownMenuItem(text = { Text("Show Log") }, onClick = {
                             onShowLog()
+                            CaltopoClient.CTEvent("LogDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = {
@@ -85,10 +86,12 @@ fun MainScreen(
                         })
                         DropdownMenuItem(text = { Text("Scanners")}, onClick = {
                             onShowScanners()
+                            CaltopoClient.CTEvent("ScannersDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
                             onShowHelp()
+                            CaltopoClient.CTEvent("HelpDisplayed", null)
                             menuExpanded = false
                         })
                     }

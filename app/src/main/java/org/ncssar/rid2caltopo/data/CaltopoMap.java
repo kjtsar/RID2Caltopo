@@ -18,6 +18,7 @@ import org.ncssar.rid2caltopo.app.R2CActivity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.location.Location;
+import android.os.Bundle;
 import android.provider.Settings;
 
 import androidx.annotation.NonNull;
@@ -470,6 +471,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     private void setMapStatus(MapStatusListener.mapStatus mapStatus) {
         if (mapStatus != this.mapStatus) {
+            CaltopoClient.CTEvent("MapIs_" + mapStatus.toString(), null);
             this.mapStatus = mapStatus;
             if (!MapListeners.isEmpty()) {
                 CTDebug(TAG, "Signaling to listeners that map is " + mapStatus);

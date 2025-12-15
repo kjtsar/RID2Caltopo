@@ -17,6 +17,7 @@ import android.content.Intent;
 import android.content.res.Resources;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.provider.DocumentsContract;
 import android.util.Log;
 
@@ -29,6 +30,7 @@ import androidx.documentfile.provider.DocumentFile;
 import java.net.URL;
 import javax.net.ssl.HttpsURLConnection;
 
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -52,7 +54,7 @@ import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.ScanningService;
-
+import com.google.firebase.analytics.FirebaseAnalytics;
 
 /*
  * Persistent state management for CaltopoClient
@@ -164,6 +166,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static CaltopoMap MyCaltopoMap = null;
     private static Uri DebugLogPath = null;
     private static DelayedExec AppIdleDelay = new DelayedExec();
+    private static FirebaseAnalytics FBAnalytics;
 
     // CaltopoClient INSTANCE VARS:=
     private final String remoteId;
@@ -302,6 +305,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) {
             Log.e(TAG, "CTError: CTLog(): Sorry.  Maximum debugging output file size reached.  Future bits will be tossed on the floor.");
         }
+    }
+    public static void CTEvent(@NonNull String eventName, @Nullable Bundle parameters) {
+        FirebaseAnalytics fbAnalytics = GetFBAnalytics();
+        if (fbAnalytics == null) return;
+        String cleanEventName = eventName.replaceAll("[^a-zA-Z0-9]", "_");
+        fbAnalytics.logEvent("r2c_" + cleanEventName, parameters);
     }
 
     public static void CTInfo(String tag, String msg) {
@@ -948,6 +957,38 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs;
     }
 
+    private static FirebaseAnalytics GetFBAnalytics() {
+        if (null == FBAnalytics) {
+            Context context = R2CActivity.getAppContext();
+            if (null != context) {
+                FBAnalytics = FirebaseAnalytics.getInstance(context);
+            }
+        }
+        return FBAnalytics;
+    }
+
+    private static void SetFBDefaults() {
+        ClientClassState ccs = GetState();
+        FirebaseAnalytics fbAnalytics = GetFBAnalytics();
+        if (null == fbAnalytics) return;
+        try {
+            Bundle parameters = new Bundle();
+            parameters.putBoolean("r2c_mapId", !ccs.mapId.isEmpty());
+            parameters.putBoolean("r2c_groupId", !ccs.groupId.isEmpty());
+            parameters.putBoolean("r2c_ctCred", CaltopoSessionConfig.sniffTest(ccs.caltopoSessionConfig));
+            parameters.putBoolean("r2c_useDirect", ccs.useDirectFlag);
+            parameters.putLong("r2c_newTrackDelayInSeconds", ccs.newTrackDelayInSeconds);
+            parameters.putLong("r2c_minDistanceInFeet", ccs.minDistanceInFeet);
+            parameters.putBoolean("r2c_usePeers", ccs.usePeersFlag);
+            parameters.putLong("r2c_maxIdleTimeInMinutes", ccs.maxIdleTimeInMinutes);
+            parameters.putLong("r2c_debugLevel", ccs.debugLevel);
+            fbAnalytics.setDefaultEventParameters(parameters);
+
+        } catch (Exception e) {
+            CTError(TAG, "setFBDefaults() raised:", e);
+        }
+    }
+
     @NonNull
     private static ClientClassState GetState() {
         if (null == Ccstate) {
@@ -955,6 +996,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             if (null == ccs) ccs = new ClientClassState();
             Ccstate = ccs;
             CTDebug(TAG, "GetState(): " + Ccstate);
+            SetFBDefaults();
         }
         return Ccstate;
     }
@@ -970,7 +1012,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             oos.flush();
             oos.close();
             CTDebug(TAG, String.format(Locale.US, "ArchiveState(%s):\n%s", reason, Ccstate));
-
+            SetFBDefaults();
+            Bundle parameters = new Bundle();
+            parameters.putString("r2c_reason", reason);
+            CTEvent("ArchiveState", parameters);
             //  Files.move(Paths.get(MyTemporaryStateFileName), Paths.get(MyStateFileName), StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             CTError(TAG, "ArchiveState() raised:", e);
@@ -1207,6 +1252,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     maxIdleInMsec - idleInMsec, 0);
             return;
         }
+        CaltopoClient.CTEvent("MaxIdleExiting", null);
         CTDebug(TAG, String.format(Locale.US,
                 "App has been idle for %.3f minutes.  Exiting to save battery.",
                 idleInMsec / 60000.0));
@@ -1260,7 +1306,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             if (HttpsURLConnection.HTTP_OK != responseCode) {
                 // FIXME: Examine response.  If we get multiple failures and no successes,
                 //        we should stop publishing updates.
-                CTError(TAG, "https bad response: " + responseCode);
+                BufferedReader reader = new BufferedReader(new InputStreamReader(httpsConn.getErrorStream(),
+                        StandardCharsets.UTF_8));
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+                reader.close();
+                String responseString = response.toString();
+
+                CTError(TAG, "https bad response: " + responseCode + " :" + responseString);
+                Bundle parameters = new Bundle();
+                parameters.putInt("r2c_responseCode", responseCode);
+                parameters.putString("r2c_response", responseString);
+                CaltopoClient.CTEvent("PublishToLivetrackFailed", parameters);
             }
         } catch (IOException e) {
             CTError(TAG, "openConnection() raised:", e);

@@ -15,6 +15,7 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static java.lang.Thread.sleep;
 
 import android.net.Uri;
+import android.os.Bundle;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -286,7 +287,16 @@ public class CaltopoSession {
 					} catch (JSONException e) {
 						CTError(TAG, "parse JSON result raised: ", e);
 					}
-				} else opPassed = false;
+				} else {
+					opPassed = false;
+					Bundle parameters = new Bundle();
+					parameters.putInt("r2c_responseCode", op.responseCode);
+					parameters.putString("r2c_response", op.response);
+					parameters.putString("r2c_url", op.url);
+					parameters.putString("r2c_method", op.method.toString());
+					CaltopoClient.CTEvent("CaltopoOpFailed", parameters);
+					CaltopoClient.CTError(TAG, "CaltopoOpFailed" + op);
+				}
 				op.setOperationIsDone(opPassed); // Provide option to handle on main thread.
 				CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
 

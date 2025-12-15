@@ -311,6 +311,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (fbAnalytics == null) return;
         String cleanEventName = eventName.replaceAll("[^a-zA-Z0-9]", "_");
         fbAnalytics.logEvent("r2c_" + cleanEventName, parameters);
+        CTDebug(TAG, String.format(Locale.US, "CTEvent(r2c_%s): %s", cleanEventName, parameters));
     }
 
     public static void CTInfo(String tag, String msg) {
@@ -914,6 +915,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (null == client) {
             client = new CaltopoClient(remoteId);
             ClientMap.put(remoteId, client);
+            CTDebug(TAG, String.format(Locale.US,
+                    "ClientForRemoteId(): Instantiating client for '%s'", remoteId));
+        }
+
+        if (null == client.droneSpec) {
+            CTError(TAG, String.format(Locale.US,
+                    "ClientForRemoteId(): droneSpec missing for '%s'", remoteId));
         }
         return client;
     }
@@ -997,6 +1005,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             Ccstate = ccs;
             CTDebug(TAG, "GetState(): " + Ccstate);
             SetFBDefaults();
+            if (null != ccs.droneSpecTable && !ccs.droneSpecTable.isEmpty()) {
+                Bundle parameters = new Bundle();
+                ArrayList<String> mappedIds = new ArrayList<>();
+                for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+                    mappedIds.add(ds.getRemoteId() + ":" + ds.getMappedId());
+                }
+                parameters.putStringArrayList("r2c_mappedIds", mappedIds);
+                CTEvent("InitialState", parameters);
+            }
         }
         return Ccstate;
     }
@@ -1056,7 +1073,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 if (currentAgeOutInMsec <= 0) continue;
                 if (currentAgeOutInMsec < nextAgeOutInMsec) {
                     nextAgeOutInMsec = currentAgeOutInMsec;
-                    CTDebug(TAG, String.format(Locale.US,
+                    CTInfo(TAG, String.format(Locale.US,
                             "GetSortedCurrentDroneSpecArray(): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
                             ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
                     DsArray.add(ds);
@@ -1392,6 +1409,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public boolean newWaypoint(double lat, double lng, long altitudeInMeters, long droneTimestampInMilliseconds, CtDroneSpec.TransportTypeEnum transportType) {
         boolean useDirectFlag = GetUseDirectFlag();
 
+        if (null == droneSpec) {
+            CTError(TAG, String.format(Locale.US, "newWaypoint() droneSpec missing for %s", remoteId));
+            return false;
+        }
         if (droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) {
             CTDebug(TAG, String.format(Locale.US, "newWaypoint(): adding %.7f, %.7f to %s via %s...",
                     lat, lng, droneSpec.trackLabel(), transportType));

@@ -213,6 +213,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      *         to be recorded.
      */
     public boolean checkNewWaypoint(double lat, double lng, long altitudeInMeters, TransportTypeEnum transportType) {
+        if (null == trackLabel) trackLabel = EMPTY_STRING;
         if (trackLabel.isEmpty()) {
             start();
             UpdateDroneSpecs();

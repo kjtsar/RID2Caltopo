@@ -243,7 +243,6 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         }
         peerIdMap.clear();
         openMapOp = null;
-        updateMapOp = null;
         folderIdOp = null;
         folderId = null;
         archiveFolderIdOp = null;
@@ -455,7 +454,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     }
 
     private void updateMapFinished() {
-        if (updateMapOp.fail()) {
+        if (updateMapOp == null || updateMapOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to update map '%s':\n  %s",
                     mapId, updateMapOp));
             return;
@@ -474,7 +473,6 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             }
         }
 
-        this.updateMapOp = null;
         setMapStatus(MapStatusListener.mapStatus.up);
     }
 

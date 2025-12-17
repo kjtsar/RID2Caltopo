@@ -372,7 +372,9 @@ public class CaltopoSession {
         long lastSyncTimestamp = 0;
 		if (!mapId.equals(this.mapId)) {
 			this.mapId = mapId;
+			CTDebug(TAG, "openMap(): Requesting entire map for " + mapId);
 		} else if (null != lastOpenMapOp && lastOpenMapOp.isDone() && !lastOpenMapOp.fail()) {
+			CTDebug(TAG, "openMap(): Just pulling in updates for " + mapId);
 			lastSyncTimestamp = lastOpenMapOp.sentTimestampMsec;
 		}
 
@@ -602,13 +604,15 @@ public class CaltopoSession {
 
 	@NonNull
 	public CaltopoOp addLiveTrackPoint(@NonNull String groupId, @NonNull String deviceId,
-									   double lat, double lng, @Nullable Runnable optRunnable) {
+									   double lat, double lng, double eleMeters, @Nullable Runnable optRunnable) {
 		String latStr = String.format(Locale.US, "%.7f", lat);
 		String lngStr = String.format(Locale.US, "%.7f", lng);
+		Long ele = (long)eleMeters;
 		String url = "https://caltopo.com/api/v1/position/report/" + groupId + "?" +
 				EncodeParm("id", deviceId) + "&" +
 				EncodeParm("lat", latStr) + "&" +
-				EncodeParm("lng", lngStr);
+				EncodeParm("lng", lngStr) + "&" +
+				EncodeParm("ele", ele.toString());
 
 		CaltopoOp op = new CaltopoOp(optRunnable);
 		sendRequest(op, CtsMethod_t.GET, url, null, true);

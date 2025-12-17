@@ -58,7 +58,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String org;
     private String owner;
     private String model; /* This is the concise text description of the drone. */
-    private transient long mostRecentMsecTimestamp; /* timestamp of most recent packet received */
+    private transient long mostRecentMsecTimestamp; /* timestamp of most recent good packet received */
     private transient long startMsecTimestamp;
     private transient R2CPeer ownerR2c;
     private transient CtDroneSpecListener myListener;
@@ -110,11 +110,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public void reset() { trackLabel = EMPTY_STRING; }
 
-    public void start() {
-        startMsecTimestamp = System.currentTimeMillis();
-        updateTrackLabel();
-    }
-
     private void updateTrackLabel() {
         trackLabel = mappedId + "_" + TimeDatestampString(startMsecTimestamp);
     }
@@ -128,7 +123,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public String getDurationInSecAsString() {
         long durationInMsec = 0;
-        if (startMsecTimestamp < mostRecentMsecTimestamp) {
+        if (startMsecTimestamp > 0 && (startMsecTimestamp < mostRecentMsecTimestamp)) {
             durationInMsec = mostRecentMsecTimestamp - startMsecTimestamp;
         }
         return SimpleTimer.DurationAsString(durationInMsec);
@@ -136,6 +131,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public int getTotalCount() {
         return totalCount;
+    }
+
+    public int getGoodCount() {
+        return goodCount;
     }
 
     public CtDroneSpec() throws RuntimeException {
@@ -213,13 +212,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      *         to be recorded.
      */
     public boolean checkNewWaypoint(double lat, double lng, long altitudeInMeters, TransportTypeEnum transportType) {
+        bumpTransportCount(transportType);
         if (null == trackLabel) trackLabel = EMPTY_STRING;
         if (trackLabel.isEmpty()) {
-            start();
+            trackLabel = mappedId;
             UpdateDroneSpecs();
         }
-        bumpTransportCount(transportType);
-        MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = System.currentTimeMillis();
         if (-1000 == altitudeInMeters || (0.0 == lat && 0.0 == lng)) {
             CTInfo(TAG, String.format(Locale.US,
                     "checkNewWaypoint(%s/%s) w/Invalid altitude %d and/or coordinates %.7f, %.7f - ignoring.",
@@ -232,6 +230,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
         double distanceInFeet = dbResult[0] * feetPerMeter;
         if (distanceInFeet < CaltopoClient.GetMinDistanceInFeet()) return false;
+        long msecTimestamp = System.currentTimeMillis();
+        if (goodCount == 0) {  // Start the clock ticking with first good waypoint.
+            startMsecTimestamp = msecTimestamp;
+            updateTrackLabel();
+        }
+        MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = msecTimestamp;
         lastLat = lat; lastLng = lng; goodCount++;
         CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f", distanceInFeet));
         return true;

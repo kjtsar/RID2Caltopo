@@ -258,7 +258,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(480.dp)
+            modifier = Modifier.width(560.dp)
         ) {
             Text(
                 text = "Waypoints Received",
@@ -310,6 +310,15 @@ fun RidmapHeader() {
                 )
                 Text(
                     text = "R2C:",
+                    modifier = Modifier
+                        .width(80.dp)
+                        .height(25.dp)
+                        .background(MaterialTheme.colorScheme.surface),
+                    textAlign = TextAlign.Right,
+                    fontSize = 18.sp
+                )
+                Text(
+                    text = "Good:",
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)

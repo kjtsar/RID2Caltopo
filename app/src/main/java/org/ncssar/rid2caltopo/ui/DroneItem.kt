@@ -208,6 +208,19 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             ) {
                 Text(
                     modifier = Modifier.align(Alignment.End),
+                    text = "${drone.goodCount}",
+                    textAlign = TextAlign.Right)
+            }
+            Column(
+                modifier = Modifier
+                    .width( 80.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(1.dp)
+                    .fillMaxHeight(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    modifier = Modifier.align(Alignment.End),
                     text = "${drone.totalCount}",
                     textAlign = TextAlign.Right)
             }

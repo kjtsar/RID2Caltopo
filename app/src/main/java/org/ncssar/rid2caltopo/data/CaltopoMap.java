@@ -33,9 +33,11 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /** CaltopoMap class
@@ -311,19 +313,23 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         }
         JSONArray features = state.optJSONArray("features");
         int count = (null == features) ? 0: features.length();
-        int newCount = 0;
+        int newCount = 0, ignoreCount = 0;
         for (int i = 0; i < count; i++) {
             JSONObject feature = features.optJSONObject(i);
             JSONObject prop = feature.optJSONObject("properties");
             if (null == prop) {
                 CTDebug(TAG, "parseMapUpdate(): Feature missing required properties parameter.");
+                ignoreCount++;
                 continue;
             }
             String thisFolderId = prop.optString("folderId");
             String classStr = prop.optString("class");
             if (!folderId.equals(thisFolderId) && !classStr.equals("Folder")) {
-                CTDebug(TAG, String.format(Locale.US, "parseMapUpdate(): feature folder id '%s' doesn't match our folder id '%s': %s",
-                        thisFolderId, folderId, feature));
+                if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
+                    CTInfo(TAG, String.format(Locale.US, "parseMapUpdate(): feature folder id '%s' doesn't match our folder id '%s': %s",
+                            thisFolderId, folderId, feature));
+                }
+                ignoreCount++;
                 continue;
             }
             String classString = prop.optString("class");
@@ -337,6 +343,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                     liveTrack.checkCaltopoTrackLabel(title);
                 } else {
                     CTDebug(TAG, "parseMapUpdate(): liveTrack is not one of ours - ignoring");
+                    ignoreCount++;
                 }
             } else if ("Marker".equals(classString)) {
                 if (!usePeersFlag || MyUUID.equals(idString) || peerIdMap.containsKey(idString)) continue;
@@ -358,8 +365,10 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                 }
             }
         }
-        if (newCount > 0) {
-            CTDebug(TAG, String.format(Locale.US, "parseMapUpdate() found %d new features since my last visit.", newCount));
+        if (newCount > 0 || ignoreCount > 0) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "parseMapUpdate() ignored %d new features.\n  Found %d new peers since my last visit.",
+                    ignoreCount, newCount));
         }
     }
 
@@ -464,8 +473,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                 CTError(TAG, "updateMapFinished(): parseMapUpdate() raised. ", e);
             }
         }
-// TODO: Uncomment the following to keep checking the map:
-//         this.updateMapOp = null;
+
+        this.updateMapOp = null;
         setMapStatus(MapStatusListener.mapStatus.up);
     }
 
@@ -741,14 +750,15 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         if (null == feature) {
             if (null == myMarkerOp || !myMarkerOp.isDone() || !myMarkerOp.success()) return;
             feature = myMarkerOp.getResponse();
-            if (null == feature) return;
+            if (null == feature) {
+                CTDebug(TAG, "updateMyMarker(null): missing marker feature.");
+                return;
+            }
         }
 
         // Our marker feature s/b/ valid at this point, so start polling for updates...
-        if (null == updateMapOp) {
-            CTInfo(TAG, "updating map connection()");
-            updateMapOp = Csp.openMap(mapId, this::updateMapFinished);
-        }
+        CTInfo(TAG, "updating map connection()");
+        updateMapOp = Csp.openMap(mapId, this::updateMapFinished);
 
         JSONObject geometry = feature.optJSONObject("geometry");
         if (null != MyLocation) try {
@@ -802,8 +812,23 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                     .append(stats)
                     .append("\n");
         }
-        if (builder.length() > 0) return builder.toString();
-        return R2CPeer.GetMyIpAddresses().toString();
+
+        if (builder.length() == 0) { // then we're still on our own.  Display our addr's and drones:
+            builder.append(R2CPeer.GetMyIpAddresses().toString());
+            for (CaltopoLiveTrack liveTrack : liveTracksById.values()) {
+                if (liveTrack.isActive()) {
+                    CtDroneSpec ds = liveTrack.getDroneSpec();
+                    builder.append("\n  ")
+                            .append(ds.trackLabel())
+                            .append("(")
+                            .append(ds.getGoodCount())
+                            .append("/")
+                            .append(ds.getTotalCount())
+                            .append(")");
+                }
+            }
+        }
+        return builder.toString();
     }
 
     private void lookForExistingLiveTracks() {

@@ -48,7 +48,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     private CaltopoOp renameTrackOp;
     private CaltopoOp liveTrackOp;
     private String liveTrackId;
-    private final LinkedList<double[]> linePoints = new LinkedList<>(); // array of arrays of [lat,lng] pairs
+    private final LinkedList<double[]> linePoints = new LinkedList<>(); // array of arrays of [lat,lng,ele] pairs
     private int linePointsSentCount;
     private String folderId;
     private final CaltopoMap myMap;
@@ -63,7 +63,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
     private CaltopoMap.MapStatusListener.mapStatus mapStatus;
     public CaltopoLiveTrack(@NonNull CaltopoMap map, @NonNull String groupId,
-                            @NonNull CtDroneSpec droneSpec, double lat, double lng,long droneTimestampInMsec) throws RuntimeException {
+                            @NonNull CtDroneSpec droneSpec, double lat, double lng, double ele, long droneTimestampInMsec) throws RuntimeException {
         if (droneSpec.trackLabel().isEmpty() || groupId.isEmpty()) {
             throw new RuntimeException("CaltopoLiveTrack(): trackLabel and groupId are both required.");
         }
@@ -79,7 +79,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         droneSpec.setMyLiveTrack(this);
         this.r2cStatus = unknown;
 
-        double[] point = {lat, lng, (double)droneTimestampInMsec};
+        double[] point = {lat, lng, ele, (double)droneTimestampInMsec};
         linePoints.add(point);
         linePointsSentCount = 0;
 
@@ -90,10 +90,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     /*
      */
-    public void startNewTrack(double lat, double lng, long droneTimestampInMsec) {
+    public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec) {
         if (shuttingDown) return;
 
-        double[] point = {lat, lng, (double)droneTimestampInMsec};
+        double[] point = {lat, lng, ele, (double)droneTimestampInMsec};
         linePoints.add(point);
         linePointsSentCount = 0;
         startLiveTrackOp = null;
@@ -148,7 +148,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     public long getFirstTimestamp() {
         if (linePoints.isEmpty()) return -1;
         double[] point = linePoints.getFirst();
-        return (long)point[2];
+        return (long)point[3];
     }
 
     public static CaltopoLiveTrack GetLiveTrackForRemoteId(@NonNull String remoteId) {
@@ -214,6 +214,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             JSONArray pointArray = new JSONArray();
             pointArray.put(String.format(Locale.US, "%.7f", point[1]));
             pointArray.put(String.format(Locale.US, "%.7f", point[0]));
+            pointArray.put(String.format(Locale.US, "%f", point[2]));
             jsonArray.put(pointArray);
         }
         String archiveFolderId = myMap.getArchiveFolderId();
@@ -253,6 +254,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     public String getTrackLabel() {
         if (isActive()) return droneSpec.trackLabel();
         return "<not active>";
+    }
+
+    public CtDroneSpec getDroneSpec() {
+        return droneSpec;
     }
 
     public void renameTrackCompleted() {
@@ -360,7 +365,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             while (!linePoints.isEmpty()) {
                 double[] point;
                 point = linePoints.getFirst();
-                if ((long) point[2] <= minAge) {
+                if ((long) point[3] <= minAge) {
                     linePoints.removeFirst();
                 } else break;
             }
@@ -393,7 +398,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     public void publishDirect(double lat, double lng, long altitudeInMeters, long droneTimestampInMillisec) {
-        double[] point = {lat, lng, (double)droneTimestampInMillisec};
+        double[] point = {lat, lng, (double)altitudeInMeters, (double)droneTimestampInMillisec};
         linePoints.add(point);
         CTDebug(TAG, String.format(Locale.US,
                 "publishDirect(%s/%s): added waypoint to queue. size is %d",
@@ -403,7 +408,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             case forwardToPeer: {
                 if (null == r2cPeer) r2cPeer = R2CPeer.PeerForRemoteId(myRemoteId);
                 if (null != r2cPeer) {
-                    r2cPeer.reportSeen(droneSpec, lat, lng, droneTimestampInMillisec);
+                    r2cPeer.reportSeen(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMillisec);
                 } else {
                     CTError(TAG, "publishDirect(): no peer to forward to.");
                 }
@@ -448,9 +453,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
                 int pointCount = linePoints.size();
                 if (linePointsSentCount < pointCount) {
                     double[] point = linePoints.get(linePointsSentCount++);
-                    CTDebug(TAG, String.format(Locale.US, "forwardNextWaypoint(%s-%s#%d): adding %.7f,%.7f to LiveTrack.  Avg rtt is %.3f seconds.",
-                            myGroupId, myRemoteId, linePointsSentCount, point[0], point[1], (double)CaltopoRttInMsec.get() / 1000.0));
-                    liveTrackOp = myMap.session().addLiveTrackPoint(myGroupId, myRemoteId, point[0], point[1], this::forwardNextWaypoint);
+                    CTDebug(TAG, String.format(Locale.US, "forwardNextWaypoint(%s-%s#%d): adding %.7f,%.7f@%dm to LiveTrack.  Avg rtt is %.3f seconds.",
+                            myGroupId, myRemoteId, linePointsSentCount, point[0], point[1], (long)point[2],(double)CaltopoRttInMsec.get() / 1000.0));
+                    liveTrackOp = myMap.session().addLiveTrackPoint(myGroupId, myRemoteId, point[0], point[1], point[2], this::forwardNextWaypoint);
                 }
             } catch (Exception e) {
                 CTError(TAG, "forwardNextWaypoint(): addLiveTrackPoint() raised: ", e);

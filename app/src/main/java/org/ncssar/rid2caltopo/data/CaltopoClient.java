@@ -84,7 +84,7 @@ class ClientClassState implements Serializable {
         mapId = "";
         useDirectFlag = false;
         usePeersFlag = true;
-        newTrackDelayInSeconds = 20;
+        newTrackDelayInSeconds = 30;
         maxIdleTimeInMinutes = 120;
         debugLevel = -1; // undefined.
         droneSpecTable = new Hashtable<>(16);
@@ -1307,9 +1307,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      *  the track writing without a map, but possibly with R2CPeers?  That
      *  would make sense if we can get broadcast/rendezvous working.
      */
-    public void bgPublishLive(String groupId, String deviceId, double lat, double lng) {
-        String https_url = String.format(Locale.US, "%s%s?id=%s&lat=%.6f&lng=%.6f",
-                BASE_URL, groupId, deviceId, lat, lng);
+    public void bgPublishLive(String groupId, String deviceId, double lat, double lng, long altitudeInMeters) {
+        String https_url = String.format(Locale.US, "%s%s?id=%s&lat=%.6f&lng=%.6f&ele=%d",
+                BASE_URL, groupId, deviceId, lat, lng, altitudeInMeters);
         try {
             URL url = new URL(https_url);
             HttpsURLConnection httpsConn;
@@ -1346,12 +1346,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
-    public void publishLive(double lat, double lng, String groupId) {
+    public void publishLive(double lat, double lng, long altitudeInMeters, String groupId) {
         try {
             if (null == ExecutorPool) {
                 ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
             }
-            ExecutorPool.submit(() -> bgPublishLive(groupId, droneSpec.getRemoteId(), lat, lng));
+            ExecutorPool.submit(() -> bgPublishLive(groupId, droneSpec.getRemoteId(), lat, lng, altitudeInMeters));
         } catch (Exception e) {
             CTError(TAG, "executorPool.submit() raised:", e);
             if (null != ExecutorPool) {
@@ -1413,60 +1413,60 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTError(TAG, String.format(Locale.US, "newWaypoint() droneSpec missing for %s", remoteId));
             return false;
         }
-        if (droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) {
-            CTDebug(TAG, String.format(Locale.US, "newWaypoint(): adding %.7f, %.7f to %s via %s...",
-                    lat, lng, droneSpec.trackLabel(), transportType));
-            WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
-            String groupId = GetGroupId();
-            if (groupId.isEmpty()) {
-                if (!WarnMissingGroupId) {
-                    ShowToast("Can't forward waypoint to caltopo - 'groupId' not specified in Settings panel.");
-                    WarnMissingGroupId = true;
+        if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) return false;
+
+        CTDebug(TAG, String.format(Locale.US, "newWaypoint(): adding %.7f, %.7f to %s via %s...",
+                lat, lng, droneSpec.trackLabel(), transportType));
+        WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
+        String groupId = GetGroupId();
+        if (groupId.isEmpty()) {
+            if (!WarnMissingGroupId) {
+                ShowToast("Can't forward waypoint to caltopo - 'groupId' not specified in Settings panel.");
+                WarnMissingGroupId = true;
+            }
+            return true;
+        } else WarnMissingGroupId = false;
+
+        if (useDirectFlag) {
+            String mapId = GetMapId();
+            if (mapId.isEmpty()) {
+                if (!WarnMissingMapFlag) {
+                    ShowToast("Can't forward waypoint to caltopo - 'mapId' not specified in Settings panel.");
+                    WarnMissingMapFlag = true;
                 }
                 return true;
-            } else WarnMissingGroupId = false;
+            } else WarnMissingMapFlag = false;
 
-            if (useDirectFlag) {
-                String mapId = GetMapId();
-                if (mapId.isEmpty()) {
-                    if (!WarnMissingMapFlag) {
-                        ShowToast("Can't forward waypoint to caltopo - 'mapId' not specified in Settings panel.");
-                        WarnMissingMapFlag = true;
-                    }
-                    return true;
-                } else WarnMissingMapFlag = false;
-
-                if (null == MyCaltopoMap) {
-                    if (!WarnConnectingToMapFlag) {
-                        ConnectToMap("newWaypoint()");
-                        ShowToast("Connecting to map...");
-                        WarnConnectingToMapFlag = true;
-                    }
-                    return true;
-                } else WarnConnectingToMapFlag = false;
-
-                if (null == liveTrack) {
-                    CTDebug(TAG, "newWaypoint(): starting new liveTrack for: " + droneSpec.trackLabel());
-                    liveTrack = new CaltopoLiveTrack(MyCaltopoMap, GetGroupId(), droneSpec, lat, lng, droneTimestampInMilliseconds);
-                } else if (liveTrack.isActive()) {
-                    liveTrack.publishDirect(lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
-                } else {
-                    CTDebug(TAG, "newWaypoint(): restarting liveTrack: " + droneSpec.trackLabel());
-                    liveTrack.startNewTrack(lat, lng, droneTimestampInMilliseconds);
+            if (null == MyCaltopoMap) {
+                if (!WarnConnectingToMapFlag) {
+                    ConnectToMap("newWaypoint()");
+                    ShowToast("Connecting to map...");
+                    WarnConnectingToMapFlag = true;
                 }
+                return true;
+            } else WarnConnectingToMapFlag = false;
 
-                // Use the idleTimeoutPoll to identify dead tracks.
-                if (!idleTimeoutPoll.isRunning()) {
-                    idleTimeoutPoll.start(this::checkIdleTime,
-                            GetNewTrackDelayInSeconds() * 1000, 0);
-                }
+            if (null == liveTrack) {
+                CTDebug(TAG, "newWaypoint(): starting new liveTrack for: " + droneSpec.trackLabel());
+                liveTrack = new CaltopoLiveTrack(MyCaltopoMap, GetGroupId(), droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
+            } else if (liveTrack.isActive()) {
+                liveTrack.publishDirect(lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
             } else {
-                // FIXME: This tries to publish to a LiveTrack created in Caltopo by someone...
-                try {
-                    publishLive(lat, lng, groupId);
-                } catch (Exception e) {
-                    CTError(TAG, "publishLive() raised:", e);
-                }
+                CTDebug(TAG, "newWaypoint(): restarting liveTrack: " + droneSpec.trackLabel());
+                liveTrack.startNewTrack(lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
+            }
+
+            // Use the idleTimeoutPoll to identify dead tracks.
+            if (!idleTimeoutPoll.isRunning()) {
+                idleTimeoutPoll.start(this::checkIdleTime,
+                        GetNewTrackDelayInSeconds() * 1000, 0);
+            }
+        } else {
+            // FIXME: This tries to publish to a LiveTrack created in Caltopo by someone...
+            try {
+                publishLive(lat, lng, altitudeInMeters, groupId);
+            } catch (Exception e) {
+                CTError(TAG, "publishLive() raised:", e);
             }
         }
         return true;

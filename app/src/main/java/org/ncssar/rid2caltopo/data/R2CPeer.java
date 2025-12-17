@@ -806,7 +806,8 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         long ts = payload.optLong("ts");
         double lat = payload.optDouble("lat");
         double lng = payload.optDouble("lng");
-        boolean archived = ctClient.newWaypoint(lat, lng, 0, ts, CtDroneSpec.TransportTypeEnum.R2C);
+        long altitude = payload.optLong("alt");
+        boolean archived = ctClient.newWaypoint(lat, lng, altitude, ts, CtDroneSpec.TransportTypeEnum.R2C);
 
         JSONObject retPayload = new JSONObject();
         try {
@@ -931,7 +932,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
      * @param lng Longitude of the last waypoint update received.
      * @param droneTimestampInMsec timestamp of last update received.
      */
-    public void reportSeen(CtDroneSpec droneSpec, double lat, double lng, long droneTimestampInMsec) throws RuntimeException {
+    public void reportSeen(CtDroneSpec droneSpec, double lat, double lng, long altitudeInMeters, long droneTimestampInMsec) throws RuntimeException {
         if (outstandingSeen) return;
         Util.SafeJSONObject jo = new Util.SafeJSONObject();
         jo.put("type", "seen");
@@ -940,6 +941,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         jo.put("rid", droneSpec.getRemoteId());
         jo.put("lat", lat);
         jo.put("lng", lng);
+        jo.put("alt", altitudeInMeters);
         jo.put("ts", droneTimestampInMsec);
         wsPipe.sendMessage(jo, 0, false);
         outstandingSeen = true;

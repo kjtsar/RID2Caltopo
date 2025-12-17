@@ -108,7 +108,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return transportCount[tt.ordinal()];
     }
 
-    public void reset() { trackLabel = EMPTY_STRING; }
+    public void reset() {
+        trackLabel = EMPTY_STRING;
+        goodCount = 0;
+        totalCount = 0;
+        startMsecTimestamp = mostRecentMsecTimestamp = 0;
+        int length = TransportTypeEnum.values().length;
+        for (int i = 0; i < length; i++) transportCount[i] = 0;
+    }
 
     private void updateTrackLabel() {
         trackLabel = mappedId + "_" + TimeDatestampString(startMsecTimestamp);
@@ -255,10 +262,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      * @return Idle time since last waypoint was received - in Milliseconds.
      */
     public static long IdleTimeInMsec() {
-        if (0 == MostRecentWaypointTimestampInMsec) {
-            MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
-            return 0;
-        }
+        if (0 == MostRecentWaypointTimestampInMsec) return 0;
         return System.currentTimeMillis() - MostRecentWaypointTimestampInMsec;
     }
 
@@ -287,11 +291,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public String getRemoteId() { return remoteId;}
     public String getMappedId() { return mappedId;}
     public String getOrg() { return org;}
-    public String setOrg(String newVal) { return org = newVal;}
+    public void setOrg(String newVal) { org = newVal;}
     public String getModel() { return model;}
-    public String setModel(String newVal) { return model = newVal;}
+    public void setModel(String newVal) { model = newVal;}
     public String getOwner() { return owner;}
-    public String setOwner(String newVal) { return owner = newVal;}
+    public void setOwner(String newVal) { owner = newVal;}
 
 
     /** merge a new dronespec into this spec.

@@ -147,8 +147,12 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         liveTracksById.put(trackId, track);
     }
     public void removeLiveTrack(@NonNull String trackId) {
-        CTDebug(TAG, "removeLiveTrack(): removing liveTrack with id: " + trackId);
-        liveTracksById.remove(trackId);
+        CaltopoLiveTrack liveTrack = liveTracksById.remove(trackId);
+        if (null != liveTrack) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "removeLiveTrack(%s): removing liveTrack %s",
+                    mapId, liveTrack.getTrackLabel()));
+        }
     }
 
     public static float DistanceFromMeInMeters(double lat, double lng) {
@@ -210,8 +214,6 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             for (CaltopoLiveTrack track : liveTracks) {
                 track.finishTrack("Map change");
             }
-            // Then delete our marker before switching over to the new map.
-            Csp.deleteMarkerWithId(MyUUID, null);
             resetMapConnection(0);
         } else if (mapStatus != MapStatusListener.mapStatus.down && !mapId.isEmpty()) {
             CTDebug(TAG, "setMapId(): ignoring attempt to change to existing map.");
@@ -221,12 +223,13 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     }
 
     public void resetMapConnection(long maxWaitInMilliseconds) {
+        if (null == openMapOp) return;
+
         setMapStatus(MapStatusListener.mapStatus.down);
         mapCheckerDelay.stop();
         long startTime = System.currentTimeMillis();
         if (null != Csp) Csp.deleteMarkerWithId(MyUUID, null);
         for (CaltopoLiveTrack track : liveTracks) {
-            CTDebug(TAG, "resetMapConnection() - shutting down track: " + track.getTrackLabel());
             track.shutdown(maxWaitInMilliseconds);
             if (0 != maxWaitInMilliseconds)
                 maxWaitInMilliseconds = (maxWaitInMilliseconds - (System.currentTimeMillis() - startTime));
@@ -478,13 +481,14 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     private void setMapStatus(MapStatusListener.mapStatus mapStatus) {
         if (mapStatus != this.mapStatus) {
-            CaltopoClient.CTEvent("MapIs_" + mapStatus.toString(), null);
+            Bundle parameters = new Bundle();
+            parameters.putString("r2c_mapId", this.mapId);
+            parameters.putInt("r2c_listenerCount", MapListeners.size());
+            parameters.putInt("r2c_featDeletePending", rogueFeaturesPendingDeletes.size());
+            CaltopoClient.CTEvent("MapIs_" + mapStatus.toString(), parameters);
             this.mapStatus = mapStatus;
             if (!MapListeners.isEmpty()) {
-                CTDebug(TAG, "Signaling to listeners that map is " + mapStatus);
                 for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(this, mapStatus);
-            } else {
-                CTDebug(TAG, "setMapStatus(): map is " + mapStatus);
             }
             if (mapStatus == MapStatusListener.mapStatus.up) {
                 while (!rogueFeaturesPendingDeletes.isEmpty()) {
@@ -800,14 +804,14 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     @NonNull
     public String r2cPeerConnectionStats() {
+        if (CaltopoClient.DebugLevel < CaltopoClient.DebugLevelDebug) return "";
+
         StringBuilder builder = new StringBuilder();
         for (R2CPeer r2cPeer : R2CPeer.GetCloneOfPeerHashtable().values()) {
-            String stats = "";
-            if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelDebug) stats = r2cPeer.stats();
             String peerName = r2cPeer.getPeerName();
             builder.append(peerName)
                     .append(":")
-                    .append(stats)
+                    .append(r2cPeer.stats())
                     .append("\n");
         }
 

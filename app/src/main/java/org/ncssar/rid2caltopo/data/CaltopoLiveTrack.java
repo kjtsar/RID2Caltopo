@@ -157,8 +157,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     public void shutdown(long maxWaitInMilliseconds) {
         shuttingDown = true;
-        CTDebug(TAG, String.format(Locale.US, "shutdown(%d).", maxWaitInMilliseconds));
         if (active && null != liveTrackId) try {
+            CTDebug(TAG, String.format(Locale.US, "shutdown(%d). Terminating '%s'",
+                    maxWaitInMilliseconds, droneSpec.trackLabel()));
             if (r2cStatus == okToPublishLocally) R2CPeer.SendDropDrone(myRemoteId);
             myMap.removeLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(maxWaitInMilliseconds);
@@ -244,6 +245,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         resetLiveTrack();
     }
     private void resetLiveTrack() {
+        if (droneSpec.isActive()) {
+            WaypointTrack.ArchiveTrack(droneSpec.trackLabel());
+            droneSpec.reset();
+        }
         linePoints.clear();
         liveTrackId = null;
         linePointsSentCount = 0;
@@ -252,8 +257,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     public String getTrackLabel() {
-        if (isActive()) return droneSpec.trackLabel();
-        return "<not active>";
+        return droneSpec.trackLabel() + (isActive()? "":"(inactive)");
     }
 
     public CtDroneSpec getDroneSpec() {
@@ -316,8 +320,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     public void finishTrack(@NonNull String reason) {
         if (r2cStatus == okToPublishLocally) R2CPeer.SendDropDrone(myRemoteId);
-        CTDebug(TAG, "finishTrack(): " + reason);
         if (active && null != liveTrackId) try {
+            CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
             myMap.removeLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(0);
             r2cStatus = unknown;

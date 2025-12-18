@@ -294,7 +294,7 @@ public class CaltopoSession {
 					parameters.putString("r2c_response", op.response);
 					parameters.putString("r2c_url", op.url);
 					parameters.putString("r2c_method", op.method.toString());
-					CaltopoClient.CTEvent("CaltopoOpFailed", parameters);
+					CaltopoClient.CTEvent(TAG,"CaltopoOpFailed", parameters);
 					CaltopoClient.CTError(TAG, "CaltopoOpFailed" + op);
 				}
 				op.setOperationIsDone(opPassed); // Provide option to handle on main thread.

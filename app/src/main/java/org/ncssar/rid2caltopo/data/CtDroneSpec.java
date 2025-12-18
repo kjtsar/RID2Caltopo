@@ -307,13 +307,13 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         CTInfo(TAG, String.format(Locale.US,
                 "Merging new dronespec:%s\n into existing:%s",
                 newSpec.toString(), this));
-        // one exception is if the mappedId is same as remoteId (default)
-        if (!this.remoteId.equals(this.mappedId)) {
-            this.mappedId = newSpec.mappedId;
-        }
         if (this.model.isEmpty()) this.model = newSpec.model;
         if (this.org.isEmpty()) this.org = newSpec.org;
         if (this.owner.isEmpty()) this.owner = newSpec.owner;
+        // one exception is if the mappedId is same as remoteId (default)
+        if (this.remoteId.equals(this.mappedId)) {
+            setMappedId(newSpec.mappedId);
+        }
     }
 
      @Override

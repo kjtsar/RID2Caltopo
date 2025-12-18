@@ -41,6 +41,7 @@ fun MainScreen(
     onShowLog: () -> Unit,
     onShowSettings: () -> Unit
 ) {
+    val TAG:String = "MainScreen"
     var menuExpanded by remember { mutableStateOf(false) }
 
     // 2. Build the unified list of display items.
@@ -75,7 +76,7 @@ fun MainScreen(
                         })
                         DropdownMenuItem(text = { Text("Show Log") }, onClick = {
                             onShowLog()
-                            CaltopoClient.CTEvent("LogDisplayed", null)
+                            CaltopoClient.CTEvent(TAG,"LogDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = {
@@ -86,12 +87,12 @@ fun MainScreen(
                         })
                         DropdownMenuItem(text = { Text("Scanners")}, onClick = {
                             onShowScanners()
-                            CaltopoClient.CTEvent("ScannersDisplayed", null)
+                            CaltopoClient.CTEvent(TAG,"ScannersDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
                             onShowHelp()
-                            CaltopoClient.CTEvent("HelpDisplayed", null)
+                            CaltopoClient.CTEvent(TAG,"HelpDisplayed", null)
                             menuExpanded = false
                         })
                     }

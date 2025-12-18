@@ -251,6 +251,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             if (null == UiUpdatePoll) {
                 UiUpdatePoll = new DelayedExec();
                 UiUpdatePoll.start(() -> DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray()), 1000, 1000);
+                CTDebug(TAG, "UpdateDroneSpecs(): Starting UiUpdatePoll...");
             }
         }
     }
@@ -306,12 +307,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             Log.e(TAG, "CTError: CTLog(): Sorry.  Maximum debugging output file size reached.  Future bits will be tossed on the floor.");
         }
     }
-    public static void CTEvent(@NonNull String eventName, @Nullable Bundle parameters) {
+    public static void CTEvent(@NonNull String tag, @NonNull String eventName, @Nullable Bundle parameters) {
         FirebaseAnalytics fbAnalytics = GetFBAnalytics();
         if (fbAnalytics == null) return;
         String cleanEventName = eventName.replaceAll("[^a-zA-Z0-9]", "_");
         fbAnalytics.logEvent("r2c_" + cleanEventName, parameters);
-        CTDebug(TAG, String.format(Locale.US, "CTEvent(r2c_%s): %s", cleanEventName, parameters));
+        CTDebug(tag, String.format(Locale.US, "CTEvent(r2c_%s): %s", cleanEventName, parameters));
     }
 
     public static void CTInfo(String tag, String msg) {
@@ -661,33 +662,37 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             String owner = entry.optString("owner");
             ds = new CtDroneSpec(rid, mid, org, model, owner);
             CtDroneSpec existingDs = ccs.droneSpecTable.get(rid);
-            if (null == existingDs) {
-                changeCount++;
-            } else {
+            boolean changed = (null == existingDs);
+            if (! changed) {
                 CTDebug(TAG, "readRidmapFileContent(): Found existing droneSpec for spec: " + existingDs);
                 if (replaceFlag) {
                     if (existingDs.isDifferentFrom(ds)) {
-                        changeCount++;
                         existingDs.setMappedId(ds.getMappedId());
                         existingDs.setOrg(ds.getOrg());
                         existingDs.setModel(ds.getModel());
                         existingDs.setOwner(ds.getOwner());
                         ds = existingDs;
+                        changed = true;
                     } else {
                         CTDebug(TAG, "readRidmapFileContent(): no changes detected for spec: " + existingDs);
                     }
                 } else {
                     existingDs.mergeWithNew(ds);
-                    if (existingDs.isDifferentFrom(ds)) changeCount++;
+                    if (existingDs.isDifferentFrom(ds)) {
+                        ds = existingDs;
+                        changed = true;
+                    }
                 }
-                CTDebug(TAG, "readRidmapFileContent(): updated ridspec: " + existingDs);
             }
             existingDs = mergedTable.get(rid);
             if (null != existingDs) {
                 throw new JSONException(String.format(Locale.US,
                         "Illegal duplicate remoteId '%s' at table offset %d - file contents ignored.", rid, i));
             }
-            CTDebug(TAG, String.format(Locale.US, "Adding dronespec:%s", ds));
+            if (changed) {
+                CTDebug(TAG, "readRidmapFileContent(): adding updated ridspec: " + ds);
+                changeCount++;
+            }
             mergedTable.put(ds.getRemoteId(), ds);
         }
 
@@ -1012,7 +1017,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     mappedIds.add(ds.getRemoteId() + ":" + ds.getMappedId());
                 }
                 parameters.putStringArrayList("r2c_mappedIds", mappedIds);
-                CTEvent("InitialState", parameters);
+                CTEvent(TAG,"InitialState", parameters);
             }
         }
         return Ccstate;
@@ -1032,7 +1037,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             SetFBDefaults();
             Bundle parameters = new Bundle();
             parameters.putString("r2c_reason", reason);
-            CTEvent("ArchiveState", parameters);
+            CTEvent(TAG,"ArchiveState", parameters);
             //  Files.move(Paths.get(MyTemporaryStateFileName), Paths.get(MyStateFileName), StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             CTError(TAG, "ArchiveState() raised:", e);
@@ -1048,6 +1053,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      * GetSortedCurrentDroneSpecArray()
      *
      * @param changedFlag True if something has changed and we need to refresh the list.
+     *                    If false, then check for inactive dronespecs.
      * @return Returns the current sorted list of dronespecs that are still active.
      */
     @NonNull
@@ -1081,6 +1087,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 PreviousEarliestAgeOutInMsec = currentTimeInMsec + nextAgeOutInMsec;
             }
             DsArray.sort(null);
+            newSize = DsArray.size();
+            if (!changedFlag && (DroneSpecsArraySize != newSize)) {
+                CTDebug(TAG, String.format(Locale.US,
+                        "GetSortedCurrentDroneSpecArray(): arraySize changed from:%d to :%d", DroneSpecsArraySize, newSize));
+                DroneSpecsArraySize = newSize;
+            }
         }
         return (ArrayList<CtDroneSpec>) DsArray.clone();
     }
@@ -1153,8 +1165,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     private static void NotifySettingsChanged() {
-        CTDebug(TAG, "notifySettingsChanged()");
         if (!NotifySettingsChangedFlag && null != SettingsListener) {
+            CTDebug(TAG, "notifySettingsChanged()");
             NotifySettingsChangedFlag = true;
             SettingsListener.settingsChanged();
             NotifySettingsChangedFlag = false;
@@ -1198,7 +1210,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             } catch (IOException e) {
                 Log.e(TAG, "CTError: Shutdown raised: " + e);
             }
-            if (null != UiUpdatePoll) UiUpdatePoll.stop();
+            if (null != UiUpdatePoll) {
+                UiUpdatePoll.stop();
+                CTDebug(TAG, "Shutdown(): UiUpdatePoll suspended.");
+            }
         }
     }
 
@@ -1269,7 +1284,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     maxIdleInMsec - idleInMsec, 0);
             return;
         }
-        CaltopoClient.CTEvent("MaxIdleExiting", null);
+        CaltopoClient.CTEvent(TAG,"MaxIdleExiting", null);
         CTDebug(TAG, String.format(Locale.US,
                 "App has been idle for %.3f minutes.  Exiting to save battery.",
                 idleInMsec / 60000.0));
@@ -1337,7 +1352,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 Bundle parameters = new Bundle();
                 parameters.putInt("r2c_responseCode", responseCode);
                 parameters.putString("r2c_response", responseString);
-                CaltopoClient.CTEvent("PublishToLivetrackFailed", parameters);
+                CaltopoClient.CTEvent(TAG,"PublishToLivetrackFailed", parameters);
             }
         } catch (IOException e) {
             CTError(TAG, "openConnection() raised:", e);

@@ -485,7 +485,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             parameters.putString("r2c_mapId", this.mapId);
             parameters.putInt("r2c_listenerCount", MapListeners.size());
             parameters.putInt("r2c_featDeletePending", rogueFeaturesPendingDeletes.size());
-            CaltopoClient.CTEvent("MapIs_" + mapStatus.toString(), parameters);
+            CaltopoClient.CTEvent(TAG, "MapIs_" + mapStatus.toString(), parameters);
             this.mapStatus = mapStatus;
             if (!MapListeners.isEmpty()) {
                 for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(this, mapStatus);

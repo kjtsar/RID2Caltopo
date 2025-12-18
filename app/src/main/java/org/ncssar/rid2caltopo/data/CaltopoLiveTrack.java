@@ -421,7 +421,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             case pending:break;
             case unknown: {
                 this.r2cStatus = R2CPeer.StatusForNewRemoteId(this, droneSpec);
-                break;
+                if (okToPublishLocally != this.r2cStatus) break;
             }
             case okToPublishLocally: {
                 if (null != liveTrackId) forwardNextWaypoint();

@@ -82,6 +82,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         retval.put("model", model);
         retval.put("startTimeInMsec", startMsecTimestamp);
         retval.put("mostRecentTimeInMsec", mostRecentMsecTimestamp);
+        retval.put("goodCount", goodCount);
         retval.put(TransportTypeEnum.BT4.name(), transportCount[TransportTypeEnum.BT4.ordinal()]);
         retval.put(TransportTypeEnum.BT5.name(), transportCount[TransportTypeEnum.BT5.ordinal()]);
         retval.put(TransportTypeEnum.WIFI.name(), transportCount[TransportTypeEnum.WIFI.ordinal()]);
@@ -167,6 +168,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         org = jo.optString("org");
         owner = jo.optString("owner");
         model = jo.optString("model");
+        goodCount = jo.optInt("goodCount");
         trackLabel = EMPTY_STRING;
         startMsecTimestamp = jo.optLong("startTimeInMsec");
         mostRecentMsecTimestamp = jo.optLong("mostRecentTimeInMsec");
@@ -251,7 +253,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     /** idleTimeInMsec()
      *
      * @param currentTimeInMsec current time in milliseconds.
-     * @return duration in milliseconds since last good waypoint was received.
+     * @return duration in milliseconds since last good waypoint was received
+     *         from this drone.
      */
     public long idleTimeInMsec(long currentTimeInMsec) {
         return (currentTimeInMsec - mostRecentMsecTimestamp);
@@ -259,7 +262,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     /** IdleTimeInMsec()
      *
-     * @return Idle time since last waypoint was received - in Milliseconds.
+     * @return Idle time since last waypoint was received from any drone -
+     *         in Milliseconds.
      */
     public static long IdleTimeInMsec() {
         if (0 == MostRecentWaypointTimestampInMsec) return 0;

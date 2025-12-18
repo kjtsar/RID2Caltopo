@@ -74,7 +74,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     private static final HashSet<CaltopoMap> Maps = new HashSet<>(16);
     private static final long FirstMapUpdateTimeInSeconds = 15;
-    private static final long RepeatMapUpdateTimeInSeconds = 45;
+    private static final long RepeatMapUpdateTimeInSeconds = 90;
 
     private static CaltopoMap CurrentMap = null;
     public static final CtLineProperty ArchiveLineProp =
@@ -456,10 +456,17 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         } else lookForExistingLiveTracks();
     }
 
+    private void pollMapUpdates() {
+        // Our marker feature s/b/ valid at this point, so start polling for updates...
+        CTInfo(TAG, "updating map connection()");
+        updateMapOp = Csp.openMap(mapId, this::updateMapFinished);
+    }
+
     private void updateMapFinished() {
         if (updateMapOp == null || updateMapOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to update map '%s':\n  %s",
                     mapId, updateMapOp));
+            mapCheckerDelay.stop();
             return;
         }
 
@@ -604,22 +611,29 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     /** UpdateMyLocation()
      *  Pay attention to ongoing periodic location updates.  If the accuracy of measurement
      *  has improved, then update our marker's location.   If the distance between our
-     *  previous marker location and this new location is greater than the combined
-     *  accuracy of our respective markers, then a good chance that we have moved, so
-     *  update our marker.
+     *  previous marker location and this new location is greater than 2.5x the least
+     *  accurate of our respective markers, then assume we've moved.
      * @param location  The latest location update from the GPS system.
      */
     public static void UpdateMyLocation(@NonNull android.location.Location location) {
         boolean updateNeeded = ( null == MyLocation || !MyLocation.hasAccuracy() );
+        double distanceInMeters = 0F;
         if (null != MyLocation && MyLocation.hasAccuracy() && location.hasAccuracy()) {
-            double distanceInMeters = DistanceFromMeInMeters(location.getLatitude(), location.getLongitude());
+            distanceInMeters = DistanceFromMeInMeters(location.getLatitude(), location.getLongitude());
             if ((location.getAccuracy() < MyLocation.getAccuracy()) ||
-                    (distanceInMeters > (location.getAccuracy() + MyLocation.getAccuracy()))
-            ) updateNeeded = true;
+                    (distanceInMeters > (2.5*location.getAccuracy()))) updateNeeded = true;
         }
+
         if (updateNeeded) {
-            CTDebug(TAG, String.format(Locale.US, "UpdateMyLocation(): lat:%.7f, lng:%.7f, accuracy:%.3fm",
-                    location.getLatitude(), location.getLongitude(), location.getAccuracy()));
+            if (null == MyLocation) MyLocation = location;
+            CTDebug(TAG, String.format(Locale.US,
+                    """
+                              UpdateMyLocation()
+                                new: lat:%.7f, lng:%.7f, accuracy:%.3fm
+                                old: lat:%.7f, lng:%.7f, accuracy:%.3fm, distanceInMeters:%.3fm""",
+                    location.getLatitude(), location.getLongitude(), location.getAccuracy(),
+                    MyLocation.getLatitude(), MyLocation.getLongitude(), MyLocation.getAccuracy(),
+                    distanceInMeters));
             MyLocation = location;
             for (CaltopoMap map : Maps) map.updateMyMarker(null);
         }
@@ -727,8 +741,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                         "R2C: " + R2CActivity.MyDeviceName, "radiotower", folderId, MyUUID, prop, this::myMarkerCompleted);
             }
         }
-        if (!mapCheckerDelay.isRunning()) mapCheckerDelay.start(() ->
-                        updateMyMarker(null), FirstMapUpdateTimeInSeconds * 1000,
+        if (!mapCheckerDelay.isRunning()) mapCheckerDelay.start(
+                this::pollMapUpdates, FirstMapUpdateTimeInSeconds * 1000,
                 RepeatMapUpdateTimeInSeconds * 1000);
     }
 
@@ -758,9 +772,10 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             }
         }
 
-        // Our marker feature s/b/ valid at this point, so start polling for updates...
-        CTInfo(TAG, "updating map connection()");
-        updateMapOp = Csp.openMap(mapId, this::updateMapFinished);
+        if (mapId.isEmpty()) {
+            CTDebug(TAG, "updateMyMarker(): Ignoring spurious update w/o map.");
+            return;
+        }
 
         JSONObject geometry = feature.optJSONObject("geometry");
         if (null != MyLocation) try {

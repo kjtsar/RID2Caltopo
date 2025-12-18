@@ -65,7 +65,7 @@ public class WiFiScanner {
     private  BroadcastReceiver wifiScanReceiver;
 
     private WifiManager.ScanResultsCallback scanResultsCallback;
-    private static final String TAG = WiFiScanner.class.getSimpleName();
+    private static final String TAG = "WiFiScanner";
 
     public WiFiScanner(Context context, OpenDroneIdDataManager dataManager) {
         this.dataManager = dataManager;

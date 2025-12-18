@@ -50,7 +50,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final long serialVersionUID = 2L;
     private static final String TAG = "CtDroneSpec";
     private static final String EMPTY_STRING = "";
-    private static long MostRecentWaypointTimestampInMsec = 0;
+    private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
 
     @NonNull private final String remoteId;
     private String mappedId;   /* The track label prefix assigned to drone */
@@ -266,7 +266,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      *         in Milliseconds.
      */
     public static long IdleTimeInMsec() {
-        if (0 == MostRecentWaypointTimestampInMsec) return 0;
         return System.currentTimeMillis() - MostRecentWaypointTimestampInMsec;
     }
 

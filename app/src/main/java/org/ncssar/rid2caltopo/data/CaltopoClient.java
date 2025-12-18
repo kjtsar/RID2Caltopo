@@ -1425,7 +1425,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CTDebug(TAG, String.format(Locale.US, "newWaypoint(%d): adding %.7f, %.7f to %s via %s...",
                 goodCount, lat, lng, droneSpec.trackLabel(), transportType));
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
-        if (!DsArray.contains(droneSpec)) UpdateDroneSpecs();
+        if (goodCount <= 3 && !DsArray.contains(droneSpec)) UpdateDroneSpecs();
         String groupId = GetGroupId();
         if (groupId.isEmpty()) {
             if (!WarnMissingGroupId) {

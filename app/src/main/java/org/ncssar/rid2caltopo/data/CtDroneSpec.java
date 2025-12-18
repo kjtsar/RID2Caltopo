@@ -11,7 +11,6 @@ package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.TimeDatestampString;
-import static org.ncssar.rid2caltopo.data.CaltopoClient.UpdateDroneSpecs;
 
 import android.location.Location;
 
@@ -110,12 +109,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
 
     public void reset() {
+        if (trackLabel.isEmpty()) return;
+        CTDebug(TAG, "checkNewWaypoint(): Advising dronespec inactive: " + trackLabel);
         trackLabel = EMPTY_STRING;
         goodCount = 0;
         totalCount = 0;
         startMsecTimestamp = mostRecentMsecTimestamp = 0;
         int length = TransportTypeEnum.values().length;
         for (int i = 0; i < length; i++) transportCount[i] = 0;
+        CaltopoClient.DroneSpecStatusChanged(this, false);
     }
 
     private void updateTrackLabel() {
@@ -225,7 +227,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (null == trackLabel) trackLabel = EMPTY_STRING;
         if (trackLabel.isEmpty()) {
             trackLabel = mappedId;
-            UpdateDroneSpecs();
         }
         if (-1000 == altitudeInMeters || (0.0 == lat && 0.0 == lng)) {
             CTInfo(TAG, String.format(Locale.US,
@@ -240,12 +241,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         double distanceInFeet = dbResult[0] * feetPerMeter;
         if (distanceInFeet < CaltopoClient.GetMinDistanceInFeet()) return false;
         long msecTimestamp = System.currentTimeMillis();
-        if (goodCount == 0) {  // Start the clock ticking with first good waypoint.
-            startMsecTimestamp = msecTimestamp;
-            updateTrackLabel();
-        }
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = msecTimestamp;
         lastLat = lat; lastLng = lng; goodCount++;
+        if (goodCount == 1) {  // Start the clock ticking with first good waypoint.
+            startMsecTimestamp = msecTimestamp;
+            updateTrackLabel();
+            CTDebug(TAG, "checkNewWaypoint(): Advising dronespec active: " + trackLabel);
+            CaltopoClient.DroneSpecStatusChanged(this, true);
+        }
         CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f", distanceInFeet));
         return true;
     }

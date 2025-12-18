@@ -113,8 +113,8 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             R2CViewModelFactory(
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
-        CaltopoClient.CheckIdle()
         CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
+        CaltopoClient.CheckIdle()
         remoteViewModels.clear()
         setContent {
             if (showSettingsDialog.value) {

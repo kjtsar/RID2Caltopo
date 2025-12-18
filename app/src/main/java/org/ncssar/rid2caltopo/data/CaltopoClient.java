@@ -199,6 +199,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void SetDroneSpecsChangedListener(CtDroneSpec.DroneSpecsChangedListener newListener) {
         DroneSpecsChangedListener = newListener;
+        UpdateDroneSpecs();
     }
 
     @Nullable
@@ -907,6 +908,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+    public static void DroneSpecStatusChanged(@NonNull CtDroneSpec ds, boolean isActiveFlag) {
+        UpdateDroneSpecs();
+    }
+
     @NonNull
     public static CaltopoClient ClientForRemoteId(@NonNull String remoteId)
             throws RuntimeException {
@@ -1068,15 +1073,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 long droneSpecIdleInMsec = ds.idleTimeInMsec(currentTimeInMsec);
                 long currentAgeOutInMsec = newTrackDelayInMsec - droneSpecIdleInMsec;
                 if (currentAgeOutInMsec <= 0) continue;
-                if (currentAgeOutInMsec < nextAgeOutInMsec) {
-                    nextAgeOutInMsec = currentAgeOutInMsec;
-                    CTDebug(TAG, String.format(Locale.US,
-                            "GetSortedCurrentDroneSpecArray(): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
-                            ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
-                    DsArray.add(ds);
-                }
-                PreviousEarliestAgeOutInMsec = currentTimeInMsec + nextAgeOutInMsec;
+                if (currentAgeOutInMsec < nextAgeOutInMsec) nextAgeOutInMsec = currentAgeOutInMsec;
+                CTDebug(TAG, String.format(Locale.US,
+                        "GetSortedCurrentDroneSpecArray(): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
+                        ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
+                DsArray.add(ds);
             }
+            PreviousEarliestAgeOutInMsec = currentTimeInMsec + nextAgeOutInMsec;
             DsArray.sort(null);
             long newSize = DsArray.size();
             if (!changedFlag && (DroneSpecsArraySize != newSize)) {
@@ -1425,7 +1428,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CTDebug(TAG, String.format(Locale.US, "newWaypoint(%d): adding %.7f, %.7f to %s via %s...",
                 goodCount, lat, lng, droneSpec.trackLabel(), transportType));
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
-        if (goodCount <= 3 && !DsArray.contains(droneSpec)) UpdateDroneSpecs();
         String groupId = GetGroupId();
         if (groupId.isEmpty()) {
             if (!WarnMissingGroupId) {

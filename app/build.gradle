@@ -15,10 +15,10 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "org.ncssar.rid2caltopo"
-    compileSdk = 35
+    compileSdk = 36
     def versionMajor = 1
     def versionMinor = 0
-    def versionPatch = 3
+    def versionPatch = 4
 
     signingConfigs {
         register("release") {
@@ -32,8 +32,8 @@ android {
     defaultConfig {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
-        targetSdk = 35
-        versionCode 9
+        targetSdk = 36
+        versionCode 10
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"

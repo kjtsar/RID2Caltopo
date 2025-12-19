@@ -234,13 +234,17 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
                     trackLabel, transportType, altitudeInMeters, lat, lng));
             return false; // only interested in recording real waypoints thank-you very much
         }
-
+        // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints
+        // that are right on top of each other, but at the same time we do want to let the world
+        // know that we're still active.
         final float feetPerMeter = 3.28084f;
+        final long minMsecInterval = 1000 * 3;
         float[] dbResult = {Float.NaN};
         Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
         double distanceInFeet = dbResult[0] * feetPerMeter;
-        if (distanceInFeet < CaltopoClient.GetMinDistanceInFeet()) return false;
         long msecTimestamp = System.currentTimeMillis();
+        if (distanceInFeet < CaltopoClient.GetMinDistanceInFeet() &&
+                (msecTimestamp - mostRecentMsecTimestamp) < minMsecInterval) return false;
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = msecTimestamp;
         lastLat = lat; lastLng = lng; goodCount++;
         if (goodCount == 1) {  // Start the clock ticking with first good waypoint.

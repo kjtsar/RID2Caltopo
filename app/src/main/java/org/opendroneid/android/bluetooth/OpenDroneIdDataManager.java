@@ -7,7 +7,6 @@
 package org.opendroneid.android.bluetooth;
 
 import android.bluetooth.le.ScanResult;
-import android.util.Log;
 
 import org.ncssar.rid2caltopo.data.CtDroneSpec;
 import org.opendroneid.android.Constants;
@@ -88,6 +87,7 @@ public class OpenDroneIdDataManager {
         // remove nulls and any other garbage from idstr:
         String idStr = rawStr.replaceAll("[^A-Z0-9]", "");
         if (idStr.isEmpty()) {
+            CtDroneSpec.BumpInvalidWaypointCount();
             if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
                 CaltopoClient.CTInfo(TAG, String.format(Locale.US,
                         "updateCaltopo(): Ignoring message with invalid id from mac:0x%x transport:%s",

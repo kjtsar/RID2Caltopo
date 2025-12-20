@@ -50,6 +50,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final String TAG = "CtDroneSpec";
     private static final String EMPTY_STRING = "";
     private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
+    private static long InvalidWaypointCount = 0;
 
     @NonNull private final String remoteId;
     private String mappedId;   /* The track label prefix assigned to drone */
@@ -215,6 +216,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     @Nullable
     public R2CPeer getMyR2cOwner() {return ownerR2c;}
 
+    public static long GetInvalidWaypointCount () {return InvalidWaypointCount;}
+
+    public static void BumpInvalidWaypointCount() {InvalidWaypointCount++;}
+
     /** checkNewWaypoint()
      *
      * @param lat new lattitude
@@ -229,9 +234,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             trackLabel = mappedId;
         }
         if (-1000 == altitudeInMeters || (0.0 == lat && 0.0 == lng)) {
-            CTInfo(TAG, String.format(Locale.US,
-                    "checkNewWaypoint(%s/%s) w/Invalid altitude %d and/or coordinates %.7f, %.7f - ignoring.",
-                    trackLabel, transportType, altitudeInMeters, lat, lng));
+            InvalidWaypointCount++;
+            if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
+                CTInfo(TAG, String.format(Locale.US,
+                        "checkNewWaypoint(%s/%s) w/Invalid altitude %d and/or coordinates %.7f, %.7f - ignoring.",
+                        trackLabel, transportType, altitudeInMeters, lat, lng));
+            }
             return false; // only interested in recording real waypoints thank-you very much
         }
         // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints

@@ -197,6 +197,30 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: Strin
                 fontSize = 14.sp
             )
         }
+        Column(
+            modifier = Modifier.width(150.dp)
+        ) {
+            Text(
+                text = "bad RID msgs",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(25.dp)
+                    .background(MaterialTheme.colorScheme.surface),
+                textAlign = TextAlign.Center,
+                fontSize = 14.sp
+            )
+            Text(
+                text = String.format(
+                    Locale.US, "%d", CtDroneSpec.GetInvalidWaypointCount()
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(25.dp)
+                    .background(MaterialTheme.colorScheme.surface),
+                textAlign = TextAlign.Center,
+                fontSize = 14.sp
+            )
+        }
     }
 }
 

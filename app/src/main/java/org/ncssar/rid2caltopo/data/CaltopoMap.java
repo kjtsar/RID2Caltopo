@@ -33,11 +33,9 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.Locale;
-import java.util.Map;
 import java.util.UUID;
 
 /** CaltopoMap class
@@ -228,7 +226,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         setMapStatus(MapStatusListener.mapStatus.down);
         mapCheckerDelay.stop();
         long startTime = System.currentTimeMillis();
-        if (null != Csp) Csp.deleteMarkerWithId(MyUUID, null);
+        CaltopoOp deleteOp = null;
+        if (null != Csp) deleteOp = Csp.deleteMarkerWithId(MyUUID, null);
         for (CaltopoLiveTrack track : liveTracks) {
             track.shutdown(maxWaitInMilliseconds);
             if (0 != maxWaitInMilliseconds)
@@ -240,8 +239,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         peers.addAll(peerIdMap.values());
         for (R2CPeer peer : peers) {
             CTDebug(TAG, String.format(Locale.US,
-                    "resetMapConnection() shutting down connection to %s due to map closure.",
-                    peer.getPeerName()));
+                    "resetMapConnection(%d) shutting down connection to %s due to map closure.",
+                    maxWaitInMilliseconds, peer.getPeerName()));
             peer.shutdown(R2CPeer.R2CListener.r2cState.down);
         }
         peerIdMap.clear();
@@ -252,6 +251,13 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         archiveFolderId = null;
         mapDumpedToLog = false;
         openMapFailedMsg = null;
+        if (null != deleteOp) try {
+            deleteOp.syncOp(maxWaitInMilliseconds);
+        } catch (Exception e) {
+            CTError(TAG, String.format(Locale.US,
+                    "resetMapConnection(%d): my marker delete raised:",
+                    maxWaitInMilliseconds), e);
+        }
     }
 
     private void startMapConnection(@NonNull String newMapId) {

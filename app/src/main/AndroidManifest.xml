@@ -59,5 +59,11 @@
             android:exported="false">
         </service>
     </application>
-
+    <queries>
+        <provider android:authorities="com.google.android.apps.docs.storage" />
+        <intent>
+            <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+        </intent>
+        <package android:name="com.google.android.apps.docs" />
+    </queries>
 </manifest>

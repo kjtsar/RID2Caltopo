@@ -7,13 +7,11 @@
 package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -24,7 +22,6 @@ fun CaltopoSettingsScreen(
     onDismiss: () -> Unit,
     settingsViewModel: CaltopoSettingsViewModel = viewModel()
 ) {
-    val focusManager = LocalFocusManager.current
     val groupId by settingsViewModel.groupId.collectAsState()
     val mapId by settingsViewModel.mapId.collectAsState()
     val minDistance by settingsViewModel.minDistance.collectAsState()
@@ -32,6 +29,8 @@ fun CaltopoSettingsScreen(
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val useDirect by settingsViewModel.useDirect.collectAsState()
     val usePeers by settingsViewModel.usePeers.collectAsState()
+    val incident by settingsViewModel.incident.collectAsState()
+    val opPeriod by settingsViewModel.opPeriod.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
         Card {
@@ -61,16 +60,28 @@ fun CaltopoSettingsScreen(
                 }
 
                 OutlinedTextField(
-                    value = groupId,
-                    onValueChange = { settingsViewModel.onGroupIdChanged(it) },
+                    value = incident,
+                    onValueChange = { settingsViewModel.onIncidentChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Group ID") }
+                    label = { Text("Incident") }
+                )
+                OutlinedTextField(
+                    value = opPeriod,
+                    onValueChange = { settingsViewModel.onOpPeriodChanged(it) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Op Period") }
                 )
                 OutlinedTextField(
                     value = mapId,
                     onValueChange = { settingsViewModel.onMapIdChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     label = { Text("Map ID") }
+                )
+                OutlinedTextField(
+                    value = groupId,
+                    onValueChange = { settingsViewModel.onGroupIdChanged(it) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Group ID") }
                 )
                 OutlinedTextField(
                     value = minDistance,

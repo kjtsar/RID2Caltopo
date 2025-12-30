@@ -18,6 +18,7 @@ import android.content.res.Resources;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Process;
 import android.provider.DocumentsContract;
 import android.util.Log;
 
@@ -27,6 +28,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.documentfile.provider.DocumentFile;
 
+import java.net.HttpURLConnection;
 import java.net.URL;
 import javax.net.ssl.HttpsURLConnection;
 
@@ -44,7 +46,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.*;
-import java.util.function.Function;
+import java.util.concurrent.Future;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -60,7 +62,7 @@ import com.google.firebase.analytics.FirebaseAnalytics;
  * Persistent state management for CaltopoClient
  */
 class ClientClassState implements Serializable {
-    private static final long SerialVersionUID = 21L; // Serializable version.
+    private static final long SerialVersionUID = 22L; // Serializable version.
     public long minDistanceInFeet;
     public String groupId;
     public String archivePath;
@@ -72,13 +74,17 @@ class ClientClassState implements Serializable {
     public int debugLevel;
     public long maxIdleTimeInMinutes;
     public boolean usePeersFlag;
+    public String incident;
+    public String opPeriod;
+    public String trackerApiKey;
+    public String trackerUrlPfx;
     public Hashtable<String, CtDroneSpec> droneSpecTable;  // Table to map remoteIDs to their data
 
     // Default/initial state for the caltopo client:
     ClientClassState() {
         minDistanceInFeet = CaltopoClient.MIN_DISTANCE_IN_FEET;
         groupId = "";
-        archivePath = null;
+        archivePath = "";
         caltopoTrackFolder = "Drone Tracks";
         caltopoSessionConfig = new CaltopoSessionConfig();
         mapId = "";
@@ -87,7 +93,18 @@ class ClientClassState implements Serializable {
         newTrackDelayInSeconds = 30;
         maxIdleTimeInMinutes = 120;
         debugLevel = -1; // undefined.
+        incident = "Training";
+        opPeriod = "1";
+        trackerApiKey = "";
+        trackerUrlPfx = "";
         droneSpecTable = new Hashtable<>(16);
+    }
+    @Serial
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        if (null == archivePath) archivePath = "";
+        if (null == trackerApiKey) trackerApiKey = "";
+        if (null == trackerUrlPfx) trackerUrlPfx = "";
     }
 
     @Override
@@ -115,14 +132,14 @@ class ClientClassState implements Serializable {
         }
 
         return String.format(Locale.US,
-                "vers:'%d', minDist:'%d' ft, groupId:'%s', mapId:'%s', useDirectFlag:'%s', usePeersFlag:'%s'\n" +
-                        "newTrackDelayInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, " +
-                        "archivePath: '%s', \n caltopoTrackFolder: '%s', caltopoDomainAndPort:%s, \n" +
-                        "teamId: '%s', credId: '%s' credSecret: '%s', ht: %s",
+                """
+                        vers:'%d', minDist:'%d' ft, groupId:'%s', mapId:'%s', useDirectFlag:'%s', usePeersFlag:'%s'
+                        newTrackDelayInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s
+                        archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
+                        teamId: '%s', credId: '%s' credSecret: '%s', ht: %s""",
                 SerialVersionUID, minDistanceInFeet, groupId, mapId, useDirectFlag, usePeersFlag,
                 newTrackDelayInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
-                (archivePath == null) ? "" : archivePath,
-                caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
+                incident, opPeriod, archivePath, caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
                 CaltopoClient.DroneSpecStringRep(droneSpecTable));
     }
 }
@@ -137,7 +154,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     static final long MIN_DISTANCE_IN_FEET = 2;
     static final long MIN_NEW_TRACK_DELAY_IN_SECONDS = 15;
-    static final long MainThreadId = android.os.Process.myTid();
+    static final long MainThreadId = Process.myTid();
     private static final String BASE_URL = "https://caltopo.com/api/v1/position/report/";
     private static final String TAG = "CaltopoClient";
     public static final String LoadConfigFileMessage = "Open Caltopo Configuration File";
@@ -146,7 +163,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static final int DebugLevelDebug = 2;
     public static final int DebugLevelInfo = 3;
     public static int DebugLevel = DebugLevelDebug;
-    private static final int ThreadPoolSize = 1;
+    private static final int ThreadPoolSize = 2;
     private static boolean WarnMissingGroupId = false;
     private static boolean WarnMissingMapFlag = false;
     private static boolean WarnConnectingToMapFlag = false;
@@ -157,7 +174,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final String MyStateFileName = TAG + ".ser";
     private static String LogFilePath;
     private static ActivityResultLauncher<Intent> QueryArchivePath;
-    private static ActivityResultLauncher<Intent> LoadConfigFileLauncher;
+    private static ActivityResultLauncher<String[]> LoadConfigFileLauncher;
     private static OutputStream DebugOutputStream;
     private static DocumentFile ArchiveDir;
     private static long BytesWrittenToDebugOutputStream;
@@ -318,7 +335,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void CTInfo(String tag, String msg) {
         if (DebugLevel >= DebugLevelInfo) {
-            long myTid = android.os.Process.myTid();
+            long myTid = Process.myTid();
             String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
             CTLog("INFO" + tidString, tag, msg);
             msg = "CTInfo" + tidString + ": " + msg;
@@ -328,7 +345,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void CTDebug(String tag, String msg) {
         if (DebugLevel >= DebugLevelDebug) {
-            long myTid = android.os.Process.myTid();
+            long myTid = Process.myTid();
             String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
             CTLog("DEBUG" + tidString, tag, msg);
             msg = "CTDebug" + tidString + ": " + msg;
@@ -337,7 +354,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTError(String tag, String msg) {
-        long myTid = android.os.Process.myTid();
+        long myTid = Process.myTid();
         String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
         CTLog("ERROR" + tidString, tag, msg);
         msg = "CTError" + tidString + ": " + msg;
@@ -356,7 +373,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTError(String tag, String msg, Exception e) {
-        long myTid = android.os.Process.myTid();
+        long myTid = Process.myTid();
         String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
         StringBuilder str = new StringBuilder();
 
@@ -370,7 +387,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void CTWarn(String tag, String msg) {
         if (DebugLevel >= DebugLevelWarn) {
-            long myTid = android.os.Process.myTid();
+            long myTid = Process.myTid();
             String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
             CTLog("WARN" + tidString, tag, msg);
             msg = "CTWarn" + tidString + ": " + msg;
@@ -380,7 +397,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void CTWarn(String tag, String msg, Exception e) {
         if (DebugLevel >= DebugLevelWarn) {
-            long myTid = android.os.Process.myTid();
+            long myTid = Process.myTid();
             String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
             StringBuilder str = new StringBuilder();
             str.append(msg);
@@ -403,7 +420,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String archivePath = GetArchivePath();
         DocumentFile todaysDir = null;
         Context ctxt = R2CActivity.getAppContext();
-        if (null != archivePath && null != ctxt) try {
+        if (!archivePath.isEmpty() && null != ctxt) try {
             VerifyArchiveDir();
             if (null != ArchiveDir) {
                 SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy", Locale.US);
@@ -424,6 +441,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTError(TAG, "Not able to create today's archive dir", e);
         }
         return todaysDir;
+    }
+
+    public static DocumentFile GetArchiveDir() {
+        String archivePath = GetArchivePath();
+        DocumentFile todaysDir = null;
+        Context ctxt = R2CActivity.getAppContext();
+        if (!archivePath.isEmpty() && null != ctxt) try {
+            VerifyArchiveDir();
+        } catch (Exception e) {
+            CTError(TAG, "VerifyArchiveDir() raised.", e);
+        }
+        return ArchiveDir;
     }
 
     public static String GetTrackFolderName() {
@@ -581,12 +610,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 return new JSONObject();
             }
             is = activity.getContentResolver().openInputStream(uri);
-            isr = new InputStreamReader(is);
+            isr = new InputStreamReader(is, StandardCharsets.UTF_8);
             bufferedReader = new BufferedReader(isr);
             String line;
             while ((line = bufferedReader.readLine()) != null) {
                 stringBuilder.append(line).append("\n");
             }
+            bufferedReader.close();
+            isr.close();
+            if (null != is) is.close();
         } catch (IOException e) {
             ShowToast(String.format(Locale.US, "Not able to read '%s'", uri), e);
             return null;
@@ -620,11 +652,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String credentialId = json.optString("credential_id");
         String credentialSecret = json.optString("credential_secret");
         String trackFolder = json.optString("track_folder");
+        String incident = json.optString("incident");
+        String opPeriod = json.optString("op_period");
         String mapid = json.optString("map_id");
         String groupid = json.optString("group_id");
+        String trackerApiKey = json.optString("tracker_api_key");
+        String trackerUrlPfx = json.optString("tracker_url_pfx");
         if (!trackFolder.isEmpty()) SetTrackFolderName(trackFolder);
+        if (!incident.isEmpty()) SetIncident(incident);
+        if (!opPeriod.isEmpty()) SetOpPeriod(opPeriod);
         if (!mapid.isEmpty()) SetMapId(mapid);
         if (!groupid.isEmpty()) SetGroupId(groupid);
+        if (!trackerApiKey.isEmpty()) SetTrackerApiKey(trackerApiKey);
+        if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
         SetCaltopoSessionConfig(new CaltopoSessionConfig(teamId, credentialId, credentialSecret));
         boolean useDirectFlag = json.optBoolean("use_direct_flag");
         CTDebug(TAG, "readCredentialsFileContent(): read useDirectFlag as: " + useDirectFlag);
@@ -711,13 +751,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
-    // yes, I know it always returns null, but that's required by Function<T, R> interface
-    // and besides, the return value is unused.
-    public static String LoadConfigFile(Uri uri) {
-        if (null == uri) return null;
+    public static void LoadConfigFile(Uri uri) {
+        if (null == uri) return;
         try {
             JSONObject json = ReadJsonFile(uri);
-            if (null == json) return null;
+            if (null == json) return;
             String type = json.optString("type").trim().toLowerCase();
             String fileVersion = json.optString("file_version");
             String updated = json.optString("updated");
@@ -734,22 +772,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         } catch (JSONException e) {
             CTError(TAG, String.format(Locale.US, "Error processing '%s':", uri), e);
         }
-        return null;
     }
 
     public static void RequestLoadConfigFile() {
-        RequestConfigFile(LoadConfigFileMessage, LoadConfigFileLauncher);
-    }
-
-    public static void RequestConfigFile(String requestMessage, ActivityResultLauncher<Intent> launcher) {
-        Intent requestFileIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        requestFileIntent.addCategory(Intent.CATEGORY_OPENABLE);
-        requestFileIntent.setType("application/json");
-
         try {
-            launcher.launch(requestFileIntent);
+            if (LoadConfigFileLauncher != null) {
+                String[] mimeTypes = {"application/json", "text/plain", "application/octet-stream"};
+                LoadConfigFileLauncher.launch(mimeTypes);
+            }
         } catch (Exception e) {
-            CTError(TAG, String.format(Locale.US, "RequestConfigFile(%s).launcher() raised:", requestMessage), e);
+            CTError(TAG, "RequestConfigFile() raised:", e);
         }
     }
 
@@ -776,13 +808,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         boolean requested = false;
 
         String archivePath = GetArchivePath();
-        if (null == archivePath || archivePath.isEmpty()) {
+        if (archivePath.isEmpty()) {
             CTDebug(TAG, "VerifyArchiveDir(): Querying user for archiveDir()");
             CaltopoClient.QueryUserForArchiveDir();
             requested = true;
         }
         Context context = R2CActivity.getAppContext();
-        if (null != archivePath && !archivePath.isEmpty() && null != context) try {
+        if (!archivePath.isEmpty() && null != context) try {
             ContentResolver contentResolver = context.getContentResolver();
             Uri treeUri = Uri.parse(archivePath);
             contentResolver.takePersistableUriPermission(treeUri,
@@ -791,34 +823,35 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ArchiveDir = DocumentFile.fromTreeUri(context, treeUri);
             ConnectToMap("VerifyArchiveDir()");
         } catch (SecurityException e) {
-            if (!requested) {
+            if (!requested) { // FIXME: What's going on here - why always true?
                 CTWarn(TAG, "VerifyArchiveDir(): re-requesting persistable Uri Permission", e);
                 CaltopoClient.QueryUserForArchiveDir();
             }
         }
     }
 
-
+    public static class OpenOpenableDocument extends ActivityResultContracts.OpenDocument {
+        @NonNull
+        @Override
+        public Intent createIntent(@NonNull Context context, @NonNull String[] input) {
+            Intent intent = super.createIntent(context, input);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            return intent;
+        }
+    }
     @Nullable
-    private static ActivityResultLauncher<Intent> InitLauncherForConfigFile(String requestMessage, Function<Uri, String> fileProcessor) {
+    private static ActivityResultLauncher<String[]> InitLauncherForConfigFile() {
         R2CActivity activity = R2CActivity.getR2CActivity();
-        if (null != activity) {
-            return activity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
-                    result -> {
-                        CTDebug(TAG, String.format(Locale.US, "In InitLauncherForConfigFile(%s):onActivityResult(%s)",
-                                requestMessage, result.toString()));
-                        if (result.getResultCode() == Activity.RESULT_OK) {
-                            Intent data = result.getData();
-                            if (null != data) {
-                                Uri jsonUri = data.getData();
-                                // Persist the URI for later use (e.g., in SharedPreferences)
-                                // Now you have a Uri representing the selected file:
-                                fileProcessor.apply(jsonUri);
-                            }
+        if (null == activity) {
+            CTError(TAG, "InitLauncherForConfigFile(): R2CActivity is null");
+            return null;
+        }
+        return activity.registerForActivityResult(new OpenOpenableDocument(),
+                    uri -> {
+                        if (null != uri) {
+                            CaltopoClient.LoadConfigFile(uri);
                         }
                     });
-        }
-        return null;
     }
 
 
@@ -892,9 +925,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+    public static void CheckUnreportedFiles() {
+        if (null == ExecutorPool) {
+            ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
+        }
+        ExecutorPool.submit(WaypointTrack::BgPollUnreportedTracks);
+    }
+
+
     public static void PermissionsGrantedWeShouldBeGoodToGo() {
         InitArchiveDir();
         ConnectToMap("PermissionsGrantedWeShouldBeGoodToGo()");
+        CheckUnreportedFiles();
     }
 
     public static void Initialize() {
@@ -902,7 +944,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CTDebug(TAG, "Initialize()");
         try {
             QueryArchivePath = InitLauncherForArchiveDir();
-            LoadConfigFileLauncher = InitLauncherForConfigFile(LoadConfigFileMessage, CaltopoClient::LoadConfigFile);
+            LoadConfigFileLauncher = InitLauncherForConfigFile();
         } catch (Exception e) {
             CTError(TAG, "Initialize() raised:", e);
         }
@@ -1106,13 +1148,63 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.minDistanceInFeet;
     }
 
+    @NonNull
     public static String GetArchivePath() {
         ClientClassState ccs = GetState();
         return ccs.archivePath;
     }
+    @NonNull
+    public static String GetTrackerApiKey() {
+        ClientClassState ccs = GetState();
+        return ccs.trackerApiKey;
+    }
+    public static void SetTrackerApiKey(@NonNull String apiKey) {
+        ClientClassState ccs = GetState();
+        if (!ccs.trackerApiKey.equals(apiKey)) {
+            ccs.trackerApiKey = apiKey;
+            ArchiveState("trackerApiKey changed");
+        }
+    }
+    @NonNull
+    public static String GetTrackerUrlPfx() {
+        ClientClassState ccs = GetState();
+        return ccs.trackerUrlPfx;
+    }
+    public static void SetTrackerUrlPfx(@NonNull String urlPfx) {
+        ClientClassState ccs = GetState();
+        if (!ccs.trackerUrlPfx.equals(urlPfx)) {
+            ccs.trackerUrlPfx = urlPfx;
+            ArchiveState( "trackerUrlPfx changed");
+        }
+    }
+
+    public static String GetIncident() {
+        ClientClassState ccs = GetState();
+        return ccs.incident;
+    }
+    public static void SetIncident(@NonNull String incident) {
+        ClientClassState ccs = GetState();
+        if (!ccs.incident.equals(incident)) {
+            ccs.incident = incident;
+            ArchiveState("incident changed");
+        }
+    }
+
+    public static String GetOpPeriod() {
+        ClientClassState ccs = GetState();
+        return ccs.opPeriod;
+    }
+
+    public static void SetOpPeriod(@NonNull String opPeriod) {
+        ClientClassState ccs = GetState();
+        if (!ccs.opPeriod.equals(opPeriod)) {
+            ccs.opPeriod = opPeriod;
+            ArchiveState("opPeriod changed");
+        }
+    }
 
     public static void InitArchiveDir() {
-        if (null == DebugOutputStream && null != GetArchivePath()) try {
+        if (null == DebugOutputStream && !GetArchivePath().isEmpty()) try {
             DocumentFile todaysArchiveDir = GetTodaysTrackDir();
             String filepath = "Log_" + TimeDatestampString(ScanningService.GetStartTimeInMsec());
             Context ctxt = R2CActivity.getAppContext();
@@ -1147,15 +1239,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
-    public static void SetArchivePath(String path)
+    public static void SetArchivePath(@NonNull String path)
             throws RuntimeException {
-        if (null == path || path.isEmpty()) {
+        if (path.isEmpty()) {
             throw new RuntimeException("CaltopoClient.SetArchivePath() invalid path.");
         }
         ClientClassState ccs = GetState();
-        ccs.archivePath = path;
-        ArchiveState("archivePath changed.");
-        InitArchiveDir();
+        if (!ccs.archivePath.equals(path)) {
+            ccs.archivePath = path;
+            ArchiveState("archivePath changed.");
+            InitArchiveDir();
+        }
     }
 
     private static void NotifySettingsChanged() {
@@ -1188,6 +1282,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void Shutdown() {
+        WaypointTrack.ArchiveTracks();
         if (ExecutorPool != null) {
             ExecutorPool.shutdownNow();
         }
@@ -1384,6 +1479,65 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTDebug(TAG, "terminateTrack(): Ignoring inactive track.");
         }
         UpdateDroneSpecs();
+    }
+
+    // returns http response status.
+    public static int BgPublishGeoJsonStats(String geoJsonString) {
+                ClientClassState ccs = GetState();
+        if (ccs.trackerApiKey.isEmpty() || ccs.trackerUrlPfx.isEmpty()) return 8675309;
+        String urlStr = String.format(Locale.US, "%s/%s", ccs.trackerUrlPfx, "upload");
+
+        int responseCode = HttpURLConnection.HTTP_OK;
+        try {
+            long startStamp = System.currentTimeMillis();
+            URL putUrl = new URL(urlStr);
+            byte[] output = geoJsonString.getBytes(StandardCharsets.UTF_8);
+            CTDebug(TAG, "BgPublishStats(): uploading " + output.length + " bytes to '" + urlStr + "'");
+            HttpURLConnection httpConn = (HttpURLConnection) putUrl.openConnection();
+            httpConn.setRequestMethod("PUT");
+            httpConn.setRequestProperty("User-Agent", "RID2Caltopo/0.1");
+            httpConn.setRequestProperty("X-SAR-Token", ccs.trackerApiKey);
+            httpConn.setRequestProperty("Content-Type", "application/json");
+            httpConn.setRequestProperty("Content-Length", String.valueOf(output.length));
+            httpConn.setDoOutput(true);
+            OutputStream os = httpConn.getOutputStream();
+            os.write(output, 0, output.length);
+            os.flush();
+            os.close();
+
+            responseCode = httpConn.getResponseCode();
+            long endStamp = System.currentTimeMillis();
+            StringBuilder response = new StringBuilder();
+            response.append(String.format(Locale.US,
+                    "BgPublishStats(%s) completed in %.3f seconds with code %d.\n",
+                    ccs.trackerUrlPfx, (endStamp-startStamp) / 1000.0, responseCode));
+            BufferedReader reader = null;
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                if (DebugLevel >= DebugLevelDebug)
+                    reader = new BufferedReader(new InputStreamReader(httpConn.getInputStream(),
+                            StandardCharsets.UTF_8));
+            } else {
+                if (DebugLevel >= DebugLevelError)
+                    reader = new BufferedReader(new InputStreamReader(
+                        httpConn.getErrorStream(), StandardCharsets.UTF_8));
+            }
+            if (null != reader) {
+                String line;
+                while ((line = reader.readLine()) != null) response.append(line);
+                reader.close();
+            }
+            CTDebug(TAG, response.toString());
+        } catch (IOException e) {
+            CTError(TAG, "BgPublishStats() raised.", e);
+        }
+        return responseCode;
+    }
+
+    public static Future<Integer> PublishGeoJsonStats(@NonNull String geoJsonString) {
+        if (null == ExecutorPool) {
+            ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
+        }
+        return ExecutorPool.submit(() -> BgPublishGeoJsonStats(geoJsonString));
     }
 
     // Make sure we catch idle drone tracks and archive them as soon as they are declared dormant.

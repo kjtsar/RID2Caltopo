@@ -10,8 +10,6 @@ import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.data.CaltopoClient
-import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-
 class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
 
     // --- Live Data for UI --- //
@@ -36,9 +34,16 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _maxIdleTimeInMinutes = MutableStateFlow(CaltopoClient.GetMaxIdleTimeInMinutes().toString())
     val maxIdleTimeInMinutes = _maxIdleTimeInMinutes.asStateFlow()
 
+    private val _incident = MutableStateFlow( CaltopoClient.GetIncident())
+    val incident = _incident.asStateFlow()
+
+    private val _opPeriod = MutableStateFlow( CaltopoClient.GetOpPeriod())
+    val opPeriod = _opPeriod.asStateFlow()
+
+
     init {
-        CaltopoClient.SetSettingsListener(this);
-        settingsChanged(); // load initial values.
+        CaltopoClient.SetSettingsListener(this)
+        settingsChanged() // load initial values.
     }
 
     override fun settingsChanged() {
@@ -79,6 +84,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onUsePeersChanged(usePeers: Boolean) {
         _usePeers.value = usePeers
     }
+    fun onIncidentChanged(incident: String) {
+        _incident.value = incident
+    }
+    fun onOpPeriodChanged(opPeriod: String) {
+        _opPeriod.value = opPeriod
+    }
 
     fun saveSettings() {
         CaltopoClient.SetGroupId(_groupId.value)
@@ -88,5 +99,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetUseDirect(_useDirect.value)
         CaltopoClient.SetUsePeers(_usePeers.value)
+        CaltopoClient.SetIncident(_incident.value)
+        CaltopoClient.SetOpPeriod(_opPeriod.value)
     }
 }

@@ -248,7 +248,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
                 val r2cPeer = drone.myR2cOwner
                 val str : String
                 if (null != r2cPeer) {
-                    str = drone.myR2cOwner!!.getRttString()
+                    str = r2cPeer.rttString
                 } else {
                     str = "n/a"
                 }

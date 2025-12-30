@@ -40,7 +40,6 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.R2CPeer
-import org.ncssar.rid2caltopo.data.WaypointTrack
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.CtAlertDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
@@ -85,15 +84,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                     permission
                 )
             )
-        }
-    }
-
-
-    fun archiveTracks() {
-        try {
-            WaypointTrack.ArchiveTracks()
-        } catch (e: Exception) {
-            CTError(TAG, "archiveTracks() raised:", e)
         }
     }
 
@@ -359,7 +349,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                 stopService(serviceIntent)
                 CaltopoClient.Shutdown()
                 CTDebug(TAG, "onDestroy() archiving tracks...")
-                archiveTracks()
                 AppActivity = null
                 forceStopApp()
                 super.onDestroy()

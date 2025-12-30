@@ -7,8 +7,13 @@
 
 package org.ncssar.rid2caltopo.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,11 +25,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
+    data class IncidentView(val incident: String, val opPeriod: String) : MainScreenItem
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
     data class RemoteView(val viewModel: R2CPeerViewModel) : MainScreenItem
     data class SpacerView(val height: Dp) : MainScreenItem
@@ -46,6 +54,8 @@ fun MainScreen(
 
     // 2. Build the unified list of display items.
     val screenItems = buildList {
+        add(MainScreenItem.IncidentView(CaltopoClient.GetIncident(), CaltopoClient.GetOpPeriod()))
+        add(MainScreenItem.SpacerView(12.dp))
         add(MainScreenItem.LocalView(localViewModel))
         if (remoteViewModels.isNotEmpty()) add(MainScreenItem.SpacerView(52.dp))
         remoteViewModels.forEach {
@@ -113,11 +123,15 @@ fun MainScreen(
                             is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
                             is MainScreenItem.RemoteView -> item.viewModel.r2cPeer.peerName
                             is MainScreenItem.SpacerView -> "spacer_view"
+                            is MainScreenItem.IncidentView -> "incident_view"
                         }
                     }
                 ) { item ->
                     // 4. Use a `when` statement to render the correct composable.
                     when (item) {
+                        is MainScreenItem.IncidentView -> {
+                             IncidentView(incident=item.incident, opPeriod=item.opPeriod)
+                        }
                         is MainScreenItem.LocalView -> {
                             val localDrones by item.viewModel.drones.collectAsState()
                             val appUptime by item.viewModel.appUpTime.collectAsState()

@@ -68,7 +68,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient String trackLabel;
     public transient double lastLat;
     public transient double lastLng;
+    private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
+    private boolean okToLog = true;
 
     @NonNull
     public String trackLabel() { return trackLabel;}
@@ -96,6 +98,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         in.defaultReadObject();
         trackLabel = EMPTY_STRING;
         startMsecTimestamp = 0;
+        distanceInFeet = 0.0F;
+        lastLat = 0.0F;
+        lastLng = 0.0F;
+        okToLog = true;
         transportCount = new int[TransportTypeEnum.values().length];
     }
 
@@ -115,6 +121,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         trackLabel = EMPTY_STRING;
         goodCount = 0;
         totalCount = 0;
+        distanceInFeet = 0.0F;
+        lastLat = 0.0F;
+        lastLng = 0.0F;
+        okToLog = true;
         startMsecTimestamp = mostRecentMsecTimestamp = 0;
         int length = TransportTypeEnum.values().length;
         for (int i = 0; i < length; i++) transportCount[i] = 0;
@@ -132,6 +142,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public boolean publishingLocally() {return (null != myLiveTrack && myLiveTrack.publishingLocally());}
 
+    public boolean okToLog() {return okToLog;}
+
     public String getDurationInSecAsString() {
         long durationInMsec = 0;
         if (startMsecTimestamp > 0 && (startMsecTimestamp < mostRecentMsecTimestamp)) {
@@ -139,6 +151,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
         return SimpleTimer.DurationAsString(durationInMsec);
     }
+
+    public double getDistanceInFeet() { return distanceInFeet;}
 
     public int getTotalCount() {
         return totalCount;
@@ -157,6 +171,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (idStr.isEmpty()) {
             throw new RuntimeException("Invalid required remoteId spec.");
         }
+        this.okToLog = true;
+        this.distanceInFeet = 0.0F;
+        this.lastLat = 0.0F;
+        this.lastLng = 0.0F;
         this.trackLabel = EMPTY_STRING;
         this.remoteId = idStr;
         this.mappedId = idStr;
@@ -172,6 +190,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         owner = jo.optString("owner");
         model = jo.optString("model");
         goodCount = jo.optInt("goodCount");
+        okToLog = false;
+        distanceInFeet = 0.0F;
+        lastLat = 0.0F;
+        lastLng = 0.0F;
         trackLabel = EMPTY_STRING;
         startMsecTimestamp = jo.optLong("startTimeInMsec");
         mostRecentMsecTimestamp = jo.optLong("mostRecentTimeInMsec");
@@ -190,6 +212,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (remoteIdIn.isEmpty()) {
             throw new RuntimeException("missing/invalid required remoteId spec.");
         }
+        okToLog = true;
+        distanceInFeet = 0.0F;
+        lastLat = 0.0F;
+        lastLng = 0.0F;
         this.trackLabel = EMPTY_STRING;
         this.remoteId = remoteIdIn;
         if (mappedIdIn.isEmpty()) {
@@ -210,7 +236,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         this.myListener = myListener;
     }
 
-    public void setMyR2cOwner(@NonNull R2CPeer newOwnerR2c) {ownerR2c = newOwnerR2c;}
+    public void setMyR2cOwner(@NonNull R2CPeer newOwnerR2c) {ownerR2c = newOwnerR2c; okToLog=false;}
     public void removeMyR2cOwner() {ownerR2c = null;}
 
     @Nullable
@@ -245,23 +271,29 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints
         // that are right on top of each other, but at the same time we do want to let the world
         // know that we're still active.
-        final float feetPerMeter = 3.28084f;
-        final long minMsecInterval = 1000 * 3;
+        final float FeetPerMeter = 3.28084f;
+        final long MinMsecInterval = 1000 * 3;
         float[] dbResult = {Float.NaN};
-        Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
-        double distanceInFeet = dbResult[0] * feetPerMeter;
+        float lDistanceInFeet = 0.0F ;
         long msecTimestamp = System.currentTimeMillis();
-        if (distanceInFeet < CaltopoClient.GetMinDistanceInFeet() &&
-                (msecTimestamp - mostRecentMsecTimestamp) < minMsecInterval) return false;
+        if (lastLat != 0.0F) {
+            Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
+            lDistanceInFeet = dbResult[0] * FeetPerMeter;
+            if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet() &&
+                    (msecTimestamp - mostRecentMsecTimestamp) < MinMsecInterval) return false;
+            distanceInFeet += lDistanceInFeet;
+        }
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = msecTimestamp;
-        lastLat = lat; lastLng = lng; goodCount++;
+        goodCount++;
         if (goodCount == 1) {  // Start the clock ticking with first good waypoint.
             startMsecTimestamp = msecTimestamp;
             updateTrackLabel();
             CTDebug(TAG, "checkNewWaypoint(): Advising dronespec active: " + trackLabel);
             CaltopoClient.DroneSpecStatusChanged(this, true);
         }
-        CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f", distanceInFeet));
+        lastLat = lat; lastLng = lng;
+//        CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f, total:%.3f",
+//                lDistanceInFeet, distanceInFeet));
         return true;
     }
 

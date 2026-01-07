@@ -245,6 +245,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public static long GetInvalidWaypointCount () {return InvalidWaypointCount;}
 
     public static void BumpInvalidWaypointCount() {InvalidWaypointCount++;}
+    public static double MyLat = 0.0F;
+    public static double MyLng = 0.0F;
 
     /** checkNewWaypoint()
      *
@@ -268,6 +270,26 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             }
             return false; // only interested in recording real waypoints thank-you very much
         }
+
+        if (MyLat == 0.0F && null != CaltopoMap.MyLocation && CaltopoMap.MyLocation.hasAccuracy()) {
+            MyLat = CaltopoMap.MyLocation.getLatitude();
+            MyLng = CaltopoMap.MyLocation.getLongitude();
+        }
+        // N.B: Autel Evo Max 4N has demonstrated willingness to publish bogus coordinates,
+        //   resulting in a 30,000mi 15 minute flight, so should filter them out... Once we have
+        //   our lat,lon w/reasonable accuracy, compare to incoming lat,lng to see if we're even
+        //   in the same general ballpark.
+        if (MyLat != 0.0F) { // 0.1 degrees about 6 miles at 40 degrees latitude
+            if ((Math.abs(MyLat - lat) > 0.1F) || (Math.abs(MyLng - lng) > 0.1F)) {
+                if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
+                    CTInfo(TAG, String.format(Locale.US,
+                            "checkNewWaypoint(%s/%s) Ignoring spurious waypoint %.7f, %.7f.",
+                            trackLabel, transportType, lat, lng));
+                }
+                return false; // only interested in recording real waypoints thank-you very much
+            }
+        }
+
         // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints
         // that are right on top of each other, but at the same time we do want to let the world
         // know that we're still active.
@@ -285,15 +307,17 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = msecTimestamp;
         goodCount++;
-        if (goodCount == 1) {  // Start the clock ticking with first good waypoint.
+        if (goodCount == 1) {  // Start the flight duration clock with first 'good' waypoint.
             startMsecTimestamp = msecTimestamp;
             updateTrackLabel();
             CTDebug(TAG, "checkNewWaypoint(): Advising dronespec active: " + trackLabel);
             CaltopoClient.DroneSpecStatusChanged(this, true);
         }
         lastLat = lat; lastLng = lng;
-//        CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f, total:%.3f",
-//                lDistanceInFeet, distanceInFeet));
+        if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
+            CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f, total:%.3f",
+                    lDistanceInFeet, distanceInFeet));
+        }
         return true;
     }
 

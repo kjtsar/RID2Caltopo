@@ -86,7 +86,7 @@ public class WaypointTrack {
 
 	public static int WaypointCount = 0;
 	private static final String TAG = "WaypointTrack";
-    private static final String ReportedFilenames = "reported.txt";
+    private static final String ReportedFilenames = "r2c_reported.txt";
 
     private static final String GEOJSON_MIME_TYPE = "application/geo+json";
 	// map trackLabel to WaypointTrack.

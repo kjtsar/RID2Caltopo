@@ -769,6 +769,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 readCredentialsFileContent(json);
             }
             NotifySettingsChanged();
+            ShowToast(String.format(Locale.US, "%s:%s successfully loaded.", type, fileVersion));
         } catch (JSONException e) {
             CTError(TAG, String.format(Locale.US, "Error processing '%s':", uri), e);
         }

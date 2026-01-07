@@ -68,7 +68,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static final String TAG = "CaltopoMap";
     private static CaltopoSession Csp;
     private static String MyUUID = null;
-    private static android.location.Location MyLocation;
+    public static android.location.Location MyLocation;
 
     private static final HashSet<CaltopoMap> Maps = new HashSet<>(16);
     private static final long FirstMapUpdateTimeInSeconds = 15;

@@ -33,7 +33,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode 13
+        versionCode = 20
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -47,16 +47,21 @@ android {
         buildConfigField "String", "BUILD_VERSION", "\"${appVersionName}\""
         def buildTime = new Date()
         buildConfigField "String", "BUILD_TIME", "\"${buildTime.format('ddLLLyyyy:HHmmss')}\""
+
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
     }
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
+            minifyEnabled = true
+            shrinkResources = true
             proguardFiles(getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
             signingConfig = signingConfigs.getByName("release")
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -74,6 +79,9 @@ android {
     packagingOptions {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+        jniLibs {
+            useLegacyPackaging = false
         }
     }
 }

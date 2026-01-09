@@ -21,6 +21,7 @@ import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -95,6 +96,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         R2CPeer.SetPeerListChangedListener(this)
         appContext = applicationContext

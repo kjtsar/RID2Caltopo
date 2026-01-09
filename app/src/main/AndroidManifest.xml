@@ -18,9 +18,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
     <uses-feature android:name="android.hardware.bluetooth"  android:required="true" />
-    <uses-feature android:name="android.hardware.bluetooth_le" />
-    <uses-feature android:name="android.hardware.wifi" />
-    <uses-feature android:name="android.hardware.wifi.aware" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
 
     <application
         android:allowBackup="true"

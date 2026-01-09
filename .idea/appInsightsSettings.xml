@@ -21,14 +21,6 @@
         <entry key="Firebase Crashlytics">
           <value>
             <InsightsFilterSettings>
-              <option name="connection">
-                <ConnectionSetting>
-                  <option name="appId" value="org.ncssar.rid2caltopo" />
-                  <option name="mobileSdkAppId" value="1:285745975050:android:011a9ad5082e29bc4cf4f3" />
-                  <option name="projectId" value="rid2caltopo-7ba65" />
-                  <option name="projectNumber" value="285745975050" />
-                </ConnectionSetting>
-              </option>
               <option name="signal" value="SIGNAL_UNSPECIFIED" />
               <option name="timeIntervalDays" value="THIRTY_DAYS" />
               <option name="visibilityType" value="ALL" />

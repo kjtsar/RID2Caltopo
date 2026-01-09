@@ -28,6 +28,10 @@ the bridge and raise it up a fair bit to optimize coverage:
 
 <img alt="Dronescout Bridge on antenna mast" src="images/DronescoutBridge.jpg" width="257" height="360">
 
+New for 2026: BlueMark Innovations has released a [tri-band bridge](https://dronescout.co/product/dronescout-bridge-triple-band-ds110-retail-remoteid-receiver-for-ios-android-and-drone/?v=0b3b97fa6688)
+that enables capturing 5Ghz WiFi and WiNan signalling commonly used with Skydio drones.  My unit arrived in California in less than 
+a week from the Netherlands.
+  
 Please note: The user of this application must always visually verify that the received Remote ID
 signal corresponds to an actual drone seen flying in the air, at the position the signal claims it 
 to be.

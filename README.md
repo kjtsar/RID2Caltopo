@@ -77,7 +77,8 @@ left blank in the current version of the app.
 
 ## credentials.json:
 Use the credentials configuration file format to specify your team's map information and 
-[Caltopo Credentials](https://training.caltopo.com/all_users/team-accounts/teamapi#keysids):
+[Caltopo Credentials](https://training.caltopo.com/all_users/team-accounts/teamapi#keysids) along with [tracker](https://github.com/kjtsar/r2c-tracker)
+website if your team is using that tool to keep track of flights:
 
 <blockquote><code>
 {
@@ -91,7 +92,9 @@ Use the credentials configuration file format to specify your team's map informa
     "map_id" : "AH2JKLM",
     "use_direct_flag" : true,
     "group_id" : "NCSSAR",
-    "track_folder" : "DroneTracks"
+    "track_folder" : "DroneTracks",
+    "tracker_url_pfx" : "https://tracker.kjt.us",
+    "tracker_api_key" : "SecretTokenToAuthenticateSubmission"
 }
 </code></blockquote>
 

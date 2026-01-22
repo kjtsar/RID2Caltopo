@@ -6,8 +6,11 @@
  */
 package org.ncssar.rid2caltopo.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,7 +36,7 @@ fun CaltopoSettingsScreen(
     val opPeriod by settingsViewModel.opPeriod.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
-        Card {
+        Card (modifier = Modifier.verticalScroll(rememberScrollState())) {
             Column(
                 modifier = Modifier.padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally

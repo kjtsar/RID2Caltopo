@@ -86,12 +86,9 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private final DelayedExec mapCheckerDelay = new DelayedExec();
 
     private CaltopoOp openMapOp;
-    private CaltopoOp updateMapOp;
     private String folderId;
-    private CaltopoOp folderIdOp;
     private CaltopoOp myMarkerOp;
     private String archiveFolderId;
-    private CaltopoOp archiveFolderIdOp;
     private boolean mapDumpedToLog;
     private final CaltopoSessionConfig sessionConfig;
     private String  mapId;
@@ -245,9 +242,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         }
         peerIdMap.clear();
         openMapOp = null;
-        folderIdOp = null;
         folderId = null;
-        archiveFolderIdOp = null;
         archiveFolderId = null;
         mapDumpedToLog = false;
         openMapFailedMsg = null;
@@ -282,7 +277,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     }
 
 
-    private void createArchiveDirFinished() {
+    private void createArchiveDirFinished(CaltopoOp archiveFolderIdOp) {
         if (archiveFolderIdOp.fail()) {
             ShowToast(String.format(Locale.US,
                     "Could not create archive folder in map '%s' - check mapId/permissions:\n  %s",
@@ -294,7 +289,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         lookForExistingLiveTracks();
     }
 
-    private void createTrackDirFinished() {
+    private void createTrackDirFinished(CaltopoOp folderIdOp) {
         if (folderIdOp.fail()) {
             ShowToast(String.format(Locale.US,
                     "Could not create track folder in map '%s' - check mapId/permissions:\n  %s",
@@ -451,24 +446,24 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         if (null == folderId) {
             CTInfo(TAG, String.format(Locale.US,
                     "parseMap() '%s' folder not found - creating...", folderName));
-            folderIdOp = Csp.addFolder(folderName, true, true, this::createTrackDirFinished);
+            Csp.addFolder(folderName, true, true, this::createTrackDirFinished);
         }
         if (usePeersFlag) findR2cPeers(markerFeatures);
 
         if (null == archiveFolderId) {
             CTInfo(TAG, String.format(Locale.US,
                     "parseMap() '%s' folder not found - creating...", archiveFolderName));
-            archiveFolderIdOp = Csp.addFolder(archiveFolderName, false, false, this::createArchiveDirFinished);
+            Csp.addFolder(archiveFolderName, false, false, this::createArchiveDirFinished);
         } else lookForExistingLiveTracks();
     }
 
     private void pollMapUpdates() {
         // Our marker feature s/b/ valid at this point, so start polling for updates...
         CTInfo(TAG, "updating map connection()");
-        updateMapOp = Csp.openMap(mapId, this::updateMapFinished);
+       Csp.openMap(mapId, this::updateMapFinished);
     }
 
-    private void updateMapFinished() {
+    private void updateMapFinished(CaltopoOp updateMapOp) {
         if (updateMapOp == null || updateMapOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to update map '%s':\n  %s",
                     mapId, updateMapOp));
@@ -527,26 +522,35 @@ public class CaltopoMap implements R2CPeer.R2CListener {
      * when the app was terminated mid-record).
      * o Create TrackDir and ArchiveDir if they weren't already present.
      */
-    private void openMapFinished() {
+    private void openMapFinished(CaltopoOp lOpenMapOp) {
         if (mapId.isEmpty()) return;
-        if (openMapOp.fail()) {
-            openMapFailedMsg = String.format(Locale.US, "Not able to open map '%s':\n  %s",
-                    mapId, openMapOp);
-            ShowToast(openMapFailedMsg);
+        if (lOpenMapOp.fail()) {
+            if (null != lOpenMapOp.response && lOpenMapOp.response.startsWith("<!DOCTYPE html>")) {
+                // Not going to figure this out on our own - write response to a file and open it with a browser:
+                CaltopoClient.OpenBufferContentsInBrowser(lOpenMapOp.response);
+            } else {
+                openMapFailedMsg = String.format(Locale.US, "openMapFinished(): Not able to open map '%s':\n  %s",
+                        mapId, lOpenMapOp.response);
+                ShowToast(openMapFailedMsg);
+            }
             mapId = "";
             return;
         }
 
         if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug && !mapDumpedToLog) {
             CTInfo(TAG, "openMapFinished() dumping map to logfile...");
-            CTInfo(TAG, openMapOp.responseString());
+            CTInfo(TAG, lOpenMapOp.responseString());
             mapDumpedToLog = true; // this means map is up.
         }
 
-        try {
-            parseMap(openMapOp.responseJson.getJSONObject("state"));
+        JSONObject responseJson = lOpenMapOp.responseJson;
+        JSONObject state = (responseJson != null) ? responseJson.optJSONObject("state") : null;
+        if (null == state) {
+            CTError(TAG, "openMapFinished(): state missing from response: " + lOpenMapOp.response );
+        } else try {
+            parseMap(state);
         } catch (Exception e) {
-            CTError(TAG, "openMapFinished(): parseMap raised:", e);
+            CTError(TAG, "openMapFinished(): parseMap() raised:", e);
         }
     }
 
@@ -752,11 +756,11 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                 RepeatMapUpdateTimeInSeconds * 1000);
     }
 
-    private void myMarkerCompleted() {
-        if (!myMarkerOp.isDone() || myMarkerOp.fail()) {
-            CTError(TAG, "Not able to create marker: " + myMarkerOp.response);
+    private void myMarkerCompleted(CaltopoOp lMyMarkerOp) {
+        if (!lMyMarkerOp.isDone() || lMyMarkerOp.fail()) {
+            CTError(TAG, "myMarkerCompleted(): Not able to create marker: " + lMyMarkerOp.response);
         } else {
-            CTDebug(TAG, "marker added.");
+            CTDebug(TAG, "myMarkerCompleted(): marker added.");
         }
     }
 
@@ -773,7 +777,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             if (null == myMarkerOp || !myMarkerOp.isDone() || !myMarkerOp.success()) return;
             feature = myMarkerOp.getResponse();
             if (null == feature) {
-                CTDebug(TAG, "updateMyMarker(null): missing marker feature.");
+                CTDebug(TAG, "updateMyMarker(): missing marker feature.");
                 return;
             }
         }

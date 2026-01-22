@@ -6,7 +6,7 @@ that are compatible with [Caltopo](https://www.caltopo.com)'s geo-json file form
 
 Additionally, if a you have configured caltopo teams credentials properly and your mapid points 
 to an existing map that the credentials have write/update permissions for, the app can plot near
-real-time LiveTrack updates into the map.
+real-time* LiveTrack updates into the map.
 
 All drones in service of a SAR organization should be required to emit Remote ID signalling, 
 enabling this drone and manufacturer-agnostic app to close the previously open loop between 
@@ -53,14 +53,14 @@ Use the ridmap configuration file format to map remoteIDs to more friendly track
     "map" : [
         {
             "remoteId" : "1581F6Z9C24BH0036EJL",
-            "mappedId" : "1SAR7mm4p",
+            "mappedId" : "1SAR7min4p",
             "org" : "NCSSAR",
             "owner" : "NCSSAR",
-            "model" : "Mavic Mini 4 Pro"
+            "model" : "Mini 4 Pro"
 	    },
         {
             "remoteId" : "1581F67QE239L00A00DE",
-            "mappedId" : "1SAR7m3p",
+            "mappedId" : "1SAR7mvc3p",
             "org" : "NCSSAR",
             "owner" : "NCSSAR",
             "model" : "Mavic 3 Pro"
@@ -74,6 +74,17 @@ is the same as the remoteId, but can be changed in the .json file or the app's u
 Try to pick values for mappedId that identify the Remote Pilot In Command (RPIC), the type of drone, 
 and the payload capabilities of the drone.  The other fields are optional and may be omitted or 
 left blank in the current version of the app.
+
+### Mapped ID Rules Checking introduced in 1.0.7rc1:
+Changes to the mapped ID must include the pilot's Callsign of the form [0-9]?[A-Z]+[0-9]+ 
+(for regex junkies) or more simply put:
+  1SAR7
+  SAR7
+  SAR007
+  1P16
+
+You can also tack on a brief mnemonic for the drone type and payload. If omitted, then
+this app will attempt to convert the model to mnemonic form by removing spaces and vowels.
 
 ## credentials.json:
 Use the credentials configuration file format to specify your team's map information and 

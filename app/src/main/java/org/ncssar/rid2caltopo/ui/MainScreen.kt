@@ -51,6 +51,37 @@ fun MainScreen(
 ) {
     val TAG:String = "MainScreen"
     var menuExpanded by remember { mutableStateOf(false) }
+    var showConfirmDialog by remember { mutableStateOf(false) }
+    var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
+
+    if (showConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDialog = false },
+            title = { Text("Ludicrous Debugging") },
+            text = { Text("This will generate a large amount of debugging information. Are you sure?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showConfirmDialog = false
+                    }
+                ) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showConfirmDialog = false
+                        // Reset to base level
+                        CaltopoClient.SetLoggingLevel(CaltopoClient.DebugLevelError)
+                        level = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     // 2. Build the unified list of display items.
     val screenItems = buildList {
@@ -68,7 +99,6 @@ fun MainScreen(
             TopAppBar(
                 title = { Text("RID-2-Caltopo") },
                 actions = {
-                    var level by remember {mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel))}
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More options")
                     }
@@ -93,6 +123,9 @@ fun MainScreen(
                             Text("LogLevel:${level}") }, onClick = {
                             CaltopoClient.BumpLoggingLevel()
                             level = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
+                            if (CaltopoClient.DebugLevel == CaltopoClient.DebugLevelInfo) {
+                                showConfirmDialog = true;
+                            }
                             menuExpanded = true
                         })
                         DropdownMenuItem(text = { Text("Scanners")}, onClick = {

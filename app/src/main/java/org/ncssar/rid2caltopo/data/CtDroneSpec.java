@@ -26,6 +26,8 @@ import java.io.Serial;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public enum TransportTypeEnum {
@@ -49,6 +51,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final long serialVersionUID = 2L;
     private static final String TAG = "CtDroneSpec";
     private static final String EMPTY_STRING = "";
+    private static final String RID_FILTER_REGEX = "[^A-Z0-9]";
+    private static final String MAPPED_ID_FILTER_REGEX = "[^_a-zA-Z0-9]";
+    private static final String CALLSIGN_OPT_MODEL_REGEX = "^([0-9]?[a-zA-Z]+[0-9]+)([_a-zA-Z0-9]{1,8})?$";
+    private static final Pattern CallsignOptModelPattern = Pattern.compile(CALLSIGN_OPT_MODEL_REGEX);
+    private static final float MAX_SPEED_METERS_PER_SECOND = 45f;
     private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
     private static long InvalidWaypointCount = 0;
 
@@ -131,8 +138,27 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         CaltopoClient.DroneSpecStatusChanged(this, false);
     }
 
+    // Track labels should be brief, but they should also identify:
+    //  1. Callsign of the rpic.
+    //  2. Brief description of the drone.
+    //  3. Start time for flight
+    //  If 1 is absent from the mappedId, then just use the remote id - guaranteed unique for each drone.
+    //  If 1 is present, but 2 is absent, but model is present, then try to extract abbreviated info from the Model field..
+    //  If 1 is present, but 2 is absent and model is absent, tack on the remoteID.
     private void updateTrackLabel() {
-        trackLabel = mappedId + "_" + TimeDatestampString(startMsecTimestamp);
+        String lModel, lMappedId = "", lCallsign = null;
+        Matcher rexMatch = CallsignOptModelPattern.matcher(mappedId);
+        if (!rexMatch.matches()) {
+            lMappedId = mappedId; // assume we're adults and there is a reason to not follow protocol.
+        } else {
+            lCallsign = rexMatch.group(1); // this part required by pattern.
+            if (null != lCallsign && !lCallsign.isEmpty()) lCallsign = lCallsign.toUpperCase(Locale.US);
+            lModel = rexMatch.group(2);  // this part is optional.
+            if (null == lModel || lModel.isEmpty()) lModel = ModelAbbreviator(model);
+            lMappedId = lCallsign + lModel;
+        }
+        trackLabel = String.format(Locale.US, "%s_%s", lMappedId,
+                TimeDatestampString(startMsecTimestamp));
     }
 
     public void setMyLiveTrack(@Nullable CaltopoLiveTrack newTrack) {
@@ -167,7 +193,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
 
     public CtDroneSpec(@NonNull String remoteId) throws RuntimeException {
-        String idStr = remoteId.replaceAll("[^A-Z0-9]", "");
+        String idStr = remoteId.replaceAll(RID_FILTER_REGEX, "");
         if (idStr.isEmpty()) {
             throw new RuntimeException("Invalid required remoteId spec.");
         }
@@ -232,6 +258,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         else this.owner = ownerIn;
     }
 
+    public CtDroneSpec copy() {
+        return new CtDroneSpec(remoteId, mappedId, org, model, owner);
+    }
+
     public void setDroneSpecListener(@Nullable CtDroneSpecListener myListener) {
         this.myListener = myListener;
     }
@@ -249,6 +279,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public static double MyLng = 0.0F;
 
     /** checkNewWaypoint()
+     * FIXME: Need to include check of change in distance over change in time to see if waypoint
+     *        updates are even close to sane.   Assume maximum DD/DT of 100mph or 45m/sec.  The
+     *        big question is what to do when we get an update that exceeds that parameter.  Do
+     *        we throw it out, smooth it to something realistic what?
      *
      * @param lat new lattitude
      * @param lng new longitude
@@ -278,7 +312,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // N.B: Autel Evo Max 4N has demonstrated willingness to publish bogus coordinates,
         //   resulting in a 30,000mi 15 minute flight, so should filter them out... Once we have
         //   our lat,lon w/reasonable accuracy, compare to incoming lat,lng to see if we're even
-        //   in the same general ballpark.
+        //   in the same ballpark.
         if (MyLat != 0.0F) { // 0.1 degrees about 6 miles at 40 degrees latitude
             if ((Math.abs(MyLat - lat) > 0.1F) || (Math.abs(MyLng - lng) > 0.1F)) {
                 if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
@@ -293,6 +327,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints
         // that are right on top of each other, but at the same time we do want to let the world
         // know that we're still active.
+        // Note that some remoteID modules will send out dozens of RemoteID updates with the exact same
+        // lat & long & timestamp even though they are moving.
         final float FeetPerMeter = 3.28084f;
         final long MinMsecInterval = 1000 * 3;
         float[] dbResult = {Float.NaN};
@@ -340,22 +376,66 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return System.currentTimeMillis() - MostRecentWaypointTimestampInMsec;
     }
 
+    // ModelAbbreviator()
+    //  Take any descriptive sentence as input and abbreviate it by preserving the
+    //  first character of each space separated word and removing any vowels
+    //  from the rest of the word, then pasting all the results together. To
+    //  limit overall number of characters and assuming the description goes from
+    //  general to specific, only the last 10 are preserved.
+    //  The following examples produce corresponding results:
+    //     Autel Evo Max 4N      : AtlEvMx4n
+    //     DJI Mavic 3 Pro       : DjMvc3Pr
+    //     DJI Matrice 4td       : DjMtrc4td
+    //     DJI Mini 4 Pro        : DjMn4Pr
+    //     Autel Evo Max 4n      : AtlEvMx4n
+    //     Autel Evo 2 Dual 640T : lEv2Dl640t
+    @NonNull
+    private static String ModelAbbreviator(@NonNull String modelIn) {
+        // (?i) makes pattern case-insensitive
+        // (?<=\S)[aeiou] matches vowels preceded by a non-space character (not word-start)
+        // | \s+ matches any spaces to be removed
+        String result = modelIn.replaceAll("(?i)(?<=\\S)[aeiou]|\\s+", "");
+        return result.substring(Math.max(0, result.length() - 10));
+    }
+
+    // As of rc1.0.7, we want track labels to be meaningful and hopefully adopt the standard
+    // format where <callSign><droneDesc>.   For example:
+    //   1SAR7mvc3p, 1P16sx10, 1SAR10m4td
+    // This format identifies the RPIC and the drone
+    @Nullable
+    private String mappedIdForTrackLabel() {
+        String lMappedId = null;
+        Matcher reMatch = CallsignOptModelPattern.matcher(mappedId);
+        if (reMatch.matches()) {
+            String lCallsign = reMatch.group(1);
+            String lModel = reMatch.group(2);
+            if (null != lCallsign) lCallsign = lCallsign.toUpperCase();
+            else lCallsign = "";
+            if (null != lModel) lModel = lModel.toLowerCase();
+            else lModel = "";
+            if (!lCallsign.isEmpty()) lMappedId = lCallsign + ( lModel.isEmpty() ? "" : lModel);
+        }
+        return lMappedId;
+    }
+
+    // as of 1.0.7rc1, just checks to see if this contains valid characters and doesn't match
+    // the rid.
     public String setMappedId(@NonNull String newMappedId) {
-        String oldString= mappedId;
-        String newStr = newMappedId.replaceAll("[^a-zA-Z0-9]", "");
-        if (!newStr.isEmpty() && !newStr.equals(oldString)) {
+        String oldMappedId= mappedId;
+        String newStr = newMappedId.replaceAll(MAPPED_ID_FILTER_REGEX, "");
+        if (!newStr.equals(oldMappedId)) {
             mappedId = newStr;
             if (null != ownerR2c) {
                 CTDebug(TAG, "Forwarding name change to owner R2C to handle...");
                 ownerR2c.updateMappedId(this, newStr);
             } else {
                 CTDebug(TAG, String.format(Locale.US, "setMappedId() changed from '%s' to '%s', listener:0x%x",
-                        oldString, newStr, System.identityHashCode(myListener)));
+                        oldMappedId, newStr, System.identityHashCode(myListener)));
                 updateTrackLabel();
                 if (null != myLiveTrack) myLiveTrack.renameTrack();
             }
             if (null != myListener) {
-                myListener.mappedIdChanged(this, oldString, newStr);
+                myListener.mappedIdChanged(this, oldMappedId, newStr);
             }
         }
         return mappedId;

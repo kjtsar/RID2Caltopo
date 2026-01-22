@@ -78,7 +78,8 @@ class ClientClassState implements Serializable {
     public String opPeriod;
     public String trackerApiKey;
     public String trackerUrlPfx;
-    public Hashtable<String, CtDroneSpec> droneSpecTable;  // Table to map remoteIDs to their data
+    public Hashtable<String, CtDroneSpec> cachedDroneSpecTable;  // Table to map remoteIDs to their data
+    transient public Hashtable<String, CtDroneSpec> droneSpecTable; // app lifespan only.
 
     // Default/initial state for the caltopo client:
     ClientClassState() {
@@ -97,6 +98,7 @@ class ClientClassState implements Serializable {
         opPeriod = "1";
         trackerApiKey = "";
         trackerUrlPfx = "";
+        cachedDroneSpecTable = new Hashtable<>(16);
         droneSpecTable = new Hashtable<>(16);
     }
     @Serial
@@ -105,6 +107,7 @@ class ClientClassState implements Serializable {
         if (null == archivePath) archivePath = "";
         if (null == trackerApiKey) trackerApiKey = "";
         if (null == trackerUrlPfx) trackerUrlPfx = "";
+        if (null == droneSpecTable) droneSpecTable = new Hashtable<>(16);
     }
 
     @Override
@@ -140,7 +143,7 @@ class ClientClassState implements Serializable {
                 SerialVersionUID, minDistanceInFeet, groupId, mapId, useDirectFlag, usePeersFlag,
                 newTrackDelayInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
                 incident, opPeriod, archivePath, caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
-                CaltopoClient.DroneSpecStringRep(droneSpecTable));
+                CaltopoClient.DroneSpecStringRep(cachedDroneSpecTable));
     }
 }
 
@@ -204,11 +207,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             throw new RuntimeException("CaltopoClient() constructor missing/invalid remoteId");
         }
         remoteId = rid;
-        droneSpec = ccs.droneSpecTable.get(rid);  // try archived value first.
-        if (null == droneSpec) {
+        droneSpec = ccs.droneSpecTable.get(rid); // Is this one already active?
+        if (null == droneSpec) { // no - check for it in our persistent cache next:
+            CtDroneSpec cachedDroneSpec = ccs.cachedDroneSpecTable.get(rid);
+            if (null != cachedDroneSpec) { // found it.  Make a working copy:
+                droneSpec = cachedDroneSpec.copy();
+                ccs.droneSpecTable.put(rid, droneSpec);
+            }
+        }
+        if (null == droneSpec) { // new - never seen before - make a working version.
             droneSpec = new CtDroneSpec(rid);
             ccs.droneSpecTable.put(rid, droneSpec);
-            ArchiveState("dronespec changed for " + rid);
         }
         droneSpec.setDroneSpecListener(this);
         idleTimeoutPoll = new DelayedExec();
@@ -222,7 +231,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @Nullable
     public static CtDroneSpec GetDroneSpec(@NonNull String remoteId) {
         ClientClassState ccs = GetState();
-        return (ccs.droneSpecTable.get(remoteId));
+        CtDroneSpec ds = ccs.droneSpecTable.get(remoteId);
+        if (null == ds) {
+            ds = ccs.cachedDroneSpecTable.get(remoteId);
+            if (null != ds) {
+                ds = ds.copy();
+                ccs.droneSpecTable.put(remoteId, ds);
+            }
+        }
+        return ds;
     }
 
     public static void SetSettingsListener(@Nullable ClientSettingsListener listener) {
@@ -243,7 +260,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         String rid = dsIn.getRemoteId();
         String mid = dsIn.getMappedId();
-        CtDroneSpec ds = ccs.droneSpecTable.get(rid);
+        CtDroneSpec ds = GetDroneSpec(rid);
         if (null == ds) {
             ds = new CtDroneSpec(rid, dsIn.getMappedId(), dsIn.getOrg(), dsIn.getModel(), dsIn.getOwner());
             ccs.droneSpecTable.put(rid, ds);
@@ -257,9 +274,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void RemoveDroneSpecOwner(@NonNull CtDroneSpec dsIn) {
-        ClientClassState ccs = GetState();
         String rid = dsIn.getRemoteId();
-        CtDroneSpec ds = ccs.droneSpecTable.get(rid);
+        CtDroneSpec ds = GetDroneSpec(rid);
         if (null != ds) ds.removeMyR2cOwner();
     }
 
@@ -277,7 +293,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public void mappedIdChanged(@NonNull CtDroneSpec ds, @NonNull String oldval, @NonNull String newval) {
         CTDebug(TAG, String.format(Locale.US,
                 "mappedIdChanged(%s): change from '%s' to '%s'", ds.trackLabel(), oldval, newval));
-        ArchiveState(String.format(Locale.US, "mappedIdChanged from '%s' to '%s'", oldval, newval));
         UpdateDroneSpecs();
     }
 
@@ -293,6 +308,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static String BumpLoggingLevel() {
         DebugLevel++;
+        if (DebugLevel > DebugLevelInfo) DebugLevel = DebugLevelError;
+        String retval = LoggingLevelName(DebugLevel);
+        ArchiveState("Logging level changed to: " + retval);
+        return retval;
+    }
+
+    public static String SetLoggingLevel(int loggingLevel) {
+        DebugLevel = loggingLevel;
         if (DebugLevel > DebugLevelInfo) DebugLevel = DebugLevelError;
         String retval = LoggingLevelName(DebugLevel);
         ArchiveState("Logging level changed to: " + retval);
@@ -407,6 +430,25 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             str.insert(0, "CTWarn" + tidString + ": ");
             Log.w(tag, msg);
         }
+    }
+    public static void OpenBufferContentsInBrowser(@NonNull String buffer) {
+        DocumentFile trackDir = GetTodaysTrackDir();
+        Context ctxt = R2CActivity.getAppContext();
+        R2CActivity r2CActivity = R2CActivity.getR2CActivity();
+
+        try {
+            String filename = "open_map_failed_" + TimeDatestampString(System.currentTimeMillis());
+            DocumentFile dataFilepath = trackDir.createFile("text/html", filename);
+            ContentResolver resolver = ctxt.getContentResolver();
+            OutputStream outputStream = resolver.openOutputStream(dataFilepath.getUri());
+            outputStream.write(buffer.getBytes());
+            outputStream.flush();
+            outputStream.close();
+            r2CActivity.openUri(dataFilepath.getUri().toString(), "text/html");
+        } catch (Exception e) {
+            CTError(TAG, "OpenBufferContentsInBrowser() raised. ", e);
+        }
+
     }
 
     /**
@@ -673,6 +715,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (useDirectFlag) ConnectToMap("readCredentialFileContent()");
     }
 
+    // readRidmapFileContent():
+    // New for v1.0.7rc1: This is now the only way to _add_ dronespecs into the
+    // persistent ClientClassState.
     public static void readRidmapFileContent(JSONObject json) throws JSONException {
         JSONArray mapJson;
         int changeCount = 0;
@@ -693,7 +738,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         ClientClassState ccs = GetState();
         Hashtable<String, CtDroneSpec> mergedTable = new Hashtable<>(16);
-        CtDroneSpec ds;
+        CtDroneSpec newDs;
         for (int i = 0; i < mapJson.length(); i++) {
             JSONObject entry = mapJson.getJSONObject(i);
             String rid = entry.optString("remoteId");
@@ -701,28 +746,23 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             String org = entry.optString("org");
             String model = entry.optString("model");
             String owner = entry.optString("owner");
-            ds = new CtDroneSpec(rid, mid, org, model, owner);
-            CtDroneSpec existingDs = ccs.droneSpecTable.get(rid);
+            newDs = new CtDroneSpec(rid, mid, org, model, owner);
+            CtDroneSpec existingDs = ccs.cachedDroneSpecTable.get(rid);
             boolean changed = (null == existingDs);
             if (! changed) {
                 CTDebug(TAG, "readRidmapFileContent(): Found existing droneSpec for spec: " + existingDs);
-                if (replaceFlag) {
-                    if (existingDs.isDifferentFrom(ds)) {
-                        existingDs.setMappedId(ds.getMappedId());
-                        existingDs.setOrg(ds.getOrg());
-                        existingDs.setModel(ds.getModel());
-                        existingDs.setOwner(ds.getOwner());
-                        ds = existingDs;
-                        changed = true;
-                    } else {
-                        CTDebug(TAG, "readRidmapFileContent(): no changes detected for spec: " + existingDs);
-                    }
+                if (existingDs.isDifferentFrom(newDs)) {
+                    existingDs.setModel(newDs.getModel());
+                    existingDs.setMappedId(newDs.getMappedId());
+                    existingDs.setOrg(newDs.getOrg());
+                    existingDs.setOwner(newDs.getOwner());
+                    CTDebug(TAG, String.format(Locale.US,
+                            "readRidmapFileContent(): changed persistent dronespec from:\n    %s\n  to:\n    %s",
+                            existingDs, newDs));
+                    newDs = existingDs;
+                    changed = true;
                 } else {
-                    existingDs.mergeWithNew(ds);
-                    if (existingDs.isDifferentFrom(ds)) {
-                        ds = existingDs;
-                        changed = true;
-                    }
+                    CTInfo(TAG, "readRidmapFileContent(): no changes detected for spec: " + existingDs);
                 }
             }
             existingDs = mergedTable.get(rid);
@@ -730,24 +770,20 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 throw new JSONException(String.format(Locale.US,
                         "Illegal duplicate remoteId '%s' at table offset %d - file contents ignored.", rid, i));
             }
-            if (changed) {
-                CTDebug(TAG, "readRidmapFileContent(): adding updated ridspec: " + ds);
-                changeCount++;
-            }
-            mergedTable.put(ds.getRemoteId(), ds);
+            if (changed) changeCount++;
+            mergedTable.put(newDs.getRemoteId(), newDs);
         }
 
-        // Be sure to include any existing mappings that weren't mentioned in the file:
-        for (Map.Entry<String, CtDroneSpec> map : ccs.droneSpecTable.entrySet()) {
-            String key = map.getKey();
-            if (null == mergedTable.get(key)) {
-                mergedTable.put(key, map.getValue());
-            }
-        }
         if (0 != changeCount) {
-            ccs.droneSpecTable = mergedTable;
-            ArchiveState("merged ridmap with updates/changes.");
-            UpdateDroneSpecs();
+            // Be sure to include any existing mappings that weren't mentioned in the file:
+            for (Map.Entry<String, CtDroneSpec> map : ccs.cachedDroneSpecTable.entrySet()) {
+                String key = map.getKey();
+                if (null == mergedTable.get(key)) {
+                    mergedTable.put(key, map.getValue());
+                }
+            }
+            ccs.cachedDroneSpecTable = mergedTable;
+            ArchiveState("readRidmapFileContent() merged ridmap with updates/changes.");
         }
     }
 
@@ -1058,10 +1094,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             Ccstate = ccs;
             CTDebug(TAG, "GetState(): " + Ccstate);
             SetFBDefaults();
-            if (null != ccs.droneSpecTable && !ccs.droneSpecTable.isEmpty()) {
+            if (null != ccs.cachedDroneSpecTable && !ccs.cachedDroneSpecTable.isEmpty()) {
                 Bundle parameters = new Bundle();
                 ArrayList<String> mappedIds = new ArrayList<>();
-                for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+                for (CtDroneSpec ds : ccs.cachedDroneSpecTable.values()) {
                     mappedIds.add(ds.getRemoteId() + ":" + ds.getMappedId());
                 }
                 parameters.putStringArrayList("r2c_mappedIds", mappedIds);

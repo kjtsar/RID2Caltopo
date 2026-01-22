@@ -332,7 +332,7 @@ public class WaypointTrack {
                 try {
                     waypointTrack = ReadGeoJson(file);
                 } catch (Exception e) {
-                    CTError(TAG, "ReadGeoJson() raised for " + file, e);
+                    CTError(TAG, "ReadGeoJson() raised for " + filename, e);
                     // ignore this file during future launches:
                     mainThreadHandler.post(() -> ReportStatsForFile(finalReportedFilepath, filename));
                     continue;

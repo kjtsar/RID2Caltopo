@@ -36,6 +36,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -295,7 +296,7 @@ public class CaltopoSession {
 					parameters.putString("r2c_url", op.url);
 					parameters.putString("r2c_method", op.method.toString());
 					CaltopoClient.CTEvent(TAG,"CaltopoOpFailed", parameters);
-					CaltopoClient.CTError(TAG, "CaltopoOpFailed" + op);
+					CaltopoClient.CTError(TAG, "CaltopoOpFailed: rc:" + op.responseCode + "details: " + op.response);
 				}
 				op.setOperationIsDone(opPassed); // Provide option to handle on main thread.
 				CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
@@ -363,7 +364,7 @@ public class CaltopoSession {
      * @return CaltopoOp responseJson on success will contain all the map info.
      *  User will likely check it to see if it needs anything.
      */
-    public CaltopoOp openMap(String mapId, Runnable optRunnable)
+    public CaltopoOp openMap(String mapId, @Nullable Consumer<CaltopoOp> onComplete)
 			throws RuntimeException {
 	
 		if (null == mapId || mapId.isEmpty()) {
@@ -382,7 +383,7 @@ public class CaltopoSession {
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/since/" +
 				Math.max(0, lastSyncTimestamp - 500);
 
-		lastOpenMapOp = new CaltopoOp(optRunnable);
+		lastOpenMapOp = new CaltopoOp(onComplete);
 		return this.sendRequest(lastOpenMapOp, CtsMethod_t.GET, urlEnd, null, false);
     }
 
@@ -394,7 +395,7 @@ public class CaltopoSession {
      */
 	@Nullable
     CaltopoOp addFolder(@NonNull String folderName, boolean contentsVisible,
-			boolean contentLabelsVisible, @Nullable Runnable optRunnable){
+			boolean contentLabelsVisible, @Nullable Consumer<CaltopoOp> onComplete){
 
 		if (folderName.isEmpty()) {
 			CTError(TAG, "Folder name must be specified.");
@@ -413,7 +414,7 @@ public class CaltopoSession {
 			return null;
 		}
 
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		return sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
     }
     
@@ -430,7 +431,7 @@ public class CaltopoSession {
     @Nullable
 	CaltopoOp addLine(@NonNull JSONArray pointArray, @NonNull String lineLabel, @Nullable String description,
 					  @Nullable String existingLineId, @Nullable String folderId,
-					  @Nullable CtLineProperty lineProp, @Nullable Runnable optRunnable) {
+					  @Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete) {
 		if (0 == pointArray.length()) {
 			CTError(TAG, "Can't add a line without any points");
 			return null;
@@ -469,7 +470,7 @@ public class CaltopoSession {
 			return null;
 		}
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Shape" + objid;
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
     }
@@ -477,7 +478,8 @@ public class CaltopoSession {
 	@Nullable
 	CaltopoOp addMarker(double lat, double lng, @NonNull String markerTitle,
 						@Nullable String symbol, @Nullable String folderId,
-						@Nullable String existingMarkerId, @Nullable JSONObject extraProperties,  @Nullable Runnable optRunnable) {
+						@Nullable String existingMarkerId, @Nullable JSONObject extraProperties,
+                        @Nullable Consumer<CaltopoOp> onComplete) {
 		JSONObject prop = new JSONObject();
 		JSONObject geometry = new JSONObject();
 		JSONObject top = new JSONObject();
@@ -524,42 +526,42 @@ public class CaltopoSession {
 		}
 
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Marker" + objid;
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp deleteShapeWithId(@NonNull String objId, @Nullable Runnable optRunnable) {
+	public CaltopoOp deleteShapeWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Shape/" + objId;
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp deleteMarkerWithId(@NonNull String objId, @Nullable Runnable optRunnable) {
+	public CaltopoOp deleteMarkerWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Marker/" + objId;
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Runnable optRunnable) {
+	public CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
 
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/LiveTrack/" + objId;
-		CaltopoOp op  = new CaltopoOp(optRunnable);
+		CaltopoOp op  = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
 	}
 
 	@NonNull
 	public CaltopoOp editObjectWithId(@NonNull String objectType, @NonNull String objId,
-									  @NonNull JSONObject featureSet, @Nullable Runnable optRunnable) {
+									  @NonNull JSONObject featureSet, @Nullable Consumer<CaltopoOp> onComplete) {
 
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/" + objectType + "/" + objId;
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.POST, urlEnd, featureSet, false);
 		return op;
 	}
@@ -567,7 +569,7 @@ public class CaltopoSession {
 	@Nullable
 	public CaltopoOp startLiveTrack(@NonNull String groupId, @NonNull String deviceId, @NonNull String label,
 									@Nullable String folderId, @Nullable String description,
-									@Nullable CtLineProperty lineProp, @Nullable Runnable optRunnable) {
+									@Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete) {
 		JSONObject prop = new JSONObject();
 		if (groupId.isEmpty() || deviceId.isEmpty()) {
 			CTError(TAG, "startLiveTrack(): group and device IDs required.");
@@ -581,7 +583,7 @@ public class CaltopoSession {
 			prop.put("stroke-opacity", lineProp.opacity);
 			prop.put("stroke", lineProp.color);
 			prop.put("pattern", lineProp.pattern);
-			prop.put("marker-symbol", "icon-8T781R60-12-0.5-0.5-tf");
+			prop.put("marker-symbol", "Drone");
 			if (null != description && !description.isEmpty()) prop.put("descripion", description);
 			prop.put("class", "LiveTrack");
 			if (folderId != null && !folderId.isEmpty()) {
@@ -592,19 +594,19 @@ public class CaltopoSession {
 			top.put("type", "Feature");
 			top.put("properties", prop);
 		} catch (Exception e) {
-			CTError(TAG, "startLiveTrack(): raised for no apparent reason.", e);
+			CTError(TAG, "startLiveTrack(): raised.", e);
 			return null;
 		}
 
 		String urlEnd = CALTOPO_API_V1 + this.mapId + "/LiveTrack";
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
 	}
 
 	@NonNull
 	public CaltopoOp addLiveTrackPoint(@NonNull String groupId, @NonNull String deviceId,
-									   double lat, double lng, double eleMeters, @Nullable Runnable optRunnable) {
+									   double lat, double lng, double eleMeters, @Nullable Consumer<CaltopoOp> onComplete) {
 		String latStr = String.format(Locale.US, "%.7f", lat);
 		String lngStr = String.format(Locale.US, "%.7f", lng);
 		Long ele = (long)eleMeters;
@@ -614,7 +616,7 @@ public class CaltopoSession {
 				EncodeParm("lng", lngStr) + "&" +
 				EncodeParm("ele", ele.toString());
 
-		CaltopoOp op = new CaltopoOp(optRunnable);
+		CaltopoOp op = new CaltopoOp(onComplete);
 		sendRequest(op, CtsMethod_t.GET, url, null, true);
 		return op;
 	}

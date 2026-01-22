@@ -17,6 +17,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 import android.os.Handler;
 import android.os.Looper;
@@ -38,7 +39,7 @@ public class CaltopoOp implements Future <CaltopoOp> {
     public long queuedTimestampMsec;
     public long sentTimestampMsec;
     public long receivedTimestampMsec;
-	public Runnable runnable;
+	public final Consumer<CaltopoOp> onComplete;
 
     // the actual message to be sent - in case it needs to be resent:
     public CaltopoSession.CtsMethod_t method;
@@ -59,10 +60,10 @@ public class CaltopoOp implements Future <CaltopoOp> {
 		throw new RuntimeException("use: new CaltopoOp(CaltopoSession) instead.");
     }
 
-	public CaltopoOp(@Nullable Runnable runnable) {
+	public CaltopoOp(@Nullable Consumer<CaltopoOp> onComplete) {
 		opNum = ++lastOpNum;
 		queuedTimestampMsec = System.currentTimeMillis();
-		this.runnable = runnable;
+		this.onComplete = onComplete;
 //		CaltopoClient.CTInfo(TAG, String.format(Locale.US, "creating op %d", opNum));
 	}
 
@@ -84,9 +85,11 @@ public class CaltopoOp implements Future <CaltopoOp> {
 	public void setOperationIsDone(boolean opPassed) {
 		goodResponse = opPassed;
 		isDone = true;
-		if (null == runnable) return;
+		if (null == onComplete) return;
 		Handler handler = new Handler(Looper.getMainLooper());
-		handler.post(runnable);
+		handler.post(() -> {
+            onComplete.accept(this);
+        });
 	}
 
 	@Override

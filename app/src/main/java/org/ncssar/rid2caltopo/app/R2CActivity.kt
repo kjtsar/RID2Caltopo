@@ -148,29 +148,34 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         }
         AppActivity = this
         InitializedCalled = false
-        CaltopoClient.Initialize()
-        CaltopoClient.VerifyArchiveDir()
+        if (!RestartingFlag) {
+            CaltopoClient.Initialize()
+            CaltopoClient.VerifyArchiveDir()
+            DataManager = OpenDroneIdDataManager(null)
 
-        DataManager = OpenDroneIdDataManager(null)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                checkPermission(Manifest.permission.NEARBY_WIFI_DEVICES)
+                checkPermission(Manifest.permission.POST_NOTIFICATIONS)
+            }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            checkPermission(Manifest.permission.NEARBY_WIFI_DEVICES)
-            checkPermission(Manifest.permission.POST_NOTIFICATIONS)
-        }
+            checkPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+            checkPermission(Manifest.permission.ACCESS_FINE_LOCATION)
 
-        checkPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
-        checkPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                checkPermission(Manifest.permission.BLUETOOTH_SCAN)
+                checkPermission(Manifest.permission.BLUETOOTH_CONNECT)
+            }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            checkPermission(Manifest.permission.BLUETOOTH_SCAN)
-            checkPermission(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-
-        if (!outstandingPermissionsList.isEmpty()) {
-            val permArray = outstandingPermissionsList.toTypedArray<String?>()
-            ActivityCompat.requestPermissions(this, permArray, Constants.REQUEST_BULK_PERMISSIONS)
-        } else {
-            initialize()
+            if (!outstandingPermissionsList.isEmpty()) {
+                val permArray = outstandingPermissionsList.toTypedArray<String?>()
+                ActivityCompat.requestPermissions(
+                    this,
+                    permArray,
+                    Constants.REQUEST_BULK_PERMISSIONS
+                )
+            } else {
+                initialize()
+            }
         }
     }
     fun showMapIdChangeDialog(newMapId: String) {

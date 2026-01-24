@@ -24,7 +24,7 @@ okhttp = "4.12.0"
 bouncycastle = "1.70"
 constraintlayout = "2.1.4"
 documentfile = "1.0.1"
-rtmp = "2.4.8"
+rtmpRtspStreamClientJava = "2.2.5"
 
 [libraries]
 # AndroidX & Google
@@ -62,7 +62,7 @@ androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-te
 appauth = { group = "net.openid", name = "appauth", version.ref = "appauth" }
 google-play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 google-play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
-rtmp = { module = "com.github.pedroSG94.RootEncoder:rtmp", version.ref = "rtmp" }
+rtmp-rtsp-stream-client-java = { module = "io.github.pedroSG94:rtmp-rtsp-stream-client-java", version.ref = "rtmpRtspStreamClientJava" }
 squareup-okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 squareup-okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
 squareup-okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }

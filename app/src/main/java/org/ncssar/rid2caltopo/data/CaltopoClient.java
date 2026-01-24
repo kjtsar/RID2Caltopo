@@ -62,13 +62,12 @@ import com.google.firebase.analytics.FirebaseAnalytics;
  * Persistent state management for CaltopoClient
  */
 class ClientClassState implements Serializable {
-    private static final long SerialVersionUID = 22L; // Serializable version.
+    private static final long SerialVersionUID = 23L; // Serializable version.
     public long minDistanceInFeet;
     public String groupId;
     public String archivePath;
     public String caltopoTrackFolder;
     public CaltopoSessionConfig caltopoSessionConfig;
-    public String mapId;
     public boolean useDirectFlag;
     public long newTrackDelayInSeconds;
     public int debugLevel;
@@ -80,6 +79,8 @@ class ClientClassState implements Serializable {
     public String trackerUrlPfx;
     public Hashtable<String, CtDroneSpec> cachedDroneSpecTable;  // Table to map remoteIDs to their data
     transient public Hashtable<String, CtDroneSpec> droneSpecTable; // app lifespan only.
+    transient public String mapId;
+
 
     // Default/initial state for the caltopo client:
     ClientClassState() {
@@ -104,6 +105,7 @@ class ClientClassState implements Serializable {
     @Serial
     private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
         in.defaultReadObject();
+        if (null == mapId) mapId = "";
         if (null == archivePath) archivePath = "";
         if (null == trackerApiKey) trackerApiKey = "";
         if (null == trackerUrlPfx) trackerUrlPfx = "";
@@ -578,7 +580,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                         ccs.mapId, trimmedMapId);
                 ccs.mapId = trimmedMapId;
                 NotifySettingsChanged();
-                ArchiveState(msg);
                 ConnectToMap("SetMapId()");
             }
         }
@@ -927,7 +928,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
     public static void ConnectToMap(@NonNull String whence) {
         String mapId = GetMapId();
-        if (!GetUseDirectFlag()) {
+        if (mapId.isEmpty() || !GetUseDirectFlag()) {
             if (null != MyCaltopoMap) {
                 CaltopoMap.Shutdown();
                 MyCaltopoMap = null;
@@ -953,9 +954,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         } else try {
             CaltopoSessionConfig config = GetCaltopoConfig();
             if (!CaltopoSessionConfig.sniffTest(config)) return;
-
             CTDebug(TAG, String.format(Locale.US,
-                    "ConnectToMap()/%s: connecting to map '%s'", whence, mapId));
+                    "ConnectToMap(%s): connecting to map '%s'", whence, mapId));
             MyCaltopoMap = new CaltopoMap(config, mapId, GetTrackFolderName());
         } catch (RuntimeException e) {
             ShowToast("could not open map: ", e);
@@ -1091,10 +1091,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (null == Ccstate) {
             ClientClassState ccs = RestoreState();
             if (null == ccs) ccs = new ClientClassState();
+            if (null == ccs.droneSpecTable) ccs.droneSpecTable = new Hashtable<>(16);
+            if (null == ccs.cachedDroneSpecTable) ccs.cachedDroneSpecTable = new Hashtable<>(16);
+            if (null == ccs.mapId) ccs.mapId = "";
             Ccstate = ccs;
             CTDebug(TAG, "GetState(): " + Ccstate);
             SetFBDefaults();
-            if (null != ccs.cachedDroneSpecTable && !ccs.cachedDroneSpecTable.isEmpty()) {
+            if (!ccs.cachedDroneSpecTable.isEmpty()) {
                 Bundle parameters = new Bundle();
                 ArrayList<String> mappedIds = new ArrayList<>();
                 for (CtDroneSpec ds : ccs.cachedDroneSpecTable.values()) {

@@ -413,7 +413,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                 // list and wait until after we have a folderId and can confirm that the
                 // feature is within either of our directories before deleting.  We don't
                 // delete anything that we didn't create.
-                CTError(TAG, "parseMap(): found rogue feature missing title: " + feature.toString(4));
+                CTDebug(TAG, "parseMap(): found rogue feature missing title: " + feature.toString(4));
                 rogueFeaturesPendingDeletes.add(feature);
                 continue;
             }

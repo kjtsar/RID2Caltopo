@@ -33,7 +33,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 29
+        versionCode = 30
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -124,5 +124,5 @@ dependencies {
     implementation(libs.firebase.analytics)
     implementation(libs.firebase.auth)
     implementation(libs.firebase.firestore)
-    implementation(libs.rtmp)
+    implementation(libs.rtmp.rtsp.stream.client.java)
 }

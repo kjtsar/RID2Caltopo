@@ -40,6 +40,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _opPeriod = MutableStateFlow( CaltopoClient.GetOpPeriod())
     val opPeriod = _opPeriod.asStateFlow()
 
+    private val _caltopoDomainAndPort = MutableStateFlow( CaltopoClient.GetCaltopoDomainAndPort())
+    val caltopoUrl = _caltopoDomainAndPort.asStateFlow()
+
+
 
     init {
         CaltopoClient.SetSettingsListener(this)
@@ -90,7 +94,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onOpPeriodChanged(opPeriod: String) {
         _opPeriod.value = opPeriod
     }
-
+    fun onCaltopoDomainAndPortChanged(url: String) {
+        _caltopoDomainAndPort.value = url
+    }
     fun saveSettings() {
         CaltopoClient.SetGroupId(_groupId.value)
         CaltopoClient.SetMapId(_mapId.value)
@@ -101,5 +107,6 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetIncident(_incident.value)
         CaltopoClient.SetOpPeriod(_opPeriod.value)
+        CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)
     }
 }

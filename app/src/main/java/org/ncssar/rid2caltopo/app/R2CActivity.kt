@@ -53,6 +53,7 @@ import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
+import java.io.File
 import java.util.Locale
 
 class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
@@ -320,8 +321,10 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                     this.hashCode()
                 )
             )
-            val serviceIntent = Intent(this, ScanningService::class.java)
-            applicationContext.startForegroundService(serviceIntent)
+            val scanningServiceIntent = Intent(this, ScanningService::class.java)
+            applicationContext.startForegroundService(scanningServiceIntent)
+            val mediaMtxServiceIntent = Intent(this, MediaMTXService::class.java)
+            applicationContext.startForegroundService(mediaMtxServiceIntent)
         }
     }
 

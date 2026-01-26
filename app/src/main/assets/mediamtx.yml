@@ -1,0 +1,11 @@
+logLevel: debug
+
+rtmp: true
+rtsp: true
+rtsp:
+  protocols [udp]
+
+paths:
+  all:
+    source: publisher
+    

@@ -18,7 +18,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 0
-    def versionPatch = 7
+    def versionPatch = 8
 
     signingConfigs {
         register("release") {
@@ -33,7 +33,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 30
+        versionCode = 32
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -49,7 +49,24 @@ android {
         buildConfigField "String", "BUILD_TIME", "\"${buildTime.format('ddLLLyyyy:HHmmss')}\""
 
         ndk {
-            abiFilters 'arm64-v8a', 'x86_64', 'armeabi-v7a'
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags ""
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
         }
     }
 
@@ -82,6 +99,11 @@ android {
         }
         jniLibs {
             useLegacyPackaging = false
+        }
+    }
+    sourceSets {
+        main {
+            assets.srcDirs += ['src/main/assets']
         }
     }
 }
@@ -124,5 +146,7 @@ dependencies {
     implementation(libs.firebase.analytics)
     implementation(libs.firebase.auth)
     implementation(libs.firebase.firestore)
-    implementation(libs.rtmp.rtsp.stream.client.java)
-}
+    implementation("androidx.media3:media3-exoplayer:1.9.0")
+    implementation("androidx.media3:media3-exoplayer-dash:1.9.0")
+    implementation("androidx.media3:media3-ui:1.9.0")
+    implementation("androidx.media3:media3-ui-compose:1.9.0")}

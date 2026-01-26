@@ -1,6 +1,7 @@
 [versions]
 # Rock-solid stable versions to fix the build
 agp = "8.2.2"
+exoplayer = "2.20.1"
 firebaseBom = "33.1.0"
 kotlin = "1.9.22"
 composeBom = "2024.02.02"
@@ -24,7 +25,6 @@ okhttp = "4.12.0"
 bouncycastle = "1.70"
 constraintlayout = "2.1.4"
 documentfile = "1.0.1"
-rtmpRtspStreamClientJava = "2.2.5"
 
 [libraries]
 # AndroidX & Google
@@ -62,7 +62,6 @@ androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-te
 appauth = { group = "net.openid", name = "appauth", version.ref = "appauth" }
 google-play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 google-play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
-rtmp-rtsp-stream-client-java = { module = "io.github.pedroSG94:rtmp-rtsp-stream-client-java", version.ref = "rtmpRtspStreamClientJava" }
 squareup-okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 squareup-okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
 squareup-okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }

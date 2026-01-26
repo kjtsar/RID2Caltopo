@@ -160,6 +160,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     static final long MIN_DISTANCE_IN_FEET = 2;
     static final long MIN_NEW_TRACK_DELAY_IN_SECONDS = 15;
     static final long MainThreadId = Process.myTid();
+    static final long ProcessId = Process.myPid();
     private static final String BASE_URL = "https://caltopo.com/api/v1/position/report/";
     private static final String TAG = "CaltopoClient";
     public static final String LoadConfigFileMessage = "Open Caltopo Configuration File";
@@ -361,7 +362,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void CTInfo(String tag, String msg) {
         if (DebugLevel >= DebugLevelInfo) {
             long myTid = Process.myTid();
-            String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+            String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
             CTLog("INFO" + tidString, tag, msg);
             msg = "CTInfo" + tidString + ": " + msg;
             Log.i(tag, msg);
@@ -371,7 +372,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void CTDebug(String tag, String msg) {
         if (DebugLevel >= DebugLevelDebug) {
             long myTid = Process.myTid();
-            String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+            String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
             CTLog("DEBUG" + tidString, tag, msg);
             msg = "CTDebug" + tidString + ": " + msg;
             Log.d(tag, msg);
@@ -380,7 +381,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void CTError(String tag, String msg) {
         long myTid = Process.myTid();
-        String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+        String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
         CTLog("ERROR" + tidString, tag, msg);
         msg = "CTError" + tidString + ": " + msg;
         Log.e(tag, msg);
@@ -399,7 +400,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void CTError(String tag, String msg, Exception e) {
         long myTid = Process.myTid();
-        String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+        String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
         StringBuilder str = new StringBuilder();
 
         str.append(msg);
@@ -413,7 +414,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void CTWarn(String tag, String msg) {
         if (DebugLevel >= DebugLevelWarn) {
             long myTid = Process.myTid();
-            String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+            String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
             CTLog("WARN" + tidString, tag, msg);
             msg = "CTWarn" + tidString + ": " + msg;
             Log.w(tag, msg);
@@ -423,7 +424,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void CTWarn(String tag, String msg, Exception e) {
         if (DebugLevel >= DebugLevelWarn) {
             long myTid = Process.myTid();
-            String tidString = (MainThreadId == myTid) ? "[main]" : "[" + myTid + "]";
+            String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
             StringBuilder str = new StringBuilder();
             str.append(msg);
             str.append("\n  ");
@@ -450,7 +451,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         } catch (Exception e) {
             CTError(TAG, "OpenBufferContentsInBrowser() raised. ", e);
         }
-
     }
 
     /**
@@ -638,6 +638,25 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ArchiveState("SessionConfigChanged to " + cfg);
         }
     }
+    public static void SetCaltopoDomainAndPort(@NonNull String dAndP) {
+        ClientClassState ccs = GetState();
+        if (null == ccs.caltopoSessionConfig) ccs.caltopoSessionConfig = new CaltopoSessionConfig();
+        if (null != ccs.caltopoSessionConfig.domainAndPort) {
+            if (dAndP.equals(ccs.caltopoSessionConfig.domainAndPort)) {
+                CTDebug(TAG, "SetCaltopoDomainAndPort(): No change.");
+                return;
+            }
+            // FIXME: Should probably check valid format...
+
+        }
+        ccs.caltopoSessionConfig.domainAndPort = dAndP;
+    }
+
+    public static String GetCaltopoDomainAndPort() {
+        ClientClassState ccs = GetState();
+        if (null == ccs.caltopoSessionConfig) ccs.caltopoSessionConfig = new CaltopoSessionConfig();
+        return ccs.caltopoSessionConfig.domainAndPort;
+    }
 
     public static JSONObject ReadJsonFile(Uri uri) {
         StringBuilder stringBuilder = new StringBuilder();
@@ -694,6 +713,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String teamId = json.optString("team_id");
         String credentialId = json.optString("credential_id");
         String credentialSecret = json.optString("credential_secret");
+        String domainAndPort = json.optString("domain_and_port");
         String trackFolder = json.optString("track_folder");
         String incident = json.optString("incident");
         String opPeriod = json.optString("op_period");
@@ -709,6 +729,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!trackerApiKey.isEmpty()) SetTrackerApiKey(trackerApiKey);
         if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
         SetCaltopoSessionConfig(new CaltopoSessionConfig(teamId, credentialId, credentialSecret));
+        if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
         boolean useDirectFlag = json.optBoolean("use_direct_flag");
         CTDebug(TAG, "readCredentialsFileContent(): read useDirectFlag as: " + useDirectFlag);
         SetUseDirect(useDirectFlag);

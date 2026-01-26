@@ -34,6 +34,7 @@ fun CaltopoSettingsScreen(
     val usePeers by settingsViewModel.usePeers.collectAsState()
     val incident by settingsViewModel.incident.collectAsState()
     val opPeriod by settingsViewModel.opPeriod.collectAsState()
+    val caltopoUrl by settingsViewModel.caltopoUrl.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
         Card (modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -103,6 +104,12 @@ fun CaltopoSettingsScreen(
                     onValueChange = { settingsViewModel.onMaxIdleTimeInMinutesChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     label = { Text("Max App Idle Time (minutes)") }
+                )
+                OutlinedTextField(
+                    value = caltopoUrl,
+                    onValueChange = { settingsViewModel.onCaltopoDomainAndPortChanged(it) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Caltopo Domain And Port (i.e. caltopo.com)") }
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))

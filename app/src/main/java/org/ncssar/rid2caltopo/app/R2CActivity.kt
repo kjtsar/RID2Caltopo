@@ -8,6 +8,7 @@
 
 package org.ncssar.rid2caltopo.app
 
+import StreamsViewModel
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
@@ -17,17 +18,21 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.util.Log
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -41,6 +46,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.R2CPeer
+import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.CtAlertDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
@@ -50,10 +56,16 @@ import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
+import org.ncssar.rid2caltopo.video.Protocol
+import org.ncssar.rid2caltopo.video.StreamRegistry
+import org.ncssar.rid2caltopo.video.StreamsScreen
+import org.ncssar.rid2caltopo.video.StreamInfo
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
-import java.io.File
+import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
+import org.ncssar.rid2caltopo.data.CaltopoClient.DebugLevel
 import java.util.Locale
 
 class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
@@ -63,6 +75,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     private val remoteViewModels = mutableStateListOf<R2CPeerViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
     private val showSettingsDialog = mutableStateOf(false)
+    private val showStreamsService = mutableStateOf(false)
     private val showScannerDialog = mutableStateOf(false)
     private val showMapIdDialog = mutableStateOf(false)
     private var newMapIdForDialog = ""
@@ -97,6 +110,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Log.e("R2CActivity", "🔥 ENTER R2CActivity.onCreate() 🔥")
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         R2CPeer.SetPeerListChangedListener(this)
@@ -108,35 +122,60 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             ))[R2CViewModel::class.java]
         CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
         CaltopoClient.CheckIdle()
+
+        /***
+        lifecycleScope.launch {
+            StreamRegistry.streams.collect {
+                CTDebug(TAG, "StreamRegistry EMIT -> ${it.keys}")
+            }
+        }
+         ***/
         remoteViewModels.clear()
         setContent {
-            if (showSettingsDialog.value) {
-                CaltopoSettingsScreen(onDismiss = {showSettingsDialog.value = false})
-            }
-            if (showScannerDialog.value) {
-                ScannerScreen(onDismiss = {showScannerDialog.value = false})
-            }
-            if (showMapIdDialog.value) {
-                CtAlertDialog(
-                    onDismissRequest = {showMapIdDialog.value = false},
-                    onConfirmation = {
-                        CaltopoClient.ConfirmMapIdChange(newMapIdForDialog)
-                        showMapIdDialog.value = false
-                    },
-                    title = "Terminate map connection",
-                    text = "Do you want to terminate the existing map connection?"
-                )
-            }
-            RID2CaltopoTheme {
-                MainScreen(
-                    localViewModel = localViewModel,
-                    remoteViewModels = remoteViewModels,
-                    onShowHelp = { showHelpMenu() },
-                    onShowScanners = {showScannerDialog.value = true },
-                    onShowLog = { openUri(CaltopoClient.GetDebugLogPath().toString(),"text/plain") },
-                    loadConfigFile = {loadConfigFile() },
-                    onShowSettings = { showSettingsDialog.value = true},
-                )
+            RID2CaltopoTheme() {
+                val streamsViewModel : StreamsViewModel = viewModel()
+                val activeScreen by localViewModel
+                    .activeScreen
+                    .collectAsState()
+                when (activeScreen) {
+                    ActiveScreen.MAIN -> {
+                        MainScreen(
+                            localViewModel = localViewModel,
+                            remoteViewModels = remoteViewModels,
+                            onShowLog = {
+                                openUri(
+                                    CaltopoClient.GetDebugLogPath().toString(),
+                                    "text/plain"
+                                )
+                            },
+                            loadConfigFile = { loadConfigFile() },
+                            onShowHelp = {showHelpMenu()}
+                        )
+                    }
+                    ActiveScreen.SETTINGS -> {
+                        CaltopoSettingsScreen(onDismiss = { localViewModel.showMain() })
+                    }
+                    ActiveScreen.SCANNER -> {
+                        ScannerScreen(onDismiss = { localViewModel.showMain() })
+                    }
+                    ActiveScreen.MAPID_DIALOG -> {
+                        CtAlertDialog(
+                            onDismissRequest = { showMapIdDialog.value = false },
+                            onConfirmation = {
+                                CaltopoClient.ConfirmMapIdChange(newMapIdForDialog)
+                                showMapIdDialog.value = false
+                            },
+                            title = "Terminate map connection",
+                            text = "Do you want to terminate the existing map connection?"
+                        )
+                    }
+                    ActiveScreen.STREAMS -> {
+                        StreamsScreen(
+                            onBack = { localViewModel.showMain() },
+                            viewModel = streamsViewModel
+                        )
+                    }
+                }
             }
         }
         if (AppActivity != null) {
@@ -323,6 +362,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             )
             val scanningServiceIntent = Intent(this, ScanningService::class.java)
             applicationContext.startForegroundService(scanningServiceIntent)
+            CTDebug(TAG, "Starting MediaMTXService...")
             val mediaMtxServiceIntent = Intent(this, MediaMTXService::class.java)
             applicationContext.startForegroundService(mediaMtxServiceIntent)
         }

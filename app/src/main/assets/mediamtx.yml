@@ -1,9 +1,14 @@
-logLevel: debug
+# For v1.8.2:
+# logLevel: warn ;# quieter....
+logLevel: info
 
-rtmp: true
-rtsp: true
+rtmp: yes
+rtsp: yes
+hls: yes
 
+
+  
 paths:
   all:
     source: publisher
-    
+    runOnReady: echo "path ready"

@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.ncssar.rid2caltopo.video.StreamsScreen
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
@@ -43,11 +44,9 @@ sealed interface MainScreenItem {
 fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CPeerViewModel>,
-    onShowHelp: () -> Unit,
-    onShowScanners: () -> Unit,
     loadConfigFile: () -> Unit,
     onShowLog: () -> Unit,
-    onShowSettings: () -> Unit
+    onShowHelp: () -> Unit
 ) {
     val TAG:String = "MainScreen"
     var menuExpanded by remember { mutableStateOf(false) }
@@ -107,7 +106,7 @@ fun MainScreen(
                         onDismissRequest = { menuExpanded = false }
                     ) {
                         DropdownMenuItem(text = { Text("Settings") }, onClick = {
-                            onShowSettings()
+                            localViewModel.showSettings()
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Load Config File") }, onClick = {
@@ -128,8 +127,13 @@ fun MainScreen(
                             }
                             menuExpanded = true
                         })
+                        DropdownMenuItem(text = { Text("Stream Service")}, onClick = {
+                            localViewModel.showStreams()
+                            CaltopoClient.CTEvent(TAG,"Stream Service Activated", null)
+                            menuExpanded = false
+                        })
                         DropdownMenuItem(text = { Text("Scanners")}, onClick = {
-                            onShowScanners()
+                            localViewModel.showScanner()
                             CaltopoClient.CTEvent(TAG,"ScannersDisplayed", null)
                             menuExpanded = false
                         })

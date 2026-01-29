@@ -1,8 +1,5 @@
 package org.ncssar.rid2caltopo.app;
 
-
-import static androidx.core.app.ServiceCompat.startForeground;
-
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
@@ -13,9 +10,7 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.os.Process;
 
-import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ApplicationInfo;
 import android.os.Build;
 import android.util.Log;
 
@@ -23,33 +18,44 @@ import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
 import org.ncssar.rid2caltopo.R;
+import org.ncssar.rid2caltopo.data.MediaMTXBootstrap;
+import org.ncssar.rid2caltopo.data.MediaMTXEvent;
+import org.ncssar.rid2caltopo.data.MediaMTXLogDispatcher;
 import org.ncssar.rid2caltopo.data.MediaMTXNative;
+import org.ncssar.rid2caltopo.video.StreamRegistry;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.util.Arrays;
 import java.util.Locale;
+import kotlin.Unit;
+import kotlin.jvm.functions.Function1;
+
 
 public class MediaMTXService extends Service {
-
     private static final String TAG = "MediaMtxService";
+    private static boolean listenersRegistered = false;
     private static int processPid = 0;
 
     public void onCreate() {
         super.onCreate();
+        Log.e("MediaMTXService", "🔥 ENTER onCreate() 🔥");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        CTDebug(TAG, "MediaMTx.onStartCommand()");
         if (processPid != 0 && processPid != Process.myPid()) {
             CTInfo(TAG, "MediaMTX already running in pid " + processPid);
             return START_NOT_STICKY;
         }
+        if (!listenersRegistered) {
+            MediaMTXBootstrap.init();
+            listenersRegistered = true;
+        }
+
         processPid = Process.myPid();
         CTDebug(TAG, "MediaMTX service started in pid " + processPid);
         createNotificationChannel();

@@ -57,6 +57,7 @@ import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.ScanningService;
 import com.google.firebase.analytics.FirebaseAnalytics;
+import androidx.work.Data;
 
 /*
  * Persistent state management for CaltopoClient
@@ -652,6 +653,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ccs.caltopoSessionConfig.domainAndPort = dAndP;
     }
 
+    public static void SubmitClue(Data workData) {
+        // FIXMME: Submit clue to caltopo
+    }
+
     public static String GetCaltopoDomainAndPort() {
         ClientClassState ccs = GetState();
         if (null == ccs.caltopoSessionConfig) ccs.caltopoSessionConfig = new CaltopoSessionConfig();
@@ -728,7 +733,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!groupid.isEmpty()) SetGroupId(groupid);
         if (!trackerApiKey.isEmpty()) SetTrackerApiKey(trackerApiKey);
         if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
-        SetCaltopoSessionConfig(new CaltopoSessionConfig(teamId, credentialId, credentialSecret));
+        if (!teamId.isEmpty() || !credentialId.isEmpty() || !credentialSecret.isEmpty())
+            SetCaltopoSessionConfig(new CaltopoSessionConfig(teamId, credentialId, credentialSecret));
+        // must follow setCaltopoSessionConfig()
         if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
         boolean useDirectFlag = json.optBoolean("use_direct_flag");
         CTDebug(TAG, "readCredentialsFileContent(): read useDirectFlag as: " + useDirectFlag);

@@ -12,4 +12,8 @@ public final class MediaMTXNative {
 
     public static native int start(String binPath, String configPath);
     public static native void stop();
+
+    public static void onMediaMtxLogLine(String line) {
+        MediaMTXLogDispatcher.dispatch(line);
+    }
 }

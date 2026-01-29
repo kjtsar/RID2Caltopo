@@ -3,9 +3,9 @@
 agp = "8.2.2"
 exoplayer = "2.20.1"
 firebaseBom = "33.1.0"
-kotlin = "1.9.22"
+kotlin = "2.1.20"
 composeBom = "2024.02.02"
-composeCompiler = "1.5.10"
+composeCompiler = "1.5.15"
 
 coreKtx = "1.12.0"
 appcompat = "1.6.1"
@@ -25,6 +25,8 @@ okhttp = "4.12.0"
 bouncycastle = "1.70"
 constraintlayout = "2.1.4"
 documentfile = "1.0.1"
+workRuntimeKtx = "2.11.0"
+media3ExoplayerHls = "1.9.0"
 
 [libraries]
 # AndroidX & Google
@@ -67,7 +69,11 @@ squareup-okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwe
 squareup-okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }
 bouncycastle-prov = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
 bouncycastle-pkix = { group = "org.bouncycastle", name = "bcpkix-jdk15on", version.ref = "bouncycastle" }
+androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workRuntimeKtx" }
+androidx-media3-exoplayer-hls = { group = "androidx.media3", name = "media3-exoplayer-hls", version.ref = "media3ExoplayerHls" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+compose-compiler = {id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin"}
+

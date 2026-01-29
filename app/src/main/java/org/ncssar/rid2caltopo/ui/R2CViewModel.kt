@@ -20,7 +20,13 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
-
+enum class ActiveScreen {
+    MAIN,
+    STREAMS,
+    SETTINGS,
+    SCANNER,
+    MAPID_DIALOG,
+}
 class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     CtDroneSpec.DroneSpecsChangedListener, CaltopoMap.MapStatusListener {
     private val _drones = MutableStateFlow<List<CtDroneSpec>>(emptyList())
@@ -37,7 +43,24 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     val mapStatus = _mapStatus.asStateFlow()
     private val _hostname = MutableStateFlow("")
     val hostname = _hostname.asStateFlow()
+    private val _activeScreen = MutableStateFlow(ActiveScreen.MAIN)
+    val activeScreen : StateFlow<ActiveScreen> = _activeScreen.asStateFlow()
 
+    fun showStreams() {
+        _activeScreen.value = ActiveScreen.STREAMS
+    }
+    fun showMain() {
+        _activeScreen.value = ActiveScreen.MAIN
+    }
+    fun showSettings() {
+        _activeScreen.value = ActiveScreen.SETTINGS
+    }
+    fun showMapidDialog() {
+        _activeScreen.value = ActiveScreen.MAPID_DIALOG
+    }
+    fun showScanner() {
+        _activeScreen.value = ActiveScreen.SCANNER
+    }
 
     init {
         delayedUptimePoll.start(this::uptimePoll, 1000, 1000)

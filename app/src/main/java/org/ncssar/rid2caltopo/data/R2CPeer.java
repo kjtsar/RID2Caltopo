@@ -1120,7 +1120,27 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         GetMyIpAddresses();
     }
 
+    @NonNull
+    public static String GetMyIpAddress(boolean tunnelFlag) {
+        JSONArray addresses = GetMyIpAddresses();
+        for (int i=0; i< addresses.length(); i++) {
+            try {
+                JSONObject map = addresses.getJSONObject(i);
+                String intf = map.getString("intf");
+                if (intf.startsWith("tun") && tunnelFlag) {
+                    return map.getString("ipaddr");
+                } else if (!tunnelFlag) {
+                    return map.getString("ipaddr");
+                }
+            } catch (Exception e) {
+                CTError(TAG, "GetMyIpAddress(): bad record");
+            }
+        }
+        CTError(TAG, "GetMyIpAddress(): No address found");
+        return "";
+    }
 
+    @NonNull
     public static JSONArray GetMyIpAddresses() {
         HashMap<String,JSONObject> map = new HashMap<>();
         boolean tunnelFound = false;

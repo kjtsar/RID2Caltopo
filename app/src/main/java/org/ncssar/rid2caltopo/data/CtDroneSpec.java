@@ -75,6 +75,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient String trackLabel;
     public transient double lastLat;
     public transient double lastLng;
+    public transient double lastAlt;
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
     private boolean okToLog = true;
@@ -170,6 +171,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public boolean okToLog() {return okToLog;}
 
+    public long getStartMsecTimestamp() { return startMsecTimestamp; }
     public String getDurationInSecAsString() {
         long durationInMsec = 0;
         if (startMsecTimestamp > 0 && (startMsecTimestamp < mostRecentMsecTimestamp)) {
@@ -178,6 +180,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return SimpleTimer.DurationAsString(durationInMsec);
     }
 
+    public double getLastLat() {return lastLat;}
+    public double getLastLng() {return lastLng;}
+    public double getLastAlt() {return lastAlt;}
     public double getDistanceInFeet() { return distanceInFeet;}
 
     public int getTotalCount() {
@@ -349,7 +354,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             CTDebug(TAG, "checkNewWaypoint(): Advising dronespec active: " + trackLabel);
             CaltopoClient.DroneSpecStatusChanged(this, true);
         }
-        lastLat = lat; lastLng = lng;
+        lastLat = lat; lastLng = lng; lastAlt = altitudeInMeters;
         if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
             CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f, total:%.3f",
                     lDistanceInFeet, distanceInFeet));

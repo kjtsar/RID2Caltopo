@@ -19,3 +19,12 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+-keep class org.ncssar.rid2caltopo.data.MediaMTXNative {
+    public static void onMediaMtxLogLine(java.lang.String);
+}
+-keep class org.ncssar.rid2caltopo.data.MediaMTXNative {
+    *;
+}
+-keepclasseswithmembers class * {
+    native <methods>;
+}

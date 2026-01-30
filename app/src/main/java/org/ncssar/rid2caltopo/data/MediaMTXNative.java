@@ -2,6 +2,8 @@ package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 
+import org.ncssar.rid2caltopo.app.MediaMTXService;
+
 public final class MediaMTXNative {
 
     static {
@@ -13,7 +15,11 @@ public final class MediaMTXNative {
     public static native int start(String binPath, String configPath);
     public static native void stop();
 
-    public static void onMediaMtxLogLine(String line) {
+    public static void onNativeProcessExit(int pid, int status, int signaled) {
+        MediaMTXService.onNativeProcessExit(pid, status, signaled);
+    }
+
+    public static void onMediaMTXLogLine(String line) {
         MediaMTXLogDispatcher.dispatch(line);
     }
 }

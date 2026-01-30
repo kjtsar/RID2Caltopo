@@ -6,23 +6,27 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-import android.content.res.Configuration
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
-import org.checkerframework.checker.units.qual.UnknownUnits
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.R2CPeer
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
+import org.ncssar.rid2caltopo.data.MediaMTXStatus
 
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -39,10 +43,25 @@ fun StreamsScreen(
     ) {
         Column {
             TopAppBar(
-                title = { Text("Streams Service") },
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = MediaMTXStatus.serverStatus,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Back"
+                        )
                     }
                 }
             )
@@ -115,9 +134,9 @@ fun submitClue(snapshot: ClueSnapshot, description: String) {
 private fun EmptyStreamsView() {
     Box(
         modifier = Modifier.fillMaxSize(),
-        contentAlignment = androidx.compose.ui.Alignment.Center
+        contentAlignment = Alignment.Center
     ) {
         val myIpAddress: String = R2CPeer.GetMyIpAddress(false)
-        Text("Waiting for... rtmp://${myIpAddress}/<droneDesig> or rtsp://${myIpAddress}/<droneDesig>")
+        Text("Waiting for drone to attach at rtmp://${myIpAddress}/<droneDesig>")
     }
 }

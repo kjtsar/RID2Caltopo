@@ -30,17 +30,27 @@ object MediaMTXLogDispatcher {
     private fun parseStreamLifecycle(line: String): MediaMTXEvent? {
         val PATH_REGEX =
             Regex("""\[path ([^\]]+)]\s*(.+)""")
-        val match = PATH_REGEX.find(line) ?: return null
-        val path = match.groupValues[1]
-        val rem = match.groupValues[2]
-        return when {
-            rem.contains("created") ->
-                MediaMTXEvent.StreamConnecting(path)
-            rem.contains("runOnReady") ->
-                MediaMTXEvent.StreamStarted(path)
-            rem.contains("destroyed") ->
-                MediaMTXEvent.StreamStopped(path)
-            else -> null
+        val START_REGEX =
+            Regex("""MediaMTX (v[0-9]+\.[0-9]+\.[0-9]+)""")
+        val match = PATH_REGEX.find(line)
+        if (null != match) {
+            val path = match.groupValues[1]
+            val rem = match.groupValues[2]
+            return when {
+                rem.contains("created") ->
+                    MediaMTXEvent.StreamConnecting(path)
+
+                rem.contains("runOnReady") ->
+                    MediaMTXEvent.StreamStarted(path)
+
+                rem.contains("destroyed") ->
+                    MediaMTXEvent.StreamStopped(path)
+
+                else -> null
+            }
         }
+        val startMatch = START_REGEX.find(line) ?: return null
+        val version = startMatch.groupValues[1]
+        return MediaMTXEvent.ServerStarted(version)
     }
 }

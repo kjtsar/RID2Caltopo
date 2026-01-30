@@ -12,23 +12,51 @@
 
 static pid_t mediamtx_pid = -1;
 static JavaVM* g_vm = NULL;
-static jclass mediaMtxClassGlobal = NULL;
+static jclass mediaMTXClassGlobal = NULL;
 static jmethodID onLogLineMethod = NULL;
+static jmethodID onExitedMethod = NULL;
+
+static void jni_report_child_exit(pid_t pid, int status, int signaled) {
+    if (!g_vm || !onExitedMethod) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
+                            "JNI exit callback not available");
+        return;
+    }
+
+    JNIEnv *env = NULL;
+    (*g_vm)->AttachCurrentThread(g_vm, &env, NULL);
+    (*env)->CallStaticVoidMethod(
+            env,
+            mediaMTXClassGlobal,
+            onExitedMethod,
+            (jint)pid,
+            (jint)status,
+            (jint)signaled
+    );
+
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
+    (*g_vm)->DetachCurrentThread(g_vm);
+}
+
 
 static void* monitor_child(void *arg) {
     int status;
+    int pid = mediamtx_pid;
+    int sig = 0;
 
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-                        "Monitoring MediaMTX pid %d", mediamtx_pid);
+                        "Monitoring MediaMTX pid %d", pid);
 
-    waitpid(mediamtx_pid, &status, 0);
+    int r = waitpid(pid, &status, 0);
 
     if (WIFEXITED(status)) {
         __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
                             "MediaMTX exited with code %d",
                             WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
-        int sig = WTERMSIG(status);
+        sig = WTERMSIG(status);
         if (sig == SIGRTMAX) {
             __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
                                 "MediaMTX terminated by Android (SIGRTMAX)");
@@ -39,86 +67,103 @@ static void* monitor_child(void *arg) {
                             WTERMSIG(status));
     }
 
+    jni_report_child_exit(pid, status, sig);
     mediamtx_pid = -1;
 
     __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
                         "MediaMTX terminated, exiting launcher");
-
-    _exit(0);   // IMPORTANT: exit *process*, not thread
+    return NULL;
 }
-
+static const char * MEDIAMTXNATIVE_CLASS_PATH = "org/ncssar/rid2caltopo/data/MediaMTXNative";
 void init_jni(JNIEnv* env, jobject clazz) {
-    mediaMtxClassGlobal = (*env)->NewGlobalRef(env, clazz);
+    if (mediaMTXClassGlobal != NULL) return;
+    jclass localCls = (*env)->FindClass(env, MEDIAMTXNATIVE_CLASS_PATH);
+    if (localCls == NULL) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
+                            "Failed to find '%s' class", MEDIAMTXNATIVE_CLASS_PATH);
+        return;
+    }
+    mediaMTXClassGlobal = (*env)->NewGlobalRef(env, localCls);
+    (*env)->DeleteLocalRef(env, localCls);
+
     onLogLineMethod = (*env)->GetStaticMethodID(
             env,
-            clazz,
-            "onMediaMtxLogLine",
+            mediaMTXClassGlobal,
+            "onMediaMTXLogLine",
             "(Ljava/lang/String;)V"
     );
+    onExitedMethod = (*env)->GetStaticMethodID(
+            env,
+            mediaMTXClassGlobal,
+            "onNativeProcessExit",
+            "(III)V"
+    );
+
 }
+
+JNIEXPORT void JNICALL
+JNI_OnUnload(JavaVM* vm, void *reserved) {
+    JNIEnv* env;
+    if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) == JNI_OK) {
+        if (mediaMTXClassGlobal) {
+            (*env)->DeleteGlobalRef(env, mediaMTXClassGlobal);
+            mediaMTXClassGlobal = NULL;
+        }
+    }
+}
+
 JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM *vm, void *reserved) {
     g_vm = vm;
     return JNI_VERSION_1_6;
 }
 
-JNIEnv* get_jni_env(void) {
-    if (g_vm == NULL) return NULL;
 
-    JNIEnv *env = NULL;
-    jint result = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
-    if (result == JNI_EDETACHED) {
-        __android_log_print(ANDROID_LOG_INFO, "MediaMTX-JNI",
-                            "Attaching log reader thread to JVM");
-        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != 0) {
-            __android_log_print(ANDROID_LOG_INFO, "MediaMTX-JNI",
-                                "Attach failed");
-            return NULL;
-        }
-    } else if (result != JNI_OK) {
-        return NULL;
-    }
-
-    return env;
-}
-
-
-void emit_log_line(const char* line) {
-    JNIEnv* env = get_jni_env();
-    if (env == NULL) {
-        __android_log_print(ANDROID_LOG_ERROR, "MediaMTX-JNI",
-                            "JNIEnv is NULL, skipping log");
-        return;
-    }
+void emit_log_line(JNIEnv* reader_env, const char* line) {
     if (!onLogLineMethod) {
         __android_log_print(ANDROID_LOG_ERROR, "MediaMTX-JNI",
-                            "onLogLineMethod is NULL, kipping log");
+                            "onLogLineMethod is NULL, skipping log");
         return;
     }
 
-    jstring jline = (*env)->NewStringUTF(env, line);
-    (*env)->CallStaticVoidMethod(
-            env,
-            mediaMtxClassGlobal,
+    jstring jline = (*reader_env)->NewStringUTF(reader_env, line);
+    (*reader_env)->CallStaticVoidMethod(
+            reader_env,
+            mediaMTXClassGlobal,
             onLogLineMethod,
             jline
     );
-    (*env)->DeleteLocalRef(env, jline);
+    (*reader_env)->DeleteLocalRef(reader_env, jline);
 }
 
 static void* read_log(void *arg) {
     int fd = *(int *)arg;
     free(arg);
+    JNIEnv* reader_env = NULL;
 
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "MediaMTX read_log() running in pid:%d, tid:%ld", getpid(), pthread_self());
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+                        "MediaMTX read_log() running in pid:%d, tid:%ld",
+                        getpid(), pthread_self());
+    if ((*g_vm)->GetEnv(g_vm, (void **)&reader_env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*g_vm)->AttachCurrentThread(g_vm, &reader_env, NULL) != 0) {
+            __android_log_print(ANDROID_LOG_INFO, "MediaMTX-JNI",
+                                "read_log(): Attach failed");
+            return NULL;
+        }
+    }
+
     char buf[256];
     while (1) {
         ssize_t n = read(fd, buf, sizeof(buf)-1);
         if (n <= 0) break;
         buf[n] = 0;
-        emit_log_line(buf);
+        emit_log_line(reader_env, buf);
         __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s", buf);
     }
+
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "MediaMTX read_log() exiting from pid:%d, tid:%ld", getpid(), pthread_self());
     (*g_vm)->DetachCurrentThread(g_vm);
     return NULL;
 }
@@ -201,8 +246,6 @@ Java_org_ncssar_rid2caltopo_data_MediaMTXNative_stop(
 
     if (mediamtx_pid > 0) {
         kill(mediamtx_pid, SIGTERM);
-        waitpid(mediamtx_pid, NULL, 0);
-        __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "MediaMTX stopped");
-        mediamtx_pid = -1;
+        // let monitor_child() catch and report back the status so it can exit cleanly.
     }
 }

@@ -19,4 +19,8 @@ sealed class MediaMTXEvent {
         val path: String,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()
+    data class ServerStarted(
+        val version: String,
+        val timestamp: Instant = Instant.now()
+    ) : MediaMTXEvent()
 }

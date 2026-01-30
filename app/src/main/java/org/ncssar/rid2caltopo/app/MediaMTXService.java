@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.app;
 
+import static android.system.OsConstants.SIGRTMAX;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
@@ -19,10 +20,8 @@ import androidx.core.app.NotificationCompat;
 
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.MediaMTXBootstrap;
-import org.ncssar.rid2caltopo.data.MediaMTXEvent;
-import org.ncssar.rid2caltopo.data.MediaMTXLogDispatcher;
 import org.ncssar.rid2caltopo.data.MediaMTXNative;
-import org.ncssar.rid2caltopo.video.StreamRegistry;
+import org.ncssar.rid2caltopo.data.MediaMTXStatus;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -30,18 +29,42 @@ import java.io.InputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Locale;
-import kotlin.Unit;
-import kotlin.jvm.functions.Function1;
 
 
 public class MediaMTXService extends Service {
-    private static final String TAG = "MediaMtxService";
+    private static final String TAG = "MediaMTXService";
+    private static int MEDIA_MTX_NOTIFICATION_ID = 1;
     private static boolean listenersRegistered = false;
     private static int processPid = 0;
+
+    public static void onNativeProcessExit(int pid, int status, int signaled) {
+        CTDebug(TAG, "MediaMTX exited pid=" + pid +
+                " status=" + status +
+                " signaled=" + signaled);
+        String description;
+        if (0 != signaled) {
+            if (signaled == SIGRTMAX) {
+                description = "terminated by Android";
+            } else {
+                description = "terminated by signal " + signaled;
+            }
+        } else {
+            description = "exited with status " + status;
+        }
+        MediaMTXStatus.onServerExited(description);
+    }
 
     public void onCreate() {
         super.onCreate();
         Log.e("MediaMTXService", "🔥 ENTER onCreate() 🔥");
+        createNotificationChannel();
+        Notification notification = new NotificationCompat.Builder(this, "streaming")
+                .setContentTitle("Drone Video Relay")
+                .setContentText("Streaming active")
+                .setSmallIcon(R.drawable.earth)
+                .build();
+
+        startForeground(MEDIA_MTX_NOTIFICATION_ID, notification);
     }
 
     @Override
@@ -58,14 +81,6 @@ public class MediaMTXService extends Service {
 
         processPid = Process.myPid();
         CTDebug(TAG, "MediaMTX service started in pid " + processPid);
-        createNotificationChannel();
-        Notification notification = new NotificationCompat.Builder(this, "streaming")
-                .setContentTitle("Drone Video Relay")
-                .setContentText("Streaming active")
-                .setSmallIcon(R.drawable.earth)
-                .build();
-
-        startForeground(1, notification);
 
         try {
             File bin = extractAsset("mediamtx");

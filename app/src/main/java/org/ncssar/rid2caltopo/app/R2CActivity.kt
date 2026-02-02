@@ -32,7 +32,6 @@ import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -56,16 +55,11 @@ import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
-import org.ncssar.rid2caltopo.video.Protocol
-import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamsScreen
-import org.ncssar.rid2caltopo.video.StreamInfo
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.launch
-import org.ncssar.rid2caltopo.data.CaltopoClient.DebugLevel
 import java.util.Locale
 
 class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
@@ -110,7 +104,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        Log.e("R2CActivity", "🔥 ENTER R2CActivity.onCreate() 🔥")
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         R2CPeer.SetPeerListChangedListener(this)
@@ -120,7 +113,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             R2CViewModelFactory(
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
-        CaltopoClient.SetDroneSpecsChangedListener(localViewModel)
+        CaltopoClient.AddDroneSpecsChangedListener(localViewModel)
         CaltopoClient.CheckIdle()
 
         /***
@@ -394,6 +387,9 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     public override fun onDestroy() {
         if (this === AppActivity) {
             if (isFinishing()) try {
+                CTDebug(TAG,"onDestroy() shutting down streaming service..." )
+                val streamServiceIntent = Intent(this, MediaMTXService::class.java)
+                stopService(streamServiceIntent)
                 CTDebug(TAG,"onDestroy() shutting down scanning service..." )
                 val serviceIntent = Intent(this, ScanningService::class.java)
                 stopService(serviceIntent)

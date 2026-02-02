@@ -25,4 +25,10 @@ object MediaMTXStatus {
             serverStatus = "\uD83D\uDD34 Server exited: ${exitDescription}"
         }
     }
+
+    @JvmStatic
+    fun waitForExit(maxDelayInMsec: Integer) {
+        // no-op for now
+    }
 }
+

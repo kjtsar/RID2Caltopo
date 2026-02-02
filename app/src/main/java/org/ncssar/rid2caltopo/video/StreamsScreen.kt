@@ -28,7 +28,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
 
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StreamsScreen(
@@ -70,38 +69,72 @@ fun StreamsScreen(
     }
 }
 
+fun <T> List<T>.padTo(size: Int): List<T?> =
+    this + List(size - this.size) { null }
+
 @Composable
 private fun StreamsGrid(viewModel: StreamsViewModel) {
     val TAG: String = "StreamsGrid"
     val streams by viewModel.streams.collectAsState()
+    val streamEntries = streams.entries.toList()
     val context = LocalContext.current
     val activity = context as Activity
-// focusedPath = viewModel.focusedPath
-    if (streams.isEmpty()) {
+    val focusedPath = viewModel.focusedPath
+    val visibleEntries =
+        if (focusedPath != null) {
+            streamEntries.filter {it.key == focusedPath}
+        } else {
+            streamEntries
+        }
+
+    if (visibleEntries.isEmpty()) {
         CTDebug(TAG, "No streams to show.")
         EmptyStreamsView()
         return
     }
 
-    val columns = if (streams.size <= 2) 1 else 2
+    val columns = if (visibleEntries.size <= 2) 1 else 2
+    val rows = when (visibleEntries.size) {
+        0, 1 -> 1
+        2 -> 2
+        else -> 2
+    }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(columns),
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(4.dp)
-    ) {
-        items(streams.entries.toList()) { (path, info) ->
-            StreamTile(
-                designator = path,
-                state = info.state,
-                onToggleFocus = {
-                    viewModel.toggleFocus(path)
-                },
-                activity = activity,
-                onSnapshot = { snapshot ->
-                    viewModel.onSnapshotCaptured(snapshot)
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val cellHeight = maxHeight / rows
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            modifier = Modifier.fillMaxSize(),
+            userScrollEnabled = false,
+            contentPadding = PaddingValues(4.dp)
+        ) {
+            items(
+                items = visibleEntries,
+                key = { it.key }
+            ) { (path, info) ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(cellHeight)
+                        .padding(4.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CTDebug(TAG, "Rendering stream ${path}...")
+                    StreamTile(
+                        viewModel = viewModel,
+                        streamDesignator = path,
+                        streamState = info.state,
+                        onToggleFocus = {
+                            viewModel.toggleFocus(path)
+                        },
+                        activity = activity,
+                        onSnapshot = { snapshot ->
+                            viewModel.onSnapshotCaptured(snapshot)
+                        }
+                    )
                 }
-            )
+            }
         }
     }
 }

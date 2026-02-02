@@ -22,6 +22,9 @@ object MediaMTXBootstrap {
 
                 is MediaMTXEvent.ServerStarted ->
                     MediaMTXStatus.onServerStarted(event.version)
+
+                is MediaMTXEvent.HlsStreamStarted -> {}
+                //    StreamRegistry.onStreamStarted(event.path)
             }
         }
     }

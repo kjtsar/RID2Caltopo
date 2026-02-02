@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.video.StreamsScreen
 
 // 1. Define a sealed interface to represent the different types of items in our list.
@@ -48,10 +49,38 @@ fun MainScreen(
     onShowLog: () -> Unit,
     onShowHelp: () -> Unit
 ) {
-    val TAG:String = "MainScreen"
+    val TAG: String = "MainScreen"
     var menuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
+    var showConfirmExitDialog by remember { mutableStateOf(false) }
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
+
+    if (showConfirmExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmExitDialog = false },
+            title = { Text("Confirm Exit") },
+            text = { Text("Do you really want to close this application?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showConfirmExitDialog = false
+                        R2CActivity.getR2CActivity()?.finish()
+                    }
+                ) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showConfirmExitDialog = false
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     if (showConfirmDialog) {
         AlertDialog(
@@ -140,6 +169,11 @@ fun MainScreen(
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
                             onShowHelp()
                             CaltopoClient.CTEvent(TAG,"HelpDisplayed", null)
+                            menuExpanded = false
+                        })
+                        DropdownMenuItem(text = { Text("Quit") }, onClick = {
+                            showConfirmExitDialog = true
+                            CaltopoClient.CTEvent(TAG,"Quit", null)
                             menuExpanded = false
                         })
                     }

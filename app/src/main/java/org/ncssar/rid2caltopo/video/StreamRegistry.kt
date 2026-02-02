@@ -19,22 +19,22 @@ object StreamRegistry {
 
     fun onStreamConnecting(path: String) {
         _streams.update { it + (path to StreamInfo(path,StreamState.CONNECTING)) }
-        CTDebug(TAG, "onStreamConnecting({_streams.value.keys})")
+        CTDebug(TAG, "onStreamConnecting(${path}): state:${StreamState.CONNECTING.name}")
     }
 
     fun onStreamError(path: String) {
         _streams.update { it + (path to StreamInfo(path,StreamState.ERROR)) }
-        CTDebug(TAG, "onStreamError({_streams.value.keys})")
+        CTDebug(TAG, "onStreamError(${path}): state:${StreamState.ERROR.name}")
     }
 
 
     fun onStreamStarted(path: String) {
         _streams.update {it + (path to StreamInfo(path, StreamState.LIVE))}
-        CTDebug(TAG, "onStreamStarted(${_streams.value.keys})")
+        CTDebug(TAG, "onStreamStarted(${path}): state:${StreamState.LIVE.name}")
     }
 
     fun onStreamStopped(path: String) {
-        _streams.update {it + (path to StreamInfo(path,StreamState.STOPPED))}
-        CTDebug(TAG, "onStreamStopped(${_streams.value.keys})")
+        _streams.update {it - path}
+        CTDebug(TAG, "onStreamStopped(${path}): state:${StreamState.STOPPED.name}")
     }
 }

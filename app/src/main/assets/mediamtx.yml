@@ -5,7 +5,10 @@ logLevel: info
 rtmp: yes
 rtsp: yes
 hls: yes
-
+hlsAlwaysRemux: yes
+hlsPartDuration: 500ms
+hlsSegmentDuration: 2s
+hlsSegmentCount: 10
 
   
 paths:

@@ -30,8 +30,56 @@ object MediaMTXLogDispatcher {
     private fun parseStreamLifecycle(line: String): MediaMTXEvent? {
         val PATH_REGEX =
             Regex("""\[path ([^\]]+)]\s*(.+)""")
+
         val START_REGEX =
             Regex("""MediaMTX (v[0-9]+\.[0-9]+\.[0-9]+)""")
+
+        val HLS_START_REGEX =
+            Regex("""\[HLS]\s+\[muxer ([^\]]+)]\s+created""")
+
+        val match = PATH_REGEX.find(line)
+        if (match != null) {
+            val path = match.groupValues[1]
+            val rem  = match.groupValues[2]
+
+            return when {
+                rem.contains("runOnReady command started") ->
+                    MediaMTXEvent.StreamStarted(path)
+
+                rem.contains("runOnReady command stopped") ->
+                    MediaMTXEvent.StreamStopped(path)
+
+                rem.contains("created") ->
+                    MediaMTXEvent.StreamConnecting(path)
+
+                rem.contains("destroyed") ->
+                    MediaMTXEvent.StreamStopped(path)
+
+                else -> null
+            }
+        }
+
+        val hlsStartMatch = HLS_START_REGEX.find(line)
+        if (hlsStartMatch != null) {
+            return MediaMTXEvent.HlsStreamStarted(hlsStartMatch.groupValues[1])
+        }
+
+        val startMatch = START_REGEX.find(line)
+        if (startMatch != null) {
+            return MediaMTXEvent.ServerStarted(startMatch.groupValues[1])
+        }
+
+        return null
+    }
+/***
+
+    private fun parseStreamLifecycle(line: String): MediaMTXEvent? {
+        val PATH_REGEX =
+            Regex("""\[path ([^\]]+)]\s*(.+)""")
+        val START_REGEX =
+            Regex("""MediaMTX (v[0-9]+\.[0-9]+\.[0-9]+)""")
+        val HLS_START_REGEX =
+            Regex("""\[HLS\]\s+\[muxer ([^\]]+])\s+ created""")
         val match = PATH_REGEX.find(line)
         if (null != match) {
             val path = match.groupValues[1]
@@ -49,8 +97,16 @@ object MediaMTXLogDispatcher {
                 else -> null
             }
         }
-        val startMatch = START_REGEX.find(line) ?: return null
-        val version = startMatch.groupValues[1]
-        return MediaMTXEvent.ServerStarted(version)
+        val hlsStartMatch = HLS_START_REGEX.find(line)
+        if (null != hlsStartMatch) {
+            return MediaMTXEvent.HlsStreamStarted(hlsStartMatch.groupValues[1]);
+        }
+        val startMatch = START_REGEX.find(line)
+        if (null != startMatch) {
+            val version = startMatch.groupValues[1]
+            return MediaMTXEvent.ServerStarted(version)
+        }
+        return null;
     }
+***/
 }

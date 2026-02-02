@@ -5,6 +5,8 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
 
+import static java.lang.Thread.sleep;
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -56,7 +58,6 @@ public class MediaMTXService extends Service {
 
     public void onCreate() {
         super.onCreate();
-        Log.e("MediaMTXService", "🔥 ENTER onCreate() 🔥");
         createNotificationChannel();
         Notification notification = new NotificationCompat.Builder(this, "streaming")
                 .setContentTitle("Drone Video Relay")

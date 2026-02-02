@@ -44,7 +44,9 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
 
 
 @Composable
-fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
+fun DroneItem(drone: CtDroneSpec,
+              totalCount: Int, // just used to force compose to redraw the DroneItem on chg.
+              onMappedIdChange: (String) -> Unit) {
     var text by remember { mutableStateOf(drone.mappedId) }
     val focusManager = LocalFocusManager.current
 
@@ -221,7 +223,7 @@ fun DroneItem(drone: CtDroneSpec, onMappedIdChange: (String) -> Unit) {
             ) {
                 Text(
                     modifier = Modifier.align(Alignment.End),
-                    text = "${drone.totalCount}",
+                    text = "${totalCount}",
                     textAlign = TextAlign.Right)
             }
             Column(

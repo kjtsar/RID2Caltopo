@@ -43,7 +43,11 @@ fun R2CView(
             RidmapHeader()
             drones.forEach { drone ->
                 key(drone.remoteId) {
-                    DroneItem(drone = drone) { newMappedId ->
+                    val triggerCount = drone.totalCount
+                    DroneItem(
+                        drone = drone,
+                        totalCount = drone.totalCount
+                    ) { newMappedId ->
                         onMappedIdChange(drone, newMappedId)
                     }
                 }

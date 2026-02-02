@@ -374,13 +374,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     /** IdleTimeInMsec()
      *
-     * @return Idle time since last waypoint was received from any drone -
-     *         in Milliseconds.
+     * @return Idle time - in Milliseconds since app was started or last
+     *         waypoint was received from any drone whichever is least.
      */
     public static long IdleTimeInMsec() {
         return System.currentTimeMillis() - MostRecentWaypointTimestampInMsec;
     }
-
+    public static long LastWaypointUpdateTimestampMsec() {
+        return MostRecentWaypointTimestampInMsec;
+    }
     // ModelAbbreviator()
     //  Take any descriptive sentence as input and abbreviate it by preserving the
     //  first character of each space separated word and removing any vowels
@@ -492,6 +494,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     @Override
     public int compareTo(@NonNull CtDroneSpec other) {
         return this.remoteId.compareTo(other.remoteId);
+    }
+
+    public int compareToAge(@NonNull CtDroneSpec other) {
+        return (int)(this.startMsecTimestamp - other.startMsecTimestamp);
     }
 
     public boolean isDifferentFrom(@NonNull CtDroneSpec other) {

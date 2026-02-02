@@ -186,11 +186,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static DocumentFile ArchiveDir;
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
-    private static CtDroneSpec.DroneSpecsChangedListener DroneSpecsChangedListener;
+    private static ArrayList<CtDroneSpec.DroneSpecsChangedListener> DroneSpecsChangedListeners = new ArrayList<>();
     private static CaltopoMap MyCaltopoMap = null;
     private static Uri DebugLogPath = null;
     private static DelayedExec AppIdleDelay = new DelayedExec();
     private static FirebaseAnalytics FBAnalytics;
+
+    private static long LastDronespecTableUpdateInMsec = CtDroneSpec.LastWaypointUpdateTimestampMsec();
 
     // CaltopoClient INSTANCE VARS:=
     private final String remoteId;
@@ -227,8 +229,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         idleTimeoutPoll = new DelayedExec();
     }
 
-    public static void SetDroneSpecsChangedListener(CtDroneSpec.DroneSpecsChangedListener newListener) {
-        DroneSpecsChangedListener = newListener;
+    public static void AddDroneSpecsChangedListener(CtDroneSpec.DroneSpecsChangedListener newListener) {
+        DroneSpecsChangedListeners.add(newListener);
+        if (false) CTDebug(TAG, String.format(Locale.US,
+                "AddDroneSpecsChangedListener() Adding 0x%x:%s, count:%d",
+                newListener.hashCode(), newListener.getClass().getName(), DroneSpecsChangedListeners.size()));
         UpdateDroneSpecs();
     }
 
@@ -283,14 +288,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (null != ds) ds.removeMyR2cOwner();
     }
 
-    public static void UpdateDroneSpecs() {
-        if (null != DroneSpecsChangedListener) {
-            DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray(true));
-            if (null == UiUpdatePoll) {
-                UiUpdatePoll = new DelayedExec();
-                UiUpdatePoll.start(() -> DroneSpecsChangedListener.onDroneSpecsChanged(GetSortedCurrentDroneSpecArray()), 1000, 1000);
-                CTDebug(TAG, "UpdateDroneSpecs(): Starting UiUpdatePoll...");
-            }
+    private static void UpdateDroneSpecs() {
+        ProcessSortedCurrentDroneSpecArray(true);
+        if (null == UiUpdatePoll) {
+            UiUpdatePoll = new DelayedExec();
+            UiUpdatePoll.start(CaltopoClient::ProcessSortedCurrentDroneSpecArray, 1000, 1000);
+            CTDebug(TAG, "UpdateDroneSpecs(): Starting UiUpdatePoll...");
         }
     }
 
@@ -1160,19 +1163,23 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     // This gets run by periodic timer.
-    public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray() {
-        return GetSortedCurrentDroneSpecArray(false);
+    private static void ProcessSortedCurrentDroneSpecArray() {
+        ProcessSortedCurrentDroneSpecArray(false);
     }
 
     /**
-     * GetSortedCurrentDroneSpecArray()
+     * ProcessSortedCurrentDroneSpecArray()
+     *   Sorts active droneSpecs by flight start Time, so oldest will appear first in
+     *   list while also checking for timeout and removing aged-out dronespecs that
+     *   have stopped transmitting RemoteID updates.
      *
      * @param changedFlag True if something has changed and we need to refresh the list.
      *                    If false, then check for inactive dronespecs.
-     * @return Returns the current sorted list of dronespecs that are still active.
      */
-    @NonNull
-    public static ArrayList<CtDroneSpec> GetSortedCurrentDroneSpecArray(boolean changedFlag) {
+
+    private static void ProcessSortedCurrentDroneSpecArray(boolean changedFlag) {
+        long mostRecentUpdate = CtDroneSpec.LastWaypointUpdateTimestampMsec();
+
         ClientClassState ccs = GetState();
         long newTrackDelayInMsec = ccs.newTrackDelayInSeconds * 1000;
         long currentTimeInMsec = System.currentTimeMillis();
@@ -1185,20 +1192,32 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 if (currentAgeOutInMsec <= 0) continue;
                 if (currentAgeOutInMsec < nextAgeOutInMsec) nextAgeOutInMsec = currentAgeOutInMsec;
                 CTDebug(TAG, String.format(Locale.US,
-                        "GetSortedCurrentDroneSpecArray(): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
-                        ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
+                        "ProcessSortedCurrentDroneSpecArray(%s): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
+                        changedFlag, ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
                 DsArray.add(ds);
             }
             PreviousEarliestAgeOutInMsec = currentTimeInMsec + nextAgeOutInMsec;
-            DsArray.sort(null);
+            DsArray.sort(CtDroneSpec::compareToAge);
             long newSize = DsArray.size();
             if (!changedFlag && (DroneSpecsArraySize != newSize)) {
                 CTDebug(TAG, String.format(Locale.US,
-                        "GetSortedCurrentDroneSpecArray(): arraySize changed from:%d to :%d", DroneSpecsArraySize, newSize));
+                        "ProcessSortedCurrentDroneSpecArray(): arraySize changed from:%d to :%d", DroneSpecsArraySize, newSize));
                 DroneSpecsArraySize = newSize;
             }
         }
-        return (ArrayList<CtDroneSpec>) DsArray.clone();
+        if (mostRecentUpdate <= LastDronespecTableUpdateInMsec) return;
+        LastDronespecTableUpdateInMsec = mostRecentUpdate;
+
+        ArrayList<CtDroneSpec> dsArrayClone = (ArrayList<CtDroneSpec>)DsArray.clone();
+        if (false) CTDebug(TAG, String.format(Locale.US,
+                "ProcessSortedCurrentDroneSpecArray(%s) updating %d listeners",
+                changedFlag, DroneSpecsChangedListeners.size()));
+        for (CtDroneSpec.DroneSpecsChangedListener listener : DroneSpecsChangedListeners) {
+            if (false) CTDebug(TAG, String.format(Locale.US,
+                    "ProcessSortedCurrentDroneSpecArray(%s) + Updating 0x%x:%s", changedFlag,
+                    listener.hashCode(), listener.getClass().getName()));
+            listener.onDroneSpecsChanged(dsArrayClone);
+        }
     }
 
     public static String GetGroupId() {

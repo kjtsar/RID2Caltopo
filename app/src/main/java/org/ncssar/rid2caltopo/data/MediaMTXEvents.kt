@@ -23,4 +23,8 @@ sealed class MediaMTXEvent {
         val version: String,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()
+    data class HlsStreamStarted(
+        val path: String,
+        val timestamp: Instant = Instant.now()
+    ) : MediaMTXEvent()
 }

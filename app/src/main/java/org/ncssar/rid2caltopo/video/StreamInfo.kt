@@ -8,18 +8,6 @@ data class StreamInfo(
     val designator: String,    // MediaMTX designator s/b <callsign><dronedesc>, but could be anything.
     //val protocol: Protocol,  // MediaMTX protocol
     val state: StreamState,
-    /***
-    val firstSeen: Instant,
-    val uri: Uri,
-    val bindingState: StreamBindingState,
-    val droneSpec: CtDroneSpec? = null,
-
-    val resolutionState: ResolutionState,
-
-    val candidateDrones: List<CtDroneSpec> = emptyList(),
-    val connected: Boolean = false,
-    val lastActivityMs: Long = System.currentTimeMillis()
-    ***/
 )
 
 enum class StreamState {

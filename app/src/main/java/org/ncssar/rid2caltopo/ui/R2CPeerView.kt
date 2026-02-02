@@ -37,7 +37,10 @@ fun R2CPeerView(
             RestRidmapHeader()
             drones.forEach { drone ->
                 key(drone.remoteId, drone.mappedId) {
-                    DroneItem(drone = drone) { newMappedId ->
+                    DroneItem(
+                        drone = drone,
+                        totalCount = drone.totalCount
+                    ) { newMappedId ->
                         onMappedIdChange(drone, newMappedId)
                     }
                 }

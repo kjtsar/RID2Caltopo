@@ -22,7 +22,6 @@ import android.os.Process;
 import android.provider.DocumentsContract;
 import android.util.Log;
 
-import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -184,8 +183,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     //    private static final String MyStateFileName = TAG + BuildConfig.BUILD_TIME + ".ser";
     private static final String MyStateFileName = TAG + ".ser";
     private static String LogFilePath;
-    private static ActivityResultLauncher<Intent> QueryArchivePath;
-    private static ActivityResultLauncher<String[]> LoadConfigFileLauncher;
     private static OutputStream DebugOutputStream;
     private static DocumentFile ArchiveDir;
     private static long BytesWrittenToDebugOutputStream;
@@ -468,7 +465,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         DocumentFile todaysDir = null;
         Context ctxt = R2CActivity.getAppContext();
         if (!archivePath.isEmpty() && null != ctxt) try {
-            VerifyArchiveDir();
+//            VerifyArchiveDir();
             if (null != ArchiveDir) {
                 SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy", Locale.US);
                 String dirpath = "tracks-" + sdf.format(new Date());
@@ -494,11 +491,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String archivePath = GetArchivePath();
         DocumentFile todaysDir = null;
         Context ctxt = R2CActivity.getAppContext();
-        if (!archivePath.isEmpty() && null != ctxt) try {
-            VerifyArchiveDir();
-        } catch (Exception e) {
-            CTError(TAG, "VerifyArchiveDir() raised.", e);
-        }
+//        if (!archivePath.isEmpty() && null != ctxt) try {
+//            VerifyArchiveDir();
+//        } catch (Exception e) {
+//            CTError(TAG, "VerifyArchiveDir() raised.", e);
+//        }
         return ArchiveDir;
     }
 
@@ -777,60 +774,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTError(TAG, String.format(Locale.US, "Error processing '%s':", uri), e);
         }
     }
-
-    public static void RequestLoadConfigFile() {
-        try {
-            if (LoadConfigFileLauncher != null) {
-                String[] mimeTypes = {"application/json", "text/plain", "application/octet-stream"};
-                LoadConfigFileLauncher.launch(mimeTypes);
-            }
-        } catch (Exception e) {
-            CTError(TAG, "RequestConfigFile() raised:", e);
-        }
-    }
-
-    public static void QueryUserForArchiveDir() {
-        final String EXTERNAL_STORAGE_PROVIDER_AUTHORITY = "com.android.externalstorage.documents";
-
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        intent.putExtra(Intent.EXTRA_TITLE, "Select directory to archive drone tracks");
-        Uri downloadsUri = DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_PROVIDER_AUTHORITY, "primary:Downloads");
-        intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadsUri);
-        CTDebug(TAG, String.format(Locale.US, "In QueryUserForArchiveDir(%s)", intent));
-        try {
-            QueryArchivePath.launch(intent);
-        } catch (Exception e) {
-            CTError(TAG, "queryUserForArchiveDir() raised:", e);
-        }
-    }
-
-    /* Make sure the archiveDir has been specified and that we have
-     * all the necessary permissions to write files into it.
-     */
-    public static void VerifyArchiveDir() {
-        if (null != ArchiveDir) return;
-        boolean requested = false;
-
-        String archivePath = GetArchivePath();
-        if (archivePath.isEmpty()) {
-            CTDebug(TAG, "VerifyArchiveDir(): Querying user for archiveDir()");
-            CaltopoClient.QueryUserForArchiveDir();
-            requested = true;
-        }
-        Context context = R2CActivity.getAppContext();
-        if (!archivePath.isEmpty() && null != context) try {
-            ContentResolver contentResolver = context.getContentResolver();
-            Uri treeUri = Uri.parse(archivePath);
-            contentResolver.takePersistableUriPermission(treeUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            );
-            ArchiveDir = DocumentFile.fromTreeUri(context, treeUri);
-        } catch (SecurityException e) {
-            if (!requested) { // FIXME: What's going on here - why always true?
-                CTWarn(TAG, "VerifyArchiveDir(): re-requesting persistable Uri Permission", e);
-                CaltopoClient.QueryUserForArchiveDir();
-            }
-        }
+    public static int GetRidmapCount() {
+        ClientClassState ccs = GetState();
+        return ccs.cachedDroneSpecTable.size();
     }
 
     public static String GetConfigFilesLoadedRecord() {
@@ -849,50 +795,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
-    @Nullable
-    private static ActivityResultLauncher<String[]> InitLauncherForConfigFile() {
-        R2CActivity activity = R2CActivity.getR2CActivity();
-        if (null == activity) {
-            CTError(TAG, "InitLauncherForConfigFile(): R2CActivity is null");
-            return null;
-        }
-        return activity.registerForActivityResult(new OpenOpenableDocument(),
-                uri -> {
-                    if (null != uri) {
-                        CaltopoClient.LoadConfigFile(uri);
-                    }
-                });
-    }
-
-
-    @Nullable
-    public static ActivityResultLauncher<Intent> InitLauncherForArchiveDir() {
-        R2CActivity activity = R2CActivity.getR2CActivity();
-        if (null == activity) {
-            CTError(TAG, "InitLauncherForArchiveDir(): R2CActivity is null");
-            return null;
-        }
-        return activity.registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
-                result -> {
-                    CTDebug(TAG, String.format(Locale.US, "In queryArchivePath:onActivityResult(%s)", result.toString()));
-                    if (result.getResultCode() == Activity.RESULT_OK) {
-                        Intent data = result.getData();
-                        if (null != data) {
-                            Uri treeUri = data.getData();
-                            if (null != treeUri) {
-                                // Persist the URI for later use (e.g., in SharedPreferences)
-                                activity.getContentResolver().takePersistableUriPermission(treeUri,
-                                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-
-                                // Now you have a Uri representing the selected directory tree, which likely includes Downloads
-                                // You can use DocumentFile to work with files within this directory
-                                SetArchivePath(treeUri.toString());
-                            }
-                        }
-                    }
-                });
-    }
-
     public static void CheckUnreportedFiles() {
         if (null == ExecutorPool) {
             ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
@@ -904,17 +806,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void PermissionsGrantedWeShouldBeGoodToGo() {
         InitArchiveDir();
         CheckUnreportedFiles();
-    }
-
-    public static void Initialize() {
-        GetState();
-        CTDebug(TAG, "Initialize()");
-        try {
-            QueryArchivePath = InitLauncherForArchiveDir();
-            LoadConfigFileLauncher = InitLauncherForConfigFile();
-        } catch (Exception e) {
-            CTError(TAG, "Initialize() raised:", e);
-        }
     }
 
     public static void DroneSpecStatusChanged(@NonNull CtDroneSpec ds, boolean isActiveFlag) {

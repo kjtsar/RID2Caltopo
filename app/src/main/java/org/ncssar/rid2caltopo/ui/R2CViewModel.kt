@@ -73,7 +73,7 @@ sealed class UIEvent {
 sealed class OverlayState {
     object None : OverlayState()
     object ConnectionSetup : OverlayState() // Formerly showStandAlonePopup
-
+    object RequestConfigFile : OverlayState()
     object Connecting: OverlayState()      // spinning icon.
     object MapBrowser : OverlayState()     // Formerly showMapBrowser
     object Management : OverlayState()     // Formerly showConnectedOptions
@@ -134,9 +134,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                     overlay = OverlayState.Connecting
                     CaltopoMap.Init() // Use credentials to fetch/update the CaltopoNode List
                 } else {
-                    overlay = OverlayState.None
                     // We don't have creds, go get the file
-                    CaltopoClient.RequestLoadConfigFile()
+                    overlay = OverlayState.RequestConfigFile
                 }
             }
 

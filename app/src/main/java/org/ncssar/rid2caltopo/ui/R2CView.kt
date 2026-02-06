@@ -7,6 +7,7 @@
 
 package org.ncssar.rid2caltopo.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -40,13 +41,32 @@ import java.util.Locale
 fun R2CView(
     hostName: String,
     viewModel: R2CViewModel?,
-    mapStatus: CaltopoMap.MapStatusListener.mapStatus,
     drones : List<CtDroneSpec>,
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
+    val loadConfigFileLauncher = rememberLauncherForActivityResult(
+        contract = CaltopoClient.OpenOpenableDocument(),
+        onResult = { uri ->
+            uri?.let { CaltopoClient.LoadConfigFile(it) }
+        }
+    )
+    if (null != viewModel) {
+        if (viewModel.overlay is OverlayState.RequestConfigFile) {
+            LaunchedEffect(Unit) {
+                loadConfigFileLauncher.launch(
+                    arrayOf(
+                        "application/json",
+                        "text/plain",
+                        "application/octet-stream"
+                    )
+                )
+            }
+        }
+    }
+
     Column {
-        AppHeader(appUptime, hostName, viewModel, mapStatus)
+        AppHeader(appUptime, hostName, viewModel)
         if (!drones.isEmpty()) {
             RidmapHeader()
             drones.forEach { drone ->
@@ -65,132 +85,66 @@ fun R2CView(
 }
 
 @Composable
-fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?, mapStatus: CaltopoMap.MapStatusListener.mapStatus) {
+fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
+    val textMod = Modifier.fillMaxWidth().padding(6.dp)
+    val colModifier = Modifier
+        .fillMaxHeight()
+        .background(MaterialTheme.colorScheme.surface)
+        .height(IntrinsicSize.Min)
     Row(
         modifier = Modifier
+            .height(60.dp)
             .background(MaterialTheme.colorScheme.primaryContainer)
-            .padding(3.dp)
+            .padding(2.dp)
     ) {
-        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.down) {
-            Column(
-                modifier = Modifier
-                    .width(40.dp)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.surface),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
-                    Image(
-                        painter = painterResource(id = R.drawable.earth),
-                        contentDescription = "earth",
-                        modifier = Modifier.size(30.dp)
-                    )
-                } else if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.connecting) {
-                    CircularProgressIndicator(
-                        color = MaterialTheme.colorScheme.secondary,
-                        strokeWidth = 4.dp,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-            }
-        }
-        Column(
-            modifier = Modifier.width(300.dp)
-        ) {
-            Text(
-                text = hostName,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 18.sp
-            )
-            Text(
-                text = R2CActivity.getMyAppVersion(),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
-        }
-        Column(
-            modifier = Modifier.width(120.dp)
-        ) {
-            Text(
-                text = "Up Time:",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 16.sp
-            )
-            Text(
-                text = appUptime,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
-        }
-        Column(
-            modifier = Modifier.width(300.dp)
-        ) {
+        Column(modifier = colModifier) {
             if (null != viewModel) MapStateView(viewModel)
         }
-        Column(
-            modifier = Modifier.width(100.dp)
-        ) {
+        Column (modifier = colModifier) {
             Text(
-                text = "ct rtt",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
-            Text(
-                text = String.format(
-                    Locale.US, "%.3f sec",
-                    CaltopoLiveTrack.GetCaltopoRttInMsec().toDouble() / 1000.0
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                text = "rid_map entries:\n${CaltopoClient.GetRidmapCount()}",
+                modifier = textMod,
+                style = MaterialTheme.typography.titleSmall,
+                textAlign = TextAlign.Center
             )
         }
-        Column(
-            modifier = Modifier.width(150.dp)
-        ) {
+        Column(modifier = colModifier) {
             Text(
-                text = "bad RID msgs",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                text = "$hostName\n${R2CActivity.getMyAppVersion()}",
+                modifier = textMod,
+                style = MaterialTheme.typography.titleSmall,
+                textAlign = TextAlign.Center
+            )
+        }
+        Column(modifier = colModifier) {
+            Text(
+                text = "Up Time:\n$appUptime",
+                modifier = textMod,
+                style = MaterialTheme.typography.titleSmall,
+                textAlign = TextAlign.Center
+            )
+        }
+        Column(modifier = colModifier) {
+            val rtt = String.format(
+                Locale.US, "%.3f sec",
+                CaltopoLiveTrack.GetCaltopoRttInMsec().toDouble() / 1000.0
             )
             Text(
-                text = String.format(
-                    Locale.US, "%d", CtDroneSpec.GetInvalidWaypointCount()
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
+                text = "Caltopo msg rtt:\n$rtt",
+                modifier = textMod,
+                style = MaterialTheme.typography.titleSmall,
+                textAlign = TextAlign.Center
+            )
+        }
+        Column(modifier = colModifier) {
+            val msgs = String.format(
+                Locale.US, "%d", CtDroneSpec.GetInvalidWaypointCount()
+            )
+            Text(
+                text = "Invalid RID msgs:\n$msgs",
+                modifier = textMod,
+                style = MaterialTheme.typography.titleSmall,
+                textAlign = TextAlign.Center
             )
         }
     }
@@ -314,7 +268,7 @@ fun RidmapHeader() {
                     fontSize = 18.sp
                 )
                 Text(
-                    text = "Good:",
+                    text = "Filtered:",
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)
@@ -382,7 +336,7 @@ fun RidmapHeader() {
 @Composable
 fun R2CViewPreview() {
     RID2CaltopoTheme {
-        R2CView("",  null, CaltopoMap.MapStatusListener.mapStatus.down, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
+        R2CView("",  null, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
     }
 }
 
@@ -392,7 +346,10 @@ fun MapStateView(viewModel: R2CViewModel) {
     val connection = viewModel.connectionState
     val overlay = viewModel.overlay
 
-    Box (modifier = Modifier.fillMaxSize()) {
+    Box (
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.padding(6.dp)
+    ) {
         // The Header only needs to know the Connection state to draw its icon/label
         CaltopoActionInterface(
             state = connection,
@@ -406,6 +363,14 @@ fun MapStateView(viewModel: R2CViewModel) {
                     hasCreds = viewModel.hasCredentials,
                     onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
                     loading = false,
+                    onAction = { viewModel.onUIEvent(UIEvent.ConnectionRequested) }
+                )
+            }
+            is OverlayState.RequestConfigFile -> {
+                StandAloneOptionsDialog(
+                    hasCreds = viewModel.hasCredentials,
+                    onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
+                    loading = true,
                     onAction = { viewModel.onUIEvent(UIEvent.ConnectionRequested) }
                 )
             }

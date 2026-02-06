@@ -30,8 +30,6 @@ fun CaltopoSettingsScreen(
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val goLiveFlag by settingsViewModel.goLiveFlag.collectAsState()
     val usePeers by settingsViewModel.usePeers.collectAsState()
-    val incident by settingsViewModel.incident.collectAsState()
-    val opPeriod by settingsViewModel.opPeriod.collectAsState()
     val caltopoUrl by settingsViewModel.caltopoUrl.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
@@ -42,18 +40,6 @@ fun CaltopoSettingsScreen(
             ) {
                 Text("Settings", style = MaterialTheme.typography.headlineSmall)
                 Spacer(modifier = Modifier.height(16.dp))
-                OutlinedTextField(
-                    value = incident,
-                    onValueChange = { settingsViewModel.onIncidentChanged(it) },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Incident") }
-                )
-                OutlinedTextField(
-                    value = opPeriod,
-                    onValueChange = { settingsViewModel.onOpPeriodChanged(it) },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("Op Period") }
-                )
                 OutlinedTextField(
                     value = minDistance,
                     onValueChange = { settingsViewModel.onMinDistanceChanged(it) },

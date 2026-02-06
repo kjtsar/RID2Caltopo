@@ -76,7 +76,7 @@ fun CaltopoHybridBrowser(
                     Icon(Icons.Default.Close, contentDescription = "Close")
                 }
                 Text(
-                    text = "Caltopo Maps (${rootNodes.size})",
+                    text = "Team Maps",
                     style = MaterialTheme.typography.titleLarge
                 )
             }

@@ -252,7 +252,7 @@ fun RestRidmapHeader() {
                     fontSize = 18.sp
                 )
                 Text(
-                    text = "Good:",
+                    text = "Filtered:",
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)

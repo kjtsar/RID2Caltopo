@@ -7,6 +7,11 @@
 
 package org.ncssar.rid2caltopo.ui
 
+import android.app.Activity
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -25,6 +30,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -34,7 +40,7 @@ import org.ncssar.rid2caltopo.video.StreamsScreen
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
-    data class IncidentView(val incident: String, val opPeriod: String) : MainScreenItem
+    object IncidentView : MainScreenItem
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
     data class RemoteView(val viewModel: R2CPeerViewModel) : MainScreenItem
     data class SpacerView(val height: Dp) : MainScreenItem
@@ -45,7 +51,6 @@ sealed interface MainScreenItem {
 fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CPeerViewModel>,
-    loadConfigFile: () -> Unit,
     onShowLog: () -> Unit,
     onShowHelp: () -> Unit
 ) {
@@ -110,10 +115,43 @@ fun MainScreen(
             }
         )
     }
+    val context = LocalContext.current
 
+    // Launcher for loading a config file
+    val loadConfigFileLauncher = rememberLauncherForActivityResult(
+        contract = CaltopoClient.OpenOpenableDocument(),
+        onResult = { uri ->
+            uri?.let { CaltopoClient.LoadConfigFile(it) }
+        }
+    )
+
+    // Launcher for selecting an archive directory
+    val queryArchiveDirLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+        onResult = { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                result.data?.data?.let { uri ->
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                    CaltopoClient.SetArchivePath(uri.toString())
+                }
+            }
+        }
+    )
+    LaunchedEffect(Unit) {
+        if (CaltopoClient.GetArchivePath().isEmpty()) {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                putExtra(Intent.EXTRA_TITLE, "Select directory to archive drone tracks")
+            }
+            queryArchiveDirLauncher.launch(intent)
+        }
+    }
+    
     // 2. Build the unified list of display items.
     val screenItems = buildList {
-        add(MainScreenItem.IncidentView(CaltopoClient.GetIncident(), CaltopoClient.GetOpPeriod()))
+        add(MainScreenItem.IncidentView)
         add(MainScreenItem.SpacerView(12.dp))
         add(MainScreenItem.LocalView(localViewModel))
         if (remoteViewModels.isNotEmpty()) add(MainScreenItem.SpacerView(52.dp))
@@ -139,7 +177,7 @@ fun MainScreen(
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Load Config File") }, onClick = {
-                            loadConfigFile()
+                            loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Show Log") }, onClick = {
@@ -201,7 +239,7 @@ fun MainScreen(
                     // 4. Use a `when` statement to render the correct composable.
                     when (item) {
                         is MainScreenItem.IncidentView -> {
-                             IncidentView(incident=item.incident, opPeriod=item.opPeriod)
+                             IncidentView()
                         }
                         is MainScreenItem.LocalView -> {
                             val localDrones by item.viewModel.drones.collectAsState()
@@ -213,7 +251,6 @@ fun MainScreen(
                                 hostName = hostname,
                                 drones = localDrones,
                                 appUptime = appUptime,
-                                mapStatus = mapStatus,
                                 viewModel = item.viewModel,
                                 onMappedIdChange = { drone, newId ->
                                     item.viewModel.updateMappedId(drone, newId)

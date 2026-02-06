@@ -10,6 +10,7 @@ package org.ncssar.rid2caltopo.app
 
 import StreamsViewModel
 import android.Manifest
+import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
@@ -22,13 +23,19 @@ import android.util.Log
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.launch
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
@@ -114,13 +121,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         CaltopoClient.AddDroneSpecsChangedListener(localViewModel)
         CaltopoClient.CheckIdle()
 
-        /***
-        lifecycleScope.launch {
-            StreamRegistry.streams.collect {
-                CTDebug(TAG, "StreamRegistry EMIT -> ${it.keys}")
-            }
-        }
-         ***/
         remoteViewModels.clear()
         setContent {
             RID2CaltopoTheme() {
@@ -139,7 +139,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                                     "text/plain"
                                 )
                             },
-                            loadConfigFile = { loadConfigFile() },
                             onShowHelp = {showHelpMenu()}
                         )
                     }
@@ -167,10 +166,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             }
         }
         AppActivity = this
-        InitializedCalled = false
-        if (!RestartingFlag) {
-            CaltopoClient.Initialize()
-            CaltopoClient.VerifyArchiveDir()
+        if (!InitializedCalled) {
             DataManager = OpenDroneIdDataManager(null)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -211,14 +207,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             startActivity(intent)
         } else {
             showToast("No app found to open $uri")
-        }
-    }
-
-    fun loadConfigFile() {
-        try {
-            CaltopoClient.RequestLoadConfigFile()
-        } catch (e: Exception) {
-            showToast("Error loading config file: " + e.message)
         }
     }
 

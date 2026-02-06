@@ -73,12 +73,6 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onUsePeersChanged(usePeers: Boolean) {
         _usePeers.value = usePeers
     }
-    fun onIncidentChanged(incident: String) {
-        _incident.value = incident
-    }
-    fun onOpPeriodChanged(opPeriod: String) {
-        _opPeriod.value = opPeriod
-    }
     fun onCaltopoDomainAndPortChanged(url: String) {
         _caltopoDomainAndPort.value = url
     }
@@ -88,8 +82,6 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetGoLiveFlag(_goLiveFlag.value)
         CaltopoClient.SetUsePeers(_usePeers.value)
-        CaltopoClient.SetIncident(_incident.value)
-        CaltopoClient.SetOpPeriod(_opPeriod.value)
         CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)
     }
 }

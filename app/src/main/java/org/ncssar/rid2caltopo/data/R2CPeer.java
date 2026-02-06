@@ -103,8 +103,6 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     private CtDroneSpec.DroneSpecsChangedListener remoteDroneSpecMonitor;
     public SimpleTimer remoteUptimeTimer = new SimpleTimer();
     public String remoteAppVersion = "<unknown>";
-    public String remoteMapId = "";
-    public String remoteGroupId = "";
     private remoteUpdateListener remoteUpdateListener;
 
     // Table to map remoteIDs owned by this peer to their corresponding data.
@@ -112,7 +110,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     private boolean outstandingSeen = false;
 
     public interface remoteUpdateListener {
-        void onRemoteAppConfig(String remoteAppVers, String remoteMapId, String remoteGroupId);
+        void onRemoteAppConfig(String remoteAppVers);
         void onRemoteStartTime(long remoteStartTimeInMsec);
     }
 
@@ -141,7 +139,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         this.remoteUpdateListener = remoteUpdateListener;
         if (null == remoteUpdateListener) return;
         if (null != remoteUptimeTimer) {
-            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion, remoteMapId, remoteGroupId);
+            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion);
             remoteUpdateListener.onRemoteStartTime(remoteUptimeTimer.getStartTimeInMsec());
         } else {
             CTDebug(TAG, "setRemoteUpdateListener(): no remoteUptimeTimer.");
@@ -348,11 +346,9 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         remoteUUID = id;
         AddPeer(this);
         remoteAppVersion = payload.optString("app-vers");
-        remoteMapId = payload.optString("map-id");
-        remoteGroupId = payload.optString("group-id");
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
-            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion, remoteMapId, remoteGroupId);
+            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion);
             long startTime = remoteUptimeTimer.getStartTimeInMsec();
             remoteUpdateListener.onRemoteStartTime(startTime);
             CTDebug(TAG, String.format(Locale.US, "handleHello(): startTime:%d, runTime:%s", startTime, remoteUptimeTimer.durationAsString()));
@@ -365,8 +361,6 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         jo.put("my-active-dronelist", activeDroneList);
         jo.put("ct-rtt", CaltopoLiveTrack.GetCaltopoRttInMsec());
         jo.put("my-id", CaltopoMap.GetMyUUID());
-        jo.put("map-id", CaltopoClient.GetMapId());
-        jo.put("group-id", CaltopoClient.GetGroupId());
         jo.put("app-vers", R2CActivity.getMyAppVersion());
         jo.put("start-timestamp", ScanningService.ScannerUptime.getStartTimeInMsec());
 
@@ -512,11 +506,9 @@ public class R2CPeer implements WsPipe.WsMsgListener {
             }
         }
         remoteAppVersion = payload.optString("app-vers");
-        remoteMapId = payload.optString("map-id");
-        remoteGroupId = payload.optString("group-id");
         remoteUptimeTimer.setStartTimeInMsec(payload.optLong("start-timestamp"));
         if (null != remoteUpdateListener) {
-            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion, remoteMapId, remoteGroupId);
+            remoteUpdateListener.onRemoteAppConfig(remoteAppVersion);
             long startTime = remoteUptimeTimer.getStartTimeInMsec();
             remoteUpdateListener.onRemoteStartTime(startTime);
             CTDebug(TAG, String.format(Locale.US, "handleHelloAck(): startTime:%d, runTime:%s", startTime, remoteUptimeTimer.durationAsString()));
@@ -1075,8 +1067,6 @@ public class R2CPeer implements WsPipe.WsMsgListener {
             payload.put("my-id", CaltopoMap.GetMyUUID());
             payload.put("my-addrs", MyIpAddresses);
             payload.put("app-vers", R2CActivity.getMyAppVersion());
-            payload.put("map-id", CaltopoClient.GetMapId());
-            payload.put("group-id", CaltopoClient.GetGroupId());
             payload.put("start-timestamp", ScanningService.ScannerUptime.getStartTimeInMsec());
             wsPipe.sendMessage(payload, 0, false);
             sendMsgCount++;

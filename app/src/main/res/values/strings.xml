@@ -20,8 +20,6 @@
 
     <string name="Caltopo">Caltopo</string>
     <string name="Caltopo_Configuration">CaltopoCfg</string>
-    <string name="ct_groupid">Group Id:</string>
-    <string name="ct_groupidVal">groupid</string>
     <string name="ct_minChgFt">Min Chg In Feet:</string>
     <string name="ct_minChgFtVal">10</string>
     <string name="ct_remoteid">Remote Id:</string>

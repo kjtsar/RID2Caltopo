@@ -39,16 +39,10 @@ class R2CPeerViewModel(val r2cPeer: R2CPeer) : ViewModel(), R2CPeer.remoteUpdate
     private val uptimePoll : DelayedExec = DelayedExec()
     private val _remoteCtRtt = MutableStateFlow("0.000 sec")
     val remoteCtRtt : StateFlow<String> = _remoteCtRtt.asStateFlow()
-    private val _remoteMapId = MutableStateFlow("")
-    private val _remoteGroupId = MutableStateFlow("")
-    val remoteMapId : StateFlow<String> = _remoteMapId.asStateFlow()
-    val remoteGroupId : StateFlow<String> = _remoteGroupId.asStateFlow()
 
 
-    override fun onRemoteAppConfig(version: String, mapId: String, groupId: String) {
+    override fun onRemoteAppConfig(version: String) {
         _remoteAppVersion.value = version
-        _remoteMapId.value = mapId
-        _remoteGroupId.value = groupId
     }
 
     override fun onRemoteStartTime(startTimeInMsec : Long) {

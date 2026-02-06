@@ -71,8 +71,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     private val showSettingsDialog = mutableStateOf(false)
     private val showStreamsService = mutableStateOf(false)
     private val showScannerDialog = mutableStateOf(false)
-    private val showMapIdDialog = mutableStateOf(false)
-    private var newMapIdForDialog = ""
 
 
     private fun checkPermission(permission: String) {
@@ -151,17 +149,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                     ActiveScreen.SCANNER -> {
                         ScannerScreen(onDismiss = { localViewModel.showMain() })
                     }
-                    ActiveScreen.MAPID_DIALOG -> {
-                        CtAlertDialog(
-                            onDismissRequest = { showMapIdDialog.value = false },
-                            onConfirmation = {
-                                CaltopoClient.ConfirmMapIdChange(newMapIdForDialog)
-                                showMapIdDialog.value = false
-                            },
-                            title = "Terminate map connection",
-                            text = "Do you want to terminate the existing map connection?"
-                        )
-                    }
                     ActiveScreen.STREAMS -> {
                         StreamsScreen(
                             onBack = { localViewModel.showMain() },
@@ -210,10 +197,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                 initialize()
             }
         }
-    }
-    fun showMapIdChangeDialog(newMapId: String) {
-        newMapIdForDialog = newMapId
-        showMapIdDialog.value = true
     }
 
     fun openUri(uriString : String?, mimeType: String? = null) {

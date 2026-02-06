@@ -1,13 +1,17 @@
 package org.ncssar.rid2caltopo.video
 
+import DroneSpecState
+import StreamsViewModel
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -16,14 +20,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import org.ncssar.rid2caltopo.data.DesignatorState
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DesignatorIndicator(
     streamDesignator: String,
-    dsTimestamp : String?,
+    viewModel: StreamsViewModel,
     designatorState: DesignatorState,
     streamState: StreamState,
     onLongPress: () -> Unit
@@ -35,15 +41,26 @@ fun DesignatorIndicator(
         StreamState.STOPPED -> "Stopped"
         StreamState.ERROR -> "Error"
     }
-    CTDebug(tag, "Recomposing Designator")
+
+    CTDebug(tag, "Recomposing Designator: {$streamDesignator}")
+
     val (color, subtitle) = when (designatorState) {
         is DesignatorState.Green -> {
-            val ds = designatorState.dronespec
-            val feetPerMeter = 3.28084
-            val lat = "%.5f".format(ds.lastLat)
-            val lng = "%.5f".format(ds.lastLng)
-            val feet = ds.lastAlt * feetPerMeter
-            Color(0xFF2ECC71) to "loc:${lat},${lng}, alt:${feet}', duration:${dsTimestamp}"
+            val ds = viewModel.droneStates[streamDesignator]
+            val lat: String
+            val lng: String
+            val feet: String
+            val dur: String
+            if (ds != null) {
+                val feetPerMeter: Double = (ds.lastAlt * 3.28084F)
+                lat = "%.5f".format(ds.lastLat)
+                lng = "%.5f".format(ds.lastLng)
+                feet = "%.0f".format(feetPerMeter)
+                dur = ds.lastTimestamp
+            } else {
+                lat = "0.0"; lng = "0.0"; feet = "0.0"; dur = "unknown"
+            }
+            Color(0xFF2ECC71) to "loc:${lat},${lng}, alt:${feet}', duration:${dur}"
         }
         is DesignatorState.Yellow ->
             Color(0xFFF1C40F) to "Long-press to match telemetry"
@@ -53,13 +70,19 @@ fun DesignatorIndicator(
     }
     Column(
         modifier = Modifier
-            .combinedClickable(
-                onClick = {},
-                onLongClick = {
+            .pointerInput(designatorState) { // Passing state as a key ensures the lambda stays updated
+            detectTapGestures(
+                onTap = {
+                    // Equivalent to onClick = {}
+                },
+                onLongPress = {
                     CTDebug(tag, "onLongClick(): designatorState is '${designatorState}'")
-                    if (designatorState is DesignatorState.Yellow) { onLongPress() }
+                    if (designatorState is DesignatorState.Yellow) {
+                        onLongPress()
+                    }
                 }
-            ),
+            )
+        }
 
 
     ) {
@@ -77,8 +100,8 @@ fun DesignatorIndicator(
 
 @Composable
 fun DroneSpecPickerDialog(
-    droneSpecs: List<CtDroneSpec>,
-    onSelect: (CtDroneSpec) -> Unit,
+    droneSpecStates: Map<String, DroneSpecState>,
+    onSelect: (Map.Entry<String, DroneSpecState>) -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -86,15 +109,17 @@ fun DroneSpecPickerDialog(
         title = { Text("Select Drone Telemetry") },
         text = {
             Column {
-                droneSpecs.forEach { droneSpec ->
+                droneSpecStates.forEach { droneSpecState ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onSelect(droneSpec) }
+                            .clickable { onSelect(droneSpecState) }
                             .padding(8.dp)
                     ) {
                         Column {
-                            Text("Mapped ID: ${droneSpec.mappedId} Remote ID: ${droneSpec.remoteId}")
+                            val (designator, droneSpecState) = droneSpecState
+                            Text("Designator: $designator")
+                            Text("Mapped ID: ${droneSpecState.mappedId} Remote ID: ${droneSpecState.remoteId}")
                         }
                     }
                 }

@@ -1,12 +1,14 @@
 package org.ncssar.rid2caltopo.data
 
+import DroneSpecState
+
 sealed class DesignatorState {
     data class Green(
-        val dronespec: CtDroneSpec
+        val droneSpecState: DroneSpecState
     ) : DesignatorState()
 
     data class Yellow(
-        val candidates: List<CtDroneSpec>
+        val candidates: Map<String,DroneSpecState>
     ) : DesignatorState()
 
     object Red : DesignatorState()

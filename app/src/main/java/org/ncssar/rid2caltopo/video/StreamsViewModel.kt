@@ -1,4 +1,5 @@
 import android.app.Application
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -27,16 +28,38 @@ import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.SeekParameters
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.MutableStateFlow
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.video.StreamState
 import java.util.Collections
-import java.util.Locale
 import java.util.WeakHashMap
 
+@Stable
+class DroneSpecState(
+    val source: CtDroneSpec
+) {
+    val remoteId = source.remoteId
+    var lastLat by mutableStateOf(source.lastLat)
+        private set
+    var lastLng by mutableStateOf(source.lastLng)
+        private set
+    var lastAlt by mutableStateOf(source.lastAlt)
+        private set
+    var lastTimestamp by mutableStateOf(source.durationInSecAsString)
+        private set
+    var mappedId by mutableStateOf(source.mappedId)
+        private set
+
+    fun changeMappedId(id: String) {source.setMappedId(id)}
+    fun updateFrom(spec: CtDroneSpec) {
+        lastLat = spec.lastLat
+        lastLng = spec.lastLng
+        lastAlt = spec.lastAlt
+        lastTimestamp = spec.durationInSecAsString
+        mappedId = spec.mappedId
+    }
+}
 
 class StreamsViewModel (
     application: Application
@@ -78,12 +101,13 @@ class StreamsViewModel (
 
     private val restartIds = mutableMapOf<String, Long>()
 
-    private val _activeDroneSpecs = MutableStateFlow<List<CtDroneSpec>>(emptyList())
-    var activeDroneSpecs : StateFlow<List<CtDroneSpec>> = _activeDroneSpecs.asStateFlow()
+    private val _droneStates = mutableMapOf<String, DroneSpecState>()
+    val droneStates: Map<String, DroneSpecState> get() = _droneStates
+
+
 
     private val stallPoll : DelayedExec = DelayedExec()
     private val MAX_BUFFERING_MS = 3_000L
-
     private fun startStallPoll() {
         val sampleTimeMs = MAX_BUFFERING_MS / 2
         stallPoll.start(this::pollForStalledPlayers, sampleTimeMs, sampleTimeMs)
@@ -98,6 +122,7 @@ class StreamsViewModel (
         }
     }
 
+
     /***
      * Received from CaltopoClient at a maximum rate of once per second if
      * there are any active dronespecs.  If currentDrones.isEmpty() we need
@@ -106,12 +131,19 @@ class StreamsViewModel (
      */
     override fun onDroneSpecsChanged(currentDrones: List<CtDroneSpec>) {
         if (!currentDrones.isEmpty()) {
+            CTDebug(TAG, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
             stallPoll.stop()
             pollForStalledPlayers()
+            currentDrones.forEach { spec ->
+                val key = spec.mappedId
+                val state = _droneStates.getOrPut(key) {
+                    DroneSpecState(spec)
+                }
+                state.updateFrom(spec)
+            }
         } else {
             startStallPoll()
         }
-        _activeDroneSpecs.value = currentDrones
     }
 
     private fun createPlayer(designator: String): ExoPlayer {
@@ -274,17 +306,14 @@ class StreamsViewModel (
     }
 
     fun designatorStateFor(designator: String): DesignatorState {
-        if (activeDroneSpecs.value.isEmpty()) return DesignatorState.Red
+        if (_droneStates.isEmpty()) return DesignatorState.Red
 
-        val exactMatch = activeDroneSpecs.value.firstOrNull {
-            it.mappedId == designator
+        val dss = _droneStates[designator]
+        if (dss != null) {
+            return DesignatorState.Green(dss)
         }
 
-        if (exactMatch != null) {
-            return DesignatorState.Green(exactMatch)
-        }
-
-        return DesignatorState.Yellow(_activeDroneSpecs.value)
+        return DesignatorState.Yellow(droneStates)
     }
 
     fun onSnapshotCaptured(snapshot: ClueSnapshot) {

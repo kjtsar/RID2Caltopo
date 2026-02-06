@@ -12,6 +12,7 @@ package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import static java.lang.Thread.sleep;
 
 import android.net.Uri;
@@ -27,6 +28,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -138,18 +140,32 @@ public class CaltopoSession {
     private static final String TAG = "CaltopoSession";
     private static final int DEFAULT_TIMEOUT_MS = 2 * 60 * 1000;
 	private static ExecutorService ExecutorPool;
-	private final CtLineProperty CtLinePropertyDefault = new CtLineProperty();
+	private static final CtLineProperty CtLinePropertyDefault = new CtLineProperty();
 	private static final String CALTOPO_API_V1 = "/api/v1/map/";
 
 	private static final CtLineProperty LiveTrackLineProp =
 			new CtLineProperty(2, 1F, "#0000ff", "solid");
-
+    private static CaltopoCredentials Cred;
+    private static String DomainAndPort;
 	// instance variables:
-	private static CaltopoSessionConfig Config;
-	private String mapId;
-	private CaltopoOp lastOpenMapOp;
+	private static String MapId;
 
-    public CaltopoSession(@NonNull CaltopoSessionConfig cfg)  {Config = cfg; }
+    public static void Init(@NonNull CaltopoCredentials cred, @NonNull String domainAndPort) {
+        Cred = cred;
+        DomainAndPort = domainAndPort;
+    }
+    /*** Initiializes and returns a session with information used for all subsequent interactions.
+     *   Caller must specify onComplete procedure to receive the team
+     */
+    public CaltopoSession()  {
+        throw new RuntimeException("CaltopoSession(): No instances permitted.");
+    }
+
+    public static CaltopoOp VerifyAccount(@Nullable Consumer<CaltopoOp> onComplete) {
+        CaltopoOp op = new CaltopoOp(onComplete);
+        String urlEnd = "/api/v1/acct/" + Cred.teamId + "/since/0";
+        return SendRequest(op, CtsMethod_t.GET, urlEnd, null, false);
+    }
 
 	public static void Shutdown() {
 		if (ExecutorPool != null) {
@@ -165,9 +181,8 @@ public class CaltopoSession {
 			       String payload, String credentialSecret) {
 		try {
 			// Construct the message
-			String message = method + " " + url + "\n"
-					+ expiresMsec + "\n"
-					+ (payload != null ? payload : "");
+			String message = method + " " + url + "\n" + expiresMsec + "\n";
+            if (payload != null && !payload.isEmpty()) message += payload;
 
 			// Decode the authentication key (Base64)
 			byte[] secretKey = Base64.getDecoder().decode(credentialSecret);
@@ -181,7 +196,7 @@ public class CaltopoSession {
 			byte[] signatureBytes = hmac.doFinal(message.getBytes(StandardCharsets.UTF_8));
 
 			// Return the signature as a Base64-encoded string
-			return Base64.getEncoder().encodeToString(signatureBytes);
+            return Base64.getEncoder().encodeToString(signatureBytes);
 
 		} catch (Exception e) {
 			throw new RuntimeException("Error while generating HMAC signature", e);
@@ -189,18 +204,18 @@ public class CaltopoSession {
     }
 
 	@NonNull
-	public static String EncodeParm(@NonNull String key, @NonNull String val) {
-		return key + "=" + Uri.encode(val);
+	private static String EncodeParm(@NonNull String key, @NonNull String val) {
+		return key + "=" + URLEncoder.encode(val, StandardCharsets.UTF_8);
 	}
 
 	@NonNull
-    public static String EncodeParams(@NonNull Map<String,String> params) {
+    private static String EncodeParams(@NonNull Map<String,String> params) {
 		StringBuilder paramString = new StringBuilder();
 		for (Map.Entry<String,String> entry : params.entrySet()) {
             paramString
-					.append(entry.getKey())
+                    .append(entry.getKey())
 					.append("=")
-					.append(Uri.encode(entry.getValue()))
+                    .append(URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8))
 					.append("&");
 		}
 		return paramString.substring(0, paramString.length()-1);
@@ -209,23 +224,26 @@ public class CaltopoSession {
 	// this needs to be run in background thread to prevent blocking the app thread.
 	private static CaltopoOp BgSendRequest(CaltopoOp op) {
 		boolean retry;
+        boolean goodResponse;
 		do  {
 			retry = false;
+            goodResponse = false;
 			try {
 				op.sentTimestampMsec = System.currentTimeMillis();
 				long expires = op.sentTimestampMsec + DEFAULT_TIMEOUT_MS;
 				String payloadString = (null == op.payload) ? "" : op.payload.toString();
 				Map <String, String>params = new HashMap<>();
 				// Construct the query string
-				String query = "";
 				if (!op.goNaked) {
 					// Generate the signature
-					String signature = Sign(op.method, op.url, expires, payloadString, Config.credentialSecret);
+					String signature = Sign(op.method, op.url, expires, payloadString, Cred.credentialSecret);
+                    params.put("id", Cred.credentialId);
+                    params.put("expires", String.valueOf(expires));
 					params.put("signature", signature);
-					params.put("id", Config.credentialId);
-					params.put("expires", String.valueOf(expires));
+                    params.put("json", "");
 				}
 
+                String query = "";
 				if (op.method == CtsMethod_t.POST && op.payload != null) {
 					params.put("json", payloadString);
 				} else if (!params.isEmpty()) {
@@ -237,8 +255,9 @@ public class CaltopoSession {
 				if (op.goNaked) {
 					fullUrl = op.url + query;
 				} else {
-					fullUrl = "https://" + Config.domainAndPort + op.url + query;
+					fullUrl = "https://" + DomainAndPort + op.url + query;
 				}
+                CTInfo(TAG, String.format(Locale.US, "BgSendRequest(%s): fullUrl: '%s'", op.method,  fullUrl));
 
 				// Open a connection
 				HttpURLConnection connection = (HttpURLConnection) new URL(fullUrl).openConnection();
@@ -279,9 +298,8 @@ public class CaltopoSession {
 				reader.close();
 				op.receivedTimestampMsec = System.currentTimeMillis();
 				op.response = response.toString();
-				boolean opPassed ;
 				if (op.responseCode == HttpURLConnection.HTTP_OK) {
-					opPassed = true;
+					goodResponse = true;
 					if (!op.response.isEmpty()) try {
 						JSONObject responseJson = new JSONObject(op.response);
 						op.responseJson = responseJson.getJSONObject("result");
@@ -289,34 +307,35 @@ public class CaltopoSession {
 						CTError(TAG, "parse JSON result raised: ", e);
 					}
 				} else {
-					opPassed = false;
+                    CTError(TAG, "BgSendRequest() failed w/code " + op.responseCode + ":\n" + op.response);
 					Bundle parameters = new Bundle();
 					parameters.putInt("r2c_responseCode", op.responseCode);
 					parameters.putString("r2c_response", op.response);
 					parameters.putString("r2c_url", op.url);
 					parameters.putString("r2c_method", op.method.toString());
 					CaltopoClient.CTEvent(TAG,"CaltopoOpFailed", parameters);
-					CaltopoClient.CTError(TAG, "CaltopoOpFailed: rc:" + op.responseCode + "details: " + op.response);
+					CaltopoClient.CTError(TAG, "CaltopoOpFailed: rc: " + op.responseCode + " details: " + op.response);
 				}
-				op.setOperationIsDone(opPassed); // Provide option to handle on main thread.
 				CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
-
 			} catch (UnknownHostException e) {
 				// this happens when no network connection, so retry after some delay period.
 				long minRetryDelayInMsec = 3000;
 				long maxRetryDelayInMsec = 60000;
 				try {
-					sleep(minRetryDelayInMsec + (int) (java.lang.Math.random() * (maxRetryDelayInMsec - minRetryDelayInMsec)));
+                    long retryDelay = minRetryDelayInMsec + (long)(java.lang.Math.random() * (maxRetryDelayInMsec - minRetryDelayInMsec));
+                    CTDebug(TAG, String.format(Locale.US, "BgSendRequest(): retrying in %.3f seconds...", retryDelay / 1000.0));
+					sleep(retryDelay);
 				} catch (InterruptedException e2) {
 					CTDebug(TAG, "sleep() interrupted.");
 				}
 				retry = true;
 			} catch (Exception e) {
-				op.goodResponse = false;
 				op.response = "Exception raised during request:\n  " + e;
 				CTError(TAG, "Exception raised during request:", e);
 			}
-		} while (retry);
+        } while (retry);
+        op.goodResponse = goodResponse;
+        op.setOperationIsDone(goodResponse);
 		return op;
 	}
 
@@ -337,7 +356,8 @@ public class CaltopoSession {
 	 * @param goNaked If true, then just perform simple http transfer.  If false, then
 	 *                build a credentialed message based on the Caltopo API.
      */
-    private CaltopoOp sendRequest(CaltopoOp op, CtsMethod_t method,
+    @NonNull
+    private static CaltopoOp SendRequest(CaltopoOp op, CtsMethod_t method,
 								  String url, JSONObject payload, boolean goNaked) {
 		// NOTE: only one bg thread to communicate w/caltopo - we are one of many users...
 		if (null == ExecutorPool) {
@@ -357,34 +377,28 @@ public class CaltopoSession {
      * dump of the specified map is requested, otherwise only the changes
      * since the previous open/synch.
      *
-     * @param mapId string is the identifier for the map we want to interact with.
-	 *    Issue
+     * @param mapNode contains the identifier for the map we want to interact with.
+	 *
+     * @param lastSyncTimestamp set to zero to bring in entire map.
 	 *
      *
      * @return CaltopoOp responseJson on success will contain all the map info.
      *  User will likely check it to see if it needs anything.
      */
-    public CaltopoOp openMap(String mapId, @Nullable Consumer<CaltopoOp> onComplete)
-			throws RuntimeException {
-	
-		if (null == mapId || mapId.isEmpty()) {
-			throw new RuntimeException("missing required mapId");
-		}
-        long lastSyncTimestamp = 0;
-		if (!mapId.equals(this.mapId)) {
-			this.mapId = mapId;
-			CTDebug(TAG, "openMap(): Requesting entire map for " + mapId);
-		} else if (null != lastOpenMapOp && lastOpenMapOp.isDone() && !lastOpenMapOp.fail()) {
-			CTDebug(TAG, "openMap(): Just pulling in updates for " + mapId);
-			lastSyncTimestamp = lastOpenMapOp.sentTimestampMsec;
-		}
+    static public CaltopoOp OpenMap(@NonNull CaltopoNode.MapNode mapNode, long lastSyncTimestamp, @Nullable Consumer<CaltopoOp> onComplete)
+            throws RuntimeException {
+
+        if (MapId != null && !MapId.equals(mapNode.getId())) {
+            CTDebug(TAG, "openMap(): changing mapId from " + MapId + " to " + mapNode.getId());
+        }
+        MapId = mapNode.getId();
 
         // remove any update key delimiter:
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/since/" +
-				Math.max(0, lastSyncTimestamp - 500);
+        String urlEnd = CALTOPO_API_V1 + MapId + "/since/" +
+                Math.max(0, lastSyncTimestamp - 500);
 
-		lastOpenMapOp = new CaltopoOp(onComplete);
-		return this.sendRequest(lastOpenMapOp, CtsMethod_t.GET, urlEnd, null, false);
+        CaltopoOp op = new CaltopoOp(onComplete);
+        return SendRequest(op, CtsMethod_t.GET, urlEnd, null, false);
     }
 
     /** Add a folder.
@@ -394,16 +408,18 @@ public class CaltopoSession {
      * @return CaltopoOp on success and null if parsing/configuring args
      */
 	@Nullable
-    CaltopoOp addFolder(@NonNull String folderName, boolean contentsVisible,
+    public static CaltopoOp AddFolder(@NonNull String folderName, boolean contentsVisible,
 			boolean contentLabelsVisible, @Nullable Consumer<CaltopoOp> onComplete){
+        if (null == MapId)
+            throw new RuntimeException("AddFolder(): Map not specified - call OpenMap() first");
 
-		if (folderName.isEmpty()) {
+        if (folderName.isEmpty()) {
 			CTError(TAG, "Folder name must be specified.");
 			return null;
 		}
 		JSONObject prop = new JSONObject();
 		JSONObject top = new JSONObject();
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Folder";
+		String urlEnd = CALTOPO_API_V1 + MapId + "/Folder";
 		try {
 			prop.put("title", folderName);
 			prop.put("visible", contentsVisible ? "true" : "false");
@@ -415,11 +431,11 @@ public class CaltopoSession {
 		}
 
 		CaltopoOp op = new CaltopoOp(onComplete);
-		return sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
+		return SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
     }
-    
-    
-    /** addLine() - add line to the session's map.
+
+
+    /** AddLine() - add line to the session's selected map.
 	 *
 	 * @param pointArray - array of {lng,lat] arrays.
      * @param lineLabel - text label for line.
@@ -428,11 +444,14 @@ public class CaltopoSession {
      * @param description - Description text for line.
      * @return CaltopoOp on success and null if configuring/sending msg failed.
      */
-    @Nullable
-	CaltopoOp addLine(@NonNull JSONArray pointArray, @NonNull String lineLabel, @Nullable String description,
-					  @Nullable String existingLineId, @Nullable String folderId,
-					  @Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete) {
-		if (0 == pointArray.length()) {
+    @NonNull
+	public static CaltopoOp AddLine(@NonNull JSONArray pointArray, @NonNull String lineLabel, @Nullable String description,
+                                    @Nullable String existingLineId, @Nullable String folderId,
+                                    @Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete) {
+        if (null == MapId)
+            throw new RuntimeException("AddLine(): Map not specified - call OpenMap() first");
+
+        if (0 == pointArray.length()) {
 			CTError(TAG, "Can't add a line without any points");
 			return null;
 		}
@@ -469,18 +488,21 @@ public class CaltopoSession {
 			CTError(TAG, "addLine() .put raised - for no apparent reason", e);
 			return null;
 		}
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Shape" + objid;
+		String urlEnd = CALTOPO_API_V1 + MapId + "/Shape" + objid;
 		CaltopoOp op = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
+		SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
     }
 
 	@Nullable
-	CaltopoOp addMarker(double lat, double lng, @NonNull String markerTitle,
-						@Nullable String symbol, @Nullable String folderId,
-						@Nullable String existingMarkerId, @Nullable JSONObject extraProperties,
-                        @Nullable Consumer<CaltopoOp> onComplete) {
-		JSONObject prop = new JSONObject();
+	public static CaltopoOp AddMarker(double lat, double lng, @NonNull String markerTitle,
+                                      @Nullable String symbol, @Nullable String folderId,
+                                      @Nullable String existingMarkerId, @Nullable JSONObject extraProperties,
+                                      @Nullable Consumer<CaltopoOp> onComplete) {
+        if (null == MapId)
+            throw new RuntimeException("AddMarker(): Map not specified - call OpenMap() first");
+
+        JSONObject prop = new JSONObject();
 		JSONObject geometry = new JSONObject();
 		JSONObject top = new JSONObject();
 		String objid = "";
@@ -525,56 +547,65 @@ public class CaltopoSession {
 			CTError(TAG, "keeping compiler happy.", e);
 		}
 
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Marker" + objid;
+		String urlEnd = CALTOPO_API_V1 + MapId + "/Marker" + objid;
 		CaltopoOp op = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
+		SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp deleteShapeWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Shape/" + objId;
+	public static CaltopoOp DeleteShapeWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+        if (null == MapId)
+            throw new RuntimeException("DeleteShapeWithId(): Map not specified - call OpenMap() first");
+
+        String urlEnd = CALTOPO_API_V1 + MapId + "/Shape/" + objId;
 		CaltopoOp op = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
+		SendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp deleteMarkerWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/Marker/" + objId;
+	public static CaltopoOp DeleteMarkerWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+        if (null == MapId)
+            throw new RuntimeException("DeleteMarkerWithId(): Map not specified - call OpenMap() first");
+
+        String urlEnd = CALTOPO_API_V1 + MapId + "/Marker/" + objId;
 		CaltopoOp op = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
+		SendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+	public static CaltopoOp DeleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+        if (null == MapId)
+            throw new RuntimeException("DeleteLiveTrackWithId(): Map not specified - call OpenMap() first");
 
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/LiveTrack/" + objId;
+        String urlEnd = CALTOPO_API_V1 + MapId + "/LiveTrack/" + objId;
 		CaltopoOp op  = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
+		SendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp editObjectWithId(@NonNull String objectType, @NonNull String objId,
-									  @NonNull JSONObject featureSet, @Nullable Consumer<CaltopoOp> onComplete) {
+	public static CaltopoOp EditObjectWithId(@NonNull String objectType, @NonNull String objId,
+                                             @NonNull JSONObject featureSet, @Nullable Consumer<CaltopoOp> onComplete) {
+        if (null == MapId)
+            throw new RuntimeException("EditObjectWithId(): Map not specified - call OpenMap() first");
 
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/" + objectType + "/" + objId;
+        String urlEnd = CALTOPO_API_V1 + MapId + "/" + objectType + "/" + objId;
 		CaltopoOp op = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.POST, urlEnd, featureSet, false);
+		SendRequest(op, CtsMethod_t.POST, urlEnd, featureSet, false);
 		return op;
 	}
 
-	@Nullable
-	public CaltopoOp startLiveTrack(@NonNull String groupId, @NonNull String deviceId, @NonNull String label,
-									@Nullable String folderId, @Nullable String description,
-									@Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete) {
-		JSONObject prop = new JSONObject();
-		if (groupId.isEmpty() || deviceId.isEmpty()) {
-			CTError(TAG, "startLiveTrack(): group and device IDs required.");
-			return null;
-		}
+	@NonNull
+	public static CaltopoOp StartLiveTrack(@NonNull String deviceId, @NonNull String label,
+                                           @Nullable String folderId, @Nullable String description,
+                                           @Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete) {
+        if (null == MapId)
+            throw new RuntimeException("StartLiveTrack(): Map not specified - call OpenMap() first");
+        JSONObject prop = new JSONObject();
+
 		if (lineProp == null) lineProp = LiveTrackLineProp;
 		JSONObject top = new JSONObject();
 		try {
@@ -589,7 +620,7 @@ public class CaltopoSession {
 			if (folderId != null && !folderId.isEmpty()) {
 				prop.put("folderId", folderId);
 			}
-			prop.put("deviceId", String.format(Locale.US, "FLEET:%s-%s", groupId, deviceId));
+			prop.put("deviceId", String.format(Locale.US, "FLEET:DRONE-%s",  deviceId));
 
 			top.put("type", "Feature");
 			top.put("properties", prop);
@@ -598,26 +629,29 @@ public class CaltopoSession {
 			return null;
 		}
 
-		String urlEnd = CALTOPO_API_V1 + this.mapId + "/LiveTrack";
+		String urlEnd = CALTOPO_API_V1 + MapId + "/LiveTrack";
 		CaltopoOp op = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
+		SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
 	}
 
 	@NonNull
-	public CaltopoOp addLiveTrackPoint(@NonNull String groupId, @NonNull String deviceId,
+	public static CaltopoOp AddLiveTrackPoint(@NonNull String deviceId,
 									   double lat, double lng, double eleMeters, @Nullable Consumer<CaltopoOp> onComplete) {
-		String latStr = String.format(Locale.US, "%.7f", lat);
+        if (null == MapId)
+            throw new RuntimeException("AddLiveTrackPoint(): Map not specified - call OpenMap() first");
+
+        String latStr = String.format(Locale.US, "%.7f", lat);
 		String lngStr = String.format(Locale.US, "%.7f", lng);
 		Long ele = (long)eleMeters;
-		String url = "https://caltopo.com/api/v1/position/report/" + groupId + "?" +
+		String url = "https://" + DomainAndPort + "/api/v1/position/report/DRONE?" +
 				EncodeParm("id", deviceId) + "&" +
 				EncodeParm("lat", latStr) + "&" +
 				EncodeParm("lng", lngStr) + "&" +
 				EncodeParm("ele", ele.toString());
 
 		CaltopoOp op = new CaltopoOp(onComplete);
-		sendRequest(op, CtsMethod_t.GET, url, null, true);
+		SendRequest(op, CtsMethod_t.GET, url, null, true);
 		return op;
 	}
 

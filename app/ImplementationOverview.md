@@ -25,14 +25,13 @@ newWaypoint() method.  The client's CtDroneSpec instance (droneSpec) confirms th
 waypoint's coordinates and altitude are valid, then checks the distance and time
 since the last waypoint and decides if the waypoint is worth keeping.  If the
 waypoint is worth keeping, the client archives the waypoint locally and checks
-the app configuration.  If no groupId is configured, no further processing is 
-performed.
+the app configuration. 
 
-If groupId is not empty and _useDirectFlag_ isn't set, the assumption is that the
-user has configured a LiveTrack within caltopo and the waypoint is forwarded to
-Caltopo with "<groupId>-<remoteId>".
+If _useDirectFlag_ isn't set, the assumption is that the user has configured a LiveTrack 
+within caltopo and the waypoint is forwarded to Caltopo as a live track with <GroupId>-<DeviceId> 
+set to "DRONE-<remoteId>".
 
-If groupId and mapId are not empty and _useDirectFlag_ is set, then a map connection
+If mapId is not empty and _useDirectFlag_ is set, then a map connection
 is started and a CaltopoLiveTrack is created to handle the archival of the waypoint
 to Caltopo.
 

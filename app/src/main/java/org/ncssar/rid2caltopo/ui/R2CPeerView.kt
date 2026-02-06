@@ -24,15 +24,14 @@ import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 fun R2CPeerView(
     peerName: String,
     appVersion: String,
-    mapId: String,
-    groupId: String,
+    viewModel: R2CPeerViewModel?,
     drones : List<CtDroneSpec>,
     remoteUptime : String,
     ctRttString : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
     Column {
-        RestHeader(remoteUptime, appVersion, peerName, mapId, groupId, ctRttString)
+        RestHeader(remoteUptime, appVersion, peerName, viewModel, ctRttString)
         if (!drones.isEmpty()) {
             RestRidmapHeader()
             drones.forEach { drone ->
@@ -50,7 +49,7 @@ fun R2CPeerView(
 }
 
 @Composable
-fun RestHeader(appUptime: String, appVersion: String, peerName: String, mapId: String, groupId: String,ctRttString: String) {
+fun RestHeader(appUptime: String, appVersion: String, peerName: String, viewModel: R2CPeerViewModel?, ctRttString: String) {
     Row(
         modifier = Modifier
             .background(MaterialTheme.colorScheme.secondaryContainer)
@@ -102,50 +101,6 @@ fun RestHeader(appUptime: String, appVersion: String, peerName: String, mapId: S
             )
             Text(
                 text = appUptime,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
-        }
-        Column(
-            modifier = Modifier.width(100.dp)
-        ) {
-            Text(
-                text = "Map Id:",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 16.sp
-            )
-            Text(
-                text = mapId,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
-        }
-        Column(
-            modifier = Modifier.width(100.dp)
-        ) {
-            Text(
-                text = "Group Id:",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 16.sp
-            )
-            Text(
-                text = groupId,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)
@@ -366,6 +321,6 @@ fun RestRidmapHeader() {
 @Composable
 fun R2CPeerViewPreview() {
     RID2CaltopoTheme {
-        R2CPeerView("", "", "", "",emptyList(), "", "", {} as (CtDroneSpec, String) -> Unit)
+        R2CPeerView("", "", null, emptyList(), "", "", {} as (CtDroneSpec, String) -> Unit)
     }
 }

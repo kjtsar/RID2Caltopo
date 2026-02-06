@@ -34,7 +34,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 35
+        versionCode = 36
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -135,6 +135,7 @@ dependencies {
     implementation libs.androidx.work.runtime.ktx
     implementation libs.androidx.media3.exoplayer.hls
     implementation libs.androidx.compose.runtime
+    implementation libs.androidx.material3
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
@@ -156,4 +157,5 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:1.9.1")
     implementation("androidx.media3:media3-ui:1.9.1")
     implementation("androidx.media3:media3-ui-compose:1.9.1")
+    implementation("androidx.compose.material:material-icons-extended")
 }

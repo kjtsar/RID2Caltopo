@@ -10,6 +10,7 @@ package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.GetTodaysTrackDir;
 
 import org.json.*;
@@ -114,7 +115,7 @@ public class WaypointTrack {
 		this.coordinates = new JSONArray();
         this.incident = CaltopoClient.GetIncident();
         this.opPeriod = CaltopoClient.GetOpPeriod();
-        this.mapId = CaltopoClient.GetMapId();
+        this.mapId = CaltopoMap.GetMapId();
 		setupOutputStream();
 		CTDebug(TAG, String.format("AddWaypointForTrack(%s): Starting new track.", trackLabel));
 	}
@@ -289,6 +290,9 @@ public class WaypointTrack {
      *  via CaltopoClient.PublishGeoJsonStats().   The first time
      *  PublishGeoJsonStats() raises, this thread must log the error and
      *  assume that the r2c-tracker server is down or il-configured.
+     *
+     * Compare the date on the ReportedFilenames file to make sure it's
+     *
      */
     public static void BgPollUnreportedTracks() {
         int consecutiveFails = 0;
@@ -299,6 +303,7 @@ public class WaypointTrack {
         }
         // archiveDir is the parent directory of the daily track log directories
         for (DocumentFile trackDir : archiveDir.listFiles()) {
+            long reportLastModifiedMillis = System.currentTimeMillis();
             if (!trackDir.isDirectory()) continue;
             CTInfo(TAG, "BgPollUnreportedTracks() Checking " + trackDir.getName());
             Handler mainThreadHandler = new Handler(Looper.getMainLooper());
@@ -312,6 +317,7 @@ public class WaypointTrack {
                     continue;
                 }
             } else {
+                reportLastModifiedMillis = reportedFilepath.lastModified();
                 reportedFilenames = ReadFilenamesFromDocFile(reportedFilepath);
             }
             for (DocumentFile file : trackDir.listFiles()) {
@@ -320,6 +326,10 @@ public class WaypointTrack {
 
                 if (null == filename || !filename.endsWith(".json")) {
                     CTInfo(TAG, "BgPollUnreportedTracks() skipping non geo-json file " + filename);
+                    continue;
+                }
+                if (reportLastModifiedMillis <= (file.lastModified() + 1000 * 60 * 60)) {
+                    CTInfo(TAG, "BgPollUnreportedTracks() skipping file that appears to still be active: " + filename);
                     continue;
                 }
                 CTInfo(TAG, "BgPollUnreportedTracks() found geo-json file " + filename);
@@ -332,7 +342,7 @@ public class WaypointTrack {
                 try {
                     waypointTrack = ReadGeoJson(file);
                 } catch (Exception e) {
-                    CTError(TAG, "ReadGeoJson() raised for " + filename, e);
+                    CTWarn(TAG, "Not able to read " + filename, e);
                     // ignore this file during future launches:
                     mainThreadHandler.post(() -> ReportStatsForFile(finalReportedFilepath, filename));
                     continue;

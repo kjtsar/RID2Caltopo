@@ -10,6 +10,8 @@ package org.ncssar.rid2caltopo.ui
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,21 +26,27 @@ import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.R
+import org.ncssar.rid2caltopo.data.CaltopoHybridBrowser
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.CaltopoClient
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+
 import java.util.Locale
 
 @Composable
 fun R2CView(
     hostName: String,
-    mapId: String,
-    groupId: String,
+    viewModel: R2CViewModel?,
     mapStatus: CaltopoMap.MapStatusListener.mapStatus,
     drones : List<CtDroneSpec>,
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
     Column {
-        AppHeader(appUptime, hostName, mapId, groupId, mapStatus)
+        AppHeader(appUptime, hostName, viewModel, mapStatus)
         if (!drones.isEmpty()) {
             RidmapHeader()
             drones.forEach { drone ->
@@ -57,12 +65,11 @@ fun R2CView(
 }
 
 @Composable
-fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: String, mapStatus: CaltopoMap.MapStatusListener.mapStatus) {
+fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?, mapStatus: CaltopoMap.MapStatusListener.mapStatus) {
     Row(
         modifier = Modifier
             .background(MaterialTheme.colorScheme.primaryContainer)
             .padding(3.dp)
-            .height(IntrinsicSize.Min)
     ) {
         if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.down) {
             Column(
@@ -133,48 +140,9 @@ fun AppHeader(appUptime: String, hostName: String, mapId: String, groupId: Strin
             )
         }
         Column(
-            modifier = Modifier.width(100.dp)
+            modifier = Modifier.width(300.dp)
         ) {
-            Text(
-                text = "Map Id:",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 16.sp
-            )
-            Text(
-                text = mapId,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
-        }
-        Column(
-            modifier = Modifier.width(100.dp)
-        ) {
-            Text(
-                text = "Group Id:",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 16.sp
-            )
-            Text(
-                text = groupId,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(25.dp)
-                    .background(MaterialTheme.colorScheme.surface),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
+            if (null != viewModel) MapStateView(viewModel)
         }
         Column(
             modifier = Modifier.width(100.dp)
@@ -414,6 +382,151 @@ fun RidmapHeader() {
 @Composable
 fun R2CViewPreview() {
     RID2CaltopoTheme {
-        R2CView("", "", "", CaltopoMap.MapStatusListener.mapStatus.down, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
+        R2CView("",  null, CaltopoMap.MapStatusListener.mapStatus.down, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
     }
+}
+
+@Composable
+fun MapStateView(viewModel: R2CViewModel) {
+    // 1. Observe the two sources of truth
+    val connection = viewModel.connectionState
+    val overlay = viewModel.overlay
+
+    Box (modifier = Modifier.fillMaxSize()) {
+        // The Header only needs to know the Connection state to draw its icon/label
+        CaltopoActionInterface(
+            state = connection,
+            onActionClicked = { viewModel.onUIEvent(UIEvent.HeaderClicked) }
+        )
+
+        // 2. The "Marching Orders": Render EXACTLY one overlay based on state
+        when (val currentOverlay = overlay) {
+            is OverlayState.ConnectionSetup -> {
+                StandAloneOptionsDialog(
+                    hasCreds = viewModel.hasCredentials,
+                    onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
+                    loading = false,
+                    onAction = { viewModel.onUIEvent(UIEvent.ConnectionRequested) }
+                )
+            }
+            is OverlayState.Connecting -> {
+                StandAloneOptionsDialog(
+                    hasCreds = viewModel.hasCredentials,
+                    onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
+                    loading = true,
+                    onAction = { viewModel.onUIEvent(UIEvent.ConnectionRequested) }
+                )
+            }
+
+            is OverlayState.MapBrowser -> {
+                val nodes = viewModel.mapHierarchy?: emptyList()
+                // The browser receives the data it needs and bubbles events back up
+                Dialog(
+                    onDismissRequest = { viewModel.onUIEvent(UIEvent.DismissRequested) },
+                    properties = DialogProperties(usePlatformDefaultWidth = false)
+                ) {
+                    // Now the browser has its own window and won't be "squished" by the header
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.surface
+                    ) {
+                        key(nodes) {
+                            CaltopoHybridBrowser(
+                                rootNodes = nodes,
+                                onUIEvent = { viewModel.onUIEvent(it) }
+                            )
+                        }
+                    }
+                }
+            }
+
+            is OverlayState.Management -> {
+                // Type safety: Management only makes sense if a map is selected
+                (connection as? CaltopoConnectionState.MapSelected)?.let { state ->
+                    ConnectedOptionsDialog(
+                        mapName = state.map.title,
+                        onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
+                        onSwitchMap = { viewModel.onUIEvent(UIEvent.SwitchMapRequested) },
+                        onDisconnect = { viewModel.onUIEvent(UIEvent.DisconnectRequested) }
+                    )
+                }
+            }
+
+            is OverlayState.Error -> {
+                ErrorDialog(
+                    message = overlay.message,
+                    onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) }
+                )
+            }
+
+            OverlayState.None -> { /* Render nothing over the map */ }
+        }
+    }
+}
+
+@Composable
+fun ErrorDialog(
+    message: String,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Default.Error,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+        },
+        title = {
+            Text(text = "Connection Error")
+        },
+        text = {
+            Text(text = message)
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("OK")
+            }
+        }
+    )
+}
+
+@Composable
+fun StandAloneOptionsDialog(
+    onDismiss: () -> Unit,
+    loading: Boolean,
+    hasCreds: Boolean,
+    onAction: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = if (loading) ({}) else onDismiss, // disable dismiss while loading
+        title = { Text(if (hasCreds) "Connect to Map" else "Credentials Required") },
+        text = {
+            if (loading) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(40.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Fetching Map Hierarchy...")
+                }
+            } else {
+                Text(
+                    if (hasCreds)
+                        "Existing credentials found. Would you like to sync with CalTopo?"
+                    else "No CalTopo credentials found. You need to load a credential file to sync maps."
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onAction) {
+                Text(if (hasCreds) "Connect" else "Load Credential File")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Stay Offline") }
+        }
+    )
 }

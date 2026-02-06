@@ -123,15 +123,15 @@ Google Drive.
 
 If you don't have a valid Teams account, you can still go into the Caltopo User Interface 
 and manually configure [Fleet Live Tracking](https://training.caltopo.com/all_users/share/live-tracking#set-up), 
-by specifying the GroupId and Remote Id for each drone you want to track.  
+by specifying the Remote Id for each drone you want to track.  Use "DRONE" for the GroupId field.
 
 This is considered live tracking mode, where the _use_direct_flag_ settings toggle is false.  If 
-you've specified a non-empty groupId in RID2Caltopo settings and configured the
-LiveTrack in Caltopo correctly, incoming RID2Caltopo waypoints will be forwarded to the
-corresponding Caltopo live tracks.   You'll need to stop the LiveTracks and restart them manually in 
-Caltopo when the drone lands and before it takes off again respectively.  Fortunately the Caltopo 
-U/I thoughtfully supplies the GroupId-RemoteId pairing as an option, so you don't need to retype 
-each time.  Remember to give each new LiveTrack a unique label to differentiate your flights.
+you've configured the LiveTrack in Caltopo correctly, incoming RID2Caltopo waypoints will be 
+forwarded to the corresponding Caltopo live tracks.   You'll need to stop the LiveTracks and restart 
+them manually in Caltopo when the drone lands and before it takes off again respectively.  Fortunately 
+the Caltopo U/I thoughtfully supplies the GroupId-RemoteId pairing as an option, so you don't need 
+to retype each time.  Remember to give each new LiveTrack a unique label to differentiate your flights
+and make sure you use "DRONE" in place of GroupId.
 
 The _track_folder_ is the name of the folder to create in the map to receive drone tracks when the 
 _use_direct_flag_ is set to true.   To recap, you must specify _map_id_, _group_id_, 
@@ -207,7 +207,7 @@ Hopefully the user interface is self-explanatory, but I'll walk you thru a quick
 The first thing you see when the app starts is the name of the device with the version of 
 the software directly below it.   To the right of that is the amount of time the app has
 been running.   Note that you may need to scroll the screen horizontally to see all the fields.
-To the right of the uptime are the current settings for the MapId and GroupId fields.  These
+To the right of the uptime are the current settings for the MapId field.  These
 fields can be specified in the _Settings_ menu item.  The final field on the right is the
 Caltopo Round-Trip_time.  The three fields on the right are blank/0 if a Caltopo map is not
 specified.  With valid settings for those values and authorized credentials, the app will try

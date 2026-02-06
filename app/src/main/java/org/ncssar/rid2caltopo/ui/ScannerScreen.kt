@@ -22,7 +22,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import org.ncssar.rid2caltopo.app.R2CActivity
-
+import org.ncssar.rid2caltopo.data.CaltopoClient
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
 @Composable
 fun ScannerScreen(
     onDismiss: () -> Unit,
@@ -33,7 +41,7 @@ fun ScannerScreen(
                 modifier = Modifier.padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("Scanner Status", style = MaterialTheme.typography.headlineSmall)
+                Text("Scanner Status:", style = MaterialTheme.typography.headlineSmall)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Spacer(modifier = Modifier.height(16.dp))
                 }
@@ -52,9 +60,28 @@ fun ScannerScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("NaN: ${R2CActivity.nanSupported}")
                 }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(modifier = Modifier.height(32.dp))
+                }
+                Text("Loaded Config Files:", style = MaterialTheme.typography.headlineSmall)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Spacer(modifier = Modifier.height(16.dp))
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(
+                        modifier = Modifier
+                        .fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text( "${CaltopoClient.GetConfigFilesLoadedRecord()}")
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Button(onClick = onDismiss) {
                         Text("Close")

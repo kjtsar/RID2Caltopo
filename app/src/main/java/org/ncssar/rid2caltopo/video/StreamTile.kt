@@ -22,7 +22,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import org.ncssar.rid2caltopo.data.CtDroneSpec
 
 @Composable
 fun StreamTile(
@@ -39,14 +38,11 @@ fun StreamTile(
     val isFocused = viewModel.focusedPath == streamDesignator
     val designatorState = remember(
         streamDesignator,
-        viewModel.activeDroneSpecs,
+        viewModel.droneStates,
         showPicker
     ) {
         viewModel.designatorStateFor(streamDesignator)
     }
-    val droneSpec: CtDroneSpec? = if (designatorState is DesignatorState.Green) designatorState.dronespec else null
-
-    var dsTimestamp: String? = remember (droneSpec) {droneSpec?.durationInSecAsString}
 
     Box(
         modifier = Modifier
@@ -98,17 +94,17 @@ fun StreamTile(
             streamDesignator = streamDesignator,
             designatorState = designatorState,
             streamState = streamState,
-            dsTimestamp = dsTimestamp,
+            viewModel = viewModel,
             onLongPress = {
                 if (designatorState is DesignatorState.Yellow) { showPicker = true }
             }
         )
         if (showPicker && designatorState is DesignatorState.Yellow) {
             DroneSpecPickerDialog(
-                droneSpecs = (designatorState as DesignatorState.Yellow).candidates,
-                onSelect = { droneSpec ->
-                    CTDebug(tag, "DroneSpecPickerDialog() User mapped '${streamDesignator}' to ${droneSpec.remoteId}")
-                    droneSpec.setMappedId(streamDesignator)
+                droneSpecStates = (designatorState as DesignatorState.Yellow).candidates,
+                onSelect = { (selectedStreamDesignator, droneSpecState) ->
+                    CTDebug(tag, "DroneSpecPickerDialog() User mapped '${streamDesignator}' to ${selectedStreamDesignator}:${droneSpecState.remoteId}")
+                    droneSpecState.changeMappedId(streamDesignator)
                     showPicker = false
                 },
                 onDismiss = {showPicker = false}
@@ -129,7 +125,6 @@ fun StreamPlayer(
     if (state != StreamState.LIVE) return
 
     val player = viewModel.playerFor(designator) ?: return
-    CTDebug(tag, "StreamPlayer(${designator}) player:${player}")
     // val restartKey = viewModel.restartIdFor(designator)
     CTDebug(tag, "StreamPlayer(${designator}): player:$player")
     key(player) {

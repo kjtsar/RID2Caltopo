@@ -161,7 +161,7 @@ fun MainScreen(
                             CaltopoClient.CTEvent(TAG,"Stream Service Activated", null)
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Scanners")}, onClick = {
+                        DropdownMenuItem(text = { Text("Status")}, onClick = {
                             localViewModel.showScanner()
                             CaltopoClient.CTEvent(TAG,"ScannersDisplayed", null)
                             menuExpanded = false
@@ -207,8 +207,6 @@ fun MainScreen(
                             val localDrones by item.viewModel.drones.collectAsState()
                             val appUptime by item.viewModel.appUpTime.collectAsState()
                             val mapStatus by item.viewModel.mapStatus.collectAsState()
-                            val mapId by item.viewModel.mapId.collectAsState()
-                            val groupId by item.viewModel.groupId.collectAsState()
                             val hostname by item.viewModel.hostname.collectAsState()
 
                             R2CView(
@@ -216,8 +214,7 @@ fun MainScreen(
                                 drones = localDrones,
                                 appUptime = appUptime,
                                 mapStatus = mapStatus,
-                                mapId = mapId,
-                                groupId = groupId,
+                                viewModel = item.viewModel,
                                 onMappedIdChange = { drone, newId ->
                                     item.viewModel.updateMappedId(drone, newId)
                                 }
@@ -231,16 +228,13 @@ fun MainScreen(
                             val remoteUptime by item.viewModel.remoteUptime.collectAsState()
                             val remoteCtRttString by item.viewModel.remoteCtRtt.collectAsState()
                             val remoteAppVersion by item.viewModel.remoteAppVersion.collectAsState()
-                            val remoteMapId by item.viewModel.remoteMapId.collectAsState()
-                            val remoteGroupId by item.viewModel.remoteGroupId.collectAsState()
 
                             R2CPeerView(
                                 peerName = item.viewModel.r2cPeer.peerName,
                                 drones = remoteDrones,
                                 remoteUptime = remoteUptime,
                                 appVersion = remoteAppVersion,
-                                mapId = remoteMapId,
-                                groupId = remoteGroupId,
+                                viewModel = item.viewModel,
                                 ctRttString = remoteCtRttString,
                                 onMappedIdChange = { drone, newId ->
                                     item.viewModel.updateMappedId(drone, newId)

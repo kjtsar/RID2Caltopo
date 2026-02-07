@@ -26,7 +26,6 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.documentfile.provider.DocumentFile;
 
-import java.net.HttpURLConnection;
 import java.net.URL;
 import javax.net.ssl.HttpsURLConnection;
 
@@ -59,15 +58,12 @@ import org.ncssar.rid2caltopo.app.ScanningService;
 import com.google.firebase.analytics.FirebaseAnalytics;
 import androidx.work.Data;
 
-import okhttp3.Call;
-import okhttp3.Callback;
 import okhttp3.Dns;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
-import okhttp3.ResponseBody;
 
 /*
  * Persistent state management for CaltopoClient
@@ -338,7 +334,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     @Nullable
-    public static Uri GetDebugLogPath() {
+    public static Uri GetDebugLogUri() {
         return DebugLogPath;
     }
 

@@ -10,7 +10,6 @@ package org.ncssar.rid2caltopo.app
 
 import StreamsViewModel
 import android.Manifest
-import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
@@ -19,24 +18,18 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
-import android.util.Log
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.launch
-import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
+import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -65,7 +58,11 @@ import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     var locationRequest: LocationRequest? = null
@@ -102,6 +99,40 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         })
     }
 
+    fun zipAndEmailLog(context: Context, logUri: Uri) {
+        // 1. Create the destination zip in private cache
+        val zipFile = File(context.cacheDir, "R2C_Log_Package.zip")
+
+        try {
+            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+                // Use openInputStream for content:// URIs from the picker
+                context.contentResolver.openInputStream(logUri)?.use { inputStream ->
+                    val entry = ZipEntry("r2c_log.txt")
+                    zos.putNextEntry(entry)
+                    inputStream.copyTo(zos)
+                    zos.closeEntry()
+                }
+            }
+
+            // 2. Share using FileProvider (make sure manifest is set up!)
+            val sharedUri = FileProvider.getUriForFile(
+                context, "${context.packageName}.fileprovider", zipFile
+            )
+
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_EMAIL, arrayOf("kjtsar@kjt.us"))
+                putExtra(Intent.EXTRA_SUBJECT, "RID2Caltopo Log Submission")
+                putExtra(Intent.EXTRA_STREAM, sharedUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            context.startActivity(Intent.createChooser(intent, "Send Log via..."))
+        } catch (e: Exception) {
+            CTError("LogShare", "Failed to zip log from URI: $logUri", e)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -118,6 +149,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         remoteViewModels.clear()
         setContent {
             RID2CaltopoTheme() {
+                val localContext =  LocalContext.current
                 val streamsViewModel : StreamsViewModel = viewModel()
                 val activeScreen by localViewModel
                     .activeScreen
@@ -127,11 +159,9 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                         MainScreen(
                             localViewModel = localViewModel,
                             remoteViewModels = remoteViewModels,
-                            onShowLog = {
-                                openUri(
-                                    CaltopoClient.GetDebugLogPath().toString(),
-                                    "text/plain"
-                                )
+                            onEmailLog = {
+                                val uri = CaltopoClient.GetDebugLogUri()
+                                if (null != uri) zipAndEmailLog(localContext, uri)
                             },
                             onShowHelp = {showHelpMenu()}
                         )
@@ -400,8 +430,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
 
         @JvmStatic
         fun getMyAppVersion(): String {
-            return String.format(Locale.US,
-                "%s(%s)",BuildConfig.BUILD_VERSION, BuildConfig.BUILD_TIME)
+            return String.format(Locale.US,"%s",BuildConfig.BUILD_VERSION)
         }
     }
 }

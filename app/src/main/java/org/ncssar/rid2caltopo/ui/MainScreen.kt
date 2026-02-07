@@ -75,10 +75,10 @@ class OpenArchiveDir() : ActivityResultContracts.OpenDocumentTree() {
 fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CPeerViewModel>,
-    onShowLog: () -> Unit,
+    onEmailLog: () -> Unit,
     onShowHelp: () -> Unit
 ) {
-    val tag: String = "MainScreen"
+    val tag = "MainScreen"
     var menuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
@@ -230,9 +230,9 @@ fun MainScreen(
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Show Log") }, onClick = {
-                            onShowLog()
-                            CaltopoClient.CTEvent(tag,"LogDisplayed", null)
+                        DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
+                            onEmailLog()
+                            CaltopoClient.CTEvent(tag,"LogEmailed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = {

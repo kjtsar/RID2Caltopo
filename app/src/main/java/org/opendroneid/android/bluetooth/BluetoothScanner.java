@@ -30,6 +30,7 @@ import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 
 import org.ncssar.rid2caltopo.app.R2CActivity;
+import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.data.CtDroneSpec;
 
 import java.util.ArrayList;
@@ -52,7 +53,7 @@ public class BluetoothScanner {
 
     public static BluetoothAdapter getBluetoothAdapter() {
 
-        Context appContext = R2CActivity.getAppContext();
+        Context appContext = R2CApplication.getAppCtxt();
         BluetoothAdapter adapter = null;
         if (null != appContext) {
             BluetoothManager btManager = (BluetoothManager) appContext.getSystemService(Context.BLUETOOTH_SERVICE);

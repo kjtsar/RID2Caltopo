@@ -8,6 +8,7 @@
 
 package org.ncssar.rid2caltopo.app;
 
+import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 
 import android.app.Notification;
@@ -35,6 +36,7 @@ import org.opendroneid.android.bluetooth.WiFiScanner;
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.Locale;
+import org.opendroneid.android.bluetooth.OpenDroneIdDataManager;
 
 /* This foreground Service required to receive Bluetooth and Wifi
    updates when the app is backgrounded/paused.
@@ -49,11 +51,8 @@ public class ScanningService extends Service {
     private BluetoothScanner btScanner;
     private WiFiScanner wiFiScanner;
     private boolean scanning = false;
-
-    private R2CActivity mAppActivity;
-    private Context mAppContext;
-    private OpenDroneIdDataManager mDataManager;
-
+    private static Context AppContext = R2CApplication.getAppCtxt();
+    private static OpenDroneIdDataManager DataManager = new OpenDroneIdDataManager(null);
     public static long GetStartTimeInMsec() {return ScannerUptime.getStartTimeInMsec();}
     public void startScanning() {
         if (scanning) {
@@ -61,11 +60,12 @@ public class ScanningService extends Service {
             return;
         }
         scanning = true;
+        if (null == AppContext) AppContext = R2CApplication.getAppCtxt();
         CaltopoClient.CTDebug(TAG, String.format(Locale.US, "startScanning(): ScanningService 0x%x", this.hashCode()));
-        wiFiScanner = new WiFiScanner(mAppContext, mDataManager);
+        wiFiScanner = new WiFiScanner(AppContext, DataManager);
         wiFiScanner.startScan();
 
-        btScanner = new BluetoothScanner(mAppContext, mDataManager);
+        btScanner = new BluetoothScanner(AppContext, DataManager);
         btScanner.startScan();
     }
 
@@ -86,18 +86,16 @@ public class ScanningService extends Service {
         CaltopoClient.CTDebug(TAG, String.format(Locale.US,
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
-        mAppActivity = R2CActivity.getR2CActivity();
-        mAppContext = getApplicationContext();
-        mDataManager = R2CActivity.getDataManager();
 
-        if (null == mAppActivity || null == mAppContext || null == mDataManager) {
+        if (null == AppContext) AppContext = R2CApplication.getAppCtxt();
+        if (null == AppContext || null == DataManager) {
             CTError(TAG, "onCreate() missing required app context - terminating.");
             System.exit(3);
             return;
         }
 
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "onCreate(): appActivity:0x%x dataManager: 0x%x",
-                mAppActivity.hashCode(), mDataManager.hashCode()));
+        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "onCreate(): Context:0x%x DataManager:0x%x",
+                AppContext.hashCode(), DataManager.hashCode()));
 
         NotificationChannel serviceChannel = new NotificationChannel(CHANNEL_ID,
                 CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT);
@@ -137,13 +135,13 @@ public class ScanningService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (null == mAppActivity) {
-            mAppActivity = R2CActivity.getR2CActivity();
-            if (null == mAppActivity) {
+        if (null == AppContext) {
+            AppContext = R2CApplication.getAppCtxt();
+            if (null == AppContext) {
                 return START_REDELIVER_INTENT;
             }
         }
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "onStartCommand(): mAppActivity 0x%x", mAppActivity.hashCode()));
+        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "onStartCommand(): AppContext:0x%x", AppContext.hashCode()));
 
 
         /* FIXME: No matter what I've tried here, Android will fire up a new instance of the
@@ -151,13 +149,13 @@ public class ScanningService extends Service {
             As a result, DebugActivity.onCreate() checks the instance id to see if it is the
             original, and if it isn't it just exits.
          */
-        intent = new Intent(mAppActivity, R2CActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT |
+        intent = new Intent(AppContext, R2CApplication.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | FLAG_ACTIVITY_NEW_TASK |
                 Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent pendingIntent = PendingIntent.getActivity(mAppActivity, 0, intent,
+        PendingIntent pendingIntent = PendingIntent.getActivity(AppContext, 0, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        Notification notification = new NotificationCompat.Builder(mAppActivity, CHANNEL_ID)
+        Notification notification = new NotificationCompat.Builder(AppContext, CHANNEL_ID)
                 .setContentTitle("OpenDroneID Scanning Service")
                 .setContentText("Scanning for remoteID broadcasts on Bluetooth and Wireless interfaces")
                 .setSmallIcon(R.drawable.r2c)

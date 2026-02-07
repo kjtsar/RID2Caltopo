@@ -7,18 +7,14 @@
 
 package org.ncssar.rid2caltopo.ui
 
-import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.launch
-import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,15 +24,13 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import org.ncssar.rid2caltopo.data.CaltopoClient
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import org.ncssar.rid2caltopo.app.R2CActivity
-import org.ncssar.rid2caltopo.video.StreamsScreen
+import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
@@ -44,6 +38,36 @@ sealed interface MainScreenItem {
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
     data class RemoteView(val viewModel: R2CPeerViewModel) : MainScreenItem
     data class SpacerView(val height: Dp) : MainScreenItem
+}
+
+// Try to bust thru Google Drive's cache to get the latest version of requested
+// document.  N.B. If battery saver is on, Google Drive will always use the
+// cached version regardless.
+class FreshOpenDocument : ActivityResultContracts.OpenDocument() {
+    override fun createIntent(context: Context, input: Array<String>): Intent {
+        return super.createIntent(context, input).apply {
+            // Tells providers (like Drive) to check the server
+            putExtra("android.content.extra.SHOW_ADVANCED", true)
+            putExtra("android.content.extra.NO_CACHE", true)
+            // Ensures we aren't restricted to files already on the device
+            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+        }
+    }
+}
+
+class OpenArchiveDir() : ActivityResultContracts.OpenDocumentTree() {
+    override fun createIntent(context: Context, input: Uri?): Intent {
+        return super.createIntent(context, input).apply {
+            val downloadsUri = DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents",
+                "primary:Downloads"
+            )
+            putExtra(Intent.EXTRA_TITLE, "Select directory to archive drone tracks")
+            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+            putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadsUri)
+            putExtra("android.content.extra.NO_CACHE", true)
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -54,7 +78,7 @@ fun MainScreen(
     onShowLog: () -> Unit,
     onShowHelp: () -> Unit
 ) {
-    val TAG: String = "MainScreen"
+    val tag: String = "MainScreen"
     var menuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
@@ -115,37 +139,63 @@ fun MainScreen(
             }
         )
     }
-    val context = LocalContext.current
-
+    val context =  LocalContext.current
+    var isPickerOpen by remember { mutableStateOf(false) }
     // Launcher for loading a config file
     val loadConfigFileLauncher = rememberLauncherForActivityResult(
-        contract = CaltopoClient.OpenOpenableDocument(),
+        contract = FreshOpenDocument(),
         onResult = { uri ->
-            uri?.let { CaltopoClient.LoadConfigFile(it) }
+            isPickerOpen = false
+            if (uri != null) {
+                CTDebug(tag, "loadConfigFileLauncher() returned '${uri}'")
+                try {
+                    val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    context.contentResolver.takePersistableUriPermission(
+                        uri, takeFlags
+                    )
+                    CTDebug(tag, "loadConfigFileLauncher() secured URI read permission.")
+                    if (CaltopoClient.LoadConfigFile(uri)) {
+                        localViewModel.onUIEvent((UIEvent.ConfigFileLoaded))
+                    } else {
+                        localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
+                    }
+                } catch (e: Exception) {
+                    CTError(tag, "loadConfigFileLauncher(): read failed: ", e)
+                }
+            } else {
+                CTDebug(tag, "loadConfigFileLauncher() picker closed w/o selection.")
+                localViewModel.onUIEvent(UIEvent.NotAbleToReadConfigFile)
+            }
         }
     )
 
+    LaunchedEffect(localViewModel.overlay) {
+        if (localViewModel.overlay == OverlayState.RequestConfigFile && !isPickerOpen) {
+            CTDebug(tag, "LaunchedEffect(): requesting config file...")
+            isPickerOpen = true
+            loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+        }
+    }
+
+
     // Launcher for selecting an archive directory
     val queryArchiveDirLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult(),
-        onResult = { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
-                result.data?.data?.let { uri ->
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                    )
-                    CaltopoClient.SetArchivePath(uri.toString())
-                }
+        contract = OpenArchiveDir(),
+        onResult = { uri ->
+            if (null != uri) {
+                CTDebug(tag, "queryArchiveDirLauncher() returned: '${uri}'")
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                CaltopoClient.SetArchiveUri(uri)
             }
         }
     )
     LaunchedEffect(Unit) {
-        if (CaltopoClient.GetArchivePath().isEmpty()) {
-            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                putExtra(Intent.EXTRA_TITLE, "Select directory to archive drone tracks")
-            }
-            queryArchiveDirLauncher.launch(intent)
+        if (null == CaltopoClient.GetArchiveUri()) {
+            CTDebug(tag, "LaunchedEffect() requesting archiveDir")
+            queryArchiveDirLauncher.launch(null)
         }
     }
     
@@ -176,13 +226,13 @@ fun MainScreen(
                             localViewModel.showSettings()
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Load Config File") }, onClick = {
+                        DropdownMenuItem(text = { Text("Load config file") }, onClick = {
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Show Log") }, onClick = {
                             onShowLog()
-                            CaltopoClient.CTEvent(TAG,"LogDisplayed", null)
+                            CaltopoClient.CTEvent(tag,"LogDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = {
@@ -196,22 +246,22 @@ fun MainScreen(
                         })
                         DropdownMenuItem(text = { Text("Stream Service")}, onClick = {
                             localViewModel.showStreams()
-                            CaltopoClient.CTEvent(TAG,"Stream Service Activated", null)
+                            CaltopoClient.CTEvent(tag,"Stream Service Activated", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Status")}, onClick = {
                             localViewModel.showScanner()
-                            CaltopoClient.CTEvent(TAG,"ScannersDisplayed", null)
+                            CaltopoClient.CTEvent(tag,"ScannersDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
                             onShowHelp()
-                            CaltopoClient.CTEvent(TAG,"HelpDisplayed", null)
+                            CaltopoClient.CTEvent(tag,"HelpDisplayed", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Quit") }, onClick = {
                             showConfirmExitDialog = true
-                            CaltopoClient.CTEvent(TAG,"Quit", null)
+                            CaltopoClient.CTEvent(tag,"Quit", null)
                             menuExpanded = false
                         })
                     }
@@ -244,7 +294,6 @@ fun MainScreen(
                         is MainScreenItem.LocalView -> {
                             val localDrones by item.viewModel.drones.collectAsState()
                             val appUptime by item.viewModel.appUpTime.collectAsState()
-                            val mapStatus by item.viewModel.mapStatus.collectAsState()
                             val hostname by item.viewModel.hostname.collectAsState()
 
                             R2CView(

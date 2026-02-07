@@ -27,9 +27,8 @@ import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
+import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.data.SimpleTimer
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 
 enum class ActiveScreen {
     MAIN,
@@ -40,6 +39,8 @@ enum class ActiveScreen {
 sealed class CaltopoConnectionState {
     // Standard operating mode: local logging only
     object StandAlone : CaltopoConnectionState()
+
+    object NoNetwork : CaltopoConnectionState()
 
     // Transient state: UI shows "Verifying Team Access..." with an animation
     object CheckingCredentials : CaltopoConnectionState()
@@ -63,7 +64,8 @@ sealed class UIEvent {
     object DismissRequested : UIEvent()
     object DisconnectRequested : UIEvent()
     object SwitchMapRequested: UIEvent()
-    object ConnectTriggered: UIEvent()
+    object ConfigFileLoaded: UIEvent()
+    object NotAbleToReadConfigFile: UIEvent()
     data class MapSelected(val map: CaltopoNode.MapNode) : UIEvent()
 
     // System/Network Notifications
@@ -101,11 +103,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     val hasCredentials: Boolean
         get() = CaltopoCredentials.sniffTest(CaltopoClient.GetCaltopoCredentials())
 
-
-    init {
-        // Assuming CaltopoMap.registerListener is static now
-        CaltopoMap.SetMapStatusListener(this)
-    }
+    val hasNetwork: Boolean
+        get() = !R2CPeer.GetMyIpAddress(false).isEmpty()
 
     // Map and U/I State management
     var connectionState by mutableStateOf<CaltopoConnectionState>(CaltopoConnectionState.StandAlone)
@@ -113,6 +112,12 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     var overlay by mutableStateOf<OverlayState>(OverlayState.None)
         private set
 
+    init {
+        // Assuming CaltopoMap.registerListener is static now
+        CaltopoMap.SetMapStatusListener(this)
+        overlay = OverlayState.None
+        connectionState = CaltopoConnectionState.StandAlone
+    }
     fun onUIEvent(uiEvent: UIEvent) {
         val oldState = "  PRE: Overlay=$overlay ConnectionState: ${connectionState::class.simpleName}"
 
@@ -120,22 +125,55 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             is UIEvent.HeaderClicked -> {
                 overlay = when (connectionState) {
                     is CaltopoConnectionState.StandAlone -> OverlayState.ConnectionSetup
+                    is CaltopoConnectionState.NoNetwork -> {
+                        if (R2CPeer.GetMyIpAddress(false).isEmpty()) {
+                            OverlayState.ConnectionSetup
+                        } else {
+                            OverlayState.None
+                        }
+                    }
                     is CaltopoConnectionState.CredentialsLoaded -> OverlayState.MapBrowser
                     is CaltopoConnectionState.CredentialsVerified -> OverlayState.MapBrowser
                     is CaltopoConnectionState.MapSelected -> OverlayState.Management
                     else -> overlay // do nothing if busy
                 }
             }
-            is UIEvent.ConnectTriggered -> {
-
+            is UIEvent.NotAbleToReadConfigFile -> {
+                CaltopoClient.ShowToast("Not able to read Config File")
+                overlay = OverlayState.None
+                connectionState = CaltopoConnectionState.StandAlone
+            }
+            is UIEvent.ConfigFileLoaded -> {
+                if (overlay is OverlayState.None) {
+                    // then just loaded a configfile independent of our fancy widget.
+                } else {
+                    if (this.hasCredentials) {
+                        CTDebug(
+                            tag,
+                            "onUIEvent(${uiEvent}): have credentials, fetching team info..."
+                        )
+                        overlay = OverlayState.Connecting
+                        CaltopoMap.Init() // Use credentials to fetch/update the CaltopoNode List
+                    } else {
+                        CTDebug(
+                            tag,
+                            "onUIEvent(${uiEvent}): No credentials loaded requesting credentials..."
+                        )
+                        overlay = OverlayState.RequestConfigFile
+                    }
+                }
             }
             is UIEvent.ConnectionRequested -> {
-                if (this.hasCredentials) {
-                    overlay = OverlayState.Connecting
-                    CaltopoMap.Init() // Use credentials to fetch/update the CaltopoNode List
+                if (R2CPeer.GetMyIpAddress(false).isEmpty()) {
+                    connectionState = CaltopoConnectionState.NoNetwork
                 } else {
-                    // We don't have creds, go get the file
-                    overlay = OverlayState.RequestConfigFile
+                    if (this.hasCredentials) {
+                        overlay = OverlayState.Connecting
+                        CaltopoMap.Init() // Use credentials to fetch/update the CaltopoNode List
+                    } else {
+                        // We don't have creds, go get the file
+                        overlay = OverlayState.RequestConfigFile
+                    }
                 }
             }
 
@@ -156,6 +194,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             is UIEvent.ConnectionStatusChanged -> {
                 // Directly map the Java Enum to our Sealed Class state
                 val status = uiEvent.mapStatus
+                CTDebug(tag, "onUIEvent(): ConnectionStatus: '${status}'")
                 connectionState = when {
                     status == CaltopoMap.MapStatusListener.mapStatus.credentialsVerified -> {
                         mapHierarchy = CaltopoMap.GetSessionNodeMap()

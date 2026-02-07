@@ -13,16 +13,15 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.LoggingLevelName;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
-import android.content.Intent;
 import android.content.res.Resources;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
-import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.util.Log;
 
-import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.documentfile.provider.DocumentFile;
@@ -39,8 +38,6 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.Iterator;
-import java.util.List;
 import java.util.Locale;
 import java.util.Hashtable;
 import java.util.Map;
@@ -48,6 +45,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.*;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -56,15 +54,26 @@ import org.json.JSONObject;
 import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.R2CActivity;
+import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.ScanningService;
 import com.google.firebase.analytics.FirebaseAnalytics;
 import androidx.work.Data;
+
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.Dns;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 /*
  * Persistent state management for CaltopoClient
  */
 class ClientClassState implements Serializable {
-    private static final long SerialVersionUID = 26L; // Serializable version.
+    private static final long SerialVersionUID = 28L; // Serializable version.
     public long minDistanceInFeet;
     public String archivePath;
     public String caltopoTrackFolder;
@@ -146,7 +155,7 @@ class ClientClassState implements Serializable {
                         vers:'%d', minDist:'%d' ft, usePeersFlag:'%s'
                         newTrackDelayInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
-                        teamId: '%s', credId: '%s' credSecret: '%s', ht: %s,\n loaded configFiles:\n  %s""",
+                        teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
                 SerialVersionUID, minDistanceInFeet, usePeersFlag,
                 newTrackDelayInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
                 incident, opPeriod, archivePath, caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
@@ -169,7 +178,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     static final long ProcessId = Process.myPid();
     private static final String BASE_URL = "https://caltopo.com/api/v1/position/report/";
     private static final String TAG = "CaltopoClient";
-    public static final String LoadConfigFileMessage = "Open Caltopo Configuration File";
     public static final int DebugLevelError = 0;
     public static final int DebugLevelWarn = 1;
     public static final int DebugLevelDebug = 2;
@@ -184,7 +192,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final String MyStateFileName = TAG + ".ser";
     private static String LogFilePath;
     private static OutputStream DebugOutputStream;
-    private static DocumentFile ArchiveDir;
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
     private static ArrayList<CtDroneSpec.DroneSpecsChangedListener> DroneSpecsChangedListeners = new ArrayList<>();
@@ -204,6 +211,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final ArrayList<CtDroneSpec> DsArray = new ArrayList<>(16);
     private static long DroneSpecsArraySize = DsArray.size();
     private static boolean NotifySettingsChangedFlag;
+
+    public static final OkHttpClient OkHttpClient = new OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .dns(Dns.SYSTEM) // This uses OkHttp's more robust DNS logic
+            .build();
+
 
     public CaltopoClient(String rid) throws RuntimeException {
         ClientClassState ccs = GetState();
@@ -436,7 +450,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void OpenBufferContentsInBrowser(@NonNull String buffer) {
         DocumentFile trackDir = GetTodaysTrackDir();
-        Context ctxt = R2CActivity.getAppContext();
+        Context ctxt = R2CApplication.getAppCtxt();
         R2CActivity r2CActivity = R2CActivity.getR2CActivity();
 
         try {
@@ -453,6 +467,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+    @Nullable
+    public static DocumentFile GetArchiveDir() {
+        Uri archiveUri = GetArchiveUri();
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (null == ctxt || null == archiveUri) return null;
+        return DocumentFile.fromTreeUri(ctxt, archiveUri);
+    }
+
     /**
      * Create/find a directory within the ArchiveDir with todays date
      * and return that as the directory to place trackfiles and logs in.
@@ -460,43 +482,31 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      * @return DocumentFile path to existing directory on success and
      * null on failure.
      */
+    @Nullable
     public static DocumentFile GetTodaysTrackDir() {
-        String archivePath = GetArchivePath();
+        Uri archivePath = GetArchiveUri();
         DocumentFile todaysDir = null;
-        Context ctxt = R2CActivity.getAppContext();
-        if (!archivePath.isEmpty() && null != ctxt) try {
-//            VerifyArchiveDir();
-            if (null != ArchiveDir) {
-                SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy", Locale.US);
-                String dirpath = "tracks-" + sdf.format(new Date());
-                todaysDir = ArchiveDir.findFile(dirpath);
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (null == ctxt || null == archivePath) return null;
+        DocumentFile archiveDir = DocumentFile.fromTreeUri(ctxt, archivePath);
+        if (null != archiveDir) try {
+            SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy", Locale.US);
+            String dirpath = "tracks-" + sdf.format(new Date());
+            todaysDir = archiveDir.findFile(dirpath);
+            if (null == todaysDir) {
+                todaysDir = archiveDir.createDirectory(dirpath);
                 if (null == todaysDir) {
-                    todaysDir = ArchiveDir.createDirectory(dirpath);
-                    if (null == todaysDir) {
-                        CTError(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Not able to create '%s'", ArchiveDir));
-                    } else {
-                        CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Created '%s'", ArchiveDir));
-                    }
+                    CTError(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Not able to create '%s'", archiveDir));
                 } else {
-                    CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): found existing '%s'", ArchiveDir));
+                    CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): Created '%s'", archiveDir));
                 }
+            } else {
+                CTDebug(TAG, String.format(Locale.US, "GetTodaysTrackDir(): found existing '%s'", archiveDir));
             }
         } catch (Exception e) {
             CTError(TAG, "Not able to create today's archive dir", e);
         }
         return todaysDir;
-    }
-
-    public static DocumentFile GetArchiveDir() {
-        String archivePath = GetArchivePath();
-        DocumentFile todaysDir = null;
-        Context ctxt = R2CActivity.getAppContext();
-//        if (!archivePath.isEmpty() && null != ctxt) try {
-//            VerifyArchiveDir();
-//        } catch (Exception e) {
-//            CTError(TAG, "VerifyArchiveDir() raised.", e);
-//        }
-        return ArchiveDir;
     }
 
     public static String GetTrackFolderName() {
@@ -604,12 +614,20 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         JSONObject retval;
 
         try {
-            R2CActivity activity = R2CActivity.getR2CActivity();
-            if (null == activity) {
-                CTError(TAG, "ReadJsonFile(): activity not defined.");
-                return new JSONObject();
+            Context ctxt = R2CApplication.getAppCtxt();
+            ContentResolver resolver  = ctxt.getContentResolver();
+            Cursor cursor = resolver.query(uri, null, null, null, null);
+            if (cursor != null) {
+                // Try reading file metadata to coerce Google Drive to fetch fresh version of
+                // the file, rather than pulling from it's cache.
+                int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+                if (cursor.moveToFirst()) {
+                    CTDebug(TAG, String.format(Locale.US, "ReadJsonFile(%s) size:%d bytes...",
+                            cursor.getString(nameIndex), cursor.getLong(sizeIndex)));
+                }
             }
-            is = activity.getContentResolver().openInputStream(uri);
+            is = resolver.openInputStream(uri);
             isr = new InputStreamReader(is, StandardCharsets.UTF_8);
             bufferedReader = new BufferedReader(isr);
             String line;
@@ -620,14 +638,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             isr.close();
             if (null != is) is.close();
         } catch (IOException e) {
-            ShowToast(String.format(Locale.US, "Not able to read '%s'", uri), e);
+            CTError(TAG, String.format(Locale.US, "Not able to read '%s'", uri), e);
             return null;
         }
 
         try {
             retval = new JSONObject(stringBuilder.toString());
         } catch (JSONException e) {
-            ShowToast(String.format(Locale.US, "Not able to parse '%s'", uri), e);
+            CTError(TAG, String.format(Locale.US, "Not able to parse '%s'", uri), e);
             return null;
         }
         return retval;
@@ -665,7 +683,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
         if (!teamId.isEmpty() || !credentialId.isEmpty() || !credentialSecret.isEmpty()) {
             SetCaltopoCredentials(new CaltopoCredentials(teamId, credentialId, credentialSecret));
-            CaltopoMap.Init();
         }
         NotifySettingsChanged();
         ArchiveState("Credentials loaded");
@@ -740,16 +757,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
             ccs.cachedDroneSpecTable = mergedTable;
             ArchiveState("readRidmapFileContent() merged ridmap with updates/changes.");
+        } else {
+            CTDebug(TAG, "readRidmapFileContent(): No changes detected.");
         }
     }
 
-    public static void LoadConfigFile(Uri uri) {
-        if (null == uri) return;
+    public static boolean LoadConfigFile(Uri uri) {
+        if (null == uri) return false;
         try {
             ClientClassState ccs = GetState();
 
             JSONObject json = ReadJsonFile(uri);
-            if (null == json) return;
+            if (null == json) return false;
             String type = json.optString("type").trim().toLowerCase();
             String fileVersion = json.optString("file_version");
             String updated = json.optString("updated");
@@ -772,8 +791,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ShowToast(String.format(Locale.US, "%s:%s successfully loaded.", type, fileVersion));
         } catch (JSONException e) {
             CTError(TAG, String.format(Locale.US, "Error processing '%s':", uri), e);
+            return false;
         }
+        return true;
     }
+
     public static int GetRidmapCount() {
         ClientClassState ccs = GetState();
         return ccs.cachedDroneSpecTable.size();
@@ -785,27 +807,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 ccs.configFilesLoaded.trim().replaceAll("\\n", "\n * "));
     }
 
-    public static class OpenOpenableDocument extends ActivityResultContracts.OpenDocument {
-        @NonNull
-        @Override
-        public Intent createIntent(@NonNull Context context, @NonNull String[] input) {
-            Intent intent = super.createIntent(context, input);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            return intent;
-        }
-    }
-
     public static void CheckUnreportedFiles() {
         if (null == ExecutorPool) {
             ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
         }
         ExecutorPool.submit(WaypointTrack::BgPollUnreportedTracks);
-    }
-
-
-    public static void PermissionsGrantedWeShouldBeGoodToGo() {
-        InitArchiveDir();
-        CheckUnreportedFiles();
     }
 
     public static void DroneSpecStatusChanged(@NonNull CtDroneSpec ds, boolean isActiveFlag) {
@@ -853,7 +859,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @Nullable
     private static ClientClassState RestoreState() {
         ClientClassState ccs;
-        Context ctxt = R2CActivity.getAppContext();
+        Context ctxt = R2CApplication.getAppCtxt();
         if (null == ctxt) return null;
         try {
             CTDebug(TAG, "RestoreState() Opening " + MyStateFileName);
@@ -865,7 +871,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTWarn(TAG, "RestoreState() no archive to restore from:", e);
             ccs = null;
         } catch (InvalidClassException e) {
-            CTError(TAG, "RestoreState() not able to restore incompatible version of state:", e);
+            CTWarn(TAG, "RestoreState() not able to restore incompatible version of state.  Resetting.", e);
             ccs = null;
         } catch (Exception e) {
             CTError(TAG, "RestoreState() raised:", e);
@@ -877,7 +883,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     private static FirebaseAnalytics GetFBAnalytics() {
         if (null == FBAnalytics) {
-            Context context = R2CActivity.getAppContext();
+            Context context = R2CApplication.getAppCtxt();
             if (null != context) {
                 FBAnalytics = FirebaseAnalytics.getInstance(context);
             }
@@ -931,8 +937,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     private static void ArchiveState(@NonNull String reason) {
         if (null != Ccstate) try {
-            Context ctxt = R2CActivity.getAppContext();
-            if (null == ctxt) return;
+            // so many contexts to choose from - hopefully one of them works...
+            Context ctxt = R2CApplication.getAppCtxt();
+            if (null == ctxt) {
+                CTDebug(TAG, "ArchiveState(): Missing required app context." );
+                return;
+            }
             Ccstate.debugLevel = DebugLevel;
             FileOutputStream fos = ctxt.openFileOutput(MyStateFileName, Context.MODE_PRIVATE);
             ObjectOutputStream oos = new ObjectOutputStream(fos);
@@ -1023,10 +1033,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.minDistanceInFeet;
     }
 
-    @NonNull
-    public static String GetArchivePath() {
+    @Nullable
+    public static Uri GetArchiveUri() {
         ClientClassState ccs = GetState();
-        return ccs.archivePath;
+        return ccs.archivePath.isEmpty() ? null : Uri.parse(ccs.archivePath);
     }
 
     @NonNull
@@ -1039,7 +1049,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         if (!ccs.trackerApiKey.equals(apiKey)) {
             ccs.trackerApiKey = apiKey;
-            ArchiveState("trackerApiKey changed");
         }
     }
 
@@ -1053,7 +1062,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         if (!ccs.trackerUrlPfx.equals(urlPfx)) {
             ccs.trackerUrlPfx = urlPfx;
-            ArchiveState("trackerUrlPfx changed");
         }
     }
 
@@ -1084,11 +1092,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void InitArchiveDir() {
-        if (null == DebugOutputStream && !GetArchivePath().isEmpty()) try {
-            DocumentFile todaysArchiveDir = GetTodaysTrackDir();
+        DocumentFile todaysArchiveDir = GetTodaysTrackDir();
+        if (null == todaysArchiveDir) {
+            CTError(TAG, "InitArchiveDir(): archive dir is mia.");
+            return;
+        }
+        if (null == DebugOutputStream) try {
+            CTDebug(TAG, "InitArchiveDir(): Initializing log stream...");
             String filepath = "Log_" + TimeDatestampString(ScanningService.GetStartTimeInMsec());
-            Context ctxt = R2CActivity.getAppContext();
-            if (null != todaysArchiveDir && null != ctxt) try {
+            Context ctxt = R2CApplication.getAppCtxt();
+            if (null != ctxt) try {
                 DocumentFile dataFilepath = todaysArchiveDir.createFile("text/plain", filepath);
                 ContentResolver resolver = ctxt.getContentResolver();
                 if (null != dataFilepath) {
@@ -1114,19 +1127,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                         BuildConfig.BUILD_TIME, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, LogFilePath, header));
             }
 
+            CheckUnreportedFiles();
         } catch (Exception e) {
             Log.e(TAG, "CTError: Not able to open DebugOutputStream: " + e);
         }
     }
 
-    public static void SetArchivePath(@NonNull String path)
-            throws RuntimeException {
-        if (path.isEmpty()) {
-            throw new RuntimeException("CaltopoClient.SetArchivePath() invalid path.");
-        }
+    public static void SetArchiveUri(@NonNull Uri pathUri) {
         ClientClassState ccs = GetState();
-        if (!ccs.archivePath.equals(path)) {
-            ccs.archivePath = path;
+        String pathString = pathUri.toString();
+        if (!ccs.archivePath.equals(pathString)) {
+            ccs.archivePath = pathString;
             ArchiveState("archivePath changed.");
             InitArchiveDir();
         }
@@ -1212,7 +1223,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (timeval < 0) timeval = 0;
         if (timeval != ccs.maxIdleTimeInMinutes) {
             ccs.maxIdleTimeInMinutes = timeval;
-            ArchiveState("minDistanceInFeet changed");
+            ArchiveState("maxIdleTimeInMinutes changed");
             CheckIdle();
         }
     }
@@ -1275,7 +1286,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      *  would make sense if we can get broadcast/rendezvous working.
      */
     public void bgPublishLive(String deviceId, double lat, double lng, long altitudeInMeters) {
-        String https_url = String.format(Locale.US, "%s%s?id=%s&lat=%.6f&lng=%.6f&ele=%d",
+        String https_url = String.format(Locale.US, "%s%s?id=%s&lat=%.6f&lng=%.6f&elevation=%d",
                 BASE_URL, deviceId, lat, lng, altitudeInMeters);
         try {
             URL url = new URL(https_url);
@@ -1285,7 +1296,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             //    Log.i(TAG, "sending to caltopo: " + https_url);
             httpsConn = (HttpsURLConnection) url.openConnection();
             httpsConn.setRequestMethod("GET");
-            httpsConn.setRequestProperty("User-Agent", "RID2Caltopo/0.1");
+            httpsConn.setRequestProperty("User-Agent", "RID2Caltopo/0.2");
             responseCode = httpsConn.getResponseCode();
             if (HttpsURLConnection.HTTP_OK != responseCode) {
                 // FIXME: Examine response.  If we get multiple failures and no successes,
@@ -1342,56 +1353,53 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         UpdateDroneSpecs();
     }
 
-    // returns http response status.
+
+    // Unfortunately, older versions of Android don't handle IPv4/IPv6 very well,
+    // so we're forced to use OkHttpClient in place of the legacy HttpURLConnection
+    // to encourage use of IPv4, which is all we ever wanted in the first place...
     public static int BgPublishGeoJsonStats(String geoJsonString) {
         ClientClassState ccs = GetState();
         if (ccs.trackerApiKey.isEmpty() || ccs.trackerUrlPfx.isEmpty()) return 8675309;
+
         String urlStr = String.format(Locale.US, "%s/%s", ccs.trackerUrlPfx, "upload");
+        long startStamp = System.currentTimeMillis();
 
-        int responseCode = HttpURLConnection.HTTP_OK;
-        try {
-            long startStamp = System.currentTimeMillis();
-            URL putUrl = new URL(urlStr);
-            byte[] output = geoJsonString.getBytes(StandardCharsets.UTF_8);
-            CTDebug(TAG, "BgPublishStats(): uploading " + output.length + " bytes to '" + urlStr + "'");
-            HttpURLConnection httpConn = (HttpURLConnection) putUrl.openConnection();
-            httpConn.setRequestMethod("PUT");
-            httpConn.setRequestProperty("User-Agent", "RID2Caltopo/0.1");
-            httpConn.setRequestProperty("X-SAR-Token", ccs.trackerApiKey);
-            httpConn.setRequestProperty("Content-Type", "application/json");
-            httpConn.setRequestProperty("Content-Length", String.valueOf(output.length));
-            httpConn.setDoOutput(true);
-            OutputStream os = httpConn.getOutputStream();
-            os.write(output, 0, output.length);
-            os.flush();
-            os.close();
+        // Define the Media Type
+        MediaType JSON = MediaType.get("application/json; charset=utf-8");
 
-            responseCode = httpConn.getResponseCode();
+        // Create the Request Body
+        RequestBody body = RequestBody.create(geoJsonString, JSON);
+
+        // Build the Request
+        Request request = new Request.Builder()
+                .url(urlStr)
+                .put(body) // This sets the method to PUT
+                .header("User-Agent", "RID2Caltopo/0.1")
+                .header("X-SAR-Token", ccs.trackerApiKey)
+                .build();
+
+        CTDebug(TAG, "BgPublishStats(): uploading " + geoJsonString.length() + " characters to '" + urlStr + "'");
+
+        try (Response response = OkHttpClient.newCall(request).execute()) {
+            int responseCode = response.code();
             long endStamp = System.currentTimeMillis();
-            StringBuilder response = new StringBuilder();
-            response.append(String.format(Locale.US,
+
+            StringBuilder responseLog = new StringBuilder();
+            responseLog.append(String.format(Locale.US,
                     "BgPublishStats(%s) completed in %.3f seconds with code %d.\n",
                     ccs.trackerUrlPfx, (endStamp - startStamp) / 1000.0, responseCode));
-            BufferedReader reader = null;
-            if (responseCode == HttpURLConnection.HTTP_OK) {
-                if (DebugLevel >= DebugLevelDebug)
-                    reader = new BufferedReader(new InputStreamReader(httpConn.getInputStream(),
-                            StandardCharsets.UTF_8));
-            } else {
-                if (DebugLevel >= DebugLevelError)
-                    reader = new BufferedReader(new InputStreamReader(
-                            httpConn.getErrorStream(), StandardCharsets.UTF_8));
-            }
-            if (null != reader) {
-                String line;
-                while ((line = reader.readLine()) != null) response.append(line);
-                reader.close();
-            }
-            CTDebug(TAG, response.toString());
+
+            // Read the body (Response.body().string() handles stream closing)
+            String bodyString = response.body() != null ? response.body().string() : "";
+            responseLog.append(bodyString);
+
+            CTDebug(TAG, responseLog.toString());
+            return responseCode;
+
         } catch (IOException e) {
-            CTError(TAG, "BgPublishStats() raised.", e);
+            CTError(TAG, "BgPublishStats() raised IOException (Network/DNS issue):", e);
+            return 503; // Service Unavailable / Custom error code
         }
-        return responseCode;
     }
 
     public static Future<Integer> PublishGeoJsonStats(@NonNull String geoJsonString) {
@@ -1400,6 +1408,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         return ExecutorPool.submit(() -> BgPublishGeoJsonStats(geoJsonString));
     }
+
+
 
     // Make sure we catch idle drone tracks and archive them as soon as they are declared dormant.
     public void checkIdleTime() {
@@ -1425,6 +1435,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+
     /**
      * newWaypoint() - process a new waypoint from OpenDroneIdDataManager().
      * Note that lat, lng, altitudeInMeters, and droneTimestampInSeconds are all values
@@ -1441,7 +1452,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) return false;
         long goodCount = droneSpec.getGoodCount();
-        CTDebug(TAG, String.format(Locale.US, "newWaypoint(%d): adding %.7f, %.7f to %s via %s...",
+        CTDebug(TAG, String.format(Locale.US,
+                "newWaypoint(%d): adding %.7f, %.7f to %s via %s...",
                 goodCount, lat, lng, droneSpec.trackLabel(), transportType));
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
         if (!goLiveFlag) {

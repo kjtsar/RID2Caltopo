@@ -34,7 +34,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 37
+        versionCode = 38
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -158,4 +158,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.9.1")
     implementation("androidx.media3:media3-ui-compose:1.9.1")
     implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.datastore:datastore-core:1.1.1")
+    implementation("com.google.code.gson:gson:2.10.1")
 }

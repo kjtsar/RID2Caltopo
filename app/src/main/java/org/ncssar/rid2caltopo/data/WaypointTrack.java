@@ -14,7 +14,7 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.GetTodaysTrackDir;
 
 import org.json.*;
-import org.ncssar.rid2caltopo.app.R2CActivity;
+import org.ncssar.rid2caltopo.app.R2CApplication;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -151,7 +151,7 @@ public class WaypointTrack {
 	}
 
 	private void setupOutputStream() {
-		Context ctxt = R2CActivity.getAppContext();
+		Context ctxt = R2CApplication.getAppCtxt();
 		DocumentFile todaysArchiveDir = GetTodaysTrackDir();
 		if (null == ctxt || null == todaysArchiveDir) return;
 		try {
@@ -212,14 +212,14 @@ public class WaypointTrack {
     @NonNull
     private static HashSet<String> ReadFilenamesFromDocFile(@NonNull DocumentFile reportedFilepath) {
         HashSet<String> filenames = new HashSet<>();
-        R2CActivity activity = R2CActivity.getR2CActivity();
-        if (null == activity) {
-            CTError(TAG, "ReadFilenamesFromDocFile(): activity not defined.");
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (null == ctxt) {
+            CTError(TAG, "ReadFilenamesFromDocFile(): context not defined.");
             return filenames;
         }
         try {
             Uri uri = reportedFilepath.getUri();
-            InputStream is = activity.getContentResolver().openInputStream(uri);
+            InputStream is = ctxt.getContentResolver().openInputStream(uri);
             InputStreamReader isr = new InputStreamReader(is);
             BufferedReader reader = new BufferedReader(isr);
             String filename;
@@ -233,15 +233,16 @@ public class WaypointTrack {
 
     @Nullable
     private static JSONObject ReadGeoJson(DocumentFile waypointFile) throws IOException, JSONException {
-        R2CActivity activity = R2CActivity.getR2CActivity();
-        if (null == activity) {
-            CTError(TAG, "ReadGeoJson(): activity not defined.");
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (null == ctxt) {
+            CTError(TAG, "ReadGeoJson(): context not defined.");
             return null;
         }
+
         JSONObject waypointTrack = null;
         Uri uri = waypointFile.getUri();
         StringBuilder builder = new StringBuilder();
-        InputStream is = activity.getContentResolver().openInputStream(uri);
+        InputStream is = ctxt.getContentResolver().openInputStream(uri);
         InputStreamReader isr = new InputStreamReader(is);
         BufferedReader reader = new BufferedReader(isr);
         String line;
@@ -256,7 +257,7 @@ public class WaypointTrack {
 
     static void ReportStatsForFile(@NonNull DocumentFile reportedFilepath, @NonNull String filename) {
         Uri uri = reportedFilepath.getUri();
-        Context ctxt = R2CActivity.getAppContext();
+        Context ctxt = R2CApplication.getAppCtxt();
         if (null == ctxt) {
             CTError(TAG, "ReportStatsForFile(): missing ctxt");
             return;

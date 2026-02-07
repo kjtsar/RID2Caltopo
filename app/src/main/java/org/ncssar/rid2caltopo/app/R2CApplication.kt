@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.app
 
 import android.app.Application
+import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 
 class R2CApplication : Application() {
@@ -8,7 +9,23 @@ class R2CApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // global initialization here
+        instance = this;
+
+        // Force IPv4 preference for older stack compatibility
+        System.setProperty("java.net.preferIPv4Stack", "true");
+        System.setProperty("java.net.preferIPv6Addresses", "false");
+
+        // DataStoreBridge.init(this)
+        CaltopoClient.InitArchiveDir()
         CTDebug(TAG, "onCreate().")
+    }
+
+    companion object {
+        private var instance: R2CApplication? = null;
+
+        @JvmStatic
+        fun getAppCtxt(): R2CApplication? {
+            return instance;
+        }
     }
 }

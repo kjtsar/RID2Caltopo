@@ -24,6 +24,7 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -45,6 +46,18 @@ import androidx.annotation.Nullable;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.Dns;
+import okhttp3.FormBody;
+import okhttp3.HttpUrl;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 /* Based on www.github.com/ncssar/caltopo_python (Tom Grundy).  The same 
  * caveats apply here.
@@ -139,7 +152,7 @@ public class CaltopoSession {
 
     private static final String TAG = "CaltopoSession";
     private static final int DEFAULT_TIMEOUT_MS = 2 * 60 * 1000;
-	private static ExecutorService ExecutorPool;
+	private static ExecutorService ExecutorPool = null;
 	private static final CtLineProperty CtLinePropertyDefault = new CtLineProperty();
 	private static final String CALTOPO_API_V1 = "/api/v1/map/";
 
@@ -174,40 +187,42 @@ public class CaltopoSession {
 		ExecutorPool = null;
     }
 
-    /*
-     * @param method
-     */
     private static String Sign(CtsMethod_t method, String url, long expiresMsec,
-			       String payload, String credentialSecret) {
-		try {
-			// Construct the message
-			String message = method + " " + url + "\n" + expiresMsec + "\n";
-            if (payload != null && !payload.isEmpty()) message += payload;
+                               String payload, String credentialSecret) {
+        try {
+            // Construct the message
+            String message = method + " " + url + "\n" + expiresMsec + "\n";
+            if (payload != null && !payload.isEmpty()) {
+                message += payload;
+            }
 
-			// Decode the authentication key (Base64)
-			byte[] secretKey = Base64.getDecoder().decode(credentialSecret);
+            // Use android.util.Base64 for maximum compatibility across all Android versions
+            // and to avoid Java 8 compatibility issues on older tablets.
+            byte[] secretKey = android.util.Base64.decode(credentialSecret, android.util.Base64.DEFAULT);
 
-			// Create a Mac instance with the HMAC-SHA256 algorithm
-			Mac hmac = Mac.getInstance("HmacSHA256");
-			SecretKeySpec keySpec = new SecretKeySpec(secretKey, "HmacSHA256");
-			hmac.init(keySpec);
+            // Create a Mac instance with the HMAC-SHA256 algorithm
+            Mac hmac = Mac.getInstance("HmacSHA256");
+            SecretKeySpec keySpec = new SecretKeySpec(secretKey, "HmacSHA256");
+            hmac.init(keySpec);
 
-			// Generate the signature
-			byte[] signatureBytes = hmac.doFinal(message.getBytes(StandardCharsets.UTF_8));
+            // Generate the signature
+            byte[] signatureBytes = hmac.doFinal(message.getBytes(StandardCharsets.UTF_8));
 
-			// Return the signature as a Base64-encoded string
-            return Base64.getEncoder().encodeToString(signatureBytes);
+            // IMPORTANT: Use NO_WRAP to prevent the encoder from adding newlines
+            // (which java.util.Base64 sometimes does for long strings)
+            return android.util.Base64.encodeToString(signatureBytes, android.util.Base64.NO_WRAP);
 
-		} catch (Exception e) {
-			throw new RuntimeException("Error while generating HMAC signature", e);
-		}
+        } catch (Exception e) {
+            throw new RuntimeException("Error while generating HMAC signature", e);
+        }
     }
 
 	@NonNull
 	private static String EncodeParm(@NonNull String key, @NonNull String val) {
-		return key + "=" + URLEncoder.encode(val, StandardCharsets.UTF_8);
+//        return key + "=" + URLEncoder.encode(val, StandardCharsets.UTF_8);
+        return key + "=" + Uri.encode(val);
 	}
-
+// Danger Danger Will Robinson: URLEncoder.encode() hangs on Android 10
 	@NonNull
     private static String EncodeParams(@NonNull Map<String,String> params) {
 		StringBuilder paramString = new StringBuilder();
@@ -215,7 +230,8 @@ public class CaltopoSession {
             paramString
                     .append(entry.getKey())
 					.append("=")
-                    .append(URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8))
+//                     .append(URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8))
+                    .append(Uri.encode(entry.getValue()))
 					.append("&");
 		}
 		return paramString.substring(0, paramString.length()-1);
@@ -225,120 +241,117 @@ public class CaltopoSession {
 	private static CaltopoOp BgSendRequest(CaltopoOp op) {
 		boolean retry;
         boolean goodResponse;
-		do  {
-			retry = false;
+        do {
+            retry = false;
             goodResponse = false;
-			try {
-				op.sentTimestampMsec = System.currentTimeMillis();
-				long expires = op.sentTimestampMsec + DEFAULT_TIMEOUT_MS;
-				String payloadString = (null == op.payload) ? "" : op.payload.toString();
-				Map <String, String>params = new HashMap<>();
-				// Construct the query string
-				if (!op.goNaked) {
-					// Generate the signature
-					String signature = Sign(op.method, op.url, expires, payloadString, Cred.credentialSecret);
+
+            try {
+                op.sentTimestampMsec = System.currentTimeMillis();
+                long expires = op.sentTimestampMsec + DEFAULT_TIMEOUT_MS;
+                String payloadString = (null == op.payload) ? "" : op.payload.toString();
+
+                // 1. Prepare Base Parameters
+                Map<String, String> params = new HashMap<>();
+                if (!op.goNaked) {
+                    String signature = Sign(op.method, op.url, expires, payloadString, Cred.credentialSecret);
                     params.put("id", Cred.credentialId);
                     params.put("expires", String.valueOf(expires));
-					params.put("signature", signature);
+                    params.put("signature", signature);
                     params.put("json", "");
-				}
+                }
 
-                String query = "";
-				if (op.method == CtsMethod_t.POST && op.payload != null) {
-					params.put("json", payloadString);
-				} else if (!params.isEmpty()) {
-					query = "?" + EncodeParams(params);
-				}
+                // 2. Build the URL and Request Body
+                HttpUrl.Builder urlBuilder;
+                if (op.goNaked) {
+                    urlBuilder = HttpUrl.parse(op.url).newBuilder();
+                } else {
+                    urlBuilder = new HttpUrl.Builder()
+                            .scheme("https")
+                            .host(DomainAndPort.split(":")[0]) // Handle domain vs domain:port
+                            .addPathSegments(op.url.startsWith("/") ? op.url.substring(1) : op.url);
 
-				// Construct the full URL
-				String fullUrl;
-				if (op.goNaked) {
-					fullUrl = op.url + query;
-				} else {
-					fullUrl = "https://" + DomainAndPort + op.url + query;
-				}
-                CTInfo(TAG, String.format(Locale.US, "BgSendRequest(%s): fullUrl: '%s'", op.method,  fullUrl));
+                    // Port handling if present in DomainAndPort
+                    if (DomainAndPort.contains(":")) {
+                        urlBuilder.port(Integer.parseInt(DomainAndPort.split(":")[1]));
+                    }
+                }
 
-				// Open a connection
-				HttpURLConnection connection = (HttpURLConnection) new URL(fullUrl).openConnection();
-				connection.setRequestMethod(op.method.toString());
-				connection.setRequestProperty("User-Agent", "RID2Caltopo/0.2");
-				if (op.method == CtsMethod_t.POST && op.payload != null) {
-					String body = EncodeParams(params);
-					connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-					connection.setRequestProperty("Content-Length", String.valueOf(body.length()));
-					connection.setDoOutput(true);
-					OutputStream os = connection.getOutputStream();
-					DataOutputStream dos = new DataOutputStream(os);
-					dos.writeBytes(body);
-					dos.flush();
-					dos.close();
-					os.close();
-				}
+                RequestBody requestBody = null;
 
-				// Get the response code
-				op.responseCode = connection.getResponseCode();
-				BufferedReader reader;
+                if (op.method == CtsMethod_t.POST && op.payload != null) {
+                    // For Caltopo POSTs, the 'json' param contains the payload
+                    params.put("json", payloadString);
 
-				// Handle the response stream
-				if (op.responseCode == HttpURLConnection.HTTP_OK) {
-					reader = new BufferedReader(new InputStreamReader(connection.getInputStream(),
-							StandardCharsets.UTF_8));
-				} else {
-					reader = new BufferedReader(new InputStreamReader(connection.getErrorStream(),
-							StandardCharsets.UTF_8));
-				}
+                    FormBody.Builder formBuilder = new FormBody.Builder();
+                    for (Map.Entry<String, String> entry : params.entrySet()) {
+                        formBuilder.add(entry.getKey(), entry.getValue());
+                    }
+                    requestBody = formBuilder.build();
+                } else {
+                    // For GET/other, params go into the Query String
+                    for (Map.Entry<String, String> entry : params.entrySet()) {
+                        urlBuilder.addQueryParameter(entry.getKey(), entry.getValue());
+                    }
+                }
 
-				// Read the response
-				StringBuilder response = new StringBuilder();
-				String line;
-				while ((line = reader.readLine()) != null) {
-					response.append(line);
-				}
-				reader.close();
-				op.receivedTimestampMsec = System.currentTimeMillis();
-				op.response = response.toString();
-				if (op.responseCode == HttpURLConnection.HTTP_OK) {
-					goodResponse = true;
-					if (!op.response.isEmpty()) try {
-						JSONObject responseJson = new JSONObject(op.response);
-						op.responseJson = responseJson.getJSONObject("result");
-					} catch (JSONException e) {
-						CTError(TAG, "parse JSON result raised: ", e);
-					}
-				} else {
-                    CTError(TAG, "BgSendRequest() failed w/code " + op.responseCode + ":\n" + op.response);
-					Bundle parameters = new Bundle();
-					parameters.putInt("r2c_responseCode", op.responseCode);
-					parameters.putString("r2c_response", op.response);
-					parameters.putString("r2c_url", op.url);
-					parameters.putString("r2c_method", op.method.toString());
-					CaltopoClient.CTEvent(TAG,"CaltopoOpFailed", parameters);
-					CaltopoClient.CTError(TAG, "CaltopoOpFailed: rc: " + op.responseCode + " details: " + op.response);
-				}
-				CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
-			} catch (UnknownHostException e) {
-				// this happens when no network connection, so retry after some delay period.
-				long minRetryDelayInMsec = 3000;
-				long maxRetryDelayInMsec = 60000;
-				try {
-                    long retryDelay = minRetryDelayInMsec + (long)(java.lang.Math.random() * (maxRetryDelayInMsec - minRetryDelayInMsec));
-                    CTDebug(TAG, String.format(Locale.US, "BgSendRequest(): retrying in %.3f seconds...", retryDelay / 1000.0));
-					sleep(retryDelay);
-				} catch (InterruptedException e2) {
-					CTDebug(TAG, "sleep() interrupted.");
-				}
-				retry = true;
-			} catch (Exception e) {
-				op.response = "Exception raised during request:\n  " + e;
-				CTError(TAG, "Exception raised during request:", e);
-			}
+                HttpUrl finalUrl = urlBuilder.build();
+                CTInfo(TAG, String.format(Locale.US, "BgSendRequest(%s): fullUrl: '%s'", op.method, finalUrl));
+
+                // 3. Build and Execute Request
+                Request.Builder requestBuilder = new Request.Builder()
+                        .url(finalUrl)
+                        .header("User-Agent", "RID2Caltopo/0.2")
+                        .method(op.method.toString(), requestBody);
+
+                try (Response response = CaltopoClient.OkHttpClient.newCall(requestBuilder.build()).execute()) {
+                    op.responseCode = response.code();
+                    op.receivedTimestampMsec = System.currentTimeMillis();
+
+                    // Response.body().string() handles the stream reading and closing automatically
+                    op.response = (response.body() != null) ? response.body().string() : "";
+
+                    if (response.isSuccessful()) {
+                        goodResponse = true;
+                        if (!op.response.isEmpty()) {
+                            try {
+                                JSONObject responseJson = new JSONObject(op.response);
+                                op.responseJson = responseJson.getJSONObject("result");
+                            } catch (JSONException e) {
+                                CTError(TAG, "parse JSON result raised: ", e);
+                            }
+                        }
+                    } else {
+                        CTError(TAG, "BgSendRequest() failed w/code " + op.responseCode + ":\n" + op.response);
+                        Bundle eventParams = new Bundle();
+                        eventParams.putInt("r2c_responseCode", op.responseCode);
+                        eventParams.putString("r2c_response", op.response);
+                        eventParams.putString("r2c_url", op.url);
+                        eventParams.putString("r2c_method", op.method.toString());
+                        CaltopoClient.CTEvent(TAG, "CaltopoOpFailed", eventParams);
+                    }
+                    CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
+                }
+
+            } catch (UnknownHostException e) {
+                // This logic remains the same for network retries
+                long retryDelay = 3000 + (long) (java.lang.Math.random() * 57000);
+                CTDebug(TAG, String.format(Locale.US, "BgSendRequest(): DNS fail, retrying in %.3f seconds...", retryDelay / 1000.0));
+                try {
+                    Thread.sleep(retryDelay);
+                } catch (InterruptedException e2) {
+                    CTDebug(TAG, "sleep() interrupted.");
+                }
+                retry = true;
+            } catch (Exception e) {
+                op.response = "Exception raised during request:\n  " + e;
+                CTError(TAG, "Exception raised during request:", e);
+            }
         } while (retry);
+
         op.goodResponse = goodResponse;
         op.setOperationIsDone(goodResponse);
-		return op;
-	}
-
+        return op;
+    }
 
 	// CaltopoSession Instance methods:
 
@@ -648,7 +661,7 @@ public class CaltopoSession {
 				EncodeParm("id", deviceId) + "&" +
 				EncodeParm("lat", latStr) + "&" +
 				EncodeParm("lng", lngStr) + "&" +
-				EncodeParm("ele", ele.toString());
+				EncodeParm("elevation", ele.toString());
 
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.GET, url, null, true);

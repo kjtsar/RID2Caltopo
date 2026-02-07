@@ -29,6 +29,7 @@ import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.SeekParameters
 import kotlinx.coroutines.delay
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.video.StreamState
@@ -131,7 +132,7 @@ class StreamsViewModel (
      */
     override fun onDroneSpecsChanged(currentDrones: List<CtDroneSpec>) {
         if (!currentDrones.isEmpty()) {
-            CTDebug(TAG, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
+            CTInfo(TAG, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
             stallPoll.stop()
             pollForStalledPlayers()
             currentDrones.forEach { spec ->

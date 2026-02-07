@@ -54,7 +54,6 @@ import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
-import org.ncssar.rid2caltopo.ui.CtAlertDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.R2CPeerViewModel
 import org.ncssar.rid2caltopo.ui.R2CPeerViewModelFactory
@@ -65,7 +64,6 @@ import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
-import org.opendroneid.android.bluetooth.OpenDroneIdDataManager
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.util.Locale
 
@@ -75,10 +73,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     var mFusedLocationClient: FusedLocationProviderClient? = null
     private val remoteViewModels = mutableStateListOf<R2CPeerViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
-    private val showSettingsDialog = mutableStateOf(false)
-    private val showStreamsService = mutableStateOf(false)
-    private val showScannerDialog = mutableStateOf(false)
-
 
     private fun checkPermission(permission: String) {
         if (ActivityCompat.checkSelfPermission(
@@ -111,8 +105,8 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        CTDebug(TAG, "onCreate().")
         R2CPeer.SetPeerListChangedListener(this)
-        appContext = applicationContext
         val localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
@@ -167,7 +161,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         }
         AppActivity = this
         if (!InitializedCalled) {
-            DataManager = OpenDroneIdDataManager(null)
+
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 checkPermission(Manifest.permission.NEARBY_WIFI_DEVICES)
@@ -284,7 +278,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         checkNaNSupport()
         checkWiFiSupport()
         CTDebug(TAG, "initialize()")
-        CaltopoClient.PermissionsGrantedWeShouldBeGoodToGo()
         InitializedCalled = true
 
         locationRequest = LocationRequest.Builder((10 * 1000).toLong()) // 10 seconds
@@ -390,7 +383,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     companion object {
         const val TAG: String = "R2CActivity"
         private var AppActivity: R2CActivity? = null
-        private var DataManager: OpenDroneIdDataManager? = null
         @JvmStatic
         fun getR2CActivity(): R2CActivity? {
             return AppActivity
@@ -405,18 +397,6 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         var extendedAdvertisingSupported: Boolean = false
         var nanSupported: Boolean = false
         var wifiSupported: Boolean = false
-
-        private var appContext: Context? = null
-
-        @JvmStatic
-        fun getAppContext(): Context? {
-            return appContext
-        }
-
-        @JvmStatic
-        fun getDataManager(): OpenDroneIdDataManager? {
-            return DataManager
-        }
 
         @JvmStatic
         fun getMyAppVersion(): String {

@@ -40,6 +40,7 @@ import androidx.annotation.Nullable;
 import org.json.JSONObject;
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.R2CActivity;
+import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.opendroneid.android.data.Util;
 
 import java.io.InputStream;
@@ -160,7 +161,7 @@ public class WsPipe extends WebSocketListener {
         if (null == Client) {
             try {
                 // Load the keystore from the app's resources
-                Context context = R2CActivity.getAppContext();
+                Context context = R2CApplication.getAppCtxt();
                 if (null == context) return;
                 InputStream keystoreInputStream = context.getResources().openRawResource(R.raw.keystore);
                 KeyStore keyStore = KeyStore.getInstance("PKCS12");

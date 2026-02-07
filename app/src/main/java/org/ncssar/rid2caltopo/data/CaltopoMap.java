@@ -29,6 +29,7 @@ import androidx.annotation.Nullable;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.ui.R2CViewModel;
 
 
@@ -92,7 +93,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static String ArchiveFolderId;
     private static CaltopoNode.MapNode MapNode;
     private static String FolderName;
-    private static MapStatusListener.mapStatus MapStatus;
+    private static MapStatusListener.mapStatus MapStatus = MapStatusListener.mapStatus.down;
     private static int WaitForGpsAccuracy;
     private static boolean UsePeersFlag;
     private static JSONArray R2cPeers; // list of r2cPeerSpecs for peers listed on our map.
@@ -115,10 +116,18 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static List<CaltopoNode> SessionNodeMap = null;
     private static CaltopoMap MyInstance = null; // keep around just to serve as listener.
 
+    private static CaltopoOp VerifyOp = null;
+    private static DelayedExec VerifyTimer = new DelayedExec();
+    private static final long VERIFY_TIMEOUT_MS = 10 * 1000L;
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
 
     public static void SessionVerifyCallback(@NonNull CaltopoOp verifyOp) {
+        VerifyTimer.stop();
+        VerifyOp = null;
         if (verifyOp.success()) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "SessionVerifyCallback(): Parsing team data. queued:%d, sent:%d, received:%d",
+                    verifyOp.queuedTimestampMsec, verifyOp.sentTimestampMsec, verifyOp.receivedTimestampMsec ));
             if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
                 DumpJsonStructure(verifyOp.responseJson, "account");
             }
@@ -130,7 +139,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             String emsg = String.format(Locale.US,
                     "Not able to verify credentials - code:%s, reason:%s",
                     verifyOp.responseCode, verifyOp.response);
-            CTError(TAG, LastErrorString);
+            LastErrorString = emsg;
+            ShowToast(emsg);
             SetMapStatus(MapStatusListener.mapStatus.down, emsg);
             SessionNodeMap = null;
         }
@@ -158,14 +168,22 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
         MyCaltopoCredentials = sessionCredentials;
         SessionNodeMap = null;
+        VerifyOp = null;
+        CTDebug(TAG, "Init(): Initializing session...");
         CaltopoSession.Init(MyCaltopoCredentials, DomainAndPort);
-        CaltopoSession.VerifyAccount(CaltopoMap::SessionVerifyCallback);
+        CTDebug(TAG, "Init(): Verifying Credentials...");
+        VerifyTimer.start(CaltopoMap::VerifyTimeout, VERIFY_TIMEOUT_MS, 0);
+        VerifyOp = CaltopoSession.VerifyAccount(CaltopoMap::SessionVerifyCallback);
         UsePeersFlag = CaltopoClient.GetUsePeersFlag();
         if (UsePeersFlag) R2CPeer.Init();
         FolderName = CaltopoClient.GetTrackFolderName();
         if (FolderName.isEmpty()) FolderName = "DroneTracks";
         if (null == MyUUID) GetMyUUID();
         return null;
+    }
+    private static void VerifyTimeout() {
+        LastErrorString = "Timeout waiting for Caltopo response... Is the network down?";
+        SetMapStatus(MapStatusListener.mapStatus.down, LastErrorString);
     }
 
     CaltopoMap() {
@@ -299,7 +317,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     @NonNull
     public static String GetMyUUID() {
         if (null != MyUUID) return MyUUID;
-        Context ctxt = R2CActivity.getAppContext();
+        Context ctxt = R2CApplication.getAppCtxt();
         if (null == ctxt) {
             DelayedExec.RunAfterDelayInMsec(CaltopoMap::GetMyUUID, 1000);
             CTDebug(TAG, "GetMyUUID() waiting for app to initialize...");

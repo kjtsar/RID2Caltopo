@@ -73,13 +73,6 @@ fun IncidentView() {
                 }
             },
             label = { Text("Incident") },
-            trailingIcon = {
-                if (incidentState.isNotEmpty()) {
-                    IconButton(onClick = { incidentState = "" }) {
-                        Icon(Icons.Default.Clear, contentDescription = "Clear")
-                    }
-                }
-            },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(
                 onDone = {
@@ -100,13 +93,6 @@ fun IncidentView() {
                 }
             },
             label = { Text("Op Period") },
-            trailingIcon = {
-                if (opPeriodState.isNotEmpty()) {
-                    IconButton(onClick = { opPeriodState = "" }) {
-                        Icon(Icons.Default.Clear, contentDescription = "Clear")
-                    }
-                }
-            },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(
                 onDone = {

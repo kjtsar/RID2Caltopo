@@ -1178,7 +1178,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
             MyIpAddresses.put(map.get(remainderKeys[i]));
         }
         if (!tunnelFound) {
-            ShowToast("No VPN tunnel found - ZeroTier network is down.");
+        //    ShowToast("No VPN tunnel found - ZeroTier network is down.");
         }
         return MyIpAddresses;
     }

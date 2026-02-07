@@ -34,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 
 import java.util.Locale
 
@@ -45,26 +46,7 @@ fun R2CView(
     appUptime : String,
     onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
-    val loadConfigFileLauncher = rememberLauncherForActivityResult(
-        contract = CaltopoClient.OpenOpenableDocument(),
-        onResult = { uri ->
-            uri?.let { CaltopoClient.LoadConfigFile(it) }
-        }
-    )
-    if (null != viewModel) {
-        if (viewModel.overlay is OverlayState.RequestConfigFile) {
-            LaunchedEffect(Unit) {
-                loadConfigFileLauncher.launch(
-                    arrayOf(
-                        "application/json",
-                        "text/plain",
-                        "application/octet-stream"
-                    )
-                )
-            }
-        }
-    }
-
+    val tag = "R2CView"
     Column {
         AppHeader(appUptime, hostName, viewModel)
         if (!drones.isEmpty()) {
@@ -93,7 +75,7 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
         .height(IntrinsicSize.Min)
     Row(
         modifier = Modifier
-            .height(60.dp)
+            .height(70.dp)
             .background(MaterialTheme.colorScheme.primaryContainer)
             .padding(2.dp)
     ) {
@@ -361,6 +343,7 @@ fun MapStateView(viewModel: R2CViewModel) {
             is OverlayState.ConnectionSetup -> {
                 StandAloneOptionsDialog(
                     hasCreds = viewModel.hasCredentials,
+                    hasNetwork = viewModel.hasNetwork,
                     onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
                     loading = false,
                     onAction = { viewModel.onUIEvent(UIEvent.ConnectionRequested) }
@@ -369,6 +352,7 @@ fun MapStateView(viewModel: R2CViewModel) {
             is OverlayState.RequestConfigFile -> {
                 StandAloneOptionsDialog(
                     hasCreds = viewModel.hasCredentials,
+                    hasNetwork = viewModel.hasNetwork,
                     onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
                     loading = true,
                     onAction = { viewModel.onUIEvent(UIEvent.ConnectionRequested) }
@@ -377,6 +361,7 @@ fun MapStateView(viewModel: R2CViewModel) {
             is OverlayState.Connecting -> {
                 StandAloneOptionsDialog(
                     hasCreds = viewModel.hasCredentials,
+                    hasNetwork = viewModel.hasNetwork,
                     onDismiss = { viewModel.onUIEvent(UIEvent.DismissRequested) },
                     loading = true,
                     onAction = { viewModel.onUIEvent(UIEvent.ConnectionRequested) }
@@ -457,16 +442,26 @@ fun ErrorDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StandAloneOptionsDialog(
     onDismiss: () -> Unit,
     loading: Boolean,
+    hasNetwork: Boolean,
     hasCreds: Boolean,
     onAction: () -> Unit
 ) {
+    val titleText = if (!hasNetwork) "No Network Connection" else if (loading) "Connect to Map" else "Credentials Required"
+    val msgText = if (!hasNetwork) {
+        "Turn on your device's WiFi and connect to hotspot before continuing"
+    } else if (hasCreds) {
+        "Existing credentials found. Would you like to select a map?"
+    } else {
+        "No CalTopo credentials found. You need to load Team acct credentials first."
+    }
     AlertDialog(
         onDismissRequest = if (loading) ({}) else onDismiss, // disable dismiss while loading
-        title = { Text(if (hasCreds) "Connect to Map" else "Credentials Required") },
+        title = { Text(titleText) },
         text = {
             if (loading) {
                 Column(
@@ -478,16 +473,16 @@ fun StandAloneOptionsDialog(
                     Text("Fetching Map Hierarchy...")
                 }
             } else {
-                Text(
-                    if (hasCreds)
-                        "Existing credentials found. Would you like to sync with CalTopo?"
-                    else "No CalTopo credentials found. You need to load a credential file to sync maps."
-                )
+                Text(msgText)
             }
         },
         confirmButton = {
-            Button(onClick = onAction) {
+            Button(
+                onClick = onAction,
+                enabled = !loading && hasNetwork
+            ) {
                 Text(if (hasCreds) "Connect" else "Load Credential File")
+
             }
         },
         dismissButton = {

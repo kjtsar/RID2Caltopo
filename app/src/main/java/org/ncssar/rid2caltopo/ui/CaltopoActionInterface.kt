@@ -35,6 +35,7 @@ fun CaltopoActionInterface(
     ) {
         when (state) {
             is CaltopoConnectionState.StandAlone -> Text("STANDALONE")
+            is CaltopoConnectionState.NoNetwork -> Text( "No Network")
             is CaltopoConnectionState.CheckingCredentials -> {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             }

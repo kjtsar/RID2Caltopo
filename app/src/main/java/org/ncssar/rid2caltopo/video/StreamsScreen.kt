@@ -14,8 +14,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowBack
-
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -24,9 +24,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
+import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -34,7 +36,8 @@ fun StreamsScreen(
     viewModel: StreamsViewModel = viewModel(),
     onBack: () -> Unit,
 ) {
-    val TAG: String = "StreamsScreen"
+    val tag: String = "StreamsScreen"
+    val pendingClue = viewModel.pendingClue
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -58,13 +61,24 @@ fun StreamsScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
-                            imageVector = Icons.Default.ArrowBack,
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back"
                         )
                     }
                 }
             )
-            StreamsGrid(viewModel)
+            Box(Modifier.fillMaxSize()) {
+                StreamsGrid(viewModel)
+                viewModel.pendingClue?.let {
+                    ClueSubmissionSheet(
+                        pendingClue = it,
+                        onTitleChanged = viewModel::updateClueTitle,
+                        onDescriptionChanged = viewModel::updateClueDescription,
+                        onSubmit = viewModel::submitClue,
+                        onCancel = viewModel::clearPendingClue,
+                    )
+                }
+            }
         }
     }
 }
@@ -77,9 +91,7 @@ private fun StreamsGrid(viewModel: StreamsViewModel) {
     val TAG: String = "StreamsGrid"
     val streams by viewModel.streams.collectAsState()
     val streamEntries = streams.entries.toList()
-    val context = LocalContext.current
-    val activity = context as Activity
-    val focusedPath = viewModel.focusedPath
+    val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val visibleEntries =
         if (focusedPath != null) {
             streamEntries.filter {it.key == focusedPath}
@@ -128,40 +140,12 @@ private fun StreamsGrid(viewModel: StreamsViewModel) {
                         onToggleFocus = {
                             viewModel.toggleFocus(path)
                         },
-                        activity = activity,
-                        onSnapshot = { snapshot ->
-                            viewModel.onSnapshotCaptured(snapshot)
-                        }
                     )
                 }
             }
         }
     }
 }
-
-
-/***
-fun submitClue(snapshot: ClueSnapshot, description: String) {
-    val context = LocalContext.current
-    val path = SnapshotStore.save(context, snapshot.bitmap)
-
-    val submission = ClueSubmission(
-        designator = snapshot.designator,
-        timestamp = snapshot.timestamp,
-        latitude = snapshot.lat, // CtDroneSpec.lastLat,
-        longitude = snapshot.lng, // CtDroneSpec.lastLng,
-        altitudeMeters = snapshot.alt, // CtDroneSpec.lastAlt,
-        description = description,
-        snapshotPath = path
-    )
-
-    val request = OneTimeWorkRequestBuilder<SubmitClueWorker>()
-        .setInputData(submission.toWorkData())
-        .build()
-
-    WorkManager.getInstance(context).enqueue(request)
-}
- ***/
 
 @Composable
 private fun EmptyStreamsView() {

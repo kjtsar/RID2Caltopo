@@ -2,6 +2,9 @@ package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
 import android.app.Activity
+import android.graphics.Bitmap
+import android.view.PixelCopy
+import android.view.SurfaceView
 import android.view.TextureView
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -13,7 +16,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.PlayerView
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-import java.time.Instant
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
@@ -22,27 +24,28 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import org.ncssar.rid2caltopo.data.CaltopoClient
+
 
 @Composable
 fun StreamTile(
     streamDesignator: String,
     viewModel: StreamsViewModel,
     streamState: StreamState,
-    activity: Activity,
     onToggleFocus: () -> Unit,
-    onSnapshot: (ClueSnapshot) -> Unit
 ) {
     val tag="StreamTile"
-    val playerViewRef = remember {mutableStateOf<PlayerView?>(null)}
+    val textureViewRef = remember {mutableStateOf<TextureView?>(null)}
     var showPicker by remember { mutableStateOf(false) }
-    val isFocused = viewModel.focusedPath == streamDesignator
-    val designatorState = remember(
-        streamDesignator,
-        viewModel.droneStates,
-        showPicker
-    ) {
-        viewModel.designatorStateFor(streamDesignator)
-    }
+    val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
+    val isFocused = (focusedPath == streamDesignator)
+    CTDebug(tag, "StreamTile(): isFocused:${isFocused}, designator:${streamDesignator}, focusedPath:$focusedPath")
+    val designatorState = viewModel.designatorStateFor(streamDesignator)
+    val currentIsFocused by rememberUpdatedState(isFocused)
+    val currentDesignatorState by rememberUpdatedState(designatorState)
 
     Box(
         modifier = Modifier
@@ -64,22 +67,28 @@ fun StreamTile(
                         }
                     },
                     onDoubleTap = {
-                        if (isFocused && designatorState is DesignatorState.Green) {
-                            CTDebug(tag, "StreamTile{${streamDesignator}) onDoubleTap")
-                            playerViewRef.value?.let { pv ->
-                                captureSnapshot(activity, pv) { bmp ->
-                                    bmp?.let {
-                                        onSnapshot(
-                                            ClueSnapshot(
-                                                bitmap = it,
-                                                designator = streamDesignator,
-                                                timestamp = Instant.now()
-                                            )
-                                        )
-                                    }
-                                }
-                            }
+                        if (!currentIsFocused) {
+                            CaltopoClient.ShowToast("Single-tap view to focus before submitting clue.")
+                            return@detectTapGestures
                         }
+                        if (currentDesignatorState !is DesignatorState.Green) {
+                            CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
+                            return@detectTapGestures
+                        }
+
+                        val tv = textureViewRef.value
+                        if (tv == null) {
+                            CTDebug(tag, "TextureView not ready yet")
+                            return@detectTapGestures
+                        }
+
+                        val bitmap = tv.bitmap
+                        if (bitmap == null) {
+                            CTDebug(tag, "Failed to capture bitmap from TextureView")
+                            return@detectTapGestures
+                        }
+
+                        viewModel.onSnapshotCaptured(streamDesignator, bitmap)
                     }
                 )
             }
@@ -87,8 +96,11 @@ fun StreamTile(
         StreamPlayer(
             state = streamState,
             designator = streamDesignator,
-            modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f),
             viewModel = viewModel,
+            onTextureViewReady = { tv -> textureViewRef.value = tv }
         )
         DesignatorIndicator(
             streamDesignator = streamDesignator,
@@ -118,14 +130,14 @@ fun StreamPlayer(
     viewModel: StreamsViewModel,
     state: StreamState,
     designator: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onTextureViewReady: (TextureView) -> Unit
 ) {
     val tag = "StreamPlayer"
     CTDebug(tag, "StreamPlayer(${designator}) streamState:${state.name}")
     if (state != StreamState.LIVE) return
 
     val player = viewModel.playerFor(designator) ?: return
-    // val restartKey = viewModel.restartIdFor(designator)
     CTDebug(tag, "StreamPlayer(${designator}): player:$player")
     key(player) {
         AndroidView(
@@ -133,6 +145,7 @@ fun StreamPlayer(
             factory = { context ->
                 TextureView(context).also { textureView ->
                     player.setVideoTextureView(textureView)
+                    onTextureViewReady(textureView)
                 }
             },
             update = { textureView ->

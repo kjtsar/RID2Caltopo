@@ -9,6 +9,7 @@
 package org.ncssar.rid2caltopo.app;
 
 import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 
 import android.app.Notification;
@@ -61,7 +62,7 @@ public class ScanningService extends Service {
         }
         scanning = true;
         if (null == AppContext) AppContext = R2CApplication.getAppCtxt();
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "startScanning(): ScanningService 0x%x", this.hashCode()));
+        CTDebug(TAG, String.format(Locale.US, "startScanning(): ScanningService 0x%x", this.hashCode()));
         wiFiScanner = new WiFiScanner(AppContext, DataManager);
         wiFiScanner.startScan();
 
@@ -74,7 +75,7 @@ public class ScanningService extends Service {
             CTError(TAG, "stopScanning(): Ignoring request to stop when idle");
             return;
         }
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "stopScanning(): ScanningService 0x%x", this.hashCode()));
+        CTDebug(TAG, String.format(Locale.US, "stopScanning(): ScanningService 0x%x", this.hashCode()));
         wiFiScanner.stopScan();
         btScanner.stopScan();
         scanning = false;
@@ -83,7 +84,7 @@ public class ScanningService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US,
+        CTDebug(TAG, String.format(Locale.US,
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
 
@@ -94,7 +95,7 @@ public class ScanningService extends Service {
             return;
         }
 
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "onCreate(): Context:0x%x DataManager:0x%x",
+        CTDebug(TAG, String.format(Locale.US, "onCreate(): Context:0x%x DataManager:0x%x",
                 AppContext.hashCode(), DataManager.hashCode()));
 
         NotificationChannel serviceChannel = new NotificationChannel(CHANNEL_ID,
@@ -114,7 +115,7 @@ public class ScanningService extends Service {
 
     @Override
     public void onDestroy() {
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US,
+        CTDebug(TAG, String.format(Locale.US,
                 "onDestroy(): ScanningService 0x%x", this.hashCode()));
         stopScanning();
         super.onDestroy();
@@ -135,13 +136,20 @@ public class ScanningService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && "STOP_SERVICE".equals(intent.getAction())) {
+            CTDebug(TAG, "ScanningService shutting down.");
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
         if (null == AppContext) {
             AppContext = R2CApplication.getAppCtxt();
             if (null == AppContext) {
                 return START_REDELIVER_INTENT;
             }
         }
-        CaltopoClient.CTDebug(TAG, String.format(Locale.US, "onStartCommand(): AppContext:0x%x", AppContext.hashCode()));
+        CTDebug(TAG, String.format(Locale.US, "onStartCommand(): AppContext:0x%x", AppContext.hashCode()));
 
 
         /* FIXME: No matter what I've tried here, Android will fire up a new instance of the
@@ -172,7 +180,7 @@ public class ScanningService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        CaltopoClient.CTDebug(TAG, "onTaskRemoved()");
+        CTDebug(TAG, "onTaskRemoved()");
         super.onTaskRemoved(rootIntent);
     }
     @Override

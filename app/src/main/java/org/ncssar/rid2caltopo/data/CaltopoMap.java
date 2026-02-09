@@ -19,6 +19,7 @@ import static org.ncssar.rid2caltopo.data.SimpleTimer.DurationAsString;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.location.Location;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -593,6 +594,15 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         SetMapStatus(MapStatusListener.mapStatus.up, null);
     }
 
+    public static void SubmitClue(
+            CtDroneSpec droneSpec,
+            double clueLat, double clueLng, double clueAlt,
+            String clueTitle,
+            String clueDescription,
+            long clueTimestamp,
+            Bitmap clueImage) {
+        CTDebug(TAG, "SubmitClue()...");
+    }
     private static void SetMapStatus(MapStatusListener.mapStatus mapStatus, @Nullable String optEmsg) {
 
         Bundle parameters = new Bundle();

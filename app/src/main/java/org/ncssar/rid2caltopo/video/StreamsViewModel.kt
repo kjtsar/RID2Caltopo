@@ -1,14 +1,20 @@
+import android.app.Activity
 import android.app.Application
+import android.graphics.Bitmap
+import android.view.PixelCopy
+import android.view.SurfaceView
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-import org.ncssar.rid2caltopo.video.ClueSnapshot
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import androidx.compose.runtime.getValue
@@ -27,6 +33,7 @@ import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
@@ -35,6 +42,29 @@ import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.video.StreamState
 import java.util.Collections
 import java.util.WeakHashMap
+
+import android.os.Handler
+import android.os.Looper
+import androidx.annotation.OptIn
+import androidx.core.graphics.createBitmap
+import androidx.media3.common.util.UnstableApi
+import androidx.core.graphics.scale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+data class PendingClue(
+    val droneSpec: CtDroneSpec,
+    val designator: String,
+    val lat: Double,
+    val lng: Double,
+    val alt: Double,
+    val timestamp: Long,
+    val bitmap: Bitmap?,
+    val preview: Bitmap?,
+    val title: String,
+    val description: String
+)
+
 
 @Stable
 class DroneSpecState(
@@ -77,8 +107,8 @@ class StreamsViewModel (
                 started = SharingStarted.WhileSubscribed(5_000),
                 initialValue = emptyMap()
             )
-    var focusedPath by mutableStateOf<String?>(null)
-        private set
+    private val _focusedPath = MutableStateFlow<String?>(null)
+    val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
 
     private val _players =
         mutableStateMapOf<String, ExoPlayer>()
@@ -105,6 +135,9 @@ class StreamsViewModel (
     private val _droneStates = mutableMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
 
+    private val _pendingClue = mutableStateOf<PendingClue?>(null)
+    val pendingClue: PendingClue?
+        get() = _pendingClue.value
 
 
     private val stallPoll : DelayedExec = DelayedExec()
@@ -294,8 +327,13 @@ class StreamsViewModel (
     }
 
     fun toggleFocus(designator: String) {
-        focusedPath =
-            if (focusedPath == designator) null else designator
+        var fString = "has"
+        _focusedPath.value =
+            if (_focusedPath.value == designator) {
+                fString = "does not have"
+                null
+            } else designator
+        CTDebug(TAG, "toggleFocus(): ${designator} ${fString} focus.")
     }
 
     override fun onCleared() {
@@ -317,11 +355,74 @@ class StreamsViewModel (
         return DesignatorState.Yellow(droneStates)
     }
 
-    fun onSnapshotCaptured(snapshot: ClueSnapshot) {
-        /***
-        _pendingSnapshot.val = snapshot
-        ***/
+    fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {
+        val droneSpec = droneStates[designator]?.source
+
+        if (null == droneSpec) {
+            CTDebug(TAG, "onSnapshotCaptured(${designator}): No associated dronespec.")
+            return
+        }
+        _pendingClue.value = PendingClue(
+            droneSpec = droneSpec,
+            designator = designator,
+            lat = droneSpec.lastLat,
+            lng = droneSpec.lastLng,
+            alt = droneSpec.lastAlt,
+            timestamp = droneSpec.mostRecentMsecTimestamp,
+            bitmap = bitmap,
+            preview = null,
+            title = "",
+            description = ""
+        )
+
+        viewModelScope.launch(Dispatchers.Default) {
+            val width = 600
+            val height = (width * bitmap.height / bitmap.width)
+            val preview = bitmap.scale(width, height)
+            withContext(Dispatchers.Main) {
+                val clue = _pendingClue.value
+                if (clue != null && clue.designator == designator) {
+                    _pendingClue.value = clue.copy(
+                        bitmap = bitmap,
+                        preview = preview,
+                    )
+                }
+            }
+        }
+        CTDebug(TAG, "onSnapshotCaptured(${designator}): clue started for ${bitmap.width}x${bitmap.height} snapshot.")
     }
+
+    fun updateClueTitle(title: String) {
+        _pendingClue.value =
+            _pendingClue.value?.copy(title = title)
+    }
+
+    fun updateClueDescription(description: String) {
+        _pendingClue.value =
+            _pendingClue.value?.copy(description = description)
+    }
+
+    fun submitClue() {
+        val clue = pendingClue ?: return
+        CTDebug(TAG, "submitting clue: '${clue.title}' for '${clue.droneSpec.trackLabel()}'")
+        CaltopoClient.SubmitClue(
+            clue.droneSpec,
+            clue.bitmap,
+            clue.lat,
+            clue.lng,
+            clue.alt,
+            clue.title,
+            clue.description,
+            clue.timestamp
+        )
+
+        clearPendingClue()
+    }
+
+    fun clearPendingClue() {
+        _pendingClue.value = null
+    }
+
 
     init {
         startStallPoll()
@@ -387,6 +488,6 @@ class StreamsViewModel (
 
 
     fun clearFocus() {
-        focusedPath = null
+        _focusedPath.value = null
     }
 }

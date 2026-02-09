@@ -429,6 +429,11 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         var wifiSupported: Boolean = false
 
         @JvmStatic
+        fun Shutdown() {
+            AppActivity?.finishAffinity()
+        }
+
+        @JvmStatic
         fun getMyAppVersion(): String {
             return String.format(Locale.US,"%s",BuildConfig.BUILD_VERSION)
         }

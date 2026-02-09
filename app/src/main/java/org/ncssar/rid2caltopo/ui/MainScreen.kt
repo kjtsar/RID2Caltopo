@@ -83,6 +83,7 @@ fun MainScreen(
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
+    val context =  LocalContext.current
 
     if (showConfirmExitDialog) {
         AlertDialog(
@@ -93,7 +94,7 @@ fun MainScreen(
                 TextButton(
                     onClick = {
                         showConfirmExitDialog = false
-                        R2CActivity.getR2CActivity()?.finish()
+                        CaltopoClient.QuitApplication()
                     }
                 ) {
                     Text("OK")
@@ -139,7 +140,6 @@ fun MainScreen(
             }
         )
     }
-    val context =  LocalContext.current
     var isPickerOpen by remember { mutableStateOf(false) }
     // Launcher for loading a config file
     val loadConfigFileLauncher = rememberLauncherForActivityResult(

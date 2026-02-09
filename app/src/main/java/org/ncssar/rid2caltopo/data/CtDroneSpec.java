@@ -65,7 +65,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String org;
     private String owner;
     private String model; /* This is the concise text description of the drone. */
-    private transient long mostRecentMsecTimestamp; /* timestamp of most recent good packet received */
+    public transient long mostRecentMsecTimestamp; /* timestamp of most recent good packet received */
     private transient long startMsecTimestamp;
     private transient R2CPeer ownerR2c;
     private transient CtDroneSpecListener myListener;

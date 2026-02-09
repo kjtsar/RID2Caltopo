@@ -8,13 +8,17 @@
 
 package org.ncssar.rid2caltopo.data;
 
+import static androidx.core.content.ContextCompat.getSystemService;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.LoggingLevelName;
 
 import android.app.Activity;
+import android.app.NotificationManager;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.Resources;
 import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -52,11 +56,11 @@ import org.json.JSONObject;
 
 import org.ncssar.rid2caltopo.BuildConfig;
 import org.ncssar.rid2caltopo.R;
+import org.ncssar.rid2caltopo.app.MediaMTXService;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.ScanningService;
 import com.google.firebase.analytics.FirebaseAnalytics;
-import androidx.work.Data;
 
 import okhttp3.Dns;
 import okhttp3.MediaType;
@@ -338,6 +342,41 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return DebugLogPath;
     }
 
+    /* build a .jpeg format respresentation of supplied bitmap.  Quality
+     * supported is 0-100, where 0 is max compression and 100 is max
+     * quality.
+     */
+    @Nullable
+    private byte[] bitmapAsCompressedJpeg(@NonNull Bitmap bitmap, int quality) {
+        ByteArrayOutputStream oStream = new ByteArrayOutputStream();
+        // Compress the bitmap to JPEG format with a specific quality
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, oStream);
+        byte[] byteArray = oStream.toByteArray();
+        try {
+            oStream.close();
+        }
+        catch (IOException e) {
+            CTDebug(TAG, "bitmapAsCompressedJpeg(): compress raised.");
+            return null;
+        }
+        return byteArray;
+    }
+
+    public static void SubmitClue(
+            CtDroneSpec droneSpec,
+            Bitmap clueImage,
+            double clueLat,
+            double clueLng,
+            double clueAlt,
+            String clueTitle,
+            String clueDescription,
+            long clueTimestamp
+    ) {
+        CTDebug(TAG, String.format(Locale.US, "SubmitClue() received for %s(%s):%s",
+                droneSpec.getMappedId(), droneSpec.getRemoteId(), clueTitle));
+        CaltopoMap.SubmitClue(droneSpec, clueLat, clueLng, clueAlt, clueTitle, clueDescription, clueTimestamp, clueImage);
+    }
+
     public static void CTLog(String type, String tag, String msg) {
         if (null == DebugOutputStream) return;
         if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) return;
@@ -577,10 +616,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!CaltopoCredentials.credentialsAreEqual(cred, ccs.caltopoCredentials)) {
             ccs.caltopoCredentials = cred;
         }
-    }
-
-    public static void SubmitClue(Data workData) {
-        // FIXMME: Submit clue to caltopo
     }
 
     public static void SetCaltopoDomainAndPort(@NonNull String dAndP) {
@@ -1148,6 +1183,35 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+    public static void QuitApplication() {
+        Context context = R2CApplication.getAppCtxt();
+
+        // 1. Stop the Scanning Service
+        Intent stopScanner = new Intent(context, ScanningService.class);
+        stopScanner.setAction("STOP_SERVICE");
+        context.startService(stopScanner);
+
+        // 2. Stop the MediaMTX Service
+        Intent stopMedia = new Intent(context, MediaMTXService.class);
+        stopMedia.setAction("STOP_SERVICE");
+        context.startService(stopMedia);
+
+        // 3. Clear any remaining notifications (optional but clean)
+        // NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        // notificationManager.cancelAll();
+
+        Activity activity = R2CActivity.getR2CActivity();
+        if (null != activity) {
+            // 4. Finish the Activity
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                activity.finishAndRemoveTask(); // Removes it from the "Recent Apps" list too
+            } else {
+                activity.finish();
+            }
+        }
+        Shutdown();
+    }
+
 
     public static void Shutdown() {
         WaypointTrack.ArchiveTracks();
@@ -1172,6 +1236,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 CTDebug(TAG, "Shutdown(): UiUpdatePoll suspended.");
             }
         }
+        R2CActivity.Shutdown();
     }
 
 

@@ -70,7 +70,15 @@ public class MediaMTXService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        CTDebug(TAG, "MediaMTx.onStartCommand()");
+        if (intent != null && "STOP_SERVICE".equals(intent.getAction())) {
+            CTDebug(TAG, "MediaMTXService shutting down.");
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        CTDebug(TAG, "MediaMTXService.onStartCommand()");
+
         if (processPid != 0 && processPid != Process.myPid()) {
             CTInfo(TAG, "MediaMTX already running in pid " + processPid);
             return START_NOT_STICKY;

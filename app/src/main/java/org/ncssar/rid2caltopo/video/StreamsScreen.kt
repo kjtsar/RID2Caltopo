@@ -3,6 +3,7 @@ package org.ncssar.rid2caltopo.video
 import StreamsViewModel
 import android.app.Activity
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -38,7 +39,17 @@ fun StreamsScreen(
 ) {
     val tag: String = "StreamsScreen"
     val pendingClue = viewModel.pendingClue
-
+    val serverStatus = MediaMTXStatus.serverStatus
+    val mapName = viewModel.mapName
+    val mapStatus by remember(mapName) {
+        derivedStateOf {
+            if (null != mapName) {
+                "\uD83D\uDFE2 Connected to $mapName \uD83D\uDFE2"
+            } else {
+                "\uD83D\uDD34 No map connection \uD83D\uDD34"
+            }
+        }
+    }
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -51,7 +62,7 @@ fun StreamsScreen(
                     ) {
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = MediaMTXStatus.serverStatus,
+                            text = "${serverStatus} - ${mapStatus}",
                             fontSize = 14.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -91,6 +102,16 @@ private fun StreamsGrid(viewModel: StreamsViewModel) {
     val TAG: String = "StreamsGrid"
     val streams by viewModel.streams.collectAsState()
     val streamEntries = streams.entries.toList()
+    val mapName = viewModel.mapName
+    val mapStatus by remember(mapName) {
+        derivedStateOf {
+            if (null != mapName) {
+                "\uD83D\uDFE2 Connected to $mapName \uD83D\uDFE2"
+            } else {
+                "\uD83D\uDD34 No map connection \uD83D\uDD34"
+            }
+        }
+    }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val visibleEntries =
         if (focusedPath != null) {
@@ -101,8 +122,13 @@ private fun StreamsGrid(viewModel: StreamsViewModel) {
 
     if (visibleEntries.isEmpty()) {
         CTDebug(TAG, "No streams to show.")
-        EmptyStreamsView()
+        EmptyStreamsView(mapStatus = mapStatus)
         return
+    }
+
+    // if there is only one stream, it should stay focused:
+    if (null == focusedPath && visibleEntries.count() == 1) {
+        viewModel.toggleFocus(visibleEntries.get(0).key);
     }
 
     val columns = if (visibleEntries.size <= 2) 1 else 2
@@ -148,12 +174,23 @@ private fun StreamsGrid(viewModel: StreamsViewModel) {
 }
 
 @Composable
-private fun EmptyStreamsView() {
+private fun EmptyStreamsView(mapStatus: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        val myIpAddress: String = R2CPeer.GetMyIpAddress(false)
-        Text("Waiting for drone to attach at rtmp://${myIpAddress}/<droneDesig>")
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+
+            val myIpAddress: String = R2CPeer.GetMyIpAddress(false)
+            Text("Waiting for drone to attach at rtmp://${myIpAddress}/<droneDesig>")
+            Text(
+                text = mapStatus,
+                style = MaterialTheme.typography.titleLarge
+            )
+        }
     }
 }

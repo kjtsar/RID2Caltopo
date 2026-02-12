@@ -30,7 +30,6 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 fun DesignatorIndicator(
     streamDesignator: String,
     viewModel: StreamsViewModel,
-    designatorState: DesignatorState,
     streamState: StreamState,
     onLongPress: () -> Unit
 ) {
@@ -41,6 +40,12 @@ fun DesignatorIndicator(
         StreamState.STOPPED -> "Stopped"
         StreamState.ERROR -> "Error"
     }
+    val mapName = viewModel.mapName
+    var mapStatus = "Standalone"
+    if (null != mapName) {
+        mapStatus = "Connected to $mapName"
+    }
+    val designatorState = viewModel.designatorStateFor(streamDesignator)
 
     CTDebug(tag, "Recomposing Designator: {$streamDesignator}")
 
@@ -60,13 +65,13 @@ fun DesignatorIndicator(
             } else {
                 lat = "0.0"; lng = "0.0"; feet = "0.0"; dur = "unknown"
             }
-            Color(0xFF2ECC71) to "loc:${lat},${lng}, alt:${feet}', duration:${dur}"
+            Color(0xFF00FF00) to "loc:${lat},${lng}, alt:${feet}', duration:${dur}, mapStatus:${mapStatus}"
         }
         is DesignatorState.Yellow ->
-            Color(0xFFF1C40F) to "Long-press to match telemetry"
+            Color(0xFFFFFF00) to "Long-press to match telemetry (mapStatus:${mapStatus}"
 
         DesignatorState.Red ->
-            Color(0xFFE74C3C) to "No telemetry available"
+            Color(0xFFFF0000) to "No telemetry available (mapStatus:${mapStatus}"
     }
     Column(
         modifier = Modifier

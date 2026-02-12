@@ -57,14 +57,15 @@ public class CaltopoOp implements Future <CaltopoOp> {
 	private boolean isDone;
 	    
     public CaltopoOp() throws RuntimeException {
-		throw new RuntimeException("use: new CaltopoOp(CaltopoSession) instead.");
+		throw new RuntimeException("use: new CaltopoOp(Consumer<CaltopoOp>onComplete) instead.");
     }
 
 	public CaltopoOp(@Nullable Consumer<CaltopoOp> onComplete) {
 		opNum = ++lastOpNum;
 		queuedTimestampMsec = System.currentTimeMillis();
 		this.onComplete = onComplete;
-//		CaltopoClient.CTInfo(TAG, String.format(Locale.US, "creating op %d", opNum));
+//        if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo)
+//            CaltopoClient.CTInfo(TAG, String.format(Locale.US, "creating op %d", opNum));
 	}
 
     public long roundTripTimeInMsec() {
@@ -72,11 +73,13 @@ public class CaltopoOp implements Future <CaltopoOp> {
     }
 	
     public boolean success() {
-	return (this.asyncFuture.isDone() && this.goodResponse);
-    }
+        boolean isDone = null == asyncFuture || asyncFuture.isDone();
+        return (isDone && this.goodResponse);
+	    }
 
     public boolean fail() {
-	return (asyncFuture.isDone() && !goodResponse);
+        boolean isDone = null == asyncFuture || asyncFuture.isDone();
+        return (isDone && !this.goodResponse);
     }
 
     @Nullable
@@ -177,48 +180,47 @@ public class CaltopoOp implements Future <CaltopoOp> {
 	}
 
     protected void finalize() {
-//		CaltopoClient.CTInfo(TAG, String.format(Locale.US, "destroying op %d", this.opNum));
+        if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo)
+            CaltopoClient.CTInfo(TAG, String.format(Locale.US, "destroying op %d", this.opNum));
     }
 
     // Future interface implementation:
     public boolean cancel(boolean mayInterruptIfRunning) {
-		if (null == asyncFuture) {
-			throw new RuntimeException("cancel() called on unscheduled operation.");
+		if (null != asyncFuture) {
+            return asyncFuture.cancel(mayInterruptIfRunning);
 		}
-		return asyncFuture.cancel(mayInterruptIfRunning);
+		return false;
     }
 
 	
     public CaltopoOp get()
 			throws ExecutionException, InterruptedException, RuntimeException {
-		if (null == asyncFuture) {
-			throw new RuntimeException("get() called on unscheduled operation.");
+		if (null != asyncFuture) {
+            asyncFuture.get();
 		}
-		asyncFuture.get();
+
 		return this;
     }
 
 	public CaltopoOp get(long timeout, TimeUnit unit)
 			throws RuntimeException, ExecutionException, InterruptedException, TimeoutException {
-		if (null == asyncFuture) {
-			throw new RuntimeException("get() called on unscheduled operation.");
+		if (null != asyncFuture) {
+            asyncFuture.get(timeout, unit);
 		}
-		asyncFuture.get(timeout, unit);
 		return this;
     }
 
     public boolean isCancelled() throws RuntimeException {
-		if (null == asyncFuture) {
-			throw new RuntimeException("isCancelled() called on unscheduled operation.");
+		if (null != asyncFuture) {
+            return asyncFuture.isCancelled();
 		}
-		return asyncFuture.isCancelled();
+		return false;
     }
 
     public boolean isDone() throws RuntimeException {
-		if (null == asyncFuture) {
-			throw new RuntimeException("isDone() called on unscheduled operation.");
+		if (null != asyncFuture) {
+            isDone = isDone || asyncFuture.isDone();
 		}
-		isDone = isDone || asyncFuture.isDone();
 		return isDone;
     }
 	

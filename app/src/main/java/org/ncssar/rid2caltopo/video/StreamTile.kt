@@ -104,7 +104,6 @@ fun StreamTile(
         )
         DesignatorIndicator(
             streamDesignator = streamDesignator,
-            designatorState = designatorState,
             streamState = streamState,
             viewModel = viewModel,
             onLongPress = {

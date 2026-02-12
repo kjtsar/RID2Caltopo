@@ -67,7 +67,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             throw new RuntimeException("CaltopoLiveTrack(): trackLabel is required.");
         }
         mapStatus = CaltopoMap.GetMapStatus();
-        CaltopoMap.SetMapStatusListener(this);
+        CaltopoMap.AddMapStatusListener(this);
         CaltopoMap.AddLiveTrack(this);
         myRemoteId = droneSpec.getRemoteId();
         LiveTrackByRemoteId.put(myRemoteId, this);

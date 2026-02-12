@@ -212,12 +212,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static long DroneSpecsArraySize = DsArray.size();
     private static boolean NotifySettingsChangedFlag;
 
-    public static final OkHttpClient OkHttpClient = new OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .dns(Dns.SYSTEM) // This uses OkHttp's more robust DNS logic
-            .build();
-
 
     public CaltopoClient(String rid) throws RuntimeException {
         ClientClassState ccs = GetState();
@@ -342,25 +336,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return DebugLogPath;
     }
 
-    /* build a .jpeg format respresentation of supplied bitmap.  Quality
-     * supported is 0-100, where 0 is max compression and 100 is max
-     * quality.
-     */
-    @Nullable
-    private byte[] bitmapAsCompressedJpeg(@NonNull Bitmap bitmap, int quality) {
-        ByteArrayOutputStream oStream = new ByteArrayOutputStream();
-        // Compress the bitmap to JPEG format with a specific quality
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, oStream);
-        byte[] byteArray = oStream.toByteArray();
-        try {
-            oStream.close();
-        }
-        catch (IOException e) {
-            CTDebug(TAG, "bitmapAsCompressedJpeg(): compress raised.");
-            return null;
-        }
-        return byteArray;
-    }
+
 
     public static void SubmitClue(
             CtDroneSpec droneSpec,
@@ -374,7 +350,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     ) {
         CTDebug(TAG, String.format(Locale.US, "SubmitClue() received for %s(%s):%s",
                 droneSpec.getMappedId(), droneSpec.getRemoteId(), clueTitle));
-        CaltopoMap.SubmitClue(droneSpec, clueLat, clueLng, clueAlt, clueTitle, clueDescription, clueTimestamp, clueImage);
+        CaltopoMap.SubmitClueWithPhoto(droneSpec, clueLat, clueLng, clueAlt, clueTitle, clueDescription, clueTimestamp, clueImage);
     }
 
     public static void CTLog(String type, String tag, String msg) {
@@ -1146,15 +1122,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             if (null != DebugOutputStream) {
                 LogFilePath = todaysArchiveDir + "/" + filepath;
                 R2CActivity activity = R2CActivity.getR2CActivity();
-                String appVers = "-";
-                if (null != activity) {
-                    Resources resources = activity.getResources();
-                    appVers = resources.getString(R.string.app_version);
-                }
+                String appVers = BuildConfig.BUILD_VERSION;
                 final String header = "########################################################################\n";
                 CTDebug(TAG, String.format(Locale.US,
                         "Logfile is up on %s @%s\n%s#  RID2Caltopo %s(%s) running on Android OS v%s(%d)\n#  Writing logs to: %s\n%s",
-                        R2CActivity.MyDeviceName, R2CPeer.GetMyIpAddresses().toString(), header, appVers,
+                        R2CActivity.MyDeviceName, R2CPeer.GetMyIpAddresses(), header, appVers,
                         BuildConfig.BUILD_TIME, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, LogFilePath, header));
             }
 
@@ -1441,7 +1413,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
         CTDebug(TAG, "BgPublishStats(): uploading " + geoJsonString.length() + " characters to '" + urlStr + "'");
 
-        try (Response response = OkHttpClient.newCall(request).execute()) {
+        try (Response response = CaltopoSession.MyOkHttpClient.newCall(request).execute()) {
             int responseCode = response.code();
             long endStamp = System.currentTimeMillis();
 

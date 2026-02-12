@@ -12,52 +12,57 @@ package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
-import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.GetTodaysTrackDir;
+import static java.lang.Math.round;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import static java.lang.Thread.sleep;
 
+import android.content.ContentResolver;
+import android.content.Context;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.ContactsContract;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.ncssar.rid2caltopo.app.R2CApplication;
+import org.opendroneid.android.data.Util;
 
-import java.io.BufferedReader;
-import java.io.DataOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.net.URLEncoder;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.documentfile.provider.DocumentFile;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
-import okhttp3.Call;
-import okhttp3.Callback;
 import okhttp3.Dns;
 import okhttp3.FormBody;
 import okhttp3.HttpUrl;
-import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
-import okhttp3.ResponseBody;
+import java.util.UUID;
+
 
 /* Based on www.github.com/ncssar/caltopo_python (Tom Grundy).  The same 
  * caveats apply here.
@@ -152,9 +157,11 @@ public class CaltopoSession {
 
     private static final String TAG = "CaltopoSession";
     private static final int DEFAULT_TIMEOUT_MS = 2 * 60 * 1000;
-	private static ExecutorService ExecutorPool = null;
+    private static ExecutorService MainExecutorPool = null;
+    private static ExecutorService PhotoWaypointExecutorPool = null;
 	private static final CtLineProperty CtLinePropertyDefault = new CtLineProperty();
-	private static final String CALTOPO_API_V1 = "/api/v1/map/";
+    private static final String CALTOPO_MAP_API_V1 = "/api/v1/map/";
+    private static final String CALTOPO_MEDIA_API_V1 = "/api/v1/media/";
 
 	private static final CtLineProperty LiveTrackLineProp =
 			new CtLineProperty(2, 1F, "#0000ff", "solid");
@@ -162,6 +169,12 @@ public class CaltopoSession {
     private static String DomainAndPort;
 	// instance variables:
 	private static String MapId;
+
+    public static final OkHttpClient MyOkHttpClient = new OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .dns(Dns.SYSTEM) // This uses OkHttp's more robust DNS logic
+            .build();
 
     public static void Init(@NonNull CaltopoCredentials cred, @NonNull String domainAndPort) {
         Cred = cred;
@@ -181,14 +194,19 @@ public class CaltopoSession {
     }
 
 	public static void Shutdown() {
-		if (ExecutorPool != null) {
-			ExecutorPool.shutdown();
-		}
-		ExecutorPool = null;
+		if (MainExecutorPool != null) {
+			MainExecutorPool.shutdown();
+            if (null != PhotoWaypointExecutorPool) {
+                PhotoWaypointExecutorPool.shutdown();
+                PhotoWaypointExecutorPool = null;
+
+            }
+            MainExecutorPool = null;
+        }
     }
 
     private static String Sign(CtsMethod_t method, String url, long expiresMsec,
-                               String payload, String credentialSecret) {
+                               String payload) {
         try {
             // Construct the message
             String message = method + " " + url + "\n" + expiresMsec + "\n";
@@ -198,7 +216,7 @@ public class CaltopoSession {
 
             // Use android.util.Base64 for maximum compatibility across all Android versions
             // and to avoid Java 8 compatibility issues on older tablets.
-            byte[] secretKey = android.util.Base64.decode(credentialSecret, android.util.Base64.DEFAULT);
+            byte[] secretKey = android.util.Base64.decode(Cred.credentialSecret, android.util.Base64.DEFAULT);
 
             // Create a Mac instance with the HMAC-SHA256 algorithm
             Mac hmac = Mac.getInstance("HmacSHA256");
@@ -219,10 +237,9 @@ public class CaltopoSession {
 
 	@NonNull
 	private static String EncodeParm(@NonNull String key, @NonNull String val) {
-//        return key + "=" + URLEncoder.encode(val, StandardCharsets.UTF_8);
         return key + "=" + Uri.encode(val);
 	}
-// Danger Danger Will Robinson: URLEncoder.encode() hangs on Android 10
+
 	@NonNull
     private static String EncodeParams(@NonNull Map<String,String> params) {
 		StringBuilder paramString = new StringBuilder();
@@ -230,7 +247,6 @@ public class CaltopoSession {
             paramString
                     .append(entry.getKey())
 					.append("=")
-//                     .append(URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8))
                     .append(Uri.encode(entry.getValue()))
 					.append("&");
 		}
@@ -253,11 +269,10 @@ public class CaltopoSession {
                 // 1. Prepare Base Parameters
                 Map<String, String> params = new HashMap<>();
                 if (!op.goNaked) {
-                    String signature = Sign(op.method, op.url, expires, payloadString, Cred.credentialSecret);
+                    String signature = Sign(op.method, op.url, expires, payloadString);
                     params.put("id", Cred.credentialId);
                     params.put("expires", String.valueOf(expires));
                     params.put("signature", signature);
-                    params.put("json", "");
                 }
 
                 // 2. Build the URL and Request Body
@@ -295,7 +310,9 @@ public class CaltopoSession {
                 }
 
                 HttpUrl finalUrl = urlBuilder.build();
-                CTInfo(TAG, String.format(Locale.US, "BgSendRequest(%s): fullUrl: '%s'", op.method, finalUrl));
+                CTDebug(TAG, String.format(Locale.US,
+                        "BgSendRequest(%s): fullUrl: '%s'\n payload:\n%s",
+                        op.method, finalUrl, payloadString));
 
                 // 3. Build and Execute Request
                 Request.Builder requestBuilder = new Request.Builder()
@@ -303,7 +320,7 @@ public class CaltopoSession {
                         .header("User-Agent", "RID2Caltopo/0.2")
                         .method(op.method.toString(), requestBody);
 
-                try (Response response = CaltopoClient.OkHttpClient.newCall(requestBuilder.build()).execute()) {
+                try (Response response = MyOkHttpClient.newCall(requestBuilder.build()).execute()) {
                     op.responseCode = response.code();
                     op.receivedTimestampMsec = System.currentTimeMillis();
 
@@ -316,6 +333,7 @@ public class CaltopoSession {
                             try {
                                 JSONObject responseJson = new JSONObject(op.response);
                                 op.responseJson = responseJson.getJSONObject("result");
+                                CTInfo(TAG, "Good Response:\n  " + op.responseJson.toString(2));
                             } catch (JSONException e) {
                                 CTError(TAG, "parse JSON result raised: ", e);
                             }
@@ -329,7 +347,7 @@ public class CaltopoSession {
                         eventParams.putString("r2c_method", op.method.toString());
                         CaltopoClient.CTEvent(TAG, "CaltopoOpFailed", eventParams);
                     }
-                    CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
+                    CTDebug(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
                 }
 
             } catch (UnknownHostException e) {
@@ -373,17 +391,35 @@ public class CaltopoSession {
     private static CaltopoOp SendRequest(CaltopoOp op, CtsMethod_t method,
 								  String url, JSONObject payload, boolean goNaked) {
 		// NOTE: only one bg thread to communicate w/caltopo - we are one of many users...
-		if (null == ExecutorPool) {
-			ExecutorPool = Executors.newFixedThreadPool(1);
-		}
-		op.goNaked = goNaked;
+        if (null == MainExecutorPool) {
+            MainExecutorPool = Executors.newFixedThreadPool(1);
+        }
+        op.goNaked = goNaked;
 		op.method = method;
 		op.url = url;
 		op.payload = payload;
-		op.asyncFuture = ExecutorPool.submit(() -> BgSendRequest(op));
+		op.asyncFuture = MainExecutorPool.submit(() -> BgSendRequest(op));
 		return op;
     }
 
+    /*** BgOp()
+     *  Send BgSendRequest() directly (blocking):
+     * @param method
+     * @param urlEnd
+     * @param payload
+     * @param goNaked
+     * @return Returns CaltopoOp.
+     */
+    @NonNull
+    private static CaltopoOp BgOp(CtsMethod_t method, @NonNull String urlEnd, @Nullable JSONObject payload, boolean goNaked) {
+        CaltopoOp op = new CaltopoOp(null);
+        op.goNaked = goNaked;
+        op.method = method;
+        op.url = urlEnd;
+        op.payload = payload;
+        BgSendRequest(op);
+        return op;
+    }
 
     /**
      * Open/sync with the specified map.   If mapId is new, then a full
@@ -401,13 +437,16 @@ public class CaltopoSession {
     static public CaltopoOp OpenMap(@NonNull CaltopoNode.MapNode mapNode, long lastSyncTimestamp, @Nullable Consumer<CaltopoOp> onComplete)
             throws RuntimeException {
 
-        if (MapId != null && !MapId.equals(mapNode.getId())) {
-            CTDebug(TAG, "openMap(): changing mapId from " + MapId + " to " + mapNode.getId());
+        String mapIdIn = mapNode.getId();
+        if (MapId != null && !mapIdIn.equals(MapId)) {
+            CTDebug(TAG, "openMap(): changing mapId from " + MapId + " to " + mapIdIn);
+        } else {
+            CTDebug(TAG, "openMap(): Setting mapid to " + mapIdIn);
         }
-        MapId = mapNode.getId();
+        MapId = mapIdIn;
 
         // remove any update key delimiter:
-        String urlEnd = CALTOPO_API_V1 + MapId + "/since/" +
+        String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/since/" +
                 Math.max(0, lastSyncTimestamp - 500);
 
         CaltopoOp op = new CaltopoOp(onComplete);
@@ -432,11 +471,11 @@ public class CaltopoSession {
 		}
 		JSONObject prop = new JSONObject();
 		JSONObject top = new JSONObject();
-		String urlEnd = CALTOPO_API_V1 + MapId + "/Folder";
+		String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/Folder";
 		try {
 			prop.put("title", folderName);
-			prop.put("visible", contentsVisible ? "true" : "false");
-			prop.put("labelVisible", contentLabelsVisible ? "true" : "false");
+			prop.put("visible", contentsVisible);
+			prop.put("labelVisible", contentLabelsVisible);
 			top.put("properties", prop);
 		} catch (Exception e) {
 			CTError(TAG, "addFolder() raised.", e);
@@ -501,7 +540,7 @@ public class CaltopoSession {
 			CTError(TAG, "addLine() .put raised - for no apparent reason", e);
 			return null;
 		}
-		String urlEnd = CALTOPO_API_V1 + MapId + "/Shape" + objid;
+		String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/Shape" + objid;
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
@@ -539,8 +578,8 @@ public class CaltopoSession {
 			} catch (Exception e) {
 				CTError(TAG, "exception processing extraProperties.", e);
 			}
-			JSONArray points = new JSONArray(String.format(Locale.US, "[%.7f,%.7f]", lng, lat));
-			geometry.put("coordinates", points);
+			JSONArray point = new JSONArray(String.format(Locale.US, "[%.7f,%.7f]", lng, lat));
+			geometry.put("coordinates", point);
 			geometry.put("type", "Point");
 
 			top.put("type", "Feature");
@@ -551,16 +590,15 @@ public class CaltopoSession {
 				objid = "/" + existingMarkerId;
 			}
 		} catch (Exception e) {
-			CTError(TAG, "addMarker() raised.", e);
+			CTError(TAG, "AddMarker() raised.", e);
 			return null;
 		}
 		try {
-			CTDebug(TAG, "addMarker(): adding:\n" + top.toString(4));
+			CTDebug(TAG, "AddMarker(): adding:\n" + top.toString(4));
 		} catch (Exception e) {
 			CTError(TAG, "keeping compiler happy.", e);
 		}
-
-		String urlEnd = CALTOPO_API_V1 + MapId + "/Marker" + objid;
+		String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/Marker" + objid;
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
@@ -571,7 +609,7 @@ public class CaltopoSession {
         if (null == MapId)
             throw new RuntimeException("DeleteShapeWithId(): Map not specified - call OpenMap() first");
 
-        String urlEnd = CALTOPO_API_V1 + MapId + "/Shape/" + objId;
+        String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/Shape/" + objId;
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
@@ -582,7 +620,7 @@ public class CaltopoSession {
         if (null == MapId)
             throw new RuntimeException("DeleteMarkerWithId(): Map not specified - call OpenMap() first");
 
-        String urlEnd = CALTOPO_API_V1 + MapId + "/Marker/" + objId;
+        String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/Marker/" + objId;
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
@@ -593,7 +631,7 @@ public class CaltopoSession {
         if (null == MapId)
             throw new RuntimeException("DeleteLiveTrackWithId(): Map not specified - call OpenMap() first");
 
-        String urlEnd = CALTOPO_API_V1 + MapId + "/LiveTrack/" + objId;
+        String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/LiveTrack/" + objId;
 		CaltopoOp op  = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
@@ -605,7 +643,7 @@ public class CaltopoSession {
         if (null == MapId)
             throw new RuntimeException("EditObjectWithId(): Map not specified - call OpenMap() first");
 
-        String urlEnd = CALTOPO_API_V1 + MapId + "/" + objectType + "/" + objId;
+        String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/" + objectType + "/" + objId;
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.POST, urlEnd, featureSet, false);
 		return op;
@@ -627,7 +665,8 @@ public class CaltopoSession {
 			prop.put("stroke-opacity", lineProp.opacity);
 			prop.put("stroke", lineProp.color);
 			prop.put("pattern", lineProp.pattern);
-			prop.put("marker-symbol", "Drone");
+            prop.put("marker-symbol", "icon-8T781R60-12-0.5-0.5-tf");
+            prop.put("marker-size", 2);
 			if (null != description && !description.isEmpty()) prop.put("descripion", description);
 			prop.put("class", "LiveTrack");
 			if (folderId != null && !folderId.isEmpty()) {
@@ -642,11 +681,34 @@ public class CaltopoSession {
 			return null;
 		}
 
-		String urlEnd = CALTOPO_API_V1 + MapId + "/LiveTrack";
+		String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/LiveTrack";
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);
 		return op;
 	}
+
+    /***
+     * FIXME: As of 6Feb, Caltopo now supports the following additional parameters:
+     *      * aircraft:altitude (height above MSL in feet, if both elevation and altitude are specified, altitude wins)
+     *      * aircraft:altitude_rate (rate of climb in ft/min)
+     *      * aircraft:pitch (in degrees, positive is nose up)
+     *      * aircraft:roll (posiitive is left wing up)
+     *      * aircraft:gs (speed over the ground in knots)
+     *      * aircraft:heading (direction the nose is pointing)
+     *      * aircraft:track (direction of travel over the ground)
+     *      * camera:azimuth (angle the camera is facing, degrees true north)
+     *      * camera:tilt (up/down angle relative to horizon, -90 is straight down)
+     *      * camera:fov_width (horizontal field of view in degrees)
+     *      * camera:fov_height (vertical field of view in degrees)
+     *      * camera:external_url (link to an external website showing the camera livestream)
+     *      * camera:thumbnail_url (direct link to camera thumbnail image)
+     * @param deviceId
+     * @param lat
+     * @param lng
+     * @param eleMeters
+     * @param onComplete
+     * @return
+     */
 
 	@NonNull
 	public static CaltopoOp AddLiveTrackPoint(@NonNull String deviceId,
@@ -667,5 +729,261 @@ public class CaltopoSession {
 		SendRequest(op, CtsMethod_t.GET, url, null, true);
 		return op;
 	}
+
+    /*** CompressScaledBitmapAsJpeg()
+     * Build a compressed copy of the input, optionally scaled down first.  The
+     * result is rendered into a byte array in jpeg format.  N.B. this procedure can
+     * block for seconds on a big image, so don't run it in the main app thread.
+     *
+     * @param bitmap      Required source bitmap is not molested.
+     * @param quality     0-100, where 0 is max compression and 100 is max quality.
+     * @param rdxPercent  Preserve aspect ratio, but scale down the source image by
+     *                    specified percent.  Use <= 0.0 or >= 1.0 to preserve the
+     *                    original image size. (i.e. 0.2 == 20% of original image).
+     * @param pixWidth    Preserve aspect ratio, but make the resulting image this
+     *                    many pixels wide.  Ignored if valid rdxPercent specified.
+     */
+    @Nullable
+    private static byte[] CompressScaledBitmapAsJpeg(@NonNull Bitmap bitmap,
+                                              int quality, double rdxPercent, int pixWidth) {
+        int inWidth = bitmap.getWidth();
+        int inHeight = bitmap.getHeight();
+        int dstWidth, dstHeight;
+        Bitmap sourceBitmap = bitmap;
+
+        if (rdxPercent > .05 && rdxPercent < 1.0) {
+            dstHeight = (int)round(rdxPercent * inHeight);
+            dstWidth = (int)round(rdxPercent * inWidth);
+        } else if (pixWidth <= 0) {
+            dstWidth = inWidth;
+            dstHeight = inHeight;
+        } else {
+            dstWidth = pixWidth;
+            dstHeight = (int)round((float)inHeight/(float)inWidth * (float)pixWidth);
+        }
+        if (inWidth != dstWidth) {
+            sourceBitmap = Bitmap.createScaledBitmap(sourceBitmap, dstWidth, dstHeight, true);
+        }
+        if (quality < 0) quality = 0;
+        if (quality > 100) quality = 100;
+        ByteArrayOutputStream oStream = new ByteArrayOutputStream();
+        // Compress the bitmap to JPEG format with a specific quality
+        sourceBitmap.compress(Bitmap.CompressFormat.JPEG, quality, oStream);
+        byte[] byteArray = oStream.toByteArray();
+        try {
+            oStream.close();
+        } catch (IOException e) {
+            CTDebug(TAG, "bitmapAsCompressedJpeg(): compress raised.");
+            return null;
+        }
+        return byteArray;
+    }
+
+    /***
+     * Returns the response for the MapMediaObject on success, otherwise returns
+     * the failed op response.
+     *
+     * FIXME: add support for the new Caltopo parameters in extraParameters:
+     * starting with heading
+     * aircraft:altitude (height above MSL in feet, if both elevation and altitude are specified, altitude wins)
+     * aircraft:altitude_rate (rate of climb in ft/min)
+     * aircraft:pitch (in degrees, positive is nose up)
+     * aircraft:roll (posiitive is left wing up)
+     * aircraft:gs (speed over the ground in knots)
+     * aircraft:heading (direction the nose is pointing)
+     * aircraft:track (direction of travel over the ground)
+
+     * camera:azimuth (angle the camera is facing, degrees true north)
+     * camera:tilt (up/down angle relative to horizon, -90 is straight down)
+     * camera:fov_width (horizontal field of view in degrees)
+     * camera:fov_height (vertical field of view in degrees)
+     * camera:external_url (link to an external website showing the camera livestream)
+     * camera:thumbnail_url (direct link to camera thumbnail image)
+     *
+     */
+    static private CaltopoOp BgAttachPhotoToMarker(@NonNull String base64ImageRep,
+                                                   double lat, double lng,
+                                                   @NonNull String parentMarkerId,
+                                                   @NonNull String title,
+                                                   @Nullable String description,
+                                                   @Nullable JSONObject extraParameters ) {
+        CaltopoOp apOp = new CaltopoOp(null);
+        String mediaId = UUID.randomUUID().toString();
+                CTDebug(TAG, "BgAttachPhotoToMarker() parent: " + parentMarkerId);
+        try {
+            // create the backend media object:
+            Util.SafeJSONObject creator = new Util.SafeJSONObject();
+            creator.put("creator", Cred.teamId);
+            Util.SafeJSONObject mediaPayload = new Util.SafeJSONObject();
+            mediaPayload.put("properties", creator);
+            String moUrl = CALTOPO_MEDIA_API_V1 + mediaId;
+            CTDebug(TAG, "BgAttachPhotoToMarker() Step 1: Create backend media object: " + moUrl);
+            CaltopoOp mediaOp = BgOp(CtsMethod_t.POST, moUrl, mediaPayload, false);
+            if (mediaOp.fail())  return mediaOp;
+            CTDebug(TAG, "BgAttachPhotoToMarker() backend media object created.");
+
+            // upload the media data:
+            JSONObject dataPayload = new JSONObject();
+            dataPayload.put("creator", Cred.teamId);
+            dataPayload.put("data", base64ImageRep);
+            String dataUrl = moUrl + "/data";
+            CTDebug(TAG, "BgAttachPhotoToMarker() Step 2: Upload media: " + dataUrl);
+            CaltopoOp dataOp = BgOp(CtsMethod_t.POST, dataUrl, dataPayload, false);
+            if (dataOp.fail()) return dataOp;
+            CTDebug(TAG, "BgAttachPhotoToMarker() media uploaded w/o error.");
+
+            // Attach the data to the parent marker:
+            JSONObject prop = new JSONObject();
+            prop.put("title", title);
+            prop.put("parentId", "Marker:" + parentMarkerId);
+            prop.put("backendMediaId", mediaId);
+            prop.put("heading", JSONObject.NULL);
+            prop.put("class", "MapMediaObject");
+            if (null != description) prop.put("description", description);
+            prop.put("marker-symbol", "aperture");
+            prop.put("marker-color", "#FF00FF");
+            prop.put("marker-size", 1);
+            prop.put("created", System.currentTimeMillis());
+            JSONObject geo = new JSONObject();
+            geo.put("type", "Point");
+            JSONArray pts = new JSONArray();
+            pts.put(lng); pts.put(lat);
+            geo.put("coordinates", pts);
+            JSONObject moPayload = new JSONObject();
+            moPayload.put("type", "Feature");
+            moPayload.put("geometry", geo);
+            moPayload.put("properties", prop);
+            String linkUrl = CALTOPO_MAP_API_V1 + MapId + "/MapMediaObject";
+            CTDebug(TAG, "BgAttachPhotoToMarker() Step 3: Attach to parent: " + moUrl);
+            CaltopoOp moOp = BgOp(CtsMethod_t.POST, linkUrl, moPayload, false);
+            if (moOp.fail()) return moOp;
+            CTDebug(TAG, "BgAttachPhotoToMarker() All operations completed w/o error.");
+            return moOp;
+
+        } catch (JSONException e) {
+            String resp = "BgAttachPhotoToMarker(): error sending message(s)";
+            CTError(TAG, resp, e);
+            apOp.response = resp;
+            apOp.setOperationIsDone(false);
+            return apOp;
+        }
+    }
+
+    private static void ArchiveJpeg(byte[] bytes, @NonNull String markerTitle) {
+        Context ctxt = R2CApplication.getAppCtxt();
+        DocumentFile todaysArchiveDir = GetTodaysTrackDir();
+        if (null == ctxt || null == todaysArchiveDir) {
+            CTError(TAG, "ArchiveJpeg(): missing required context.");
+            return;
+        }
+        String JPEG_MIME_TYPE = "image/jpeg";
+        SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy-HHmmss", Locale.US);
+        String timeStr = sdf.format(new Date());
+        String capitalized = String.valueOf(Pattern.compile("\\b(\\w)")
+                .matcher(markerTitle)
+                .replaceAll(m -> m.group().toUpperCase()));
+        String filename = capitalized.replaceAll("[^a-zA-Z0-9-]+", "") + "_" + timeStr +".jpeg";
+        try {
+            DocumentFile jpegFile = todaysArchiveDir.createFile(JPEG_MIME_TYPE, filename);
+            ContentResolver resolver = ctxt.getContentResolver();
+            OutputStream outputStream = resolver.openOutputStream(jpegFile.getUri());
+            outputStream.write(bytes);
+            outputStream.flush();
+            outputStream.close();
+            CTDebug(TAG, "ArchiveJpeg() Wrote:" + filename);
+        } catch (Exception e) {
+            CTError(TAG, "ArchiveJpeg() Not able to write jpeg file: " + filename);
+        }
+    }
+
+    static CaltopoOp BgAddPhotoWaypoint(CaltopoOp apwOp,
+                                      double lat, double lng, @NonNull String markerTitle, @Nullable String markerDesc,
+                                   @NonNull String folderId, long createdTimestamp, @NonNull Bitmap photoBitmap
+
+    ) {
+        String markerId = UUID.randomUUID().toString();
+        String mediaId = UUID.randomUUID().toString();
+
+        CTDebug(TAG, "BgAddPhotoWaypoint() " + markerTitle);
+        Util.SafeJSONObject jo = new Util.SafeJSONObject();
+        jo.put("created", createdTimestamp);
+        if (markerDesc != null) jo.put("description", markerDesc);
+        CaltopoOp markerOp = AddMarker(lat, lng, markerTitle, "Drone", folderId, markerId, jo, null);
+        if (null == markerOp) {
+            String emsg = "BgAddPhotoWaypoint(): Need to use Util.SafeJSONObject() in AddMarker.";
+            CTError(TAG, emsg );
+            apwOp.response = emsg;
+            apwOp.setOperationIsDone(false);
+            return apwOp;
+        }
+
+       /* byte[] thumbNailBitmap = CompressScaledBitmapAsJpeg(photoBitmap, 80, 0, 1024);
+        String thumbEnc = android.util.Base64.encodeToString(thumbNailBitmap, android.util.Base64.NO_WRAP);
+        CaltopoOp op = BgAttachPhotoToMarker(thumbEnc, lat, lng, markerId, markerTitle + "_small", markerDesc, jo);
+        if (op.fail()) return op;
+        */
+        byte[] fullSizedBitmap = CompressScaledBitmapAsJpeg(photoBitmap, 80, 100, 0);
+        String fullEnc = android.util.Base64.encodeToString(fullSizedBitmap, android.util.Base64.NO_WRAP);
+        ArchiveJpeg(fullSizedBitmap, markerTitle);
+        // FIXME: Add metadata to image, i.e. lat,lng, description, drone designation,
+        //    map name, incident, op_period timestamp when captured,
+
+        // Attach Images:
+        CTDebug(TAG, "BgAddPhotoWaypoint() " + markerTitle + " - Attaching full sized...");
+        CaltopoOp op = BgAttachPhotoToMarker(fullEnc, lat, lng, markerId, markerTitle, markerDesc, jo);
+        if (op.fail()) return op;
+
+        apwOp.response = "Successfully attached two photos to marker.";
+        apwOp.setOperationIsDone(true);
+        return apwOp;
+    }
+
+    /*** AddPhotoMarker().
+     * Add a Marker with an attached photo to the current map.
+     * Note that this is a bit of a process, so we have a dedicated background thread that
+     * just handles photo markers.   First we need to create a normal clue marker, with title
+     * and description in our ArchiveFolder (n.b. not in active folder). While that effort is
+     * under way, we need to resize and compress the supplied bitmap to create both a thumbnail
+     * rep with same title as the marker, but '_small' suffix.  When that completes, we also
+     * compress the full-sized
+     *
+     *   The CaltopOp that is returned (and callback if supplied), will be invoked once the
+     * marker has been completed and the photos have been added to it.
+     *
+     *   Since this is such an involved process, we just sanity check args here and then
+     * hand everything off to a dedicated photo processing background thread to implement.
+     * The reason we use a separate thread is we don't want to significantly impact the
+     * flow of the main caltopo interaction thread that is busy with waypoint updates.
+     *
+     * @param lat
+     * @param lng
+     * @param markerTitle
+     * @param markerDesc
+     * @param folderId
+     * @param clueTimestamp
+     * @param photoBitmap
+     * @param onComplete   Ignored if you passed in non-null apmOp
+     * @return
+     */
+    @Nullable
+    public static CaltopoOp AddPhotoMarker(double lat, double lng, @NonNull String markerTitle, @NonNull String markerDesc,
+                                           @NonNull String folderId, long clueTimestamp, @NonNull Bitmap photoBitmap,
+                                           @Nullable Consumer<CaltopoOp> onComplete) {
+
+        CaltopoOp apmOp = new CaltopoOp(onComplete);
+        if (null == MapId) {
+            apmOp.response = "AddPhotoMarker(): Map not specified - call OpenMap() first";
+            apmOp.setOperationIsDone(false);
+            return apmOp;
+        }
+
+        if (null == PhotoWaypointExecutorPool) {
+            PhotoWaypointExecutorPool = Executors.newFixedThreadPool(1);
+        }
+        apmOp.asyncFuture = PhotoWaypointExecutorPool.submit(() ->
+            BgAddPhotoWaypoint(apmOp, lat, lng, markerTitle, markerDesc, folderId, clueTimestamp, photoBitmap));
+
+        return apmOp;
+    }
 
 } // end of CaltopoSession class spec.

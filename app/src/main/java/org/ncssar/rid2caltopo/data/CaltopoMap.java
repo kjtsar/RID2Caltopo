@@ -12,7 +12,6 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.ShowToast;
-import static org.ncssar.rid2caltopo.data.CaltopoCredentials.credentialsAreEqual;
 import static org.ncssar.rid2caltopo.data.CaltopoMapHierarchyKt.parseMapHierarchy;
 import static org.ncssar.rid2caltopo.data.SimpleTimer.DurationAsString;
 
@@ -31,7 +30,6 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.ncssar.rid2caltopo.app.R2CApplication;
-import org.ncssar.rid2caltopo.ui.R2CViewModel;
 
 
 import java.nio.charset.StandardCharsets;
@@ -116,15 +114,13 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static String DomainAndPort;
     private static List<CaltopoNode> SessionNodeMap = null;
     private static CaltopoMap MyInstance = null; // keep around just to serve as listener.
-
-    private static CaltopoOp VerifyOp = null;
     private static DelayedExec VerifyTimer = new DelayedExec();
+    private static DelayedExec VerifyPhotoTimeout = new DelayedExec();
     private static final long VERIFY_TIMEOUT_MS = 10 * 1000L;
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
 
     public static void SessionVerifyCallback(@NonNull CaltopoOp verifyOp) {
         VerifyTimer.stop();
-        VerifyOp = null;
         if (verifyOp.success()) {
             CTDebug(TAG, String.format(Locale.US,
                     "SessionVerifyCallback(): Parsing team data. queued:%d, sent:%d, received:%d",
@@ -169,12 +165,11 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
         MyCaltopoCredentials = sessionCredentials;
         SessionNodeMap = null;
-        VerifyOp = null;
         CTDebug(TAG, "Init(): Initializing session...");
         CaltopoSession.Init(MyCaltopoCredentials, DomainAndPort);
         CTDebug(TAG, "Init(): Verifying Credentials...");
         VerifyTimer.start(CaltopoMap::VerifyTimeout, VERIFY_TIMEOUT_MS, 0);
-        VerifyOp = CaltopoSession.VerifyAccount(CaltopoMap::SessionVerifyCallback);
+        CaltopoSession.VerifyAccount(CaltopoMap::SessionVerifyCallback);
         UsePeersFlag = CaltopoClient.GetUsePeersFlag();
         if (UsePeersFlag) R2CPeer.Init();
         FolderName = CaltopoClient.GetTrackFolderName();
@@ -262,7 +257,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         }
     }
 
-    public static void SetMapStatusListener(@NonNull MapStatusListener listener) {
+    public static void AddMapStatusListener(@NonNull MapStatusListener listener) {
         MapListeners.add(listener);
     }
 
@@ -594,15 +589,46 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         SetMapStatus(MapStatusListener.mapStatus.up, null);
     }
 
-    public static void SubmitClue(
-            CtDroneSpec droneSpec,
-            double clueLat, double clueLng, double clueAlt,
-            String clueTitle,
-            String clueDescription,
-            long clueTimestamp,
-            Bitmap clueImage) {
-        CTDebug(TAG, "SubmitClue()...");
+    private static void PhotoMarkerTimeout() {
+        ShowToast("Timeout while trying to add photo waypoint to map.");
     }
+
+    private static void PhotoMarkerComplete(CaltopoOp op) {
+        VerifyPhotoTimeout.stop();
+        if (op.success()) {
+            ShowToast("Photo Waypoint created.");
+        } else {
+            ShowToast("Not able to create Photo Waypoint.");
+        }
+    }
+
+    public static void SubmitClueWithPhoto(
+            @NonNull CtDroneSpec droneSpec,
+            double clueLat, double clueLng, double clueAlt,
+            @NonNull String clueTitle,
+            @NonNull String clueDescription,
+            long clueTimestamp,
+            @NonNull Bitmap clueImage) {
+
+        // FIXME: Can we attach the image to our local WaypointTrack when no map is available?
+        if (GetMapId().isEmpty() || null == FolderId || FolderId.isEmpty()) {
+            ShowToast("Map is not connected - cannot publish to map at this time.");
+        }
+        CTDebug(TAG, "SubmitClue(" + clueTitle + ")...");
+
+        VerifyPhotoTimeout.start(CaltopoMap::PhotoMarkerTimeout, 30 * 1000, 0);
+        CaltopoSession.AddPhotoMarker(
+                clueLat,
+                clueLng,
+                clueTitle,
+                clueDescription,
+                FolderId,
+                clueTimestamp,
+                clueImage,
+                CaltopoMap::PhotoMarkerComplete);
+    }
+
+
     private static void SetMapStatus(MapStatusListener.mapStatus mapStatus, @Nullable String optEmsg) {
 
         Bundle parameters = new Bundle();
@@ -610,6 +636,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         parameters.putInt("r2c_listenerCount", MapListeners.size());
         parameters.putInt("r2c_featDeletePending", RogueFeaturesPendingDeletes.size());
         CaltopoClient.CTEvent(TAG, "MapIs_" + mapStatus.toString(), parameters);
+        CTDebug(TAG, "XYZZY: Changing map status from: " + MapStatus.name() + " to: " + mapStatus.name());
         MapStatus = mapStatus;
         if (!MapListeners.isEmpty()) {
             for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(MapStatus, MapNode, optEmsg);

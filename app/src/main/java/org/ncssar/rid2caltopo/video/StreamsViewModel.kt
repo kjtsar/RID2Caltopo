@@ -1,56 +1,48 @@
-import android.app.Activity
 import android.app.Application
 import android.graphics.Bitmap
-import android.view.PixelCopy
-import android.view.SurfaceView
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.hls.HlsMediaSource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.MutableStateFlow
-
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
-import org.ncssar.rid2caltopo.video.StreamInfo
-import org.ncssar.rid2caltopo.video.StreamRegistry
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.setValue
-import androidx.media3.common.C
-import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
-import org.ncssar.rid2caltopo.data.CtDroneSpec
-import org.ncssar.rid2caltopo.data.DesignatorState
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.hls.HlsMediaSource
-import androidx.media3.common.Player
-import androidx.media3.common.Tracks
-import androidx.media3.exoplayer.SeekParameters
-import androidx.media3.ui.PlayerView
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
+import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.CaltopoMap.MapStatusListener.mapStatus
+import org.ncssar.rid2caltopo.data.CaltopoNode
+import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
+import org.ncssar.rid2caltopo.data.DesignatorState
+import org.ncssar.rid2caltopo.video.StreamInfo
+import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
 import java.util.Collections
 import java.util.WeakHashMap
-
-import android.os.Handler
-import android.os.Looper
-import androidx.annotation.OptIn
-import androidx.core.graphics.createBitmap
-import androidx.media3.common.util.UnstableApi
-import androidx.core.graphics.scale
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 data class PendingClue(
     val droneSpec: CtDroneSpec,
@@ -95,7 +87,8 @@ class DroneSpecState(
 class StreamsViewModel (
     application: Application
 ) : AndroidViewModel(application),
-    CtDroneSpec.DroneSpecsChangedListener {
+    CtDroneSpec.DroneSpecsChangedListener,
+    CaltopoMap.MapStatusListener {
     private val TAG = "StreamsViewModel"
 
     private val context = application.applicationContext
@@ -132,12 +125,15 @@ class StreamsViewModel (
 
     private val restartIds = mutableMapOf<String, Long>()
 
-    private val _droneStates = mutableMapOf<String, DroneSpecState>()
+    private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
 
     private val _pendingClue = mutableStateOf<PendingClue?>(null)
     val pendingClue: PendingClue?
         get() = _pendingClue.value
+
+    private val _mapName = mutableStateOf<String?>(null)
+    val mapName: String? by _mapName
 
 
     private val stallPoll : DelayedExec = DelayedExec()
@@ -166,7 +162,10 @@ class StreamsViewModel (
     override fun onDroneSpecsChanged(currentDrones: List<CtDroneSpec>) {
         if (!currentDrones.isEmpty()) {
             CTInfo(TAG, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
-            stallPoll.stop()
+            if (stallPoll.isRunning) {
+                CTDebug(TAG, "Stopping stall poll.");
+                stallPoll.stop()
+            }
             pollForStalledPlayers()
             currentDrones.forEach { spec ->
                 val key = spec.mappedId
@@ -175,7 +174,8 @@ class StreamsViewModel (
                 }
                 state.updateFrom(spec)
             }
-        } else {
+        } else if (!stallPoll.isRunning){
+            CTDebug(TAG, "Starting stall poll.");
             startStallPoll()
         }
     }
@@ -344,15 +344,25 @@ class StreamsViewModel (
         restarting.clear()
     }
 
+    override fun mapStatusUpdate(status: mapStatus?, mapNode: CaltopoNode.MapNode?, optErrmsg: String?) {
+        if (status == CaltopoMap.MapStatusListener.mapStatus.up) {
+            CTDebug(TAG, "XYZZY: Connected to ${mapNode?.title}")
+            _mapName.value = mapNode?.title
+        } else {
+            _mapName.value = null;
+            CTDebug(TAG, "XYZZY: Disconnected from map")
+        }
+    }
+
     fun designatorStateFor(designator: String): DesignatorState {
         if (_droneStates.isEmpty()) return DesignatorState.Red
 
         val dss = _droneStates[designator]
-        if (dss != null) {
-            return DesignatorState.Green(dss)
+        return if (dss != null) {
+            DesignatorState.Green(dss)
+        } else {
+            DesignatorState.Yellow(droneStates)
         }
-
-        return DesignatorState.Yellow(droneStates)
     }
 
     fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {
@@ -426,6 +436,7 @@ class StreamsViewModel (
 
     init {
         startStallPoll()
+        CaltopoMap.AddMapStatusListener(this)
         CaltopoClient.AddDroneSpecsChangedListener(this)
         viewModelScope.launch {
             StreamRegistry.streams.collect { map ->

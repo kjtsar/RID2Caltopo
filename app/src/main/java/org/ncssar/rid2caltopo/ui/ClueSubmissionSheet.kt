@@ -99,8 +99,7 @@ fun ClueSheetContent (
     val configuration = LocalConfiguration.current
     val maxSheetHeight = configuration.screenHeightDp.dp * 0.7f
 
-    LaunchedEffect(clue) {
-        delay(100) // avoid keyboard race condition some devices.
+    LaunchedEffect(Unit) {
         titleFocusRequester.requestFocus()
     }
 
@@ -176,7 +175,6 @@ fun ClueSheetContent (
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                 keyboardActions = KeyboardActions(
                     onNext = { descriptionFocusRequester.requestFocus() },
-                    onDone = { focusManager.clearFocus() }
                 )
             )
 

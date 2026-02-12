@@ -37,6 +37,7 @@ enum class ActiveScreen {
     SCANNER
 }
 sealed class CaltopoConnectionState {
+    override fun toString(): String = this::class.simpleName ?: "Unknown"
     // Standard operating mode: local logging only
     object StandAlone : CaltopoConnectionState()
 
@@ -58,6 +59,7 @@ sealed class CaltopoConnectionState {
 }
 
 sealed class UIEvent {
+    override fun toString(): String = this::class.simpleName ?: "Unknown"
     // User Actions
     object HeaderClicked : UIEvent()
     object ConnectionRequested: UIEvent()
@@ -73,6 +75,7 @@ sealed class UIEvent {
 }
 
 sealed class OverlayState {
+    override fun toString(): String = this::class.simpleName ?: "Unknown"
     object None : OverlayState()
     object ConnectionSetup : OverlayState() // Formerly showStandAlonePopup
     object RequestConfigFile : OverlayState()
@@ -117,7 +120,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         connectionState = CaltopoConnectionState.StandAlone
     }
     fun onUIEvent(uiEvent: UIEvent) {
-        val oldState = "  PRE: Overlay=${overlay::class.simpleName} ConnectionState: '${connectionState::class.simpleName}'"
+        val oldState = "  PRE: Overlay='${overlay}' ConnectionState: '${connectionState}'"
 
         when (uiEvent) {
             is UIEvent.HeaderClicked -> {
@@ -148,14 +151,14 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                     if (this.hasCredentials) {
                         CTDebug(
                             tag,
-                            "onUIEvent(${uiEvent::class.simpleName}): have credentials, fetching team info..."
+                            "onUIEvent(${uiEvent}): have credentials, fetching team info..."
                         )
                         overlay = OverlayState.Connecting
                         CaltopoMap.Init() // Use credentials to fetch/update the CaltopoNode List
                     } else {
                         CTDebug(
                             tag,
-                            "onUIEvent(${uiEvent::class.simpleName}): No credentials loaded requesting credentials..."
+                            "onUIEvent(${uiEvent}): No credentials loaded requesting credentials..."
                         )
                         overlay = OverlayState.RequestConfigFile
                     }
@@ -192,7 +195,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             is UIEvent.ConnectionStatusChanged -> {
                 // Directly map the Java Enum to our Sealed Class state
                 val status = uiEvent.mapStatus
-                CTDebug(tag, "onUIEvent(${uiEvent::class.simpleName}): ConnectionStatus: '${status.name}'")
+                CTDebug(tag, "onUIEvent(${uiEvent}): ConnectionStatus: '${status.name}'")
                 connectionState = when (status) {
                     CaltopoMap.MapStatusListener.mapStatus.credentialsVerified -> {
                         mapHierarchy = CaltopoMap.GetSessionNodeMap()
@@ -220,8 +223,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             }
         }
 
-        val newState = " POST: Overlay=${overlay::class.simpleName} ConnectionState: '${connectionState::class.simpleName}'"
-        CTDebug(tag, "onUIEvent(${uiEvent::class.simpleName})\n$oldState\n$newState")
+        val newState = " POST: Overlay='${overlay}' ConnectionState: '${connectionState}'"
+        CTDebug(tag, "onUIEvent(${uiEvent})\n$oldState\n$newState")
     }
 
     override fun mapStatusUpdate(status: CaltopoMap.MapStatusListener.mapStatus, mapNode: CaltopoNode.MapNode?, optErrmsg: String?) {

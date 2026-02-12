@@ -94,10 +94,11 @@ fun DesignatorIndicator(
         Text(
             text = "$streamDesignator - $streamStateText - $subtitle",
             color = color,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleLarge,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
+                .padding(10.dp)
                 .background(Color.Transparent)
         )
     }

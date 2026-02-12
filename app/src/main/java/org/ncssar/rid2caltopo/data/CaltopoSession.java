@@ -879,10 +879,12 @@ public class CaltopoSession {
         String JPEG_MIME_TYPE = "image/jpeg";
         SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy-HHmmss", Locale.US);
         String timeStr = sdf.format(new Date());
-        String capitalized = String.valueOf(Pattern.compile("\\b(\\w)")
-                .matcher(markerTitle)
-                .replaceAll(m -> m.group().toUpperCase()));
-        String filename = capitalized.replaceAll("[^a-zA-Z0-9-]+", "") + "_" + timeStr +".jpeg";
+// FIXME: The .replaceAll() hangs on android 10
+//        String capitalized = String.valueOf(Pattern.compile("\\b(\\w)")
+//                .matcher(markerTitle)
+//                .replaceAll(m -> m.group().toUpperCase()));
+//        String filename = capitalized.replaceAll("[^a-zA-Z0-9-]+", "") + "_" + timeStr +".jpeg";
+        String filename = markerTitle.replaceAll("[^a-zA-Z0-9-]+", "") + "_" + timeStr +".jpeg";
         try {
             DocumentFile jpegFile = todaysArchiveDir.createFile(JPEG_MIME_TYPE, filename);
             ContentResolver resolver = ctxt.getContentResolver();

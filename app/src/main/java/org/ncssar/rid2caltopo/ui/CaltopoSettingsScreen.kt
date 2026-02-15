@@ -73,7 +73,7 @@ fun CaltopoSettingsScreen(
                         checked = goLiveFlag,
                         onCheckedChange = { settingsViewModel.onSendLiveChanged(it) }
                     )
-                    Text(if (goLiveFlag) "No" else "Send")
+                    Text(if (goLiveFlag) "Yes" else "No")
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {

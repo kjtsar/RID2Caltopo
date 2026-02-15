@@ -36,53 +36,53 @@ enum class ActiveScreen {
     SETTINGS,
     SCANNER
 }
-sealed class CaltopoConnectionState {
-    override fun toString(): String = this::class.simpleName ?: "Unknown"
+sealed class CaltopoConnectionState(val displayName: String) {
+    override fun toString(): String = displayName
     // Standard operating mode: local logging only
-    object StandAlone : CaltopoConnectionState()
+    object StandAlone : CaltopoConnectionState("StandAlone")
 
-    object NoNetwork : CaltopoConnectionState()
+    object NoNetwork : CaltopoConnectionState("NoNetwork")
 
     // Transient state: UI shows "Verifying Team Access..." with an animation
-    object CheckingCredentials : CaltopoConnectionState()
+    object CheckingCredentials : CaltopoConnectionState("CheckingCredentials")
 
     // Credentials verified, we have the hierarchy, waiting for user to pick a map
-    object CredentialsVerified : CaltopoConnectionState()
+    object CredentialsVerified : CaltopoConnectionState("CredentialsVerified")
 
-    object CredentialsLoaded : CaltopoConnectionState()
+    object CredentialsLoaded : CaltopoConnectionState("CredentialsLoaded")
 
     // Transition state: Handing the MapNode to your Java openMap() logic
-    object Connecting : CaltopoConnectionState()
+    object Connecting : CaltopoConnectionState("Connecting")
 
     // Active state: Map is UP
-    data class MapSelected(val map: CaltopoNode.MapNode) : CaltopoConnectionState()
+    data class MapSelected(val map: CaltopoNode.MapNode) : CaltopoConnectionState("MapSelected")
 }
 
-sealed class UIEvent {
-    override fun toString(): String = this::class.simpleName ?: "Unknown"
+sealed class UIEvent(val displayName: String) {
+    override fun toString(): String = displayName
     // User Actions
-    object HeaderClicked : UIEvent()
-    object ConnectionRequested: UIEvent()
-    object DismissRequested : UIEvent()
-    object DisconnectRequested : UIEvent()
-    object SwitchMapRequested: UIEvent()
-    object ConfigFileLoaded: UIEvent()
-    object NotAbleToReadConfigFile: UIEvent()
-    data class MapSelected(val map: CaltopoNode.MapNode) : UIEvent()
+    object HeaderClicked : UIEvent("HeaderClicked")
+    object ConnectionRequested: UIEvent("ConnectionRequested")
+    object DismissRequested : UIEvent("DismissRequested")
+    object DisconnectRequested : UIEvent("DisconnectRequested")
+    object SwitchMapRequested: UIEvent("SwitchMapRequested")
+    object ConfigFileLoaded: UIEvent("ConfigFileLoaded")
+    object NotAbleToReadConfigFile: UIEvent("NotAbleToReadConfigFile")
+    data class MapSelected(val map: CaltopoNode.MapNode) : UIEvent("MapSelected")
 
     // System/Network Notifications
-    data class ConnectionStatusChanged(val mapStatus: CaltopoMap.MapStatusListener.mapStatus) : UIEvent()
+    data class ConnectionStatusChanged(val mapStatus: CaltopoMap.MapStatusListener.mapStatus) : UIEvent("ConnectionStatusChanged")
 }
 
-sealed class OverlayState {
-    override fun toString(): String = this::class.simpleName ?: "Unknown"
-    object None : OverlayState()
-    object ConnectionSetup : OverlayState() // Formerly showStandAlonePopup
-    object RequestConfigFile : OverlayState()
-    object Connecting: OverlayState()      // spinning icon.
-    object MapBrowser : OverlayState()     // Formerly showMapBrowser
-    object Management : OverlayState()     // Formerly showConnectedOptions
-    data class Error(val message: String) : OverlayState() // Added for the error dialog
+sealed class OverlayState(val displayName: String) {
+    override fun toString(): String = displayName
+    object None : OverlayState("None")
+    object ConnectionSetup : OverlayState("ConnectionSetup") // Formerly showStandAlonePopup
+    object RequestConfigFile : OverlayState("RequestConfigFile")
+    object Connecting: OverlayState("Connecting")      // spinning icon.
+    object MapBrowser : OverlayState("MapBrowser")     // Formerly showMapBrowser
+    object Management : OverlayState("Management")     // Formerly showConnectedOptions
+    data class Error(val message: String) : OverlayState("Error") // Added for the error dialog
 }
 
 class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
@@ -120,7 +120,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         connectionState = CaltopoConnectionState.StandAlone
     }
     fun onUIEvent(uiEvent: UIEvent) {
-        val oldState = "  PRE: Overlay='${overlay}' ConnectionState: '${connectionState}'"
+        val oldState = "      PRE: Overlay='${overlay}' ConnectionState: '${connectionState}'"
 
         when (uiEvent) {
             is UIEvent.HeaderClicked -> {
@@ -223,7 +223,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             }
         }
 
-        val newState = " POST: Overlay='${overlay}' ConnectionState: '${connectionState}'"
+        val newState = "     POST: Overlay='${overlay}' ConnectionState: '${connectionState}'"
         CTDebug(tag, "onUIEvent(${uiEvent})\n$oldState\n$newState")
     }
 

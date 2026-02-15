@@ -310,9 +310,11 @@ public class CaltopoSession {
                 }
 
                 HttpUrl finalUrl = urlBuilder.build();
-                CTDebug(TAG, String.format(Locale.US,
-                        "BgSendRequest(%s): fullUrl: '%s'\n payload:\n%s",
-                        op.method, finalUrl, payloadString));
+                if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
+                    CTInfo(TAG, String.format(Locale.US,
+                            "BgSendRequest(%s): fullUrl: '%s'\n payload:\n%s",
+                            op.method, finalUrl, payloadString));
+                }
 
                 // 3. Build and Execute Request
                 Request.Builder requestBuilder = new Request.Builder()
@@ -333,7 +335,9 @@ public class CaltopoSession {
                             try {
                                 JSONObject responseJson = new JSONObject(op.response);
                                 op.responseJson = responseJson.getJSONObject("result");
-                                CTInfo(TAG, "Good Response:\n  " + op.responseJson.toString(2));
+                                if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
+                                    CTInfo(TAG, "Good Response:\n  " + op.responseJson.toString(2));
+                                }
                             } catch (JSONException e) {
                                 CTError(TAG, "parse JSON result raised: ", e);
                             }
@@ -347,7 +351,9 @@ public class CaltopoSession {
                         eventParams.putString("r2c_method", op.method.toString());
                         CaltopoClient.CTEvent(TAG, "CaltopoOpFailed", eventParams);
                     }
-                    CTDebug(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
+                    if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
+                        CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
+                    }
                 }
 
             } catch (UnknownHostException e) {

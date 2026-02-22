@@ -8,18 +8,9 @@ import androidx.compose.runtime.setValue
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.C
-import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.Tracks
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.SeekParameters
-import androidx.media3.exoplayer.hls.HlsMediaSource
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,13 +27,12 @@ import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CaltopoMap.MapStatusListener.mapStatus
 import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
-import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.DesignatorState
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
-import java.util.Collections
-import java.util.WeakHashMap
+import org.ncssar.rid2caltopo.video.session.StreamRecoveryPolicy
+import org.ncssar.rid2caltopo.video.session.StreamSessionService
 
 data class PendingClue(
     val droneSpec: CtDroneSpec,
@@ -56,7 +46,6 @@ data class PendingClue(
     val title: String,
     val description: String
 )
-
 
 @Stable
 class DroneSpecState(
@@ -74,7 +63,8 @@ class DroneSpecState(
     var mappedId by mutableStateOf(source.mappedId)
         private set
 
-    fun changeMappedId(id: String) {source.setMappedId(id)}
+    fun changeMappedId(id: String) { source.setMappedId(id) }
+
     fun updateFrom(spec: CtDroneSpec) {
         lastLat = spec.lastLat
         lastLng = spec.lastLng
@@ -84,46 +74,49 @@ class DroneSpecState(
     }
 }
 
-class StreamsViewModel (
+class StreamsViewModel(
     application: Application
 ) : AndroidViewModel(application),
     CtDroneSpec.DroneSpecsChangedListener,
     CaltopoMap.MapStatusListener {
-    private val TAG = "StreamsViewModel"
 
+    private val tag = "StreamsViewModel"
     private val context = application.applicationContext
 
+    private val streamSessions = StreamSessionService(
+        context = context,
+        scope = viewModelScope,
+        policy = StreamRecoveryPolicy(),
+        listener = object : StreamSessionService.Listener {
+            override fun onBuffering(designator: String) {
+                this@StreamsViewModel.onBuffering(designator)
+            }
+
+            override fun onLive(designator: String) {
+                this@StreamsViewModel.onLive(designator)
+            }
+
+            override fun onEnded(designator: String) {
+                this@StreamsViewModel.onEnded(designator)
+            }
+
+            override fun onError(designator: String, error: PlaybackException) {
+                CTWarn(tag, "Session error for $designator", error)
+            }
+        }
+    )
+
     val streams: StateFlow<Map<String, StreamInfo>> =
-        StreamRegistry.streams
-            .stateIn(
-                scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(5_000),
-                initialValue = emptyMap()
-            )
+        StreamRegistry.streams.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = emptyMap()
+        )
+
     private val _focusedPath = MutableStateFlow<String?>(null)
     val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
 
-    private val _players =
-        mutableStateMapOf<String, ExoPlayer>()
-    val players: Map<String, ExoPlayer> get() = _players
-
-    private val restarting = mutableSetOf<String>()
-    private val lastError = mutableMapOf<String, Long>()
-
-    private fun isRestarting(designator: String): Boolean {
-        return restarting.contains(designator)
-    }
-
-    private val lastBufferingTime = mutableMapOf<String, Long>()
-
-    private val firstFrameRendered = mutableSetOf<String>()
-    private val BUFFERING_GRACE_MS = 1500L
-    private val RESTART_COOLDOWN_MS = 8_000L
-
-    private val preparedPlayers =
-        Collections.newSetFromMap(WeakHashMap<Player, Boolean>())
-
-    private val restartIds = mutableMapOf<String, Long>()
+    val players: Map<String, ExoPlayer> get() = streamSessions.players
 
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
@@ -135,195 +128,46 @@ class StreamsViewModel (
     private val _mapName = mutableStateOf<String?>(null)
     val mapName: String? by _mapName
 
+    private var lastLiveDesignators: Set<String> = emptySet()
 
-    private val stallPoll : DelayedExec = DelayedExec()
-    private val MAX_BUFFERING_MS = 3_000L
-    private fun startStallPoll() {
-        val sampleTimeMs = MAX_BUFFERING_MS / 2
-        stallPoll.start(this::pollForStalledPlayers, sampleTimeMs, sampleTimeMs)
-    }
-    private fun pollForStalledPlayers() {
-        val now = System.currentTimeMillis()
-        lastBufferingTime.forEach { (designator, since) ->
-            if (now - since > MAX_BUFFERING_MS && !isRestarting(designator)) {
-                CTWarn(TAG, "Video stalled for $designator -> restarting player")
-                recreatePlayer(designator)
-            }
-        }
-    }
-
-
-    /***
+    /**
      * Received from CaltopoClient at a maximum rate of once per second if
-     * there are any active dronespecs.  If currentDrones.isEmpty() we need
-     * to fire a one second timer to check for frozen streams.
-     * Only update _activeDroneSpecs when any of the members have changed.
+     * there are any active dronespecs.
      */
     override fun onDroneSpecsChanged(currentDrones: List<CtDroneSpec>) {
-        if (!currentDrones.isEmpty()) {
-            CTInfo(TAG, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
-            if (stallPoll.isRunning) {
-                CTDebug(TAG, "Stopping stall poll.");
-                stallPoll.stop()
-            }
-            pollForStalledPlayers()
+        if (currentDrones.isNotEmpty()) {
+            CTInfo(tag, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
             currentDrones.forEach { spec ->
                 val key = spec.mappedId
-                val state = _droneStates.getOrPut(key) {
-                    DroneSpecState(spec)
-                }
+                val state = _droneStates.getOrPut(key) { DroneSpecState(spec) }
                 state.updateFrom(spec)
             }
-        } else if (!stallPoll.isRunning){
-            CTDebug(TAG, "Starting stall poll.");
-            startStallPoll()
         }
-    }
-
-    private fun createPlayer(designator: String): ExoPlayer {
-        CTDebug(TAG, "createPlayer(${designator})...")
-
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                2_000,
-                5_000,
-                500,
-                500
-            )
-            .build()
-
-        val player = ExoPlayer.Builder(context)
-            .setLoadControl(loadControl)
-            .build()
-        // restartId to force unique URL for each stream that gets reused - to
-        // prevent HLS player from reusing old context:
-        val restartId = System.currentTimeMillis()
-        val url = "http://127.0.0.1:8888/$designator/index.m3u8?rid=${restartId}"
-        CTDebug(TAG, "Starting HLS player with url: '${url}'")
-
-        val mediaSource = HlsMediaSource.Factory(
-            DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true)
-        ).createMediaSource(MediaItem.fromUri(url))
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
-            .build()
-        player.setMediaSource(mediaSource)
-        player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
-        attachPlayerListeners(player, designator)
-        CTDebug(TAG, "createPlayer() HLS player started for $designator")
-        return player
     }
 
     fun playerFor(designator: String): ExoPlayer? {
-        CTDebug(TAG, "playerFor(${designator}):${players.containsKey(designator)}")
-        return _players[designator]
-    }
-
-    fun releasePlayer(designator: String) {
-        CTDebug(TAG, "releasePlayer(${designator})")
-        _players.remove(designator)?.let { player ->
-            CTDebug(TAG, "releasePlayer(${designator}): clearing surface and /releasing...")
-            player.clearVideoSurface()
-            player.release()
-        }
+        CTDebug(tag, "playerFor(${designator}):${players.containsKey(designator)}")
+        return streamSessions.playerFor(designator)
     }
 
     fun ensurePlayer(designator: String) {
-        // Already playing or already restarting? Do nothing.
-        CTDebug(TAG, "ensurePlayer(${designator})...")
-        if (_players.containsKey(designator)) return
-        if (restarting.contains(designator)) return
-
-        restarting += designator
-        CTDebug(TAG, "ensurePlayer(${designator}) restarting...")
-
-        viewModelScope.launch {
-            val player = createPlayer(designator)
-            _players[designator] = player
-            restarting -= designator
-        }
+        streamSessions.ensurePlayer(designator)
     }
 
-    private fun markPrepared(player: Player): Boolean {
-        return preparedPlayers.add(player)
-    }
-
-    private fun attachPlayerListeners(
-        player: ExoPlayer,
-        designator: String
-    ) {
-        player.addListener(object : Player.Listener {
-            override fun onRenderedFirstFrame() {
-                val now = System.currentTimeMillis()
-                onLive(designator)
-            }
-            override fun onPlayerError(error: PlaybackException) {
-                // there are different degrees of errors... this seems to
-                // happen on normal stream closure
-                onFatalPlayerError(designator, error)
-            }
-            override fun onTracksChanged(tracks: Tracks) {
-                val now = System.currentTimeMillis()
-
-                val hasSelectedVideo =
-                    tracks.groups.any { group ->
-                        group.type == C.TRACK_TYPE_VIDEO && group.isSelected
-                    }
-
-                if (hasSelectedVideo && markPrepared(player)) {
-                    // prepare() must happen exactly once per Player instance,
-                    // after the first video track becomes available
-                    CTDebug(TAG, "Video track available → prepare + play")
-                    player.prepare()
-                    player.playWhenReady = true
-                }
-            }
-            override fun onPlaybackStateChanged(state: Int) {
-                val now = System.currentTimeMillis()
-                when (state) {
-                    Player.STATE_BUFFERING -> {
-                        lastBufferingTime.putIfAbsent(designator, now)
-                        onBuffering(designator)
-                    }
-                    Player.STATE_READY     -> {
-                        lastBufferingTime.remove(designator)
-                        restarting.remove(designator)
-                        onLive(designator)
-                    }
-                    Player.STATE_ENDED     -> {
-                        onEnded(designator)
-                    }
-                }
-            }
-        })
+    fun releasePlayer(designator: String) {
+        streamSessions.releasePlayer(designator)
     }
 
     fun recreatePlayer(designator: String) {
-        if (isRestarting(designator)) return
-        resetPlayerState(designator)
-        restarting.add(designator)
-        lastError[designator] = System.currentTimeMillis()
-
-        viewModelScope.launch {
-            // Let MediaMTX settle (muxer recreate, etc)
-            delay(750)
-
-            _players.remove(designator)?.let { old ->
-                old.release()
-            }
-
-            _players[designator] = createPlayer(designator)
-        }
+        streamSessions.recreatePlayer(designator)
     }
-
 
     fun onFatalPlayerError(
         designator: String,
         error: PlaybackException
     ) {
-        CTWarn(TAG, "onFatalPlayerError(${designator}).", error)
-        // recreatePlayer(designator)
+        CTWarn(tag, "onFatalPlayerError(${designator}).", error)
+        recreatePlayer(designator)
     }
 
     fun toggleFocus(designator: String) {
@@ -333,24 +177,20 @@ class StreamsViewModel (
                 fString = "does not have"
                 null
             } else designator
-        CTDebug(TAG, "toggleFocus(): ${designator} ${fString} focus.")
+        CTDebug(tag, "toggleFocus(): ${designator} ${fString} focus.")
     }
 
     override fun onCleared() {
-        _players.values.forEach { it.release() }
-        _players.clear()
-        firstFrameRendered.clear()
-        lastBufferingTime.clear()
-        restarting.clear()
+        streamSessions.releaseAll()
     }
 
     override fun mapStatusUpdate(status: mapStatus?, mapNode: CaltopoNode.MapNode?, optErrmsg: String?) {
         if (status == CaltopoMap.MapStatusListener.mapStatus.up) {
-            CTDebug(TAG, "XYZZY: Connected to ${mapNode?.title}")
+            CTDebug(tag, "XYZZY: Connected to ${mapNode?.title}")
             _mapName.value = mapNode?.title
         } else {
-            _mapName.value = null;
-            CTDebug(TAG, "XYZZY: Disconnected from map")
+            _mapName.value = null
+            CTDebug(tag, "XYZZY: Disconnected from map")
         }
     }
 
@@ -368,10 +208,11 @@ class StreamsViewModel (
     fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {
         val droneSpec = droneStates[designator]?.source
 
-        if (null == droneSpec) {
-            CTDebug(TAG, "onSnapshotCaptured(${designator}): No associated dronespec.")
+        if (droneSpec == null) {
+            CTDebug(tag, "onSnapshotCaptured(${designator}): No associated dronespec.")
             return
         }
+
         _pendingClue.value = PendingClue(
             droneSpec = droneSpec,
             designator = designator,
@@ -389,6 +230,7 @@ class StreamsViewModel (
             val width = 600
             val height = (width * bitmap.height / bitmap.width)
             val preview = bitmap.scale(width, height)
+
             withContext(Dispatchers.Main) {
                 val clue = _pendingClue.value
                 if (clue != null && clue.designator == designator) {
@@ -399,22 +241,21 @@ class StreamsViewModel (
                 }
             }
         }
-        CTDebug(TAG, "onSnapshotCaptured(${designator}): clue started for ${bitmap.width}x${bitmap.height} snapshot.")
+
+        CTDebug(tag, "onSnapshotCaptured(${designator}): clue started for ${bitmap.width}x${bitmap.height} snapshot.")
     }
 
     fun updateClueTitle(title: String) {
-        _pendingClue.value =
-            _pendingClue.value?.copy(title = title)
+        _pendingClue.value = _pendingClue.value?.copy(title = title)
     }
 
     fun updateClueDescription(description: String) {
-        _pendingClue.value =
-            _pendingClue.value?.copy(description = description)
+        _pendingClue.value = _pendingClue.value?.copy(description = description)
     }
 
     fun submitClue() {
         val clue = pendingClue ?: return
-        CTDebug(TAG, "submitting clue: '${clue.title}' for '${clue.droneSpec.trackLabel()}'")
+        CTDebug(tag, "submitting clue: '${clue.title}' for '${clue.droneSpec.trackLabel()}'")
         CaltopoClient.SubmitClue(
             clue.droneSpec,
             clue.bitmap,
@@ -433,72 +274,55 @@ class StreamsViewModel (
         _pendingClue.value = null
     }
 
+    private fun syncStreamSessions(streamsMap: Map<String, StreamInfo>) {
+        val liveDesignators = streamsMap.values
+            .filter { it.state == StreamState.LIVE }
+            .map { it.designator }
+            .toSet()
 
-    init {
-        startStallPoll()
-        CaltopoMap.AddMapStatusListener(this)
-        CaltopoClient.AddDroneSpecsChangedListener(this)
-        viewModelScope.launch {
-            StreamRegistry.streams.collect { map ->
-                map.values.forEach { info ->
-                    when (info.state) {
-                        StreamState.LIVE -> {
-                            val rid = System.currentTimeMillis()
-                            restartIds[info.designator] = rid
-                            CTDebug(TAG, "Stream ${info.designator} is LIVE → ensurePlayer - rid:$rid")
-                            ensurePlayer(info.designator)
-                        }
-                        StreamState.STOPPED -> {
-                            CTDebug(TAG, "Stream ${info.designator} STOPPED → releasePlayer")
-                            releasePlayer(info.designator)
-                        }
-                        else -> Unit
-                    }
-                }
-            }
+        val removed = lastLiveDesignators - liveDesignators
+        removed.forEach { designator ->
+            CTDebug(tag, "Stream $designator no longer live -> release player")
+            streamSessions.onStreamStopped(designator)
         }
-    }
 
-    private fun onStreamLive(designator: String) {
-        val rid = System.currentTimeMillis()
-        restartIds[designator] = rid
-        CTDebug(TAG, "onStreamLive($designator) restartId:$rid")
-    }
-
-    private fun resetPlayerState(designator: String) {
-        firstFrameRendered.remove(designator)
-        lastBufferingTime.remove(designator)
-        restarting.remove(designator)
-        _players.remove(designator)?.let {
-            it.release()
-            CTDebug(TAG, "Released player for $designator")
+        liveDesignators.forEach { designator ->
+            CTDebug(tag, "Stream $designator live -> ensure player")
+            streamSessions.onStreamBecameLive(designator)
         }
-    }
-    private fun onStreamStopped(designator: String) {
-        CTDebug(TAG, "onStreamStopped($designator)")
-        resetPlayerState(designator)
+
+        lastLiveDesignators = liveDesignators
     }
 
     fun onBuffering(designator: String) {
-        CTDebug(TAG, "onBuffering(${designator})")
-    }
-    fun onLive(designator: String) {
-        CTDebug(TAG, "onLive(${designator})")
-    }
-    fun onEnded(designator: String) {
-        CTDebug(TAG, "onEnded(${designator})")
-    }
-    fun onError(designator: String, error: String) {
-        CTError(TAG, "onError(${designator}): ${error}")
-        if (isRestarting(designator)) return;
-        viewModelScope.launch {
-            delay(750) // let HLS settle
-            recreatePlayer(designator)
-        }
+        CTDebug(tag, "onBuffering(${designator})")
     }
 
+    fun onLive(designator: String) {
+        CTDebug(tag, "onLive(${designator})")
+    }
+
+    fun onEnded(designator: String) {
+        CTDebug(tag, "onEnded(${designator})")
+    }
+
+    fun onError(designator: String, error: String) {
+        CTError(tag, "onError(${designator}): ${error}")
+        recreatePlayer(designator)
+    }
 
     fun clearFocus() {
         _focusedPath.value = null
+    }
+
+    init {
+        CaltopoMap.AddMapStatusListener(this)
+        CaltopoClient.AddDroneSpecsChangedListener(this)
+
+        viewModelScope.launch {
+            StreamRegistry.streams.collect { map ->
+                syncStreamSessions(map)
+            }
+        }
     }
 }

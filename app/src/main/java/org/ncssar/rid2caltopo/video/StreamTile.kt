@@ -138,27 +138,31 @@ fun StreamPlayer(
 
     val player = viewModel.playerFor(designator) ?: return
     CTDebug(tag, "StreamPlayer(${designator}): player:$player")
+    var attachedTextureView by remember(player) { mutableStateOf<TextureView?>(null) }
+
     key(player) {
         AndroidView(
             modifier = modifier,
             factory = { context ->
                 TextureView(context).also { textureView ->
+                    attachedTextureView = textureView
                     player.setVideoTextureView(textureView)
                     onTextureViewReady(textureView)
                 }
             },
             update = { textureView ->
-                player.setVideoTextureView(textureView)
+                if (attachedTextureView !== textureView) {
+                    attachedTextureView = textureView
+                    player.setVideoTextureView(textureView)
+                }
             }
         )
     }
 
     DisposableEffect(player) {
-        CTDebug(tag, "StreamPlayer(${designator}): Preparing player - surface ready.")
-        player.prepare()
-        player.playWhenReady = true
         onDispose {
-            player.clearVideoTextureView(null)
+            attachedTextureView?.let { player.clearVideoTextureView(it) }
+            attachedTextureView = null
         }
     }
 }

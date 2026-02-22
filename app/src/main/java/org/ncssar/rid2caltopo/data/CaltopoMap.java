@@ -72,12 +72,20 @@ public class CaltopoMap implements R2CPeer.R2CListener {
          */
         void mapStatusUpdate(mapStatus status, @Nullable CaltopoNode.MapNode mapNode,  @Nullable String optErrmsg);
     }
+
+    public interface ArtifactListener {
+        void onArtifactFeature(
+                @NonNull JSONObject feature,
+                @NonNull String source,
+                long receivedAtMsec
+        );
+    }
     private static final String TAG = "CaltopoMap";
     private static CaltopoSession Csp;
     private static String MyUUID = null;
     public static android.location.Location MyLocation;
-    private static final long FirstMapUpdateTimeInSeconds = 15;
-    private static final long RepeatMapUpdateTimeInSeconds = 90;
+    private static long FirstMapUpdateTimeInSeconds = 15;
+    private static long RepeatMapUpdateTimeInSeconds = 90;
     public static final CtLineProperty ArchiveLineProp =
             new CtLineProperty(2, 0.5F, "#ff00ff", "solid");
     private static final int MAX_MAP_STARTUP_DELAY_IN_SECONDS = 45;
@@ -107,6 +115,9 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static final ArrayList<JSONObject> RogueFeaturesPendingDeletes = new ArrayList<>();
 
     private static final HashSet<MapStatusListener> MapListeners = new HashSet<>();
+    private static final HashSet<ArtifactListener> ArtifactListeners = new HashSet<>();
+    private static final Object ArtifactLock = new Object();
+    private static final Hashtable<String, JSONObject> ArtifactFeaturesById = new Hashtable<>();
 
     private static JSONArray MyLiveTracksInThisMap;   // Actual 'LiveTrack' objects in the current map
     private static String LastErrorString = null;
@@ -265,6 +276,59 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         MapListeners.remove(listener);
     }
 
+    public static void AddArtifactListener(@NonNull ArtifactListener listener) {
+        ArrayList<JSONObject> artifactSnapshot;
+        synchronized (ArtifactLock) {
+            ArtifactListeners.add(listener);
+            artifactSnapshot = new ArrayList<>(ArtifactFeaturesById.values());
+        }
+        if (!artifactSnapshot.isEmpty()) {
+            long now = System.currentTimeMillis();
+            CTDebug(TAG, String.format(Locale.US,
+                    "AddArtifactListener(): replaying %d cached artifacts to new listener.",
+                    artifactSnapshot.size()));
+            for (JSONObject feature : artifactSnapshot) try {
+                listener.onArtifactFeature(feature, "full", now);
+            } catch (Exception e) {
+                CTError(TAG, "AddArtifactListener() replay listener raised", e);
+            }
+        }
+    }
+
+    public static void RemoveArtifactListener(@NonNull ArtifactListener listener) {
+        synchronized (ArtifactLock) {
+            ArtifactListeners.remove(listener);
+        }
+    }
+
+    @NonNull
+    public static ArrayList<JSONObject> GetArtifactFeatureSnapshot() {
+        synchronized (ArtifactLock) {
+            return new ArrayList<>(ArtifactFeaturesById.values());
+        }
+    }
+
+    public static long GetMapUpdateInitialDelayInSeconds() {
+        return FirstMapUpdateTimeInSeconds;
+    }
+
+    public static long GetMapUpdateRepeatDelayInSeconds() {
+        return RepeatMapUpdateTimeInSeconds;
+    }
+
+    public static void SetMapUpdateDelayInSeconds(long initialDelay, long repeatDelay) {
+        FirstMapUpdateTimeInSeconds = Math.max(5, initialDelay);
+        RepeatMapUpdateTimeInSeconds = Math.max(10, repeatDelay);
+        CTInfo(TAG, String.format(Locale.US,
+                "SetMapUpdateDelayInSeconds(): initial=%d repeat=%d",
+                FirstMapUpdateTimeInSeconds, RepeatMapUpdateTimeInSeconds));
+    }
+
+    public static void RequestMapRefreshNow() {
+        if (MapNode == null) return;
+        PollMapUpdates();
+    }
+
     public static void AddLiveTrack(@NonNull CaltopoLiveTrack track) {
         liveTracks.add(track);
     }
@@ -333,6 +397,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     public static void ResetMapConnection(long maxWaitInMilliseconds) {
         if (MapStatus == MapStatusListener.mapStatus.down) return;
         MapCheckerDelay.stop();
+        resetArtifactStore("ResetMapConnection");
         long startTime = System.currentTimeMillis();
         CaltopoOp deleteOp = null;
         if (UsePeersFlag) {
@@ -418,6 +483,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         int newCount = 0, ignoreCount = 0;
         for (int i = 0; i < count; i++) {
             JSONObject feature = features.optJSONObject(i);
+            notifyArtifactFeature(feature, "delta");
             JSONObject prop = feature.optJSONObject("properties");
             if (null == prop) {
                 CTDebug(TAG, "parseMapUpdate(): Feature missing required properties parameter.");
@@ -486,6 +552,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static void ParseMap(JSONObject state)
             throws RuntimeException, JSONException {
 
+        resetArtifactStore("ParseMap(full)");
         MyLiveTracksInThisMap = new JSONArray();
         JSONArray markerFeatures = new JSONArray();
         SimpleDateFormat sdf = new SimpleDateFormat("ddMMM", Locale.US);
@@ -499,6 +566,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
         for (int i = 0; i < features.length(); i++) {
             JSONObject feature = features.getJSONObject(i);
+            notifyArtifactFeature(feature, "full");
             CTInfo(TAG, "parseMap(): Parsing returned feature:\n" + feature.toString(2));
             JSONObject prop = feature.optJSONObject("properties");
             if (null == prop) {
@@ -778,7 +846,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
         if (updateNeeded) {
             if (null == MyLocation) MyLocation = location;
-            CTDebug(TAG, String.format(Locale.US,
+            CTInfo(TAG, String.format(Locale.US,
                     """
                               UpdateMyLocation()
                                 new: lat:%.7f, lng:%.7f, accuracy:%.3fm
@@ -1113,5 +1181,65 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         } catch (Exception e) {
             CTError(TAG, "Shutdown() raised: ", e);
         }
+    }
+
+    private static void notifyArtifactFeature(@Nullable JSONObject feature, @NonNull String source) {
+        if (feature == null) return;
+        ArrayList<ArtifactListener> listeners;
+        int artifactCount = applyArtifactToStore(feature);
+        synchronized (ArtifactLock) {
+            if (ArtifactListeners.isEmpty()) return;
+            listeners = new ArrayList<>(ArtifactListeners);
+        }
+        String featureId = feature.optString("id");
+        String featureClass = "";
+        JSONObject properties = feature.optJSONObject("properties");
+        if (properties != null) {
+            featureClass = properties.optString("class");
+        }
+        CTDebug(TAG, String.format(Locale.US,
+                "notifyArtifactFeature(): source=%s id=%s class=%s cached=%d listeners=%d",
+                source, featureId, featureClass, artifactCount, listeners.size()));
+        long now = System.currentTimeMillis();
+        for (ArtifactListener listener : listeners) try {
+            listener.onArtifactFeature(feature, source, now);
+        } catch (Exception e) {
+            CTError(TAG, "notifyArtifactFeature() listener raised", e);
+        }
+    }
+
+    private static int applyArtifactToStore(@NonNull JSONObject feature) {
+        String featureId = feature.optString("id", "");
+        if (featureId.isEmpty()) {
+            synchronized (ArtifactLock) {
+                return ArtifactFeaturesById.size();
+            }
+        }
+        synchronized (ArtifactLock) {
+            if (isArtifactDelete(feature)) {
+                ArtifactFeaturesById.remove(featureId);
+            } else {
+                ArtifactFeaturesById.put(featureId, feature);
+            }
+            return ArtifactFeaturesById.size();
+        }
+    }
+
+    private static boolean isArtifactDelete(@NonNull JSONObject feature) {
+        if (feature.optBoolean("deleted", false)) return true;
+        JSONObject properties = feature.optJSONObject("properties");
+        if (properties == null) {
+            return feature.has("id") && !feature.has("geometry");
+        }
+        if (properties.optBoolean("deleted", false)) return true;
+        String action = properties.optString("action", "");
+        return "delete".equalsIgnoreCase(action) || "removed".equalsIgnoreCase(action);
+    }
+
+    private static void resetArtifactStore(@NonNull String reason) {
+        synchronized (ArtifactLock) {
+            ArtifactFeaturesById.clear();
+        }
+        CTDebug(TAG, "resetArtifactStore(): " + reason);
     }
 }

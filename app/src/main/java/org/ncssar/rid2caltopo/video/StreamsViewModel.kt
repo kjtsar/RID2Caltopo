@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.PlaybackException
 import androidx.media3.exoplayer.ExoPlayer
+import android.view.Surface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
@@ -28,6 +30,8 @@ import org.ncssar.rid2caltopo.data.CaltopoMap.MapStatusListener.mapStatus
 import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DesignatorState
+import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
@@ -44,7 +48,8 @@ data class PendingClue(
     val bitmap: Bitmap?,
     val preview: Bitmap?,
     val title: String,
-    val description: String
+    val description: String,
+    val streamTelemetrySummary: String? = null
 )
 
 @Stable
@@ -105,6 +110,7 @@ class StreamsViewModel(
             }
         }
     )
+    private val ffmpegProbeService = FfmpegProbeService()
 
     val streams: StateFlow<Map<String, StreamInfo>> =
         StreamRegistry.streams.stateIn(
@@ -150,6 +156,18 @@ class StreamsViewModel(
         return streamSessions.playerFor(designator)
     }
 
+    fun useFfmpegRender(designator: String): Boolean {
+        return ffmpegProbeService.isRenderEnabled(designator)
+    }
+
+    fun bindFfmpegRenderSurface(designator: String, surface: Surface): Boolean {
+        return ffmpegProbeService.bindRenderSurface(designator, surface)
+    }
+
+    fun unbindFfmpegRenderSurface(designator: String) {
+        ffmpegProbeService.unbindRenderSurface(designator)
+    }
+
     fun ensurePlayer(designator: String) {
         streamSessions.ensurePlayer(designator)
     }
@@ -181,6 +199,7 @@ class StreamsViewModel(
     }
 
     override fun onCleared() {
+        ffmpegProbeService.close()
         streamSessions.releaseAll()
     }
 
@@ -213,17 +232,25 @@ class StreamsViewModel(
             return
         }
 
+        val telemetry = ffmpegProbeService.telemetrySnapshot(designator)
+        val clueLat = telemetry?.latitude ?: droneSpec.lastLat
+        val clueLng = telemetry?.longitude ?: droneSpec.lastLng
+        val clueAlt = telemetry?.altitudeMeters ?: droneSpec.lastAlt
+        val clueTimestamp = telemetry?.sourceTimestampUs?.let { it / 1000L } ?: droneSpec.mostRecentMsecTimestamp
+        val summary = buildTelemetrySummary(designator, droneSpec, telemetry)
+
         _pendingClue.value = PendingClue(
             droneSpec = droneSpec,
             designator = designator,
-            lat = droneSpec.lastLat,
-            lng = droneSpec.lastLng,
-            alt = droneSpec.lastAlt,
-            timestamp = droneSpec.mostRecentMsecTimestamp,
+            lat = clueLat,
+            lng = clueLng,
+            alt = clueAlt,
+            timestamp = clueTimestamp,
             bitmap = bitmap,
             preview = null,
             title = "",
-            description = ""
+            description = summary ?: "",
+            streamTelemetrySummary = summary
         )
 
         viewModelScope.launch(Dispatchers.Default) {
@@ -256,6 +283,7 @@ class StreamsViewModel(
     fun submitClue() {
         val clue = pendingClue ?: return
         CTDebug(tag, "submitting clue: '${clue.title}' for '${clue.droneSpec.trackLabel()}'")
+        val finalDescription = appendTelemetrySummary(clue.description, clue.streamTelemetrySummary)
         CaltopoClient.SubmitClue(
             clue.droneSpec,
             clue.bitmap,
@@ -263,7 +291,7 @@ class StreamsViewModel(
             clue.lng,
             clue.alt,
             clue.title,
-            clue.description,
+            finalDescription,
             clue.timestamp
         )
 
@@ -272,6 +300,45 @@ class StreamsViewModel(
 
     fun clearPendingClue() {
         _pendingClue.value = null
+    }
+
+    private fun buildTelemetrySummary(
+        designator: String,
+        droneSpec: CtDroneSpec,
+        telemetry: StreamTelemetrySnapshot?
+    ): String? {
+        if (telemetry == null) return null
+
+        val lines = mutableListOf<String>()
+        lines += "[Stream Telemetry]"
+        lines += "Designator: $designator"
+        lines += "Mapped ID: ${droneSpec.mappedId}"
+        lines += "RID (track): ${droneSpec.remoteId}"
+
+        telemetry.latestRemoteId?.let { lines += "RID (stream): $it" }
+        if (telemetry.remoteIdCandidates.isNotEmpty()) {
+            lines += "RID candidates: ${telemetry.remoteIdCandidates.joinToString(",")}"
+        }
+        if (telemetry.latitude != null && telemetry.longitude != null) {
+            val altText = telemetry.altitudeMeters?.let { String.format(Locale.US, ", alt=%.1fm", it) } ?: ""
+            lines += String.format(Locale.US, "Stream position: %.6f, %.6f%s", telemetry.latitude, telemetry.longitude, altText)
+        }
+        telemetry.headingDeg?.let { lines += String.format(Locale.US, "Heading: %.1f deg", it) }
+        telemetry.gimbalPitchDeg?.let { lines += String.format(Locale.US, "Gimbal pitch: %.1f deg", it) }
+        telemetry.cameraYawDeg?.let { lines += String.format(Locale.US, "Camera yaw: %.1f deg", it) }
+        telemetry.sourceTag?.let { src ->
+            val confidenceText = telemetry.confidence?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"
+            lines += "Telemetry source: $src (confidence=$confidenceText)"
+        }
+        telemetry.sourceTimestampUs?.let { lines += "Telemetry timestamp(us): $it" }
+        return lines.joinToString("\n")
+    }
+
+    private fun appendTelemetrySummary(description: String, summary: String?): String {
+        if (summary.isNullOrBlank()) return description
+        if (description.contains("[Stream Telemetry]")) return description
+        if (description.isBlank()) return summary
+        return "$description\n\n$summary"
     }
 
     private fun syncStreamSessions(streamsMap: Map<String, StreamInfo>) {
@@ -283,12 +350,19 @@ class StreamsViewModel(
         val removed = lastLiveDesignators - liveDesignators
         removed.forEach { designator ->
             CTDebug(tag, "Stream $designator no longer live -> release player")
+            ffmpegProbeService.onStreamStopped(designator)
             streamSessions.onStreamStopped(designator)
         }
 
         liveDesignators.forEach { designator ->
-            CTDebug(tag, "Stream $designator live -> ensure player")
-            streamSessions.onStreamBecameLive(designator)
+            ffmpegProbeService.onStreamBecameLive(designator)
+            if (ffmpegProbeService.isRenderEnabled(designator)) {
+                CTDebug(tag, "Stream $designator live -> FFmpeg render active, skipping Exo player")
+                streamSessions.onStreamStopped(designator)
+            } else {
+                CTDebug(tag, "Stream $designator live -> ensure Exo player")
+                streamSessions.onStreamBecameLive(designator)
+            }
         }
 
         lastLiveDesignators = liveDesignators

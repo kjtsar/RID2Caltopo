@@ -48,6 +48,9 @@ android {
         buildConfigField "String", "BUILD_VERSION", "\"${appVersionName}\""
         def buildTime = new Date()
         buildConfigField "String", "BUILD_TIME", "\"${buildTime.format('ddLLLyyyy:HHmmss')}\""
+        buildConfigField "boolean", "ENABLE_FFMPEG_PROBE", "true"
+        buildConfigField "boolean", "ENABLE_FFMPEG_RENDER", "true"
+        buildConfigField "String", "FFMPEG_RENDER_DESIGNATOR", "\"\""
 
         ndk {
             abiFilters 'arm64-v8a'
@@ -165,4 +168,5 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.datastore:datastore-core:1.1.1")
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
 }

@@ -244,7 +244,7 @@ fun MainScreen(
                             }
                             menuExpanded = true
                         })
-                        DropdownMenuItem(text = { Text("Stream Service")}, onClick = {
+                        DropdownMenuItem(text = { Text("Live View")}, onClick = {
                             localViewModel.showStreams()
                             CaltopoClient.CTEvent(tag,"Stream Service Activated", null)
                             menuExpanded = false

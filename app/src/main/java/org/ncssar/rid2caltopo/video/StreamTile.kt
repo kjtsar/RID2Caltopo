@@ -1,10 +1,8 @@
 package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
-import android.app.Activity
-import android.graphics.Bitmap
-import android.view.PixelCopy
-import android.view.SurfaceView
+import android.graphics.SurfaceTexture
+import android.view.Surface
 import android.view.TextureView
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -14,7 +12,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.ui.PlayerView
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -24,8 +21,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.ncssar.rid2caltopo.data.CaltopoClient
 
@@ -135,6 +130,69 @@ fun StreamPlayer(
     val tag = "StreamPlayer"
     CTDebug(tag, "StreamPlayer(${designator}) streamState:${state.name}")
     if (state != StreamState.LIVE) return
+
+    val useFfmpeg = viewModel.useFfmpegRender(designator)
+    if (useFfmpeg) {
+        CTDebug(tag, "StreamPlayer(${designator}) using FFmpeg render path.")
+        var attachedTextureView by remember(designator) { mutableStateOf<TextureView?>(null) }
+        var attachedSurface by remember(designator) { mutableStateOf<Surface?>(null) }
+
+        AndroidView(
+            modifier = modifier,
+            factory = { context ->
+                TextureView(context).also { textureView ->
+                    attachedTextureView = textureView
+                    onTextureViewReady(textureView)
+                    textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(
+                            surfaceTexture: SurfaceTexture,
+                            width: Int,
+                            height: Int
+                        ) {
+                            attachedSurface?.release()
+                            attachedSurface = Surface(surfaceTexture)
+                            val bound = viewModel.bindFfmpegRenderSurface(
+                                designator,
+                                attachedSurface!!
+                            )
+                            CTDebug(tag, "FFmpeg surface bound for $designator: $bound")
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(
+                            surfaceTexture: SurfaceTexture,
+                            width: Int,
+                            height: Int
+                        ) = Unit
+
+                        override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                            viewModel.unbindFfmpegRenderSurface(designator)
+                            attachedSurface?.release()
+                            attachedSurface = null
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
+                    }
+                }
+            },
+            update = { textureView ->
+                if (attachedTextureView !== textureView) {
+                    attachedTextureView = textureView
+                    onTextureViewReady(textureView)
+                }
+            }
+        )
+
+        DisposableEffect(designator) {
+            onDispose {
+                viewModel.unbindFfmpegRenderSurface(designator)
+                attachedSurface?.release()
+                attachedSurface = null
+                attachedTextureView = null
+            }
+        }
+        return
+    }
 
     val player = viewModel.playerFor(designator) ?: return
     CTDebug(tag, "StreamPlayer(${designator}): player:$player")

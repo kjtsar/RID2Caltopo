@@ -1,8 +1,16 @@
 package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.location.Location
 import android.graphics.Color as AndroidColor
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Rect
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -42,6 +50,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,6 +70,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
@@ -81,8 +91,13 @@ import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
 import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
+import java.net.URLEncoder
+import java.net.URL
+import java.nio.charset.StandardCharsets
 
 private const val MAP_PANE_TAG = "SplitMapPane"
+private const val LOCAL_DEVICE_SYMBOL = "radiotower"
+private const val LOCAL_DEVICE_COLOR = "0000FF"
 
 private enum class ScreenLayoutMode {
     Both,
@@ -106,7 +121,9 @@ private data class ArtifactPointSpec(
     val id: String,
     val lat: Double,
     val lng: Double,
-    val title: String
+    val title: String,
+    val markerSymbol: String,
+    val markerColor: String?
 )
 
 private data class ArtifactLineSpec(
@@ -406,6 +423,10 @@ private fun SplitMapPane(
     var initialViewportApplied by remember { mutableStateOf(false) }
     var initialViewportArtifactCount by remember { mutableStateOf(-1) }
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
+    val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
+    val caltopoMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
+    val caltopoMarkerPending = remember { HashSet<String>() }
+    val unknownSymbolsSeen = remember { LinkedHashSet<String>() }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val dronePoints = viewModel.droneStates.mapNotNull { (designator, state) ->
         val lat = state.lastLat
@@ -579,13 +600,71 @@ private fun SplitMapPane(
                 }
 
                 artifactOverlayState.points.forEach { point ->
+                    val remoteCacheKey = caltopoMarkerCacheKey(point.markerSymbol, point.markerColor)
+                    val remoteIcon = caltopoMarkerCache[remoteCacheKey]
+                    if (remoteIcon == null && !caltopoMarkerPending.contains(remoteCacheKey)) {
+                        caltopoMarkerPending.add(remoteCacheKey)
+                        val iconUrl = caltopoIconUrl(point.markerSymbol, point.markerColor)
+                        uiScope.launch(Dispatchers.IO) {
+                            val loaded = tryLoadRemoteIconDrawable(context.resources, iconUrl)
+                            withContext(Dispatchers.Main.immediate) {
+                                if (loaded != null) {
+                                    caltopoMarkerCache[remoteCacheKey] = loaded
+                                }
+                                caltopoMarkerPending.remove(remoteCacheKey)
+                            }
+                        }
+                    }
                     val marker = Marker(mapView).apply {
                         position = GeoPoint(point.lat, point.lng)
-                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        icon = (remoteIcon?.constantState?.newDrawable(context.resources)?.mutate())
+                            ?: markerIconForArtifactSymbol(
+                                resources = context.resources,
+                                symbol = point.markerSymbol,
+                                colorHex = point.markerColor,
+                                cache = symbolMarkerCache
+                            )
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = point.title
+                    }
+                    if (!isKnownArtifactSymbol(point.markerSymbol) && unknownSymbolsSeen.add(point.markerSymbol)) {
+                        CTDebug(MAP_PANE_TAG, "Unknown marker-symbol encountered: '${point.markerSymbol}'")
                     }
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
+                }
+
+                val myLocation = CaltopoMap.MyLocation
+                if (myLocation != null && myLocation.latitude.isFinite() && myLocation.longitude.isFinite()) {
+                    val localCacheKey = caltopoMarkerCacheKey(LOCAL_DEVICE_SYMBOL, LOCAL_DEVICE_COLOR)
+                    val localRemoteIcon = caltopoMarkerCache[localCacheKey]
+                    if (localRemoteIcon == null && !caltopoMarkerPending.contains(localCacheKey)) {
+                        caltopoMarkerPending.add(localCacheKey)
+                        val iconUrl = caltopoIconUrl(LOCAL_DEVICE_SYMBOL, LOCAL_DEVICE_COLOR)
+                        uiScope.launch(Dispatchers.IO) {
+                            val loaded = tryLoadRemoteIconDrawable(context.resources, iconUrl)
+                            withContext(Dispatchers.Main.immediate) {
+                                if (loaded != null) {
+                                    caltopoMarkerCache[localCacheKey] = loaded
+                                }
+                                caltopoMarkerPending.remove(localCacheKey)
+                            }
+                        }
+                    }
+                    val localMarker = Marker(mapView).apply {
+                        position = GeoPoint(myLocation.latitude, myLocation.longitude)
+                        icon = (localRemoteIcon?.constantState?.newDrawable(context.resources)?.mutate())
+                            ?: markerIconForArtifactSymbol(
+                                resources = context.resources,
+                                symbol = LOCAL_DEVICE_SYMBOL,
+                                colorHex = LOCAL_DEVICE_COLOR,
+                                cache = symbolMarkerCache
+                            )
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        title = "RID2Caltopo Device"
+                    }
+                    mapView.overlays.add(localMarker)
+                    managedOverlays.add(localMarker)
                 }
 
                 dronePoints.forEach { point ->
@@ -740,6 +819,8 @@ private fun buildArtifactOverlayState(features: Collection<JSONObject>): Artifac
         val featureTitle = properties?.optString("title")
             ?.takeIf { it.isNotBlank() }
             ?: "$className:$featureId"
+        val markerSymbol = properties?.optString("marker-symbol", "point").orEmpty().ifBlank { "point" }
+        val markerColor = properties?.optString("marker-color")
         val trackLikeFeature = isTrackLikeFeature(properties, className)
 
         val strokeColor = colorFromHex(
@@ -761,6 +842,8 @@ private fun buildArtifactOverlayState(features: Collection<JSONObject>): Artifac
             strokeColor = strokeColor,
             fillColor = fillColor,
             strokeWidth = strokeWidth,
+            markerSymbol = markerSymbol,
+            markerColor = markerColor,
             trackLikeFeature = trackLikeFeature,
             pointsOut = points,
             linesOut = lines,
@@ -795,6 +878,8 @@ private fun appendGeometryArtifact(
     strokeColor: Int,
     fillColor: Int,
     strokeWidth: Float,
+    markerSymbol: String,
+    markerColor: String?,
     trackLikeFeature: Boolean,
     pointsOut: MutableList<ArtifactPointSpec>,
     linesOut: MutableList<ArtifactLineSpec>,
@@ -805,7 +890,14 @@ private fun appendGeometryArtifact(
         "Point" -> {
             val coords = geometry.optJSONArray("coordinates") ?: return 0
             val geoPoint = geoPointFromLngLat(coords) ?: return 0
-            pointsOut += ArtifactPointSpec(featureId, geoPoint.latitude, geoPoint.longitude, featureTitle)
+            pointsOut += ArtifactPointSpec(
+                id = featureId,
+                lat = geoPoint.latitude,
+                lng = geoPoint.longitude,
+                title = featureTitle,
+                markerSymbol = markerSymbol,
+                markerColor = markerColor
+            )
         }
 
         "LineString" -> {
@@ -881,6 +973,8 @@ private fun appendGeometryArtifact(
                     strokeColor = strokeColor,
                     fillColor = fillColor,
                     strokeWidth = strokeWidth,
+                    markerSymbol = markerSymbol,
+                    markerColor = markerColor,
                     trackLikeFeature = trackLikeFeature,
                     pointsOut = pointsOut,
                     linesOut = linesOut,
@@ -993,6 +1087,285 @@ private fun nearestLocalTrackTailDistanceMeters(
         }
     }
     return best
+}
+
+private fun isKnownArtifactSymbol(symbol: String): Boolean {
+    return symbolGlyphForMarkerSymbol(symbol) != null
+}
+
+private fun markerIconForArtifactSymbol(
+    resources: android.content.res.Resources,
+    symbol: String,
+    colorHex: String?,
+    cache: MutableMap<String, Drawable>
+): Drawable {
+    val normalizedSymbol = symbol.ifBlank { "point" }
+    val normalizedColor = normalizeMarkerColor(colorHex, normalizedSymbol)
+    val cacheKey = "$normalizedSymbol|$normalizedColor"
+    val cached = cache[cacheKey]
+    if (cached != null) {
+        return cached.constantState?.newDrawable(resources)?.mutate() ?: cached
+    }
+
+    val icon = buildCaltopoLikeSymbolDrawable(resources, normalizedSymbol, normalizedColor)
+    cache[cacheKey] = icon
+    return icon.constantState?.newDrawable(resources)?.mutate() ?: icon
+}
+
+private fun caltopoMarkerCacheKey(symbol: String, colorHex: String?): String {
+    return "${symbol.ifBlank { "point" }}|${colorHex?.trim().orEmpty()}"
+}
+
+private fun caltopoIconUrl(symbol: String, colorHex: String?): String {
+    val normalizedSymbol = symbol.ifBlank { "point" }
+    val color = colorHex
+        ?.trim()
+        ?.removePrefix("#")
+        ?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+    val cfg = if (color != null) "$normalizedSymbol,$color" else normalizedSymbol
+    val encodedCfg = URLEncoder.encode(cfg, StandardCharsets.UTF_8.toString())
+    return "https://caltopo.com/icon@2x.png?cfg=$encodedCfg"
+}
+
+private fun tryLoadRemoteIconDrawable(
+    resources: android.content.res.Resources,
+    iconUrl: String
+): Drawable? {
+    return try {
+        URL(iconUrl).openStream().use { stream ->
+            val bitmap = BitmapFactory.decodeStream(stream) ?: return null
+            BitmapDrawable(resources, bitmap)
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun symbolGlyphForMarkerSymbol(symbol: String): String? {
+    return when (symbol.lowercase()) {
+        "point" -> "\u2022"
+        "c:ring" -> "\u25cb"
+        "c:target1" -> "1"
+        "c:target2" -> "2"
+        "c:target3" -> "3"
+        "cp" -> "CP"
+        "clue" -> "?"
+        "heatsource" -> "HS"
+        "fire-hotspot" -> "HOT"
+        "medevac-site" -> "+"
+        "hut" -> "\u2302"
+        "camping" -> "CAMP"
+        "radiotower" -> "RT"
+        "waterfalls" -> "WF"
+        "fuel" -> "F"
+        "automobile" -> "CAR"
+        "4wd" -> "4W"
+        else -> null
+    }
+}
+
+private fun fallbackGlyphForSymbol(symbol: String): String {
+    val compact = symbol.replace("[^A-Za-z0-9]".toRegex(), "").uppercase()
+    return when {
+        compact.length >= 2 -> compact.substring(0, 2)
+        compact.isNotEmpty() -> compact
+        else -> "?"
+    }
+}
+
+private fun normalizeMarkerColor(colorHex: String?, symbol: String): Int {
+    val raw = colorHex?.trim().orEmpty()
+    if (raw.isEmpty() || raw.equals("null", ignoreCase = true)) {
+        return when (symbol.lowercase()) {
+            "cp", "clue", "medevac-site" -> AndroidColor.parseColor("#2D4FAE")
+            "heatsource", "fire-hotspot", "c:ring", "c:target1", "c:target2", "c:target3", "point" ->
+                AndroidColor.parseColor("#FF1B1B")
+            else -> AndroidColor.parseColor("#111111")
+        }
+    }
+    val prefixed = if (raw.startsWith("#")) raw else "#$raw"
+    return try {
+        AndroidColor.parseColor(prefixed)
+    } catch (_: IllegalArgumentException) {
+        AndroidColor.parseColor("#111111")
+    }
+}
+
+private fun buildCaltopoLikeSymbolDrawable(
+    resources: android.content.res.Resources,
+    symbol: String,
+    fillColor: Int
+): Drawable {
+    val sizePx = 56
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val cx = sizePx / 2f
+    val cy = sizePx / 2f
+
+    val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = fillColor
+    }
+    val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = fillColor
+        strokeWidth = 4f
+    }
+    val whiteStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = AndroidColor.WHITE
+        strokeWidth = 4f
+    }
+    val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.WHITE
+        textAlign = Paint.Align.CENTER
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    val black = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = AndroidColor.BLACK
+    }
+    val blackStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = AndroidColor.BLACK
+        strokeWidth = 3f
+    }
+
+    when (symbol.lowercase()) {
+        "point" -> canvas.drawCircle(cx, cy, 8f, fill)
+        "c:ring" -> canvas.drawCircle(cx, cy, 10f, stroke)
+        "c:target1" -> {
+            canvas.drawCircle(cx, cy, 11f, stroke)
+            canvas.drawCircle(cx, cy, 2.5f, fill)
+        }
+        "c:target2" -> {
+            canvas.drawCircle(cx, cy, 11f, stroke)
+            canvas.drawLine(cx - 16, cy, cx + 16, cy, stroke)
+            canvas.drawLine(cx, cy - 16, cx, cy + 16, stroke)
+        }
+        "c:target3" -> {
+            canvas.drawCircle(cx, cy, 8f, stroke)
+            canvas.drawCircle(cx, cy, 14f, stroke)
+            canvas.drawLine(cx - 16, cy, cx + 16, cy, stroke)
+            canvas.drawLine(cx, cy - 16, cx, cy + 16, stroke)
+        }
+        "cp" -> {
+            val p = Path().apply {
+                moveTo(cx - 12, cy - 12)
+                lineTo(cx + 12, cy - 12)
+                lineTo(cx + 12, cy + 12)
+                lineTo(cx - 12, cy + 12)
+                close()
+            }
+            canvas.drawPath(p, fill)
+            canvas.drawLine(cx - 10, cy + 10, cx + 10, cy - 10, whiteStroke)
+        }
+        "clue" -> {
+            canvas.drawCircle(cx, cy, 11.5f, fill)
+            text.textSize = 22f
+            val bounds = Rect()
+            text.getTextBounds("?", 0, 1, bounds)
+            canvas.drawText("?", cx, cy + bounds.height() / 2f, text)
+        }
+        "heatsource" -> {
+            canvas.drawCircle(cx, cy, 11.5f, stroke)
+            canvas.drawLine(cx - 8, cy - 8, cx + 8, cy + 8, stroke)
+            canvas.drawLine(cx + 8, cy - 8, cx - 8, cy + 8, stroke)
+        }
+        "fire-hotspot" -> {
+            canvas.drawCircle(cx, cy, 11.5f, stroke)
+            canvas.drawCircle(cx, cy, 4.5f, fill)
+        }
+        "medevac-site" -> {
+            stroke.color = AndroidColor.parseColor("#2D4FAE")
+            canvas.drawCircle(cx, cy, 11.5f, stroke)
+            fill.color = AndroidColor.parseColor("#E61E2B")
+            canvas.drawRect(cx - 2, cy - 7, cx + 2, cy + 7, fill)
+            canvas.drawRect(cx - 7, cy - 2, cx + 7, cy + 2, fill)
+        }
+        "hut" -> {
+            val roof = Path().apply {
+                moveTo(cx - 11, cy + 2)
+                lineTo(cx, cy - 10)
+                lineTo(cx + 11, cy + 2)
+                close()
+            }
+            canvas.drawPath(roof, black)
+            canvas.drawRect(cx - 9, cy + 2, cx + 9, cy + 12, black)
+            val door = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.WHITE }
+            canvas.drawRect(cx - 2, cy + 6, cx + 2, cy + 12, door)
+        }
+        "camping" -> {
+            val tent = Path().apply {
+                moveTo(cx - 12, cy + 10)
+                lineTo(cx - 1, cy - 10)
+                lineTo(cx + 12, cy + 10)
+                close()
+            }
+            canvas.drawPath(tent, blackStroke)
+            canvas.drawLine(cx - 2, cy + 10, cx + 3, cy + 2, blackStroke)
+        }
+        "radiotower" -> {
+            canvas.drawLine(cx, cy - 12, cx - 5, cy + 12, blackStroke)
+            canvas.drawLine(cx, cy - 12, cx + 5, cy + 12, blackStroke)
+            canvas.drawLine(cx - 4, cy + 2, cx + 4, cy + 2, blackStroke)
+            canvas.drawLine(cx - 6, cy + 12, cx + 6, cy + 12, blackStroke)
+            canvas.drawArc(cx - 14, cy - 12, cx - 2, cy, -70f, 140f, false, blackStroke)
+            canvas.drawArc(cx + 2, cy - 12, cx + 14, cy, 110f, 140f, false, blackStroke)
+        }
+        "waterfalls" -> {
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.BLACK
+                style = Paint.Style.STROKE
+                strokeWidth = 2.5f
+            }
+            canvas.drawLine(cx - 8, cy - 10, cx - 8, cy + 6, p)
+            canvas.drawLine(cx - 2, cy - 10, cx - 2, cy + 4, p)
+            canvas.drawLine(cx + 4, cy - 10, cx + 4, cy + 7, p)
+            canvas.drawArc(cx - 12, cy + 2, cx + 10, cy + 16, 200f, 140f, false, p)
+        }
+        "fuel" -> {
+            canvas.drawRect(cx - 8, cy - 10, cx + 4, cy + 10, blackStroke)
+            canvas.drawLine(cx + 4, cy - 8, cx + 10, cy - 8, blackStroke)
+            canvas.drawLine(cx + 10, cy - 8, cx + 10, cy + 4, blackStroke)
+            canvas.drawLine(cx + 10, cy + 4, cx + 6, cy + 4, blackStroke)
+            canvas.drawLine(cx - 10, cy + 12, cx + 10, cy + 12, blackStroke)
+        }
+        "automobile", "4wd" -> {
+            val y = cy + 4
+            val body = Path().apply {
+                moveTo(cx - 12, y)
+                lineTo(cx - 7, y - 6)
+                lineTo(cx + 5, y - 6)
+                lineTo(cx + 12, y)
+                lineTo(cx + 12, y + 5)
+                lineTo(cx - 12, y + 5)
+                close()
+            }
+            canvas.drawPath(body, black)
+            canvas.drawCircle(cx - 7, y + 6, 3f, black)
+            canvas.drawCircle(cx + 7, y + 6, 3f, black)
+            if (symbol.lowercase() == "4wd") {
+                canvas.drawRect(cx - 2, y - 12, cx + 2, y - 6, black)
+            }
+        }
+        else -> {
+            val glyph = symbolGlyphForMarkerSymbol(symbol) ?: fallbackGlyphForSymbol(symbol)
+            canvas.drawCircle(cx, cy, sizePx * 0.38f, fill)
+            val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                color = AndroidColor.WHITE
+                strokeWidth = 3f
+            }
+            canvas.drawCircle(cx, cy, sizePx * 0.38f, border)
+            text.textSize = if (glyph.length > 2) 14f else 18f
+            val bounds = Rect()
+            text.getTextBounds(glyph, 0, glyph.length, bounds)
+            canvas.drawText(glyph, cx, cy + bounds.height() / 2f, text)
+        }
+    }
+
+    return BitmapDrawable(resources, bitmap)
 }
 
 fun <T> List<T>.padTo(size: Int): List<T?> =

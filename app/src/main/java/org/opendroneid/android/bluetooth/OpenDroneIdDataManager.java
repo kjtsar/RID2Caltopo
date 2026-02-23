@@ -20,13 +20,27 @@ import org.opendroneid.android.data.SystemData;
 import org.opendroneid.android.data.OperatorIdData;
 import org.ncssar.rid2caltopo.data.CaltopoClient;
 
-import java.time.Instant;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class OpenDroneIdDataManager {
     public final ConcurrentHashMap<Long, AircraftObject> aircraft = new ConcurrentHashMap<>();
+    private static class LastReportedLocation {
+        final long droneTimestampMsec;
+        final double lat;
+        final double lng;
+        final long altitudeMeters;
+
+        LastReportedLocation(long droneTimestampMsec, double lat, double lng, long altitudeMeters) {
+            this.droneTimestampMsec = droneTimestampMsec;
+            this.lat = lat;
+            this.lng = lng;
+            this.altitudeMeters = altitudeMeters;
+        }
+    }
+    private final ConcurrentHashMap<String, LastReportedLocation> lastReportedLocationByRemoteId =
+            new ConcurrentHashMap<>();
 
     private static final String TAG = "OpenDroneIdDataManager";
 
@@ -44,6 +58,42 @@ public class OpenDroneIdDataManager {
 
     public ConcurrentHashMap<Long, AircraftObject> getAircraft() {
         return aircraft;
+    }
+
+    private static long ridTimestampTenthsToUtcMsec(double locationTimestampTenths, long nowWallMsec) {
+        long rawTenths = Math.round(locationTimestampTenths);
+        if (rawTenths == 0xFFFFL) {
+            return 0L; // invalid/unknown
+        }
+        if (rawTenths < 0L) {
+            rawTenths = 0L;
+        }
+        if (rawTenths > 36_000L) {
+            CaltopoClient.CTError(TAG, String.format(Locale.US,
+                    "Received invalid location timestamp tenths:%d", rawTenths));
+            rawTenths = rawTenths % 36_000L;
+        }
+        // Timestamp is time within current UTC hour in 0.1 second units.
+        long withinHourMsec = (rawTenths % 36_000L) * 100L;
+        long hourMsec = 60L * 60L * 1000L;
+        long baseHourMsec = (nowWallMsec / hourMsec) * hourMsec;
+
+        long candidatePrev = baseHourMsec - hourMsec + withinHourMsec;
+        long candidateThis = baseHourMsec + withinHourMsec;
+        long candidateNext = baseHourMsec + hourMsec + withinHourMsec;
+
+        long best = candidateThis;
+        long bestDelta = Math.abs(nowWallMsec - candidateThis);
+        long prevDelta = Math.abs(nowWallMsec - candidatePrev);
+        if (prevDelta < bestDelta) {
+            best = candidatePrev;
+            bestDelta = prevDelta;
+        }
+        long nextDelta = Math.abs(nowWallMsec - candidateNext);
+        if (nextDelta < bestDelta) {
+            best = candidateNext;
+        }
+        return best;
     }
 
     void receiveDataBluetooth(byte[] data, ScanResult result, CtDroneSpec.TransportTypeEnum transportType) {
@@ -99,49 +149,66 @@ public class OpenDroneIdDataManager {
         CaltopoClient client = CaltopoClient.ClientForRemoteId(idStr);
         LocationData location = ac.getLocation();
         if (null != location) {
-            long timestampInTenthsOfASecond = (long)location.getLocationTimestamp();
-            /* timestampInSeconds from UAS is for the current hour based on gps, so accurate
-               w/in the current hour only.  Here's the problem: Rx UAS timestamp of 3599.9
-               (i.e. .1 second before the next hour).  With delays in transmitting/receiving the
-               UAS timestamp, it arrives here after the hour.  So if we blindly add it to the current
-               hour, we're going to occasionally see a big discontinuity in the flow of timestamps.
-               One way to prevent this is to check the arriving timestamp and if it's close to
-               rolling over, then subtract 60 seconds (more than worst-case delay) from our epoch
-               timestamp before calculating the seconds for the hour.
-             */
-            long timestampInMilliseconds;
-            if (timestampInTenthsOfASecond != 0xffff) {
-                Instant currentInstant = Instant.now();
-                // Get the epoch second (seconds since 1970-01-01T00:00:00Z)
-                long epochSecond = currentInstant.getEpochSecond();
-                long epochSecondHr;
-                timestampInMilliseconds = timestampInTenthsOfASecond * 100;
-                if (timestampInMilliseconds >= (60 * 60 * 1000)) {
-                    CaltopoClient.CTError(TAG, String.format(Locale.US,
-                            "Received invalid TimestampInTenthsOfASecond:%d", timestampInTenthsOfASecond));
-                    timestampInMilliseconds = timestampInMilliseconds % (60 * 60 * 100);
-                }
-                if (timestampInMilliseconds > (59*60*1000)) {
-                    epochSecondHr = ((epochSecond - 60) / (60 * 60)) * (60 * 60);
-                } else {
-                    epochSecondHr = (epochSecond / (60 * 60)) * (60 * 60);
-                }
-                // Log.d(TAG, String.format(Locale.US, "TimestampIn:%f, epochSeconds:%d, epochSecondsHr:%d, timestampOut:%f",
-                //        timestampInSeconds, epochSecond, epochSecondHr, (double)epochSecondHr + timestampInSeconds));
-                timestampInMilliseconds += epochSecondHr * 1000;
-            } else {
-                timestampInMilliseconds = 0; // not yet valid, so just set to zero.
-            }
+            long nowWallMsec = System.currentTimeMillis();
+            long timestampInMilliseconds = ridTimestampTenthsToUtcMsec(location.getLocationTimestamp(), nowWallMsec);
             double lat = location.getLatitude();
             double lng = location.getLongitude();
             long altitudeInMeters = (long)location.getAltitudeGeodetic();
+            LastReportedLocation prior = lastReportedLocationByRemoteId.get(idStr);
+            if (prior != null &&
+                    prior.droneTimestampMsec == timestampInMilliseconds &&
+                    Double.compare(prior.lat, lat) == 0 &&
+                    Double.compare(prior.lng, lng) == 0 &&
+                    prior.altitudeMeters == altitudeInMeters) {
+                return;
+            }
+            lastReportedLocationByRemoteId.put(
+                    idStr,
+                    new LastReportedLocation(timestampInMilliseconds, lat, lng, altitudeInMeters)
+            );
+            CaltopoClient.PositionTelemetry telemetry = null;
+            double altitudeMslMeters = location.getAltitudeGeodetic();
+            double speedVerticalMps = location.getSpeedVertical();
+            double speedGroundMps = location.getSpeedHorizontal();
+            double directionDeg = location.getDirection();
+            Double aircraftAltitudeFt = (altitudeMslMeters != -1000.0)
+                    ? altitudeMslMeters * 3.28084
+                    : null;
+            Double aircraftAltitudeRateFpm = (speedVerticalMps != 63.0)
+                    ? speedVerticalMps * 196.850394
+                    : null;
+            Double aircraftGsKnots = (speedGroundMps != 255.0)
+                    ? speedGroundMps * 1.94384449
+                    : null;
+            Double aircraftTrackDeg = (directionDeg >= 0.0 && directionDeg <= 360.0)
+                    ? directionDeg
+                    : null;
+            if (aircraftAltitudeFt != null || aircraftAltitudeRateFpm != null ||
+                    aircraftGsKnots != null || aircraftTrackDeg != null) {
+                // ASTM RID does not provide true nose heading, so use direction as a heading proxy.
+                telemetry = new CaltopoClient.PositionTelemetry(
+                        aircraftAltitudeFt,
+                        aircraftAltitudeRateFpm,
+                        aircraftGsKnots,
+                        aircraftTrackDeg,
+                        aircraftTrackDeg,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null
+                );
+            }
             /*
             Log.i(TAG, String.format(Locale.US,
                     "Processing new waypoint from %s on transport:%s, " +
                             "TimestampIn:%d, Altitude:%d at %.5f,%.5f",
                     idStr, transportType, timestampInSeconds, altitudeInMeters, lat, lng));
              */
-            client.newWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, transportType);
+            client.newWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, transportType, telemetry);
         }
     }
 
@@ -179,35 +246,43 @@ public class OpenDroneIdDataManager {
             if (null != callback) callback.onNewAircraft(ac);
         }
 
-        if (message.header.type == OpenDroneIdParser.Type.MESSAGE_PACK)
-            handleMessagePack(ac, (OpenDroneIdParser.Message<OpenDroneIdParser.MessagePack>) message, timeNano, message.msgCounter);
-        else
-            handleMessages(ac, message);
+        boolean locationUpdated;
+        if (message.header.type == OpenDroneIdParser.Type.MESSAGE_PACK) {
+            locationUpdated = handleMessagePack(ac,
+                    (OpenDroneIdParser.Message<OpenDroneIdParser.MessagePack>) message,
+                    timeNano, message.msgCounter);
+        } else {
+            locationUpdated = handleMessages(ac, message);
+        }
 
-        updateCaltopo(ac, transportType);
+        if (locationUpdated) {
+            updateCaltopo(ac, transportType);
+        }
     }
 
     @SuppressWarnings("unchecked")
-    private void handleMessages(AircraftObject ac, OpenDroneIdParser.Message<?> message) {
+    private boolean handleMessages(AircraftObject ac, OpenDroneIdParser.Message<?> message) {
         switch (message.header.type) {
             case BASIC_ID:
                 handleBasicId(ac, (OpenDroneIdParser.Message<OpenDroneIdParser.BasicId>) message);
-                break;
+                return false;
             case LOCATION:
                 handleLocation(ac, (OpenDroneIdParser.Message<OpenDroneIdParser.Location>) message);
-                break;
+                return true;
             case AUTH:
                 handleAuthentication(ac, (OpenDroneIdParser.Message<OpenDroneIdParser.Authentication>) message);
-                break;
+                return false;
             case SELFID:
                 handleSelfID(ac, (OpenDroneIdParser.Message<OpenDroneIdParser.SelfID>) message);
-                break;
+                return false;
             case SYSTEM:
                 handleSystem(ac, (OpenDroneIdParser.Message<OpenDroneIdParser.SystemMsg>) message);
-                break;
+                return false;
             case OPERATOR_ID:
                 handleOperatorID(ac, (OpenDroneIdParser.Message<OpenDroneIdParser.OperatorID>) message);
-                break;
+                return false;
+            default:
+                return false;
         }
     }
 
@@ -344,26 +419,30 @@ public class OpenDroneIdDataManager {
         ac.operatorid.setValue(data);
     }
 
-    private void handleMessagePack(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.MessagePack> message,
-                                   long timestamp, int msgCounter) {
+    private boolean handleMessagePack(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.MessagePack> message,
+                                      long timestamp, int msgCounter) {
         OpenDroneIdParser.MessagePack raw = message.payload;
         if (raw == null)
-            return;
+            return false;
 
         if (raw.messageSize != Constants.MAX_MESSAGE_SIZE ||
             raw.messagesInPack <= 0 ||
             raw.messagesInPack > Constants.MAX_MESSAGES_IN_PACK)
-            return;
+            return false;
 
+        boolean locationUpdated = false;
         for (int i = 0; i < raw.messagesInPack; i++) {
             int offset = i*raw.messageSize;
             byte[] data = Arrays.copyOfRange(raw.messages, offset, offset + raw.messageSize);
             OpenDroneIdParser.Message<?> subMessage =
                     OpenDroneIdParser.parseMessage(data, 0, timestamp, receiverLocation, msgCounter);
             if (subMessage == null)
-                return;
+                return locationUpdated;
 
-            handleMessages(ac, subMessage);
+            if (handleMessages(ac, subMessage)) {
+                locationUpdated = true;
+            }
         }
+        return locationUpdated;
     }
 }

@@ -414,7 +414,7 @@ public class WaypointTrack {
                 CTDebug(TAG, String.format(Locale.US,
                         "archive(%s): Publishing...", fileName));
                 Future<Integer> result = CaltopoClient.PublishGeoJsonStats(geoJsonString);
-                Integer responseCode = result.get(10, TimeUnit.SECONDS);
+                Integer responseCode = result.get(20, TimeUnit.SECONDS);
                 CTDebug(TAG, String.format(Locale.US,
                         "archive(%s): server returned %d", fileName, responseCode));
                 if (responseCode != 408 && responseCode < 500) statsReported();

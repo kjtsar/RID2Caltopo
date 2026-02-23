@@ -59,7 +59,23 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     private static final LinkedList<LocalTrackListener> LocalTrackListeners = new LinkedList<>();
     private CaltopoOp startLiveTrackOp;
     private String liveTrackId;
-    private final LinkedList<double[]> linePoints = new LinkedList<>(); // array of arrays of [lat,lng,ele] pairs
+    private static class QueuedPoint {
+        final double lat;
+        final double lng;
+        final double ele;
+        final long timestampMsec;
+        @Nullable final CaltopoClient.PositionTelemetry telemetry;
+
+        QueuedPoint(double lat, double lng, double ele, long timestampMsec,
+                    @Nullable CaltopoClient.PositionTelemetry telemetry) {
+            this.lat = lat;
+            this.lng = lng;
+            this.ele = ele;
+            this.timestampMsec = timestampMsec;
+            this.telemetry = telemetry;
+        }
+    }
+    private final LinkedList<QueuedPoint> linePoints = new LinkedList<>();
     private int linePointsSentCount;
     private int linePointsConfirmedCount;
     private String folderId;
@@ -74,7 +90,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     private CaltopoMap.MapStatusListener.mapStatus mapStatus;
 
     public CaltopoLiveTrack(@NonNull CtDroneSpec droneSpec, double lat, double lng, double ele,
-                            long droneTimestampInMsec) throws RuntimeException {
+                            long droneTimestampInMsec,
+                            @Nullable CaltopoClient.PositionTelemetry telemetry) throws RuntimeException {
         if (droneSpec.trackLabel().isEmpty()) {
             throw new RuntimeException("CaltopoLiveTrack(): trackLabel is required.");
         }
@@ -88,8 +105,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         droneSpec.setMyLiveTrack(this);
         this.r2cStatus = unknown;
 
-        double[] point = {lat, lng, ele, (double)droneTimestampInMsec};
-        linePoints.add(point);
+        linePoints.add(new QueuedPoint(lat, lng, ele, droneTimestampInMsec, telemetry));
         notifyLocalTrackPoint(lat, lng, ele, droneTimestampInMsec);
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
 
@@ -100,11 +116,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     /*
      */
-    public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec) {
+    public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec,
+                              @Nullable CaltopoClient.PositionTelemetry telemetry) {
         if (shuttingDown) return;
 
-        double[] point = {lat, lng, ele, (double)droneTimestampInMsec};
-        linePoints.add(point);
+        linePoints.add(new QueuedPoint(lat, lng, ele, droneTimestampInMsec, telemetry));
         notifyLocalTrackPoint(lat, lng, ele, droneTimestampInMsec);
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
         startLiveTrackOp = null;
@@ -157,8 +173,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     /* Return -1 if no corresponding point */
     public long getFirstTimestamp() {
         if (linePoints.isEmpty()) return -1;
-        double[] point = linePoints.getFirst();
-        return (long)point[3];
+        QueuedPoint point = linePoints.getFirst();
+        return point.timestampMsec;
     }
 
     public static CaltopoLiveTrack GetLiveTrackForRemoteId(@NonNull String remoteId) {
@@ -173,6 +189,19 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     public static void RemoveLocalTrackListener(@NonNull LocalTrackListener listener) {
         LocalTrackListeners.remove(listener);
+    }
+
+    public static void NotifyLocalTrackPoint(@NonNull CtDroneSpec droneSpec,
+                                             double lat, double lng, double altitudeMeters,
+                                             long timestampMsec) {
+        if (LocalTrackListeners.isEmpty()) return;
+        String remoteId = droneSpec.getRemoteId();
+        String mappedId = droneSpec.getMappedId();
+        for (LocalTrackListener listener : LocalTrackListeners) try {
+            listener.onLocalTrackPoint(remoteId, mappedId, lat, lng, altitudeMeters, timestampMsec);
+        } catch (Exception e) {
+            CTError(TAG, "NotifyLocalTrackPoint() listener raised", e);
+        }
     }
 
     public void shutdown(long maxWaitInMilliseconds) {
@@ -231,11 +260,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         }
         JSONArray jsonArray = new JSONArray();
         for (int i = 0; i < size; i++) {
-            double[] point = linePoints.get(i);
+            QueuedPoint point = linePoints.get(i);
             JSONArray pointArray = new JSONArray();
-            pointArray.put(String.format(Locale.US, "%.7f", point[1]));
-            pointArray.put(String.format(Locale.US, "%.7f", point[0]));
-            pointArray.put(String.format(Locale.US, "%f", point[2]));
+            pointArray.put(String.format(Locale.US, "%.7f", point.lng));
+            pointArray.put(String.format(Locale.US, "%.7f", point.lat));
+            pointArray.put(String.format(Locale.US, "%f", point.ele));
             jsonArray.put(pointArray);
         }
         String archiveFolderId = CaltopoMap.GetArchiveFolderId();
@@ -389,9 +418,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             long minAge = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000);
 
             while (!linePoints.isEmpty()) {
-                double[] point;
-                point = linePoints.getFirst();
-                if ((long) point[3] <= minAge) {
+                QueuedPoint point = linePoints.getFirst();
+                if (point.timestampMsec <= minAge) {
                     linePoints.removeFirst();
                 } else break;
             }
@@ -425,9 +453,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         forwardNextWaypoints(null);
     }
 
-    public void publishDirect(double lat, double lng, long altitudeInMeters, long droneTimestampInMillisec) {
-        double[] point = {lat, lng, (double)altitudeInMeters, (double)droneTimestampInMillisec};
-        linePoints.add(point);
+    public void publishDirect(double lat, double lng, long altitudeInMeters, long droneTimestampInMillisec,
+                              @Nullable CaltopoClient.PositionTelemetry telemetry) {
+        linePoints.add(new QueuedPoint(lat, lng, (double)altitudeInMeters, droneTimestampInMillisec, telemetry));
         notifyLocalTrackPoint(lat, lng, altitudeInMeters, droneTimestampInMillisec);
         CTDebug(TAG, String.format(Locale.US,
                 "publishDirect(%s/%s/%s): added waypoint to queue. size is %d, sent count is %d, confirm count is %d and consecutive errors is %d",
@@ -482,10 +510,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         try {
             int pointCount = linePoints.size();
             while (linePointsSentCount < pointCount) {
-                double[] point = linePoints.get(linePointsSentCount++);
+                QueuedPoint point = linePoints.get(linePointsSentCount++);
                 CTDebug(TAG, String.format(Locale.US, "forwardNextWaypoint(DRONE-%s#%d): adding %.7f,%.7f@%dm to LiveTrack.",
-                        myRemoteId, linePointsSentCount, point[0], point[1], (long)point[2]));
-                CaltopoSession.AddLiveTrackPoint(myRemoteId, point[0], point[1], point[2], this::forwardNextWaypoints);
+                        myRemoteId, linePointsSentCount, point.lat, point.lng, (long)point.ele));
+                CaltopoSession.AddLiveTrackPoint(myRemoteId, point.lat, point.lng, point.ele, point.telemetry,
+                        this::forwardNextWaypoints);
             }
         } catch (Exception e) {
             CTError(TAG, "forwardNextWaypoints(): addLiveTrackPoint() raised: ", e);

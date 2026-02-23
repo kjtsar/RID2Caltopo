@@ -60,7 +60,7 @@ public class BluetoothScanner {
             adapter = btManager.getAdapter();
             if (null == adapter) {
                 CTWarn(TAG, "getBluetoothAdapter(): Can't get the default bluetooth adapter.");
-            } else if (adapter.isEnabled()) {
+            } else if (!adapter.isEnabled()) {
                 // not sure what is going on.  Adapter frequently says it's not available, though it seems to be working.
                 CTWarn(TAG, "getBluetoothAdapter(): Default bluetooth adapter not enabled.");
             } else {
@@ -124,12 +124,20 @@ public class BluetoothScanner {
 
         ScanSettings scanSettings = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+                .setReportDelay(0L)
                 .build();
         if (bluetoothAdapter.isLeCodedPhySupported() &&
                 bluetoothAdapter.isLeExtendedAdvertisingSupported()) {
             CTDebug(TAG, "startScan: Enable scanning also for devices advertising on an LE Coded PHY S2 or S8");
             scanSettings = new ScanSettings.Builder()
                     .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                    .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                    .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+                    .setReportDelay(0L)
                     .setLegacy(false)
                     .setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
                     .build();

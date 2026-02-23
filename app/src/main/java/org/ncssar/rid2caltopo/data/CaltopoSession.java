@@ -718,23 +718,75 @@ public class CaltopoSession {
 
 	@NonNull
 	public static CaltopoOp AddLiveTrackPoint(@NonNull String deviceId,
-									   double lat, double lng, double eleMeters, @Nullable Consumer<CaltopoOp> onComplete) {
+									   double lat, double lng, double eleMeters,
+                                       @Nullable CaltopoClient.PositionTelemetry telemetry,
+                                       @Nullable Consumer<CaltopoOp> onComplete) {
         if (null == MapId)
             throw new RuntimeException("AddLiveTrackPoint(): Map not specified - call OpenMap() first");
 
-        String latStr = String.format(Locale.US, "%.7f", lat);
+		String latStr = String.format(Locale.US, "%.7f", lat);
 		String lngStr = String.format(Locale.US, "%.7f", lng);
 		Long ele = (long)eleMeters;
-		String url = "https://" + DomainAndPort + "/api/v1/position/report/DRONE?" +
+        StringBuilder urlBuilder = new StringBuilder("https://" + DomainAndPort + "/api/v1/position/report/DRONE?" +
 				EncodeParm("id", deviceId) + "&" +
 				EncodeParm("lat", latStr) + "&" +
 				EncodeParm("lng", lngStr) + "&" +
-				EncodeParm("elevation", ele.toString());
+				EncodeParm("elevation", ele.toString()));
+        if (telemetry != null) {
+            appendTelemetryJson(urlBuilder, telemetry);
+        }
+        String url = urlBuilder.toString();
 
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.GET, url, null, true);
 		return op;
 	}
+
+    private static void appendTelemetryJson(@NonNull StringBuilder sb,
+                                            @NonNull CaltopoClient.PositionTelemetry telemetry) {
+        JSONObject aircraft = new JSONObject();
+        JSONObject camera = new JSONObject();
+        try {
+            putFinite(aircraft, "altitude", telemetry.aircraftAltitudeFt);
+            putFinite(aircraft, "altitude_rate", telemetry.aircraftAltitudeRateFpm);
+            putFinite(aircraft, "gs", telemetry.aircraftGsKnots);
+            putFinite(aircraft, "heading", telemetry.aircraftHeadingDeg);
+            putFinite(aircraft, "track", telemetry.aircraftTrackDeg);
+            putFinite(aircraft, "pitch", telemetry.aircraftPitchDeg);
+            putFinite(aircraft, "roll", telemetry.aircraftRollDeg);
+
+            putFinite(camera, "azimuth", telemetry.cameraAzimuthDeg);
+            putFinite(camera, "tilt", telemetry.cameraTiltDeg);
+            putFinite(camera, "fov_width", telemetry.cameraFovWidthDeg);
+            putFinite(camera, "fov_height", telemetry.cameraFovHeightDeg);
+            putString(camera, "external_url", telemetry.cameraExternalUrl);
+            putString(camera, "thumbnail_url", telemetry.cameraThumbnailUrl);
+        } catch (Exception e) {
+            CTError(TAG, "appendTelemetryJson() JSON put raised", e);
+            return;
+        }
+
+        if (aircraft.length() > 0) {
+            sb.append("&").append(EncodeParm("aircraft", aircraft.toString()));
+        }
+        if (camera.length() > 0) {
+            sb.append("&").append(EncodeParm("camera", camera.toString()));
+        }
+    }
+
+    private static void putFinite(@NonNull JSONObject jo, @NonNull String key,
+                                  @Nullable Double value) throws JSONException {
+        if (value != null && Double.isFinite(value)) {
+            jo.put(key, value);
+        }
+    }
+
+    private static void putString(@NonNull JSONObject jo, @NonNull String key,
+                                  @Nullable String value) throws JSONException {
+        if (value != null && !value.isEmpty()) {
+            jo.put(key, value);
+        }
+    }
 
     /*** CompressScaledBitmapAsJpeg()
      * Build a compressed copy of the input, optionally scaled down first.  The

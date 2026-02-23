@@ -799,7 +799,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         double lat = payload.optDouble("lat");
         double lng = payload.optDouble("lng");
         long altitude = payload.optLong("alt");
-        boolean archived = ctClient.newWaypoint(lat, lng, altitude, ts, CtDroneSpec.TransportTypeEnum.R2C);
+        boolean archived = ctClient.newWaypoint(lat, lng, altitude, ts, CtDroneSpec.TransportTypeEnum.R2C, null);
 
         JSONObject retPayload = new JSONObject();
         try {

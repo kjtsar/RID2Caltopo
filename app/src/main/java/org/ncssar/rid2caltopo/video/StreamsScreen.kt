@@ -2,9 +2,10 @@ package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.location.Location
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Path
@@ -14,6 +15,7 @@ import android.graphics.drawable.Drawable
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -34,6 +36,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,6 +54,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -80,24 +84,44 @@ import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
 import org.osmdroid.views.MapView
+import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
 import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
-import java.net.URLEncoder
-import java.net.URL
-import java.nio.charset.StandardCharsets
+import org.ncssar.rid2caltopo.video.mapcache.CaltopoIconCacheService
+import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
+import org.ncssar.rid2caltopo.video.mapcache.MapCachePolicy
+import org.ncssar.rid2caltopo.video.mapcache.TileCacheMapProvider
+import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
 
 private const val MAP_PANE_TAG = "SplitMapPane"
+private const val MAP_PANE_VERBOSE_LOGS = false
 private const val LOCAL_DEVICE_SYMBOL = "radiotower"
 private const val LOCAL_DEVICE_COLOR = "0000FF"
+private const val AGL_LIMIT_FT = 200.0
+private const val RANGE_LIMIT_FT = 5280.0
+private const val AGL_ICON_NEAR_DELTA_FT = 20.0
+private const val FT_TO_METERS = 0.3048
+private const val NEAR_LIMIT_RATIO = 0.90
+private const val NEAR_ALERT_COOLDOWN_MS = 30_000L
+private const val OVER_ALERT_COOLDOWN_MS = 12_000L
+private const val TAKEOFF_RECALIBRATE_DELTA_M = 3.0
+private const val METERS_TO_FEET = 3.28084
+private const val PREDICTIVE_HEAD_MIN_AGE_MS = 600L
+private const val PREDICTIVE_HEAD_MAX_AGE_MS = 5_000L
+private const val PREDICTIVE_HEAD_MAX_LOOKAHEAD_MS = 2_000L
+private const val PREDICTIVE_HEAD_MAX_SPEED_MPS = 45.0
+private const val PREDICTIVE_HEAD_MAX_DISTANCE_M = 90.0
 
 private enum class ScreenLayoutMode {
     Both,
@@ -114,8 +138,41 @@ private data class DroneMapPoint(
     val designator: String,
     val lat: Double,
     val lng: Double,
-    val altitudeM: Double
+    val altitudeM: Double,
+    val timestampMsec: Long
 )
+
+private data class DroneAglState(
+    val groundM: Double,
+    val aglM: Double,
+    val stale: Boolean
+)
+
+private data class DroneAltitudeCalibration(
+    val takeoffDroneAltM: Double,
+    val takeoffGroundM: Double
+)
+
+private data class DroneTakeoffCalibrationState(
+    val baselineDroneAltM: Double,
+    val takeoffResetApplied: Boolean
+)
+
+private data class DroneComplianceState(
+    val aglM: Double?,
+    val rangeFromHomeM: Double?,
+    val nearAgl: Boolean,
+    val nearRange: Boolean,
+    val overAgl: Boolean,
+    val overRange: Boolean,
+    val staleDem: Boolean
+)
+
+private enum class AlertSeverity {
+    None,
+    Near,
+    Over
+}
 
 private data class ArtifactPointSpec(
     val id: String,
@@ -156,7 +213,8 @@ private data class LocalTrackPoint(
     val lat: Double,
     val lng: Double,
     val altitudeM: Double,
-    val timestampMsec: Long
+    val timestampMsec: Long,
+    val receivedAtMsec: Long
 )
 
 private object ArcGisWorldImageryTileSource : OnlineTileSourceBase(
@@ -223,26 +281,18 @@ fun StreamsScreen(
                 },
                 actions = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        LayoutToggleChip(
-                            label = "Both",
-                            selected = layoutMode == ScreenLayoutMode.Both,
-                            onClick = {
-                                layoutMode = ScreenLayoutMode.Both
-                                if (splitFraction !in 0.1f..0.9f) {
-                                    splitFraction = 0.5f
+                        if (layoutMode != ScreenLayoutMode.Both) {
+                            LayoutToggleChip(
+                                label = "Split",
+                                selected = false,
+                                onClick = {
+                                    layoutMode = ScreenLayoutMode.Both
+                                    if (splitFraction !in 0.1f..0.9f) {
+                                        splitFraction = 0.5f
+                                    }
                                 }
-                            }
-                        )
-                        LayoutToggleChip(
-                            label = "Streams",
-                            selected = layoutMode == ScreenLayoutMode.Streams,
-                            onClick = { layoutMode = ScreenLayoutMode.Streams }
-                        )
-                        LayoutToggleChip(
-                            label = "Map",
-                            selected = layoutMode == ScreenLayoutMode.Map,
-                            onClick = { layoutMode = ScreenLayoutMode.Map }
-                        )
+                            )
+                        }
                     }
                 }
             )
@@ -253,7 +303,9 @@ fun StreamsScreen(
                         SplitStreamsAndMap(
                             viewModel = viewModel,
                             splitFraction = splitFraction,
-                            onSplitFractionChange = { splitFraction = it }
+                            onSplitFractionChange = { splitFraction = it },
+                            onStreamsPaneTap = { layoutMode = ScreenLayoutMode.Streams },
+                            onMapPaneTap = { layoutMode = ScreenLayoutMode.Map }
                         )
                     }
 
@@ -284,7 +336,9 @@ fun StreamsScreen(
 private fun SplitStreamsAndMap(
     viewModel: StreamsViewModel,
     splitFraction: Float,
-    onSplitFractionChange: (Float) -> Unit
+    onSplitFractionChange: (Float) -> Unit,
+    onStreamsPaneTap: () -> Unit,
+    onMapPaneTap: () -> Unit
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isPortrait = maxHeight > maxWidth
@@ -306,6 +360,9 @@ private fun SplitStreamsAndMap(
                         .fillMaxWidth()
                         .fillMaxHeight(clamped.coerceIn(0f, 1f))
                         .align(Alignment.TopStart)
+                        .pointerInput(Unit) {
+                            detectTapGestures(onTap = { onStreamsPaneTap() })
+                        }
                 ) {
                     StreamsGrid(viewModel = viewModel, modifier = Modifier.fillMaxSize())
                 }
@@ -317,7 +374,8 @@ private fun SplitStreamsAndMap(
                 ) {
                     SplitMapPane(
                         viewModel = viewModel,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        onSingleTapFocus = onMapPaneTap
                     )
                 }
                 Box(
@@ -350,6 +408,9 @@ private fun SplitStreamsAndMap(
                         .fillMaxHeight()
                         .fillMaxWidth(clamped.coerceIn(0f, 1f))
                         .align(Alignment.CenterStart)
+                        .pointerInput(Unit) {
+                            detectTapGestures(onTap = { onStreamsPaneTap() })
+                        }
                 ) {
                     StreamsGrid(viewModel = viewModel, modifier = Modifier.fillMaxSize())
                 }
@@ -361,7 +422,8 @@ private fun SplitStreamsAndMap(
                 ) {
                     SplitMapPane(
                         viewModel = viewModel,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        onSingleTapFocus = onMapPaneTap
                     )
                 }
                 Box(
@@ -407,15 +469,17 @@ private fun LayoutToggleChip(
 @Composable
 private fun SplitMapPane(
     viewModel: StreamsViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onSingleTapFocus: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val uiScope = rememberCoroutineScope()
     var baseLayer by remember { mutableStateOf(BaseLayerOption.OpenStreetMap) }
-    var layerMenuExpanded by remember { mutableStateOf(false) }
+    var settingsMenuExpanded by remember { mutableStateOf(false) }
+    var predictiveHeadEnabled by remember { mutableStateOf(true) }
     val mapName = viewModel.mapName
     val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
-    val localTrackPointsByMappedId = remember { LinkedHashMap<String, MutableList<LocalTrackPoint>>() }
+    val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val managedOverlays = remember { mutableListOf<Overlay>() }
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
     var lastRenderStats by remember { mutableStateOf("") }
@@ -427,19 +491,111 @@ private fun SplitMapPane(
     val caltopoMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
     val caltopoMarkerPending = remember { HashSet<String>() }
     val unknownSymbolsSeen = remember { LinkedHashSet<String>() }
+    val iconCacheService = remember(context) { CaltopoIconCacheService(context) }
+    val demElevationService = remember(context) { DemElevationService(context) }
+    val tileCacheWriter = remember(context) { TileDiskCacheWriter(context) }
+    val tileMapProvider = remember(context) {
+        TileCacheMapProvider(
+            context = context,
+            tileSource = TileSourceFactory.MAPNIK,
+            tileWriter = tileCacheWriter
+        )
+    }
+    var lastCacheStats by remember { mutableStateOf("") }
+    var nextCacheStatsLogAtMs by remember { mutableStateOf(0L) }
+    var cacheStatsQueryInFlight by remember { mutableStateOf(false) }
+    val demAglByDesignator = remember { mutableStateMapOf<String, DroneAglState>() }
+    val demPendingByDesignator = remember { HashSet<String>() }
+    val demKeyByDesignator = remember { LinkedHashMap<String, String>() }
+    val demCalibrationByDesignator = remember { mutableStateMapOf<String, DroneAltitudeCalibration>() }
+    val takeoffCalibrationStateByDesignator = remember { mutableStateMapOf<String, DroneTakeoffCalibrationState>() }
+    val complianceByDesignator = remember { mutableStateMapOf<String, DroneComplianceState>() }
+    var lastAlertSeverity by remember { mutableStateOf(AlertSeverity.None) }
+    var lastAlertToneAtMs by remember { mutableStateOf(0L) }
+    val toneGenerator = remember {
+        try {
+            ToneGenerator(AudioManager.STREAM_NOTIFICATION, 55)
+        } catch (_: Exception) {
+            null
+        }
+    }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
-    val dronePoints = viewModel.droneStates.mapNotNull { (designator, state) ->
-        val lat = state.lastLat
-        val lng = state.lastLng
-        if (lat == 0.0 && lng == 0.0) {
+    val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
+    val dronePointEntries = viewModel.droneStates.mapNotNull { (designator, state) ->
+        val stateTs = state.source.mostRecentMsecTimestamp
+        var lat = state.lastLat
+        var lng = state.lastLng
+        var altitudeM = state.lastAlt
+        var timestampMsec = stateTs
+        var usingLocalTail = false
+
+        localTrackPointsByMappedId[designator]?.lastOrNull()?.let { localTail ->
+            val localTailIsUsable =
+                localTail.receivedAtMsec >= staleTrackCutoffMs &&
+                    localTail.lat.isFinite() &&
+                    localTail.lng.isFinite() &&
+                    !(localTail.lat == 0.0 && localTail.lng == 0.0)
+            if (localTailIsUsable) {
+                lat = localTail.lat
+                lng = localTail.lng
+                altitudeM = localTail.altitudeM
+                timestampMsec = localTail.timestampMsec
+                usingLocalTail = true
+            }
+        }
+
+        if ((lat == 0.0 && lng == 0.0) || timestampMsec <= staleTrackCutoffMs) {
             null
         } else {
-            DroneMapPoint(
-                designator = designator,
-                lat = lat,
-                lng = lng,
-                altitudeM = state.lastAlt
+            Pair(
+                DroneMapPoint(
+                    designator = designator,
+                    lat = lat,
+                    lng = lng,
+                    altitudeM = altitudeM,
+                    timestampMsec = timestampMsec
+                ),
+                usingLocalTail
             )
+        }
+    }
+    val dronePoints = dronePointEntries.map { it.first }
+    val localTailHeadOverrideCount = dronePointEntries.count { it.second }
+    val focusedDrone = dronePoints.firstOrNull { it.designator == focusedPath } ?: dronePoints.firstOrNull()
+
+    fun recalibrateFocusedDrone() {
+        val target = focusedDrone ?: return
+        uiScope.launch(Dispatchers.IO) {
+            val sample = demElevationService.sampleElevationMeters(target.lat, target.lng)
+            withContext(Dispatchers.Main.immediate) {
+                if (sample != null) {
+                    demCalibrationByDesignator[target.designator] = DroneAltitudeCalibration(
+                        takeoffDroneAltM = target.altitudeM,
+                        takeoffGroundM = sample.elevationMeters
+                    )
+                    takeoffCalibrationStateByDesignator[target.designator] = DroneTakeoffCalibrationState(
+                        baselineDroneAltM = target.altitudeM,
+                        takeoffResetApplied = true
+                    )
+                    demAglByDesignator[target.designator] = DroneAglState(
+                        groundM = sample.elevationMeters,
+                        aglM = 0.0,
+                        stale = sample.stale
+                    )
+                    demKeyByDesignator[target.designator] =
+                        demElevationService.cacheKey(target.lat, target.lng)
+                    CTDebug(
+                        MAP_PANE_TAG,
+                        "Manual DEM recalibration for ${target.designator}: " +
+                            "droneAlt=${"%.1f".format(target.altitudeM)}m ground=${"%.1f".format(sample.elevationMeters)}m"
+                    )
+                } else {
+                    CTDebug(
+                        MAP_PANE_TAG,
+                        "Manual DEM recalibration skipped for ${target.designator}: DEM sample unavailable."
+                    )
+                }
+            }
         }
     }
 
@@ -447,10 +603,6 @@ private fun SplitMapPane(
         val snapshot = CaltopoMap.GetArtifactFeatureSnapshot()
         val shouldReplace = snapshot.isNotEmpty() || artifactStoreById.isEmpty()
         if (!shouldReplace) {
-            CTDebug(
-                MAP_PANE_TAG,
-                "Skipping snapshot hydrate ($reason): snapshot empty while local artifact store has ${artifactStoreById.size} features."
-            )
             return
         }
         artifactStoreById.clear()
@@ -461,10 +613,12 @@ private fun SplitMapPane(
             }
         }
         artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values)
-        CTDebug(
-            MAP_PANE_TAG,
-            "Hydrated artifacts from snapshot ($reason): cached=${snapshot.size}, renderable=${artifactOverlayState.totalFeatures}"
-        )
+        if (MAP_PANE_VERBOSE_LOGS || snapshot.isNotEmpty() || artifactOverlayState.totalFeatures > 0) {
+            CTDebug(
+                MAP_PANE_TAG,
+                "Hydrated artifacts from snapshot ($reason): cached=${snapshot.size}, renderable=${artifactOverlayState.totalFeatures}"
+            )
+        }
     }
 
     LaunchedEffect(mapName) {
@@ -472,8 +626,27 @@ private fun SplitMapPane(
         localTrackPointsByMappedId.clear()
         lastRenderStats = ""
         lastAlignmentStats = ""
+        lastCacheStats = ""
+        demAglByDesignator.clear()
+        demPendingByDesignator.clear()
+        demKeyByDesignator.clear()
+        demCalibrationByDesignator.clear()
+        takeoffCalibrationStateByDesignator.clear()
+        complianceByDesignator.clear()
+        lastAlertSeverity = AlertSeverity.None
+        lastAlertToneAtMs = 0L
         initialViewportApplied = false
         initialViewportArtifactCount = -1
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            tileMapProvider.detach()
+            try {
+                toneGenerator?.release()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     DisposableEffect(Unit) {
@@ -513,17 +686,21 @@ private fun SplitMapPane(
             uiScope.launch(Dispatchers.Main.immediate) {
                 if (!lat.isFinite() || !lng.isFinite()) return@launch
                 if (lat == 0.0 && lng == 0.0) return@launch
+                val nowWallMsec = System.currentTimeMillis()
                 val key = mappedId.ifBlank { "unmapped" }
-                val list = localTrackPointsByMappedId.getOrPut(key) { mutableListOf() }
-                val point = LocalTrackPoint(key, lat, lng, altitudeMeters, timestampMsec)
+                val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+                val point = LocalTrackPoint(
+                    mappedId = key,
+                    lat = lat,
+                    lng = lng,
+                    altitudeM = altitudeMeters,
+                    timestampMsec = timestampMsec,
+                    receivedAtMsec = nowWallMsec
+                )
                 list.add(point)
                 if (list.size > 500) {
                     list.removeAt(0)
                 }
-                CTDebug(
-                    MAP_PANE_TAG,
-                    "Local track ingest: mappedId=$key points=${list.size} ts=$timestampMsec"
-                )
             }
         }
         CaltopoLiveTrack.AddLocalTrackListener(localTrackListener)
@@ -544,13 +721,19 @@ private fun SplitMapPane(
             factory = {
                 Configuration.getInstance().load(context, context.getSharedPreferences("osmdroid", 0))
                 Configuration.getInstance().userAgentValue = context.packageName
+                Configuration.getInstance().tileFileSystemCacheMaxBytes = MapCachePolicy.TILE_CACHE_MAX_BYTES
+                Configuration.getInstance().tileFileSystemCacheTrimBytes =
+                    (MapCachePolicy.TILE_CACHE_MAX_BYTES * 9L) / 10L
+                Configuration.getInstance().expirationOverrideDuration = MapCachePolicy.TILE_TTL_MS
                 MapView(context).apply {
                     setMultiTouchControls(true)
+                    setTileProvider(tileMapProvider)
                     setTileSource(TileSourceFactory.MAPNIK)
                     controller.setZoom(14.0)
                 }
             },
             update = { mapView ->
+                val uiNowWallMsec = System.currentTimeMillis()
                 val tileSource = when (baseLayer) {
                     BaseLayerOption.OpenStreetMap -> TileSourceFactory.MAPNIK
                     BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
@@ -562,6 +745,23 @@ private fun SplitMapPane(
                 if (managedOverlays.isNotEmpty()) {
                     mapView.overlays.removeAll(managedOverlays)
                     managedOverlays.clear()
+                }
+
+                if (onSingleTapFocus != null) {
+                    val tapOverlay = MapEventsOverlay(
+                        object : MapEventsReceiver {
+                            override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                                onSingleTapFocus()
+                                return false
+                            }
+
+                            override fun longPressHelper(p: GeoPoint?): Boolean {
+                                return false
+                            }
+                        }
+                    )
+                    mapView.overlays.add(tapOverlay)
+                    managedOverlays.add(tapOverlay)
                 }
 
                 artifactOverlayState.polygons.forEach { polygonSpec ->
@@ -587,6 +787,18 @@ private fun SplitMapPane(
                     managedOverlays.add(line)
                 }
 
+                val trackPointMinTimestampMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
+                val expiredTrackIds = mutableListOf<String>()
+                localTrackPointsByMappedId.forEach { (mappedId, points) ->
+                    while (points.isNotEmpty() && points.first().receivedAtMsec <= trackPointMinTimestampMs) {
+                        points.removeAt(0)
+                    }
+                    if (points.isEmpty()) {
+                        expiredTrackIds += mappedId
+                    }
+                }
+                expiredTrackIds.forEach { localTrackPointsByMappedId.remove(it) }
+
                 localTrackPointsByMappedId.forEach { (mappedId, points) ->
                     if (points.size < 2) return@forEach
                     val line = Polyline(mapView).apply {
@@ -600,13 +812,16 @@ private fun SplitMapPane(
                 }
 
                 artifactOverlayState.points.forEach { point ->
-                    val remoteCacheKey = caltopoMarkerCacheKey(point.markerSymbol, point.markerColor)
+                    val remoteCacheKey = iconCacheService.cacheKey(point.markerSymbol, point.markerColor)
                     val remoteIcon = caltopoMarkerCache[remoteCacheKey]
                     if (remoteIcon == null && !caltopoMarkerPending.contains(remoteCacheKey)) {
                         caltopoMarkerPending.add(remoteCacheKey)
-                        val iconUrl = caltopoIconUrl(point.markerSymbol, point.markerColor)
                         uiScope.launch(Dispatchers.IO) {
-                            val loaded = tryLoadRemoteIconDrawable(context.resources, iconUrl)
+                            val loaded = iconCacheService.loadBestAvailableDrawable(
+                                resources = context.resources,
+                                markerSymbol = point.markerSymbol,
+                                markerColor = point.markerColor
+                            )
                             withContext(Dispatchers.Main.immediate) {
                                 if (loaded != null) {
                                     caltopoMarkerCache[remoteCacheKey] = loaded
@@ -636,13 +851,16 @@ private fun SplitMapPane(
 
                 val myLocation = CaltopoMap.MyLocation
                 if (myLocation != null && myLocation.latitude.isFinite() && myLocation.longitude.isFinite()) {
-                    val localCacheKey = caltopoMarkerCacheKey(LOCAL_DEVICE_SYMBOL, LOCAL_DEVICE_COLOR)
+                    val localCacheKey = iconCacheService.cacheKey(LOCAL_DEVICE_SYMBOL, LOCAL_DEVICE_COLOR)
                     val localRemoteIcon = caltopoMarkerCache[localCacheKey]
                     if (localRemoteIcon == null && !caltopoMarkerPending.contains(localCacheKey)) {
                         caltopoMarkerPending.add(localCacheKey)
-                        val iconUrl = caltopoIconUrl(LOCAL_DEVICE_SYMBOL, LOCAL_DEVICE_COLOR)
                         uiScope.launch(Dispatchers.IO) {
-                            val loaded = tryLoadRemoteIconDrawable(context.resources, iconUrl)
+                            val loaded = iconCacheService.loadBestAvailableDrawable(
+                                resources = context.resources,
+                                markerSymbol = LOCAL_DEVICE_SYMBOL,
+                                markerColor = LOCAL_DEVICE_COLOR
+                            )
                             withContext(Dispatchers.Main.immediate) {
                                 if (loaded != null) {
                                     caltopoMarkerCache[localCacheKey] = loaded
@@ -667,23 +885,216 @@ private fun SplitMapPane(
                     managedOverlays.add(localMarker)
                 }
 
+                val iconLimitAglM = AGL_LIMIT_FT * FT_TO_METERS
+                val nearIconAglM = (AGL_LIMIT_FT - AGL_ICON_NEAR_DELTA_FT) * FT_TO_METERS
+                val homeLocation = CaltopoMap.MyLocation
                 dronePoints.forEach { point ->
+                    val predictedHead = if (predictiveHeadEnabled) {
+                        predictedHeadPoint(
+                            designator = point.designator,
+                            nowWallMsec = uiNowWallMsec,
+                            dronePointTimestampMsec = point.timestampMsec,
+                            tracksByMappedId = localTrackPointsByMappedId
+                        )
+                    } else {
+                        null
+                    }
+                    val renderLat = predictedHead?.latitude ?: point.lat
+                    val renderLng = predictedHead?.longitude ?: point.lng
+                    val demKey = demElevationService.cacheKey(point.lat, point.lng)
+                    val priorKey = demKeyByDesignator[point.designator]
+                    val aglState = demAglByDesignator[point.designator]
+                    if (priorKey != demKey && !demPendingByDesignator.contains(point.designator)) {
+                        demPendingByDesignator.add(point.designator)
+                        uiScope.launch(Dispatchers.IO) {
+                            val sample = demElevationService.sampleElevationMeters(point.lat, point.lng)
+                            withContext(Dispatchers.Main.immediate) {
+                                if (sample != null) {
+                                    if (!demCalibrationByDesignator.containsKey(point.designator)) {
+                                        demCalibrationByDesignator[point.designator] = DroneAltitudeCalibration(
+                                            takeoffDroneAltM = point.altitudeM,
+                                            takeoffGroundM = sample.elevationMeters
+                                        )
+                                        takeoffCalibrationStateByDesignator[point.designator] = DroneTakeoffCalibrationState(
+                                            baselineDroneAltM = point.altitudeM,
+                                            takeoffResetApplied = false
+                                        )
+                                        CTDebug(
+                                            MAP_PANE_TAG,
+                                            "DEM calibration locked for ${point.designator}: droneAlt=${"%.1f".format(point.altitudeM)}m " +
+                                                "ground=${"%.1f".format(sample.elevationMeters)}m"
+                                        )
+                                    }
+                                    val takeoffState = takeoffCalibrationStateByDesignator[point.designator]
+                                    if (takeoffState != null && !takeoffState.takeoffResetApplied) {
+                                        val climbDeltaM = point.altitudeM - takeoffState.baselineDroneAltM
+                                        if (climbDeltaM >= TAKEOFF_RECALIBRATE_DELTA_M) {
+                                            demCalibrationByDesignator[point.designator] = DroneAltitudeCalibration(
+                                                takeoffDroneAltM = point.altitudeM,
+                                                takeoffGroundM = sample.elevationMeters
+                                            )
+                                            takeoffCalibrationStateByDesignator[point.designator] = takeoffState.copy(
+                                                takeoffResetApplied = true
+                                            )
+                                            CTDebug(
+                                                MAP_PANE_TAG,
+                                                "DEM calibration reset at takeoff for ${point.designator}: climb=${"%.1f".format(climbDeltaM)}m " +
+                                                    "droneAlt=${"%.1f".format(point.altitudeM)}m ground=${"%.1f".format(sample.elevationMeters)}m"
+                                            )
+                                        }
+                                    }
+                                    val calibration = demCalibrationByDesignator[point.designator]
+                                    val estimatedMsl = if (calibration != null) {
+                                        calibration.takeoffGroundM + (point.altitudeM - calibration.takeoffDroneAltM)
+                                    } else {
+                                        point.altitudeM
+                                    }
+                                    val agl = estimatedMsl - sample.elevationMeters
+                                    demAglByDesignator[point.designator] = DroneAglState(
+                                        groundM = sample.elevationMeters,
+                                        aglM = agl,
+                                        stale = sample.stale
+                                    )
+                                    demKeyByDesignator[point.designator] = demKey
+                                } else {
+                                    demAglByDesignator.remove(point.designator)
+                                }
+                                demPendingByDesignator.remove(point.designator)
+                            }
+                        }
+                    }
                     val marker = Marker(mapView).apply {
-                        position = GeoPoint(point.lat, point.lng)
-                        icon = droneMarkerIcon?.constantState?.newDrawable()?.mutate()
+                        position = GeoPoint(renderLat, renderLng)
+                        icon = droneMarkerIcon?.constantState?.newDrawable()?.mutate()?.apply {
+                            when {
+                                (aglState?.aglM ?: Double.NEGATIVE_INFINITY) >= iconLimitAglM ->
+                                    setTint(AndroidColor.parseColor("#D32F2F"))
+                                (aglState?.aglM ?: Double.NEGATIVE_INFINITY) >= nearIconAglM ->
+                                    setTint(AndroidColor.parseColor("#FBC02D"))
+                            }
+                        }
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                        title = "${point.designator} alt=${"%.0f".format(point.altitudeM)}m"
+                        val aglText = if (aglState != null) {
+                            val aglFt = aglState.aglM * METERS_TO_FEET
+                            val groundFt = aglState.groundM * METERS_TO_FEET
+                            val staleSuffix = if (aglState.stale) " (stale)" else ""
+                            " agl=${"%.0f".format(aglFt)}ft gnd=${"%.0f".format(groundFt)}ft$staleSuffix"
+                        } else {
+                            ""
+                        }
+                        val altitudeFt = point.altitudeM * METERS_TO_FEET
+                        title = "${point.designator} alt=${"%.0f".format(altitudeFt)}ft$aglText"
                     }
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
+
+                    val labelRangeFeet = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
+                        val out = FloatArray(1)
+                        Location.distanceBetween(
+                            homeLocation.latitude,
+                            homeLocation.longitude,
+                            point.lat,
+                            point.lng,
+                            out
+                        )
+                        if (out[0].isFinite()) out[0].toDouble() * METERS_TO_FEET else null
+                    } else {
+                        null
+                    }
+                    val labelAglFeet = aglState?.aglM?.times(METERS_TO_FEET)
+                    val aglToken = labelAglFeet?.let { "%.0f".format(it) } ?: "--"
+                    val rangeToken = labelRangeFeet?.let { "%.0f".format(it) } ?: "--"
+                    val labelText = "$aglToken-$rangeToken"
+                    val labelMarker = Marker(mapView).apply {
+                        position = GeoPoint(renderLat, renderLng)
+                        icon = buildDroneStatusLabelDrawable(context.resources, labelText)
+                        setAnchor(-0.45f, Marker.ANCHOR_CENTER)
+                    }
+                    mapView.overlays.add(labelMarker)
+                    managedOverlays.add(labelMarker)
+                }
+
+                val limitAglM = AGL_LIMIT_FT * FT_TO_METERS
+                val limitRangeM = RANGE_LIMIT_FT * FT_TO_METERS
+                val nearAglM = limitAglM * NEAR_LIMIT_RATIO
+                val nearRangeM = limitRangeM * NEAR_LIMIT_RATIO
+
+                val activeDesignators = dronePoints.map { it.designator }.toSet()
+                complianceByDesignator.keys.toList().forEach { key ->
+                    if (!activeDesignators.contains(key)) {
+                        complianceByDesignator.remove(key)
+                    }
+                }
+
+                dronePoints.forEach { point ->
+                    val agl = demAglByDesignator[point.designator]
+                    val rangeM = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
+                        val out = FloatArray(1)
+                        Location.distanceBetween(
+                            homeLocation.latitude,
+                            homeLocation.longitude,
+                            point.lat,
+                            point.lng,
+                            out
+                        )
+                        if (out[0].isFinite()) out[0].toDouble() else null
+                    } else {
+                        null
+                    }
+
+                    val aglM = agl?.aglM
+                    val nearAgl = aglM != null && aglM >= nearAglM
+                    val overAgl = aglM != null && aglM >= limitAglM
+                    val nearRange = rangeM != null && rangeM >= nearRangeM
+                    val overRange = rangeM != null && rangeM >= limitRangeM
+                    complianceByDesignator[point.designator] = DroneComplianceState(
+                        aglM = aglM,
+                        rangeFromHomeM = rangeM,
+                        nearAgl = nearAgl,
+                        nearRange = nearRange,
+                        overAgl = overAgl,
+                        overRange = overRange,
+                        staleDem = agl?.stale ?: false
+                    )
+                }
+
+                val focusedCompliance = focusedPath?.let { complianceByDesignator[it] }
+                val anyOver = complianceByDesignator.values.any { it.overAgl || it.overRange }
+                val anyNear = complianceByDesignator.values.any { it.nearAgl || it.nearRange }
+                val severity = when {
+                    focusedCompliance != null && (focusedCompliance.overAgl || focusedCompliance.overRange) -> AlertSeverity.Over
+                    focusedCompliance != null && (focusedCompliance.nearAgl || focusedCompliance.nearRange) -> AlertSeverity.Near
+                    anyOver -> AlertSeverity.Over
+                    anyNear -> AlertSeverity.Near
+                    else -> AlertSeverity.None
+                }
+
+                val nowMs = System.currentTimeMillis()
+                val cooldownMs = if (severity == AlertSeverity.Over) OVER_ALERT_COOLDOWN_MS else NEAR_ALERT_COOLDOWN_MS
+                val shouldTone = severity != AlertSeverity.None &&
+                    (severity != lastAlertSeverity || nowMs - lastAlertToneAtMs >= cooldownMs)
+                if (shouldTone) {
+                    val toneType = if (severity == AlertSeverity.Over) {
+                        ToneGenerator.TONE_CDMA_HIGH_SS
+                    } else {
+                        ToneGenerator.TONE_PROP_BEEP
+                    }
+                    toneGenerator?.startTone(toneType, if (severity == AlertSeverity.Over) 250 else 140)
+                    lastAlertToneAtMs = nowMs
+                    CTDebug(MAP_PANE_TAG, "Compliance alert tone: severity=$severity")
+                }
+                if (severity != lastAlertSeverity) {
+                    lastAlertSeverity = severity
+                    CTDebug(MAP_PANE_TAG, "Compliance alert state changed: severity=$severity")
                 }
 
                 val renderStats =
                     "features=${artifactOverlayState.totalFeatures} points=${artifactOverlayState.points.size} " +
                         "lines=${artifactOverlayState.lines.size} polygons=${artifactOverlayState.polygons.size} " +
                         "ignoredTrackLike=${artifactOverlayState.ignoredTrackLikeFeatures} " +
-                        "localTracks=${localTrackPointsByMappedId.size} drones=${dronePoints.size}"
-                if (renderStats != lastRenderStats) {
+                        "localTracks=${localTrackPointsByMappedId.size} drones=${dronePoints.size} " +
+                        "localHeadOverrides=$localTailHeadOverrideCount"
+                if (MAP_PANE_VERBOSE_LOGS && renderStats != lastRenderStats) {
                     lastRenderStats = renderStats
                     CTDebug(MAP_PANE_TAG, "Artifact render stats: $renderStats")
                 }
@@ -705,7 +1116,7 @@ private fun SplitMapPane(
                             "localTailDeltaM=${tailDeltaMeters?.let { "%.1f".format(it) } ?: "n/a"} " +
                             "artifactFeatures=${artifactOverlayState.totalFeatures}"
                     }
-                    if (alignStats != lastAlignmentStats) {
+                    if (MAP_PANE_VERBOSE_LOGS && alignStats != lastAlignmentStats) {
                         lastAlignmentStats = alignStats
                         CTDebug(MAP_PANE_TAG, "Drone alignment: $alignStats")
                     }
@@ -725,80 +1136,111 @@ private fun SplitMapPane(
                         viewportPoints.size >= 2 -> {
                             val bounds = boundingBoxFromPoints(viewportPoints)
                             mapView.zoomToBoundingBox(bounds, true, 96)
-                            CTDebug(
-                                MAP_PANE_TAG,
-                                "Initial viewport: myLocation=${myLocation != null}, artifactPts=${artifactPoints.size}, mode=bounds"
-                            )
+                            if (MAP_PANE_VERBOSE_LOGS) {
+                                CTDebug(
+                                    MAP_PANE_TAG,
+                                    "Initial viewport: myLocation=${myLocation != null}, artifactPts=${artifactPoints.size}, mode=bounds"
+                                )
+                            }
                         }
 
                         myLocation != null -> {
                             mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
                             mapView.controller.setZoom(15.0)
-                            CTDebug(MAP_PANE_TAG, "Initial viewport: centered on MyLocation.")
+                            if (MAP_PANE_VERBOSE_LOGS) {
+                                CTDebug(MAP_PANE_TAG, "Initial viewport: centered on MyLocation.")
+                            }
                         }
 
                         focusPoint != null -> {
                             mapView.controller.setCenter(GeoPoint(focusPoint.lat, focusPoint.lng))
                             mapView.controller.setZoom(14.0)
-                            CTDebug(MAP_PANE_TAG, "Initial viewport: fallback to focused drone point.")
+                            if (MAP_PANE_VERBOSE_LOGS) {
+                                CTDebug(MAP_PANE_TAG, "Initial viewport: fallback to focused drone point.")
+                            }
                         }
                     }
                     initialViewportApplied = true
                     initialViewportArtifactCount = artifactOverlayState.totalFeatures
                 }
+
+                val now = System.currentTimeMillis()
+                if (!cacheStatsQueryInFlight && now >= nextCacheStatsLogAtMs) {
+                    cacheStatsQueryInFlight = true
+                    nextCacheStatsLogAtMs = now + 15_000L
+                    uiScope.launch(Dispatchers.IO) {
+                        val iconStats = iconCacheService.statsSnapshot()
+                        val tileStats = tileCacheWriter.statsSnapshot()
+                        val demStats = demElevationService.statsSnapshot()
+                        val statsLine =
+                            "CacheStats icon(hit=${iconStats.hits} miss=${iconStats.misses} stale=${iconStats.staleServed} " +
+                                "evict=${iconStats.evictions} bytes=${iconStats.bytesUsed}) " +
+                                "tile(hit=${tileStats.hits} miss=${tileStats.misses} stale=${tileStats.staleServed} " +
+                                "evict=${tileStats.evictions} bytes=${tileStats.bytesUsed}) " +
+                                "dem(hit=${demStats.hits} miss=${demStats.misses} stale=${demStats.staleServed} " +
+                                "evict=${demStats.evictions} bytes=${demStats.bytesUsed})"
+                        withContext(Dispatchers.Main.immediate) {
+                            if (statsLine != lastCacheStats) {
+                                lastCacheStats = statsLine
+                                CTDebug(MAP_PANE_TAG, statsLine)
+                            }
+                            cacheStatsQueryInFlight = false
+                        }
+                    }
+                }
                 mapView.invalidate()
             }
         )
 
-        Column(
+        Box(
             modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(8.dp)
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
-                .padding(8.dp)
+                .align(Alignment.TopEnd)
+                .padding(6.dp)
         ) {
-            Text(
-                text = CaltopoMap.GetMapName().ifBlank { "Local Incident Map" },
-                style = MaterialTheme.typography.titleSmall
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { layerMenuExpanded = true }) {
-                    Text(
-                        when (baseLayer) {
-                            BaseLayerOption.OpenStreetMap -> "Base: OpenStreetMap"
-                            BaseLayerOption.Imagery -> "Base: Imagery"
-                        }
-                    )
-                }
-                DropdownMenu(
-                    expanded = layerMenuExpanded,
-                    onDismissRequest = { layerMenuExpanded = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("OpenStreetMap") },
-                        onClick = {
-                            baseLayer = BaseLayerOption.OpenStreetMap
-                            layerMenuExpanded = false
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Imagery") },
-                        onClick = {
-                            baseLayer = BaseLayerOption.Imagery
-                            layerMenuExpanded = false
-                        }
-                    )
-                }
+            IconButton(
+                onClick = { settingsMenuExpanded = true },
+                modifier = Modifier
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = "Map settings"
+                )
             }
-            Text(
-                text = "Live RID markers refresh with local telemetry.",
-                style = MaterialTheme.typography.bodySmall
-            )
-            Text(
-                text = "Caltopo artifacts rendered: ${artifactOverlayState.totalFeatures}",
-                style = MaterialTheme.typography.bodySmall
-            )
+            DropdownMenu(
+                expanded = settingsMenuExpanded,
+                onDismissRequest = { settingsMenuExpanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Base: OpenStreetMap") },
+                    onClick = {
+                        baseLayer = BaseLayerOption.OpenStreetMap
+                        settingsMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Base: Imagery") },
+                    onClick = {
+                        baseLayer = BaseLayerOption.Imagery
+                        settingsMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Recalibrate Ground") },
+                    onClick = {
+                        recalibrateFocusedDrone()
+                        settingsMenuExpanded = false
+                    },
+                    enabled = focusedDrone != null
+                )
+                DropdownMenuItem(
+                    text = { Text(if (predictiveHeadEnabled) "Predictive Head: On" else "Predictive Head: Off") },
+                    onClick = {
+                        predictiveHeadEnabled = !predictiveHeadEnabled
+                        settingsMenuExpanded = false
+                    }
+                )
+            }
         }
     }
 }
@@ -888,6 +1330,10 @@ private fun appendGeometryArtifact(
     var ignoredTrackLike = 0
     when (geometry.optString("type")) {
         "Point" -> {
+            if (trackLikeFeature) {
+                ignoredTrackLike++
+                return ignoredTrackLike
+            }
             val coords = geometry.optJSONArray("coordinates") ?: return 0
             val geoPoint = geoPointFromLngLat(coords) ?: return 0
             pointsOut += ArtifactPointSpec(
@@ -1089,6 +1535,99 @@ private fun nearestLocalTrackTailDistanceMeters(
     return best
 }
 
+private fun predictedHeadPoint(
+    designator: String,
+    nowWallMsec: Long,
+    dronePointTimestampMsec: Long,
+    tracksByMappedId: Map<String, List<LocalTrackPoint>>
+): GeoPoint? {
+    val points = tracksByMappedId[designator] ?: return null
+    val p2 = points.lastOrNull() ?: return null
+    val p1 = points.asReversed().drop(1).firstOrNull() ?: return null
+
+    val deltaByDroneTsMsec = p2.timestampMsec - p1.timestampMsec
+    val deltaByReceiveMsec = p2.receivedAtMsec - p1.receivedAtMsec
+    val deltaMsec = when {
+        deltaByDroneTsMsec > 0L -> deltaByDroneTsMsec
+        deltaByReceiveMsec > 0L -> deltaByReceiveMsec
+        else -> return null
+    }
+
+    val distanceAndBearing = FloatArray(2)
+    Location.distanceBetween(
+        p1.lat, p1.lng,
+        p2.lat, p2.lng,
+        distanceAndBearing
+    )
+    val segmentDistanceM = distanceAndBearing[0].toDouble()
+    if (!segmentDistanceM.isFinite() || segmentDistanceM <= 0.0) return null
+
+    val speedMps = (segmentDistanceM / deltaMsec.toDouble() * 1000.0)
+        .coerceAtMost(PREDICTIVE_HEAD_MAX_SPEED_MPS)
+    if (speedMps <= 0.0) return null
+
+    val ageMsec = nowWallMsec - dronePointTimestampMsec
+    if (ageMsec < PREDICTIVE_HEAD_MIN_AGE_MS || ageMsec > PREDICTIVE_HEAD_MAX_AGE_MS) return null
+
+    val projectionMsec = ageMsec.coerceAtMost(PREDICTIVE_HEAD_MAX_LOOKAHEAD_MS)
+    val projectionDistanceM = (speedMps * projectionMsec.toDouble() / 1000.0)
+        .coerceAtMost(PREDICTIVE_HEAD_MAX_DISTANCE_M)
+    if (projectionDistanceM <= 0.0) return null
+
+    return destinationPoint(
+        startLat = p2.lat,
+        startLng = p2.lng,
+        bearingDeg = distanceAndBearing[1].toDouble(),
+        distanceM = projectionDistanceM
+    )
+}
+
+private fun destinationPoint(
+    startLat: Double,
+    startLng: Double,
+    bearingDeg: Double,
+    distanceM: Double
+): GeoPoint {
+    val earthRadiusM = 6_371_000.0
+    val angularDistance = distanceM / earthRadiusM
+    val bearing = Math.toRadians(bearingDeg)
+    val lat1 = Math.toRadians(startLat)
+    val lon1 = Math.toRadians(startLng)
+
+    val sinLat1 = kotlin.math.sin(lat1)
+    val cosLat1 = kotlin.math.cos(lat1)
+    val sinAngular = kotlin.math.sin(angularDistance)
+    val cosAngular = kotlin.math.cos(angularDistance)
+
+    val lat2 = kotlin.math.asin(
+        sinLat1 * cosAngular + cosLat1 * sinAngular * kotlin.math.cos(bearing)
+    )
+    val lon2 = lon1 + kotlin.math.atan2(
+        kotlin.math.sin(bearing) * sinAngular * cosLat1,
+        cosAngular - sinLat1 * kotlin.math.sin(lat2)
+    )
+
+    return GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2))
+}
+
+private fun buildDroneStatusLabelDrawable(
+    resources: android.content.res.Resources,
+    text: String
+): Drawable {
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#1A5CFF")
+        textSize = 24f
+        typeface = android.graphics.Typeface.MONOSPACE
+    }
+    val baselineY = 22f
+    val width = maxOf(1, (textPaint.measureText(text) + 4f).toInt())
+    val height = 30
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    canvas.drawText(text, 0f, baselineY, textPaint)
+    return BitmapDrawable(resources, bitmap)
+}
+
 private fun isKnownArtifactSymbol(symbol: String): Boolean {
     return symbolGlyphForMarkerSymbol(symbol) != null
 }
@@ -1110,35 +1649,6 @@ private fun markerIconForArtifactSymbol(
     val icon = buildCaltopoLikeSymbolDrawable(resources, normalizedSymbol, normalizedColor)
     cache[cacheKey] = icon
     return icon.constantState?.newDrawable(resources)?.mutate() ?: icon
-}
-
-private fun caltopoMarkerCacheKey(symbol: String, colorHex: String?): String {
-    return "${symbol.ifBlank { "point" }}|${colorHex?.trim().orEmpty()}"
-}
-
-private fun caltopoIconUrl(symbol: String, colorHex: String?): String {
-    val normalizedSymbol = symbol.ifBlank { "point" }
-    val color = colorHex
-        ?.trim()
-        ?.removePrefix("#")
-        ?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
-    val cfg = if (color != null) "$normalizedSymbol,$color" else normalizedSymbol
-    val encodedCfg = URLEncoder.encode(cfg, StandardCharsets.UTF_8.toString())
-    return "https://caltopo.com/icon@2x.png?cfg=$encodedCfg"
-}
-
-private fun tryLoadRemoteIconDrawable(
-    resources: android.content.res.Resources,
-    iconUrl: String
-): Drawable? {
-    return try {
-        URL(iconUrl).openStream().use { stream ->
-            val bitmap = BitmapFactory.decodeStream(stream) ?: return null
-            BitmapDrawable(resources, bitmap)
-        }
-    } catch (_: Exception) {
-        null
-    }
 }
 
 private fun symbolGlyphForMarkerSymbol(symbol: String): String? {

@@ -33,6 +33,8 @@ import android.net.wifi.aware.SubscribeDiscoverySession;
 import android.net.wifi.aware.WifiAwareManager;
 import android.net.wifi.aware.WifiAwareSession;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
@@ -66,6 +68,25 @@ public class WiFiScanner {
 
     private WifiManager.ScanResultsCallback scanResultsCallback;
     private static final String TAG = "WiFiScanner";
+    private static final long WIFI_SCAN_KICK_INTERVAL_MS = 10_000L;
+    private final Handler scanKickHandler = new Handler(Looper.getMainLooper());
+    private boolean scanKickRunning = false;
+    private final Runnable scanKickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!scanKickRunning) return;
+            try {
+                // On newer Android versions this is best-effort and may be throttled,
+                // but it still improves callback cadence on some devices.
+                wifiManager.startScan();
+            } catch (SecurityException se) {
+                CTError(TAG, "scanKickRunnable: startScan() permission/security error:\n", se);
+            } catch (Exception e) {
+                CTError(TAG, "scanKickRunnable: startScan() raised:\n", e);
+            }
+            scanKickHandler.postDelayed(this, WIFI_SCAN_KICK_INTERVAL_MS);
+        }
+    };
 
     public WiFiScanner(Context context, OpenDroneIdDataManager dataManager) {
         this.dataManager = dataManager;
@@ -172,6 +193,7 @@ public class WiFiScanner {
 
     public void startScan() {
         CaltopoClient.CTDebug(TAG, "Starting WiFi beacon scanning");
+        scanKickRunning = true;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             wifiManager.registerScanResultsCallback(context.getMainExecutor(), scanResultsCallback);
         } else {
@@ -179,6 +201,8 @@ public class WiFiScanner {
             intentFilter.addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
             context.registerReceiver(wifiScanReceiver, intentFilter);
         }
+        scanKickHandler.removeCallbacks(scanKickRunnable);
+        scanKickHandler.post(scanKickRunnable);
 
         wifiAwareManager = (WifiAwareManager) context.getSystemService(Context.WIFI_AWARE_SERVICE);
         if (wifiAwareManager != null && wifiAwareManager.isAvailable()) {
@@ -193,6 +217,8 @@ public class WiFiScanner {
 
     public void stopScan() {
         CaltopoClient.CTInfo(TAG, "Stopping WiFi beacon scanning");
+        scanKickRunning = false;
+        scanKickHandler.removeCallbacks(scanKickRunnable);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             wifiManager.unregisterScanResultsCallback(scanResultsCallback);
         } else {
@@ -278,4 +304,3 @@ public class WiFiScanner {
     };
 
 }
-

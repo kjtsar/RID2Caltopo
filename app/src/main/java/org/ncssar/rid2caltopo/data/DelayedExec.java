@@ -19,6 +19,7 @@ public class DelayedExec {
     private static final String TAG = "DelayedExec";
     private Runnable runnable;
     private Handler handler;
+    private Runnable dispatcherRunnable;
     private long repeatMsec;  // zero == no repeat.
     private boolean running;
 
@@ -54,7 +55,7 @@ public class DelayedExec {
             }
 
             if (savedRunState) {
-                handler.postDelayed(this::dispatcher, repeatMsec);
+                handler.postDelayed(dispatcherRunnable, repeatMsec);
             } else {
                 CTInfo(TAG, String.format(Locale.US,
                         "'%s' completed single delayed operation.", runnable.toString()));
@@ -69,27 +70,31 @@ public class DelayedExec {
     }
 
     public void start(Runnable runnable, long delayInMsec, long repeatDelayInMsec) {
-        if (running) {
-            handler.removeCallbacks(this.runnable);
-        } else if (null == handler) {
+        if (null == handler) {
             handler = new Handler(Looper.getMainLooper());
-            this.runnable = runnable;
         }
+        if (null == dispatcherRunnable) {
+            dispatcherRunnable = this::dispatcher;
+        }
+        this.runnable = runnable;
+        handler.removeCallbacks(dispatcherRunnable);
         repeatMsec = repeatDelayInMsec;
         running = true;
-        handler.postDelayed(this::dispatcher, delayInMsec);
+        handler.postDelayed(dispatcherRunnable, delayInMsec);
     }
 
     public void stop() {
-        if (running) {
-            handler.removeCallbacks(this.runnable);
-            repeatMsec = 0;
+        if (handler != null && dispatcherRunnable != null) {
+            handler.removeCallbacks(dispatcherRunnable);
         }
+        repeatMsec = 0;
         running = false;
     }
 
     protected void finalize() {
-        if (running) handler.removeCallbacks(this.runnable);
+        if (handler != null && dispatcherRunnable != null) {
+            handler.removeCallbacks(dispatcherRunnable);
+        }
         running = false;
     }
 }

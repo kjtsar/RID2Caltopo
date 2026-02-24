@@ -109,6 +109,7 @@ private const val MAP_PANE_VERBOSE_LOGS = false
 private const val LOCAL_DEVICE_SYMBOL = "radiotower"
 private const val LOCAL_DEVICE_COLOR = "0000FF"
 private const val AGL_LIMIT_FT = 200.0
+private const val CALIBRATE_ATO_TARGET_FT = 50.0
 private const val RANGE_LIMIT_FT = 5280.0
 private const val AGL_ICON_NEAR_DELTA_FT = 20.0
 private const val FT_TO_METERS = 0.3048
@@ -121,7 +122,11 @@ private const val PREDICTIVE_HEAD_MIN_AGE_MS = 600L
 private const val PREDICTIVE_HEAD_MAX_AGE_MS = 5_000L
 private const val PREDICTIVE_HEAD_MAX_LOOKAHEAD_MS = 2_000L
 private const val PREDICTIVE_HEAD_MAX_SPEED_MPS = 45.0
+private const val PREDICTIVE_HEAD_MAX_VERTICAL_SPEED_MPS = 15.0
 private const val PREDICTIVE_HEAD_MAX_DISTANCE_M = 90.0
+private const val DRONE_NAME_LABEL_ANCHOR_Y = 1.40f
+private const val DRONE_STATUS_LABEL_ANCHOR_Y = 2.00f
+private const val LABEL_MAX_ABS_FEET = 1000.0
 
 private enum class ScreenLayoutMode {
     Both,
@@ -215,6 +220,11 @@ private data class LocalTrackPoint(
     val altitudeM: Double,
     val timestampMsec: Long,
     val receivedAtMsec: Long
+)
+
+private data class PredictedHead(
+    val lat: Double,
+    val lng: Double
 )
 
 private object ArcGisWorldImageryTileSource : OnlineTileSourceBase(
@@ -563,14 +573,16 @@ private fun SplitMapPane(
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
     val focusedDrone = dronePoints.firstOrNull { it.designator == focusedPath } ?: dronePoints.firstOrNull()
 
-    fun recalibrateFocusedDrone() {
+    fun calibrateFocusedDroneAto50() {
         val target = focusedDrone ?: return
+        val targetAtoM = CALIBRATE_ATO_TARGET_FT * FT_TO_METERS
         uiScope.launch(Dispatchers.IO) {
             val sample = demElevationService.sampleElevationMeters(target.lat, target.lng)
             withContext(Dispatchers.Main.immediate) {
                 if (sample != null) {
+                    val calibratedTakeoffDroneAltM = target.altitudeM - targetAtoM
                     demCalibrationByDesignator[target.designator] = DroneAltitudeCalibration(
-                        takeoffDroneAltM = target.altitudeM,
+                        takeoffDroneAltM = calibratedTakeoffDroneAltM,
                         takeoffGroundM = sample.elevationMeters
                     )
                     takeoffCalibrationStateByDesignator[target.designator] = DroneTakeoffCalibrationState(
@@ -579,20 +591,22 @@ private fun SplitMapPane(
                     )
                     demAglByDesignator[target.designator] = DroneAglState(
                         groundM = sample.elevationMeters,
-                        aglM = 0.0,
+                        aglM = targetAtoM,
                         stale = sample.stale
                     )
                     demKeyByDesignator[target.designator] =
                         demElevationService.cacheKey(target.lat, target.lng)
                     CTDebug(
                         MAP_PANE_TAG,
-                        "Manual DEM recalibration for ${target.designator}: " +
-                            "droneAlt=${"%.1f".format(target.altitudeM)}m ground=${"%.1f".format(sample.elevationMeters)}m"
+                        "Manual ATO calibration (${CALIBRATE_ATO_TARGET_FT.toInt()}ft) for ${target.designator}: " +
+                            "droneAlt=${"%.1f".format(target.altitudeM)}m " +
+                            "takeoffDroneAlt=${"%.1f".format(calibratedTakeoffDroneAltM)}m " +
+                            "ground=${"%.1f".format(sample.elevationMeters)}m"
                     )
                 } else {
                     CTDebug(
                         MAP_PANE_TAG,
-                        "Manual DEM recalibration skipped for ${target.designator}: DEM sample unavailable."
+                        "Manual ATO calibration skipped for ${target.designator}: DEM sample unavailable."
                     )
                 }
             }
@@ -899,11 +913,13 @@ private fun SplitMapPane(
                     } else {
                         null
                     }
-                    val renderLat = predictedHead?.latitude ?: point.lat
-                    val renderLng = predictedHead?.longitude ?: point.lng
+                    val renderLat = predictedHead?.lat ?: point.lat
+                    val renderLng = predictedHead?.lng ?: point.lng
+                    val displayAltitudeM = point.altitudeM
                     val demKey = demElevationService.cacheKey(point.lat, point.lng)
                     val priorKey = demKeyByDesignator[point.designator]
                     val aglState = demAglByDesignator[point.designator]
+                    val calibration = demCalibrationByDesignator[point.designator]
                     if (priorKey != demKey && !demPendingByDesignator.contains(point.designator)) {
                         demPendingByDesignator.add(point.designator)
                         uiScope.launch(Dispatchers.IO) {
@@ -982,33 +998,56 @@ private fun SplitMapPane(
                         } else {
                             ""
                         }
-                        val altitudeFt = point.altitudeM * METERS_TO_FEET
+                        val altitudeFt = displayAltitudeM * METERS_TO_FEET
                         title = "${point.designator} alt=${"%.0f".format(altitudeFt)}ft$aglText"
                     }
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
+
+                    val nameMarker = Marker(mapView).apply {
+                        position = GeoPoint(renderLat, renderLng)
+                        icon = buildDroneNameLabelDrawable(context.resources, point.designator)
+                        setAnchor(Marker.ANCHOR_CENTER, DRONE_NAME_LABEL_ANCHOR_Y)
+                    }
+                    mapView.overlays.add(nameMarker)
+                    managedOverlays.add(nameMarker)
 
                     val labelRangeFeet = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
                         val out = FloatArray(1)
                         Location.distanceBetween(
                             homeLocation.latitude,
                             homeLocation.longitude,
-                            point.lat,
-                            point.lng,
+                            renderLat,
+                            renderLng,
                             out
                         )
                         if (out[0].isFinite()) out[0].toDouble() * METERS_TO_FEET else null
                     } else {
                         null
                     }
-                    val labelAglFeet = aglState?.aglM?.times(METERS_TO_FEET)
-                    val aglToken = labelAglFeet?.let { "%.0f".format(it) } ?: "--"
+                    val labelAglFeet = if (aglState != null) {
+                        val aglM = if (calibration != null) {
+                            (calibration.takeoffGroundM + (displayAltitudeM - calibration.takeoffDroneAltM)) - aglState.groundM
+                        } else {
+                            aglState.aglM
+                        }
+                        aglM * METERS_TO_FEET
+                    } else {
+                        null
+                    }
+                    val labelAtoFeet = calibration?.let { (displayAltitudeM - it.takeoffDroneAltM) * METERS_TO_FEET }
+                    val aglToken = labelAglFeet
+                        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
+                        ?.let { "%.0fAGL".format(it) } ?: "--AGL"
+                    val atoToken = labelAtoFeet
+                        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
+                        ?.let { "%.0fATO".format(it) } ?: "--ATO"
                     val rangeToken = labelRangeFeet?.let { "%.0f".format(it) } ?: "--"
-                    val labelText = "$aglToken-$rangeToken"
+                    val labelText = "$aglToken,$atoToken,$rangeToken"
                     val labelMarker = Marker(mapView).apply {
                         position = GeoPoint(renderLat, renderLng)
                         icon = buildDroneStatusLabelDrawable(context.resources, labelText)
-                        setAnchor(-0.45f, Marker.ANCHOR_CENTER)
+                        setAnchor(Marker.ANCHOR_CENTER, DRONE_STATUS_LABEL_ANCHOR_Y)
                     }
                     mapView.overlays.add(labelMarker)
                     managedOverlays.add(labelMarker)
@@ -1226,9 +1265,9 @@ private fun SplitMapPane(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Recalibrate Ground") },
+                    text = { Text("Calibrate 50' ATO") },
                     onClick = {
-                        recalibrateFocusedDrone()
+                        calibrateFocusedDroneAto50()
                         settingsMenuExpanded = false
                     },
                     enabled = focusedDrone != null
@@ -1540,7 +1579,7 @@ private fun predictedHeadPoint(
     nowWallMsec: Long,
     dronePointTimestampMsec: Long,
     tracksByMappedId: Map<String, List<LocalTrackPoint>>
-): GeoPoint? {
+): PredictedHead? {
     val points = tracksByMappedId[designator] ?: return null
     val p2 = points.lastOrNull() ?: return null
     val p1 = points.asReversed().drop(1).firstOrNull() ?: return null
@@ -1574,11 +1613,15 @@ private fun predictedHeadPoint(
         .coerceAtMost(PREDICTIVE_HEAD_MAX_DISTANCE_M)
     if (projectionDistanceM <= 0.0) return null
 
-    return destinationPoint(
+    val predictedGeoPoint = destinationPoint(
         startLat = p2.lat,
         startLng = p2.lng,
         bearingDeg = distanceAndBearing[1].toDouble(),
         distanceM = projectionDistanceM
+    )
+    return PredictedHead(
+        lat = predictedGeoPoint.latitude,
+        lng = predictedGeoPoint.longitude
     )
 }
 
@@ -1625,6 +1668,25 @@ private fun buildDroneStatusLabelDrawable(
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
     canvas.drawText(text, 0f, baselineY, textPaint)
+    return BitmapDrawable(resources, bitmap)
+}
+
+private fun buildDroneNameLabelDrawable(
+    resources: android.content.res.Resources,
+    text: String
+): Drawable {
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#F5F7FA")
+        textSize = 24f
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        setShadowLayer(4f, 1f, 1f, AndroidColor.parseColor("#D0000000"))
+    }
+    val baselineY = 23f
+    val width = maxOf(1, (textPaint.measureText(text) + 8f).toInt())
+    val height = 32
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    canvas.drawText(text, 4f, baselineY, textPaint)
     return BitmapDrawable(resources, bitmap)
 }
 

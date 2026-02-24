@@ -306,6 +306,7 @@ public class WaypointTrack {
         for (DocumentFile trackDir : archiveDir.listFiles()) {
             long reportLastModifiedMillis = System.currentTimeMillis();
             if (!trackDir.isDirectory()) continue;
+            if (trackDir.getName().equals("cache")) continue;
             CTInfo(TAG, "BgPollUnreportedTracks() Checking " + trackDir.getName());
             Handler mainThreadHandler = new Handler(Looper.getMainLooper());
             DocumentFile reportedFilepath = trackDir.findFile(ReportedFilenames);

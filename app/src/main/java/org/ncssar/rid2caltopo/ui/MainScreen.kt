@@ -82,6 +82,8 @@ fun MainScreen(
     var menuExpanded by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
+    var showDebugTagDialog by remember { mutableStateOf(false) }
+    var debugTagFilterText by remember { mutableStateOf("") }
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
     val context =  LocalContext.current
 
@@ -137,6 +139,48 @@ fun MainScreen(
                 ) {
                     Text("Cancel")
                 }
+            }
+        )
+    }
+
+    if (showDebugTagDialog) {
+        AlertDialog(
+            onDismissRequest = { showDebugTagDialog = false },
+            title = { Text("Debug Tag Filter") },
+            text = {
+                OutlinedTextField(
+                    value = debugTagFilterText,
+                    onValueChange = { debugTagFilterText = it },
+                    label = { Text("Comma-separated tags") },
+                    placeholder = { Text("StreamTile,StreamPlayer,StreamsViewModel") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val csv = debugTagFilterText.trim()
+                        CaltopoClient.SetDebugTagFilter(csv)
+                        val msg = if (csv.isBlank()) {
+                            "Debug tag filter disabled."
+                        } else {
+                            "Debug tag filter: $csv"
+                        }
+                        CaltopoClient.ShowToast(msg)
+                        CTDebug(tag, msg)
+                        showDebugTagDialog = false
+                    }
+                ) { Text("Apply") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        CaltopoClient.ClearDebugTagFilter()
+                        debugTagFilterText = ""
+                        CaltopoClient.ShowToast("Debug tag filter cleared.")
+                        showDebugTagDialog = false
+                    }
+                ) { Text("Clear") }
             }
         )
     }
@@ -243,6 +287,14 @@ fun MainScreen(
                                 showConfirmDialog = true;
                             }
                             menuExpanded = true
+                        })
+                        DropdownMenuItem(text = {
+                            val active = if (CaltopoClient.IsDebugTagFilterEnabled()) "on" else "off"
+                            Text("Debug Tags ($active)")
+                        }, onClick = {
+                            debugTagFilterText = CaltopoClient.GetDebugTagFilterCsv()
+                            showDebugTagDialog = true
+                            menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Live View")}, onClick = {
                             localViewModel.showStreams()

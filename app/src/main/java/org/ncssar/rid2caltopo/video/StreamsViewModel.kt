@@ -342,10 +342,30 @@ class StreamsViewModel(
     }
 
     private fun syncStreamSessions(streamsMap: Map<String, StreamInfo>) {
+        val focused = _focusedPath.value
+        if (focused != null && !streamsMap.containsKey(focused)) {
+            CTDebug(tag, "Focused stream $focused is no longer present -> clearing focus")
+            _focusedPath.value = null
+        }
+
         val liveDesignators = streamsMap.values
             .filter { it.state == StreamState.LIVE }
             .map { it.designator }
             .toSet()
+        val added = liveDesignators - lastLiveDesignators
+        val focusedPath = _focusedPath.value
+        if (focusedPath != null) {
+            val newlyAttachedOffFocus = added.filter { it != focusedPath }
+            if (newlyAttachedOffFocus.isNotEmpty()) {
+                val msg = if (newlyAttachedOffFocus.size == 1) {
+                    "New stream attached: ${newlyAttachedOffFocus.first()}"
+                } else {
+                    "New streams attached: ${newlyAttachedOffFocus.joinToString(", ")}"
+                }
+                CaltopoClient.ShowToast("$msg. Tap focused stream to return to grid.")
+                CTInfo(tag, msg)
+            }
+        }
 
         val removed = lastLiveDesignators - liveDesignators
         removed.forEach { designator ->

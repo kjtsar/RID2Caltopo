@@ -41,9 +41,12 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Hashtable;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.*;
@@ -183,6 +186,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static final int DebugLevelDebug = 2;
     public static final int DebugLevelInfo = 3;
     public static int DebugLevel = DebugLevelDebug;
+    private static final Object DebugTagFilterLock = new Object();
+    private static boolean DebugTagFilterEnabled = false;
+    private static final Set<String> DebugTagFilter = new HashSet<>();
     private static final int ThreadPoolSize = 2;
     private static boolean WarnMissingMapFlag = false;
     private static Hashtable<String, CaltopoClient> ClientMap;
@@ -377,6 +383,76 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return retval;
     }
 
+    public interface DebugMessageSupplier {
+        String get();
+    }
+
+    public static boolean CTDebugEnabled(@Nullable String tag) {
+        if (DebugLevel < DebugLevelDebug) return false;
+        if (!DebugTagFilterEnabled) return true;
+        if (tag == null || tag.isEmpty()) return false;
+        synchronized (DebugTagFilterLock) {
+            return DebugTagFilter.contains(tag);
+        }
+    }
+
+    public static void ClearDebugTagFilter() {
+        synchronized (DebugTagFilterLock) {
+            DebugTagFilter.clear();
+            DebugTagFilterEnabled = false;
+        }
+    }
+
+    public static void SetDebugTagFilter(@Nullable String csvTags) {
+        synchronized (DebugTagFilterLock) {
+            DebugTagFilter.clear();
+            if (csvTags != null) {
+                String[] tags = csvTags.split(",");
+                for (String raw : tags) {
+                    String tag = raw.trim();
+                    if (!tag.isEmpty()) {
+                        DebugTagFilter.add(tag);
+                    }
+                }
+            }
+            DebugTagFilterEnabled = !DebugTagFilter.isEmpty();
+        }
+    }
+
+    public static void AddDebugTagFilter(@NonNull String tag) {
+        String t = tag.trim();
+        if (t.isEmpty()) return;
+        synchronized (DebugTagFilterLock) {
+            DebugTagFilter.add(t);
+            DebugTagFilterEnabled = true;
+        }
+    }
+
+    public static void RemoveDebugTagFilter(@NonNull String tag) {
+        String t = tag.trim();
+        if (t.isEmpty()) return;
+        synchronized (DebugTagFilterLock) {
+            DebugTagFilter.remove(t);
+            DebugTagFilterEnabled = !DebugTagFilter.isEmpty();
+        }
+    }
+
+    public static boolean IsDebugTagFilterEnabled() {
+        synchronized (DebugTagFilterLock) {
+            return DebugTagFilterEnabled;
+        }
+    }
+
+    @NonNull
+    public static String GetDebugTagFilterCsv() {
+        synchronized (DebugTagFilterLock) {
+            if (DebugTagFilter.isEmpty()) return "";
+            List<String> sorted = new ArrayList<>(DebugTagFilter);
+            sorted.sort(String::compareTo);
+            return String.join(",", sorted);
+        }
+    }
+
     @Nullable
     public static Uri GetDebugLogUri() {
         return DebugLogPath;
@@ -440,13 +516,24 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTDebug(String tag, String msg) {
-        if (DebugLevel >= DebugLevelDebug) {
-            long myTid = Process.myTid();
-            String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
-            CTLog("DEBUG" + tidString, tag, msg);
-            msg = "CTDebug" + tidString + ": " + msg;
-            Log.d(tag, msg);
+        if (!CTDebugEnabled(tag)) return;
+        long myTid = Process.myTid();
+        String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
+        CTLog("DEBUG" + tidString, tag, msg);
+        msg = "CTDebug" + tidString + ": " + msg;
+        Log.d(tag, msg);
+    }
+
+    public static void CTDebug(String tag, DebugMessageSupplier supplier) {
+        if (!CTDebugEnabled(tag)) return;
+        String msg;
+        try {
+            msg = supplier.get();
+        } catch (Exception e) {
+            CTError(tag, "CTDebug supplier raised", e);
+            return;
         }
+        CTDebug(tag, msg);
     }
 
     public static void CTError(String tag, String msg) {

@@ -395,8 +395,11 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     }
 
     public override fun onDestroy() {
-        if (this === AppActivity) {
-            if (isFinishing()) try {
+        val exitRequested = CaltopoClient.IsExitRequested()
+        val shouldShutdown = (this === AppActivity) && isFinishing && exitRequested
+
+        if (shouldShutdown) {
+            try {
                 stopLocationUpdates()
                 R2CPeer.SetPeerListChangedListener(null)
                 CTDebug(TAG,"onDestroy() shutting down streaming service..." )
@@ -411,6 +414,19 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             } catch (e: Exception) {
                 CTError(TAG, "onDestroy() raised:", e)
             }
+        } else {
+            stopLocationUpdates()
+            CTDebug(
+                TAG,
+                String.format(
+                    Locale.US,
+                    "onDestroy() skipping app shutdown (thisIsApp=%s, isFinishing=%s, isChangingConfig=%s, exitRequested=%s)",
+                    (this === AppActivity),
+                    isFinishing,
+                    isChangingConfigurations,
+                    exitRequested
+                )
+            )
         }
         super.onDestroy()
     }

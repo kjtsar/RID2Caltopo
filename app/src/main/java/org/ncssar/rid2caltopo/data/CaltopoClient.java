@@ -56,7 +56,6 @@ import java.util.concurrent.Executors;
 import java.io.*;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
-import java.security.SecureRandom;
 import java.util.concurrent.Future;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
@@ -1210,10 +1209,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 oos.flush();
             }
             byte[] serializedState = bos.toByteArray();
-            byte[] iv = new byte[12];
-            new SecureRandom().nextBytes(iv);
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateStateKey(), new GCMParameterSpec(128, iv));
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateStateKey());
+            byte[] iv = cipher.getIV();
+            if (iv == null || iv.length == 0) {
+                throw new GeneralSecurityException("ArchiveState(): secure cipher generated empty IV.");
+            }
             byte[] cipherText = cipher.doFinal(serializedState);
 
             fos = stateFile.startWrite();
@@ -1680,6 +1681,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CTDebug(TAG, String.format(Locale.US,
                 "App has been idle for %.3f minutes.  Exiting to save battery.",
                 idleInMsec / 60000.0));
+        synchronized (ShutdownLock) {
+            AppExitRequested = true;
+        }
         Activity activity = R2CActivity.getR2CActivity();
         if (null != activity) activity.finishAffinity();
     }

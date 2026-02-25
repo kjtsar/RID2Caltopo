@@ -110,7 +110,12 @@ class StreamsViewModel(
             }
         }
     )
-    private val ffmpegProbeService = FfmpegProbeService()
+    private val ffmpegProbeService: FfmpegProbeService? = try {
+        FfmpegProbeService()
+    } catch (t: Throwable) {
+        CTError(tag, "FFmpeg probe service unavailable; falling back to Exo-only playback.", Exception(t))
+        null
+    }
 
     val streams: StateFlow<Map<String, StreamInfo>> =
         StreamRegistry.streams.stateIn(
@@ -164,15 +169,15 @@ class StreamsViewModel(
     }
 
     fun useFfmpegRender(designator: String): Boolean {
-        return ffmpegProbeService.isRenderEnabled(designator)
+        return ffmpegProbeService?.isRenderEnabled(designator) == true
     }
 
     fun bindFfmpegRenderSurface(designator: String, surface: Surface): Boolean {
-        return ffmpegProbeService.bindRenderSurface(designator, surface)
+        return ffmpegProbeService?.bindRenderSurface(designator, surface) == true
     }
 
     fun unbindFfmpegRenderSurface(designator: String) {
-        ffmpegProbeService.unbindRenderSurface(designator)
+        ffmpegProbeService?.unbindRenderSurface(designator)
     }
 
     fun ensurePlayer(designator: String) {
@@ -207,7 +212,7 @@ class StreamsViewModel(
 
     override fun onCleared() {
         CaltopoMap.RemoveMapStatusListener(this)
-        ffmpegProbeService.close()
+        ffmpegProbeService?.close()
         streamSessions.releaseAll()
         super.onCleared()
     }
@@ -241,7 +246,7 @@ class StreamsViewModel(
             return
         }
 
-        val telemetry = ffmpegProbeService.telemetrySnapshot(designator)
+        val telemetry = ffmpegProbeService?.telemetrySnapshot(designator)
         val clueLat = telemetry?.latitude ?: droneSpec.lastLat
         val clueLng = telemetry?.longitude ?: droneSpec.lastLng
         val clueAlt = telemetry?.altitudeMeters ?: droneSpec.lastAlt
@@ -379,13 +384,13 @@ class StreamsViewModel(
         val removed = lastLiveDesignators - liveDesignators
         removed.forEach { designator ->
             CTDebug(tag, "Stream $designator no longer live -> release player")
-            ffmpegProbeService.onStreamStopped(designator)
+            ffmpegProbeService?.onStreamStopped(designator)
             streamSessions.onStreamStopped(designator)
         }
 
         liveDesignators.forEach { designator ->
-            ffmpegProbeService.onStreamBecameLive(designator)
-            if (ffmpegProbeService.isRenderEnabled(designator)) {
+            ffmpegProbeService?.onStreamBecameLive(designator)
+            if (ffmpegProbeService?.isRenderEnabled(designator) == true) {
                 CTDebug(tag, "Stream $designator live -> FFmpeg render active, skipping Exo player")
                 streamSessions.onStreamStopped(designator)
             } else {

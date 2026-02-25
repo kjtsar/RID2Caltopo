@@ -28,3 +28,7 @@
 -keepclasseswithmembers class * {
     native <methods>;
 }
+
+# FFmpeg JNI bridge relies on stable class/method names for native callbacks.
+-keep class org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge { *; }
+-keep class org.ncssar.rid2caltopo.video.ffmpeg.FfmpegTelemetry { *; }

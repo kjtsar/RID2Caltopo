@@ -1657,17 +1657,23 @@ private fun buildDroneStatusLabelDrawable(
     resources: android.content.res.Resources,
     text: String
 ): Drawable {
+    val scaledDensity = resources.displayMetrics.scaledDensity
     val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AndroidColor.parseColor("#1A5CFF")
-        textSize = 24f
+        textSize = 12f * scaledDensity
         typeface = android.graphics.Typeface.MONOSPACE
     }
-    val baselineY = 22f
-    val width = maxOf(1, (textPaint.measureText(text) + 4f).toInt())
-    val height = 30
+    val fm = textPaint.fontMetrics
+    val horizontalPaddingPx = 2f * scaledDensity
+    val verticalPaddingPx = 1.5f * scaledDensity
+    val textWidth = textPaint.measureText(text)
+    val textHeight = fm.descent - fm.ascent
+    val width = maxOf(1, (textWidth + (horizontalPaddingPx * 2f)).toInt())
+    val height = maxOf(1, (textHeight + (verticalPaddingPx * 2f)).toInt())
+    val baselineY = verticalPaddingPx - fm.ascent
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
-    canvas.drawText(text, 0f, baselineY, textPaint)
+    canvas.drawText(text, horizontalPaddingPx, baselineY, textPaint)
     return BitmapDrawable(resources, bitmap)
 }
 

@@ -47,6 +47,11 @@ internal class BlobSqlDiskCache(
         }
     }
 
+    init {
+        // Fail fast so callers can choose a fallback cache root if opening this DB path is invalid.
+        db
+    }
+
     override fun defaultExpiry(nowMs: Long): Long = nowMs + defaultTtlMs
 
     override fun put(cacheKey: String, bytes: ByteArray, expiresAtMs: Long) {

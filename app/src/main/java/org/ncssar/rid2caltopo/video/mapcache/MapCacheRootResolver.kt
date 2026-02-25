@@ -2,8 +2,6 @@ package org.ncssar.rid2caltopo.video.mapcache
 
 import android.content.Context
 import android.net.Uri
-import android.os.Environment
-import android.provider.DocumentsContract
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import java.io.File
@@ -59,11 +57,6 @@ internal object MapCacheRootResolver {
                         return MapCacheRoot.FileBacked(root)
                     }
                 }
-                val resolvedFile = resolveTreeUriToFile(uri)
-                if (resolvedFile != null && (resolvedFile.exists() || resolvedFile.mkdirs())) {
-                    CTDebug(TAG, "Map cache root using archive resolved file dir: ${resolvedFile.absolutePath}")
-                    return MapCacheRoot.FileBacked(resolvedFile)
-                }
                 CTDebug(TAG, "Map cache root using archive SAF dir: $uri")
                 return MapCacheRoot.SafBacked(archiveCacheDir)
             }
@@ -75,20 +68,5 @@ internal object MapCacheRootResolver {
         }
         CTDebug(TAG, "Map cache root using app cache fallback: ${fallback.absolutePath}")
         return MapCacheRoot.FileBacked(fallback)
-    }
-
-    private fun resolveTreeUriToFile(uri: Uri): File? {
-        return try {
-            val docId = DocumentsContract.getTreeDocumentId(uri)
-            val parts = docId.split(':', limit = 2)
-            if (parts.size != 2) return null
-            val volume = parts[0]
-            val relPath = parts[1]
-            if (!volume.equals("primary", ignoreCase = true)) return null
-            val extRoot = Environment.getExternalStorageDirectory() ?: return null
-            File(extRoot, relPath)
-        } catch (_: Exception) {
-            null
-        }
     }
 }

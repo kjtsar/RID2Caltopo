@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video.mapcache
 
 import android.content.Context
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 
 internal object BlobCacheStoreFactory {
     fun create(
@@ -11,13 +12,13 @@ internal object BlobCacheStoreFactory {
         defaultTtlMs: Long,
         forceFileBacked: Boolean = false
     ): BlobCacheStore {
+        val internalFallbackRoot = context.applicationContext.noBackupFilesDir.resolve("map_cache")
+        if (!internalFallbackRoot.exists()) {
+            internalFallbackRoot.mkdirs()
+        }
         if (forceFileBacked) {
-            val appCacheRoot = context.applicationContext.noBackupFilesDir.resolve("map_cache")
-            if (!appCacheRoot.exists()) {
-                appCacheRoot.mkdirs()
-            }
             return BlobSqlDiskCache(
-                cacheDir = appCacheRoot,
+                cacheDir = internalFallbackRoot,
                 dbName = dbName,
                 maxBytes = maxBytes,
                 defaultTtlMs = defaultTtlMs
@@ -25,12 +26,26 @@ internal object BlobCacheStoreFactory {
         }
 
         return when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
-            is MapCacheRoot.FileBacked -> BlobSqlDiskCache(
-                cacheDir = root.dir,
-                dbName = dbName,
-                maxBytes = maxBytes,
-                defaultTtlMs = defaultTtlMs
-            )
+            is MapCacheRoot.FileBacked -> try {
+                BlobSqlDiskCache(
+                    cacheDir = root.dir,
+                    dbName = dbName,
+                    maxBytes = maxBytes,
+                    defaultTtlMs = defaultTtlMs
+                )
+            } catch (t: Throwable) {
+                CTWarn(
+                    "SplitMapPane",
+                    "Map cache SQL open failed for ${root.dir.absolutePath}; using internal fallback.",
+                    Exception(t)
+                )
+                BlobSqlDiskCache(
+                    cacheDir = internalFallbackRoot,
+                    dbName = dbName,
+                    maxBytes = maxBytes,
+                    defaultTtlMs = defaultTtlMs
+                )
+            }
 
             is MapCacheRoot.SafBacked -> SafBlobCacheStore(
                 context = context.applicationContext,

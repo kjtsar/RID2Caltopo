@@ -30,6 +30,7 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.time.ZoneId;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -88,6 +89,9 @@ public class WaypointTrack {
 	public static int WaypointCount = 0;
 	private static final String TAG = "WaypointTrack";
     private static final String ReportedFilenames = "r2c_reported.txt";
+    private static final int MAX_GEOJSON_STATS_RETRIES = 3;
+    private static final long GEOJSON_RETRY_BASE_DELAY_MS = 500;
+    private static final long GEOJSON_PUBLISH_TIMEOUT_SECONDS = 20;
 
     private static final String GEOJSON_MIME_TYPE = "application/geo+json";
 	// map trackLabel to WaypointTrack.
@@ -282,6 +286,52 @@ public class WaypointTrack {
         }
     }
 
+    private static boolean IsTransientStatsResponse(int responseCode) {
+        return responseCode == 408 || responseCode == 429 || responseCode >= 500;
+    }
+
+    private static int PublishGeoJsonStatsWithRetry(@NonNull String geoJsonString, @NonNull String context) {
+        int responseCode = 503;
+        for (int attempt = 1; attempt <= MAX_GEOJSON_STATS_RETRIES; attempt++) {
+            if (CaltopoClient.IsExitRequested()) {
+                return 499;
+            }
+            Future<Integer> publishFuture = null;
+            try {
+                publishFuture = CaltopoClient.PublishGeoJsonStats(geoJsonString);
+                responseCode = publishFuture.get(GEOJSON_PUBLISH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                if (publishFuture != null) publishFuture.cancel(true);
+                responseCode = 408;
+                CTWarn(TAG, context + " publish timeout", e);
+            } catch (Exception e) {
+                responseCode = 503;
+                CTWarn(TAG, context + " publish failed", e);
+            }
+            if (!IsTransientStatsResponse(responseCode)) {
+                return responseCode;
+            }
+            if (attempt >= MAX_GEOJSON_STATS_RETRIES) {
+                break;
+            }
+            if (CaltopoClient.IsExitRequested()) {
+                return 499;
+            }
+            long delayMs = GEOJSON_RETRY_BASE_DELAY_MS * attempt;
+            CTWarn(TAG, String.format(Locale.US,
+                    "%s transient response %d (attempt %d/%d), retrying in %.3f seconds",
+                    context, responseCode, attempt, MAX_GEOJSON_STATS_RETRIES, delayMs / 1000.0));
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                CTWarn(TAG, context + " retry sleep interrupted");
+                break;
+            }
+        }
+        return responseCode;
+    }
+
 
     /* BgPollUnreportedTracks()
      *  Called from CaltopoClient by one of it's background threads if it's been
@@ -352,7 +402,9 @@ public class WaypointTrack {
                 if (null == waypointTrack) continue;
                 String geoJsonString = waypointTrack.toString();
                 CTDebug(TAG, "BgPollUnreportedTracks() publishing " + filename);
-                int responseCode = CaltopoClient.BgPublishGeoJsonStats(geoJsonString);
+                int responseCode = PublishGeoJsonStatsWithRetry(
+                        geoJsonString,
+                        String.format(Locale.US, "BgPollUnreportedTracks(%s)", filename));
                 if (responseCode == 408 || responseCode >= 500) { // timeouts may indicate network issues
                     consecutiveFails++;
                     if (consecutiveFails > 2) {
@@ -414,8 +466,8 @@ public class WaypointTrack {
             if (null != droneSpec && droneSpec.okToLog()) {
                 CTDebug(TAG, String.format(Locale.US,
                         "archive(%s): Publishing...", fileName));
-                Future<Integer> result = CaltopoClient.PublishGeoJsonStats(geoJsonString);
-                Integer responseCode = result.get(20, TimeUnit.SECONDS);
+                int responseCode = PublishGeoJsonStatsWithRetry(
+                        geoJsonString, String.format(Locale.US, "archive(%s)", fileName));
                 CTDebug(TAG, String.format(Locale.US,
                         "archive(%s): server returned %d", fileName, responseCode));
                 if (responseCode != 408 && responseCode < 500) statsReported();

@@ -114,10 +114,10 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         private set
 
     init {
-        // Assuming CaltopoMap.registerListener is static now
         CaltopoMap.AddMapStatusListener(this)
         overlay = OverlayState.None
         connectionState = CaltopoConnectionState.StandAlone
+        delayedUptimePoll.start(this::uptimePoll, 1000, 1000)
     }
     fun onUIEvent(uiEvent: UIEvent) {
         val oldState = "      PRE: Overlay='${overlay}' ConnectionState: '${connectionState}'"
@@ -245,12 +245,6 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     fun showScanner() {
         _activeScreen.value = ActiveScreen.SCANNER
     }
-
-    init {
-        delayedUptimePoll.start(this::uptimePoll, 1000, 1000)
-        CaltopoMap.AddMapStatusListener(this)
-    }
-
     // Clean up the listener when the ViewModel is no longer in use.
     override fun onCleared() {
         super.onCleared()

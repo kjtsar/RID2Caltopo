@@ -25,6 +25,8 @@ import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class OpenDroneIdDataManager {
+    static final double RID_INVALID_ALTITUDE_METERS = -1000.0;
+
     public final ConcurrentHashMap<Long, AircraftObject> aircraft = new ConcurrentHashMap<>();
     private static class LastReportedLocation {
         final long droneTimestampMsec;
@@ -41,6 +43,16 @@ public class OpenDroneIdDataManager {
     }
     private static class AltitudeReferenceState {
         Double geodeticMinusRidHeightMeters;
+    }
+
+    static class SelectedTrackAltitude {
+        final long roundedMeters;
+        final Double geodeticMinusRidHeightMeters;
+
+        SelectedTrackAltitude(long roundedMeters, Double geodeticMinusRidHeightMeters) {
+            this.roundedMeters = roundedMeters;
+            this.geodeticMinusRidHeightMeters = geodeticMinusRidHeightMeters;
+        }
     }
     private final ConcurrentHashMap<String, LastReportedLocation> lastReportedLocationByRemoteId =
             new ConcurrentHashMap<>();
@@ -65,7 +77,7 @@ public class OpenDroneIdDataManager {
         return aircraft;
     }
 
-    private static long ridTimestampTenthsToUtcMsec(double locationTimestampTenths, long nowWallMsec) {
+    static long ridTimestampTenthsToUtcMsec(double locationTimestampTenths, long nowWallMsec) {
         long rawTenths = Math.round(locationTimestampTenths);
         if (rawTenths == 0xFFFFL) {
             return 0L; // invalid/unknown
@@ -99,6 +111,35 @@ public class OpenDroneIdDataManager {
             best = candidateNext;
         }
         return best;
+    }
+
+    private static boolean isRidAltitudeValid(double altitudeMeters) {
+        return altitudeMeters != RID_INVALID_ALTITUDE_METERS && Double.isFinite(altitudeMeters);
+    }
+
+    static SelectedTrackAltitude selectTrackAltitudeMeters(
+            double ridHeightMeters,
+            double altitudeMslMeters,
+            Double geodeticMinusRidHeightMeters
+    ) {
+        boolean ridHeightValid = isRidAltitudeValid(ridHeightMeters);
+        boolean altitudeMslValid = isRidAltitudeValid(altitudeMslMeters);
+        double selectedTrackAltitudeMeters;
+        Double nextReference = geodeticMinusRidHeightMeters;
+        if (ridHeightValid) {
+            // Primary source for ATO: RID height (relative to takeoff/ground semantics from aircraft).
+            selectedTrackAltitudeMeters = ridHeightMeters;
+            if (altitudeMslValid) {
+                nextReference = altitudeMslMeters - ridHeightMeters;
+            }
+        } else if (geodeticMinusRidHeightMeters != null && altitudeMslValid) {
+            // Keep continuity if RID height temporarily drops out.
+            selectedTrackAltitudeMeters = altitudeMslMeters - geodeticMinusRidHeightMeters;
+        } else {
+            // Last resort if we have no relative-height reference yet.
+            selectedTrackAltitudeMeters = altitudeMslMeters;
+        }
+        return new SelectedTrackAltitude(Math.round(selectedTrackAltitudeMeters), nextReference);
     }
 
     void receiveDataBluetooth(byte[] data, ScanResult result, CtDroneSpec.TransportTypeEnum transportType) {
@@ -164,23 +205,13 @@ public class OpenDroneIdDataManager {
             AltitudeReferenceState altitudeRef = altitudeReferenceByRemoteId.computeIfAbsent(
                     idStr, k -> new AltitudeReferenceState()
             );
-            boolean ridHeightValid = ridHeightMeters != -1000.0 && Double.isFinite(ridHeightMeters);
-            double selectedTrackAltitudeMeters;
-            if (ridHeightValid) {
-                // Primary source for ATO: RID height (relative to takeoff/ground semantics from aircraft).
-                selectedTrackAltitudeMeters = ridHeightMeters;
-                if (altitudeMslMeters != -1000.0 && Double.isFinite(altitudeMslMeters)) {
-                    altitudeRef.geodeticMinusRidHeightMeters = altitudeMslMeters - ridHeightMeters;
-                }
-            } else if (altitudeRef.geodeticMinusRidHeightMeters != null &&
-                    altitudeMslMeters != -1000.0 && Double.isFinite(altitudeMslMeters)) {
-                // Keep continuity if RID height temporarily drops out.
-                selectedTrackAltitudeMeters = altitudeMslMeters - altitudeRef.geodeticMinusRidHeightMeters;
-            } else {
-                // Last resort if we have no relative-height reference yet.
-                selectedTrackAltitudeMeters = altitudeMslMeters;
-            }
-            long altitudeInMeters = Math.round(selectedTrackAltitudeMeters);
+            SelectedTrackAltitude selectedAltitude = selectTrackAltitudeMeters(
+                    ridHeightMeters,
+                    altitudeMslMeters,
+                    altitudeRef.geodeticMinusRidHeightMeters
+            );
+            altitudeRef.geodeticMinusRidHeightMeters = selectedAltitude.geodeticMinusRidHeightMeters;
+            long altitudeInMeters = selectedAltitude.roundedMeters;
             if (prior != null &&
                     prior.droneTimestampMsec == timestampInMilliseconds &&
                     Double.compare(prior.lat, lat) == 0 &&

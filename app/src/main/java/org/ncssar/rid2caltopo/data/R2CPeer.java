@@ -104,6 +104,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     public SimpleTimer remoteUptimeTimer = new SimpleTimer();
     public String remoteAppVersion = "<unknown>";
     private remoteUpdateListener remoteUpdateListener;
+    private boolean shuttingDown = false;
 
     // Table to map remoteIDs owned by this peer to their corresponding data.
     private final Hashtable<String, CtDroneSpec> droneSpecTable = new Hashtable<>(4);
@@ -150,7 +151,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         void onPeerListChanged(@NonNull List<R2CPeer> peerList);
     }
 
-    public static void SetPeerListChangedListener(@NonNull PeerListChangedListener listener) {
+    public static void SetPeerListChangedListener(@Nullable PeerListChangedListener listener) {
         peerListChangedListener = listener;
     }
 
@@ -190,7 +191,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         if (null != peer) {
             CTDebug(TAG, "R2CPeer(): already found this peer in my map - This can happen if remote connected to us first.");
             // In either case, this new instance is redundant and needs to shutdown.
-            shutdown(R2CListener.r2cState.down);
+            shutdown(R2CListener.r2cState.down, false);
         } else {
             try {
                 CTDebug(TAG, "Trying to connect to remote: " + remoteR2cSpec.toString(4));
@@ -338,7 +339,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
                 wsPipe.sendResponse(seqnum, errorResponsePayload(
                         "handleHello(): We already have a connection. Bye.", payload));
                 sendMsgCount++;
-                shutdown(R2CListener.r2cState.down);
+                shutdown(R2CListener.r2cState.down, false);
                 return;
             }
         }
@@ -823,7 +824,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     public void pipeIsClosing(@NonNull WsPipe wsPipe) {
         if (null != remoteIpAddr) {  // then this is an established connection closing:
             CTError(TAG, "R2CPeer: received pipeIsClosing().  Shutting down connection to " + wsPipe.getPeerName());
-            shutdown(R2CListener.r2cState.down);
+            shutdown(R2CListener.r2cState.down, false);
         } else { // else we're just trying to establish a connection - see if we have another addr to try:
             tryConnect();
         }
@@ -844,7 +845,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
                     "handleLeaving(): Removing '%s' from the list of drones owned by %s", rid, peerName));
             PeerRidMap.remove(rid);
         }
-        this.shutdown(R2CListener.r2cState.down);
+        this.shutdown(R2CListener.r2cState.down, false);
         // don't bother replying - remote is on it's way out and we're lucky to be notified.
     }
 
@@ -910,7 +911,7 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         if ((null == remoteIpAddrs || 0 == remoteIpAddrs.length()) && (null == remoteIpAddr)) {
             CTError(TAG, String.format(Locale.US,
                     "tryConnect(%s): Not able to connect via any supplied address.", peerName));
-            this.shutdown(R2CListener.r2cState.failed);
+            this.shutdown(R2CListener.r2cState.failed, false);
         }
     }
 
@@ -1184,24 +1185,38 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     }
 
     public void shutdown(R2CListener.r2cState state) {
-        CTDebug(TAG, "Shutting down connection to " + peerName);
-        RemovePeer(this);
-        if (null != peerListener) {
-            peerListener.peerStatusChange(this, state);
-            peerListener = null;
+        shutdown(state, true);
+    }
+
+    private void shutdown(R2CListener.r2cState state, boolean notifyRemote) {
+        synchronized (this) {
+            if (shuttingDown) return;
+            shuttingDown = true;
         }
-        R2CPeer r2cPeer = PeerIdMap.get(remoteUUID);
-        if (null != r2cPeer) {
-            // Then we have an established connection to leave. Be polite and say goodbye.
+        CTDebug(TAG, "Shutting down connection to " + peerName);
+
+        boolean establishedPeer = notifyRemote
+                && null != remoteUUID
+                && PeerIdMap.get(remoteUUID) == this;
+        if (establishedPeer && null != wsPipe) {
+            // Established connection: send leave notification before closing socket.
             JSONObject jo = new JSONObject();
             try {
                 jo.put("type", "leaving");
             } catch (Exception e) {
-                CTError(TAG, "argh!", e);
+                CTError(TAG, "shutdown(): put() raised.", e);
             }
             wsPipe.sendMessage(jo, 0, true);
             sendMsgCount++;
             wsPipe.closeSocket(1000, "'leaving'.");
+        } else if (null != wsPipe) {
+            wsPipe.closeSocket(1000, "Shutting down.");
+        }
+
+        RemovePeer(this);
+        if (null != peerListener) {
+            peerListener.peerStatusChange(this, state);
+            peerListener = null;
         }
 
         String[] ridKeyArray = new String[PeerRidMap.size()];

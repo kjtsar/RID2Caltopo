@@ -5,6 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.gms.google-services")
     id("com.google.firebase.crashlytics")
+    id("jacoco")
 }
 
 // Read the keystore properties
@@ -18,8 +19,8 @@ android {
     namespace = "org.ncssar.rid2caltopo"
     compileSdk = 36
     def versionMajor = 1
-    def versionMinor = 0
-    def versionPatch = 12
+    def versionMinor = 1
+    def versionPatch = 0
 
     signingConfigs {
         register("release") {
@@ -34,7 +35,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 43
+        versionCode = 44
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -110,6 +111,14 @@ android {
             assets.srcDirs += ['src/main/assets']
         }
     }
+    testOptions {
+        unitTests.all {
+            jacoco {
+                includeNoLocationClasses = true
+                excludes = ['jdk.internal.*']
+            }
+        }
+    }
 }
 
 dependencies {
@@ -170,4 +179,49 @@ dependencies {
     implementation("com.google.code.gson:gson:2.10.1")
     implementation("org.osmdroid:osmdroid-android:6.1.20")
     implementation("mil.nga:tiff:3.0.0")
+}
+
+jacoco {
+    toolVersion = "0.8.12"
+}
+
+tasks.register("jacocoTestReport", JacocoReport) {
+    dependsOn("testDebugUnitTest")
+
+    reports {
+        xml.required = true
+        html.required = true
+        csv.required = false
+    }
+
+    def fileFilter = [
+            '**/R.class',
+            '**/R$*.class',
+            '**/BuildConfig.*',
+            '**/Manifest*.*',
+            '**/*Test*.*',
+            '**/*\$Companion*.*',
+            '**/*\$Lambda$*.*',
+            '**/*\$inlined$*.*',
+            '**/*_Factory*.*',
+            '**/*_MembersInjector*.*'
+    ]
+
+    def javaClasses = fileTree(
+            dir: "$buildDir/intermediates/javac/debug/classes",
+            excludes: fileFilter
+    )
+    def kotlinClasses = fileTree(
+            dir: "$buildDir/tmp/kotlin-classes/debug",
+            excludes: fileFilter
+    )
+    classDirectories.setFrom(files(javaClasses, kotlinClasses))
+    sourceDirectories.setFrom(files("src/main/java"))
+    executionData.setFrom(fileTree(
+            dir: buildDir,
+            includes: [
+                    "jacoco/testDebugUnitTest.exec",
+                    "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec"
+            ]
+    ))
 }

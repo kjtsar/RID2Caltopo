@@ -136,6 +136,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        CaltopoClient.MarkAppActive()
         CTDebug(TAG, "onCreate().")
         R2CPeer.SetPeerListChangedListener(this)
         val localViewModel = ViewModelProvider(
@@ -355,6 +356,21 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         }
     }
 
+    private fun stopLocationUpdates() {
+        try {
+            val callback = locationCallback
+            if (callback != null) {
+                mFusedLocationClient?.removeLocationUpdates(callback)
+            }
+        } catch (e: Exception) {
+            CTError(TAG, "stopLocationUpdates() raised:", e)
+        } finally {
+            locationCallback = null
+            locationRequest = null
+            mFusedLocationClient = null
+        }
+    }
+
     fun showToast(message: String) {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) Toast.makeText(
             baseContext,
@@ -381,33 +397,22 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     public override fun onDestroy() {
         if (this === AppActivity) {
             if (isFinishing()) try {
+                stopLocationUpdates()
+                R2CPeer.SetPeerListChangedListener(null)
                 CTDebug(TAG,"onDestroy() shutting down streaming service..." )
                 val streamServiceIntent = Intent(this, MediaMTXService::class.java)
                 stopService(streamServiceIntent)
                 CTDebug(TAG,"onDestroy() shutting down scanning service..." )
                 val serviceIntent = Intent(this, ScanningService::class.java)
                 stopService(serviceIntent)
-                CaltopoClient.Shutdown()
+                CaltopoClient.ShutdownAsync()
                 CTDebug(TAG, "onDestroy() archiving tracks...")
                 AppActivity = null
-                forceStopApp()
-                super.onDestroy()
-                return
             } catch (e: Exception) {
                 CTError(TAG, "onDestroy() raised:", e)
             }
         }
         super.onDestroy()
-    }
-
-    fun forceStopApp() {
-        Thread {
-            try {
-                Thread.sleep(3000)
-            } catch (ignored: java.lang.Exception) {
-            }
-            finish()
-        }.start()
     }
 
     companion object {

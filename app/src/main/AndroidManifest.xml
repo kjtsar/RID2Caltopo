@@ -72,6 +72,9 @@
         <service android:name=".app.MediaMTXService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback|connectedDevice|dataSync"/>
+        <service
+            android:name="com.google.firebase.sessions.SessionLifecycleService"
+            tools:node="remove" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

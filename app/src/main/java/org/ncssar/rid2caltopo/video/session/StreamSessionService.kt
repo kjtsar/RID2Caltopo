@@ -19,6 +19,27 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.DelayedExec
 
+data class RestartDecision(
+    val allow: Boolean,
+    val reason: String,
+)
+
+object StreamRestartBackoff {
+    fun evaluate(
+        isRestarting: Boolean,
+        lastRestartAtMs: Long?,
+        nowMs: Long,
+        cooldownMs: Long,
+    ): RestartDecision {
+        if (isRestarting) return RestartDecision(allow = false, reason = "already-restarting")
+        val lastRestart = lastRestartAtMs ?: return RestartDecision(allow = true, reason = "no-prior-restart")
+        if (nowMs - lastRestart < cooldownMs) {
+            return RestartDecision(allow = false, reason = "cooldown")
+        }
+        return RestartDecision(allow = true, reason = "cooldown-expired")
+    }
+}
+
 class StreamSessionService(
     private val context: Context,
     private val scope: CoroutineScope,
@@ -71,8 +92,14 @@ class StreamSessionService(
         choosePreferredMode(designator)
         restarting += designator
         scope.launch {
-            playersByDesignator[designator] = createPlayer(designator)
-            restarting -= designator
+            try {
+                playersByDesignator[designator] = createPlayer(designator)
+            } catch (t: Throwable) {
+                CTWarn(tag, "ensurePlayer failed for '$designator': ${t.message}")
+                playersByDesignator.remove(designator)
+            } finally {
+                restarting -= designator
+            }
         }
     }
 
@@ -88,14 +115,24 @@ class StreamSessionService(
         val now = System.currentTimeMillis()
         if (!canRestart(designator, now)) return
 
+        playersByDesignator.remove(designator)?.let { player ->
+            player.clearVideoSurface()
+            player.release()
+        }
         clearTracking(designator)
         restarting += designator
         lastRestartAt[designator] = now
 
         scope.launch {
             delay(policy.restartSettleDelayMs)
-            playersByDesignator[designator] = createPlayer(designator)
-            restarting -= designator
+            try {
+                playersByDesignator[designator] = createPlayer(designator)
+            } catch (t: Throwable) {
+                CTWarn(tag, "recreatePlayer failed for '$designator': ${t.message}")
+                playersByDesignator.remove(designator)
+            } finally {
+                restarting -= designator
+            }
         }
     }
 
@@ -144,13 +181,16 @@ class StreamSessionService(
     }
 
     private fun canRestart(designator: String, now: Long): Boolean {
-        if (restarting.contains(designator)) return false
-        val lastRestart = lastRestartAt[designator] ?: return true
-        if (now - lastRestart < policy.restartCooldownMs) {
+        val decision = StreamRestartBackoff.evaluate(
+            isRestarting = restarting.contains(designator),
+            lastRestartAtMs = lastRestartAt[designator],
+            nowMs = now,
+            cooldownMs = policy.restartCooldownMs,
+        )
+        if (!decision.allow && decision.reason == "cooldown") {
             CTDebug(tag, "Skipping restart for $designator due to cooldown.")
-            return false
         }
-        return true
+        return decision.allow
     }
 
     private fun createPlayer(designator: String): ExoPlayer {

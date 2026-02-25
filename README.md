@@ -222,6 +222,22 @@ To build the application, use Android Studio.
 Import the project (File -> New -> Import Project, or just Open on newer versions of Android Studio) 
 and point to the root folder. Then Build -> Make Project.
 
+## Android Studio "Stop" button note
+After quitting from the app UI, Android may keep an **empty cached process** for this package.
+This can leave Android Studio's red "Stop" button active even though the app has no active services.
+
+Use this helper to verify process state:
+
+```bash
+./tools/android_process_status.sh
+```
+
+Optional force-stop for a clean development handoff:
+
+```bash
+./tools/android_process_status.sh org.ncssar.rid2caltopo --force-stop
+```
+
 ## Supported interfaces and protocols
 Bluetooth 4 (legacy bluetooth), Bluetooth 5 (long range/coded phy), WiFi Beacon, and WiFi NaN are all 
 supported by the app. While bluetooth 4 seems to be universally supported, some phones/tablets may not 

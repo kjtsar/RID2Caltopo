@@ -141,12 +141,19 @@ class StreamsViewModel(
      * there are any active dronespecs.
      */
     override fun onDroneSpecsChanged(currentDrones: List<CtDroneSpec>) {
+        val activeKeys = HashSet<String>(currentDrones.size)
         if (currentDrones.isNotEmpty()) {
             CTInfo(tag, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
             currentDrones.forEach { spec ->
                 val key = spec.mappedId
+                activeKeys.add(key)
                 val state = _droneStates.getOrPut(key) { DroneSpecState(spec) }
                 state.updateFrom(spec)
+            }
+        }
+        _droneStates.keys.toList().forEach { key ->
+            if (!activeKeys.contains(key)) {
+                _droneStates.remove(key)
             }
         }
     }
@@ -199,8 +206,10 @@ class StreamsViewModel(
     }
 
     override fun onCleared() {
+        CaltopoMap.RemoveMapStatusListener(this)
         ffmpegProbeService.close()
         streamSessions.releaseAll()
+        super.onCleared()
     }
 
     override fun mapStatusUpdate(status: mapStatus?, mapNode: CaltopoNode.MapNode?, optErrmsg: String?) {

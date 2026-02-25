@@ -40,6 +40,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Locale;
@@ -51,6 +52,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.*;
 import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import org.json.JSONArray;
@@ -189,10 +192,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final Object DebugTagFilterLock = new Object();
     private static boolean DebugTagFilterEnabled = false;
     private static final Set<String> DebugTagFilter = new HashSet<>();
-    private static final int ThreadPoolSize = 2;
+    private static boolean DebugTagRegistryInitialized = false;
+    private static final int LivePublishThreadPoolSize = 2;
+    private static final int GeoJsonStatsThreadPoolSize = 2;
+    private static final int ArchiveScanThreadPoolSize = 1;
     private static boolean WarnMissingMapFlag = false;
     private static Hashtable<String, CaltopoClient> ClientMap;
-    private static ExecutorService ExecutorPool = null;
+    private static ExecutorService LivePublishExecutorPool = null;
+    private static ExecutorService GeoJsonStatsExecutorPool = null;
+    private static ExecutorService ArchiveScanExecutorPool = null;
     private static ClientClassState Ccstate = null;
     //    private static final String MyStateFileName = TAG + BuildConfig.BUILD_TIME + ".ser";
     private static final String MyStateFileName = TAG + ".ser";
@@ -204,6 +212,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static Uri DebugLogPath = null;
     private static DelayedExec AppIdleDelay = new DelayedExec();
     private static FirebaseAnalytics FBAnalytics;
+    private static final Object ShutdownLock = new Object();
+    private static boolean ShutdownInProgress = false;
+    private static boolean AppExitRequested = false;
 
     // CaltopoClient INSTANCE VARS:=
     private final String remoteId;
@@ -388,6 +399,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static boolean CTDebugEnabled(@Nullable String tag) {
+        RegisterDebugTag(tag);
         if (DebugLevel < DebugLevelDebug) return false;
         if (!DebugTagFilterEnabled) return true;
         if (tag == null || tag.isEmpty()) return false;
@@ -411,6 +423,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 for (String raw : tags) {
                     String tag = raw.trim();
                     if (!tag.isEmpty()) {
+                        RegisterDebugTag(tag);
                         DebugTagFilter.add(tag);
                     }
                 }
@@ -422,6 +435,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void AddDebugTagFilter(@NonNull String tag) {
         String t = tag.trim();
         if (t.isEmpty()) return;
+        RegisterDebugTag(t);
         synchronized (DebugTagFilterLock) {
             DebugTagFilter.add(t);
             DebugTagFilterEnabled = true;
@@ -451,6 +465,54 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             sorted.sort(String::compareTo);
             return String.join(",", sorted);
         }
+    }
+
+    public static void RegisterDebugTag(@Nullable String tag) {
+        InitializeDebugTagRegistry();
+        DebugTagRegistry.registerTag(tag);
+    }
+
+    public static void RegisterDebugTags(@NonNull List<String> tags) {
+        InitializeDebugTagRegistry();
+        DebugTagRegistry.registerTags(tags);
+    }
+
+    @NonNull
+    public static List<String> GetRegisteredDebugTags() {
+        InitializeDebugTagRegistry();
+        return DebugTagRegistry.getTags();
+    }
+
+    private static synchronized void InitializeDebugTagRegistry() {
+        if (DebugTagRegistryInitialized) return;
+        List<String> builtInTags = Arrays.asList(
+                "CaltopoClient",
+                "CaltopoHybridBrowser",
+                "CaltopoLiveTrack",
+                "CaltopoMap",
+                "CaltopoMapHierarchy",
+                "CaltopoOp",
+                "CaltopoSession",
+                "CtDroneSpec",
+                "DelayedExec",
+                "DesignatorIndicator",
+                "FfmpegProbeService",
+                "MainScreen",
+                "MediaMTXService",
+                "R2CPeer",
+                "R2CView",
+                "R2CViewModel",
+                "ScanningService",
+                "ServerTemplate",
+                "StreamPlayer",
+                "StreamSessionService",
+                "StreamsGrid",
+                "StreamsViewModel",
+                "WaypointTrack",
+                "WsPipe"
+        );
+        DebugTagRegistry.registerTags(builtInTags);
+        DebugTagRegistryInitialized = true;
     }
 
     @Nullable
@@ -506,6 +568,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTInfo(String tag, String msg) {
+        RegisterDebugTag(tag);
         if (DebugLevel >= DebugLevelInfo) {
             long myTid = Process.myTid();
             String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
@@ -516,6 +579,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTDebug(String tag, String msg) {
+        RegisterDebugTag(tag);
         if (!CTDebugEnabled(tag)) return;
         long myTid = Process.myTid();
         String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
@@ -525,6 +589,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTDebug(String tag, DebugMessageSupplier supplier) {
+        RegisterDebugTag(tag);
         if (!CTDebugEnabled(tag)) return;
         String msg;
         try {
@@ -537,6 +602,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTError(String tag, String msg) {
+        RegisterDebugTag(tag);
         long myTid = Process.myTid();
         String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
         CTLog("ERROR" + tidString, tag, msg);
@@ -556,6 +622,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTError(String tag, String msg, Exception e) {
+        RegisterDebugTag(tag);
         long myTid = Process.myTid();
         String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
         StringBuilder str = new StringBuilder();
@@ -569,6 +636,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTWarn(String tag, String msg) {
+        RegisterDebugTag(tag);
         if (DebugLevel >= DebugLevelWarn) {
             long myTid = Process.myTid();
             String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
@@ -579,6 +647,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTWarn(String tag, String msg, Exception e) {
+        RegisterDebugTag(tag);
         if (DebugLevel >= DebugLevelWarn) {
             long myTid = Process.myTid();
             String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
@@ -948,10 +1017,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CheckUnreportedFiles() {
-        if (null == ExecutorPool) {
-            ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
+        if (IsExitRequested()) {
+            CTDebug(TAG, "CheckUnreportedFiles(): skipping while app exit is in progress.");
+            return;
         }
-        ExecutorPool.submit(WaypointTrack::BgPollUnreportedTracks);
+        try {
+            GetArchiveScanExecutorPool().submit(WaypointTrack::BgPollUnreportedTracks);
+        } catch (RejectedExecutionException e) {
+            CTWarn(TAG, "CheckUnreportedFiles(): archive scan executor rejected task", e);
+        }
     }
 
     public static void DroneSpecStatusChanged(@NonNull CtDroneSpec ds, boolean isActiveFlag) {
@@ -1054,6 +1128,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     @NonNull
     private static ClientClassState GetState() {
+        InitializeDebugTagRegistry();
         if (null == Ccstate) {
             ClientClassState ccs = RestoreState();
             if (null == ccs) ccs = new ClientClassState();
@@ -1126,6 +1201,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             DsArray.clear();
             for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
                 long droneSpecIdleInMsec = ds.idleTimeInMsec(currentTimeInMsec);
+                if (ds.isActive() && droneSpecIdleInMsec > newTrackDelayInMsec) {
+                    CaltopoClient client = (ClientMap != null) ? ClientMap.get(ds.getRemoteId()) : null;
+                    String msg = String.format(Locale.US,
+                            "ProcessSortedCurrentDroneSpecArray(%s): %s idle for %.3f/%.3f seconds. Finishing track...",
+                            changedFlag, ds.trackLabel(),
+                            (double) droneSpecIdleInMsec / 1000.0, (double) newTrackDelayInMsec / 1000.0);
+                    CTInfo(TAG, msg);
+                    if (client != null) {
+                        client.terminateTrack(msg, false);
+                    } else {
+                        CTWarn(TAG, "ProcessSortedCurrentDroneSpecArray(): no CaltopoClient found for " + ds.getRemoteId());
+                    }
+                    changedFlag = true;
+                    continue;
+                }
                 long currentAgeOutInMsec = newTrackDelayInMsec - droneSpecIdleInMsec;
                 if (currentAgeOutInMsec <= 0) continue;
                 if (currentAgeOutInMsec < nextAgeOutInMsec) nextAgeOutInMsec = currentAgeOutInMsec;
@@ -1289,6 +1379,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void QuitApplication() {
+        synchronized (ShutdownLock) {
+            AppExitRequested = true;
+        }
         Context context = R2CApplication.getAppCtxt();
 
         // 1. Stop the Scanning Service
@@ -1314,34 +1407,66 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 activity.finish();
             }
         }
-        Shutdown();
+        ShutdownAsync();
     }
 
 
+    public static void ShutdownAsync() {
+        Thread shutdownThread = new Thread(CaltopoClient::Shutdown, "R2C-Shutdown");
+        shutdownThread.start();
+    }
+
     public static void Shutdown() {
-        WaypointTrack.ArchiveTracks();
-        if (ExecutorPool != null) {
-            ExecutorPool.shutdownNow();
+        synchronized (ShutdownLock) {
+            if (ShutdownInProgress) {
+                return;
+            }
+            ShutdownInProgress = true;
         }
         try {
-            CaltopoMap.Shutdown();
-        } catch (Exception e) {
-            CTError(TAG, "CaltopoMap.Shutdown() raised: ", e);
-        }
-        if (null != DebugOutputStream) {
+            WaypointTrack.ArchiveTracks();
+            ShutdownExecutorPool(LivePublishExecutorPool, true);
+            LivePublishExecutorPool = null;
+            ShutdownExecutorPool(GeoJsonStatsExecutorPool, true);
+            GeoJsonStatsExecutorPool = null;
+            ShutdownExecutorPool(ArchiveScanExecutorPool, true);
+            ArchiveScanExecutorPool = null;
             try {
-                DebugOutputStream.flush();
-                DebugOutputStream.close();
-                DebugOutputStream = null;
-            } catch (IOException e) {
-                Log.e(TAG, "CTError: Shutdown raised: " + e);
+                CaltopoMap.Shutdown();
+            } catch (Exception e) {
+                CTError(TAG, "CaltopoMap.Shutdown() raised: ", e);
             }
             if (null != UiUpdatePoll) {
                 UiUpdatePoll.stop();
                 CTDebug(TAG, "Shutdown(): UiUpdatePoll suspended.");
             }
+            AppIdleDelay.stop();
+            if (null != DebugOutputStream) {
+                try {
+                    DebugOutputStream.flush();
+                    DebugOutputStream.close();
+                    DebugOutputStream = null;
+                } catch (IOException e) {
+                    Log.e(TAG, "CTError: Shutdown raised: " + e);
+                }
+            }
+        } finally {
+            synchronized (ShutdownLock) {
+                ShutdownInProgress = false;
+            }
         }
-        R2CActivity.Shutdown();
+    }
+
+    public static void MarkAppActive() {
+        synchronized (ShutdownLock) {
+            AppExitRequested = false;
+        }
+    }
+
+    public static boolean IsExitRequested() {
+        synchronized (ShutdownLock) {
+            return AppExitRequested;
+        }
     }
 
 
@@ -1536,26 +1661,23 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
         } catch (IOException e) {
             CTError(TAG, "openConnection() raised:", e);
-            ExecutorPool.shutdown();
         }
     }
 
     public void publishLive(double lat, double lng, long altitudeInMeters,
                             @Nullable PositionTelemetry telemetry) {
+        if (IsExitRequested()) return;
         try {
-            if (null == ExecutorPool) {
-                ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
-            }
-            ExecutorPool.submit(() -> bgPublishLive(droneSpec.getRemoteId(), lat, lng, altitudeInMeters, telemetry));
+            GetLivePublishExecutorPool().submit(() ->
+                    bgPublishLive(droneSpec.getRemoteId(), lat, lng, altitudeInMeters, telemetry));
+        } catch (RejectedExecutionException e) {
+            CTWarn(TAG, "publishLive(): executor rejected task", e);
         } catch (Exception e) {
             CTError(TAG, "executorPool.submit() raised:", e);
-            if (null != ExecutorPool) {
-                ExecutorPool.shutdown();
-            }
         }
     }
 
-    public void terminateTrack(String msg) {
+    private void terminateTrack(String msg, boolean updateDroneSpecs) {
         if (droneSpec.isActive()) {
             String trackLabel = droneSpec.trackLabel();
             WaypointTrack.ArchiveTrack(trackLabel);
@@ -1568,14 +1690,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         } else {
             CTDebug(TAG, "terminateTrack(): Ignoring inactive track.");
         }
-        UpdateDroneSpecs();
+        if (updateDroneSpecs) {
+            UpdateDroneSpecs();
+        }
     }
-
 
     // Unfortunately, older versions of Android don't handle IPv4/IPv6 very well,
     // so we're forced to use OkHttpClient in place of the legacy HttpURLConnection
     // to encourage use of IPv4, which is all we ever wanted in the first place...
     public static int BgPublishGeoJsonStats(String geoJsonString) {
+        if (IsExitRequested()) {
+            return 499;
+        }
         ClientClassState ccs = GetState();
         if (ccs.trackerApiKey.isEmpty() || ccs.trackerUrlPfx.isEmpty()) return 8675309;
 
@@ -1621,35 +1747,51 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static Future<Integer> PublishGeoJsonStats(@NonNull String geoJsonString) {
-        if (null == ExecutorPool) {
-            ExecutorPool = Executors.newFixedThreadPool(ThreadPoolSize);
+        if (IsExitRequested()) {
+            return CompletableFuture.completedFuture(499);
         }
-        return ExecutorPool.submit(() -> BgPublishGeoJsonStats(geoJsonString));
+        return GetGeoJsonStatsExecutorPool().submit(() -> BgPublishGeoJsonStats(geoJsonString));
     }
 
+    @NonNull
+    private static synchronized ExecutorService GetLivePublishExecutorPool() {
+        if (IsExitRequested()) {
+            throw new RejectedExecutionException("App exit in progress");
+        }
+        if (LivePublishExecutorPool == null || LivePublishExecutorPool.isShutdown() || LivePublishExecutorPool.isTerminated()) {
+            LivePublishExecutorPool = Executors.newFixedThreadPool(LivePublishThreadPoolSize);
+        }
+        return LivePublishExecutorPool;
+    }
 
+    @NonNull
+    private static synchronized ExecutorService GetGeoJsonStatsExecutorPool() {
+        if (IsExitRequested()) {
+            throw new RejectedExecutionException("App exit in progress");
+        }
+        if (GeoJsonStatsExecutorPool == null || GeoJsonStatsExecutorPool.isShutdown() || GeoJsonStatsExecutorPool.isTerminated()) {
+            GeoJsonStatsExecutorPool = Executors.newFixedThreadPool(GeoJsonStatsThreadPoolSize);
+        }
+        return GeoJsonStatsExecutorPool;
+    }
 
-    // Make sure we catch idle drone tracks and archive them as soon as they are declared dormant.
-    public void checkIdleTime() {
-        if (null != liveTrack && liveTrack.isActive()) {
-            long maxIdleDelayInMilliseconds = GetNewTrackDelayInSeconds() * 1000;
-            if (droneSpec.isActive()) {
-                String trackLabel = droneSpec.trackLabel();
-                long idleDurationInMilliseconds = droneSpec.idleTimeInMsec(System.currentTimeMillis());
-                String msg = String.format(Locale.US,
-                        "checkIdleTime(%s) has been idle for %.3f/%.3f seconds.", trackLabel,
-                        (double) idleDurationInMilliseconds / 1000.0, (double) maxIdleDelayInMilliseconds / 1000.0);
-                CTInfo(TAG, msg);
-                if (idleDurationInMilliseconds > maxIdleDelayInMilliseconds) {
-                    msg = msg + "  Finishing track...";
-                    terminateTrack(msg);
-                } else {
-                    long delayInMsec = maxIdleDelayInMilliseconds - idleDurationInMilliseconds;
-                    CTInfo(TAG, String.format(Locale.US, "checkIdleTime(%s) Restarting timer for another %.3f seconds.",
-                            trackLabel, delayInMsec / 1000.0));
-                    idleTimeoutPoll.start(this::checkIdleTime, delayInMsec, 0);
-                }
-            }
+    @NonNull
+    private static synchronized ExecutorService GetArchiveScanExecutorPool() {
+        if (IsExitRequested()) {
+            throw new RejectedExecutionException("App exit in progress");
+        }
+        if (ArchiveScanExecutorPool == null || ArchiveScanExecutorPool.isShutdown() || ArchiveScanExecutorPool.isTerminated()) {
+            ArchiveScanExecutorPool = Executors.newFixedThreadPool(ArchiveScanThreadPoolSize);
+        }
+        return ArchiveScanExecutorPool;
+    }
+
+    private static void ShutdownExecutorPool(@Nullable ExecutorService pool, boolean immediate) {
+        if (pool == null) return;
+        if (immediate) {
+            pool.shutdownNow();
+        } else {
+            pool.shutdown();
         }
     }
 
@@ -1681,7 +1823,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 "newWaypoint(%d): adding %.7f, %.7f to %s via %s...",
                 goodCount, lat, lng, droneSpec.trackLabel(), transportType));
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
-        if (!goLiveFlag) {
+        CaltopoMap.MapStatusListener.mapStatus mapStatus = CaltopoMap.GetMapStatus();
+        if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
             if (null == liveTrack) {
                 CTDebug(TAG, "newWaypoint(): starting new liveTrack for: " + droneSpec.trackLabel());
                 liveTrack = new CaltopoLiveTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds, telemetry);
@@ -1692,21 +1835,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 liveTrack.startNewTrack(lat, lng, altitudeInMeters, droneTimestampInMilliseconds, telemetry);
             }
 
-            // Use the idleTimeoutPoll to identify dead tracks.
-            // FIXME: Can we consolidate this poll with the GetSortedCurrentDroneSpecArray() poll?
-            if (!idleTimeoutPoll.isRunning()) {
-                idleTimeoutPoll.start(this::checkIdleTime,
-                        GetNewTrackDelayInSeconds() * 1000, 0);
-            }
+            // Idle-track termination is handled centrally by ProcessSortedCurrentDroneSpecArray().
+        }
 
-            // Preserve legacy personal-map behavior: when no Teams map is up,
-            // continue publishing direct LiveTrack updates to Caltopo.
-            if (CaltopoMap.GetMapStatus() == CaltopoMap.MapStatusListener.mapStatus.down) {
-                try {
-                    publishLive(lat, lng, altitudeInMeters, telemetry);
-                } catch (Exception e) {
-                    CTError(TAG, "publishLive() raised:", e);
-                }
+        // Preserve legacy personal-map behavior: when no Teams map is up,
+        // direct LiveTrack updates are controlled exclusively by the LiveUpdates toggle.
+        if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.down && goLiveFlag) {
+            try {
+                publishLive(lat, lng, altitudeInMeters, telemetry);
+            } catch (Exception e) {
+                CTError(TAG, "publishLive() raised:", e);
             }
         }
         return true;

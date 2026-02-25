@@ -44,7 +44,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 
 import androidx.annotation.NonNull;
@@ -157,6 +160,10 @@ public class CaltopoSession {
 
     private static final String TAG = "CaltopoSession";
     private static final int DEFAULT_TIMEOUT_MS = 2 * 60 * 1000;
+    private static final int MAX_RETRY_ATTEMPTS = 4;
+    private static final long BASE_RETRY_DELAY_MS = 1000;
+    private static final long MAX_RETRY_DELAY_MS = 8000;
+    private static final long RETRY_JITTER_MAX_MS = 500;
     private static ExecutorService MainExecutorPool = null;
     private static ExecutorService PhotoWaypointExecutorPool = null;
 	private static final CtLineProperty CtLinePropertyDefault = new CtLineProperty();
@@ -196,12 +203,88 @@ public class CaltopoSession {
 	public static void Shutdown() {
 		if (MainExecutorPool != null) {
 			MainExecutorPool.shutdown();
-            if (null != PhotoWaypointExecutorPool) {
-                PhotoWaypointExecutorPool.shutdown();
-                PhotoWaypointExecutorPool = null;
-
-            }
             MainExecutorPool = null;
+        }
+        if (null != PhotoWaypointExecutorPool) {
+            PhotoWaypointExecutorPool.shutdown();
+            PhotoWaypointExecutorPool = null;
+        }
+    }
+
+    @NonNull
+    private static synchronized ExecutorService GetMainExecutorPool() {
+        if (MainExecutorPool == null || MainExecutorPool.isShutdown() || MainExecutorPool.isTerminated()) {
+            MainExecutorPool = Executors.newFixedThreadPool(1);
+        }
+        return MainExecutorPool;
+    }
+
+    @NonNull
+    private static synchronized ExecutorService GetPhotoWaypointExecutorPool() {
+        if (PhotoWaypointExecutorPool == null || PhotoWaypointExecutorPool.isShutdown() || PhotoWaypointExecutorPool.isTerminated()) {
+            PhotoWaypointExecutorPool = Executors.newFixedThreadPool(1);
+        }
+        return PhotoWaypointExecutorPool;
+    }
+
+    private static boolean IsTransientResponseCode(int responseCode) {
+        return responseCode == 408 || responseCode == 429 || responseCode >= 500;
+    }
+
+    private static long RetryDelayMsecForAttempt(int attemptNum) {
+        long expDelay = BASE_RETRY_DELAY_MS << Math.max(0, attemptNum - 1);
+        expDelay = Math.min(expDelay, MAX_RETRY_DELAY_MS);
+        long jitter = ThreadLocalRandom.current().nextLong(RETRY_JITTER_MAX_MS + 1);
+        return expDelay + jitter;
+    }
+
+    private static boolean RetryAfterDelay(@NonNull String reason, int attemptNum) {
+        if (attemptNum >= MAX_RETRY_ATTEMPTS) return false;
+        long retryDelay = RetryDelayMsecForAttempt(attemptNum);
+        CTInfo(TAG, String.format(Locale.US,
+                "BgSendRequest(): transient %s (attempt %d/%d), retrying in %.3f seconds",
+                reason, attemptNum, MAX_RETRY_ATTEMPTS, retryDelay / 1000.0));
+        try {
+            Thread.sleep(retryDelay);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            CTInfo(TAG, "BgSendRequest(): retry sleep interrupted");
+            return false;
+        }
+    }
+
+    private static String SafeResponseText(@Nullable String response) {
+        return response == null ? "" : response;
+    }
+
+    private static String ExceptionMessage(@NonNull Exception e) {
+        String msg = e.getMessage();
+        return msg == null ? e.getClass().getSimpleName() : msg;
+    }
+
+    private static void SubmitRequest(@NonNull CaltopoOp op) {
+        try {
+            op.asyncFuture = GetMainExecutorPool().submit(() -> BgSendRequest(op));
+        } catch (RejectedExecutionException e) {
+            CTError(TAG, "SendRequest(): main executor rejected task, rebuilding pool", e);
+            synchronized (CaltopoSession.class) {
+                MainExecutorPool = null;
+            }
+            op.asyncFuture = GetMainExecutorPool().submit(() -> BgSendRequest(op));
+        }
+    }
+
+    private static void SubmitPhotoRequest(@NonNull CaltopoOp op,
+                                           @NonNull Callable<CaltopoOp> task) {
+        try {
+            op.asyncFuture = GetPhotoWaypointExecutorPool().submit(task);
+        } catch (RejectedExecutionException e) {
+            CTError(TAG, "AddPhotoMarker(): photo executor rejected task, rebuilding pool", e);
+            synchronized (CaltopoSession.class) {
+                PhotoWaypointExecutorPool = null;
+            }
+            op.asyncFuture = GetPhotoWaypointExecutorPool().submit(task);
         }
     }
 
@@ -255,12 +338,8 @@ public class CaltopoSession {
 
 	// this needs to be run in background thread to prevent blocking the app thread.
 	private static CaltopoOp BgSendRequest(CaltopoOp op) {
-		boolean retry;
-        boolean goodResponse;
-        do {
-            retry = false;
-            goodResponse = false;
-
+        boolean goodResponse = false;
+        for (int attemptNum = 1; attemptNum <= MAX_RETRY_ATTEMPTS; attemptNum++) {
             try {
                 op.sentTimestampMsec = System.currentTimeMillis();
                 long expires = op.sentTimestampMsec + DEFAULT_TIMEOUT_MS;
@@ -350,30 +429,40 @@ public class CaltopoSession {
                         eventParams.putString("r2c_url", op.url);
                         eventParams.putString("r2c_method", op.method.toString());
                         CaltopoClient.CTEvent(TAG, "CaltopoOpFailed", eventParams);
+                        if (IsTransientResponseCode(op.responseCode)
+                                && RetryAfterDelay("HTTP " + op.responseCode, attemptNum)) {
+                            continue;
+                        }
                     }
                     if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
                         CTInfo(TAG, "BgSendRequest(): Normal Completion:\n  " + op);
                     }
+                    break;
                 }
 
             } catch (UnknownHostException e) {
-                // This logic remains the same for network retries
-                long retryDelay = 3000 + (long) (java.lang.Math.random() * 57000);
-                CTDebug(TAG, String.format(Locale.US, "BgSendRequest(): DNS fail, retrying in %.3f seconds...", retryDelay / 1000.0));
-                try {
-                    Thread.sleep(retryDelay);
-                } catch (InterruptedException e2) {
-                    CTDebug(TAG, "sleep() interrupted.");
+                op.response = "UnknownHostException during request: " + ExceptionMessage(e);
+                if (!RetryAfterDelay("DNS lookup failure", attemptNum)) {
+                    break;
                 }
-                retry = true;
+            } catch (IOException e) {
+                op.response = "IOException during request: " + ExceptionMessage(e);
+                CTError(TAG, "IOException raised during request", e);
+                if (!RetryAfterDelay("I/O exception", attemptNum)) {
+                    break;
+                }
             } catch (Exception e) {
                 op.response = "Exception raised during request:\n  " + e;
                 CTError(TAG, "Exception raised during request:", e);
+                break;
             }
-        } while (retry);
+        }
 
         op.goodResponse = goodResponse;
         op.setOperationIsDone(goodResponse);
+        if (!goodResponse && op.responseCode > 0 && op.response.isEmpty()) {
+            op.response = SafeResponseText(op.response);
+        }
         return op;
     }
 
@@ -396,15 +485,12 @@ public class CaltopoSession {
     @NonNull
     private static CaltopoOp SendRequest(CaltopoOp op, CtsMethod_t method,
 								  String url, JSONObject payload, boolean goNaked) {
-		// NOTE: only one bg thread to communicate w/caltopo - we are one of many users...
-        if (null == MainExecutorPool) {
-            MainExecutorPool = Executors.newFixedThreadPool(1);
-        }
         op.goNaked = goNaked;
 		op.method = method;
 		op.url = url;
 		op.payload = payload;
-		op.asyncFuture = MainExecutorPool.submit(() -> BgSendRequest(op));
+        // NOTE: only one bg thread to communicate w/caltopo - we are one of many users...
+        SubmitRequest(op);
 		return op;
     }
 
@@ -1037,11 +1123,8 @@ public class CaltopoSession {
             return apmOp;
         }
 
-        if (null == PhotoWaypointExecutorPool) {
-            PhotoWaypointExecutorPool = Executors.newFixedThreadPool(1);
-        }
-        apmOp.asyncFuture = PhotoWaypointExecutorPool.submit(() ->
-            BgAddPhotoWaypoint(apmOp, lat, lng, markerTitle, markerDesc, folderId, clueTimestamp, photoBitmap));
+        SubmitPhotoRequest(apmOp, () ->
+                BgAddPhotoWaypoint(apmOp, lat, lng, markerTitle, markerDesc, folderId, clueTimestamp, photoBitmap));
 
         return apmOp;
     }

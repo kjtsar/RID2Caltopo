@@ -15,10 +15,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
@@ -31,6 +37,22 @@ import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+
+private fun parseCsvTags(csv: String): List<String> {
+    val tags = linkedSetOf<String>()
+    csv.split(",").forEach { raw ->
+        val tag = raw.trim()
+        if (tag.isNotEmpty()) tags.add(tag)
+    }
+    return tags.toList()
+}
+
+private fun buildTagCsv(selectedKnownTags: Set<String>, customTagsText: String): String {
+    val tags = linkedSetOf<String>()
+    tags.addAll(selectedKnownTags)
+    tags.addAll(parseCsvTags(customTagsText))
+    return tags.joinToString(",")
+}
 
 // 1. Define a sealed interface to represent the different types of items in our list.
 sealed interface MainScreenItem {
@@ -83,7 +105,9 @@ fun MainScreen(
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showConfirmExitDialog by remember { mutableStateOf(false) }
     var showDebugTagDialog by remember { mutableStateOf(false) }
-    var debugTagFilterText by remember { mutableStateOf("") }
+    var knownDebugTags by remember { mutableStateOf(listOf<String>()) }
+    var selectedKnownTags by remember { mutableStateOf(setOf<String>()) }
+    var customDebugTagsText by remember { mutableStateOf("") }
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
     val context =  LocalContext.current
 
@@ -148,18 +172,43 @@ fun MainScreen(
             onDismissRequest = { showDebugTagDialog = false },
             title = { Text("Debug Tag Filter") },
             text = {
-                OutlinedTextField(
-                    value = debugTagFilterText,
-                    onValueChange = { debugTagFilterText = it },
-                    label = { Text("Comma-separated tags") },
-                    placeholder = { Text("StreamTile,StreamPlayer,StreamsViewModel") },
-                    singleLine = true
-                )
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    if (knownDebugTags.isNotEmpty()) {
+                        Text("Known tags")
+                        Spacer(Modifier.height(8.dp))
+                        knownDebugTags.forEach { knownTag ->
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                Checkbox(
+                                    checked = selectedKnownTags.contains(knownTag),
+                                    onCheckedChange = { checked ->
+                                        selectedKnownTags = if (checked) {
+                                            selectedKnownTags + knownTag
+                                        } else {
+                                            selectedKnownTags - knownTag
+                                        }
+                                    }
+                                )
+                                Text(knownTag, modifier = Modifier.padding(top = 12.dp))
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    OutlinedTextField(
+                        value = customDebugTagsText,
+                        onValueChange = { customDebugTagsText = it },
+                        label = { Text("Custom tags (CSV)") },
+                        placeholder = { Text("StreamTile,StreamPlayer,StreamsViewModel") },
+                        singleLine = true
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val csv = debugTagFilterText.trim()
+                        val csv = buildTagCsv(selectedKnownTags, customDebugTagsText)
+                        parseCsvTags(customDebugTagsText).forEach { tag ->
+                            CaltopoClient.RegisterDebugTag(tag)
+                        }
                         CaltopoClient.SetDebugTagFilter(csv)
                         val msg = if (csv.isBlank()) {
                             "Debug tag filter disabled."
@@ -176,7 +225,8 @@ fun MainScreen(
                 TextButton(
                     onClick = {
                         CaltopoClient.ClearDebugTagFilter()
-                        debugTagFilterText = ""
+                        selectedKnownTags = emptySet()
+                        customDebugTagsText = ""
                         CaltopoClient.ShowToast("Debug tag filter cleared.")
                         showDebugTagDialog = false
                     }
@@ -292,7 +342,13 @@ fun MainScreen(
                             val active = if (CaltopoClient.IsDebugTagFilterEnabled()) "on" else "off"
                             Text("Debug Tags ($active)")
                         }, onClick = {
-                            debugTagFilterText = CaltopoClient.GetDebugTagFilterCsv()
+                            val currentFilterTags = parseCsvTags(CaltopoClient.GetDebugTagFilterCsv())
+                            val knownTags = CaltopoClient.GetRegisteredDebugTags()
+                            val knownSet = knownTags.toSet()
+                            knownDebugTags = knownTags
+                            selectedKnownTags = currentFilterTags.filter { knownSet.contains(it) }.toSet()
+                            customDebugTagsText = currentFilterTags.filter { !knownSet.contains(it) }
+                                .joinToString(",")
                             showDebugTagDialog = true
                             menuExpanded = false
                         })

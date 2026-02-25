@@ -128,6 +128,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static DelayedExec VerifyTimer = new DelayedExec();
     private static DelayedExec VerifyPhotoTimeout = new DelayedExec();
     private static final long VERIFY_TIMEOUT_MS = 10 * 1000L;
+    private static volatile boolean ShutdownInProgress = false;
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
 
     public static void SessionVerifyCallback(@NonNull CaltopoOp verifyOp) {
@@ -162,6 +163,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     @Nullable
     public static String Init() {
         CTDebug(TAG, "Init()");
+        ShutdownInProgress = false;
         if (null == MyInstance)
             MyInstance = new CaltopoMap(); // needed to receive notifications only.
 
@@ -245,6 +247,10 @@ public class CaltopoMap implements R2CPeer.R2CListener {
      * @param mapNode  : If null, just reset map connection.
      */
     public static void OpenMap(CaltopoNode.MapNode mapNode) {
+        if (ShutdownInProgress) {
+            CTDebug(TAG, "OpenMap(): ignoring request while shutdown in progress.");
+            return;
+        }
         if (MapNode != null) {
             // don't wait around for reset operations to complete:
             ResetMapConnection(0);
@@ -625,6 +631,10 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     }
 
     private static void PollMapUpdates() {
+        if (ShutdownInProgress || MapNode == null) {
+            CTDebug(TAG, "PollMapUpdates(): skipping due to shutdown or no map.");
+            return;
+        }
         // Our marker feature s/b/ valid at this point, so start polling for updates...
         CTInfo(TAG, "PollMapUpdates(): updating map connection()");
         long mapSync = System.currentTimeMillis();
@@ -633,6 +643,10 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     }
 
     private static void UpdateMapFinished(CaltopoOp updateMapOp) {
+        if (ShutdownInProgress) {
+            CTDebug(TAG, "updateMapFinished(): ignoring callback during shutdown.");
+            return;
+        }
         CTInfo(TAG, "updateMapFinished()");
         if (updateMapOp == null || updateMapOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to update map '%s':\n  %s",
@@ -1176,6 +1190,13 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     public static void Shutdown() {
         try {
+            ShutdownInProgress = true;
+            MapCheckerDelay.stop();
+            VerifyTimer.stop();
+            VerifyPhotoTimeout.stop();
+            MapNode = null;
+            SessionNodeMap = null;
+            SetMapStatus(MapStatusListener.mapStatus.down, "Shutdown in progress.");
             if (UsePeersFlag) R2CPeer.Shutdown();
             CaltopoSession.Shutdown();
         } catch (Exception e) {

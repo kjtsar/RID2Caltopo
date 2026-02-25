@@ -37,7 +37,6 @@ import org.opendroneid.android.bluetooth.WiFiScanner;
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.Locale;
-import org.opendroneid.android.bluetooth.OpenDroneIdDataManager;
 
 /* This foreground Service required to receive Bluetooth and Wifi
    updates when the app is backgrounded/paused.
@@ -90,8 +89,8 @@ public class ScanningService extends Service {
 
         if (null == AppContext) AppContext = R2CApplication.getAppCtxt();
         if (null == AppContext || null == DataManager) {
-            CTError(TAG, "onCreate() missing required app context - terminating.");
-            System.exit(3);
+            CTError(TAG, "onCreate() missing required app context - stopping service.");
+            stopSelf();
             return;
         }
 
@@ -117,10 +116,10 @@ public class ScanningService extends Service {
     public void onDestroy() {
         CTDebug(TAG, String.format(Locale.US,
                 "onDestroy(): ScanningService 0x%x", this.hashCode()));
-        stopScanning();
+        if (scanning) {
+            stopScanning();
+        }
         super.onDestroy();
-        // FIXME: This shouldn't be necessary if we release all references...
-        Process.killProcess(Process.myPid());
     }
 
     @Override

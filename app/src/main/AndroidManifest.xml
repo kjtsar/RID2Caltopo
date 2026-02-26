@@ -46,6 +46,7 @@
         <activity
             android:name=".app.R2CActivity"
             android:exported="true"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode"
             android:theme="@style/Theme.AppCompat.DayNight.NoActionBar" >
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

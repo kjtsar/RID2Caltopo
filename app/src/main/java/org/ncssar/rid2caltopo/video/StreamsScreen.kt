@@ -19,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -30,11 +31,13 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -94,6 +97,7 @@ import kotlinx.coroutines.channels.Channel
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -101,10 +105,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
+import org.osmdroid.util.TileSystem
 import org.osmdroid.views.MapView
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.views.overlay.Marker
@@ -112,9 +116,11 @@ import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
+import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
@@ -122,6 +128,7 @@ import org.ncssar.rid2caltopo.data.MediaMTXStatus
 import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
 import org.ncssar.rid2caltopo.video.mapcache.CaltopoIconCacheService
+import org.ncssar.rid2caltopo.video.mapcache.BadTilePolicy
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheDebug
 import org.ncssar.rid2caltopo.video.mapcache.MapCachePolicy
@@ -153,6 +160,13 @@ private const val PREDICTIVE_HEAD_MAX_DISTANCE_M = 90.0
 private const val DRONE_NAME_LABEL_ANCHOR_Y = 1.82f
 private const val DRONE_STATUS_LABEL_ANCHOR_Y = 3.35f
 private const val LABEL_MAX_ABS_FEET = 1000.0
+private const val OSM_MAX_ZOOM = 19.0
+private const val MAP_CACHE_PREFS_NAME = "map_cache"
+private const val MAP_CACHE_PREWARM_SIG_KEY = "prewarm_signature_v1"
+private const val OSM_TILE_DOWNLOAD_THREADS: Short = 1
+private const val OSM_TILE_DOWNLOAD_MAX_QUEUE: Short = 1000
+private const val TILE_FS_THREADS: Short = 4
+private const val TILE_FS_MAX_QUEUE: Short = 2000
 
 private enum class ScreenLayoutMode {
     Both,
@@ -178,13 +192,34 @@ private val OFFLINE_PREP_PRESETS = listOf(
     OfflinePrepPreset(label = "Full detail (z8-z19)", minZoom = 8, maxZoom = 19, demStepMeters = 120.0)
 )
 
+private fun demSamplingSummary(stepMeters: Double): String {
+    if (stepMeters <= 0.0) return "DEM sampling disabled"
+    val stepFeet = stepMeters * METERS_TO_FEET
+    val densityPerKm2 = 1_000_000.0 / (stepMeters * stepMeters)
+    return String.format(
+        Locale.US,
+        "DEM sample spacing ~%.0f m (%.0f ft), ~%.1f samples/km²",
+        stepMeters,
+        stepFeet,
+        densityPerKm2
+    )
+}
+
 private data class OfflinePrepProgress(
     val phase: String = "Idle",
     val total: Int = 0,
     val completed: Int = 0,
+    val tileTotal: Int = 0,
+    val tileCompleted: Int = 0,
+    val demTotal: Int = 0,
+    val demCompleted: Int = 0,
+    val demHits: Int = 0,
+    val demFetched: Int = 0,
     val hits: Int = 0,
     val fetched: Int = 0,
     val failed: Int = 0,
+    val demFailed: Int = 0,
+    val totalFailed: Int = 0,
     val opsPerSec: Double = 0.0,
     val etaSeconds: Long? = null
 )
@@ -208,7 +243,8 @@ private data class OfflineBoundaryOption(
 private data class OfflinePrepEstimate(
     val tileEstimate: Int = 0,
     val demEstimate: Int = 0,
-    val estimatedMb: Double = 0.0,
+    val estimatedTileCacheMb: Double = 0.0,
+    val estimatedDemCacheMb: Double = 0.0,
     val ready: Boolean = false
 )
 
@@ -300,6 +336,14 @@ private data class PredictedHead(
     val lng: Double
 )
 
+private data class BadTileDialogState(
+    val tileIndex: Long,
+    val zoom: Int,
+    val x: Int,
+    val y: Int,
+    val hash: String
+)
+
 private object ArcGisWorldImageryTileSource : OnlineTileSourceBase(
     "ArcGIS-WorldImagery",
     0,
@@ -314,6 +358,40 @@ private object ArcGisWorldImageryTileSource : OnlineTileSourceBase(
         val y = MapTileIndex.getY(pMapTileIndex)
         return "$baseUrl$zoom/$y/$x${imageFilenameEnding()}"
     }
+}
+
+private object OsmStandardTileSource : OnlineTileSourceBase(
+    "OSM-Standard",
+    0,
+    19,
+    256,
+    ".png",
+    arrayOf("https://tile.openstreetmap.org/")
+) {
+    override fun getTileURLString(pMapTileIndex: Long): String {
+        val zoom = MapTileIndex.getZoom(pMapTileIndex)
+        val x = MapTileIndex.getX(pMapTileIndex)
+        val y = MapTileIndex.getY(pMapTileIndex)
+        return "$baseUrl$zoom/$x/$y${imageFilenameEnding()}"
+    }
+}
+
+private fun osmUserAgent(): String =
+    "RID2Caltopo v${BuildConfig.VERSION_NAME} (contact: kjtsar@kjt.us)"
+
+private fun configureOsmdroid(context: android.content.Context) {
+    val cfg = Configuration.getInstance()
+    val tileCacheMaxBytes = MapCachePolicy.tileCacheMaxBytes(context)
+    cfg.load(context, context.getSharedPreferences("osmdroid", 0))
+    cfg.userAgentValue = osmUserAgent()
+    cfg.tileDownloadThreads = OSM_TILE_DOWNLOAD_THREADS
+    cfg.tileDownloadMaxQueueSize = OSM_TILE_DOWNLOAD_MAX_QUEUE
+    cfg.tileFileSystemThreads = TILE_FS_THREADS
+    cfg.tileFileSystemMaxQueueSize = TILE_FS_MAX_QUEUE
+    cfg.isDebugMapTileDownloader = MapCacheDebug.isEnabled()
+    cfg.tileFileSystemCacheMaxBytes = tileCacheMaxBytes
+    cfg.tileFileSystemCacheTrimBytes = (tileCacheMaxBytes * 9L) / 10L
+    cfg.expirationOverrideDuration = MapCachePolicy.TILE_TTL_MS
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -561,7 +639,6 @@ private fun SplitMapPane(
     var baseLayer by remember { mutableStateOf(BaseLayerOption.OpenStreetMap) }
     var settingsMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
-    var cachePrewarmInFlight by remember { mutableStateOf(false) }
     var showOfflinePrepDialog by remember { mutableStateOf(false) }
     var offlinePrepInFlight by remember { mutableStateOf(false) }
     var offlinePrepPreset by remember { mutableStateOf(OFFLINE_PREP_PRESETS[1]) }
@@ -573,10 +650,14 @@ private fun SplitMapPane(
     var offlinePrepEstimate by remember { mutableStateOf(OfflinePrepEstimate()) }
     var offlinePrepEstimateRunning by remember { mutableStateOf(false) }
     var offlinePrepAvailableBytes by remember { mutableStateOf<Long?>(null) }
+    var offlinePrepTileCacheCapBytes by remember { mutableStateOf(MapCachePolicy.tileCacheMaxBytes(context)) }
     var offlinePrepJob by remember { mutableStateOf<Job?>(null) }
     var mapBounds by remember { mutableStateOf<BoundingBox?>(null) }
     val downloadMapBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
     var predictiveHeadEnabled by remember { mutableStateOf(true) }
+    var autoRemoveBadTiles by remember { mutableStateOf(BadTilePolicy.isAutoRemoveEnabled(context)) }
+    var badTileDialogState by remember { mutableStateOf<BadTileDialogState?>(null) }
+    var quarantineMatchingHash by remember { mutableStateOf(true) }
     val mapName = viewModel.mapName
     val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
@@ -595,9 +676,10 @@ private fun SplitMapPane(
     val demElevationService = remember(context) { DemElevationService(context) }
     val tileCacheWriter = remember(context) { TileDiskCacheWriter(context) }
     val tileMapProvider = remember(context) {
+        configureOsmdroid(context)
         TileCacheMapProvider(
             context = context,
-            tileSource = TileSourceFactory.MAPNIK,
+            tileSource = OsmStandardTileSource,
             tileWriter = tileCacheWriter
         )
     }
@@ -692,6 +774,29 @@ private fun SplitMapPane(
             offlinePrepMaxThroughput = false
         }
     }
+    LaunchedEffect(autoRemoveBadTiles) {
+        BadTilePolicy.setAutoRemoveEnabled(context, autoRemoveBadTiles)
+    }
+    LaunchedEffect(context) {
+        withContext(Dispatchers.IO) {
+            try {
+                val appContext = context.applicationContext
+                val prefs = appContext.getSharedPreferences(MAP_CACHE_PREFS_NAME, 0)
+                val signature =
+                    "tile=${MapCachePolicy.TILE_CACHE_VERSION}|icon=${MapCachePolicy.ICON_CACHE_VERSION}|dem=v1|root=${mapCacheRootSignature(appContext)}"
+                if (prefs.getString(MAP_CACHE_PREWARM_SIG_KEY, null) == signature) return@withContext
+                val startMs = System.currentTimeMillis()
+                tileCacheWriter.prewarm()
+                iconCacheService.prewarm()
+                demElevationService.prewarm()
+                prefs.edit().putString(MAP_CACHE_PREWARM_SIG_KEY, signature).apply()
+                val elapsedMs = System.currentTimeMillis() - startMs
+                MapCacheDebug.log("prewarm auto complete elapsedMs=$elapsedMs sig=$signature")
+            } catch (e: Exception) {
+                MapCacheDebug.log("prewarm auto failed err=${e.javaClass.simpleName}:${e.message}")
+            }
+        }
+    }
     LaunchedEffect(
         showOfflinePrepDialog,
         offlinePrepAreaMode,
@@ -732,11 +837,13 @@ private fun SplitMapPane(
             } else {
                 0
             }
-            val estimatedMb = (((tileEstimate.toLong() * 20_000L) + (demEstimate.toLong() * 200L)) / (1024.0 * 1024.0))
+            val tileCacheMb = (tileEstimate.toLong() * 20_000L) / (1024.0 * 1024.0)
+            val demCacheMb = (demEstimate.toLong() * 200L) / (1024.0 * 1024.0)
             OfflinePrepEstimate(
                 tileEstimate = tileEstimate,
                 demEstimate = demEstimate,
-                estimatedMb = estimatedMb,
+                estimatedTileCacheMb = tileCacheMb,
+                estimatedDemCacheMb = demCacheMb,
                 ready = true
             )
         }
@@ -744,6 +851,9 @@ private fun SplitMapPane(
         offlinePrepEstimateRunning = false
         offlinePrepAvailableBytes = withContext(Dispatchers.IO) {
             queryAvailableCacheBytes(context)
+        }
+        offlinePrepTileCacheCapBytes = withContext(Dispatchers.IO) {
+            MapCachePolicy.tileCacheMaxBytes(context)
         }
     }
 
@@ -789,7 +899,7 @@ private fun SplitMapPane(
 
     fun selectedTileSource(): org.osmdroid.tileprovider.tilesource.ITileSource {
         return when (baseLayer) {
-            BaseLayerOption.OpenStreetMap -> TileSourceFactory.MAPNIK
+            BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
             BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
         }
     }
@@ -820,9 +930,17 @@ private fun SplitMapPane(
                 return@launch
             }
             val completed = AtomicInteger(0)
+            val tileCompleted = AtomicInteger(0)
+            val demCompleted = AtomicInteger(0)
             val hits = AtomicInteger(0)
             val fetched = AtomicInteger(0)
-            val failed = AtomicInteger(0)
+            val tileFailed = AtomicInteger(0)
+            val demFailed = AtomicInteger(0)
+            val demHits = AtomicInteger(0)
+            val demFetched = AtomicInteger(0)
+            val totalFailed = AtomicInteger(0)
+            val tileFailureLogCount = AtomicInteger(0)
+            val demFailureLogCount = AtomicInteger(0)
             val startedAt = System.currentTimeMillis()
             var lastUiUpdateMs = 0L
             var phase = "Downloading map tiles"
@@ -831,12 +949,20 @@ private fun SplitMapPane(
                 if (!force && now - lastUiUpdateMs < 400L) return
                 lastUiUpdateMs = now
                 val done = completed.get()
+                val tileDone = tileCompleted.get()
+                val demDone = demCompleted.get()
+                val demHit = demHits.get()
+                val demFetch = demFetched.get()
                 val hit = hits.get()
                 val fetch = fetched.get()
-                val fail = failed.get()
+                val tileFail = tileFailed.get()
+                val demFail = demFailed.get()
+                val failTotal = totalFailed.get()
                 val elapsedSec = ((now - startedAt).coerceAtLeast(1L)).toDouble() / 1000.0
                 val rate = done.toDouble() / elapsedSec
                 val displayTotal = maxOf(estimatedTotalOps, done)
+                val displayTileTotal = maxOf(estimatedTileOps, tileDone)
+                val displayDemTotal = maxOf(estimatedDemOps, demDone)
                 val remaining = (displayTotal - done).coerceAtLeast(0)
                 val eta = if (rate > 0.05) kotlin.math.ceil(remaining / rate).toLong() else null
                 withContext(Dispatchers.Main.immediate) {
@@ -844,9 +970,17 @@ private fun SplitMapPane(
                         phase = phase,
                         total = displayTotal,
                         completed = done,
+                        tileTotal = displayTileTotal,
+                        tileCompleted = tileDone,
+                        demTotal = displayDemTotal,
+                        demCompleted = demDone,
+                        demHits = demHit,
+                        demFetched = demFetch,
                         hits = hit,
                         fetched = fetch,
-                        failed = fail,
+                        failed = tileFail,
+                        demFailed = demFail,
+                        totalFailed = failTotal,
                         opsPerSec = rate,
                         etaSeconds = eta
                     )
@@ -861,57 +995,215 @@ private fun SplitMapPane(
                             delay(500L)
                         }
                     }
-                    val workerCount = if (maximizeThroughput) 12 else 3
-                    val tileQueue = Channel<Long>(capacity = workerCount * 3)
-                    val workers = List(workerCount) {
-                        launch {
-                            for (tileIndex in tileQueue) {
-                                ensureActive()
-                                val exists = tileCacheWriter.exists(tileSource, tileIndex)
-                                if (exists) {
-                                    hits.incrementAndGet()
-                                } else {
-                                    val ok = try {
-                                        val url = onlineTileSource.getTileURLString(tileIndex)
-                                        val req = Request.Builder().url(url).build()
-                                        offlineHttpClient.newCall(req).execute().use { resp ->
-                                            if (!resp.isSuccessful) return@use false
-                                            val body = resp.body ?: return@use false
-                                            val bytes = body.bytes()
-                                            tileCacheWriter.saveFile(
-                                                tileSource,
-                                                tileIndex,
-                                                ByteArrayInputStream(bytes),
-                                                null
-                                            )
-                                        }
-                                    } catch (_: Exception) {
-                                        false
+                    suspend fun processTile(tileIndex: Long) {
+                        ensureActive()
+                        val exists = tileCacheWriter.exists(tileSource, tileIndex)
+                        if (exists) {
+                            hits.incrementAndGet()
+                        } else {
+                            val z = MapTileIndex.getZoom(tileIndex)
+                            val x = MapTileIndex.getX(tileIndex)
+                            val y = MapTileIndex.getY(tileIndex)
+                            var failureDetail = ""
+                            val ok = try {
+                                val url = onlineTileSource.getTileURLString(tileIndex)
+                                val req = Request.Builder().url(url).build()
+                                offlineHttpClient.newCall(req).execute().use { resp ->
+                                    if (!resp.isSuccessful) {
+                                        failureDetail = "http=${resp.code} z=$z x=$x y=$y source=${tileSource.name()}"
+                                        return@use false
                                     }
-                                    if (ok) fetched.incrementAndGet() else failed.incrementAndGet()
+                                    val body = resp.body ?: return@use false
+                                    val bytes = body.bytes()
+                                    tileCacheWriter.saveFile(
+                                        tileSource,
+                                        tileIndex,
+                                        ByteArrayInputStream(bytes),
+                                        null
+                                    )
                                 }
-                                completed.incrementAndGet()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                failureDetail = "ex=${e.javaClass.simpleName} z=$z x=$x y=$y source=${tileSource.name()}"
+                                false
+                            }
+                            if (ok) {
+                                fetched.incrementAndGet()
+                            } else {
+                                tileFailed.incrementAndGet()
+                                totalFailed.incrementAndGet()
+                                val n = tileFailureLogCount.incrementAndGet()
+                                if (n <= 12 || (n % 50) == 0) {
+                                    CTDebug(MAP_PANE_TAG, "DownloadMap tile failure#$n $failureDetail")
+                                    MapCacheDebug.log("download tile failure#$n $failureDetail")
+                                }
                             }
                         }
+                        tileCompleted.incrementAndGet()
+                        completed.incrementAndGet()
                     }
-                    forEachTileIndexForBounds(bounds, preset.minZoom, preset.maxZoom, clipBoundary) { tileIndex ->
-                        currentCoroutineContext().ensureActive()
-                        tileQueue.send(tileIndex)
+                    suspend fun processDem(lat: Double, lng: Double) {
+                        ensureActive()
+                        val wasCached = demElevationService.hasCachedSample(lat, lng)
+                        var failureDetail = "no-sample"
+                        val sample = try {
+                            demElevationService.sampleElevationMeters(lat, lng)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            failureDetail = "ex=${e.javaClass.simpleName}:${e.message}"
+                            null
+                        }
+                        if (sample == null) {
+                            demFailed.incrementAndGet()
+                            totalFailed.incrementAndGet()
+                            val n = demFailureLogCount.incrementAndGet()
+                            if (n <= 12 || (n % 50) == 0) {
+                                val msg = "download dem failure#$n lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)} reason=$failureDetail"
+                                CTError(MAP_PANE_TAG, "DownloadMap DEM $msg")
+                                MapCacheDebug.warn(MapCacheDebug.TAG_DEM, msg)
+                            }
+                        }
+                        if (sample != null) {
+                            if (wasCached) demHits.incrementAndGet() else demFetched.incrementAndGet()
+                        }
+                        demCompleted.incrementAndGet()
+                        completed.incrementAndGet()
                     }
-                    tileQueue.close()
-                    workers.forEach { it.join() }
 
-                    if (includeDem) {
-                        phase = "Sampling DEM"
-                        forEachDemSamplePointForBounds(bounds, preset.demStepMeters, clipBoundary) { lat, lng ->
-                            currentCoroutineContext().ensureActive()
-                            try {
-                                demElevationService.sampleElevationMeters(lat, lng)
-                            } catch (_: Exception) {
-                                failed.incrementAndGet()
+                    if (!maximizeThroughput) {
+                        val workerCount = 3
+                        val tileQueue = Channel<Long>(capacity = workerCount * 3)
+                        val workers = List(workerCount) {
+                            launch {
+                                for (tileIndex in tileQueue) {
+                                    processTile(tileIndex)
+                                }
                             }
-                            completed.incrementAndGet()
                         }
+                        forEachTileIndexForBounds(bounds, preset.minZoom, preset.maxZoom, clipBoundary) { tileIndex ->
+                            currentCoroutineContext().ensureActive()
+                            tileQueue.send(tileIndex)
+                        }
+                        tileQueue.close()
+                        workers.forEach { it.join() }
+
+                        if (includeDem) {
+                            phase = "Sampling DEM"
+                            forEachDemSamplePointForBounds(bounds, preset.demStepMeters, clipBoundary) { lat, lng ->
+                                processDem(lat, lng)
+                            }
+                        }
+                    } else {
+                        val maxWorkers = 16
+                        val minWorkers = 2
+                        val tileQueue = Channel<Long>(capacity = maxWorkers * 4)
+                        val demQueue = Channel<Pair<Double, Double>>(capacity = maxWorkers * 3)
+                        val tileWorkers = mutableListOf<Job>()
+                        val demWorkers = mutableListOf<Job>()
+
+                        val tileProducer = launch {
+                            forEachTileIndexForBounds(bounds, preset.minZoom, preset.maxZoom, clipBoundary) { tileIndex ->
+                                currentCoroutineContext().ensureActive()
+                                tileQueue.send(tileIndex)
+                            }
+                            tileQueue.close()
+                        }
+                        val demProducer = if (includeDem) {
+                            launch {
+                                forEachDemSamplePointForBounds(bounds, preset.demStepMeters, clipBoundary) { lat, lng ->
+                                    currentCoroutineContext().ensureActive()
+                                    demQueue.send(Pair(lat, lng))
+                                }
+                                demQueue.close()
+                            }
+                        } else {
+                            null
+                        }
+
+                        fun addTileWorker() {
+                            tileWorkers += launch {
+                                for (tileIndex in tileQueue) {
+                                    processTile(tileIndex)
+                                }
+                            }
+                        }
+                        fun addDemWorker() {
+                            demWorkers += launch {
+                                for ((lat, lng) in demQueue) {
+                                    processDem(lat, lng)
+                                }
+                            }
+                        }
+                        fun removeTileWorker() {
+                            val worker = tileWorkers.removeLastOrNull() ?: return
+                            worker.cancel()
+                        }
+                        fun removeDemWorker() {
+                            val worker = demWorkers.removeLastOrNull() ?: return
+                            worker.cancel()
+                        }
+
+                        var initialTileWorkers = if (includeDem) 6 else 10
+                        var initialDemWorkers = if (includeDem) 4 else 0
+                        if (initialTileWorkers + initialDemWorkers > maxWorkers) {
+                            initialTileWorkers = maxWorkers - initialDemWorkers
+                        }
+                        repeat(initialTileWorkers) { addTileWorker() }
+                        repeat(initialDemWorkers) { addDemWorker() }
+
+                        var priorRate = 0.0
+                        var priorCompleted = 0
+                        var ramping = true
+                        val adaptiveManager = launch {
+                            while (isActive) {
+                                delay(8_000L)
+                                val done = completed.get()
+                                val delta = (done - priorCompleted).coerceAtLeast(0)
+                                priorCompleted = done
+                                val currentRate = delta / 8.0
+                                val totalWorkers = tileWorkers.size + demWorkers.size
+                                val demRemaining = (estimatedDemOps - demCompleted.get()).coerceAtLeast(0)
+                                val tileRemaining = (estimatedTileOps - tileCompleted.get()).coerceAtLeast(0)
+
+                                if (demRemaining <= 0) {
+                                    while (demWorkers.isNotEmpty()) removeDemWorker()
+                                    while (tileWorkers.size < maxWorkers) addTileWorker()
+                                    phase = "Downloading map tiles"
+                                    continue
+                                }
+
+                                phase = if (demRemaining > 0) "Downloading map + DEM" else "Downloading map tiles"
+                                if (totalWorkers < minWorkers) {
+                                    if (tileWorkers.isEmpty()) addTileWorker()
+                                    else if (includeDem && demWorkers.isEmpty()) addDemWorker()
+                                }
+
+                                if (ramping && totalWorkers < maxWorkers) {
+                                    if (priorRate > 0.0 && currentRate < priorRate * 1.03) {
+                                        ramping = false
+                                        if (demWorkers.size > 1) removeDemWorker() else if (tileWorkers.size > 1) removeTileWorker()
+                                    } else {
+                                        if (tileRemaining >= demRemaining) addTileWorker() else addDemWorker()
+                                    }
+                                } else if (!ramping && totalWorkers > minWorkers) {
+                                    if (priorRate > 0.0 && currentRate < priorRate * 0.92) {
+                                        if (demWorkers.size > 1) removeDemWorker() else if (tileWorkers.size > 1) removeTileWorker()
+                                    }
+                                }
+                                priorRate = currentRate
+                            }
+                        }
+
+                        tileProducer.join()
+                        tileWorkers.toList().forEach { it.join() }
+                        if (includeDem && demProducer != null) {
+                            phase = "Sampling DEM"
+                            demProducer.join()
+                            demWorkers.toList().forEach { it.join() }
+                        }
+                        adaptiveManager.cancel()
                     }
                     progressTicker.cancel()
                 }
@@ -921,11 +1213,13 @@ private fun SplitMapPane(
                 pushProgress(force = true)
                 val hit = hits.get()
                 val fetch = fetched.get()
-                val fail = failed.get()
+                val tileFail = tileFailed.get()
+                val demFail = demFailed.get()
+                val failTotal = totalFailed.get()
                 withContext(Dispatchers.Main.immediate) {
                     offlinePrepInFlight = false
                     offlinePrepJob = null
-                    val doneMsg = "Download map done: hit=$hit fetched=$fetch failed=$fail in ${elapsedMs}ms"
+                    val doneMsg = "Download map done: hit=$hit fetched=$fetch tileFail=$tileFail demFail=$demFail totalFail=$failTotal in ${elapsedMs}ms"
                     CaltopoClient.ShowToast(doneMsg)
                     MapCacheDebug.log(doneMsg)
                 }
@@ -1001,6 +1295,45 @@ private fun SplitMapPane(
         }
     }
 
+    badTileDialogState?.let { dlg ->
+        AlertDialog(
+            onDismissRequest = { badTileDialogState = null },
+            title = { Text("Remove Bad Tile?") },
+            text = {
+                Column {
+                    Text("Tile z=${dlg.zoom} x=${dlg.x} y=${dlg.y}")
+                    Text("Hash: ${dlg.hash.take(12)}...")
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = quarantineMatchingHash,
+                            onCheckedChange = { quarantineMatchingHash = it }
+                        )
+                        Text("Also quarantine same-hash tiles")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val source = tileMapProvider.tileSource
+                        tileCacheWriter.remove(source, dlg.tileIndex)
+                        if (quarantineMatchingHash) {
+                            BadTilePolicy.addBlockedHash(context, dlg.hash)
+                            CaltopoClient.ShowToast("Tile removed and hash quarantined.")
+                        } else {
+                            CaltopoClient.ShowToast("Tile removed from cache.")
+                        }
+                        badTileDialogState = null
+                    }
+                ) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { badTileDialogState = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     DisposableEffect(Unit) {
         hydrateArtifactsFromCaltopoSnapshot("listener-init")
         val listener = CaltopoMap.ArtifactListener { feature, source, _ ->
@@ -1071,16 +1404,14 @@ private fun SplitMapPane(
                 .fillMaxSize()
                 .clipToBounds(),
             factory = {
-                Configuration.getInstance().load(context, context.getSharedPreferences("osmdroid", 0))
-                Configuration.getInstance().userAgentValue = context.packageName
-                Configuration.getInstance().tileFileSystemCacheMaxBytes = MapCachePolicy.TILE_CACHE_MAX_BYTES
-                Configuration.getInstance().tileFileSystemCacheTrimBytes =
-                    (MapCachePolicy.TILE_CACHE_MAX_BYTES * 9L) / 10L
-                Configuration.getInstance().expirationOverrideDuration = MapCachePolicy.TILE_TTL_MS
+                configureOsmdroid(context)
                 MapView(context).apply {
                     setMultiTouchControls(true)
                     setTileProvider(tileMapProvider)
-                    setTileSource(TileSourceFactory.MAPNIK)
+                    setTileSource(OsmStandardTileSource)
+                    setUseDataConnection(true)
+                    tileMapProvider.setUseDataConnection(true)
+                    setMaxZoomLevel(OSM_MAX_ZOOM)
                     controller.setZoom(14.0)
                 }
             },
@@ -1088,8 +1419,18 @@ private fun SplitMapPane(
                 val uiNowWallMsec = System.currentTimeMillis()
                 mapBounds = mapView.boundingBox
                 val tileSource = when (baseLayer) {
-                    BaseLayerOption.OpenStreetMap -> TileSourceFactory.MAPNIK
+                    BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
                     BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
+                }
+                val maxZoom = if (baseLayer == BaseLayerOption.OpenStreetMap) OSM_MAX_ZOOM else 19.0
+                if (mapView.maxZoomLevel != maxZoom) {
+                    mapView.setMaxZoomLevel(maxZoom)
+                }
+                if (!mapView.useDataConnection()) {
+                    mapView.setUseDataConnection(true)
+                }
+                if (!tileMapProvider.useDataConnection()) {
+                    tileMapProvider.setUseDataConnection(true)
                 }
                 if (mapView.tileProvider.tileSource.name() != tileSource.name()) {
                     mapView.setTileSource(tileSource)
@@ -1100,22 +1441,39 @@ private fun SplitMapPane(
                     managedOverlays.clear()
                 }
 
-                if (onSingleTapFocus != null) {
-                    val tapOverlay = MapEventsOverlay(
-                        object : MapEventsReceiver {
-                            override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
-                                onSingleTapFocus()
-                                return false
-                            }
-
-                            override fun longPressHelper(p: GeoPoint?): Boolean {
-                                return false
-                            }
+                val tapOverlay = MapEventsOverlay(
+                    object : MapEventsReceiver {
+                        override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                            onSingleTapFocus?.invoke()
+                            return false
                         }
-                    )
-                    mapView.overlays.add(tapOverlay)
-                    managedOverlays.add(tapOverlay)
-                }
+
+                        override fun longPressHelper(p: GeoPoint?): Boolean {
+                            val press = p ?: return false
+                            val zoom = TileSystem.getInputTileZoomLevel(mapView.zoomLevelDouble)
+                            val tx = lonToTileX(press.longitude, zoom)
+                            val ty = latToTileY(press.latitude, zoom)
+                            val tileIndex = MapTileIndex.getTileIndex(zoom, tx, ty)
+                            val source = tileMapProvider.tileSource
+                            val hash = tileCacheWriter.tileHash(source, tileIndex)
+                            if (hash == null) {
+                                CaltopoClient.ShowToast("Selected tile is not cached yet.")
+                                return false
+                            }
+                            quarantineMatchingHash = true
+                            badTileDialogState = BadTileDialogState(
+                                tileIndex = tileIndex,
+                                zoom = zoom,
+                                x = tx,
+                                y = ty,
+                                hash = hash
+                            )
+                            return true
+                        }
+                    }
+                )
+                mapView.overlays.add(tapOverlay)
+                managedOverlays.add(tapOverlay)
 
                 artifactOverlayState.polygons.forEach { polygonSpec ->
                     val polygon = Polygon(mapView).apply {
@@ -1645,25 +2003,31 @@ private fun SplitMapPane(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text(if (cachePrewarmInFlight) "Prewarm Cache Index (running...)" else "Prewarm Cache Index") },
+                    text = { Text(if (autoRemoveBadTiles) "Auto Remove Bad Tiles: On" else "Auto Remove Bad Tiles: Off") },
                     onClick = {
-                        if (cachePrewarmInFlight) return@DropdownMenuItem
+                        autoRemoveBadTiles = !autoRemoveBadTiles
                         settingsMenuExpanded = false
-                        cachePrewarmInFlight = true
-                        uiScope.launch(Dispatchers.IO) {
-                            val startMs = System.currentTimeMillis()
-                            tileCacheWriter.prewarm()
-                            iconCacheService.prewarm()
-                            demElevationService.prewarm()
-                            val elapsedMs = System.currentTimeMillis() - startMs
-                            withContext(Dispatchers.Main.immediate) {
-                                cachePrewarmInFlight = false
-                                CaltopoClient.ShowToast("Cache prewarm complete in ${elapsedMs}ms.")
-                                MapCacheDebug.log("prewarm complete elapsedMs=$elapsedMs")
-                            }
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Clear Bad Tile Flags (${BadTilePolicy.blockedHashCount(context)})") },
+                    onClick = {
+                        BadTilePolicy.clearBlockedHashes(context)
+                        CaltopoClient.ShowToast("Bad tile flags cleared.")
+                        settingsMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Export Bad Tile Hashes") },
+                    onClick = {
+                        val exportedTo = exportBadTileHashes(context)
+                        if (exportedTo != null) {
+                            CaltopoClient.ShowToast("Exported bad tile hashes to $exportedTo")
+                        } else {
+                            CaltopoClient.ShowToast("Bad tile hash export failed.")
                         }
-                    },
-                    enabled = !cachePrewarmInFlight
+                        settingsMenuExpanded = false
+                    }
                 )
                 DropdownMenuItem(
                     text = { Text("Download Map...") },
@@ -1707,7 +2071,12 @@ private fun SplitMapPane(
                 },
                 title = { Text("Download Map") },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = 520.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text("Area")
                         OfflinePrepAreaMode.entries.forEach { area ->
                             val enabled = area != OfflinePrepAreaMode.MapBoundary || offlineBoundaryOptions.isNotEmpty()
@@ -1774,9 +2143,19 @@ private fun SplitMapPane(
                                     },
                                     enabled = !offlinePrepInFlight
                                 )
-                                Text(preset.label)
+                                Column {
+                                    Text(preset.label)
+                                    Text(
+                                        demSamplingSummary(preset.demStepMeters),
+                                        fontSize = 11.sp
+                                    )
+                                }
                             }
                         }
+                        Text(
+                            "DEM spacing above is cache sampling interval, not native USGS DEM raster resolution.",
+                            fontSize = 11.sp
+                        )
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
                                 checked = offlinePrepIncludeDem,
@@ -1803,15 +2182,19 @@ private fun SplitMapPane(
                             if (offlinePrepEstimateRunning || !offlinePrepEstimate.ready) {
                                 "Estimate: calculating..."
                             } else {
-                                "Estimate: tiles=${offlinePrepEstimate.tileEstimate} " +
-                                    "dem=${offlinePrepEstimate.demEstimate} " +
-                                    "(~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedMb)} MB)"
+                                "Estimate (cache footprint): " +
+                                    "tiles=${offlinePrepEstimate.tileEstimate} (~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedTileCacheMb)} MB), " +
+                                    "dem=${offlinePrepEstimate.demEstimate} (~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedDemCacheMb)} MB)"
                             },
                             fontSize = 12.sp
                         )
+                        Text(
+                            "Note: runtime is often dominated by DEM query latency, not tile MB size.",
+                            fontSize = 11.sp
+                        )
                         if (offlinePrepEstimate.ready) {
-                            val cacheCapMb = MapCachePolicy.TILE_CACHE_MAX_BYTES.toDouble() / (1024.0 * 1024.0)
-                            if (offlinePrepEstimate.estimatedMb > cacheCapMb) {
+                            val cacheCapMb = offlinePrepTileCacheCapBytes.toDouble() / (1024.0 * 1024.0)
+                            if (offlinePrepEstimate.estimatedTileCacheMb > cacheCapMb) {
                                 Text(
                                     "Warning: estimate exceeds tile cache cap (~${"%.0f".format(Locale.US, cacheCapMb)} MB). Older tiles may be evicted.",
                                     fontSize = 11.sp
@@ -1823,7 +2206,8 @@ private fun SplitMapPane(
                                     "Available storage: ~${"%.0f".format(Locale.US, availableMb)} MB",
                                     fontSize = 11.sp
                                 )
-                                if (offlinePrepEstimate.estimatedMb > (availableMb * 0.95)) {
+                                val totalEstimateMb = offlinePrepEstimate.estimatedTileCacheMb + offlinePrepEstimate.estimatedDemCacheMb
+                                if (totalEstimateMb > (availableMb * 0.95)) {
                                     Text(
                                         "Warning: estimated download may exceed available storage.",
                                         fontSize = 11.sp
@@ -1843,10 +2227,27 @@ private fun SplitMapPane(
                                 "Progress: ${offlinePrepProgress.phase} ${offlinePrepProgress.completed}/${offlinePrepProgress.total} " +
                                     "(${String.format(Locale.US, "%.2f", pct)}%) " +
                                     "rate=${String.format(Locale.US, "%.1f", offlinePrepProgress.opsPerSec)}/s " +
-                                    "ETA=$etaText " +
+                                    "ETA=$etaText",
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                "Tiles: ${offlinePrepProgress.tileCompleted}/${offlinePrepProgress.tileTotal} " +
                                     "(hit=${offlinePrepProgress.hits} fetched=${offlinePrepProgress.fetched} failed=${offlinePrepProgress.failed})",
                                 fontSize = 12.sp
                             )
+                            if (offlinePrepProgress.demTotal > 0) {
+                                Text(
+                                    "DEM: ${offlinePrepProgress.demCompleted}/${offlinePrepProgress.demTotal} " +
+                                        "(hit=${offlinePrepProgress.demHits} fetched=${offlinePrepProgress.demFetched} failed=${offlinePrepProgress.demFailed})",
+                                    fontSize = 12.sp
+                                )
+                            }
+                            if (offlinePrepProgress.totalFailed > 0) {
+                                Text(
+                                    "Total failures: ${offlinePrepProgress.totalFailed}",
+                                    fontSize = 12.sp
+                                )
+                            }
                         }
                     }
                 },
@@ -1870,7 +2271,8 @@ private fun SplitMapPane(
                                 return@TextButton
                             }
                             if (offlinePrepEstimate.ready) {
-                                val estimateBytes = (offlinePrepEstimate.estimatedMb * 1024.0 * 1024.0).toLong()
+                                val estimateMb = offlinePrepEstimate.estimatedTileCacheMb + offlinePrepEstimate.estimatedDemCacheMb
+                                val estimateBytes = (estimateMb * 1024.0 * 1024.0).toLong()
                                 val available = offlinePrepAvailableBytes
                                 if (available != null && estimateBytes > (available * 95L / 100L)) {
                                     CaltopoClient.ShowToast("Estimated download exceeds available storage. Pick a smaller area/zoom.")
@@ -2296,6 +2698,46 @@ private fun queryAvailableCacheBytes(context: android.content.Context): Long? {
             }
         }
     } catch (_: Exception) {
+        null
+    }
+}
+
+private fun mapCacheRootSignature(context: android.content.Context): String {
+    return try {
+        when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
+            is MapCacheRoot.FileBacked -> "file:${root.dir.absolutePath}"
+            is MapCacheRoot.SafBacked -> "saf:${root.dir.uri}"
+        }
+    } catch (_: Exception) {
+        "unknown"
+    }
+}
+
+private fun exportBadTileHashes(context: android.content.Context): String? {
+    return try {
+        val hashes = BadTilePolicy.blockedHashesSorted(context)
+        val header = "# RID2Caltopo bad tile hashes\n# count=${hashes.size}\n"
+        val body = if (hashes.isEmpty()) "# (none)\n" else hashes.joinToString(separator = "\n", postfix = "\n")
+        val payload = (header + body).toByteArray(Charsets.UTF_8)
+        when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
+            is MapCacheRoot.FileBacked -> {
+                val out = File(root.dir, "bad_tile_hashes.txt")
+                out.writeBytes(payload)
+                out.absolutePath
+            }
+            is MapCacheRoot.SafBacked -> {
+                val existing = root.dir.findFile("bad_tile_hashes.txt")
+                val file = existing ?: root.dir.createFile("text/plain", "bad_tile_hashes.txt")
+                if (file == null) return null
+                context.applicationContext.contentResolver.openOutputStream(file.uri, "w")?.use { out ->
+                    out.write(payload)
+                    out.flush()
+                } ?: return null
+                file.uri.toString()
+            }
+        }
+    } catch (e: Exception) {
+        MapCacheDebug.log("bad-hash export failed err=${e.javaClass.simpleName}:${e.message}")
         null
     }
 }

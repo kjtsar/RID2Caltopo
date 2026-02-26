@@ -2,6 +2,8 @@ package org.ncssar.rid2caltopo.video.mapcache
 
 import android.content.Context
 import android.graphics.drawable.Drawable
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.IRegisterReceiver
 import org.osmdroid.tileprovider.MapTileProviderArray
@@ -15,6 +17,7 @@ import org.osmdroid.tileprovider.modules.MapTileFileArchiveProvider
 import org.osmdroid.tileprovider.modules.MapTileFileStorageProviderBase
 import org.osmdroid.tileprovider.modules.MapTileModuleProviderBase
 import org.osmdroid.tileprovider.modules.NetworkAvailabliltyCheck
+import org.osmdroid.tileprovider.modules.TileDownloader
 import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
@@ -22,6 +25,7 @@ import org.osmdroid.util.MapTileAreaBorderComputer
 import org.osmdroid.util.MapTileAreaZoomComputer
 import org.osmdroid.util.MapTileIndex
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 class TileCacheMapProvider private constructor(
     context: Context,
@@ -29,16 +33,28 @@ class TileCacheMapProvider private constructor(
     private val tileWriter: IFilesystemCache,
     private val registerReceiver: SimpleRegisterReceiver
 ) : MapTileProviderArray(tileSource, registerReceiver) {
+    private companion object {
+        private const val PROBE_MIN_INTERVAL_MS = 30_000L
+        private val lastProbeByTile = LinkedHashMap<Long, Long>()
+    }
+
     constructor(
         context: Context,
         tileSource: ITileSource = TileSourceFactory.DEFAULT_TILE_SOURCE,
         tileWriter: IFilesystemCache
     ) : this(context, tileSource, tileWriter, SimpleRegisterReceiver(context))
 
-    private val networkAvailabilityCheck: INetworkAvailablityCheck = NetworkAvailabliltyCheck(context)
+    private val platformNetworkCheck = NetworkAvailabliltyCheck(context)
+    private val networkAvailabilityCheck: INetworkAvailablityCheck = object : INetworkAvailablityCheck {
+        override fun getNetworkAvailable(): Boolean = true
+        override fun getWiFiNetworkAvailable(): Boolean = platformNetworkCheck.wiFiNetworkAvailable
+        override fun getCellularDataNetworkAvailable(): Boolean = platformNetworkCheck.cellularDataNetworkAvailable
+        override fun getRouteToPathExists(hostAddress: Int): Boolean = true
+    }
     private val cacheProvider: TileCacheStorageProvider
     private val downloaderProvider: MapTileDownloader
     private val approximater: MapTileApproximater
+    private val probeClient = OkHttpClient.Builder().build()
 
     init {
         val assetsProvider = MapTileAssetsProvider(
@@ -67,6 +83,38 @@ class TileCacheMapProvider private constructor(
             Configuration.getInstance().tileDownloadThreads.toInt(),
             Configuration.getInstance().tileDownloadMaxQueueSize.toInt()
         )
+        downloaderProvider.setTileDownloader(object : TileDownloader() {
+            override fun downloadTile(
+                pMapTileIndex: Long,
+                redirectCount: Int,
+                targetUrl: String,
+                pFilesystemCache: IFilesystemCache?,
+                pTileSource: org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
+            ): Drawable? {
+                val drawable = super.downloadTile(
+                    pMapTileIndex,
+                    redirectCount,
+                    targetUrl,
+                    pFilesystemCache,
+                    pTileSource
+                )
+                if (MapCacheDebug.isEnabled() && redirectCount == 0) {
+                    val z = MapTileIndex.getZoom(pMapTileIndex)
+                    val x = MapTileIndex.getX(pMapTileIndex)
+                    val y = MapTileIndex.getY(pMapTileIndex)
+                    if (drawable == null) {
+                        MapCacheDebug.log(
+                            "tile net-null source=${pTileSource.name()} z=$z x=$x y=$y url=$targetUrl"
+                        )
+                    } else {
+                        MapCacheDebug.log(
+                            "tile net-ok source=${pTileSource.name()} z=$z x=$x y=$y url=$targetUrl"
+                        )
+                    }
+                }
+                return drawable
+            }
+        })
         mTileProviderList.add(downloaderProvider)
 
         getTileCache().protectedTileComputers.add(MapTileAreaZoomComputer(-1))
@@ -77,7 +125,6 @@ class TileCacheMapProvider private constructor(
         getTileCache().preCache.addProvider(assetsProvider)
         getTileCache().preCache.addProvider(cacheProvider)
         getTileCache().preCache.addProvider(archiveProvider)
-        getTileCache().preCache.addProvider(downloaderProvider)
         getTileCache().protectedTileContainers.add(this)
 
         setOfflineFirst(true)
@@ -85,9 +132,87 @@ class TileCacheMapProvider private constructor(
 
     override fun getTileWriter(): IFilesystemCache = tileWriter
 
+    override fun mapTileRequestCompleted(pState: MapTileRequestState, pDrawable: Drawable?) {
+        if (MapCacheDebug.isEnabled()) {
+            val idx = pState.mapTile
+            MapCacheDebug.log(
+                "tile req-complete z=${MapTileIndex.getZoom(idx)} x=${MapTileIndex.getX(idx)} y=${MapTileIndex.getY(idx)} drawable=${pDrawable != null}"
+            )
+        }
+        super.mapTileRequestCompleted(pState, pDrawable)
+    }
+
+    override fun mapTileRequestFailed(pState: MapTileRequestState) {
+        if (MapCacheDebug.isEnabled()) {
+            val idx = pState.mapTile
+            val provider = pState.currentProvider?.javaClass?.simpleName ?: "unknown"
+            val isDownloader = pState.currentProvider is MapTileDownloader
+            MapCacheDebug.log(
+                (if (isDownloader) "tile req-final-failed" else "tile req-stage-failed") +
+                    " z=${MapTileIndex.getZoom(idx)} x=${MapTileIndex.getX(idx)} y=${MapTileIndex.getY(idx)} " +
+                    "useData=${useDataConnection()} provider=$provider"
+            )
+            if (isDownloader) {
+                probeFailedTile(idx)
+            }
+        }
+        super.mapTileRequestFailed(pState)
+    }
+
+    override fun mapTileRequestFailedExceedsMaxQueueSize(pState: MapTileRequestState) {
+        if (MapCacheDebug.isEnabled()) {
+            val idx = pState.mapTile
+            val provider = pState.currentProvider?.javaClass?.simpleName ?: "unknown"
+            MapCacheDebug.log(
+                "tile req-queue-failed z=${MapTileIndex.getZoom(idx)} x=${MapTileIndex.getX(idx)} y=${MapTileIndex.getY(idx)} useData=${useDataConnection()} provider=$provider"
+            )
+            probeFailedTile(idx)
+        }
+        super.mapTileRequestFailedExceedsMaxQueueSize(pState)
+    }
+
     override fun detach() {
         tileWriter.onDetach()
         super.detach()
+    }
+
+    private fun probeFailedTile(tileIndex: Long) {
+        val now = System.currentTimeMillis()
+        synchronized(lastProbeByTile) {
+            val prev = lastProbeByTile[tileIndex]
+            if (prev != null && (now - prev) < PROBE_MIN_INTERVAL_MS) return
+            lastProbeByTile[tileIndex] = now
+            if (lastProbeByTile.size > 2048) {
+                val iter = lastProbeByTile.entries.iterator()
+                repeat(256) {
+                    if (iter.hasNext()) {
+                        iter.next()
+                        iter.remove()
+                    }
+                }
+            }
+        }
+        val source = tileSource as? org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase ?: return
+        val url = source.getTileURLString(tileIndex)
+        val z = MapTileIndex.getZoom(tileIndex)
+        val x = MapTileIndex.getX(tileIndex)
+        val y = MapTileIndex.getY(tileIndex)
+        val uaHeader = Configuration.getInstance().userAgentHttpHeader
+        val uaValue = Configuration.getInstance().userAgentValue
+        thread(name = "tile-fail-probe", isDaemon = true) {
+            try {
+                val req = Request.Builder().url(url).header(uaHeader, uaValue).build()
+                probeClient.newCall(req).execute().use { resp ->
+                    MapCacheDebug.log(
+                        "tile probe http=${resp.code} z=$z x=$x y=$y bytes=${resp.body?.contentLength() ?: -1} url=$url"
+                    )
+                }
+            } catch (e: Exception) {
+                MapCacheDebug.log(
+                    "tile probe ex=${e.javaClass.simpleName}:${e.message} z=$z x=$x y=$y url=$url"
+                )
+            }
+        }
     }
 
     override fun isDowngradedMode(pMapTileIndex: Long): Boolean {

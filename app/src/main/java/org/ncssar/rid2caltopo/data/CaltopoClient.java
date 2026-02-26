@@ -525,6 +525,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 "StreamSessionService",
                 "StreamsGrid",
                 "StreamsViewModel",
+                "MapCacheDebug",
+                "MapCacheTile",
+                "MapCacheDEM",
+                "MapCacheIcon",
+                "MapCacheStore",
                 "WaypointTrack",
                 "WsPipe"
         );

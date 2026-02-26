@@ -10,6 +10,7 @@ import static java.lang.Thread.sleep;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.os.Process;
 
@@ -35,7 +36,8 @@ import java.util.Locale;
 
 public class MediaMTXService extends Service {
     private static final String TAG = "MediaMTXService";
-    private static int MEDIA_MTX_NOTIFICATION_ID = 1;
+    private static final String CHANNEL_ID = "streaming";
+    private static final int MEDIA_MTX_NOTIFICATION_ID = 2;
     private static boolean listenersRegistered = false;
     private static int processPid = 0;
 
@@ -59,10 +61,25 @@ public class MediaMTXService extends Service {
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
-        Notification notification = new NotificationCompat.Builder(this, "streaming")
+        Intent launchIntent = new Intent(this, R2CActivity.class);
+        launchIntent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                | Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+                this,
+                1,
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Drone Video Relay")
                 .setContentText("Streaming active")
-                .setSmallIcon(R.drawable.earth)
+                .setSmallIcon(R.drawable.ic_notification_drone)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(false)
+                .setOngoing(true)
                 .build();
 
         startForeground(MEDIA_MTX_NOTIFICATION_ID, notification);
@@ -122,13 +139,15 @@ public class MediaMTXService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
+        stopForeground(true);
         stopSelf();
+        super.onTaskRemoved(rootIntent);
     }
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                    "streaming",
+                    CHANNEL_ID,
                     "Streaming",
                     NotificationManager.IMPORTANCE_LOW
             );

@@ -45,14 +45,23 @@ internal class DemElevationService(context: Context) {
 
         synchronized(mem) {
             val cached = mem[key]
-            if (cached != null) return@withContext cached
+            if (cached != null) {
+                MapCacheDebug.log("dem mem-hit key=$key source=${cached.source} stale=${cached.stale}")
+                return@withContext cached
+            }
         }
 
         val local = cache.get(key)
         val cachedSample = local?.let { bytesToSample(it.bytes, stale = it.stale) }
         if (cachedSample != null && !cachedSample.stale) {
             synchronized(mem) { mem[key] = cachedSample }
+            MapCacheDebug.log("dem disk-hit key=$key source=${cachedSample.source}")
             return@withContext cachedSample
+        }
+        if (cachedSample == null) {
+            MapCacheDebug.log("dem disk-miss key=$key")
+        } else {
+            MapCacheDebug.log("dem disk-stale key=$key source=${cachedSample.source}")
         }
 
         val localTiff = localGeoTiff.sampleElevationMeters(lat, lng)
@@ -64,20 +73,25 @@ internal class DemElevationService(context: Context) {
             )
             cache.put(key, sampleToBytes(sample), cache.defaultExpiry())
             synchronized(mem) { mem[key] = sample }
+            MapCacheDebug.log("dem local-geotiff key=$key elevM=${"%.2f".format(Locale.US, sample.elevationMeters)}")
             return@withContext sample
         }
+        MapCacheDebug.log("dem local-geotiff-miss key=$key")
 
         val network = fetchSample(lat, lng)
         if (network != null) {
             cache.put(key, sampleToBytes(network), cache.defaultExpiry())
             synchronized(mem) { mem[key] = network }
+            MapCacheDebug.log("dem network-fetch key=$key elevM=${"%.2f".format(Locale.US, network.elevationMeters)}")
             return@withContext network
         }
+        MapCacheDebug.log("dem network-fail key=$key")
 
         if (cachedSample != null) {
             cache.markStaleServed()
             synchronized(mem) { mem[key] = cachedSample }
             CTDebug("SplitMapPane", "DEM stale fallback lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)}")
+            MapCacheDebug.log("dem stale-fallback key=$key source=${cachedSample.source}")
             return@withContext cachedSample
         }
 
@@ -87,6 +101,10 @@ internal class DemElevationService(context: Context) {
     fun clear() {
         synchronized(mem) { mem.clear() }
         cache.clear()
+    }
+
+    fun prewarm() {
+        cache.prewarm()
     }
 
     fun statsSnapshot(): CacheStatsSnapshot = cache.snapshot()

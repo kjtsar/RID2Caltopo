@@ -19,8 +19,10 @@ internal object MapCacheRootResolver {
     fun resolveRoot(context: Context): MapCacheRoot {
         val appContext = context.applicationContext
         val archiveUri = CaltopoClient.GetArchiveUri()?.toString()
+        MapCacheDebug.log("resolveRoot archiveUri=${archiveUri ?: "<none>"}")
         cached?.let { entry ->
             if (entry.archiveUri == archiveUri) {
+                MapCacheDebug.log("resolveRoot cache-hit root=${entry.root}")
                 return entry.root
             }
         }
@@ -34,6 +36,7 @@ internal object MapCacheRootResolver {
 
             val resolved = resolveRootUncached(appContext)
             cached = CachedRoot(archiveUri = archiveUri, root = resolved)
+            MapCacheDebug.log("resolveRoot resolved root=$resolved")
             return resolved
         }
     }
@@ -54,10 +57,12 @@ internal object MapCacheRootResolver {
                     val root = uri.path?.let { File(it) }
                     if (root != null && (root.exists() || root.mkdirs())) {
                         CTDebug(TAG, "Map cache root using archive file dir: ${root.absolutePath}")
+                        MapCacheDebug.log("root archive-file path=${root.absolutePath}")
                         return MapCacheRoot.FileBacked(root)
                     }
                 }
                 CTDebug(TAG, "Map cache root using archive SAF dir: $uri")
+                MapCacheDebug.log("root archive-saf uri=$uri")
                 return MapCacheRoot.SafBacked(archiveCacheDir)
             }
         }
@@ -67,6 +72,7 @@ internal object MapCacheRootResolver {
             fallback.mkdirs()
         }
         CTDebug(TAG, "Map cache root using app cache fallback: ${fallback.absolutePath}")
+        MapCacheDebug.log("root app-cache-fallback path=${fallback.absolutePath}")
         return MapCacheRoot.FileBacked(fallback)
     }
 }

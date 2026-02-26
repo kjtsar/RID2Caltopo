@@ -10,4 +10,5 @@ internal interface BlobCacheStore {
     fun clear()
     fun snapshot(): CacheStatsSnapshot
     fun markStaleServed()
+    fun prewarm() {}
 }

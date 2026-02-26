@@ -151,12 +151,7 @@ public class ScanningService extends Service {
         CTDebug(TAG, String.format(Locale.US, "onStartCommand(): AppContext:0x%x", AppContext.hashCode()));
 
 
-        /* FIXME: No matter what I've tried here, Android will fire up a new instance of the
-            R2C/DebugActivity class - rather than just bring the existing instance to the front.
-            As a result, DebugActivity.onCreate() checks the instance id to see if it is the
-            original, and if it isn't it just exits.
-         */
-        intent = new Intent(AppContext, R2CApplication.class);
+        intent = new Intent(AppContext, R2CActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | FLAG_ACTIVITY_NEW_TASK |
                 Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent pendingIntent = PendingIntent.getActivity(AppContext, 0, intent,
@@ -165,7 +160,7 @@ public class ScanningService extends Service {
         Notification notification = new NotificationCompat.Builder(AppContext, CHANNEL_ID)
                 .setContentTitle("OpenDroneID Scanning Service")
                 .setContentText("Scanning for remoteID broadcasts on Bluetooth and Wireless interfaces")
-                .setSmallIcon(R.drawable.r2c)
+                .setSmallIcon(R.drawable.ic_notification_drone)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .setContentIntent(pendingIntent)
                 .setAutoCancel(false)
@@ -180,6 +175,8 @@ public class ScanningService extends Service {
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         CTDebug(TAG, "onTaskRemoved()");
+        stopForeground(true);
+        stopSelf();
         super.onTaskRemoved(rootIntent);
     }
     @Override

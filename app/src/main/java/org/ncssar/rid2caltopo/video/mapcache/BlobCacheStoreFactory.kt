@@ -16,7 +16,11 @@ internal object BlobCacheStoreFactory {
         if (!internalFallbackRoot.exists()) {
             internalFallbackRoot.mkdirs()
         }
+        MapCacheDebug.log(
+            "store create namespace=$namespace db=$dbName maxBytes=$maxBytes ttlMs=$defaultTtlMs forceFile=$forceFileBacked"
+        )
         if (forceFileBacked) {
+            MapCacheDebug.log("store backend=file(forced) root=${internalFallbackRoot.absolutePath}")
             return BlobSqlDiskCache(
                 cacheDir = internalFallbackRoot,
                 dbName = dbName,
@@ -27,6 +31,7 @@ internal object BlobCacheStoreFactory {
 
         return when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
             is MapCacheRoot.FileBacked -> try {
+                MapCacheDebug.log("store backend=file root=${root.dir.absolutePath}")
                 BlobSqlDiskCache(
                     cacheDir = root.dir,
                     dbName = dbName,
@@ -39,6 +44,10 @@ internal object BlobCacheStoreFactory {
                     "Map cache SQL open failed for ${root.dir.absolutePath}; using internal fallback.",
                     Exception(t)
                 )
+                MapCacheDebug.log(
+                    "store backend=file-open-failed root=${root.dir.absolutePath} err=${t.javaClass.simpleName}:${t.message}"
+                )
+                MapCacheDebug.log("store backend=file-fallback root=${internalFallbackRoot.absolutePath}")
                 BlobSqlDiskCache(
                     cacheDir = internalFallbackRoot,
                     dbName = dbName,
@@ -47,13 +56,16 @@ internal object BlobCacheStoreFactory {
                 )
             }
 
-            is MapCacheRoot.SafBacked -> SafBlobCacheStore(
-                context = context.applicationContext,
-                rootDir = root.dir,
-                namespace = namespace,
-                maxBytes = maxBytes,
-                defaultTtlMs = defaultTtlMs
-            )
+            is MapCacheRoot.SafBacked -> {
+                MapCacheDebug.log("store backend=saf root=${root.dir.uri}")
+                SafBlobCacheStore(
+                    context = context.applicationContext,
+                    rootDir = root.dir,
+                    namespace = namespace,
+                    maxBytes = maxBytes,
+                    defaultTtlMs = defaultTtlMs
+                )
+            }
         }
     }
 }

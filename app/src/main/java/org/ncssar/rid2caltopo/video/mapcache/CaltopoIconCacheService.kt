@@ -41,14 +41,23 @@ class CaltopoIconCacheService(context: Context) {
     ): Drawable? = withContext(Dispatchers.IO) {
         val key = cacheKey(markerSymbol, markerColor)
         synchronized(memoryCache) {
-            memoryCache[key]?.let { return@withContext cloneDrawable(resources, it) }
+            memoryCache[key]?.let {
+                MapCacheDebug.log("icon mem-hit key=$key")
+                return@withContext cloneDrawable(resources, it)
+            }
         }
 
         val cached = diskCache.get(key)
         val staleDrawable = cached?.let { bytesToDrawable(resources, it.bytes) }
         if (cached != null && !cached.stale && staleDrawable != null) {
             synchronized(memoryCache) { memoryCache[key] = staleDrawable }
+            MapCacheDebug.log("icon disk-hit key=$key bytes=${cached.bytes.size}")
             return@withContext cloneDrawable(resources, staleDrawable)
+        }
+        if (cached == null) {
+            MapCacheDebug.log("icon disk-miss key=$key")
+        } else if (cached.stale) {
+            MapCacheDebug.log("icon disk-stale key=$key bytes=${cached.bytes.size}")
         }
 
         val url = iconUrl(markerSymbol, markerColor)
@@ -57,15 +66,20 @@ class CaltopoIconCacheService(context: Context) {
             val bytes = drawableToPngBytes(networkDrawable)
             if (bytes != null) {
                 diskCache.put(key, bytes, diskCache.defaultExpiry())
+                MapCacheDebug.log("icon network-fetch key=$key bytes=${bytes.size}")
+            } else {
+                MapCacheDebug.log("icon network-fetch key=$key bytes=unavailable")
             }
             synchronized(memoryCache) { memoryCache[key] = networkDrawable }
             return@withContext cloneDrawable(resources, networkDrawable)
         }
+        MapCacheDebug.log("icon network-fail key=$key")
 
         if (staleDrawable != null) {
             synchronized(memoryCache) { memoryCache[key] = staleDrawable }
             diskCache.markStaleServed()
             CTDebug("SplitMapPane", "Icon cache serving stale icon for key=$key")
+            MapCacheDebug.log("icon stale-fallback key=$key")
             return@withContext cloneDrawable(resources, staleDrawable)
         }
 
@@ -73,6 +87,10 @@ class CaltopoIconCacheService(context: Context) {
     }
 
     fun statsSnapshot(): CacheStatsSnapshot = diskCache.snapshot()
+
+    fun prewarm() {
+        diskCache.prewarm()
+    }
 
     fun clear() {
         synchronized(memoryCache) {

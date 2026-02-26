@@ -27,10 +27,17 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
     ): Boolean {
         return try {
             val bytes = pStream.readAllBytesCompat()
+            val key = tileKey(pTileSourceInfo, pMapTileIndex)
             val expiresAt = diskCache.defaultExpiry()
-            diskCache.put(tileKey(pTileSourceInfo, pMapTileIndex), bytes, expiresAt)
+            diskCache.put(key, bytes, expiresAt)
+            MapCacheDebug.log(
+                "tile put source=${pTileSourceInfo.name()} key=$key bytes=${bytes.size} expiresAt=$expiresAt"
+            )
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            MapCacheDebug.log(
+                "tile put failed source=${pTileSourceInfo.name()} idx=$pMapTileIndex err=${e.javaClass.simpleName}:${e.message}"
+            )
             false
         }
     }
@@ -52,17 +59,28 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
     }
 
     override fun loadTile(pTileSource: ITileSource, pMapTileIndex: Long): Drawable? {
-        val cached = diskCache.get(tileKey(pTileSource, pMapTileIndex), countHitMiss = true) ?: return null
+        val key = tileKey(pTileSource, pMapTileIndex)
+        val cached = diskCache.get(key, countHitMiss = true) ?: run {
+            MapCacheDebug.log("tile miss source=${pTileSource.name()} key=$key")
+            return null
+        }
         val drawable = pTileSource.getDrawable(ByteArrayInputStream(cached.bytes)) ?: return null
         if (cached.stale) {
             diskCache.markStaleServed()
             ExpirableBitmapDrawable.setState(drawable, ExpirableBitmapDrawable.EXPIRED)
+            MapCacheDebug.log("tile stale-hit source=${pTileSource.name()} key=$key bytes=${cached.bytes.size}")
+        } else {
+            MapCacheDebug.log("tile hit source=${pTileSource.name()} key=$key bytes=${cached.bytes.size}")
         }
         return drawable
     }
 
     fun clear() {
         diskCache.clear()
+    }
+
+    fun prewarm() {
+        diskCache.prewarm()
     }
 
     fun statsSnapshot(): CacheStatsSnapshot = diskCache.snapshot()

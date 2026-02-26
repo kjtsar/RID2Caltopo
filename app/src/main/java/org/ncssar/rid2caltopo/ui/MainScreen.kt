@@ -37,6 +37,7 @@ import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.video.mapcache.MapCacheDebug
 
 private fun parseCsvTags(csv: String): List<String> {
     val tags = linkedSetOf<String>()
@@ -84,9 +85,10 @@ class OpenArchiveDir() : ActivityResultContracts.OpenDocumentTree() {
                 "com.android.externalstorage.documents",
                 "primary:Downloads"
             )
+            val initialUri = input ?: downloadsUri
             putExtra(Intent.EXTRA_TITLE, "Select directory to archive drone tracks")
             putExtra(Intent.EXTRA_LOCAL_ONLY, true)
-            putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadsUri)
+            putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
             putExtra("android.content.extra.NO_CACHE", true)
         }
     }
@@ -108,6 +110,7 @@ fun MainScreen(
     var knownDebugTags by remember { mutableStateOf(listOf<String>()) }
     var selectedKnownTags by remember { mutableStateOf(setOf<String>()) }
     var customDebugTagsText by remember { mutableStateOf("") }
+    var cacheDebugEnabled by remember { mutableStateOf(MapCacheDebug.isEnabled()) }
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
     val context =  LocalContext.current
 
@@ -173,6 +176,14 @@ fun MainScreen(
             title = { Text("Debug Tag Filter") },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        Checkbox(
+                            checked = cacheDebugEnabled,
+                            onCheckedChange = { checked -> cacheDebugEnabled = checked }
+                        )
+                        Text("Enable cache debug logs", modifier = Modifier.padding(top = 12.dp))
+                    }
+                    Spacer(Modifier.height(8.dp))
                     if (knownDebugTags.isNotEmpty()) {
                         Text("Known tags")
                         Spacer(Modifier.height(8.dp))
@@ -209,6 +220,7 @@ fun MainScreen(
                         parseCsvTags(customDebugTagsText).forEach { tag ->
                             CaltopoClient.RegisterDebugTag(tag)
                         }
+                        MapCacheDebug.setEnabled(cacheDebugEnabled)
                         CaltopoClient.SetDebugTagFilter(csv)
                         val msg = if (csv.isBlank()) {
                             "Debug tag filter disabled."
@@ -225,8 +237,10 @@ fun MainScreen(
                 TextButton(
                     onClick = {
                         CaltopoClient.ClearDebugTagFilter()
+                        MapCacheDebug.setEnabled(false)
                         selectedKnownTags = emptySet()
                         customDebugTagsText = ""
+                        cacheDebugEnabled = false
                         CaltopoClient.ShowToast("Debug tag filter cleared.")
                         showDebugTagDialog = false
                     }
@@ -288,8 +302,15 @@ fun MainScreen(
     )
     LaunchedEffect(Unit) {
         if (null == CaltopoClient.GetArchiveUri()) {
-            CTDebug(tag, "LaunchedEffect() requesting archiveDir")
-            queryArchiveDirLauncher.launch(null)
+            val initialUri = CaltopoClient.GetArchiveUriSelectionHint()
+            val prompt = if (CaltopoClient.WasArchiveUriPermissionMissing()) {
+                "Archive folder access expired. Please re-select the archive directory for tracks and map cache."
+            } else {
+                "Select an archive directory for drone tracks and map cache."
+            }
+            CaltopoClient.ShowToast(prompt)
+            CTDebug(tag, "LaunchedEffect() requesting archiveDir initialUri='${initialUri ?: "<none>"}'")
+            queryArchiveDirLauncher.launch(initialUri)
         }
     }
     
@@ -346,6 +367,7 @@ fun MainScreen(
                             val knownTags = CaltopoClient.GetRegisteredDebugTags()
                             val knownSet = knownTags.toSet()
                             knownDebugTags = knownTags
+                            cacheDebugEnabled = MapCacheDebug.isEnabled()
                             selectedKnownTags = currentFilterTags.filter { knownSet.contains(it) }.toSet()
                             customDebugTagsText = currentFilterTags.filter { !knownSet.contains(it) }
                                 .joinToString(",")

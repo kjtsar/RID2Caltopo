@@ -6,14 +6,17 @@ import android.graphics.Canvas
 import android.location.Location
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.os.StatFs
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -42,11 +46,13 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -66,6 +72,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -73,8 +80,23 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.Channel
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.ByteArrayInputStream
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
@@ -91,6 +113,7 @@ import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 import org.ncssar.rid2caltopo.R
+import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
@@ -100,7 +123,10 @@ import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
 import org.ncssar.rid2caltopo.video.mapcache.CaltopoIconCacheService
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
+import org.ncssar.rid2caltopo.video.mapcache.MapCacheDebug
 import org.ncssar.rid2caltopo.video.mapcache.MapCachePolicy
+import org.ncssar.rid2caltopo.video.mapcache.MapCacheRoot
+import org.ncssar.rid2caltopo.video.mapcache.MapCacheRootResolver
 import org.ncssar.rid2caltopo.video.mapcache.TileCacheMapProvider
 import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
 
@@ -124,8 +150,8 @@ private const val PREDICTIVE_HEAD_MAX_LOOKAHEAD_MS = 2_000L
 private const val PREDICTIVE_HEAD_MAX_SPEED_MPS = 45.0
 private const val PREDICTIVE_HEAD_MAX_VERTICAL_SPEED_MPS = 15.0
 private const val PREDICTIVE_HEAD_MAX_DISTANCE_M = 90.0
-private const val DRONE_NAME_LABEL_ANCHOR_Y = 1.40f
-private const val DRONE_STATUS_LABEL_ANCHOR_Y = 2.00f
+private const val DRONE_NAME_LABEL_ANCHOR_Y = 1.82f
+private const val DRONE_STATUS_LABEL_ANCHOR_Y = 3.35f
 private const val LABEL_MAX_ABS_FEET = 1000.0
 
 private enum class ScreenLayoutMode {
@@ -134,10 +160,57 @@ private enum class ScreenLayoutMode {
     Map
 }
 
-private enum class BaseLayerOption {
-    OpenStreetMap,
-    Imagery
+private enum class BaseLayerOption(val label: String) {
+    OpenStreetMap("OpenStreetMap"),
+    Imagery("Imagery")
 }
+
+private data class OfflinePrepPreset(
+    val label: String,
+    val minZoom: Int,
+    val maxZoom: Int,
+    val demStepMeters: Double
+)
+
+private val OFFLINE_PREP_PRESETS = listOf(
+    OfflinePrepPreset(label = "Overview (z8-z12)", minZoom = 8, maxZoom = 12, demStepMeters = 500.0),
+    OfflinePrepPreset(label = "Ops (z12-z16)", minZoom = 12, maxZoom = 16, demStepMeters = 250.0),
+    OfflinePrepPreset(label = "Full detail (z8-z19)", minZoom = 8, maxZoom = 19, demStepMeters = 120.0)
+)
+
+private data class OfflinePrepProgress(
+    val phase: String = "Idle",
+    val total: Int = 0,
+    val completed: Int = 0,
+    val hits: Int = 0,
+    val fetched: Int = 0,
+    val failed: Int = 0,
+    val opsPerSec: Double = 0.0,
+    val etaSeconds: Long? = null
+)
+
+private enum class OfflinePrepAreaMode(val label: String) {
+    Viewport("Current visible map"),
+    MapBoundary("Selected map shape")
+}
+
+private data class GeoBoundary(
+    val ring: List<GeoPoint>,
+    val bounds: BoundingBox
+)
+
+private data class OfflineBoundaryOption(
+    val id: String,
+    val label: String,
+    val boundary: GeoBoundary
+)
+
+private data class OfflinePrepEstimate(
+    val tileEstimate: Int = 0,
+    val demEstimate: Int = 0,
+    val estimatedMb: Double = 0.0,
+    val ready: Boolean = false
+)
 
 private data class DroneMapPoint(
     val designator: String,
@@ -483,9 +556,26 @@ private fun SplitMapPane(
     onSingleTapFocus: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     val uiScope = rememberCoroutineScope()
     var baseLayer by remember { mutableStateOf(BaseLayerOption.OpenStreetMap) }
     var settingsMenuExpanded by remember { mutableStateOf(false) }
+    var baseLayerMenuExpanded by remember { mutableStateOf(false) }
+    var cachePrewarmInFlight by remember { mutableStateOf(false) }
+    var showOfflinePrepDialog by remember { mutableStateOf(false) }
+    var offlinePrepInFlight by remember { mutableStateOf(false) }
+    var offlinePrepPreset by remember { mutableStateOf(OFFLINE_PREP_PRESETS[1]) }
+    var offlinePrepIncludeDem by remember { mutableStateOf(true) }
+    var offlinePrepMaxThroughput by remember { mutableStateOf(false) }
+    var offlinePrepAreaMode by remember { mutableStateOf(OfflinePrepAreaMode.Viewport) }
+    var offlinePrepBoundaryId by remember { mutableStateOf<String?>(null) }
+    var offlinePrepProgress by remember { mutableStateOf(OfflinePrepProgress()) }
+    var offlinePrepEstimate by remember { mutableStateOf(OfflinePrepEstimate()) }
+    var offlinePrepEstimateRunning by remember { mutableStateOf(false) }
+    var offlinePrepAvailableBytes by remember { mutableStateOf<Long?>(null) }
+    var offlinePrepJob by remember { mutableStateOf<Job?>(null) }
+    var mapBounds by remember { mutableStateOf<BoundingBox?>(null) }
+    val downloadMapBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
     var predictiveHeadEnabled by remember { mutableStateOf(true) }
     val mapName = viewModel.mapName
     val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
@@ -511,9 +601,22 @@ private fun SplitMapPane(
             tileWriter = tileCacheWriter
         )
     }
+    val offlineHttpClient = remember {
+        OkHttpClient.Builder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(14, TimeUnit.SECONDS)
+            .build()
+    }
     var lastCacheStats by remember { mutableStateOf("") }
     var nextCacheStatsLogAtMs by remember { mutableStateOf(0L) }
     var cacheStatsQueryInFlight by remember { mutableStateOf(false) }
+    var prevIconHits by remember { mutableStateOf(0L) }
+    var prevIconMisses by remember { mutableStateOf(0L) }
+    var prevTileHits by remember { mutableStateOf(0L) }
+    var prevTileMisses by remember { mutableStateOf(0L) }
+    var prevDemHits by remember { mutableStateOf(0L) }
+    var prevDemMisses by remember { mutableStateOf(0L) }
     val demAglByDesignator = remember { mutableStateMapOf<String, DroneAglState>() }
     val demPendingByDesignator = remember { HashSet<String>() }
     val demKeyByDesignator = remember { LinkedHashMap<String, String>() }
@@ -572,6 +675,77 @@ private fun SplitMapPane(
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
     val focusedDrone = dronePoints.firstOrNull { it.designator == focusedPath } ?: dronePoints.firstOrNull()
+    val offlineBoundaryOptions = remember(artifactOverlayState) {
+        buildOfflineBoundaryOptions(artifactOverlayState)
+    }
+    LaunchedEffect(offlineBoundaryOptions) {
+        val selectedStillExists = offlineBoundaryOptions.any { it.id == offlinePrepBoundaryId }
+        if (!selectedStillExists) {
+            offlinePrepBoundaryId = offlineBoundaryOptions.firstOrNull()?.id
+        }
+        if (offlineBoundaryOptions.isEmpty() && offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+            offlinePrepAreaMode = OfflinePrepAreaMode.Viewport
+        }
+    }
+    LaunchedEffect(baseLayer) {
+        if (baseLayer == BaseLayerOption.OpenStreetMap) {
+            offlinePrepMaxThroughput = false
+        }
+    }
+    LaunchedEffect(
+        showOfflinePrepDialog,
+        offlinePrepAreaMode,
+        offlinePrepBoundaryId,
+        offlinePrepPreset,
+        offlinePrepIncludeDem,
+        mapBounds,
+        offlineBoundaryOptions
+    ) {
+        if (!showOfflinePrepDialog) return@LaunchedEffect
+        offlinePrepEstimateRunning = true
+        offlinePrepEstimate = OfflinePrepEstimate(ready = false)
+        val selectedBoundary =
+            if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
+            } else {
+                null
+            }
+        val estimateBounds = selectedBoundary?.bounds ?: mapBounds
+        if (estimateBounds == null) {
+            offlinePrepEstimateRunning = false
+            offlinePrepEstimate = OfflinePrepEstimate(ready = false)
+            return@LaunchedEffect
+        }
+        val computed = withContext(Dispatchers.Default) {
+            val tileEstimate = estimateTileCountApproximate(
+                bounds = estimateBounds,
+                minZoom = offlinePrepPreset.minZoom,
+                maxZoom = offlinePrepPreset.maxZoom,
+                clipBoundary = selectedBoundary
+            )
+            val demEstimate = if (offlinePrepIncludeDem) {
+                estimateDemSamplesApproximate(
+                    bounds = estimateBounds,
+                    stepMeters = offlinePrepPreset.demStepMeters,
+                    clipBoundary = selectedBoundary
+                )
+            } else {
+                0
+            }
+            val estimatedMb = (((tileEstimate.toLong() * 20_000L) + (demEstimate.toLong() * 200L)) / (1024.0 * 1024.0))
+            OfflinePrepEstimate(
+                tileEstimate = tileEstimate,
+                demEstimate = demEstimate,
+                estimatedMb = estimatedMb,
+                ready = true
+            )
+        }
+        offlinePrepEstimate = computed
+        offlinePrepEstimateRunning = false
+        offlinePrepAvailableBytes = withContext(Dispatchers.IO) {
+            queryAvailableCacheBytes(context)
+        }
+    }
 
     fun calibrateFocusedDroneAto50() {
         val target = focusedDrone ?: return
@@ -609,6 +783,170 @@ private fun SplitMapPane(
                         "Manual ATO calibration skipped for ${target.designator}: DEM sample unavailable."
                     )
                 }
+            }
+        }
+    }
+
+    fun selectedTileSource(): org.osmdroid.tileprovider.tilesource.ITileSource {
+        return when (baseLayer) {
+            BaseLayerOption.OpenStreetMap -> TileSourceFactory.MAPNIK
+            BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
+        }
+    }
+
+    fun startOfflinePrep(bounds: BoundingBox, clipBoundary: GeoBoundary?) {
+        if (offlinePrepInFlight) return
+        if (baseLayer == BaseLayerOption.OpenStreetMap) {
+            CaltopoClient.ShowToast("Download Map is disabled for OpenStreetMap due to tile usage policy.")
+            return
+        }
+        offlinePrepInFlight = true
+        offlinePrepProgress = OfflinePrepProgress(phase = "Preparing", total = 0, completed = 0)
+        val preset = offlinePrepPreset
+        val includeDem = offlinePrepIncludeDem
+        val maximizeThroughput = offlinePrepMaxThroughput
+        val estimatedTileOps = offlinePrepEstimate.tileEstimate
+        val estimatedDemOps = if (includeDem) offlinePrepEstimate.demEstimate else 0
+        val estimatedTotalOps = (estimatedTileOps + estimatedDemOps).coerceAtLeast(1)
+        val tileSource = selectedTileSource()
+        offlinePrepJob = uiScope.launch(Dispatchers.IO) {
+            val onlineTileSource = tileSource as? OnlineTileSourceBase
+            if (onlineTileSource == null) {
+                withContext(Dispatchers.Main.immediate) {
+                    offlinePrepInFlight = false
+                    offlinePrepJob = null
+                    CaltopoClient.ShowToast("Selected base layer does not support map download.")
+                }
+                return@launch
+            }
+            val completed = AtomicInteger(0)
+            val hits = AtomicInteger(0)
+            val fetched = AtomicInteger(0)
+            val failed = AtomicInteger(0)
+            val startedAt = System.currentTimeMillis()
+            var lastUiUpdateMs = 0L
+            var phase = "Downloading map tiles"
+            suspend fun pushProgress(force: Boolean = false) {
+                val now = System.currentTimeMillis()
+                if (!force && now - lastUiUpdateMs < 400L) return
+                lastUiUpdateMs = now
+                val done = completed.get()
+                val hit = hits.get()
+                val fetch = fetched.get()
+                val fail = failed.get()
+                val elapsedSec = ((now - startedAt).coerceAtLeast(1L)).toDouble() / 1000.0
+                val rate = done.toDouble() / elapsedSec
+                val displayTotal = maxOf(estimatedTotalOps, done)
+                val remaining = (displayTotal - done).coerceAtLeast(0)
+                val eta = if (rate > 0.05) kotlin.math.ceil(remaining / rate).toLong() else null
+                withContext(Dispatchers.Main.immediate) {
+                    offlinePrepProgress = OfflinePrepProgress(
+                        phase = phase,
+                        total = displayTotal,
+                        completed = done,
+                        hits = hit,
+                        fetched = fetch,
+                        failed = fail,
+                        opsPerSec = rate,
+                        etaSeconds = eta
+                    )
+                }
+            }
+
+            try {
+                coroutineScope {
+                    val progressTicker = launch {
+                        while (isActive) {
+                            pushProgress(force = true)
+                            delay(500L)
+                        }
+                    }
+                    val workerCount = if (maximizeThroughput) 12 else 3
+                    val tileQueue = Channel<Long>(capacity = workerCount * 3)
+                    val workers = List(workerCount) {
+                        launch {
+                            for (tileIndex in tileQueue) {
+                                ensureActive()
+                                val exists = tileCacheWriter.exists(tileSource, tileIndex)
+                                if (exists) {
+                                    hits.incrementAndGet()
+                                } else {
+                                    val ok = try {
+                                        val url = onlineTileSource.getTileURLString(tileIndex)
+                                        val req = Request.Builder().url(url).build()
+                                        offlineHttpClient.newCall(req).execute().use { resp ->
+                                            if (!resp.isSuccessful) return@use false
+                                            val body = resp.body ?: return@use false
+                                            val bytes = body.bytes()
+                                            tileCacheWriter.saveFile(
+                                                tileSource,
+                                                tileIndex,
+                                                ByteArrayInputStream(bytes),
+                                                null
+                                            )
+                                        }
+                                    } catch (_: Exception) {
+                                        false
+                                    }
+                                    if (ok) fetched.incrementAndGet() else failed.incrementAndGet()
+                                }
+                                completed.incrementAndGet()
+                            }
+                        }
+                    }
+                    forEachTileIndexForBounds(bounds, preset.minZoom, preset.maxZoom, clipBoundary) { tileIndex ->
+                        currentCoroutineContext().ensureActive()
+                        tileQueue.send(tileIndex)
+                    }
+                    tileQueue.close()
+                    workers.forEach { it.join() }
+
+                    if (includeDem) {
+                        phase = "Sampling DEM"
+                        forEachDemSamplePointForBounds(bounds, preset.demStepMeters, clipBoundary) { lat, lng ->
+                            currentCoroutineContext().ensureActive()
+                            try {
+                                demElevationService.sampleElevationMeters(lat, lng)
+                            } catch (_: Exception) {
+                                failed.incrementAndGet()
+                            }
+                            completed.incrementAndGet()
+                        }
+                    }
+                    progressTicker.cancel()
+                }
+
+                val elapsedMs = System.currentTimeMillis() - startedAt
+                phase = "Complete"
+                pushProgress(force = true)
+                val hit = hits.get()
+                val fetch = fetched.get()
+                val fail = failed.get()
+                withContext(Dispatchers.Main.immediate) {
+                    offlinePrepInFlight = false
+                    offlinePrepJob = null
+                    val doneMsg = "Download map done: hit=$hit fetched=$fetch failed=$fail in ${elapsedMs}ms"
+                    CaltopoClient.ShowToast(doneMsg)
+                    MapCacheDebug.log(doneMsg)
+                }
+            } catch (_: CancellationException) {
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    phase = "Cancelled"
+                    offlinePrepInFlight = false
+                    offlinePrepJob = null
+                    offlinePrepProgress = offlinePrepProgress.copy(phase = "Cancelled")
+                    CaltopoClient.ShowToast("Download map cancelled.")
+                }
+                MapCacheDebug.log("download map cancelled at completed=${completed.get()}")
+            } catch (e: Exception) {
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    phase = "Failed"
+                    offlinePrepInFlight = false
+                    offlinePrepJob = null
+                    offlinePrepProgress = offlinePrepProgress.copy(phase = "Failed")
+                    CaltopoClient.ShowToast("Download map failed: ${e.javaClass.simpleName}")
+                }
+                MapCacheDebug.log("download map failed err=${e.javaClass.simpleName}:${e.message}")
             }
         }
     }
@@ -748,6 +1086,7 @@ private fun SplitMapPane(
             },
             update = { mapView ->
                 val uiNowWallMsec = System.currentTimeMillis()
+                mapBounds = mapView.boundingBox
                 val tileSource = when (baseLayer) {
                     BaseLayerOption.OpenStreetMap -> TileSourceFactory.MAPNIK
                     BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
@@ -893,7 +1232,12 @@ private fun SplitMapPane(
                                 cache = symbolMarkerCache
                             )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                        title = "RID2Caltopo Device"
+                        val localDeviceName = R2CActivity.MyDeviceName
+                        title = if (localDeviceName.isBlank() || localDeviceName == "<unknown>") {
+                            "RID2Caltopo Device"
+                        } else {
+                            localDeviceName
+                        }
                     }
                     mapView.overlays.add(localMarker)
                     managedOverlays.add(localMarker)
@@ -920,6 +1264,30 @@ private fun SplitMapPane(
                     val priorKey = demKeyByDesignator[point.designator]
                     val aglState = demAglByDesignator[point.designator]
                     val calibration = demCalibrationByDesignator[point.designator]
+                    val labelRangeFeet = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
+                        val out = FloatArray(1)
+                        Location.distanceBetween(
+                            homeLocation.latitude,
+                            homeLocation.longitude,
+                            renderLat,
+                            renderLng,
+                            out
+                        )
+                        if (out[0].isFinite()) out[0].toDouble() * METERS_TO_FEET else null
+                    } else {
+                        null
+                    }
+                    val labelAglFeet = if (aglState != null) {
+                        val aglM = if (calibration != null) {
+                            (calibration.takeoffGroundM + (displayAltitudeM - calibration.takeoffDroneAltM)) - aglState.groundM
+                        } else {
+                            aglState.aglM
+                        }
+                        aglM * METERS_TO_FEET
+                    } else {
+                        null
+                    }
+                    val labelAtoFeet = calibration?.let { (displayAltitudeM - it.takeoffDroneAltM) * METERS_TO_FEET }
                     if (priorKey != demKey && !demPendingByDesignator.contains(point.designator)) {
                         demPendingByDesignator.add(point.designator)
                         uiScope.launch(Dispatchers.IO) {
@@ -981,25 +1349,23 @@ private fun SplitMapPane(
                     }
                     val marker = Marker(mapView).apply {
                         position = GeoPoint(renderLat, renderLng)
-                        icon = droneMarkerIcon?.constantState?.newDrawable()?.mutate()?.apply {
-                            when {
-                                (aglState?.aglM ?: Double.NEGATIVE_INFINITY) >= iconLimitAglM ->
-                                    setTint(AndroidColor.parseColor("#D32F2F"))
-                                (aglState?.aglM ?: Double.NEGATIVE_INFINITY) >= nearIconAglM ->
-                                    setTint(AndroidColor.parseColor("#FBC02D"))
-                            }
+                        val markerTint = when {
+                            (aglState?.aglM ?: Double.NEGATIVE_INFINITY) >= iconLimitAglM ->
+                                AndroidColor.parseColor("#D32F2F")
+                            (aglState?.aglM ?: Double.NEGATIVE_INFINITY) >= nearIconAglM ->
+                                AndroidColor.parseColor("#FBC02D")
+                            else -> null
                         }
+                        icon = buildDroneMarkerDrawable(
+                            resources = context.resources,
+                            baseIcon = droneMarkerIcon,
+                            tint = markerTint
+                        )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                        val aglText = if (aglState != null) {
-                            val aglFt = aglState.aglM * METERS_TO_FEET
-                            val groundFt = aglState.groundM * METERS_TO_FEET
-                            val staleSuffix = if (aglState.stale) " (stale)" else ""
-                            " agl=${"%.0f".format(aglFt)}ft gnd=${"%.0f".format(groundFt)}ft$staleSuffix"
-                        } else {
-                            ""
-                        }
-                        val altitudeFt = displayAltitudeM * METERS_TO_FEET
-                        title = "${point.designator} alt=${"%.0f".format(altitudeFt)}ft$aglText"
+                        val aglText = labelAglFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
+                        val atoText = labelAtoFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
+                        val distanceText = labelRangeFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
+                        title = "desig: ${point.designator}, AGL: $aglText, ATO: $atoText, distance: $distanceText"
                     }
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
@@ -1012,30 +1378,6 @@ private fun SplitMapPane(
                     mapView.overlays.add(nameMarker)
                     managedOverlays.add(nameMarker)
 
-                    val labelRangeFeet = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
-                        val out = FloatArray(1)
-                        Location.distanceBetween(
-                            homeLocation.latitude,
-                            homeLocation.longitude,
-                            renderLat,
-                            renderLng,
-                            out
-                        )
-                        if (out[0].isFinite()) out[0].toDouble() * METERS_TO_FEET else null
-                    } else {
-                        null
-                    }
-                    val labelAglFeet = if (aglState != null) {
-                        val aglM = if (calibration != null) {
-                            (calibration.takeoffGroundM + (displayAltitudeM - calibration.takeoffDroneAltM)) - aglState.groundM
-                        } else {
-                            aglState.aglM
-                        }
-                        aglM * METERS_TO_FEET
-                    } else {
-                        null
-                    }
-                    val labelAtoFeet = calibration?.let { (displayAltitudeM - it.takeoffDroneAltM) * METERS_TO_FEET }
                     val aglToken = labelAglFeet
                         ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
                         ?.let { "%.0fAGL".format(it) } ?: "--AGL"
@@ -1223,6 +1565,33 @@ private fun SplitMapPane(
                                 lastCacheStats = statsLine
                                 CTDebug(MAP_PANE_TAG, statsLine)
                             }
+                            if (MapCacheDebug.isEnabled()) {
+                                val iconDeltaHits = (iconStats.hits - prevIconHits).coerceAtLeast(0L)
+                                val iconDeltaMisses = (iconStats.misses - prevIconMisses).coerceAtLeast(0L)
+                                val tileDeltaHits = (tileStats.hits - prevTileHits).coerceAtLeast(0L)
+                                val tileDeltaMisses = (tileStats.misses - prevTileMisses).coerceAtLeast(0L)
+                                val demDeltaHits = (demStats.hits - prevDemHits).coerceAtLeast(0L)
+                                val demDeltaMisses = (demStats.misses - prevDemMisses).coerceAtLeast(0L)
+
+                                fun formatHitRate(hits: Long, misses: Long): String {
+                                    val total = hits + misses
+                                    if (total <= 0L) return "--"
+                                    val pct = (hits.toDouble() * 100.0) / total.toDouble()
+                                    return "%.1f%%".format(Locale.US, pct)
+                                }
+
+                                MapCacheDebug.log(
+                                    "summary/15s tile(hit=$tileDeltaHits miss=$tileDeltaMisses rate=${formatHitRate(tileDeltaHits, tileDeltaMisses)}) " +
+                                        "icon(hit=$iconDeltaHits miss=$iconDeltaMisses rate=${formatHitRate(iconDeltaHits, iconDeltaMisses)}) " +
+                                        "dem(hit=$demDeltaHits miss=$demDeltaMisses rate=${formatHitRate(demDeltaHits, demDeltaMisses)})"
+                                )
+                            }
+                            prevIconHits = iconStats.hits
+                            prevIconMisses = iconStats.misses
+                            prevTileHits = tileStats.hits
+                            prevTileMisses = tileStats.misses
+                            prevDemHits = demStats.hits
+                            prevDemMisses = demStats.misses
                             cacheStatsQueryInFlight = false
                         }
                     }
@@ -1248,20 +1617,16 @@ private fun SplitMapPane(
             }
             DropdownMenu(
                 expanded = settingsMenuExpanded,
-                onDismissRequest = { settingsMenuExpanded = false }
+                onDismissRequest = {
+                    settingsMenuExpanded = false
+                    baseLayerMenuExpanded = false
+                }
             ) {
                 DropdownMenuItem(
-                    text = { Text("Base: OpenStreetMap") },
+                    text = { Text("Base: ${baseLayer.label}") },
                     onClick = {
-                        baseLayer = BaseLayerOption.OpenStreetMap
                         settingsMenuExpanded = false
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Base: Imagery") },
-                    onClick = {
-                        baseLayer = BaseLayerOption.Imagery
-                        settingsMenuExpanded = false
+                        baseLayerMenuExpanded = true
                     }
                 )
                 DropdownMenuItem(
@@ -1279,7 +1644,283 @@ private fun SplitMapPane(
                         settingsMenuExpanded = false
                     }
                 )
+                DropdownMenuItem(
+                    text = { Text(if (cachePrewarmInFlight) "Prewarm Cache Index (running...)" else "Prewarm Cache Index") },
+                    onClick = {
+                        if (cachePrewarmInFlight) return@DropdownMenuItem
+                        settingsMenuExpanded = false
+                        cachePrewarmInFlight = true
+                        uiScope.launch(Dispatchers.IO) {
+                            val startMs = System.currentTimeMillis()
+                            tileCacheWriter.prewarm()
+                            iconCacheService.prewarm()
+                            demElevationService.prewarm()
+                            val elapsedMs = System.currentTimeMillis() - startMs
+                            withContext(Dispatchers.Main.immediate) {
+                                cachePrewarmInFlight = false
+                                CaltopoClient.ShowToast("Cache prewarm complete in ${elapsedMs}ms.")
+                                MapCacheDebug.log("prewarm complete elapsedMs=$elapsedMs")
+                            }
+                        }
+                    },
+                    enabled = !cachePrewarmInFlight
+                )
+                DropdownMenuItem(
+                    text = { Text("Download Map...") },
+                    onClick = {
+                        settingsMenuExpanded = false
+                        showOfflinePrepDialog = true
+                    }
+                )
             }
+            DropdownMenu(
+                expanded = baseLayerMenuExpanded,
+                onDismissRequest = { baseLayerMenuExpanded = false }
+            ) {
+                BaseLayerOption.entries.forEach { option ->
+                    DropdownMenuItem(
+                        text = {
+                            val selected = if (option == baseLayer) " \u2713" else ""
+                            Text("${option.label}$selected")
+                        },
+                        onClick = {
+                            baseLayer = option
+                            baseLayerMenuExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+
+        if (showOfflinePrepDialog) {
+            val selectedBoundary =
+                if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                    offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
+                } else {
+                    null
+                }
+            val effectiveBoundary = selectedBoundary
+            val bounds = effectiveBoundary?.bounds ?: mapBounds
+            AlertDialog(
+                onDismissRequest = {
+                    if (!offlinePrepInFlight) showOfflinePrepDialog = false
+                },
+                title = { Text("Download Map") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Area")
+                        OfflinePrepAreaMode.entries.forEach { area ->
+                            val enabled = area != OfflinePrepAreaMode.MapBoundary || offlineBoundaryOptions.isNotEmpty()
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = enabled && !offlinePrepInFlight) {
+                                        offlinePrepAreaMode = area
+                                    },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = offlinePrepAreaMode == area,
+                                    onCheckedChange = {
+                                        if (enabled && !offlinePrepInFlight && it == true) {
+                                            offlinePrepAreaMode = area
+                                        }
+                                    },
+                                    enabled = enabled && !offlinePrepInFlight
+                                )
+                                val label = if (area == OfflinePrepAreaMode.MapBoundary && offlineBoundaryOptions.isEmpty()) {
+                                    "${area.label} (no polygons/lines in map)"
+                                } else {
+                                    area.label
+                                }
+                                Text(label)
+                            }
+                        }
+                        if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary && offlineBoundaryOptions.isNotEmpty()) {
+                            Text("Boundary shape", fontSize = 12.sp)
+                            offlineBoundaryOptions.forEach { option ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !offlinePrepInFlight) {
+                                            offlinePrepBoundaryId = option.id
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = offlinePrepBoundaryId == option.id,
+                                        onCheckedChange = {
+                                            if (!offlinePrepInFlight && it == true) {
+                                                offlinePrepBoundaryId = option.id
+                                            }
+                                        },
+                                        enabled = !offlinePrepInFlight
+                                    )
+                                    Text(option.label, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                        OFFLINE_PREP_PRESETS.forEach { preset ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !offlinePrepInFlight) { offlinePrepPreset = preset },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = offlinePrepPreset == preset,
+                                    onCheckedChange = {
+                                        if (!offlinePrepInFlight && it == true) offlinePrepPreset = preset
+                                    },
+                                    enabled = !offlinePrepInFlight
+                                )
+                                Text(preset.label)
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = offlinePrepIncludeDem,
+                                onCheckedChange = { if (!offlinePrepInFlight) offlinePrepIncludeDem = it },
+                                enabled = !offlinePrepInFlight
+                            )
+                            Text("Include DEM sampling")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = offlinePrepMaxThroughput,
+                                onCheckedChange = { if (!offlinePrepInFlight) offlinePrepMaxThroughput = it },
+                                enabled = !offlinePrepInFlight && !downloadMapBlockedForOsm
+                            )
+                            Text(if (downloadMapBlockedForOsm) "Maximize throughput (Imagery only)" else "Maximize throughput")
+                        }
+                        if (downloadMapBlockedForOsm) {
+                            Text(
+                                "OpenStreetMap bulk download is disabled to comply with OSM tile server usage policy. Switch Base layer to Imagery for Download Map.",
+                                fontSize = 11.sp
+                            )
+                        }
+                        Text(
+                            if (offlinePrepEstimateRunning || !offlinePrepEstimate.ready) {
+                                "Estimate: calculating..."
+                            } else {
+                                "Estimate: tiles=${offlinePrepEstimate.tileEstimate} " +
+                                    "dem=${offlinePrepEstimate.demEstimate} " +
+                                    "(~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedMb)} MB)"
+                            },
+                            fontSize = 12.sp
+                        )
+                        if (offlinePrepEstimate.ready) {
+                            val cacheCapMb = MapCachePolicy.TILE_CACHE_MAX_BYTES.toDouble() / (1024.0 * 1024.0)
+                            if (offlinePrepEstimate.estimatedMb > cacheCapMb) {
+                                Text(
+                                    "Warning: estimate exceeds tile cache cap (~${"%.0f".format(Locale.US, cacheCapMb)} MB). Older tiles may be evicted.",
+                                    fontSize = 11.sp
+                                )
+                            }
+                            val availableMb = offlinePrepAvailableBytes?.toDouble()?.div(1024.0 * 1024.0)
+                            if (availableMb != null) {
+                                Text(
+                                    "Available storage: ~${"%.0f".format(Locale.US, availableMb)} MB",
+                                    fontSize = 11.sp
+                                )
+                                if (offlinePrepEstimate.estimatedMb > (availableMb * 0.95)) {
+                                    Text(
+                                        "Warning: estimated download may exceed available storage.",
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                        if (offlinePrepInFlight) {
+                            val pct = if (offlinePrepProgress.total > 0) {
+                                (offlinePrepProgress.completed.toDouble() * 100.0 / offlinePrepProgress.total.toDouble())
+                                    .coerceIn(0.0, 100.0)
+                            } else {
+                                0.0
+                            }
+                            val etaText = offlinePrepProgress.etaSeconds?.let { formatDurationShort(it) } ?: "--:--"
+                            Text(
+                                "Progress: ${offlinePrepProgress.phase} ${offlinePrepProgress.completed}/${offlinePrepProgress.total} " +
+                                    "(${String.format(Locale.US, "%.2f", pct)}%) " +
+                                    "rate=${String.format(Locale.US, "%.1f", offlinePrepProgress.opsPerSec)}/s " +
+                                    "ETA=$etaText " +
+                                    "(hit=${offlinePrepProgress.hits} fetched=${offlinePrepProgress.fetched} failed=${offlinePrepProgress.failed})",
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val currentBounds = mapBounds
+                            val boundary =
+                                if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                                    offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
+                                } else {
+                                    null
+                                }
+                            val prepBounds = boundary?.bounds ?: currentBounds
+                            if (prepBounds == null) {
+                                CaltopoClient.ShowToast("Offline prep needs visible map bounds.")
+                                return@TextButton
+                            }
+                            if (downloadMapBlockedForOsm) {
+                                CaltopoClient.ShowToast("Download Map is disabled for OpenStreetMap. Switch to Imagery.")
+                                return@TextButton
+                            }
+                            if (offlinePrepEstimate.ready) {
+                                val estimateBytes = (offlinePrepEstimate.estimatedMb * 1024.0 * 1024.0).toLong()
+                                val available = offlinePrepAvailableBytes
+                                if (available != null && estimateBytes > (available * 95L / 100L)) {
+                                    CaltopoClient.ShowToast("Estimated download exceeds available storage. Pick a smaller area/zoom.")
+                                    return@TextButton
+                                }
+                            }
+                            startOfflinePrep(prepBounds, boundary)
+                        },
+                        enabled = !offlinePrepInFlight && !downloadMapBlockedForOsm && (mapBounds != null || selectedBoundary != null)
+                    ) { Text("Start") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            if (offlinePrepInFlight) {
+                                offlinePrepJob?.cancel()
+                            } else {
+                                showOfflinePrepDialog = false
+                            }
+                        }
+                    ) { Text(if (offlinePrepInFlight) "Cancel" else "Close") }
+                }
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .navigationBarsPadding()
+                .padding(start = 6.dp, end = 6.dp, bottom = 6.dp)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                .padding(horizontal = 4.dp, vertical = 1.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "© OpenStreetMap contributors",
+                fontSize = 8.sp,
+                lineHeight = 8.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.clickable {
+                    uriHandler.openUri("https://www.openstreetmap.org/copyright")
+                }
+            )
+            Text(
+                text = "DEM: USGS National Geospatial Program",
+                fontSize = 8.sp,
+                lineHeight = 8.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
         }
     }
 }
@@ -1338,6 +1979,358 @@ private fun buildArtifactOverlayState(features: Collection<JSONObject>): Artifac
         points = points,
         lines = lines,
         polygons = polygons
+    )
+}
+
+private fun estimateTileCountForBounds(
+    bounds: BoundingBox,
+    minZoom: Int,
+    maxZoom: Int,
+    clipBoundary: GeoBoundary? = null
+): Int {
+    val north = bounds.latNorth.coerceIn(-85.05112878, 85.05112878)
+    val south = bounds.latSouth.coerceIn(-85.05112878, 85.05112878)
+    val west = bounds.lonWest
+    val east = bounds.lonEast
+    val loLat = minOf(north, south)
+    val hiLat = maxOf(north, south)
+    val loLon = minOf(west, east)
+    val hiLon = maxOf(west, east)
+    var total = 0L
+    for (z in minZoom..maxZoom) {
+        val maxTile = (1 shl z) - 1
+        val minX = lonToTileX(loLon, z).coerceIn(0, maxTile)
+        val maxX = lonToTileX(hiLon, z).coerceIn(0, maxTile)
+        val minY = latToTileY(hiLat, z).coerceIn(0, maxTile)
+        val maxY = latToTileY(loLat, z).coerceIn(0, maxTile)
+        for (x in minX..maxX) {
+            for (y in minY..maxY) {
+                if (tileIndexInsideBoundary(z, x, y, clipBoundary)) {
+                    total++
+                }
+            }
+        }
+    }
+    return total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+}
+
+private fun estimateTileCountApproximate(
+    bounds: BoundingBox,
+    minZoom: Int,
+    maxZoom: Int,
+    clipBoundary: GeoBoundary? = null
+): Int {
+    val north = bounds.latNorth.coerceIn(-85.05112878, 85.05112878)
+    val south = bounds.latSouth.coerceIn(-85.05112878, 85.05112878)
+    val west = bounds.lonWest
+    val east = bounds.lonEast
+    val loLat = minOf(north, south)
+    val hiLat = maxOf(north, south)
+    val loLon = minOf(west, east)
+    val hiLon = maxOf(west, east)
+
+    var total = 0.0
+    for (z in minZoom..maxZoom) {
+        val maxTile = (1 shl z) - 1
+        val minX = lonToTileX(loLon, z).coerceIn(0, maxTile)
+        val maxX = lonToTileX(hiLon, z).coerceIn(0, maxTile)
+        val minY = latToTileY(hiLat, z).coerceIn(0, maxTile)
+        val maxY = latToTileY(loLat, z).coerceIn(0, maxTile)
+        val xCount = (maxX - minX + 1).coerceAtLeast(0)
+        val yCount = (maxY - minY + 1).coerceAtLeast(0)
+        total += xCount.toDouble() * yCount.toDouble()
+    }
+    val coverage = boundaryCoverageRatio(bounds, clipBoundary)
+    return kotlin.math.max(1, kotlin.math.round(total * coverage).toInt())
+}
+
+private suspend fun forEachTileIndexForBounds(
+    bounds: BoundingBox,
+    minZoom: Int,
+    maxZoom: Int,
+    clipBoundary: GeoBoundary? = null,
+    block: suspend (Long) -> Unit
+) {
+    val north = bounds.latNorth.coerceIn(-85.05112878, 85.05112878)
+    val south = bounds.latSouth.coerceIn(-85.05112878, 85.05112878)
+    val west = bounds.lonWest
+    val east = bounds.lonEast
+    val loLat = minOf(north, south)
+    val hiLat = maxOf(north, south)
+    val loLon = minOf(west, east)
+    val hiLon = maxOf(west, east)
+    for (z in minZoom..maxZoom) {
+        val maxTile = (1 shl z) - 1
+        val minX = lonToTileX(loLon, z).coerceIn(0, maxTile)
+        val maxX = lonToTileX(hiLon, z).coerceIn(0, maxTile)
+        val minY = latToTileY(hiLat, z).coerceIn(0, maxTile)
+        val maxY = latToTileY(loLat, z).coerceIn(0, maxTile)
+        for (x in minX..maxX) {
+            for (y in minY..maxY) {
+                if (!tileIndexInsideBoundary(z, x, y, clipBoundary)) continue
+                block(MapTileIndex.getTileIndex(z, x, y))
+            }
+        }
+    }
+}
+
+private fun estimateDemSamplesForBounds(
+    bounds: BoundingBox,
+    stepMeters: Double,
+    clipBoundary: GeoBoundary? = null
+): Int {
+    if (stepMeters <= 0.0) return 0
+    val north = bounds.latNorth
+    val south = bounds.latSouth
+    val west = bounds.lonWest
+    val east = bounds.lonEast
+    val loLat = minOf(north, south)
+    val hiLat = maxOf(north, south)
+    val loLon = minOf(west, east)
+    val hiLon = maxOf(west, east)
+    val centerLat = (loLat + hiLat) / 2.0
+    val latStepDeg = stepMeters / 111_320.0
+    val lonMetersAtLat = 111_320.0 * kotlin.math.cos(Math.toRadians(centerLat)).coerceAtLeast(0.1)
+    val lonStepDeg = stepMeters / lonMetersAtLat
+    var total = 0
+    var lat = loLat
+    while (lat <= hiLat) {
+        var lon = loLon
+        while (lon <= hiLon) {
+            if (clipBoundary == null || pointInPolygon(lat, lon, clipBoundary.ring)) {
+                total++
+            }
+            lon += lonStepDeg
+        }
+        lat += latStepDeg
+    }
+    return total
+}
+
+private fun estimateDemSamplesApproximate(
+    bounds: BoundingBox,
+    stepMeters: Double,
+    clipBoundary: GeoBoundary? = null
+): Int {
+    if (stepMeters <= 0.0) return 0
+    val effectiveArea = if (clipBoundary != null) {
+        polygonAreaMeters2(clipBoundary.ring).coerceAtLeast(0.0)
+    } else {
+        boundsAreaMeters2(bounds).coerceAtLeast(0.0)
+    }
+    if (effectiveArea <= 0.0) return 0
+    val sampleArea = stepMeters * stepMeters
+    return kotlin.math.max(1, kotlin.math.ceil(effectiveArea / sampleArea).toInt())
+}
+
+private suspend fun forEachDemSamplePointForBounds(
+    bounds: BoundingBox,
+    stepMeters: Double,
+    clipBoundary: GeoBoundary? = null,
+    block: suspend (Double, Double) -> Unit
+) {
+    if (stepMeters <= 0.0) return
+    val north = bounds.latNorth
+    val south = bounds.latSouth
+    val west = bounds.lonWest
+    val east = bounds.lonEast
+    val loLat = minOf(north, south)
+    val hiLat = maxOf(north, south)
+    val loLon = minOf(west, east)
+    val hiLon = maxOf(west, east)
+    val centerLat = (loLat + hiLat) / 2.0
+    val latStepDeg = stepMeters / 111_320.0
+    val lonMetersAtLat = 111_320.0 * kotlin.math.cos(Math.toRadians(centerLat)).coerceAtLeast(0.1)
+    val lonStepDeg = stepMeters / lonMetersAtLat
+    var lat = loLat
+    while (lat <= hiLat) {
+        var lon = loLon
+        while (lon <= hiLon) {
+            if (clipBoundary == null || pointInPolygon(lat, lon, clipBoundary.ring)) {
+                block(lat, lon)
+            }
+            lon += lonStepDeg
+        }
+        lat += latStepDeg
+    }
+}
+
+private fun lonToTileX(lon: Double, zoom: Int): Int {
+    val n = 1 shl zoom
+    val x = ((lon + 180.0) / 360.0 * n.toDouble())
+    return kotlin.math.floor(x).toInt()
+}
+
+private fun latToTileY(lat: Double, zoom: Int): Int {
+    val latRad = Math.toRadians(lat)
+    val n = 1 shl zoom
+    val y = (1.0 - kotlin.math.ln(kotlin.math.tan(latRad) + 1.0 / kotlin.math.cos(latRad)) / Math.PI) / 2.0 * n.toDouble()
+    return kotlin.math.floor(y).toInt()
+}
+
+private fun tileXToLon(x: Int, zoom: Int): Double {
+    val n = 1 shl zoom
+    return x.toDouble() / n.toDouble() * 360.0 - 180.0
+}
+
+private fun tileYToLat(y: Int, zoom: Int): Double {
+    val n = 1 shl zoom
+    val m = Math.PI * (1.0 - 2.0 * y.toDouble() / n.toDouble())
+    return Math.toDegrees(kotlin.math.atan(kotlin.math.sinh(m)))
+}
+
+private fun tileIndexInsideBoundary(
+    zoom: Int,
+    x: Int,
+    y: Int,
+    clipBoundary: GeoBoundary?
+): Boolean {
+    val boundary = clipBoundary ?: return true
+    val west = tileXToLon(x, zoom)
+    val east = tileXToLon(x + 1, zoom)
+    val north = tileYToLat(y, zoom)
+    val south = tileYToLat(y + 1, zoom)
+
+    if (east < boundary.bounds.lonWest || west > boundary.bounds.lonEast) return false
+    if (north < boundary.bounds.latSouth || south > boundary.bounds.latNorth) return false
+
+    val centerLat = (north + south) * 0.5
+    val centerLon = (west + east) * 0.5
+    if (pointInPolygon(centerLat, centerLon, boundary.ring)) return true
+
+    val corners = arrayOf(
+        doubleArrayOf(north, west),
+        doubleArrayOf(north, east),
+        doubleArrayOf(south, east),
+        doubleArrayOf(south, west)
+    )
+    for (corner in corners) {
+        if (pointInPolygon(corner[0], corner[1], boundary.ring)) return true
+    }
+
+    boundary.ring.forEach { point ->
+        if (point.latitude in south..north && point.longitude in west..east) return true
+    }
+    return false
+}
+
+private fun pointInPolygon(lat: Double, lon: Double, ring: List<GeoPoint>): Boolean {
+    if (ring.size < 3) return false
+    var inside = false
+    var j = ring.lastIndex
+    for (i in ring.indices) {
+        val yi = ring[i].latitude
+        val xi = ring[i].longitude
+        val yj = ring[j].latitude
+        val xj = ring[j].longitude
+        val denom = (yj - yi).takeIf { kotlin.math.abs(it) > 1e-12 } ?: 1e-12
+        val intersects = ((yi > lat) != (yj > lat)) &&
+            (lon < (xj - xi) * (lat - yi) / denom + xi)
+        if (intersects) inside = !inside
+        j = i
+    }
+    return inside
+}
+
+private fun boundaryCoverageRatio(bounds: BoundingBox, clipBoundary: GeoBoundary?): Double {
+    if (clipBoundary == null) return 1.0
+    val bboxArea = boundsAreaMeters2(bounds)
+    if (bboxArea <= 1.0) return 1.0
+    val polygonArea = polygonAreaMeters2(clipBoundary.ring)
+    if (polygonArea <= 0.0) return 1.0
+    return (polygonArea / bboxArea).coerceIn(0.02, 1.0)
+}
+
+private fun boundsAreaMeters2(bounds: BoundingBox): Double {
+    val north = bounds.latNorth
+    val south = bounds.latSouth
+    val west = bounds.lonWest
+    val east = bounds.lonEast
+    val latCenter = ((north + south) * 0.5)
+    val latMetersPerDeg = 111_320.0
+    val lonMetersPerDeg = 111_320.0 * kotlin.math.cos(Math.toRadians(latCenter)).coerceAtLeast(0.1)
+    val widthM = kotlin.math.abs(east - west) * lonMetersPerDeg
+    val heightM = kotlin.math.abs(north - south) * latMetersPerDeg
+    return widthM * heightM
+}
+
+private fun polygonAreaMeters2(ring: List<GeoPoint>): Double {
+    if (ring.size < 3) return 0.0
+    val centerLat = ring.map { it.latitude }.average()
+    val centerLon = ring.map { it.longitude }.average()
+    val latMetersPerDeg = 111_320.0
+    val lonMetersPerDeg = 111_320.0 * kotlin.math.cos(Math.toRadians(centerLat)).coerceAtLeast(0.1)
+    var twiceArea = 0.0
+    for (i in ring.indices) {
+        val j = (i + 1) % ring.size
+        val x1 = (ring[i].longitude - centerLon) * lonMetersPerDeg
+        val y1 = (ring[i].latitude - centerLat) * latMetersPerDeg
+        val x2 = (ring[j].longitude - centerLon) * lonMetersPerDeg
+        val y2 = (ring[j].latitude - centerLat) * latMetersPerDeg
+        twiceArea += (x1 * y2) - (x2 * y1)
+    }
+    return kotlin.math.abs(twiceArea) * 0.5
+}
+
+private fun formatDurationShort(totalSeconds: Long): String {
+    val safe = totalSeconds.coerceAtLeast(0L)
+    val h = safe / 3600L
+    val m = (safe % 3600L) / 60L
+    val s = safe % 60L
+    return if (h > 0L) {
+        String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+    } else {
+        String.format(Locale.US, "%02d:%02d", m, s)
+    }
+}
+
+private fun queryAvailableCacheBytes(context: android.content.Context): Long? {
+    return try {
+        when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
+            is MapCacheRoot.FileBacked -> {
+                val stat = StatFs(root.dir.absolutePath)
+                stat.availableBytes
+            }
+            is MapCacheRoot.SafBacked -> {
+                null
+            }
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun buildOfflineBoundaryOptions(state: ArtifactOverlayState): List<OfflineBoundaryOption> {
+    val options = mutableListOf<OfflineBoundaryOption>()
+    state.polygons.forEachIndexed { index, polygon ->
+        val boundary = geoBoundaryFromPoints(polygon.points) ?: return@forEachIndexed
+        options += OfflineBoundaryOption(
+            id = "poly:${polygon.id}:$index",
+            label = "[Polygon] ${polygon.title}",
+            boundary = boundary
+        )
+    }
+    state.lines.forEachIndexed { index, line ->
+        val boundary = geoBoundaryFromPoints(line.points) ?: return@forEachIndexed
+        options += OfflineBoundaryOption(
+            id = "line:${line.id}:$index",
+            label = "[Line] ${line.title}",
+            boundary = boundary
+        )
+    }
+    return options
+}
+
+private fun geoBoundaryFromPoints(points: List<GeoPoint>): GeoBoundary? {
+    if (points.size < 3) return null
+    val ring = if (points.first().latitude == points.last().latitude && points.first().longitude == points.last().longitude) {
+        points
+    } else {
+        points + points.first()
+    }
+    return GeoBoundary(
+        ring = ring,
+        bounds = boundingBoxFromPoints(ring)
     )
 }
 
@@ -1657,23 +2650,40 @@ private fun buildDroneStatusLabelDrawable(
     resources: android.content.res.Resources,
     text: String
 ): Drawable {
+    val density = resources.displayMetrics.density
     val scaledDensity = resources.displayMetrics.scaledDensity
-    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = AndroidColor.parseColor("#1A5CFF")
-        textSize = 12f * scaledDensity
-        typeface = android.graphics.Typeface.MONOSPACE
+    val textSizePx = 13f * scaledDensity
+    val cornerPx = 5f * density
+    val horizontalPaddingPx = 5f * density
+    val verticalPaddingPx = 2.5f * density
+
+    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#FFFFFF")
+        textSize = textSizePx
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        style = Paint.Style.FILL
     }
-    val fm = textPaint.fontMetrics
-    val horizontalPaddingPx = 2f * scaledDensity
-    val verticalPaddingPx = 1.5f * scaledDensity
-    val textWidth = textPaint.measureText(text)
+    val haloPaint = Paint(fillPaint).apply {
+        color = AndroidColor.parseColor("#CC000000")
+        style = Paint.Style.STROKE
+        strokeWidth = 2.4f * density
+        strokeJoin = Paint.Join.ROUND
+    }
+    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#66000000")
+        style = Paint.Style.FILL
+    }
+    val fm = fillPaint.fontMetrics
+    val textWidth = fillPaint.measureText(text)
     val textHeight = fm.descent - fm.ascent
     val width = maxOf(1, (textWidth + (horizontalPaddingPx * 2f)).toInt())
     val height = maxOf(1, (textHeight + (verticalPaddingPx * 2f)).toInt())
     val baselineY = verticalPaddingPx - fm.ascent
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
-    canvas.drawText(text, horizontalPaddingPx, baselineY, textPaint)
+    canvas.drawRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()), cornerPx, cornerPx, bgPaint)
+    canvas.drawText(text, horizontalPaddingPx, baselineY, haloPaint)
+    canvas.drawText(text, horizontalPaddingPx, baselineY, fillPaint)
     return BitmapDrawable(resources, bitmap)
 }
 
@@ -1681,18 +2691,82 @@ private fun buildDroneNameLabelDrawable(
     resources: android.content.res.Resources,
     text: String
 ): Drawable {
-    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = AndroidColor.parseColor("#F5F7FA")
-        textSize = 24f
+    val density = resources.displayMetrics.density
+    val scaledDensity = resources.displayMetrics.scaledDensity
+    val textSizePx = 16f * scaledDensity
+    val cornerPx = 6f * density
+    val horizontalPaddingPx = 6f * density
+    val verticalPaddingPx = 3f * density
+
+    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#FFFFFF")
+        textSize = textSizePx
         typeface = android.graphics.Typeface.DEFAULT_BOLD
-        setShadowLayer(4f, 1f, 1f, AndroidColor.parseColor("#D0000000"))
+        style = Paint.Style.FILL
     }
-    val baselineY = 23f
-    val width = maxOf(1, (textPaint.measureText(text) + 8f).toInt())
-    val height = 32
+    val haloPaint = Paint(fillPaint).apply {
+        color = AndroidColor.parseColor("#CC000000")
+        style = Paint.Style.STROKE
+        strokeWidth = 2.4f * density
+        strokeJoin = Paint.Join.ROUND
+    }
+    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#66000000")
+        style = Paint.Style.FILL
+    }
+    val fm = fillPaint.fontMetrics
+    val textWidth = fillPaint.measureText(text)
+    val textHeight = fm.descent - fm.ascent
+    val width = maxOf(1, (textWidth + (horizontalPaddingPx * 2f)).toInt())
+    val height = maxOf(1, (textHeight + (verticalPaddingPx * 2f)).toInt())
+    val baselineY = verticalPaddingPx - fm.ascent
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
-    canvas.drawText(text, 4f, baselineY, textPaint)
+    canvas.drawRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()), cornerPx, cornerPx, bgPaint)
+    canvas.drawText(text, horizontalPaddingPx, baselineY, haloPaint)
+    canvas.drawText(text, horizontalPaddingPx, baselineY, fillPaint)
+    return BitmapDrawable(resources, bitmap)
+}
+
+private fun buildDroneMarkerDrawable(
+    resources: android.content.res.Resources,
+    baseIcon: Drawable?,
+    tint: Int?
+): Drawable? {
+    if (baseIcon == null) return null
+    val density = resources.displayMetrics.density
+    val icon = baseIcon.constantState?.newDrawable(resources)?.mutate() ?: baseIcon.mutate()
+    if (tint != null) {
+        icon.setTint(tint)
+    } else {
+        icon.clearColorFilter()
+    }
+
+    val iconW = if (icon.intrinsicWidth > 0) icon.intrinsicWidth else (18f * density).toInt()
+    val iconH = if (icon.intrinsicHeight > 0) icon.intrinsicHeight else (18f * density).toInt()
+    val pad = (4f * density).toInt()
+    val width = iconW + pad * 2
+    val height = iconH + pad * 2
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val cx = width / 2f
+    val cy = height / 2f
+    val radius = (maxOf(iconW, iconH) / 2f) + (2.5f * density)
+
+    val haloFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#CCFFFFFF")
+        style = Paint.Style.FILL
+    }
+    val haloStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#99000000")
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f * density
+    }
+    canvas.drawCircle(cx, cy, radius, haloFill)
+    canvas.drawCircle(cx, cy, radius, haloStroke)
+
+    icon.setBounds(pad, pad, pad + iconW, pad + iconH)
+    icon.draw(canvas)
     return BitmapDrawable(resources, bitmap)
 }
 

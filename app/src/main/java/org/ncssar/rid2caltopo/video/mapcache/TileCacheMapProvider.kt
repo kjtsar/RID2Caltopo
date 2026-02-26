@@ -152,6 +152,7 @@ private class TileCacheStorageProvider(
         tileSourceRef.get()?.maximumZoomLevel ?: org.osmdroid.util.TileSystem.getMaximumZoomLevel()
 
     override fun setTileSource(tileSource: ITileSource) {
+        MapCacheDebug.log("tile source switch ${tileSourceRef.get()?.name()} -> ${tileSource.name()}")
         tileSourceRef.set(tileSource)
     }
 

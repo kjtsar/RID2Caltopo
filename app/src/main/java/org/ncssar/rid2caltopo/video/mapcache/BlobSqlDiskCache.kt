@@ -66,6 +66,7 @@ internal class BlobSqlDiskCache(
                 put("expires_at", expiresAtMs)
             }
             db.replaceOrThrow("entries", null, cv)
+            MapCacheDebug.log("sql put db=$dbName key=$cacheKey bytes=${bytes.size} expiresAt=$expiresAtMs dir=${cacheDir.absolutePath}")
             evictToCapLocked()
         }
     }
@@ -85,6 +86,9 @@ internal class BlobSqlDiskCache(
             cursor.use {
                 if (!it.moveToFirst()) {
                     if (countHitMiss) missCount.incrementAndGet()
+                    if (countHitMiss) {
+                        MapCacheDebug.log("sql miss db=$dbName key=$cacheKey dir=${cacheDir.absolutePath}")
+                    }
                     return null
                 }
                 val bytes = it.getBlob(0)
@@ -93,6 +97,11 @@ internal class BlobSqlDiskCache(
                 val touch = ContentValues().apply { put("accessed_at", now) }
                 db.update("entries", touch, "cache_key = ?", arrayOf(cacheKey))
                 if (countHitMiss) hitCount.incrementAndGet()
+                if (countHitMiss) {
+                    MapCacheDebug.log(
+                        "sql hit db=$dbName key=$cacheKey bytes=${bytes.size} stale=$stale dir=${cacheDir.absolutePath}"
+                    )
+                }
                 return CachedBlob(bytes = bytes, expiresAt = expiresAt, stale = stale)
             }
         }

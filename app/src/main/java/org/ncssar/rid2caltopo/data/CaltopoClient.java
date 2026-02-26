@@ -16,6 +16,7 @@ import android.app.NotificationManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.UriPermission;
 import android.content.res.Resources;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -216,6 +217,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final String SECURE_STATE_KEY_ALIAS = "RID2Caltopo.StateKey.v1";
     private static final String SECURE_STATE_HEADER = "R2CS2";
     private static final int SECURE_STATE_VERSION = 1;
+    private static final String BACKUP_PREFS_NAME = "rid2caltopo_public_state";
+    private static final String BACKUP_KEY_ARCHIVE_PATH = "archive_path_uri";
+    private static final String BACKUP_KEY_ARCHIVE_HINT = "archive_hint_uri";
     private static String LogFilePath;
     private static OutputStream DebugOutputStream;
     private static long BytesWrittenToDebugOutputStream;
@@ -227,6 +231,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final Object ShutdownLock = new Object();
     private static boolean ShutdownInProgress = false;
     private static boolean AppExitRequested = false;
+    private static volatile boolean ArchivePermissionMissingFlag = false;
 
     // CaltopoClient INSTANCE VARS:=
     private final String remoteId;
@@ -1089,12 +1094,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
         ClientClassState secureState = restoreSecureState(ctxt);
         if (secureState != null) {
+            applyArchivePathBackupPrefs(ctxt, secureState);
             if (secureState.debugLevel >= 0) DebugLevel = secureState.debugLevel;
             return secureState;
         }
 
         ClientClassState ccs = restoreLegacyState(ctxt);
         if (ccs != null) {
+            applyArchivePathBackupPrefs(ctxt, ccs);
             // Best-effort migration to encrypted-at-rest state storage.
             archiveSecureState(ctxt, ccs);
             if (ccs.debugLevel >= 0) DebugLevel = ccs.debugLevel;
@@ -1276,6 +1283,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (null == Ccstate) {
             ClientClassState ccs = RestoreState();
             if (null == ccs) ccs = new ClientClassState();
+            Context ctxt = R2CApplication.getAppCtxt();
+            if (ctxt != null) {
+                applyArchivePathBackupPrefs(ctxt, ccs);
+            }
             if (null == ccs.droneSpecTable) ccs.droneSpecTable = new Hashtable<>(16);
             if (null == ccs.cachedDroneSpecTable) ccs.cachedDroneSpecTable = new Hashtable<>(16);
             Ccstate = ccs;
@@ -1405,7 +1416,43 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @Nullable
     public static Uri GetArchiveUri() {
         ClientClassState ccs = GetState();
-        return ccs.archivePath.isEmpty() ? null : Uri.parse(ccs.archivePath);
+        if (ccs.archivePath.isEmpty()) return null;
+        Uri archiveUri;
+        try {
+            archiveUri = Uri.parse(ccs.archivePath);
+        } catch (Exception e) {
+            CTWarn(TAG, "GetArchiveUri(): archivePath parse failed. clearing.", e);
+            clearArchivePath("archivePath parse failed");
+            return null;
+        }
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (ctxt != null && !isArchiveUriUsable(ctxt, archiveUri)) {
+            CTWarn(TAG, "GetArchiveUri(): archive uri no longer accessible. clearing.");
+            ArchivePermissionMissingFlag = true;
+            clearArchivePath("archivePath permission missing");
+            return null;
+        }
+        ArchivePermissionMissingFlag = false;
+        return archiveUri;
+    }
+
+    @Nullable
+    public static Uri GetArchiveUriSelectionHint() {
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (ctxt == null) return null;
+        String hint = ctxt.getSharedPreferences(BACKUP_PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(BACKUP_KEY_ARCHIVE_HINT, "");
+        if (hint == null || hint.isEmpty()) return null;
+        try {
+            return Uri.parse(hint);
+        } catch (Exception e) {
+            CTWarn(TAG, "GetArchiveUriSelectionHint(): parse failed.", e);
+            return null;
+        }
+    }
+
+    public static boolean WasArchiveUriPermissionMissing() {
+        return ArchivePermissionMissingFlag;
     }
 
     @NonNull
@@ -1503,8 +1550,80 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String pathString = pathUri.toString();
         if (!ccs.archivePath.equals(pathString)) {
             ccs.archivePath = pathString;
+            persistArchivePathBackup(pathString);
+            persistArchiveHintBackup(pathString);
+            ArchivePermissionMissingFlag = false;
             ArchiveState("archivePath changed.");
             InitArchiveDir();
+        }
+    }
+
+    private static void clearArchivePath(@NonNull String reason) {
+        ClientClassState ccs = GetState();
+        if (ccs.archivePath.isEmpty()) return;
+        persistArchiveHintBackup(ccs.archivePath);
+        ccs.archivePath = "";
+        persistArchivePathBackup("");
+        ArchiveState(reason);
+    }
+
+    private static void applyArchivePathBackupPrefs(@NonNull Context ctxt, @NonNull ClientClassState ccs) {
+        String backupArchivePath = ctxt.getSharedPreferences(BACKUP_PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(BACKUP_KEY_ARCHIVE_PATH, "");
+        if (backupArchivePath == null) backupArchivePath = "";
+        if (!backupArchivePath.isEmpty() && !backupArchivePath.equals(ccs.archivePath)) {
+            ccs.archivePath = backupArchivePath;
+            CTDebug(TAG, "RestoreState(): archivePath restored from backup preferences.");
+            persistArchiveHintBackup(backupArchivePath);
+        } else if (backupArchivePath.isEmpty() && !ccs.archivePath.isEmpty()) {
+            // one-time migration from secure/legacy serialized state into backup-eligible prefs.
+            persistArchivePathBackup(ccs.archivePath);
+            persistArchiveHintBackup(ccs.archivePath);
+        }
+    }
+
+    private static void persistArchivePathBackup(@Nullable String archivePath) {
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (ctxt == null) return;
+        String normalized = archivePath == null ? "" : archivePath;
+        ctxt.getSharedPreferences(BACKUP_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(BACKUP_KEY_ARCHIVE_PATH, normalized)
+                .apply();
+    }
+
+    private static void persistArchiveHintBackup(@Nullable String archivePath) {
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (ctxt == null) return;
+        String normalized = archivePath == null ? "" : archivePath;
+        ctxt.getSharedPreferences(BACKUP_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(BACKUP_KEY_ARCHIVE_HINT, normalized)
+                .apply();
+    }
+
+    private static boolean hasPersistedReadPermission(@NonNull Context ctxt, @NonNull Uri uri) {
+        ContentResolver resolver = ctxt.getContentResolver();
+        List<UriPermission> permissions = resolver.getPersistedUriPermissions();
+        for (UriPermission permission : permissions) {
+            if (permission == null) continue;
+            Uri granted = permission.getUri();
+            if (granted == null) continue;
+            if (uri.equals(granted) && permission.isReadPermission()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isArchiveUriUsable(@NonNull Context ctxt, @NonNull Uri archiveUri) {
+        try {
+            if (!hasPersistedReadPermission(ctxt, archiveUri)) return false;
+            DocumentFile archiveDir = DocumentFile.fromTreeUri(ctxt, archiveUri);
+            return archiveDir != null && archiveDir.exists() && archiveDir.isDirectory() && archiveDir.canRead();
+        } catch (Exception e) {
+            CTWarn(TAG, "isArchiveUriUsable() raised.", e);
+            return false;
         }
     }
 

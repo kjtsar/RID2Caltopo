@@ -21,8 +21,6 @@ import org.osmdroid.tileprovider.modules.TileDownloader
 import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
-import org.osmdroid.util.MapTileAreaBorderComputer
-import org.osmdroid.util.MapTileAreaZoomComputer
 import org.osmdroid.util.MapTileIndex
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
@@ -117,20 +115,21 @@ class TileCacheMapProvider private constructor(
         })
         mTileProviderList.add(downloaderProvider)
 
-        getTileCache().protectedTileComputers.add(MapTileAreaZoomComputer(-1))
-        getTileCache().protectedTileComputers.add(MapTileAreaBorderComputer(1))
+        // Keep tile activity strictly tied to current viewport to reduce background work.
         getTileCache().setAutoEnsureCapacity(false)
         getTileCache().setStressedMemory(false)
 
-        getTileCache().preCache.addProvider(assetsProvider)
-        getTileCache().preCache.addProvider(cacheProvider)
-        getTileCache().preCache.addProvider(archiveProvider)
+        // Avoid pre-cache provider registration to prevent speculative/background tile requests.
         getTileCache().protectedTileContainers.add(this)
 
         setOfflineFirst(true)
     }
 
     override fun getTileWriter(): IFilesystemCache = tileWriter
+
+    fun setCacheLookupEnabled(enabled: Boolean) {
+        cacheProvider.setCacheLookupEnabled(enabled)
+    }
 
     override fun mapTileRequestCompleted(pState: MapTileRequestState, pDrawable: Drawable?) {
         if (MapCacheDebug.isEnabled()) {
@@ -260,6 +259,8 @@ private class TileCacheStorageProvider(
     Configuration.getInstance().tileFileSystemMaxQueueSize.toInt()
 ) {
     private val tileSourceRef = AtomicReference(pTileSource)
+    @Volatile
+    private var cacheLookupEnabled = true
     private val tileLoader = LocalTileLoader()
 
     override fun getUsesDataConnection(): Boolean = false
@@ -281,8 +282,13 @@ private class TileCacheStorageProvider(
         tileSourceRef.set(tileSource)
     }
 
+    fun setCacheLookupEnabled(enabled: Boolean) {
+        cacheLookupEnabled = enabled
+    }
+
     inner class LocalTileLoader : TileLoader() {
         override fun loadTile(pMapTileIndex: Long): Drawable? {
+            if (!cacheLookupEnabled) return null
             val source = tileSourceRef.get() ?: return null
             return tileWriter.loadTile(source, pMapTileIndex)
         }

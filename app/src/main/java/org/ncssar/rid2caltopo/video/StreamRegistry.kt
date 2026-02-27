@@ -79,13 +79,18 @@ object StreamAdmissionPolicy {
         )
     }
 
-    fun markError(state: StreamAdmissionState, path: String, nowMs: Long): StreamTransitionResult {
+    fun markError(
+        state: StreamAdmissionState,
+        path: String,
+        nowMs: Long,
+        reason: String? = null,
+    ): StreamTransitionResult {
         val active = state.active.toMutableMap()
         if (!active.containsKey(path)) {
             return StreamTransitionResult(state = state, changed = false, existed = false)
         }
         val changedAt = state.stateChangedAtMs.toMutableMap()
-        active[path] = StreamInfo(path, StreamState.ERROR)
+        active[path] = StreamInfo(path, StreamState.ERROR, errorDetail = reason)
         changedAt[path] = nowMs
         return StreamTransitionResult(
             state = StreamAdmissionState(active, changedAt, state.rejectedPaths),
@@ -162,15 +167,23 @@ object StreamRegistry {
         }
     }
 
-    fun onStreamError(path: String) {
+    fun onStreamError(path: String, reason: String? = null) {
         val updated = synchronized(lock) {
-            val result = StreamAdmissionPolicy.markError(snapshotLocked(), path, nowMsProvider())
+            val result = StreamAdmissionPolicy.markError(
+                snapshotLocked(),
+                path,
+                nowMsProvider(),
+                reason = reason,
+            )
             applyStateLocked(result.state)
             result.changed
         }
         if (!updated) {
             CTDebug(TAG, "onStreamError($path): ignoring orphan error transition.")
             return
+        }
+        reason?.let {
+            CTWarn(TAG, "onStreamError($path): $it")
         }
         CTDebug(TAG, "onStreamError(${path}): state:${StreamState.ERROR.name}")
     }

@@ -80,4 +80,27 @@ class StreamRegistryLifecycleTest {
         val stopped = StreamAdmissionPolicy.markStopped(live, "d1").state
         assertFalse(stopped.active.containsKey("d1"))
     }
+
+    @Test
+    fun markError_recordsErrorDetail() {
+        val initial = StreamAdmissionState(
+            active = mapOf("d1" to StreamInfo("d1", StreamState.LIVE)),
+            stateChangedAtMs = mapOf("d1" to 1_000L),
+            rejectedPaths = emptySet(),
+        )
+
+        val result = StreamAdmissionPolicy.markError(
+            state = initial,
+            path = "d1",
+            nowMs = 2_000L,
+            reason = "RTMP closed: received an audio packet",
+        )
+
+        assertTrue(result.changed)
+        assertEquals(StreamState.ERROR, result.state.active["d1"]?.state)
+        assertEquals(
+            "RTMP closed: received an audio packet",
+            result.state.active["d1"]?.errorDetail,
+        )
+    }
 }

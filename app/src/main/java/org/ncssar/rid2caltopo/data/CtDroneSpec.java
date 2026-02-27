@@ -76,6 +76,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public transient double lastLat;
     public transient double lastLng;
     public transient double lastAlt;
+    @Nullable
+    private transient CaltopoClient.PositionTelemetry lastPositionTelemetry;
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
     private boolean okToLog = true;
@@ -132,6 +134,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         distanceInFeet = 0.0F;
         lastLat = 0.0F;
         lastLng = 0.0F;
+        lastPositionTelemetry = null;
         okToLog = true;
         startMsecTimestamp = mostRecentMsecTimestamp = 0;
         int length = TransportTypeEnum.values().length;
@@ -183,6 +186,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public double getLastLat() {return lastLat;}
     public double getLastLng() {return lastLng;}
     public double getLastAlt() {return lastAlt;}
+    @Nullable
+    public CaltopoClient.PositionTelemetry getLastPositionTelemetry() { return lastPositionTelemetry; }
+    public void setLastPositionTelemetry(@Nullable CaltopoClient.PositionTelemetry telemetry) {
+        lastPositionTelemetry = telemetry;
+    }
     public double getDistanceInFeet() { return distanceInFeet;}
 
     public int getTotalCount() {
@@ -282,6 +290,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public static void BumpInvalidWaypointCount() {InvalidWaypointCount++;}
     public static double MyLat = 0.0F;
     public static double MyLng = 0.0F;
+    // Reject altitude spikes/drops that imply unrealistic vertical rates for small UAS.
+    private static final double MAX_REASONABLE_VERTICAL_SPEED_MPS = 20.0;
+    private static final double MIN_ALTITUDE_DELTA_FILTER_M = 8.0;
 
     /** checkNewWaypoint()
      * FIXME: Need to include check of change in distance over change in time to see if waypoint
@@ -339,12 +350,32 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         float[] dbResult = {Float.NaN};
         float lDistanceInFeet = 0.0F ;
         long msecTimestamp = System.currentTimeMillis();
+        long priorTimestamp = mostRecentMsecTimestamp;
         if (lastLat != 0.0F) {
             Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
             lDistanceInFeet = dbResult[0] * FeetPerMeter;
             if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet() &&
                     (msecTimestamp - mostRecentMsecTimestamp) < MinMsecInterval) return false;
             distanceInFeet += lDistanceInFeet;
+        }
+        if (goodCount > 0 && priorTimestamp > 0) {
+            long dtMs = Math.max(1L, msecTimestamp - priorTimestamp);
+            double dtSec = dtMs / 1000.0;
+            double maxAllowedAltitudeDeltaM = Math.max(
+                    MIN_ALTITUDE_DELTA_FILTER_M,
+                    MAX_REASONABLE_VERTICAL_SPEED_MPS * dtSec
+            );
+            double altitudeDeltaM = Math.abs(((double) altitudeInMeters) - lastAlt);
+            if (altitudeDeltaM > maxAllowedAltitudeDeltaM) {
+                if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
+                    CTInfo(TAG, String.format(
+                            Locale.US,
+                            "checkNewWaypoint(%s/%s) ignoring spurious altitude jump: prior=%.1fm new=%dm dt=%.2fs (delta=%.1fm > %.1fm)",
+                            trackLabel, transportType, lastAlt, altitudeInMeters, dtSec, altitudeDeltaM, maxAllowedAltitudeDeltaM
+                    ));
+                }
+                return false;
+            }
         }
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = msecTimestamp;
         goodCount++;

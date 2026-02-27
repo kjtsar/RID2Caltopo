@@ -2,6 +2,9 @@
 # logLevel: warn ;# quieter....
 logLevel: info
 
+readTimeout: 30s
+writeTimeout: 30s
+
 rtmp: yes
 rtsp: yes
 hls: yes

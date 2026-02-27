@@ -30,6 +30,7 @@ fun StreamTile(
     streamDesignator: String,
     viewModel: StreamsViewModel,
     streamState: StreamState,
+    streamErrorDetail: String?,
     onToggleFocus: () -> Unit,
 ) {
     val tag="StreamTile"
@@ -37,7 +38,7 @@ fun StreamTile(
     var showPicker by remember { mutableStateOf(false) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val isFocused = (focusedPath == streamDesignator)
-    CTDebug(tag) { "StreamTile(): isFocused:${isFocused}, designator:${streamDesignator}, focusedPath:$focusedPath" }
+    CTDebug(tag, "StreamTile(): isFocused:${isFocused}, designator:${streamDesignator}, focusedPath:$focusedPath")
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val currentIsFocused by rememberUpdatedState(isFocused)
     val currentDesignatorState by rememberUpdatedState(designatorState)
@@ -52,12 +53,12 @@ fun StreamTile(
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = {
-                        CTDebug(tag) { "StreamTile{${streamDesignator}) onTap" }
+                        CTDebug(tag, "StreamTile{${streamDesignator}) onTap")
                         onToggleFocus()
                     },
                     onLongPress = {
                         if (designatorState is DesignatorState.Yellow) {
-                            CTDebug(tag) { "StreamTile{${streamDesignator}) onLongPress" }
+                            CTDebug(tag, "StreamTile{${streamDesignator}) onLongPress")
                             showPicker = true
                         }
                     },
@@ -73,13 +74,13 @@ fun StreamTile(
 
                         val tv = textureViewRef.value
                         if (tv == null) {
-                            CTDebug(tag) { "TextureView not ready yet" }
+                            CTDebug(tag, "TextureView not ready yet")
                             return@detectTapGestures
                         }
 
                         val bitmap = tv.bitmap
                         if (bitmap == null) {
-                            CTDebug(tag) { "Failed to capture bitmap from TextureView" }
+                            CTDebug(tag, "Failed to capture bitmap from TextureView")
                             return@detectTapGestures
                         }
 
@@ -100,6 +101,7 @@ fun StreamTile(
         DesignatorIndicator(
             streamDesignator = streamDesignator,
             streamState = streamState,
+            streamErrorDetail = streamErrorDetail,
             viewModel = viewModel,
             onLongPress = {
                 if (designatorState is DesignatorState.Yellow) { showPicker = true }
@@ -109,7 +111,7 @@ fun StreamTile(
             DroneSpecPickerDialog(
                 droneSpecStates = (designatorState as DesignatorState.Yellow).candidates,
                 onSelect = { (selectedStreamDesignator, droneSpecState) ->
-                    CTDebug(tag) { "DroneSpecPickerDialog() User mapped '${streamDesignator}' to ${selectedStreamDesignator}:${droneSpecState.remoteId}" }
+                    CTDebug(tag, "DroneSpecPickerDialog() User mapped '${streamDesignator}' to ${selectedStreamDesignator}:${droneSpecState.remoteId}")
                     droneSpecState.changeMappedId(streamDesignator)
                     showPicker = false
                 },
@@ -128,12 +130,12 @@ fun StreamPlayer(
     onTextureViewReady: (TextureView) -> Unit
 ) {
     val tag = "StreamPlayer"
-    CTDebug(tag) { "StreamPlayer(${designator}) streamState:${state.name}" }
+    CTDebug(tag, "StreamPlayer(${designator}) streamState:${state.name}")
     if (state != StreamState.LIVE) return
 
     val useFfmpeg = viewModel.useFfmpegRender(designator)
     if (useFfmpeg) {
-        CTDebug(tag) { "StreamPlayer(${designator}) using FFmpeg render path." }
+        CTDebug(tag, "StreamPlayer(${designator}) using FFmpeg render path.")
         var attachedTextureView by remember(designator) { mutableStateOf<TextureView?>(null) }
         var attachedSurface by remember(designator) { mutableStateOf<Surface?>(null) }
 
@@ -155,7 +157,7 @@ fun StreamPlayer(
                                 designator,
                                 attachedSurface!!
                             )
-                            CTDebug(tag) { "FFmpeg surface bound for $designator: $bound" }
+                            CTDebug(tag, "FFmpeg surface bound for $designator: $bound")
                         }
 
                         override fun onSurfaceTextureSizeChanged(
@@ -195,7 +197,7 @@ fun StreamPlayer(
     }
 
     val player = viewModel.playerFor(designator) ?: return
-    CTDebug(tag) { "StreamPlayer(${designator}): player:$player" }
+    CTDebug(tag, "StreamPlayer(${designator}): player:$player")
     var attachedTextureView by remember(player) { mutableStateOf<TextureView?>(null) }
 
     key(player) {

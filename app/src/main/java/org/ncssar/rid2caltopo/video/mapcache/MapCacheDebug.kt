@@ -1,9 +1,10 @@
 package org.ncssar.rid2caltopo.video.mapcache
 
 import org.ncssar.rid2caltopo.data.CaltopoClient
-import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import java.util.concurrent.atomic.AtomicLong
 
@@ -28,6 +29,12 @@ internal object MapCacheDebug {
         tagsRegistered = true
     }
 
+    private fun isTagEnabled(tag: String): Boolean {
+        ensureRegistered()
+        // Allow the umbrella tag to enable all map-cache debug categories.
+        return CTDebugEnabled(TAG) || CTDebugEnabled(tag)
+    }
+
     fun isEnabled(): Boolean {
         ensureRegistered()
         return CTDebugEnabled(TAG) || CTDebugEnabled(TAG_TILE) || CTDebugEnabled(TAG_DEM) ||
@@ -44,9 +51,15 @@ internal object MapCacheDebug {
     }
 
     fun debug(tag: String, message: String) {
-        if (!CTDebugEnabled(tag)) return
+        if (!isTagEnabled(tag)) return
         val seq = eventCount.incrementAndGet()
         CTDebug(tag, "#$seq $message")
+    }
+
+    fun info(tag: String, message: String) {
+        if (!isTagEnabled(tag)) return
+        val seq = eventCount.incrementAndGet()
+        CTInfo(tag, "#$seq $message")
     }
 
     fun warn(tag: String, message: String) {

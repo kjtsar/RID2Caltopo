@@ -18,7 +18,10 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
         private val LEGACY_OSM_SOURCE_NAMES = listOf("Mapnik", "MAPNIK")
         private const val OSM_UNIFORM_WINDOW_MS = 120_000L
         private const val OSM_UNIFORM_TILE_THRESHOLD = 8
+        private const val MISS_LOG_MIN_INTERVAL_MS = 30_000L
+        private const val MISS_LOG_MAX_TRACKED_KEYS = 4096
         private val osmHashTracker = LinkedHashMap<String, OsmHashWindow>()
+        private val lastMissLogAtMsByKey = LinkedHashMap<String, Long>()
 
         private data class OsmHashWindow(
             var firstSeenMs: Long,
@@ -108,7 +111,10 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
             }
         }
         if (cached == null || usedKey == null) {
-            MapCacheDebug.log("tile miss source=${pTileSource.name()} key=${keys.first()}")
+            val primaryKey = keys.first()
+            if (shouldLogMiss(primaryKey)) {
+                MapCacheDebug.log("tile miss source=${pTileSource.name()} key=$primaryKey")
+            }
             return null
         }
         val hash = sha256Hex(cached.bytes)
@@ -206,6 +212,26 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
             }
         }
         return false
+    }
+
+    private fun shouldLogMiss(cacheKey: String): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(lastMissLogAtMsByKey) {
+            val previous = lastMissLogAtMsByKey[cacheKey]
+            if (previous != null && (now - previous) < MISS_LOG_MIN_INTERVAL_MS) {
+                return false
+            }
+            lastMissLogAtMsByKey[cacheKey] = now
+            if (lastMissLogAtMsByKey.size > MISS_LOG_MAX_TRACKED_KEYS) {
+                val iter = lastMissLogAtMsByKey.entries.iterator()
+                repeat(lastMissLogAtMsByKey.size - MISS_LOG_MAX_TRACKED_KEYS) {
+                    if (!iter.hasNext()) return@repeat
+                    iter.next()
+                    iter.remove()
+                }
+            }
+            return true
+        }
     }
 
     private fun sha256Hex(bytes: ByteArray): String {

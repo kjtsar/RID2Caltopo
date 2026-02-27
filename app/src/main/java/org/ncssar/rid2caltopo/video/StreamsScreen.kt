@@ -167,6 +167,7 @@ private const val OSM_TILE_DOWNLOAD_THREADS: Short = 1
 private const val OSM_TILE_DOWNLOAD_MAX_QUEUE: Short = 1000
 private const val TILE_FS_THREADS: Short = 4
 private const val TILE_FS_MAX_QUEUE: Short = 2000
+private const val TILE_IO_ACTIVE_GRACE_MS = 2_000L
 
 private enum class ScreenLayoutMode {
     Both,
@@ -699,6 +700,8 @@ private fun SplitMapPane(
     var prevTileMisses by remember { mutableStateOf(0L) }
     var prevDemHits by remember { mutableStateOf(0L) }
     var prevDemMisses by remember { mutableStateOf(0L) }
+    var tileIoActiveUntilMs by remember { mutableStateOf(System.currentTimeMillis() + 12_000L) }
+    var lastViewportSignature by remember { mutableStateOf<String?>(null) }
     val demAglByDesignator = remember { mutableStateMapOf<String, DroneAglState>() }
     val demPendingByDesignator = remember { HashSet<String>() }
     val demKeyByDesignator = remember { LinkedHashMap<String, String>() }
@@ -756,7 +759,7 @@ private fun SplitMapPane(
     }
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
-    val focusedDrone = dronePoints.firstOrNull { it.designator == focusedPath } ?: dronePoints.firstOrNull()
+    val selectedDrone = dronePoints.firstOrNull { it.designator == focusedPath }
     val offlineBoundaryOptions = remember(artifactOverlayState) {
         buildOfflineBoundaryOptions(artifactOverlayState)
     }
@@ -773,6 +776,7 @@ private fun SplitMapPane(
         if (baseLayer == BaseLayerOption.OpenStreetMap) {
             offlinePrepMaxThroughput = false
         }
+        tileIoActiveUntilMs = System.currentTimeMillis() + TILE_IO_ACTIVE_GRACE_MS
     }
     LaunchedEffect(autoRemoveBadTiles) {
         BadTilePolicy.setAutoRemoveEnabled(context, autoRemoveBadTiles)
@@ -857,8 +861,7 @@ private fun SplitMapPane(
         }
     }
 
-    fun calibrateFocusedDroneAto50() {
-        val target = focusedDrone ?: return
+    fun calibrateDroneAto50(target: DroneMapPoint) {
         val targetAtoM = CALIBRATE_ATO_TARGET_FT * FT_TO_METERS
         uiScope.launch(Dispatchers.IO) {
             val sample = demElevationService.sampleElevationMeters(target.lat, target.lng)
@@ -895,6 +898,11 @@ private fun SplitMapPane(
                 }
             }
         }
+    }
+
+    fun calibrateSelectedDroneAto50() {
+        val target = selectedDrone ?: return
+        calibrateDroneAto50(target)
     }
 
     fun selectedTileSource(): org.osmdroid.tileprovider.tilesource.ITileSource {
@@ -1426,15 +1434,34 @@ private fun SplitMapPane(
                 if (mapView.maxZoomLevel != maxZoom) {
                     mapView.setMaxZoomLevel(maxZoom)
                 }
-                if (!mapView.useDataConnection()) {
-                    mapView.setUseDataConnection(true)
-                }
-                if (!tileMapProvider.useDataConnection()) {
-                    tileMapProvider.setUseDataConnection(true)
-                }
                 if (mapView.tileProvider.tileSource.name() != tileSource.name()) {
                     mapView.setTileSource(tileSource)
+                    tileIoActiveUntilMs = uiNowWallMsec + TILE_IO_ACTIVE_GRACE_MS
                 }
+
+                val center = mapView.mapCenter
+                val viewportSignature = String.format(
+                    Locale.US,
+                    "%.5f|%.5f|%.3f|%d|%d|%s",
+                    center.latitude,
+                    center.longitude,
+                    mapView.zoomLevelDouble,
+                    mapView.width,
+                    mapView.height,
+                    tileSource.name()
+                )
+                if (lastViewportSignature != viewportSignature) {
+                    lastViewportSignature = viewportSignature
+                    tileIoActiveUntilMs = uiNowWallMsec + TILE_IO_ACTIVE_GRACE_MS
+                }
+                val tileIoActive = offlinePrepInFlight || (uiNowWallMsec <= tileIoActiveUntilMs)
+                if (mapView.useDataConnection() != tileIoActive) {
+                    mapView.setUseDataConnection(tileIoActive)
+                }
+                if (tileMapProvider.useDataConnection() != tileIoActive) {
+                    tileMapProvider.setUseDataConnection(tileIoActive)
+                }
+                tileMapProvider.setCacheLookupEnabled(tileIoActive)
 
                 if (managedOverlays.isNotEmpty()) {
                     mapView.overlays.removeAll(managedOverlays)
@@ -1724,6 +1751,25 @@ private fun SplitMapPane(
                         val atoText = labelAtoFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
                         val distanceText = labelRangeFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
                         title = "desig: ${point.designator}, AGL: $aglText, ATO: $atoText, distance: $distanceText"
+                        subDescription = "Tap again to calibrate ${CALIBRATE_ATO_TARGET_FT.toInt()}' ATO"
+                        setOnMarkerClickListener { tappedMarker, _ ->
+                            val alreadySelected = focusedPath == point.designator
+                            val bubbleAlreadyOpen = tappedMarker.isInfoWindowShown
+                            if (!alreadySelected) {
+                                viewModel.toggleFocus(point.designator)
+                            }
+                            if (alreadySelected && bubbleAlreadyOpen) {
+                                calibrateDroneAto50(point)
+                                CaltopoClient.ShowToast(
+                                    "Calibrating ${point.designator} to ${CALIBRATE_ATO_TARGET_FT.toInt()}' ATO..."
+                                )
+                                tappedMarker.closeInfoWindow()
+                                true
+                            } else {
+                                tappedMarker.showInfoWindow()
+                                true
+                            }
+                        }
                     }
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
@@ -1958,6 +2004,62 @@ private fun SplitMapPane(
             }
         )
 
+        val selectedAglFeet = selectedDrone?.let { selected ->
+            val aglState = demAglByDesignator[selected.designator]
+            val calibration = demCalibrationByDesignator[selected.designator]
+            val aglM = when {
+                aglState == null -> null
+                calibration != null ->
+                    (calibration.takeoffGroundM + (selected.altitudeM - calibration.takeoffDroneAltM)) - aglState.groundM
+                else -> aglState.aglM
+            }
+            aglM?.times(METERS_TO_FEET)
+        }
+        val selectedAtoFeet = selectedDrone?.let { selected ->
+            demCalibrationByDesignator[selected.designator]
+                ?.let { calibration -> (selected.altitudeM - calibration.takeoffDroneAltM) * METERS_TO_FEET }
+        }
+        val selectedRangeFeet = selectedDrone?.let { selected ->
+            complianceByDesignator[selected.designator]?.rangeFromHomeM?.times(METERS_TO_FEET)
+        }
+
+        selectedDrone?.let { selected ->
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 6.dp, top = 6.dp, end = 62.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(1.dp)
+                ) {
+                    Text(
+                        text = "Selected: ${selected.designator}",
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "AGL ${selectedAglFeet?.let { "%.0f'".format(it) } ?: "--"}  " +
+                            "ATO ${selectedAtoFeet?.let { "%.0f'".format(it) } ?: "--"}  " +
+                            "Range ${selectedRangeFeet?.let { "%.0f'".format(it) } ?: "--"}",
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                TextButton(
+                    onClick = { calibrateSelectedDroneAto50() }
+                ) {
+                    Text("Calibrate 50' ATO", fontSize = 11.sp)
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -1988,12 +2090,12 @@ private fun SplitMapPane(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Calibrate 50' ATO") },
+                    text = { Text("Calibrate selected 50' ATO") },
                     onClick = {
-                        calibrateFocusedDroneAto50()
+                        calibrateSelectedDroneAto50()
                         settingsMenuExpanded = false
                     },
-                    enabled = focusedDrone != null
+                    enabled = selectedDrone != null
                 )
                 DropdownMenuItem(
                     text = { Text(if (predictiveHeadEnabled) "Predictive Head: On" else "Predictive Head: Off") },
@@ -3533,6 +3635,7 @@ private fun StreamsGrid(
                         viewModel = viewModel,
                         streamDesignator = path,
                         streamState = info.state,
+                        streamErrorDetail = info.errorDetail,
                         onToggleFocus = {
                             viewModel.toggleFocus(path)
                         },

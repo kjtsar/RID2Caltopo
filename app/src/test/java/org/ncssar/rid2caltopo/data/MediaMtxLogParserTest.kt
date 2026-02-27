@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaMtxLogParserTest {
@@ -34,6 +35,7 @@ class MediaMtxLogParserTest {
         assertEquals(MediaMTXEvent.StreamStarted("alpha").path, (result.event as MediaMTXEvent.StreamStarted).path)
         assertEquals(emptySet<String>(), result.state.pendingRunOnReadyPaths)
         assertEquals(emptySet<String>(), result.state.pendingRunOnReadyVerbPaths)
+        assertEquals("alpha", result.state.rtmpConnPathMap["127.0.0.1:5555"])
     }
 
     @Test
@@ -44,5 +46,31 @@ class MediaMtxLogParserTest {
         )
 
         assertEquals(MediaMTXEvent.HlsStreamStarted("bravo").path, (result.event as MediaMTXEvent.HlsStreamStarted).path)
+    }
+
+    @Test
+    fun parseLine_rtmpClosedWithMappedConnection_emitsErrorAndSuppressesImmediateStop() {
+        val start = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.10:5000] is publishing to path 'alpha'",
+        )
+        assertTrue(start.event is MediaMTXEvent.StreamStarted)
+
+        val closed = MediaMtxLogParser.parseLine(
+            start.state,
+            "[RTMP] [conn 192.168.1.10:5000] closed: received an audio packet, track is H264",
+        )
+        val error = closed.event as MediaMTXEvent.StreamError
+        assertEquals("alpha", error.path)
+        assertEquals(
+            "RTMP closed: received an audio packet, track is H264",
+            error.reason,
+        )
+
+        val stopped = MediaMtxLogParser.parseLine(
+            closed.state,
+            "[path alpha] runOnReady command stopped",
+        )
+        assertNull(stopped.event)
     }
 }

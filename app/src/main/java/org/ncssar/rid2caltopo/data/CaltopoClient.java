@@ -247,19 +247,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static boolean NotifySettingsChangedFlag;
 
     public static class PositionTelemetry {
-        @Nullable public final Double aircraftAltitudeFt;
-        @Nullable public final Double aircraftAltitudeRateFpm;
-        @Nullable public final Double aircraftGsKnots;
-        @Nullable public final Double aircraftHeadingDeg;
-        @Nullable public final Double aircraftTrackDeg;
-        @Nullable public final Double aircraftPitchDeg;
-        @Nullable public final Double aircraftRollDeg;
-        @Nullable public final Double cameraAzimuthDeg;
-        @Nullable public final Double cameraTiltDeg;
-        @Nullable public final Double cameraFovWidthDeg;
-        @Nullable public final Double cameraFovHeightDeg;
-        @Nullable public final String cameraExternalUrl;
-        @Nullable public final String cameraThumbnailUrl;
+        @Nullable public final Double aircraftAltitudeFt;      //  (height above MSL in feet, if both elevation and altitude are specified, altitude wins)
+        @Nullable public final Double aircraftAltitudeRateFpm; // (rate of climb in ft/min)
+        @Nullable public final Double aircraftGsKnots;         // (speed over the ground in knots)
+        @Nullable public final Double aircraftHeadingDeg;      // (direction the nose is pointing)
+        @Nullable public final Double aircraftTrackDeg;        // (direction of travel over the ground)
+        @Nullable public final Double aircraftPitchDeg;        // (in degrees, positive is nose up)
+        @Nullable public final Double aircraftRollDeg;         // (posiitive is left wing up)
+        @Nullable public final Double cameraAzimuthDeg;        // (angle the camera is facing, degrees true north)
+        @Nullable public final Double cameraTiltDeg;           // (up/down angle relative to horizon, -90 is straight down)
+        @Nullable public final Double cameraFovWidthDeg;       // (horizontal field of view in degrees)
+        @Nullable public final Double cameraFovHeightDeg;      // (vertical field of view in degrees)
+        @Nullable public final String cameraExternalUrl;       // (link to an external website showing the camera livestream)
+        @Nullable public final String cameraThumbnailUrl;      //  (direct link to camera thumbnail image)
 
         public PositionTelemetry(
                 @Nullable Double aircraftAltitudeFt,
@@ -409,10 +409,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String retval = LoggingLevelName(DebugLevel);
         ArchiveState("Logging level changed to: " + retval);
         return retval;
-    }
-
-    public interface DebugMessageSupplier {
-        String get();
     }
 
     public static boolean CTDebugEnabled(@Nullable String tag) {
@@ -592,6 +588,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void CTInfo(String tag, String msg) {
         RegisterDebugTag(tag);
         if (DebugLevel >= DebugLevelInfo) {
+            if (!CTDebugEnabled(tag)) return;
             long myTid = Process.myTid();
             String tidString = "[" + ProcessId + "-" + ((MainThreadId == myTid) ? "main]" : myTid + "]");
             CTLog("INFO" + tidString, tag, msg);
@@ -609,6 +606,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         msg = "CTDebug" + tidString + ": " + msg;
         Log.d(tag, msg);
     }
+/***
+
+ public interface DebugMessageSupplier {
+ String get();
+ }
 
     public static void CTDebug(String tag, DebugMessageSupplier supplier) {
         RegisterDebugTag(tag);
@@ -622,7 +624,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         CTDebug(tag, msg);
     }
-
+***/
     public static void CTError(String tag, String msg) {
         RegisterDebugTag(tag);
         long myTid = Process.myTid();
@@ -2077,6 +2079,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (null == droneSpec) {
             CTError(TAG, String.format(Locale.US, "newWaypoint() droneSpec missing for %s", remoteId));
             return false;
+        }
+        if (telemetry != null) {
+            droneSpec.setLastPositionTelemetry(telemetry);
         }
         if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) {
             // Keep local map motion responsive even when this waypoint is filtered out

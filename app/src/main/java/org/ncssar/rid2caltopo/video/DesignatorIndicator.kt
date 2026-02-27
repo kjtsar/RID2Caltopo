@@ -31,6 +31,7 @@ fun DesignatorIndicator(
     streamDesignator: String,
     viewModel: StreamsViewModel,
     streamState: StreamState,
+    streamErrorDetail: String?,
     onLongPress: () -> Unit
 ) {
     val tag = "DesignatorIndicator"
@@ -38,7 +39,7 @@ fun DesignatorIndicator(
         StreamState.CONNECTING -> "Connecting..."
         StreamState.LIVE -> "Live"
         StreamState.STOPPED -> "Stopped"
-        StreamState.ERROR -> "Error"
+        StreamState.ERROR -> streamErrorDetail?.let { "Error ($it)" } ?: "Error"
     }
     val mapName = viewModel.mapName
     var mapStatus = "Standalone"

@@ -321,36 +321,51 @@ class StreamsViewModel(
         droneSpec: CtDroneSpec,
         telemetry: StreamTelemetrySnapshot?
     ): String? {
-        if (telemetry == null) return null
+        val ridTelemetry = droneSpec.lastPositionTelemetry
+        if (telemetry == null && ridTelemetry == null) return null
 
         val lines = mutableListOf<String>()
-        lines += "[Stream Telemetry]"
         lines += "Designator: $designator"
         lines += "Mapped ID: ${droneSpec.mappedId}"
         lines += "RID (track): ${droneSpec.remoteId}"
 
-        telemetry.latestRemoteId?.let { lines += "RID (stream): $it" }
-        if (telemetry.remoteIdCandidates.isNotEmpty()) {
-            lines += "RID candidates: ${telemetry.remoteIdCandidates.joinToString(",")}"
+        ridTelemetry?.let { rid ->
+            lines += "[RID Telemetry]"
+            rid.aircraftAltitudeFt?.let { lines += String.format(Locale.US, "Aircraft altitude: %.0f ft", it) }
+            rid.aircraftAltitudeRateFpm?.let { lines += String.format(Locale.US, "Aircraft vertical rate: %.0f fpm", it) }
+            rid.aircraftGsKnots?.let { lines += String.format(Locale.US, "Aircraft ground speed: %.1f kt", it) }
+            rid.aircraftHeadingDeg?.let { lines += String.format(Locale.US, "Aircraft heading: %.1f deg", it) }
+            rid.aircraftTrackDeg?.let { lines += String.format(Locale.US, "Aircraft track: %.1f deg", it) }
         }
-        if (telemetry.latitude != null && telemetry.longitude != null) {
-            val altText = telemetry.altitudeMeters?.let { String.format(Locale.US, ", alt=%.1fm", it) } ?: ""
-            lines += String.format(Locale.US, "Stream position: %.6f, %.6f%s", telemetry.latitude, telemetry.longitude, altText)
+
+        telemetry?.let {
+            lines += "[Stream Telemetry]"
+
+            telemetry.latestRemoteId?.let { lines += "RID (stream): $it" }
+            if (telemetry.remoteIdCandidates.isNotEmpty()) {
+                lines += "RID candidates: ${telemetry.remoteIdCandidates.joinToString(",")}" 
+            }
+            if (telemetry.latitude != null && telemetry.longitude != null) {
+                val altText = telemetry.altitudeMeters?.let { String.format(Locale.US, ", alt=%.1fm", it) } ?: ""
+                lines += String.format(Locale.US, "Stream position: %.6f, %.6f%s", telemetry.latitude, telemetry.longitude, altText)
+            }
+            telemetry.headingDeg?.let { lines += String.format(Locale.US, "Heading: %.1f deg", it) }
+            telemetry.gimbalPitchDeg?.let { lines += String.format(Locale.US, "Gimbal pitch: %.1f deg", it) }
+            telemetry.cameraYawDeg?.let { lines += String.format(Locale.US, "Camera yaw: %.1f deg", it) }
+            telemetry.sourceTag?.let { src ->
+                val confidenceText = telemetry.confidence?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"
+                lines += "Telemetry source: $src (confidence=$confidenceText)"
+            }
+            telemetry.sourceTimestampUs?.let { lines += "Telemetry timestamp(us): $it" }
         }
-        telemetry.headingDeg?.let { lines += String.format(Locale.US, "Heading: %.1f deg", it) }
-        telemetry.gimbalPitchDeg?.let { lines += String.format(Locale.US, "Gimbal pitch: %.1f deg", it) }
-        telemetry.cameraYawDeg?.let { lines += String.format(Locale.US, "Camera yaw: %.1f deg", it) }
-        telemetry.sourceTag?.let { src ->
-            val confidenceText = telemetry.confidence?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"
-            lines += "Telemetry source: $src (confidence=$confidenceText)"
-        }
-        telemetry.sourceTimestampUs?.let { lines += "Telemetry timestamp(us): $it" }
         return lines.joinToString("\n")
     }
 
     private fun appendTelemetrySummary(description: String, summary: String?): String {
         if (summary.isNullOrBlank()) return description
+        if (description.trim() == summary.trim()) return description
         if (description.contains("[Stream Telemetry]")) return description
+        if (description.contains("[RID Telemetry]")) return description
         if (description.isBlank()) return summary
         return "$description\n\n$summary"
     }

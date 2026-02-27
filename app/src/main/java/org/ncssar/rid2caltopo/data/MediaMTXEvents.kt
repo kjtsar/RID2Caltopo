@@ -17,6 +17,7 @@ sealed class MediaMTXEvent {
     ) : MediaMTXEvent()
     data class StreamError(
         val path: String,
+        val reason: String? = null,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()
     data class ServerStarted(

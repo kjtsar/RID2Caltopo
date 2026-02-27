@@ -8,6 +8,7 @@ data class StreamInfo(
     val designator: String,    // MediaMTX designator s/b <callsign><dronedesc>, but could be anything.
     //val protocol: Protocol,  // MediaMTX protocol
     val state: StreamState,
+    val errorDetail: String? = null,
 )
 
 enum class StreamState {

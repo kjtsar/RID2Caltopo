@@ -18,7 +18,7 @@ object MediaMTXBootstrap {
                     StreamRegistry.onStreamStopped(event.path)
 
                 is MediaMTXEvent.StreamError ->
-                    StreamRegistry.onStreamError(event.path)
+                    StreamRegistry.onStreamError(event.path, event.reason)
 
                 is MediaMTXEvent.ServerStarted ->
                     MediaMTXStatus.onServerStarted(event.version)

@@ -30,6 +30,53 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
+
+    public static class PositionTelemetry {
+        @Nullable public final Double aircraftAltitudeFt;      //  (height above MSL in feet, if both elevation and altitude are specified, altitude wins)
+        @Nullable public final Double aircraftAltitudeRateFpm; // (rate of climb in ft/min)
+        @Nullable public final Double aircraftGsKnots;         // (speed over the ground in knots)
+        @Nullable public final Double aircraftHeadingDeg;      // (direction the nose is pointing)
+        @Nullable public final Double aircraftTrackDeg;        // (direction of travel over the ground)
+        @Nullable public final Double aircraftPitchDeg;        // (in degrees, positive is nose up)
+        @Nullable public final Double aircraftRollDeg;         // (posiitive is left wing up)
+        @Nullable public final Double cameraAzimuthDeg;        // (angle the camera is facing, degrees true north)
+        @Nullable public final Double cameraTiltDeg;           // (up/down angle relative to horizon, -90 is straight down)
+        @Nullable public final Double cameraFovWidthDeg;       // (horizontal field of view in degrees)
+        @Nullable public final Double cameraFovHeightDeg;      // (vertical field of view in degrees)
+        @Nullable public final String cameraExternalUrl;       // (link to an external website showing the camera livestream)
+        @Nullable public final String cameraThumbnailUrl;      //  (direct link to camera thumbnail image)
+
+        public PositionTelemetry(
+                @Nullable Double aircraftAltitudeFt,
+                @Nullable Double aircraftAltitudeRateFpm,
+                @Nullable Double aircraftGsKnots,
+                @Nullable Double aircraftHeadingDeg,
+                @Nullable Double aircraftTrackDeg,
+                @Nullable Double aircraftPitchDeg,
+                @Nullable Double aircraftRollDeg,
+                @Nullable Double cameraAzimuthDeg,
+                @Nullable Double cameraTiltDeg,
+                @Nullable Double cameraFovWidthDeg,
+                @Nullable Double cameraFovHeightDeg,
+                @Nullable String cameraExternalUrl,
+                @Nullable String cameraThumbnailUrl
+        ) {
+            this.aircraftAltitudeFt = aircraftAltitudeFt;
+            this.aircraftAltitudeRateFpm = aircraftAltitudeRateFpm;
+            this.aircraftGsKnots = aircraftGsKnots;
+            this.aircraftHeadingDeg = aircraftHeadingDeg;
+            this.aircraftTrackDeg = aircraftTrackDeg;
+            this.aircraftPitchDeg = aircraftPitchDeg;
+            this.aircraftRollDeg = aircraftRollDeg;
+            this.cameraAzimuthDeg = cameraAzimuthDeg;
+            this.cameraTiltDeg = cameraTiltDeg;
+            this.cameraFovWidthDeg = cameraFovWidthDeg;
+            this.cameraFovHeightDeg = cameraFovHeightDeg;
+            this.cameraExternalUrl = cameraExternalUrl;
+            this.cameraThumbnailUrl = cameraThumbnailUrl;
+        }
+    }
+
     public enum TransportTypeEnum {
         BT4,
         BT5,
@@ -77,7 +124,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public transient double lastLng;
     public transient double lastAlt;
     @Nullable
-    private transient CaltopoClient.PositionTelemetry lastPositionTelemetry;
+    private transient PositionTelemetry lastPositionTelemetry;
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
     private boolean okToLog = true;
@@ -187,8 +234,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public double getLastLng() {return lastLng;}
     public double getLastAlt() {return lastAlt;}
     @Nullable
-    public CaltopoClient.PositionTelemetry getLastPositionTelemetry() { return lastPositionTelemetry; }
-    public void setLastPositionTelemetry(@Nullable CaltopoClient.PositionTelemetry telemetry) {
+    public PositionTelemetry getLastPositionTelemetry() { return lastPositionTelemetry; }
+    public void setLastPositionTelemetry(@Nullable PositionTelemetry telemetry) {
         lastPositionTelemetry = telemetry;
     }
     public double getDistanceInFeet() { return distanceInFeet;}
@@ -354,7 +401,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (lastLat != 0.0F) {
             Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
             lDistanceInFeet = dbResult[0] * FeetPerMeter;
-            if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet() &&
+            if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet() ||
                     (msecTimestamp - mostRecentMsecTimestamp) < MinMsecInterval) return false;
             distanceInFeet += lDistanceInFeet;
         }

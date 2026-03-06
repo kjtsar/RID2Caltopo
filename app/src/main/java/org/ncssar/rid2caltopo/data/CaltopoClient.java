@@ -8,16 +8,13 @@
 
 package org.ncssar.rid2caltopo.data;
 
-import static androidx.core.content.ContextCompat.getSystemService;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.LoggingLevelName;
 
 import android.app.Activity;
-import android.app.NotificationManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.UriPermission;
-import android.content.res.Resources;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -60,7 +57,6 @@ import java.security.KeyStore;
 import java.util.concurrent.Future;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -71,16 +67,13 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import org.ncssar.rid2caltopo.BuildConfig;
-import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.app.MediaMTXService;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.ScanningService;
 import com.google.firebase.analytics.FirebaseAnalytics;
 
-import okhttp3.Dns;
 import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
@@ -194,6 +187,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     static final long ProcessId = Process.myPid();
     private static final String BASE_URL = "https://caltopo.com/api/v1/position/report/";
     private static final String TAG = "CaltopoClient";
+    private static final String ICON_LATENCY_TAG = "RidIconLatency";
     public static final int DebugLevelError = 0;
     public static final int DebugLevelWarn = 1;
     public static final int DebugLevelDebug = 2;
@@ -206,7 +200,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final int LivePublishThreadPoolSize = 2;
     private static final int GeoJsonStatsThreadPoolSize = 2;
     private static final int ArchiveScanThreadPoolSize = 1;
-    private static boolean WarnMissingMapFlag = false;
     private static Hashtable<String, CaltopoClient> ClientMap;
     private static ExecutorService LivePublishExecutorPool = null;
     private static ExecutorService GeoJsonStatsExecutorPool = null;
@@ -245,53 +238,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final ArrayList<CtDroneSpec> DsArray = new ArrayList<>(16);
     private static long DroneSpecsArraySize = DsArray.size();
     private static boolean NotifySettingsChangedFlag;
-
-    public static class PositionTelemetry {
-        @Nullable public final Double aircraftAltitudeFt;      //  (height above MSL in feet, if both elevation and altitude are specified, altitude wins)
-        @Nullable public final Double aircraftAltitudeRateFpm; // (rate of climb in ft/min)
-        @Nullable public final Double aircraftGsKnots;         // (speed over the ground in knots)
-        @Nullable public final Double aircraftHeadingDeg;      // (direction the nose is pointing)
-        @Nullable public final Double aircraftTrackDeg;        // (direction of travel over the ground)
-        @Nullable public final Double aircraftPitchDeg;        // (in degrees, positive is nose up)
-        @Nullable public final Double aircraftRollDeg;         // (posiitive is left wing up)
-        @Nullable public final Double cameraAzimuthDeg;        // (angle the camera is facing, degrees true north)
-        @Nullable public final Double cameraTiltDeg;           // (up/down angle relative to horizon, -90 is straight down)
-        @Nullable public final Double cameraFovWidthDeg;       // (horizontal field of view in degrees)
-        @Nullable public final Double cameraFovHeightDeg;      // (vertical field of view in degrees)
-        @Nullable public final String cameraExternalUrl;       // (link to an external website showing the camera livestream)
-        @Nullable public final String cameraThumbnailUrl;      //  (direct link to camera thumbnail image)
-
-        public PositionTelemetry(
-                @Nullable Double aircraftAltitudeFt,
-                @Nullable Double aircraftAltitudeRateFpm,
-                @Nullable Double aircraftGsKnots,
-                @Nullable Double aircraftHeadingDeg,
-                @Nullable Double aircraftTrackDeg,
-                @Nullable Double aircraftPitchDeg,
-                @Nullable Double aircraftRollDeg,
-                @Nullable Double cameraAzimuthDeg,
-                @Nullable Double cameraTiltDeg,
-                @Nullable Double cameraFovWidthDeg,
-                @Nullable Double cameraFovHeightDeg,
-                @Nullable String cameraExternalUrl,
-                @Nullable String cameraThumbnailUrl
-        ) {
-            this.aircraftAltitudeFt = aircraftAltitudeFt;
-            this.aircraftAltitudeRateFpm = aircraftAltitudeRateFpm;
-            this.aircraftGsKnots = aircraftGsKnots;
-            this.aircraftHeadingDeg = aircraftHeadingDeg;
-            this.aircraftTrackDeg = aircraftTrackDeg;
-            this.aircraftPitchDeg = aircraftPitchDeg;
-            this.aircraftRollDeg = aircraftRollDeg;
-            this.cameraAzimuthDeg = cameraAzimuthDeg;
-            this.cameraTiltDeg = cameraTiltDeg;
-            this.cameraFovWidthDeg = cameraFovWidthDeg;
-            this.cameraFovHeightDeg = cameraFovHeightDeg;
-            this.cameraExternalUrl = cameraExternalUrl;
-            this.cameraThumbnailUrl = cameraThumbnailUrl;
-        }
-    }
-
 
     public CaltopoClient(String rid) throws RuntimeException {
         ClientClassState ccs = GetState();
@@ -609,25 +555,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         msg = "CTDebug" + tidString + ": " + msg;
         Log.d(tag, msg);
     }
-/***
 
- public interface DebugMessageSupplier {
- String get();
- }
-
-    public static void CTDebug(String tag, DebugMessageSupplier supplier) {
-        RegisterDebugTag(tag);
-        if (!CTDebugEnabled(tag)) return;
-        String msg;
-        try {
-            msg = supplier.get();
-        } catch (Exception e) {
-            CTError(tag, "CTDebug supplier raised", e);
-            return;
-        }
-        CTDebug(tag, msg);
-    }
-***/
     public static void CTError(String tag, String msg) {
         RegisterDebugTag(tag);
         long myTid = Process.myTid();
@@ -1379,7 +1307,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 long currentAgeOutInMsec = newTrackDelayInMsec - droneSpecIdleInMsec;
                 if (currentAgeOutInMsec <= 0) continue;
                 if (currentAgeOutInMsec < nextAgeOutInMsec) nextAgeOutInMsec = currentAgeOutInMsec;
-                CTDebug(TAG, String.format(Locale.US,
+                if (CTDebugEnabled(TAG)) CTDebug(TAG, String.format(Locale.US,
                         "ProcessSortedCurrentDroneSpecArray(%s): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
                         changedFlag, ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
                 DsArray.add(ds);
@@ -1388,7 +1316,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             DsArray.sort(CtDroneSpec::compareToAge);
             long newSize = DsArray.size();
             if (!changedFlag && (DroneSpecsArraySize != newSize)) {
-                CTDebug(TAG, String.format(Locale.US,
+                if (CTDebugEnabled(TAG)) CTDebug(TAG, String.format(Locale.US,
                         "ProcessSortedCurrentDroneSpecArray(): arraySize changed from:%d to :%d", DroneSpecsArraySize, newSize));
                 DroneSpecsArraySize = newSize;
             }
@@ -1841,7 +1769,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     private static void appendPositionTelemetryQuery(@NonNull StringBuilder sb,
-                                                     @Nullable PositionTelemetry telemetry) {
+                                                     @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         if (telemetry == null) return;
         JSONObject aircraft = new JSONObject();
         JSONObject camera = new JSONObject();
@@ -1895,7 +1823,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      *  would make sense if we can get broadcast/rendezvous working.
      */
     public void bgPublishLive(String deviceId, double lat, double lng, long altitudeInMeters,
-                              @Nullable PositionTelemetry telemetry) {
+                              @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         StringBuilder urlBuilder = new StringBuilder(String.format(Locale.US,
                 "%s%s?id=%s&lat=%.6f&lng=%.6f&elevation=%d",
                 BASE_URL, deviceId, deviceId, lat, lng, altitudeInMeters));
@@ -1936,7 +1864,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public void publishLive(double lat, double lng, long altitudeInMeters,
-                            @Nullable PositionTelemetry telemetry) {
+                            @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         if (IsExitRequested()) return;
         try {
             GetLivePublishExecutorPool().submit(() ->
@@ -1993,7 +1921,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 .header("X-SAR-Token", ccs.trackerApiKey)
                 .build();
 
-        CTDebug(TAG, "BgPublishStats(): uploading " + geoJsonString.length() + " characters to '" + urlStr + "'");
+        if (CTDebugEnabled(TAG)) CTDebug(TAG, "BgPublishStats(): uploading " + geoJsonString.length() + " characters to '" + urlStr + "'");
 
         try (Response response = CaltopoSession.MyOkHttpClient.newCall(request).execute()) {
             int responseCode = response.code();
@@ -2008,7 +1936,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             String bodyString = response.body() != null ? response.body().string() : "";
             responseLog.append(bodyString);
 
-            CTDebug(TAG, responseLog.toString());
+            if (CTDebugEnabled(TAG)) CTDebug(TAG, responseLog.toString());
             return responseCode;
 
         } catch (IOException e) {
@@ -2076,7 +2004,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
     public boolean newWaypoint(double lat, double lng, long altitudeInMeters, long droneTimestampInMilliseconds,
                                CtDroneSpec.TransportTypeEnum transportType,
-                               @Nullable PositionTelemetry telemetry) {
+                               @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         boolean goLiveFlag = GetGoLiveFlag();
 
         if (null == droneSpec) {
@@ -2086,30 +2014,40 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (telemetry != null) {
             droneSpec.setLastPositionTelemetry(telemetry);
         }
-        if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType)) {
+        boolean accepted = droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, transportType);
+        if (CTDebugEnabled(ICON_LATENCY_TAG))  CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                "waypoint_gate remoteId=%s accepted=%s droneTs=%d lat=%.6f lng=%.6f alt=%d transport=%s",
+                remoteId, accepted, droneTimestampInMilliseconds, lat, lng, altitudeInMeters, transportType));
+        if (!accepted) {
             // Keep local map motion responsive even when this waypoint is filtered out
             // for Caltopo publishing/rate control.
             CaltopoLiveTrack.NotifyLocalTrackPoint(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
             return false;
         }
         long goodCount = droneSpec.getGoodCount();
-        CTDebug(TAG, String.format(Locale.US,
+        if (CTDebugEnabled(TAG)) CTDebug(TAG, String.format(Locale.US,
                 "newWaypoint(%d): adding %.7f, %.7f to %s via %s...",
                 goodCount, lat, lng, droneSpec.trackLabel(), transportType));
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
         CaltopoMap.MapStatusListener.mapStatus mapStatus = CaltopoMap.GetMapStatus();
         if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
             if (null == liveTrack) {
-                CTDebug(TAG, "newWaypoint(): starting new liveTrack for: " + droneSpec.trackLabel());
+                if (CTDebugEnabled(TAG)) CTDebug(TAG, "newWaypoint(): starting new liveTrack for: " + droneSpec.trackLabel());
                 liveTrack = new CaltopoLiveTrack(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds, telemetry);
             } else if (liveTrack.isActive()) {
                 liveTrack.publishDirect(lat, lng, altitudeInMeters, droneTimestampInMilliseconds, telemetry);
             } else {
-                CTDebug(TAG, "newWaypoint(): restarting liveTrack: " + droneSpec.trackLabel());
+                if (CTDebugEnabled(TAG)) CTDebug(TAG, "newWaypoint(): restarting liveTrack: " + droneSpec.trackLabel());
                 liveTrack.startNewTrack(lat, lng, altitudeInMeters, droneTimestampInMilliseconds, telemetry);
             }
 
             // Idle-track termination is handled centrally by ProcessSortedCurrentDroneSpecArray().
+        } else {
+            // Keep local map motion responsive even when the Teams/Caltopo live-track path is unavailable.
+            CaltopoLiveTrack.NotifyLocalTrackPoint(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
+            if (CTDebugEnabled(ICON_LATENCY_TAG)) CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                    "track_notify_fallback remoteId=%s droneTs=%d lat=%.6f lng=%.6f alt=%d mapStatus=%s",
+                    remoteId, droneTimestampInMilliseconds, lat, lng, altitudeInMeters, mapStatus));
         }
 
         // Preserve legacy personal-map behavior: when no Teams map is up,

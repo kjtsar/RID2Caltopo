@@ -42,6 +42,7 @@ import java.util.LinkedList;
  */
 
 public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
+    private static final String ICON_LATENCY_TAG = "RidIconLatency";
     public interface LocalTrackListener {
         void onLocalTrackPoint(
                 @NonNull String remoteId,
@@ -64,10 +65,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         final double lng;
         final double ele;
         final long timestampMsec;
-        @Nullable final CaltopoClient.PositionTelemetry telemetry;
+        @Nullable final CtDroneSpec.PositionTelemetry telemetry;
 
         QueuedPoint(double lat, double lng, double ele, long timestampMsec,
-                    @Nullable CaltopoClient.PositionTelemetry telemetry) {
+                    @Nullable CtDroneSpec.PositionTelemetry telemetry) {
             this.lat = lat;
             this.lng = lng;
             this.ele = ele;
@@ -91,7 +92,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     public CaltopoLiveTrack(@NonNull CtDroneSpec droneSpec, double lat, double lng, double ele,
                             long droneTimestampInMsec,
-                            @Nullable CaltopoClient.PositionTelemetry telemetry) throws RuntimeException {
+                            @Nullable CtDroneSpec.PositionTelemetry telemetry) throws RuntimeException {
         if (droneSpec.trackLabel().isEmpty()) {
             throw new RuntimeException("CaltopoLiveTrack(): trackLabel is required.");
         }
@@ -117,7 +118,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     /*
      */
     public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec,
-                              @Nullable CaltopoClient.PositionTelemetry telemetry) {
+                              @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         if (shuttingDown) return;
 
         linePoints.add(new QueuedPoint(lat, lng, ele, droneTimestampInMsec, telemetry));
@@ -194,7 +195,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     public static void NotifyLocalTrackPoint(@NonNull CtDroneSpec droneSpec,
                                              double lat, double lng, double altitudeMeters,
                                              long timestampMsec) {
-        if (LocalTrackListeners.isEmpty()) return;
+        if (LocalTrackListeners.isEmpty()) {
+            CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                    "track_notify_skipped remoteId=%s mappedId=%s reason=no_listeners droneTs=%d lat=%.6f lng=%.6f alt=%.1f",
+                    droneSpec.getRemoteId(), droneSpec.getMappedId(), timestampMsec, lat, lng, altitudeMeters));
+            return;
+        }
         String remoteId = droneSpec.getRemoteId();
         String mappedId = droneSpec.getMappedId();
         for (LocalTrackListener listener : LocalTrackListeners) try {
@@ -454,7 +460,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     public void publishDirect(double lat, double lng, long altitudeInMeters, long droneTimestampInMillisec,
-                              @Nullable CaltopoClient.PositionTelemetry telemetry) {
+                              @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         linePoints.add(new QueuedPoint(lat, lng, (double)altitudeInMeters, droneTimestampInMillisec, telemetry));
         notifyLocalTrackPoint(lat, lng, altitudeInMeters, droneTimestampInMillisec);
         CTDebug(TAG, String.format(Locale.US,
@@ -522,7 +528,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     private void notifyLocalTrackPoint(double lat, double lng, double altitudeMeters, long timestampMsec) {
-        if (LocalTrackListeners.isEmpty()) return;
+        if (LocalTrackListeners.isEmpty()) {
+            CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                    "track_notify_skipped remoteId=%s mappedId=%s reason=no_listeners droneTs=%d lat=%.6f lng=%.6f alt=%.1f",
+                    myRemoteId, droneSpec.getMappedId(), timestampMsec, lat, lng, altitudeMeters));
+            return;
+        }
         String mappedId = droneSpec.getMappedId();
         for (LocalTrackListener listener : LocalTrackListeners) try {
             listener.onLocalTrackPoint(myRemoteId, mappedId, lat, lng, altitudeMeters, timestampMsec);

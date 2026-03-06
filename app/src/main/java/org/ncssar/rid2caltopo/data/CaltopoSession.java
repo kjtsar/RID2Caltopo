@@ -805,7 +805,7 @@ public class CaltopoSession {
 	@NonNull
 	public static CaltopoOp AddLiveTrackPoint(@NonNull String deviceId,
 									   double lat, double lng, double eleMeters,
-                                       @Nullable CaltopoClient.PositionTelemetry telemetry,
+                                       @Nullable CtDroneSpec.PositionTelemetry telemetry,
                                        @Nullable Consumer<CaltopoOp> onComplete) {
         if (null == MapId)
             throw new RuntimeException("AddLiveTrackPoint(): Map not specified - call OpenMap() first");
@@ -829,7 +829,7 @@ public class CaltopoSession {
 	}
 
     private static void appendTelemetryJson(@NonNull StringBuilder sb,
-                                            @NonNull CaltopoClient.PositionTelemetry telemetry) {
+                                            @NonNull CtDroneSpec.PositionTelemetry telemetry) {
         JSONObject aircraft = new JSONObject();
         JSONObject camera = new JSONObject();
         try {

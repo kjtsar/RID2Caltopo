@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class OpenDroneIdDataManager {
     static final double RID_INVALID_ALTITUDE_METERS = -1000.0;
+    static final String ICON_LATENCY_TAG = "RidIconLatency";
 
     public final ConcurrentHashMap<Long, AircraftObject> aircraft = new ConcurrentHashMap<>();
     private static class LastReportedLocation {
@@ -217,13 +218,19 @@ public class OpenDroneIdDataManager {
                     Double.compare(prior.lat, lat) == 0 &&
                     Double.compare(prior.lng, lng) == 0 &&
                     prior.altitudeMeters == altitudeInMeters) {
+                CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                        "rid_drop remoteId=%s reason=dedupe wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%d transport=%s",
+                        idStr, nowWallMsec, timestampInMilliseconds, lat, lng, altitudeInMeters, transportType));
                 return;
             }
             lastReportedLocationByRemoteId.put(
                     idStr,
                     new LastReportedLocation(timestampInMilliseconds, lat, lng, altitudeInMeters)
             );
-            CaltopoClient.PositionTelemetry telemetry = null;
+            CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                    "rid_rx remoteId=%s wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%d transport=%s",
+                    idStr, nowWallMsec, timestampInMilliseconds, lat, lng, altitudeInMeters, transportType));
+            CtDroneSpec.PositionTelemetry telemetry = null;
             double speedVerticalMps = location.getSpeedVertical();
             double speedGroundMps = location.getSpeedHorizontal();
             double directionDeg = location.getDirection();
@@ -242,7 +249,7 @@ public class OpenDroneIdDataManager {
             if (aircraftAltitudeFt != null || aircraftAltitudeRateFpm != null ||
                     aircraftGsKnots != null || aircraftTrackDeg != null) {
                 // ASTM RID does not provide true nose heading, so use direction as a heading proxy.
-                telemetry = new CaltopoClient.PositionTelemetry(
+                telemetry = new CtDroneSpec.PositionTelemetry(
                         aircraftAltitudeFt,
                         aircraftAltitudeRateFpm,
                         aircraftGsKnots,

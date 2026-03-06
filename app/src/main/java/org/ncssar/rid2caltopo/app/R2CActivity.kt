@@ -427,6 +427,20 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                     exitRequested
                 )
             )
+            // For unexpected finishes (e.g. external caller, swipe-to-dismiss):
+            // stop the app context and flush the log.
+            if (isFinishing && !isChangingConfigurations) {
+                if (this === AppActivity) AppActivity = null
+                CaltopoClient.ShutdownAsync()
+            }
+        }
+        // Reset the one-shot initialization guard whenever the activity is truly
+        // finishing (any path: Quit button, CheckIdle, or unexpected Shutdown call).
+        // Without this reset, a cached process relaunch skips initialize() entirely
+        // and the services never start.  Config-change rotations are excluded so that
+        // a normal orientation change does not re-trigger service startup.
+        if (isFinishing && !isChangingConfigurations) {
+            InitializedCalled = false
         }
         super.onDestroy()
     }
@@ -451,7 +465,12 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
 
         @JvmStatic
         fun Shutdown() {
-            AppActivity?.finishAffinity()
+            // Route through QuitApplication() so that AppExitRequested is set before
+            // finishAffinity() fires, services are stopped explicitly, and the log file
+            // is flushed.  The old direct finishAffinity() call left AppExitRequested=false,
+            // which caused onDestroy() to skip cleanup and left services running with no
+            // way to restart them on the next launch.
+            CaltopoClient.QuitApplication()
         }
 
         @JvmStatic

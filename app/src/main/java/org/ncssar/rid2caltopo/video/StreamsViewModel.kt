@@ -1,5 +1,6 @@
 import android.app.Application
 import android.graphics.Bitmap
+import android.view.Surface
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -8,9 +9,6 @@ import androidx.compose.runtime.setValue
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.PlaybackException
-import androidx.media3.exoplayer.ExoPlayer
-import android.view.Surface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -24,19 +22,18 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
-import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CaltopoMap.MapStatusListener.mapStatus
 import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DesignatorState
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
-import org.ncssar.rid2caltopo.video.session.StreamRecoveryPolicy
-import org.ncssar.rid2caltopo.video.session.StreamSessionService
 
 data class PendingClue(
     val droneSpec: CtDroneSpec,
@@ -86,34 +83,10 @@ class StreamsViewModel(
     CaltopoMap.MapStatusListener {
 
     private val tag = "StreamsViewModel"
-    private val context = application.applicationContext
-
-    private val streamSessions = StreamSessionService(
-        context = context,
-        scope = viewModelScope,
-        policy = StreamRecoveryPolicy(),
-        listener = object : StreamSessionService.Listener {
-            override fun onBuffering(designator: String) {
-                this@StreamsViewModel.onBuffering(designator)
-            }
-
-            override fun onLive(designator: String) {
-                this@StreamsViewModel.onLive(designator)
-            }
-
-            override fun onEnded(designator: String) {
-                this@StreamsViewModel.onEnded(designator)
-            }
-
-            override fun onError(designator: String, error: PlaybackException) {
-                CTWarn(tag, "Session error for $designator", error)
-            }
-        }
-    )
     private val ffmpegProbeService: FfmpegProbeService? = try {
         FfmpegProbeService()
     } catch (t: Throwable) {
-        CTError(tag, "FFmpeg probe service unavailable; falling back to Exo-only playback.", Exception(t))
+        CTError(tag, "FFmpeg probe service unavailable; stream playback will remain unavailable.", Exception(t))
         null
     }
 
@@ -127,10 +100,13 @@ class StreamsViewModel(
     private val _focusedPath = MutableStateFlow<String?>(null)
     val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
 
-    val players: Map<String, ExoPlayer> get() = streamSessions.players
-
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
+    private val _anomalyConfigByDesignator = mutableStateMapOf<String, AnomalyConfig>()
+    private val _renderDelayMsByDesignator = mutableStateMapOf<String, Long>()
+    private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
+    private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
+    private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
 
     private val _pendingClue = mutableStateOf<PendingClue?>(null)
     val pendingClue: PendingClue?
@@ -139,7 +115,8 @@ class StreamsViewModel(
     private val _mapName = mutableStateOf<String?>(null)
     val mapName: String? by _mapName
 
-    private var lastLiveDesignators: Set<String> = emptySet()
+    private var lastLiveRevisions: Map<String, Long> = emptyMap()
+    private var lastLivePublisherConnIds: Map<String, String?> = emptyMap()
 
     /**
      * Received from CaltopoClient at a maximum rate of once per second if
@@ -163,13 +140,12 @@ class StreamsViewModel(
         }
     }
 
-    fun playerFor(designator: String): ExoPlayer? {
-        CTDebug(tag, "playerFor(${designator}):${players.containsKey(designator)}")
-        return streamSessions.playerFor(designator)
+    fun isStreamVisible(stream: StreamInfo): Boolean {
+        return dismissedStreamRevisions[stream.designator] != stream.revision
     }
 
     fun useFfmpegRender(designator: String): Boolean {
-        return ffmpegProbeService?.isRenderEnabled(designator) == true
+        return renderRouteByDesignator[designator] == true
     }
 
     fun bindFfmpegRenderSurface(designator: String, surface: Surface): Boolean {
@@ -180,48 +156,33 @@ class StreamsViewModel(
         ffmpegProbeService?.unbindRenderSurface(designator)
     }
 
-    fun ensurePlayer(designator: String) {
-        streamSessions.ensurePlayer(designator)
-    }
-
-    fun releasePlayer(designator: String) {
-        streamSessions.releasePlayer(designator)
-    }
-
-    fun recreatePlayer(designator: String) {
-        streamSessions.recreatePlayer(designator)
-    }
-
-    fun onFatalPlayerError(
-        designator: String,
-        error: PlaybackException
-    ) {
-        CTWarn(tag, "onFatalPlayerError(${designator}).", error)
-        recreatePlayer(designator)
-    }
-
     fun toggleFocus(designator: String) {
         var fString = "has"
         _focusedPath.value =
             if (_focusedPath.value == designator) {
                 fString = "does not have"
                 null
-            } else designator
+            } else {
+                designator
+            }
         CTDebug(tag, "toggleFocus(): ${designator} ${fString} focus.")
+        applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+        syncStreamSessions(streams.value)
     }
 
     override fun onCleared() {
         CaltopoMap.RemoveMapStatusListener(this)
         ffmpegProbeService?.close()
-        streamSessions.releaseAll()
         super.onCleared()
     }
 
     override fun mapStatusUpdate(status: mapStatus?, mapNode: CaltopoNode.MapNode?, optErrmsg: String?) {
-        if (status == CaltopoMap.MapStatusListener.mapStatus.up) {
-            CTDebug(tag, "XYZZY: Connected to ${mapNode?.title}")
-            _mapName.value = mapNode?.title
-        } else {
+        val newName = mapNode?.title;
+        val oldName = _mapName.value;
+        if (status == CaltopoMap.MapStatusListener.mapStatus.up && !oldName.equals(newName)) {
+            CTDebug(tag, "XYZZY: Connected to ${newName}")
+            _mapName.value = newName
+        } else if (_mapName.value != null) {
             _mapName.value = null
             CTDebug(tag, "XYZZY: Disconnected from map")
         }
@@ -236,6 +197,10 @@ class StreamsViewModel(
         } else {
             DesignatorState.Yellow(droneStates)
         }
+    }
+
+    fun renderDelayMsFor(designator: String): Long? {
+        return _renderDelayMsByDesignator[designator]
     }
 
     fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {
@@ -316,6 +281,57 @@ class StreamsViewModel(
         _pendingClue.value = null
     }
 
+    fun anomalyConfigFor(designator: String): AnomalyConfig {
+        return _anomalyConfigByDesignator[designator] ?: AnomalyConfig()
+    }
+
+    fun toggleAnomalyEnabled(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(enabled = !current.enabled)
+        }
+    }
+
+    fun toggleAnomalyAlgorithm(designator: String, algorithm: AnomalyAlgorithm) {
+        updateAnomalyConfig(designator) { current ->
+            val updated = current.algorithms.toMutableSet()
+            if (!updated.add(algorithm)) {
+                updated.remove(algorithm)
+            }
+            current.copy(algorithms = updated)
+        }
+    }
+
+    fun cycleAnomalyFrameStride(designator: String) {
+        val frameStrideSteps = listOf(1, 2, 3, 4)
+        updateAnomalyConfig(designator) { current ->
+            val idx = frameStrideSteps.indexOf(current.frameStride)
+            val next = if (idx < 0) frameStrideSteps[0] else frameStrideSteps[(idx + 1) % frameStrideSteps.size]
+            current.copy(frameStride = next)
+        }
+    }
+
+    fun cycleAnomalySensitivity(designator: String) {
+        val sensitivitySteps = listOf(0.25f, 0.60f, 0.90f)
+        updateAnomalyConfig(designator) { current ->
+            val currentClamped = current.sensitivity.coerceIn(0f, 1f)
+            val idx = sensitivitySteps.indexOfFirst { kotlin.math.abs(it - currentClamped) < 0.01f }
+            val next = if (idx < 0) sensitivitySteps[1] else sensitivitySteps[(idx + 1) % sensitivitySteps.size]
+            current.copy(sensitivity = next)
+        }
+    }
+
+    fun setAnomalySensitivity(designator: String, sensitivity: Float) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(sensitivity = sensitivity.coerceIn(0f, 1f))
+        }
+    }
+
+    fun cycleAnomalyThermalPolarity(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(thermalPolarity = current.thermalPolarity.next())
+        }
+    }
+
     private fun buildTelemetrySummary(
         designator: String,
         droneSpec: CtDroneSpec,
@@ -370,18 +386,50 @@ class StreamsViewModel(
         return "$description\n\n$summary"
     }
 
+    private fun shouldUseFfmpegRender(designator: String): Boolean {
+        return streamInfoByDesignator[designator]?.state == StreamState.LIVE
+    }
+
     private fun syncStreamSessions(streamsMap: Map<String, StreamInfo>) {
+        streamInfoByDesignator.clear()
+        streamInfoByDesignator.putAll(streamsMap)
+
         val focused = _focusedPath.value
         if (focused != null && !streamsMap.containsKey(focused)) {
             CTDebug(tag, "Focused stream $focused is no longer present -> clearing focus")
             _focusedPath.value = null
         }
 
-        val liveDesignators = streamsMap.values
+        val liveStreams = streamsMap.values
             .filter { it.state == StreamState.LIVE }
+        val liveRevisions = liveStreams.associate { it.designator to it.revision }
+        val livePublisherConnIds = liveStreams.associate { it.designator to it.publisherConnId }
+        dismissedStreamRevisions.entries.toList().forEach { (designator, dismissedRevision) ->
+            val liveRevision = liveRevisions[designator]
+            if (liveRevision == null || liveRevision != dismissedRevision) {
+                dismissedStreamRevisions.remove(designator)
+            }
+        }
+        val dismissedLiveDesignators = liveStreams
+            .filterNot(::isStreamVisible)
             .map { it.designator }
             .toSet()
-        val added = liveDesignators - lastLiveDesignators
+        val activeLiveStreams = liveStreams.filter(::isStreamVisible)
+        val liveDesignators = liveRevisions.keys
+        val added = activeLiveStreams.map { it.designator }.toSet() - lastLiveRevisions.keys
+        val republished = activeLiveStreams
+            .filter { info ->
+                val previousRevision = lastLiveRevisions[info.designator]
+                val revisionChanged = previousRevision != null && info.revision != previousRevision
+                val previousPublisherConnId = lastLivePublisherConnIds[info.designator]
+                val publisherChanged =
+                    previousPublisherConnId != null &&
+                    info.publisherConnId != null &&
+                    info.publisherConnId != previousPublisherConnId
+                revisionChanged || publisherChanged
+            }
+            .map { it.designator }
+            .toSet()
         val focusedPath = _focusedPath.value
         if (focusedPath != null) {
             val newlyAttachedOffFocus = added.filter { it != focusedPath }
@@ -391,51 +439,107 @@ class StreamsViewModel(
                 } else {
                     "New streams attached: ${newlyAttachedOffFocus.joinToString(", ")}"
                 }
-                CaltopoClient.ShowToast("$msg. Tap focused stream to return to grid.")
-                CTInfo(tag, msg)
+                _focusedPath.value = null
+                CaltopoClient.ShowToast("$msg. Returning to grid.")
+                CTInfo(tag, "$msg -> clearing focus to return to grid")
             }
         }
 
-        val removed = lastLiveDesignators - liveDesignators
+        val removed = lastLiveRevisions.keys - liveDesignators
         removed.forEach { designator ->
-            CTDebug(tag, "Stream $designator no longer live -> release player")
+            CTDebug(tag, "Stream $designator no longer live -> stop FFmpeg render")
+            renderRouteByDesignator.remove(designator)
+            ffmpegProbeService?.setRenderEnabled(designator, false)
             ffmpegProbeService?.onStreamStopped(designator)
-            streamSessions.onStreamStopped(designator)
         }
 
-        liveDesignators.forEach { designator ->
-            ffmpegProbeService?.onStreamBecameLive(designator)
-            if (ffmpegProbeService?.isRenderEnabled(designator) == true) {
-                CTDebug(tag, "Stream $designator live -> FFmpeg render active, skipping Exo player")
-                streamSessions.onStreamStopped(designator)
-            } else {
-                CTDebug(tag, "Stream $designator live -> ensure Exo player")
-                streamSessions.onStreamBecameLive(designator)
+        dismissedLiveDesignators.forEach { designator ->
+            renderRouteByDesignator[designator] = false
+            ffmpegProbeService?.setRenderEnabled(designator, false)
+            ffmpegProbeService?.onStreamStopped(designator)
+        }
+
+        activeLiveStreams.forEach { info ->
+            val designator = info.designator
+            val newlyLive = designator in added
+            val previousPublisherConnId = lastLivePublisherConnIds[designator]
+            val publisherChanged =
+                previousPublisherConnId != null &&
+                info.publisherConnId != null &&
+                info.publisherConnId != previousPublisherConnId
+            val republishDetected = designator in republished
+            val useFfmpeg = shouldUseFfmpegRender(designator)
+            val wasUsingFfmpeg = renderRouteByDesignator[designator] == true
+            ffmpegProbeService?.updateSourcePath(designator, info.sourcePath)
+            renderRouteByDesignator[designator] = useFfmpeg
+            ffmpegProbeService?.setRenderEnabled(designator, useFfmpeg)
+            if (useFfmpeg) {
+                if (republishDetected) {
+                    if (publisherChanged) {
+                        CTDebug(
+                            tag,
+                            "Stream $designator publisherConn=${previousPublisherConnId} -> ${info.publisherConnId} -> evaluating FFmpeg render session"
+                        )
+                    } else {
+                        CTDebug(tag, "Stream $designator live revision=${info.revision} -> tolerating controller republish")
+                    }
+                    ffmpegProbeService?.onStreamRepublished(
+                        designator,
+                        publisherChanged = publisherChanged,
+                        previousPublisherConnId = previousPublisherConnId,
+                        publisherConnId = info.publisherConnId,
+                    )
+                    CTDebug(tag, "Stream $designator live -> using FFmpeg render path")
+                } else if (newlyLive || !wasUsingFfmpeg) {
+                    ffmpegProbeService?.onStreamBecameLive(designator)
+                    CTDebug(tag, "Stream $designator live -> using FFmpeg render path")
+                }
             }
         }
 
-        lastLiveDesignators = liveDesignators
-    }
-
-    fun onBuffering(designator: String) {
-        CTDebug(tag, "onBuffering(${designator})")
-    }
-
-    fun onLive(designator: String) {
-        CTDebug(tag, "onLive(${designator})")
-    }
-
-    fun onEnded(designator: String) {
-        CTDebug(tag, "onEnded(${designator})")
-    }
-
-    fun onError(designator: String, error: String) {
-        CTError(tag, "onError(${designator}): ${error}")
-        recreatePlayer(designator)
+        applyFocusedAnomalyPolicy(liveDesignators)
+        lastLiveRevisions = liveRevisions
+        lastLivePublisherConnIds = livePublisherConnIds
     }
 
     fun clearFocus() {
         _focusedPath.value = null
+        applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+        syncStreamSessions(streams.value)
+    }
+
+    fun dismissFocusedStream() {
+        val designator = _focusedPath.value ?: return
+        val info = streams.value[designator] ?: return
+        dismissedStreamRevisions[designator] = info.revision
+        CTDebug(tag, "dismissFocusedStream(): hiding $designator at revision=${info.revision}")
+        _focusedPath.value = null
+        applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+        syncStreamSessions(streams.value)
+        CaltopoClient.ShowToast("Closed $designator until it republishes.")
+    }
+
+    private fun updateAnomalyConfig(
+        designator: String,
+        reducer: (AnomalyConfig) -> AnomalyConfig,
+    ) {
+        val current = _anomalyConfigByDesignator[designator] ?: AnomalyConfig()
+        val updated = reducer(current)
+        _anomalyConfigByDesignator[designator] = updated
+        applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+        syncStreamSessions(streams.value)
+    }
+
+    private fun applyFocusedAnomalyPolicy(liveDesignators: Set<String>) {
+        val focused = _focusedPath.value
+        liveDesignators.forEach { designator ->
+            val config = _anomalyConfigByDesignator[designator] ?: AnomalyConfig()
+            val enableForDesignator = focused == designator && config.enabled
+            ffmpegProbeService?.setAnomalyConfig(
+                designator,
+                config.toNativeConfig(enabledOverride = enableForDesignator)
+            )
+        }
     }
 
     init {
@@ -445,6 +549,14 @@ class StreamsViewModel(
         viewModelScope.launch {
             StreamRegistry.streams.collect { map ->
                 syncStreamSessions(map)
+            }
+        }
+        ffmpegProbeService?.let { service ->
+            viewModelScope.launch {
+                service.renderDelayMsByDesignatorFlow.collect { delays ->
+                    _renderDelayMsByDesignator.clear()
+                    _renderDelayMsByDesignator.putAll(delays)
+                }
             }
         }
     }

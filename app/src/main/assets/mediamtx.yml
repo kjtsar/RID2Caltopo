@@ -1,20 +1,49 @@
-# For v1.8.2:
-# logLevel: warn ;# quieter....
-logLevel: info
+# MediaMTX config for Android-embedded RTMP ingest / RTSP local playback.
+# Keep settings conservative for DJI reconnect tolerance.
+logLevel: debug
+logDestinations: [stdout]
+logStructured: no
+api: true
+metrics: true
+pprof: true
 
-readTimeout: 30s
-writeTimeout: 30s
+# DJI sources can go quiet for tens of seconds without a true disconnect.
+# Keep sessions alive longer before timing out blocked socket reads.
+readTimeout: 90s
+writeTimeout: 90s
 
 rtmp: yes
 rtsp: yes
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ['*']
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: [127.0.0.1, localhost]
 hls: yes
-hlsAlwaysRemux: yes
-hlsPartDuration: 500ms
-hlsSegmentDuration: 2s
-hlsSegmentCount: 10
+#rtmpEncryption: "no"
 
-  
+pathDefaults:
+  source: publisher
+  overridePublisher: yes
+  # Some controllers pause media delivery for multiple seconds without closing
+  # the RTMP socket. Keep the publisher session alive across those gaps.
+  publisherInactivityCloseAfter: 30s
+  runOnReady: echo "path ready"
+
 paths:
-  all:
+  "~^autel/.+$":
     source: publisher
-    runOnReady: echo "path ready"
+    overridePublisher: yes
+    publisherCloseAfter: 20s
+    publisherInactivityCloseAfter: 0s
+
+  all_others:
+    source: publisher
+    overridePublisher: yes
+    publisherCloseAfter: 20s
+    publisherInactivityCloseAfter: 30s
+    # DJI is the primary path right now. Publish video-only to isolate
+    # audio-track analysis and mapping delays during RTMP ingest.
+    rtmpPublishVideoOnly: true

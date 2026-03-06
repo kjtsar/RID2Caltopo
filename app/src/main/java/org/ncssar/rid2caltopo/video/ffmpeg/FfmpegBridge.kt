@@ -1,12 +1,19 @@
 package org.ncssar.rid2caltopo.video.ffmpeg
 
-import android.util.Log
 import android.view.Surface
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
+import org.ncssar.rid2caltopo.data.CaltopoClient.RegisterDebugTags
+import org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig
 
 object FfmpegBridge {
-    private const val TAG = "FfmpegBridge"
-    private val listeners = linkedSetOf<(String, String, FfmpegTelemetry) -> Unit>()
+    const val TAG = "FfmpegBridge"
+    const val NATIVE_TAG = "ffmpeg_bridge"
+    private val probeListeners = linkedSetOf<(String, Long, String, FfmpegTelemetry) -> Unit>()
     private val listenerLock = Any()
+
+    init {
+        RegisterDebugTags(listOf(TAG, NATIVE_TAG))
+    }
 
     private val nativeLoaded: Boolean by lazy {
         try {
@@ -14,7 +21,7 @@ object FfmpegBridge {
             nativeInitBridge()
             true
         } catch (t: Throwable) {
-            Log.w(TAG, "ffmpeg_bridge unavailable: ${t.message}")
+            CTWarn(TAG, "ffmpeg_bridge unavailable: ${t.message}")
             false
         }
     }
@@ -57,16 +64,29 @@ object FfmpegBridge {
         nativeDetachSurface(sessionId)
     }
 
-    fun addProbeListener(listener: (String, String, FfmpegTelemetry) -> Unit) {
+    fun addProbeListener(listener: (String, Long, String, FfmpegTelemetry) -> Unit) {
         synchronized(listenerLock) {
-            listeners += listener
+            probeListeners += listener
         }
     }
 
-    fun removeProbeListener(listener: (String, String, FfmpegTelemetry) -> Unit) {
+    fun removeProbeListener(listener: (String, Long, String, FfmpegTelemetry) -> Unit) {
         synchronized(listenerLock) {
-            listeners -= listener
+            probeListeners -= listener
         }
+    }
+
+    fun updateAnomalyConfig(sessionId: Long, config: NativeAnomalyConfig) {
+        if (!nativeLoaded || sessionId <= 0L) return
+        nativeUpdateAnomalyConfig(
+            sessionId = sessionId,
+            enabled = config.enabled,
+            algorithmMask = config.algorithmMask,
+            frameStride = config.frameStride,
+            scoreThreshold = config.scoreThreshold,
+            minAreaFraction = config.minAreaFraction,
+            thermalPolarity = config.thermalPolarity,
+        )
     }
 
     private fun normalizeTelemetryFromNative(
@@ -74,6 +94,7 @@ object FfmpegBridge {
         confidence: Double,
         remoteId: String,
         sourceTimestampUs: Long,
+        renderLatencyMs: Long,
         latitude: Double,
         longitude: Double,
         altitudeMeters: Double,
@@ -86,6 +107,7 @@ object FfmpegBridge {
             confidence = confidence.takeIf { !it.isNaN() && it >= 0.0 },
             remoteId = remoteId.ifBlank { null },
             sourceTimestampUs = sourceTimestampUs.takeIf { it > 0L },
+            renderLatencyMs = renderLatencyMs.takeIf { it >= 0L },
             latitude = latitude.takeUnless { it.isNaN() },
             longitude = longitude.takeUnless { it.isNaN() },
             altitudeMeters = altitudeMeters.takeUnless { it.isNaN() },
@@ -99,10 +121,12 @@ object FfmpegBridge {
     fun dispatchNativeProbeEvent(
         designator: String,
         eventType: String,
+        sessionId: Long,
         sourceTag: String,
         confidence: Double,
         remoteId: String,
         sourceTimestampUs: Long,
+        renderLatencyMs: Long,
         latitude: Double,
         longitude: Double,
         altitudeMeters: Double,
@@ -116,6 +140,7 @@ object FfmpegBridge {
             confidence = confidence,
             remoteId = remoteId,
             sourceTimestampUs = sourceTimestampUs,
+            renderLatencyMs = renderLatencyMs,
             latitude = latitude,
             longitude = longitude,
             altitudeMeters = altitudeMeters,
@@ -124,12 +149,12 @@ object FfmpegBridge {
             headingDeg = headingDeg,
         )
 
-        val snapshot = synchronized(listenerLock) { listeners.toList() }
+        val snapshot = synchronized(listenerLock) { probeListeners.toList() }
         snapshot.forEach { callback ->
             try {
-                callback(designator, eventType, telemetry)
+                callback(designator, sessionId, eventType, telemetry)
             } catch (t: Throwable) {
-                Log.w(TAG, "Probe listener failed for $designator: ${t.message}")
+                CTWarn(TAG, "Probe listener failed for $designator: ${t.message}")
             }
         }
     }
@@ -141,5 +166,14 @@ object FfmpegBridge {
     private external fun nativeStartRender(designator: String, rtspUrl: String): Long
     private external fun nativeAttachSurface(sessionId: Long, surface: Surface): Boolean
     private external fun nativeDetachSurface(sessionId: Long)
+    private external fun nativeUpdateAnomalyConfig(
+        sessionId: Long,
+        enabled: Boolean,
+        algorithmMask: Int,
+        frameStride: Int,
+        scoreThreshold: Float,
+        minAreaFraction: Float,
+        thermalPolarity: Int,
+    )
     private external fun nativeStop(sessionId: Long)
 }

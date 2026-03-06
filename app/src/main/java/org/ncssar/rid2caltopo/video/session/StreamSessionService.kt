@@ -44,6 +44,10 @@ class StreamSessionService(
     private val context: Context,
     private val scope: CoroutineScope,
     private val policy: StreamRecoveryPolicy = StreamRecoveryPolicy(),
+    private val sourcePathProvider: (String) -> String = { it },
+    private val burstyHlsSourceProvider: (String) -> Boolean = { false },
+    private val restartCooldownProvider: (String) -> Long = { policy.restartCooldownMs },
+    private val preferredModeProvider: (String) -> ProtocolMode = { ProtocolMode.HLS },
     private val listener: Listener? = null,
 ) {
     interface Listener {
@@ -58,7 +62,7 @@ class StreamSessionService(
     private val playersByDesignator = mutableStateMapOf<String, ExoPlayer>()
     val players: Map<String, ExoPlayer> get() = playersByDesignator
 
-    private enum class ProtocolMode { RTSP, HLS }
+    enum class ProtocolMode { RTSP, HLS }
     private val protocolByDesignator = mutableMapOf<String, ProtocolMode>()
     private val modeScoresByDesignator = mutableMapOf<String, MutableMap<ProtocolMode, Int>>()
 
@@ -75,7 +79,25 @@ class StreamSessionService(
     }
 
     fun onStreamBecameLive(designator: String) {
+        val currentMode = protocolByDesignator[designator]
+        val preferredMode = preferredModeFor(designator)
+        if (playersByDesignator.containsKey(designator)) {
+            if (currentMode != null && currentMode != preferredMode) {
+                CTDebug(tag, "Preferred mode change for $designator: $currentMode -> $preferredMode")
+                recreatePlayer(designator, ignoreCooldown = true)
+            }
+            return
+        }
         ensurePlayer(designator)
+    }
+
+    fun onStreamRepublished(designator: String) {
+        if (!playersByDesignator.containsKey(designator)) {
+            ensurePlayer(designator)
+            return
+        }
+        CTDebug(tag, "Republish detected for $designator -> recreating player")
+        recreatePlayer(designator, ignoreCooldown = true)
     }
 
     fun onStreamStopped(designator: String) {
@@ -93,6 +115,7 @@ class StreamSessionService(
         restarting += designator
         scope.launch {
             try {
+                if (!restarting.contains(designator)) return@launch
                 playersByDesignator[designator] = createPlayer(designator)
             } catch (t: Throwable) {
                 CTWarn(tag, "ensurePlayer failed for '$designator': ${t.message}")
@@ -111,25 +134,30 @@ class StreamSessionService(
         }
     }
 
-    fun recreatePlayer(designator: String) {
+    fun recreatePlayer(designator: String, ignoreCooldown: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!canRestart(designator, now)) return
+        if (!ignoreCooldown && !canRestart(designator, now)) return
 
-        playersByDesignator.remove(designator)?.let { player ->
-            player.clearVideoSurface()
-            player.release()
-        }
+        val previousPlayer = playersByDesignator[designator]
         clearTracking(designator)
         restarting += designator
         lastRestartAt[designator] = now
 
         scope.launch {
             delay(policy.restartSettleDelayMs)
+            if (!restarting.contains(designator)) return@launch
             try {
-                playersByDesignator[designator] = createPlayer(designator)
+                val replacementPlayer = createPlayer(designator)
+                val playerToRelease = playersByDesignator.put(designator, replacementPlayer)
+                if (playerToRelease != null && playerToRelease !== replacementPlayer) {
+                    playerToRelease.clearVideoSurface()
+                    playerToRelease.release()
+                }
             } catch (t: Throwable) {
                 CTWarn(tag, "recreatePlayer failed for '$designator': ${t.message}")
-                playersByDesignator.remove(designator)
+                if (previousPlayer == null) {
+                    playersByDesignator.remove(designator)
+                }
             } finally {
                 restarting -= designator
             }
@@ -150,26 +178,39 @@ class StreamSessionService(
     }
 
     private fun startStallPoll() {
-        val sampleMs = policy.rtspMaxBufferingMsBeforeRestart / 2
+        val sampleMs = minOf(
+            policy.rtspMaxBufferingMsBeforeRestart,
+            minOf(policy.hlsMaxBufferingMsBeforeRestart, BURSTY_HLS_MAX_BUFFERING_BEFORE_RESTART_MS)
+        ) / 2
         stallPoll.start(this::pollForStalledPlayers, sampleMs, sampleMs)
     }
 
     private fun pollForStalledPlayers() {
         val now = System.currentTimeMillis()
 
-        lastBufferingAt.forEach { (designator, bufferingSince) ->
+        lastBufferingAt.toList().forEach { (designator, bufferingSince) ->
             val player = playersByDesignator[designator] ?: return@forEach
             if (player.playbackState != Player.STATE_BUFFERING) return@forEach
 
             val mode = protocolByDesignator[designator] ?: ProtocolMode.RTSP
+            val burstyHls = mode == ProtocolMode.HLS && burstyHlsSourceProvider(designator)
             val maxBufferingMs = if (mode == ProtocolMode.RTSP) {
                 policy.rtspMaxBufferingMsBeforeRestart
+            } else if (burstyHls) {
+                BURSTY_HLS_MAX_BUFFERING_BEFORE_RESTART_MS
             } else {
                 policy.hlsMaxBufferingMsBeforeRestart
             }
+            val startupGraceMs = if (mode == ProtocolMode.RTSP) {
+                policy.rtspStartupGraceMs
+            } else if (burstyHls) {
+                BURSTY_HLS_STARTUP_GRACE_MS
+            } else {
+                policy.hlsStartupGraceMs
+            }
             val bufferingMs = now - bufferingSince
             val startupMs = now - (playerCreatedAt[designator] ?: now)
-            val stillStarting = !firstFrameRendered.contains(designator) && startupMs < policy.startupGraceMs
+            val stillStarting = !firstFrameRendered.contains(designator) && startupMs < startupGraceMs
 
             if (stillStarting) return@forEach
             if (bufferingMs <= maxBufferingMs) return@forEach
@@ -181,11 +222,12 @@ class StreamSessionService(
     }
 
     private fun canRestart(designator: String, now: Long): Boolean {
+        val cooldownMs = restartCooldownProvider(designator)
         val decision = StreamRestartBackoff.evaluate(
             isRestarting = restarting.contains(designator),
             lastRestartAtMs = lastRestartAt[designator],
             nowMs = now,
-            cooldownMs = policy.restartCooldownMs,
+            cooldownMs = cooldownMs,
         )
         if (!decision.allow && decision.reason == "cooldown") {
             CTDebug(tag, "Skipping restart for $designator due to cooldown.")
@@ -195,13 +237,35 @@ class StreamSessionService(
 
     private fun createPlayer(designator: String): ExoPlayer {
         val mode = modeFor(designator)
+        val burstyHls = mode == ProtocolMode.HLS && burstyHlsSourceProvider(designator)
+
+        val minBufferMs = when {
+            mode == ProtocolMode.RTSP -> policy.rtspMinBufferMs
+            burstyHls -> BURSTY_HLS_MIN_BUFFER_MS
+            else -> policy.hlsMinBufferMs
+        }
+        val maxBufferMs = when {
+            mode == ProtocolMode.RTSP -> policy.rtspMaxBufferMs
+            burstyHls -> BURSTY_HLS_MAX_BUFFER_MS
+            else -> policy.hlsMaxBufferMs
+        }
+        val bufferForPlaybackMs = when {
+            mode == ProtocolMode.RTSP -> policy.rtspBufferForPlaybackMs
+            burstyHls -> BURSTY_HLS_BUFFER_FOR_PLAYBACK_MS
+            else -> policy.hlsBufferForPlaybackMs
+        }
+        val bufferForPlaybackAfterRebufferMs = when {
+            mode == ProtocolMode.RTSP -> policy.rtspBufferForPlaybackAfterRebufferMs
+            burstyHls -> BURSTY_HLS_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
+            else -> policy.hlsBufferForPlaybackAfterRebufferMs
+        }
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (mode == ProtocolMode.RTSP) policy.rtspMinBufferMs else policy.hlsMinBufferMs,
-                if (mode == ProtocolMode.RTSP) policy.rtspMaxBufferMs else policy.hlsMaxBufferMs,
-                if (mode == ProtocolMode.RTSP) policy.rtspBufferForPlaybackMs else policy.hlsBufferForPlaybackMs,
-                if (mode == ProtocolMode.RTSP) policy.rtspBufferForPlaybackAfterRebufferMs else policy.hlsBufferForPlaybackAfterRebufferMs,
+                minBufferMs,
+                maxBufferMs,
+                bufferForPlaybackMs,
+                bufferForPlaybackAfterRebufferMs,
             )
             .build()
 
@@ -209,7 +273,7 @@ class StreamSessionService(
             .setLoadControl(loadControl)
             .build()
 
-        val mediaSource = createMediaSource(designator, mode)
+        val mediaSource = createMediaSource(designator, mode, burstyHls)
 
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
@@ -236,9 +300,10 @@ class StreamSessionService(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                CTDebug(
+                CTWarn(
                     tag,
-                    "Player error for $designator: code=${error.errorCodeName} msg=${error.message}"
+                    "Player error for $designator mode=${modeFor(designator)} " +
+                        "code=${error.errorCodeName} details=${describePlaybackError(error)}"
                 )
                 adjustModeScore(designator, modeFor(designator), -4)
                 if (maybeSwitchProtocol(designator, error)) {
@@ -246,6 +311,10 @@ class StreamSessionService(
                     return
                 }
                 listener?.onError(designator, error)
+                if (!playersByDesignator.containsKey(designator)) {
+                    CTDebug(tag, "Skipping Exo restart for $designator because playback was rerouted.")
+                    return
+                }
                 recreatePlayer(designator)
             }
 
@@ -273,6 +342,23 @@ class StreamSessionService(
         })
     }
 
+    private fun describePlaybackError(error: PlaybackException): String {
+        val parts = mutableListOf<String>()
+        parts += "msg=${error.message ?: "n/a"}"
+
+        var current: Throwable? = error.cause
+        var depth = 0
+        while (current != null && depth < 4) {
+            val type = current::class.java.simpleName.ifBlank { current::class.java.name }
+            val message = current.message ?: "n/a"
+            parts += "cause$depth=$type:$message"
+            current = current.cause
+            depth += 1
+        }
+
+        return parts.joinToString(" | ")
+    }
+
     private fun clearTracking(designator: String) {
         playerCreatedAt.remove(designator)
         firstFrameRendered.remove(designator)
@@ -280,60 +366,55 @@ class StreamSessionService(
         restarting.remove(designator)
     }
 
-    private fun createMediaSource(designator: String, mode: ProtocolMode): androidx.media3.exoplayer.source.MediaSource {
+    private fun createMediaSource(
+        designator: String,
+        mode: ProtocolMode,
+        burstyHls: Boolean,
+    ): androidx.media3.exoplayer.source.MediaSource {
+        val sourcePath = sourcePathProvider(designator)
         return when (mode) {
             ProtocolMode.RTSP -> {
-                val url = "rtsp://127.0.0.1:8554/$designator"
+                val url = "rtsp://127.0.0.1:8554/$sourcePath"
                 CTDebug(tag, "Starting RTSP player for $designator url='$url'")
-                RtspMediaSource.Factory().createMediaSource(MediaItem.fromUri(url))
+                RtspMediaSource.Factory()
+                    .setForceUseRtpTcp(true)
+                    .setTimeoutMs(policy.rtspTimeoutMs.toLong())
+                    .createMediaSource(MediaItem.fromUri(url))
             }
             ProtocolMode.HLS -> {
                 val restartId = System.currentTimeMillis()
-                val url = "http://127.0.0.1:8888/$designator/index.m3u8?rid=$restartId"
-                CTDebug(tag, "Starting HLS fallback player for $designator url='$url'")
+                val url = "http://127.0.0.1:8888/$sourcePath/index.m3u8?rid=$restartId"
+                CTDebug(tag, "Starting HLS player for $designator url='$url'")
+                val targetOffsetMs = if (burstyHls) BURSTY_HLS_TARGET_OFFSET_MS else 3_500L
+                val minOffsetMs = if (burstyHls) BURSTY_HLS_MIN_OFFSET_MS else 2_500L
+                val maxOffsetMs = if (burstyHls) BURSTY_HLS_MAX_OFFSET_MS else 7_000L
+                val maxPlaybackSpeed = if (burstyHls) BURSTY_HLS_MAX_PLAYBACK_SPEED else 1.03f
+                val connectTimeoutMs = if (burstyHls) BURSTY_HLS_CONNECT_TIMEOUT_MS else 3_000
+                val readTimeoutMs = if (burstyHls) BURSTY_HLS_READ_TIMEOUT_MS else 8_000
                 val mediaItem = MediaItem.Builder()
                     .setUri(url)
                     .setLiveConfiguration(
                         MediaItem.LiveConfiguration.Builder()
-                            .setTargetOffsetMs(2_000)
-                            .setMinOffsetMs(1_000)
-                            .setMaxOffsetMs(5_000)
-                            .setMinPlaybackSpeed(0.97f)
-                            .setMaxPlaybackSpeed(1.05f)
+                            .setTargetOffsetMs(targetOffsetMs)
+                            .setMinOffsetMs(minOffsetMs)
+                            .setMaxOffsetMs(maxOffsetMs)
+                            .setMinPlaybackSpeed(0.98f)
+                            .setMaxPlaybackSpeed(maxPlaybackSpeed)
                             .build()
                     )
                     .build()
                 HlsMediaSource.Factory(
-                    DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
+                    DefaultHttpDataSource.Factory()
+                        .setAllowCrossProtocolRedirects(true)
+                        .setConnectTimeoutMs(connectTimeoutMs)
+                        .setReadTimeoutMs(readTimeoutMs)
                 ).createMediaSource(mediaItem)
             }
         }
     }
 
     private fun maybeSwitchProtocol(designator: String, error: PlaybackException): Boolean {
-        val current = modeFor(designator)
-        val other = if (current == ProtocolMode.RTSP) ProtocolMode.HLS else ProtocolMode.RTSP
-
-        if (current == ProtocolMode.RTSP &&
-            error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED) {
-            adjustModeScore(designator, ProtocolMode.RTSP, -12)
-            adjustModeScore(designator, ProtocolMode.HLS, +4)
-        } else if (current == ProtocolMode.HLS &&
-            error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
-            adjustModeScore(designator, ProtocolMode.HLS, -8)
-        }
-
-        val currentScore = scoreFor(designator, current)
-        val otherScore = scoreFor(designator, other)
-        if (otherScore <= currentScore) return false
-
-        protocolByDesignator[designator] = other
-        lastRestartAt.remove(designator)
-        CTWarn(
-            tag,
-            "Switching $designator from $current(score=$currentScore) to $other(score=$otherScore) after error."
-        )
-        return true
+        return false
     }
 
     private fun modeFor(designator: String): ProtocolMode {
@@ -341,11 +422,28 @@ class StreamSessionService(
     }
 
     private fun choosePreferredMode(designator: String): ProtocolMode {
-        val rtsp = scoreFor(designator, ProtocolMode.RTSP)
-        val hls = scoreFor(designator, ProtocolMode.HLS)
-        val mode = if (rtsp >= hls) ProtocolMode.RTSP else ProtocolMode.HLS
+        val mode = preferredModeFor(designator)
         protocolByDesignator[designator] = mode
         return mode
+    }
+
+    private fun preferredModeFor(designator: String): ProtocolMode {
+        return preferredModeProvider(designator)
+    }
+
+    private companion object {
+        const val BURSTY_HLS_MIN_BUFFER_MS = 4_000
+        const val BURSTY_HLS_MAX_BUFFER_MS = 12_000
+        const val BURSTY_HLS_BUFFER_FOR_PLAYBACK_MS = 1_500
+        const val BURSTY_HLS_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 3_000
+        const val BURSTY_HLS_MAX_BUFFERING_BEFORE_RESTART_MS = 1_500L
+        const val BURSTY_HLS_STARTUP_GRACE_MS = 30_000L
+        const val BURSTY_HLS_TARGET_OFFSET_MS = 5_000L
+        const val BURSTY_HLS_MIN_OFFSET_MS = 3_500L
+        const val BURSTY_HLS_MAX_OFFSET_MS = 10_000L
+        const val BURSTY_HLS_MAX_PLAYBACK_SPEED = 1.02f
+        const val BURSTY_HLS_CONNECT_TIMEOUT_MS = 3_000
+        const val BURSTY_HLS_READ_TIMEOUT_MS = 12_000
     }
 
     private fun scoreFor(designator: String, mode: ProtocolMode): Int {

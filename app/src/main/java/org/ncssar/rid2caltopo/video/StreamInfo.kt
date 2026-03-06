@@ -5,11 +5,24 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
 import java.time.Instant
 
 data class StreamInfo(
-    val designator: String,    // MediaMTX designator s/b <callsign><dronedesc>, but could be anything.
+    val designator: String,    // Display name shown in UI; usually the stream path leaf.
+    val sourcePath: String = designator, // Full MediaMTX path, including any controller prefix.
+    val controllerProfile: StreamControllerProfile = StreamControllerProfile.GENERIC,
     //val protocol: Protocol,  // MediaMTX protocol
     val state: StreamState,
     val errorDetail: String? = null,
+    val revision: Long = 0L,
+    val publisherConnId: String? = null,
 )
+
+enum class StreamControllerProfile {
+    GENERIC,
+    RC2,
+    RCPRO2,
+    RCPRO1,
+    ENTERPRISE2,
+    AUTEL,
+}
 
 enum class StreamState {
     CONNECTING,

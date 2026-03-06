@@ -6,7 +6,9 @@ data class MediaMtxParserState(
     val pendingRunOnReadyPaths: LinkedHashSet<String> = linkedSetOf(),
     val pendingRunOnReadyVerbPaths: LinkedHashSet<String> = linkedSetOf(),
     val rtmpConnPathMap: Map<String, String> = emptyMap(),
-    val suppressNextStopForPath: LinkedHashSet<String> = linkedSetOf(),
+    val pathPublisherConnMap: Map<String, String> = emptyMap(),
+    val suppressStopForPath: LinkedHashSet<String> = linkedSetOf(),
+    val publisherHandoffClosingConns: LinkedHashSet<String> = linkedSetOf(),
 )
 
 data class MediaMtxParserResult(
@@ -28,66 +30,33 @@ object MediaMtxLogParser {
         val pendingRunOnReadyPaths = LinkedHashSet(state.pendingRunOnReadyPaths)
         val pendingRunOnReadyVerbPaths = LinkedHashSet(state.pendingRunOnReadyVerbPaths)
         val rtmpConnPathMap = state.rtmpConnPathMap.toMutableMap()
-        val suppressNextStopForPath = LinkedHashSet(state.suppressNextStopForPath)
+        val pathPublisherConnMap = state.pathPublisherConnMap.toMutableMap()
+        val suppressStopForPath = LinkedHashSet(state.suppressStopForPath)
+        val publisherHandoffClosingConns = LinkedHashSet(state.publisherHandoffClosingConns)
         val trimmed = line.trim()
 
         fun updatedState() = MediaMtxParserState(
             pendingRunOnReadyPaths = pendingRunOnReadyPaths,
             pendingRunOnReadyVerbPaths = pendingRunOnReadyVerbPaths,
             rtmpConnPathMap = rtmpConnPathMap,
-            suppressNextStopForPath = suppressNextStopForPath,
+            pathPublisherConnMap = pathPublisherConnMap,
+            suppressStopForPath = suppressStopForPath,
+            publisherHandoffClosingConns = publisherHandoffClosingConns,
         )
 
         fun emitStop(path: String): MediaMTXEvent? {
-            if (suppressNextStopForPath.remove(path)) return null
+            if (suppressStopForPath.contains(path)) return null
             return MediaMTXEvent.StreamStopped(path)
         }
 
-        if (pendingRunOnReadyPaths.size > 1 && (trimmed == "started" || trimmed == "stopped")) {
-            pendingRunOnReadyPaths.clear()
-        }
-        if (pendingRunOnReadyPaths.size == 1) {
-            val pendingPath = pendingRunOnReadyPaths.first()
-            if (trimmed == "started") {
-                pendingRunOnReadyPaths.clear()
-                return MediaMtxParserResult(
-                    MediaMTXEvent.StreamStarted(pendingPath),
-                    updatedState(),
-                )
+        fun normalizeRtmpCloseReason(reason: String): String {
+            if (reason.contains("extended chunk stream IDs are not supported", ignoreCase = true)) {
+                return "RTMP closed: publisher uses extended chunk stream IDs unsupported by current MediaMTX"
             }
-            if (trimmed == "stopped") {
-                pendingRunOnReadyPaths.clear()
-                return MediaMtxParserResult(
-                    emitStop(pendingPath),
-                    updatedState(),
-                )
+            if (reason.contains("unexpected EOF", ignoreCase = true)) {
+                return "RTMP closed: publisher disconnected unexpectedly"
             }
-            pendingRunOnReadyPaths.clear()
-        }
-
-        if (
-            pendingRunOnReadyVerbPaths.size > 1 &&
-            (trimmed == "command started" || trimmed == "command stopped")
-        ) {
-            pendingRunOnReadyVerbPaths.clear()
-        }
-        if (pendingRunOnReadyVerbPaths.size == 1) {
-            val pendingVerbPath = pendingRunOnReadyVerbPaths.first()
-            if (trimmed == "command started") {
-                pendingRunOnReadyVerbPaths.clear()
-                return MediaMtxParserResult(
-                    MediaMTXEvent.StreamStarted(pendingVerbPath),
-                    updatedState(),
-                )
-            }
-            if (trimmed == "command stopped") {
-                pendingRunOnReadyVerbPaths.clear()
-                return MediaMtxParserResult(
-                    emitStop(pendingVerbPath),
-                    updatedState(),
-                )
-            }
-            pendingRunOnReadyVerbPaths.clear()
+            return "RTMP closed: $reason"
         }
 
         val match = pathRegex.find(line)
@@ -95,20 +64,32 @@ object MediaMtxLogParser {
             val path = match.groupValues[1]
             val rem = match.groupValues[2]
             val event = when {
-                rem.contains("runOnReady command started") -> MediaMTXEvent.StreamStarted(path)
-                rem.contains("runOnReady command stopped") -> emitStop(path)
                 rem.contains("runOnReady command") -> {
-                    pendingRunOnReadyPaths += path
+                    pendingRunOnReadyPaths.remove(path)
+                    pendingRunOnReadyVerbPaths.remove(path)
                     null
                 }
 
                 rem.contains("runOnReady") -> {
-                    pendingRunOnReadyVerbPaths += path
+                    pendingRunOnReadyPaths.remove(path)
+                    pendingRunOnReadyVerbPaths.remove(path)
                     null
                 }
 
-                rem.contains("created") -> MediaMTXEvent.StreamConnecting(path)
-                rem.contains("destroyed") -> emitStop(path)
+                rem.contains("closing existing publisher") -> {
+                    suppressStopForPath.add(path)
+                    pathPublisherConnMap[path]?.let { publisherHandoffClosingConns.add(it) }
+                    MediaMTXEvent.StreamPublisherHandoff(path)
+                }
+
+                rem.contains("created") -> {
+                    suppressStopForPath.remove(path)
+                    MediaMTXEvent.StreamConnecting(path)
+                }
+                rem.contains("destroyed") -> {
+                    pathPublisherConnMap.remove(path)?.let { publisherHandoffClosingConns.remove(it) }
+                    emitStop(path)
+                }
                 else -> null
             }
             return MediaMtxParserResult(
@@ -121,10 +102,28 @@ object MediaMtxLogParser {
         if (rtmpPublishingMatch != null) {
             val conn = rtmpPublishingMatch.groupValues[1]
             val path = rtmpPublishingMatch.groupValues[2]
+            val previousPathForConn = rtmpConnPathMap[conn]
+            val previousConnForPath = pathPublisherConnMap[path]
+            val isDuplicatePublisherLine =
+                previousPathForConn == path && previousConnForPath == conn
+
+            if (previousPathForConn != null &&
+                previousPathForConn != path &&
+                pathPublisherConnMap[previousPathForConn] == conn
+            ) {
+                pathPublisherConnMap.remove(previousPathForConn)
+            }
             rtmpConnPathMap[conn] = path
+            pathPublisherConnMap[path] = conn
             pendingRunOnReadyPaths.remove(path)
             pendingRunOnReadyVerbPaths.remove(path)
-            suppressNextStopForPath.remove(path)
+            suppressStopForPath.remove(path)
+            if (isDuplicatePublisherLine) {
+                return MediaMtxParserResult(
+                    null,
+                    updatedState(),
+                )
+            }
             return MediaMtxParserResult(
                 MediaMTXEvent.StreamStarted(path),
                 updatedState(),
@@ -137,9 +136,20 @@ object MediaMtxLogParser {
             val reason = rtmpClosedMatch.groupValues[2].trim()
             val path = rtmpConnPathMap.remove(conn)
             if (path != null) {
-                suppressNextStopForPath.add(path)
+                if (pathPublisherConnMap[path] == conn) {
+                    pathPublisherConnMap.remove(path)
+                }
+                suppressStopForPath.add(path)
+                if (publisherHandoffClosingConns.remove(conn) &&
+                    reason.equals("terminated", ignoreCase = true)
+                ) {
+                    return MediaMtxParserResult(
+                        null,
+                        updatedState(),
+                    )
+                }
                 return MediaMtxParserResult(
-                    MediaMTXEvent.StreamError(path, "RTMP closed: $reason"),
+                    MediaMTXEvent.StreamError(path = path, reason = normalizeRtmpCloseReason(reason)),
                     updatedState(),
                 )
             }
@@ -162,6 +172,9 @@ object MediaMtxLogParser {
 
         val rtspNoPublishingMatch = rtspNoPublishingRegex.find(line)
         if (rtspNoPublishingMatch != null) {
+            pathPublisherConnMap.remove(rtspNoPublishingMatch.groupValues[1])?.let {
+                publisherHandoffClosingConns.remove(it)
+            }
             return MediaMtxParserResult(
                 emitStop(rtspNoPublishingMatch.groupValues[1]),
                 updatedState(),
@@ -186,6 +199,7 @@ object MediaMtxLogParser {
 object MediaMTXLogDispatcher {
     private val listeners = mutableSetOf<(MediaMTXEvent) -> Unit>()
     private var parserState = MediaMtxParserState()
+    private var pendingChunkFragment = ""
 
     fun addListener(listener: (MediaMTXEvent) -> Unit) {
         listeners += listener
@@ -201,9 +215,37 @@ object MediaMTXLogDispatcher {
         result.event?.let { emit(it) }
     }
 
+    internal fun dispatchChunk(
+        chunk: String,
+        shouldLog: Boolean,
+        flushTrailingFragment: Boolean = true,
+    ) {
+        val combined = pendingChunkFragment + chunk
+        val endsWithNewline = combined.endsWith('\n') || combined.endsWith('\r')
+        val rawLines = combined.split(Regex("""\r?\n"""))
+        val completeLines = if (endsWithNewline || flushTrailingFragment) rawLines else rawLines.dropLast(1)
+        pendingChunkFragment = if (endsWithNewline || flushTrailingFragment) "" else rawLines.lastOrNull().orEmpty()
+
+        completeLines
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .forEach { chunkLine ->
+                if (shouldLog) {
+                    CTDebug("MediaMTX", chunkLine)
+                }
+                onLogLine(chunkLine)
+            }
+    }
+
     @JvmStatic
     fun dispatch(line: String) {
-        CTDebug("MediaMTX", line)
-        onLogLine(line)
+        dispatchChunk(line, shouldLog = true, flushTrailingFragment = true)
+    }
+
+    internal fun resetForTests() {
+        listeners.clear()
+        parserState = MediaMtxParserState()
+        pendingChunkFragment = ""
     }
 }

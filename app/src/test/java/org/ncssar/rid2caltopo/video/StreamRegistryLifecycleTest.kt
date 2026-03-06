@@ -65,6 +65,7 @@ class StreamRegistryLifecycleTest {
             staleErrorMs = 120_000L,
         ).state
         assertEquals(StreamState.CONNECTING, connecting.active["d1"]?.state)
+        assertEquals(1L, connecting.active["d1"]?.revision)
 
         val live = StreamAdmissionPolicy.admit(
             state = connecting,
@@ -76,8 +77,21 @@ class StreamRegistryLifecycleTest {
             staleErrorMs = 120_000L,
         ).state
         assertEquals(StreamState.LIVE, live.active["d1"]?.state)
+        assertEquals(2L, live.active["d1"]?.revision)
 
-        val stopped = StreamAdmissionPolicy.markStopped(live, "d1").state
+        val republished = StreamAdmissionPolicy.admit(
+            state = live,
+            path = "d1",
+            targetState = StreamState.LIVE,
+            nowMs = 3_000L,
+            maxSimultaneousStreams = 4,
+            staleConnectingMs = 30_000L,
+            staleErrorMs = 120_000L,
+        ).state
+        assertEquals(StreamState.LIVE, republished.active["d1"]?.state)
+        assertEquals(3L, republished.active["d1"]?.revision)
+
+        val stopped = StreamAdmissionPolicy.markStopped(republished, "d1").state
         assertFalse(stopped.active.containsKey("d1"))
     }
 
@@ -93,14 +107,53 @@ class StreamRegistryLifecycleTest {
             state = initial,
             path = "d1",
             nowMs = 2_000L,
-            reason = "RTMP closed: received an audio packet",
+            reason = "decoder failed to start",
         )
 
         assertTrue(result.changed)
         assertEquals(StreamState.ERROR, result.state.active["d1"]?.state)
         assertEquals(
-            "RTMP closed: received an audio packet",
+            "decoder failed to start",
             result.state.active["d1"]?.errorDetail,
         )
+    }
+
+    @Test
+    fun transientRtmpClose_isDeferredWhileStreamIsStillActive() {
+        val initial = StreamAdmissionState(
+            active = mapOf("d1" to StreamInfo("d1", StreamState.LIVE)),
+            stateChangedAtMs = mapOf("d1" to 1_000L),
+            rejectedPaths = emptySet(),
+        )
+
+        val result = StreamAdmissionPolicy.markError(
+            state = initial,
+            path = "d1",
+            nowMs = 2_000L,
+            reason = "RTMP closed: publisher disconnected unexpectedly",
+        )
+
+        assertFalse(result.changed)
+        assertEquals(StreamState.LIVE, result.state.active["d1"]?.state)
+    }
+
+    @Test
+    fun nonRtmpError_stillTransitionsToError() {
+        val initial = StreamAdmissionState(
+            active = mapOf("d1" to StreamInfo("d1", StreamState.LIVE)),
+            stateChangedAtMs = mapOf("d1" to 1_000L),
+            rejectedPaths = emptySet(),
+        )
+
+        val result = StreamAdmissionPolicy.markError(
+            state = initial,
+            path = "d1",
+            nowMs = 2_000L,
+            reason = "decoder failed to start",
+        )
+
+        assertTrue(result.changed)
+        assertEquals(StreamState.ERROR, result.state.active["d1"]?.state)
+        assertEquals("decoder failed to start", result.state.active["d1"]?.errorDetail)
     }
 }

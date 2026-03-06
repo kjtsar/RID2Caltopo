@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.location.Location
@@ -20,6 +21,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -70,6 +72,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -118,6 +121,7 @@ import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.R
+import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
@@ -138,6 +142,7 @@ import org.ncssar.rid2caltopo.video.mapcache.TileCacheMapProvider
 import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
 
 private const val MAP_PANE_TAG = "SplitMapPane"
+private const val STREAMS_PANE_TAG = "StreamsPane"
 private const val MAP_PANE_VERBOSE_LOGS = false
 private const val LOCAL_DEVICE_SYMBOL = "radiotower"
 private const val LOCAL_DEVICE_COLOR = "0000FF"
@@ -336,6 +341,16 @@ private data class PredictedHead(
     val lat: Double,
     val lng: Double
 )
+
+private fun restartMediaMtxServer(context: android.content.Context) {
+    val appContext = context.applicationContext
+    val restartIntent = Intent(appContext, MediaMTXService::class.java).apply {
+        action = "RESTART_SERVICE"
+    }
+    appContext.startForegroundService(restartIntent)
+    CaltopoClient.ShowToast("Streams server restarted. Connected publishers will reconnect if supported.")
+    CTDebug(STREAMS_PANE_TAG, "User requested MediaMTXService restart from streams settings.")
+}
 
 private data class BadTileDialogState(
     val tileIndex: Long,
@@ -3573,8 +3588,11 @@ private fun StreamsGrid(
     modifier: Modifier = Modifier
 ) {
     val tag = "StreamsGrid"
+    val context = LocalContext.current
     val streams by viewModel.streams.collectAsStateWithLifecycle()
-    val streamEntries = streams.entries.toList()
+    val streamEntries = streams.entries
+        .filter { (_, info) -> viewModel.isStreamVisible(info) }
+        .toList()
     val mapName = viewModel.mapName
     val mapStatus by remember(mapName) {
         derivedStateOf {
@@ -3593,56 +3611,70 @@ private fun StreamsGrid(
             streamEntries
         }
 
-    if (visibleEntries.isEmpty()) {
-        CTDebug(tag, "No streams to show.")
-        EmptyStreamsView(mapStatus = mapStatus, modifier = modifier)
-        return
-    }
+    Box(modifier = modifier) {
+        if (visibleEntries.isEmpty()) {
+            CTDebug(tag, "No streams to show.")
+            EmptyStreamsView(
+                mapStatus = mapStatus,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            if (focusedPath == null && visibleEntries.count() == 1) {
+                viewModel.toggleFocus(visibleEntries[0].key)
+            }
 
-    if (focusedPath == null && visibleEntries.count() == 1) {
-        viewModel.toggleFocus(visibleEntries[0].key)
-    }
+            val columns = if (visibleEntries.size <= 2) 1 else 2
+            val rows = when (visibleEntries.size) {
+                0, 1 -> 1
+                2 -> 2
+                else -> 2
+            }
 
-    val columns = if (visibleEntries.size <= 2) 1 else 2
-    val rows = when (visibleEntries.size) {
-        0, 1 -> 1
-        2 -> 2
-        else -> 2
-    }
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val cellHeight = maxHeight / rows
 
-    BoxWithConstraints(modifier = modifier) {
-        val cellHeight = maxHeight / rows
-
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(columns),
-            modifier = Modifier.fillMaxSize(),
-            userScrollEnabled = false,
-            contentPadding = PaddingValues(4.dp)
-        ) {
-            items(
-                items = visibleEntries,
-                key = { it.key }
-            ) { (path, info) ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(cellHeight)
-                        .padding(4.dp),
-                    contentAlignment = Alignment.Center
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    modifier = Modifier.fillMaxSize(),
+                    userScrollEnabled = false,
+                    contentPadding = PaddingValues(4.dp)
                 ) {
-                    CTDebug(tag, "Rendering stream $path...")
-                    StreamTile(
-                        viewModel = viewModel,
-                        streamDesignator = path,
-                        streamState = info.state,
-                        streamErrorDetail = info.errorDetail,
-                        onToggleFocus = {
-                            viewModel.toggleFocus(path)
-                        },
-                    )
+                    items(
+                        items = visibleEntries,
+                        key = { it.key }
+                    ) { (path, info) ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(cellHeight)
+                                .padding(4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            StreamTile(
+                                viewModel = viewModel,
+                                streamDesignator = path,
+                                streamRevision = info.revision,
+                                streamState = info.state,
+                                streamErrorDetail = info.errorDetail,
+                                onCloseStream = {
+                                    if (focusedPath != path) {
+                                        viewModel.toggleFocus(path)
+                                    }
+                                    viewModel.dismissFocusedStream()
+                                },
+                                onRestartServer = {
+                                    restartMediaMtxServer(context)
+                                },
+                                onToggleFocus = {
+                                    viewModel.toggleFocus(path)
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
+
     }
 }
 

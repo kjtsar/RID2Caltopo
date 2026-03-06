@@ -9,14 +9,22 @@ sealed class MediaMTXEvent {
     ) : MediaMTXEvent()
     data class StreamStarted(
         val path: String,
+        val publisherConnId: String? = null,
+        val timestamp: Instant = Instant.now()
+    ) : MediaMTXEvent()
+    data class StreamPublisherHandoff(
+        val path: String,
+        val publisherConnId: String? = null,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()
     data class StreamStopped(
         val path: String,
+        val publisherConnId: String? = null,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()
     data class StreamError(
         val path: String,
+        val publisherConnId: String? = null,
         val reason: String? = null,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()

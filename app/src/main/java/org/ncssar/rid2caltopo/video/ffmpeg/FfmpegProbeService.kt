@@ -1,9 +1,21 @@
 package org.ncssar.rid2caltopo.video.ffmpeg
 
-import android.util.Log
+import android.os.Debug
+import android.os.Process
 import android.view.Surface
 import org.ncssar.rid2caltopo.BuildConfig
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn
 import org.ncssar.rid2caltopo.data.DelayedExec
+import org.ncssar.rid2caltopo.data.CaltopoClient.RegisterDebugTags
+import org.ncssar.rid2caltopo.video.UpstreamBoundaryMarker
+import org.ncssar.rid2caltopo.video.UpstreamTimingRegistry
+import org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.max
+import java.util.concurrent.Executors
 
 data class StreamTelemetrySnapshot(
     val sourceTag: String? = null,
@@ -36,6 +48,7 @@ object FfmpegTelemetryReducer {
             confidence = incoming.confidence ?: existing?.confidence,
             remoteId = incoming.remoteId ?: existing?.remoteId,
             sourceTimestampUs = incoming.sourceTimestampUs ?: existing?.sourceTimestampUs,
+            renderLatencyMs = incoming.renderLatencyMs ?: existing?.renderLatencyMs,
             latitude = incoming.latitude ?: existing?.latitude,
             longitude = incoming.longitude ?: existing?.longitude,
             altitudeMeters = incoming.altitudeMeters ?: existing?.altitudeMeters,
@@ -53,157 +66,448 @@ object FfmpegTelemetryReducer {
     }
 }
 
-data class NoFrameRestartDecision(
-    val shouldRestart: Boolean,
-    val reason: String,
+private enum class RenderSessionPhase {
+    STARTING,
+    PRIMED,
+    LIVE,
+    RETIRING,
+}
+
+private enum class RenderSessionHealth {
+    HEALTHY,
+    STALLED,
+    LONG_IDLE,
+}
+
+private data class UpstreamRepublishMarker(
+    val observedAtMs: Long,
+    val previousPublisherConnId: String?,
+    val publisherConnId: String?,
+    val upstreamBoundary: String?,
+    val upstreamBoundaryOutcome: String?,
+    val upstreamBoundaryObservedAtMs: Long?,
+    val upstreamBoundaryRotationSeq: Long?,
+    val upstreamBoundaryPublisherConnId: String?,
 )
 
-object NoFrameRestartPolicy {
-    fun evaluate(
-        nowMs: Long,
-        liveAtMs: Long?,
-        lastFrameAtMs: Long?,
-        lastRestartAtMs: Long?,
-        startupGraceMs: Long,
-        noFrameTimeoutMs: Long,
-        restartCooldownMs: Long,
-    ): NoFrameRestartDecision {
-        val liveAt = liveAtMs ?: return NoFrameRestartDecision(false, "not-live")
-        if (nowMs - liveAt < startupGraceMs) return NoFrameRestartDecision(false, "startup-grace")
-        val frameAt = lastFrameAtMs ?: liveAt
-        if (nowMs - frameAt <= noFrameTimeoutMs) return NoFrameRestartDecision(false, "frame-recent")
-        val lastRestart = lastRestartAtMs ?: 0L
-        if (nowMs - lastRestart < restartCooldownMs) {
-            return NoFrameRestartDecision(false, "restart-cooldown")
-        }
-        return NoFrameRestartDecision(true, "restart-needed")
-    }
-}
+private data class ManagedRenderSession(
+    val designator: String,
+    var phase: RenderSessionPhase,
+    var phaseChangedAtMs: Long,
+    var lastReaderWaitAtMs: Long? = null,
+    var lastFrameAtMs: Long? = null,
+    var sourceClockOffsetMs: Long? = null,
+    var lastSourceTimestampUs: Long? = null,
+    var readerWaitWindowStartedAtMs: Long? = null,
+    var readerWaitEventCountInWindow: Int = 0,
+    var pendingRepublishMarker: UpstreamRepublishMarker? = null,
+    var startupRecoveryAttempted: Boolean = false,
+    var recoveryFrameStreak: Int = 0,
+    var decodedFrameCount: Long = 0L,
+    var renderedFrameCount: Long = 0L,
+    var lastObservedDecodedFrameCount: Long = 0L,
+    var lastObservedRenderedFrameCount: Long = 0L,
+    var idlePollCount: Int = 0,
+    var lastStartupRecoveryDeferredLogAtMs: Long = 0L,
+)
 
 class FfmpegProbeService {
     private val tag = "FfmpegProbeService"
-    private val startupGraceMs = 4_000L
-    private val noFrameTimeoutMs = 8_000L
-    private val noFrameCheckMs = 2_000L
-    private val restartCooldownMs = 3_000L
-    private val probeSessions = mutableMapOf<String, Long>()
+    private val recentReaderWaitPenaltyMs = 5_000L
+    private val readerWaitRecoveryFramesToClear = 3
+    private val recoveryFrameContinuityGapMs = 250L
+    private val sourceTimestampResetThresholdMs = 1_000L
+    private val startupNoFrameRecoveryMs = 12_000L
+    private val startupNoFrameAbsoluteRecoveryMs = 45_000L
+    private val startupNoFrameDeferralLogMs = 5_000L
+    private val noFrameCheckMs = 1_000L
+    private val longIdlePollsBeforeCleanup = 60
     private val renderSessions = mutableMapOf<String, Long>()
-    private val lastFrameLogAtMs = mutableMapOf<String, Long>()
     private val lastFrameAtMs = mutableMapOf<String, Long>()
-    private val streamLiveAtMs = mutableMapOf<String, Long>()
-    private val lastRestartAtMs = mutableMapOf<String, Long>()
+    private val sourcePathByDesignator = mutableMapOf<String, String>()
+    private val renderEnabledDesignators = mutableSetOf<String>()
+    private val startingRenderDesignators = mutableSetOf<String>()
     private val boundRenderSurfaces = mutableMapOf<String, Surface>()
+    private val retiringSessionIds = mutableSetOf<Long>()
+    private val managedRenderSessions = mutableMapOf<Long, ManagedRenderSession>()
     private val telemetryByDesignator = mutableMapOf<String, FfmpegTelemetry>()
     private val remoteIdCandidatesByDesignator = mutableMapOf<String, LinkedHashSet<String>>()
+    private val renderDelayMsByDesignator = mutableMapOf<String, Long>()
+    private val renderDelayBaseMsByDesignator = mutableMapOf<String, Long>()
+    private val renderDelayMeasuredAtMsByDesignator = mutableMapOf<String, Long>()
+    private val anomalyConfigByDesignator = mutableMapOf<String, NativeAnomalyConfig>()
+    private val pendingRepublishByDesignator = mutableMapOf<String, UpstreamRepublishMarker>()
+    private val _renderDelayMsByDesignator = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val renderDelayMsByDesignatorFlow: StateFlow<Map<String, Long>> =
+        _renderDelayMsByDesignator.asStateFlow()
     private val noFramePoll = DelayedExec()
+    private val sessionControlExecutor = Executors.newSingleThreadExecutor()
     private val stateLock = Any()
-    private val probeListener: (String, String, FfmpegTelemetry) -> Unit = { designator, eventType, telemetry ->
+    private var lastPerfSampleAtMs = 0L
+    private var lastPerfProcessCpuMs = 0L
+    private var lastPerfMainThreadCpuNs = 0L
+    private var lastPollAtMs = 0L
+    @Volatile
+    private var closing = false
+    private val probeListener: (String, Long, String, FfmpegTelemetry) -> Unit =
+        probeListener@{ designator, sessionId, eventType, telemetry ->
+        val staleReason = staleSessionReason(designator, sessionId)
+        if (staleReason != null && !(staleReason == "retiring" && eventType == "session_stopped")) {
+            if (staleReason == "retiring") {
+                CTDebug(tag, "Ignoring retiring FFmpeg session event for $designator sessionId=$sessionId type=$eventType")
+            } else {
+                CTWarn(
+                    tag,
+                    "Stopping stale FFmpeg session for $designator sessionId=$sessionId type=$eventType reason=$staleReason"
+                )
+                stopSessionAsync(
+                    sessionId,
+                    "Stopped stale FFmpeg session for $designator sessionId=$sessionId"
+                )
+            }
+            return@probeListener
+        }
         if (eventType == "telemetry") {
             mergeTelemetry(designator, telemetry)
         }
 
         val now = System.currentTimeMillis()
-        if (eventType.startsWith("frame_")) {
+        if (eventType == "reader_wait_long") {
             synchronized(stateLock) {
-                lastFrameAtMs[designator] = now
-            }
-        }
-
-        var shouldLog = true
-        if (eventType.startsWith("frame_")) {
-            synchronized(stateLock) {
-                val last = lastFrameLogAtMs[designator] ?: 0L
-                shouldLog = (now - last >= 2_000L)
-                if (shouldLog) {
-                    lastFrameLogAtMs[designator] = now
+                val session = managedRenderSessions[sessionId]
+                session?.let {
+                    if (it.readerWaitWindowStartedAtMs == null) {
+                        it.readerWaitWindowStartedAtMs = now
+                    }
+                    it.readerWaitEventCountInWindow += 1
+                    session.lastReaderWaitAtMs = now
+                    session.recoveryFrameStreak = 0
                 }
             }
         }
-        if (shouldLog) {
-            Log.d(tag, "Probe event designator=$designator type=$eventType telemetry=$telemetry")
+        if (
+            eventType == "reader_wait_long" ||
+                eventType == "video_packet_gap" ||
+                eventType == "decoded_frame_gap"
+        ) {
+            CTDebug(
+                tag,
+                "FFmpeg pipeline correlation designator=$designator sessionId=$sessionId event=$eventType " +
+                    pipelineCorrelationSummary(sessionId, now)
+            )
+        }
+        when (eventType) {
+            "decoder_opened" -> {
+                synchronized(stateLock) {
+                    managedRenderSessions[sessionId]?.let { session ->
+                        setSessionPhaseLocked(
+                            session = session,
+                            phase = RenderSessionPhase.PRIMED,
+                            nowMs = now,
+                        )
+                    }
+                }
+            }
+            "decoder_open_error" -> handleDecoderOpenError(designator, sessionId)
+            "session_stopped" -> handleSessionStopped(designator, sessionId)
+        }
+        if (eventType == "frame_decoded") {
+            synchronized(stateLock) {
+                handleDecodedFrameEventLocked(
+                    sessionId = sessionId,
+                    now = now,
+                    sourceTimestampUs = telemetry.sourceTimestampUs,
+                )
+            }
+        }
+        if (eventType == "frame_rendered") {
+            synchronized(stateLock) {
+                handleRenderedFrameEventLocked(
+                    designator = designator,
+                    sessionId = sessionId,
+                    now = now,
+                    sourceTimestampUs = telemetry.sourceTimestampUs,
+                    renderLatencyMs = telemetry.renderLatencyMs,
+                )
+            }
+        }
+        when {
+            eventType == "telemetry" -> {
+                CTDebug(tag, "FFmpeg telemetry designator=$designator telemetry=$telemetry")
+            }
+
+            eventType == "render_lock_failed" -> {
+                CTDebug(tag, "FFmpeg event designator=$designator type=$eventType")
+            }
+        }
+        when (eventType) {
+            "session_started",
+            "session_stopped",
+            "decoder_opened",
+            "decoder_open_error",
+            "decoder_alloc_error",
+            "surface_attached",
+            "surface_detached" -> {
+                val sessionState = synchronized(stateLock) {
+                    managedRenderSessions[sessionId]
+                }
+                CTDebug(
+                    tag,
+                    "Session lifecycle designator=$designator sessionId=$sessionId event=$eventType " +
+                        "phase=${sessionState?.phase?.name?.lowercase()}"
+                )
+            }
         }
     }
-
     init {
+        RegisterDebugTags(listOf(tag, FfmpegBridge.TAG, FfmpegBridge.NATIVE_TAG))
         FfmpegBridge.addProbeListener(probeListener)
-        Log.i(tag, "FFmpeg bridge backend=${FfmpegBridge.decoderBackend()}")
+        CTDebug(tag, "FFmpeg bridge backend=${FfmpegBridge.decoderBackend()}")
         if (!FfmpegBridge.isRealDecoderBackend()) {
-            Log.w(tag, "FFmpeg decoder backend is stub. Real video decode is not active yet.")
+            CTWarn(tag, "FFmpeg decoder backend is stub. Real video decode is not active yet.")
         }
         noFramePoll.start(this::pollForNoFrameSessions, noFrameCheckMs, noFrameCheckMs)
     }
 
     fun onStreamBecameLive(designator: String) {
-        synchronized(stateLock) {
-            streamLiveAtMs.putIfAbsent(designator, System.currentTimeMillis())
-        }
-        val renderEnabled = isRenderEnabled(designator)
-        if (renderEnabled) {
+        val now = System.currentTimeMillis()
+        CTDebug(
+            tag,
+            "Stream became live for $designator renderEnabled=${isRenderEnabled(designator)} " +
+                upstreamCorrelationSummary(designator, now)
+        )
+        if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
             ensureRenderSession(designator)
-        } else {
-            ensureProbeSession(designator)
+        }
+    }
+
+    private fun latestUpstreamBoundary(designator: String): UpstreamBoundaryMarker? {
+        return UpstreamTimingRegistry.latestForDesignator(designator)
+    }
+
+    private fun upstreamCorrelationSummary(designator: String, observedAtMs: Long): String {
+        val marker = latestUpstreamBoundary(designator)
+        if (marker == null) {
+            return "upstreamBoundary=none"
+        }
+        val upstreamAgeMs = observedAtMs - marker.observedAtMs
+        return "upstreamBoundary=${marker.boundary} upstreamOutcome=${marker.outcome} " +
+            "upstreamAgeMs=$upstreamAgeMs upstreamRotationSeq=${marker.rotationSequence} " +
+            "upstreamPublisherConnId=${marker.publisherConnId} " +
+            "upstreamPreviousPublisherConnId=${marker.previousPublisherConnId} " +
+            "upstreamPublisherRotated=${marker.publisherRotated}"
+    }
+
+    private fun pipelineCorrelationSummary(sessionId: Long, observedAtMs: Long): String {
+        val snapshot = synchronized(stateLock) {
+            managedRenderSessions[sessionId]
+        } ?: return "session=none"
+        val lastFrameAgeMs = snapshot.lastFrameAtMs?.let { observedAtMs - it } ?: -1L
+        val lastReaderWaitAgeMs = snapshot.lastReaderWaitAtMs?.let { observedAtMs - it } ?: -1L
+        return "phase=${snapshot.phase.name.lowercase()} decodedFrames=${snapshot.decodedFrameCount} " +
+            "renderedFrames=${snapshot.renderedFrameCount} idlePolls=${snapshot.idlePollCount} " +
+            "lastFrameAgeMs=$lastFrameAgeMs lastReaderWaitAgeMs=$lastReaderWaitAgeMs"
+    }
+
+    private fun setSessionPhaseLocked(
+        session: ManagedRenderSession,
+        phase: RenderSessionPhase,
+        nowMs: Long,
+    ) {
+        if (session.phase == phase) return
+        session.phase = phase
+        session.phaseChangedAtMs = nowMs
+    }
+
+    fun updateSourcePath(designator: String, sourcePath: String) {
+        val normalized = sourcePath.trim().trim('/')
+        val resolvedPath = normalized.ifEmpty { designator }
+        var changedFrom: String? = null
+        synchronized(stateLock) {
+            val previous = sourcePathByDesignator.put(designator, resolvedPath)
+            if (previous != null && previous != resolvedPath) {
+                changedFrom = previous
+            }
+        }
+        changedFrom?.let { previous ->
+            CTDebug(tag, "Source path updated for $designator: $previous -> $resolvedPath")
+        }
+    }
+
+    fun onStreamRepublished(
+        designator: String,
+        publisherChanged: Boolean = false,
+        previousPublisherConnId: String? = null,
+        publisherConnId: String? = null,
+    ) {
+        val now = System.currentTimeMillis()
+        val upstreamBoundary = latestUpstreamBoundary(designator)
+        val marker = UpstreamRepublishMarker(
+            observedAtMs = now,
+            previousPublisherConnId = previousPublisherConnId,
+            publisherConnId = publisherConnId,
+            upstreamBoundary = upstreamBoundary?.boundary,
+            upstreamBoundaryOutcome = upstreamBoundary?.outcome,
+            upstreamBoundaryObservedAtMs = upstreamBoundary?.observedAtMs,
+            upstreamBoundaryRotationSeq = upstreamBoundary?.rotationSequence,
+            upstreamBoundaryPublisherConnId = upstreamBoundary?.publisherConnId,
+        )
+        var activeSessionId: Long? = null
+        synchronized(stateLock) {
+            val sessionId = renderSessions[designator]
+            if (sessionId != null) {
+                activeSessionId = sessionId
+                managedRenderSessions[sessionId]?.pendingRepublishMarker = marker
+            } else {
+                pendingRepublishByDesignator[designator] = marker
+            }
+        }
+        CTDebug(
+            tag,
+            "Republish detected for $designator renderEnabled=${isRenderEnabled(designator)} " +
+                "publisherChanged=$publisherChanged prevPublisherConnId=$previousPublisherConnId " +
+                "publisherConnId=$publisherConnId activeSessionId=$activeSessionId " +
+                upstreamCorrelationSummary(designator, now)
+        )
+        val hasActiveRender = activeSessionId != null
+        if (hasActiveRender) {
+            CTDebug(
+                tag,
+                "Republish for $designator -> keeping active render session (publisherChanged=$publisherChanged)"
+            )
+            return
+        }
+        CTDebug(tag, "Republish for $designator -> no active render session; ensuring FFmpeg render is started")
+        sessionControlExecutor.execute {
+            if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
+                ensureRenderSession(designator)
+            }
         }
     }
 
     fun onStreamStopped(designator: String) {
-        val renderSessionId: Long?
-        val probeSessionId: Long?
+        CTDebug(tag, "Stream stopped for $designator; tearing down FFmpeg sessions")
+        val sessionIds: List<Long>
         synchronized(stateLock) {
-            renderSessionId = renderSessions.remove(designator)
-            probeSessionId = probeSessions.remove(designator)
-            lastFrameLogAtMs.remove(designator)
+            sessionIds = listOfNotNull(
+                renderSessions.remove(designator),
+            ).distinct()
+            startingRenderDesignators.remove(designator)
             lastFrameAtMs.remove(designator)
-            streamLiveAtMs.remove(designator)
-            lastRestartAtMs.remove(designator)
+            sourcePathByDesignator.remove(designator)
             boundRenderSurfaces.remove(designator)
             telemetryByDesignator.remove(designator)
             remoteIdCandidatesByDesignator.remove(designator)
+            clearRenderDelayLocked(designator)
+            pendingRepublishByDesignator.remove(designator)
         }
-        renderSessionId?.let { sessionId ->
-            FfmpegBridge.stop(sessionId)
-            Log.d(tag, "Stopped FFmpeg render for $designator sessionId=$sessionId")
+        sessionIds.forEach { sessionId ->
+            stopSessionAsync(sessionId, "Stopped FFmpeg render for $designator sessionId=$sessionId")
         }
-        probeSessionId?.let { sessionId ->
-            FfmpegBridge.stop(sessionId)
-            Log.d(tag, "Stopped FFmpeg probe for $designator sessionId=$sessionId")
+    }
+
+    private fun collectActiveSessionsForShutdown(): List<Long> {
+        return synchronized(stateLock) {
+            val snapshot = renderSessions.values.distinct()
+            renderSessions.clear()
+            startingRenderDesignators.clear()
+            lastFrameAtMs.clear()
+            sourcePathByDesignator.clear()
+            renderEnabledDesignators.clear()
+            boundRenderSurfaces.clear()
+            telemetryByDesignator.clear()
+            remoteIdCandidatesByDesignator.clear()
+            renderDelayMsByDesignator.clear()
+            renderDelayBaseMsByDesignator.clear()
+            renderDelayMeasuredAtMsByDesignator.clear()
+            anomalyConfigByDesignator.clear()
+            pendingRepublishByDesignator.clear()
+            _renderDelayMsByDesignator.value = emptyMap()
+            snapshot
         }
     }
 
     fun stopAll() {
-        val active = synchronized(stateLock) {
-            val snapshot = (probeSessions.values + renderSessions.values).toList()
-            probeSessions.clear()
-            renderSessions.clear()
-            lastFrameAtMs.clear()
-            streamLiveAtMs.clear()
-            lastRestartAtMs.clear()
-            boundRenderSurfaces.clear()
-            telemetryByDesignator.clear()
-            remoteIdCandidatesByDesignator.clear()
-            snapshot
-        }
+        val active = collectActiveSessionsForShutdown()
         noFramePoll.stop()
-        active.forEach { sessionId -> FfmpegBridge.stop(sessionId) }
+        active.forEach { sessionId ->
+            stopSessionAsync(sessionId, "Stopped FFmpeg sessionId=$sessionId during stopAll()")
+        }
     }
 
     fun close() {
-        stopAll()
+        closing = true
+        val active = collectActiveSessionsForShutdown()
+        noFramePoll.stop()
         FfmpegBridge.removeProbeListener(probeListener)
+        sessionControlExecutor.execute {
+            active.forEach { sessionId ->
+                FfmpegBridge.stop(sessionId)
+                CTDebug(tag, "Stopped FFmpeg sessionId=$sessionId during close()")
+            }
+            sessionControlExecutor.shutdown()
+        }
     }
 
-    fun isRenderEnabled(designator: String): Boolean {
+    fun isRenderSupported(designator: String): Boolean {
         if (!BuildConfig.ENABLE_FFMPEG_RENDER) return false
         val configured = BuildConfig.FFMPEG_RENDER_DESIGNATOR.trim()
         return configured.isEmpty() || configured.equals(designator, ignoreCase = true)
     }
 
+    fun setRenderEnabled(designator: String, enabled: Boolean) {
+        synchronized(stateLock) {
+            if (enabled) {
+                if (isRenderSupported(designator)) {
+                    renderEnabledDesignators += designator
+                }
+            } else {
+                renderEnabledDesignators -= designator
+            }
+        }
+    }
+
+    fun isRenderEnabled(designator: String): Boolean {
+        if (!isRenderSupported(designator)) return false
+        return synchronized(stateLock) {
+            renderEnabledDesignators.contains(designator)
+        }
+    }
+
     fun bindRenderSurface(designator: String, surface: Surface): Boolean {
         if (!isRenderEnabled(designator)) return false
-        synchronized(stateLock) {
+        val existingRenderSessionId = synchronized(stateLock) {
             boundRenderSurfaces[designator] = surface
+            renderSessions[designator]
         }
-        val sessionId = ensureRenderSession(designator) ?: return false
-        return FfmpegBridge.attachSurface(sessionId, surface)
+        if (existingRenderSessionId != null) {
+            val attached = FfmpegBridge.attachSurface(existingRenderSessionId, surface)
+            if (!attached) {
+                CTWarn(tag, "Unable to bind render surface for $designator sessionId=$existingRenderSessionId")
+            }
+            return attached
+        }
+        sessionControlExecutor.execute {
+            ensureRenderSession(designator)
+        }
+        return true
+    }
+
+    private fun hasBoundRenderSurface(designator: String): Boolean {
+        return synchronized(stateLock) {
+            boundRenderSurfaces.containsKey(designator)
+        }
+    }
+
+    private fun staleSessionReason(designator: String, sessionId: Long): String? {
+        return synchronized(stateLock) {
+            if (retiringSessionIds.contains(sessionId)) return@synchronized "retiring"
+            if (sessionId == renderSessions[designator]) return@synchronized null
+            val managed = managedRenderSessions[sessionId]
+            if (managed != null && managed.designator == designator) return@synchronized null
+            if (startingRenderDesignators.contains(designator)) return@synchronized null
+            "untracked"
+        }
     }
 
     fun unbindRenderSurface(designator: String) {
@@ -211,6 +515,7 @@ class FfmpegProbeService {
             boundRenderSurfaces.remove(designator)
             renderSessions[designator]
         } ?: return
+        CTDebug(tag, "Unbinding render surface for $designator sessionId=$sessionId")
         FfmpegBridge.detachSurface(sessionId)
     }
 
@@ -236,121 +541,510 @@ class FfmpegProbeService {
         )
     }
 
-    private fun ensureProbeSession(designator: String): Long? {
-        if (!BuildConfig.ENABLE_FFMPEG_PROBE) return null
-        synchronized(stateLock) {
-            probeSessions[designator]?.let { return it }
+    fun hasRecentFrame(designator: String, maxAgeMs: Long = 2_500L): Boolean {
+        val now = System.currentTimeMillis()
+        return synchronized(stateLock) {
+            val lastFrameAt = lastFrameAtMs[designator] ?: return@synchronized false
+            now - lastFrameAt <= maxAgeMs
         }
-        val renderSessionId = synchronized(stateLock) {
-            renderSessions.remove(designator)
-        }
-        renderSessionId?.let {
-            FfmpegBridge.stop(renderSessionId)
-            Log.d(tag, "Stopped FFmpeg render for $designator before starting probe sessionId=$renderSessionId")
-        }
+    }
 
-        val rtspUrl = "rtsp://127.0.0.1:8554/$designator"
-        val sessionId = FfmpegBridge.startProbe(designator, rtspUrl)
-        if (sessionId > 0L) {
-            synchronized(stateLock) {
-                val existing = probeSessions[designator]
-                if (existing != null && existing != sessionId) {
-                    FfmpegBridge.stop(sessionId)
-                    return existing
-                }
-                probeSessions[designator] = sessionId
-            }
-            Log.d(tag, "Started FFmpeg probe for $designator sessionId=$sessionId")
-            return sessionId
+    fun setAnomalyConfig(designator: String, config: NativeAnomalyConfig) {
+        synchronized(stateLock) {
+            anomalyConfigByDesignator[designator] = config
         }
-        Log.w(tag, "Unable to start FFmpeg probe for $designator")
-        return null
+        applyAnomalyConfig(designator)
     }
 
     private fun ensureRenderSession(designator: String): Long? {
         synchronized(stateLock) {
-            renderSessions[designator]?.let { return it }
+            renderSessions[designator]?.let {
+                CTDebug(tag, "Reusing FFmpeg render session for $designator sessionId=$it")
+                return it
+            }
+            if (!startingRenderDesignators.add(designator)) {
+                CTDebug(tag, "FFmpeg render start already pending for $designator")
+                return null
+            }
         }
-        val probeSessionId = synchronized(stateLock) {
-            probeSessions.remove(designator)
-        }
-        probeSessionId?.let {
-            FfmpegBridge.stop(probeSessionId)
-            Log.d(tag, "Stopped FFmpeg probe for $designator before starting render sessionId=$probeSessionId")
+        synchronized(stateLock) {
+            lastFrameAtMs.remove(designator)
+            clearRenderDelayLocked(designator)
         }
 
-        val rtspUrl = "rtsp://127.0.0.1:8554/$designator"
+        val streamPath = synchronized(stateLock) {
+            sourcePathByDesignator[designator]
+        } ?: designator
+        val rtspUrl = "rtsp://127.0.0.1:8554/$streamPath"
+        CTDebug(
+            tag,
+            "Starting FFmpeg render for $designator url=$rtspUrl " +
+                upstreamCorrelationSummary(designator, System.currentTimeMillis())
+        )
         val sessionId = FfmpegBridge.startRender(designator, rtspUrl)
         if (sessionId > 0L) {
+            var duplicateSessionId: Long? = null
+            var existingSessionId: Long? = null
             val reboundSurface = synchronized(stateLock) {
-                val existing = renderSessions[designator]
-                if (existing != null && existing != sessionId) {
-                    FfmpegBridge.stop(sessionId)
-                    return existing
+                startingRenderDesignators.remove(designator)
+                val existingActive = renderSessions[designator]
+                if (existingActive != null) {
+                    duplicateSessionId = sessionId
+                    existingSessionId = existingActive
+                    return@synchronized null
                 }
                 renderSessions[designator] = sessionId
+                val created = ManagedRenderSession(
+                    designator = designator,
+                    phase = RenderSessionPhase.STARTING,
+                    phaseChangedAtMs = System.currentTimeMillis(),
+                )
+                pendingRepublishByDesignator.remove(designator)?.let { marker ->
+                    created.pendingRepublishMarker = marker
+                }
+                managedRenderSessions[sessionId] = created
                 boundRenderSurfaces[designator]
             }
-            Log.d(tag, "Started FFmpeg render for $designator sessionId=$sessionId")
+            if (duplicateSessionId != null) {
+                stopSessionAsync(sessionId, "Stopped duplicate FFmpeg render for $designator sessionId=$sessionId")
+                return existingSessionId
+            }
             reboundSurface?.let { surface ->
-                if (FfmpegBridge.attachSurface(sessionId, surface)) {
-                    Log.d(tag, "Reattached render surface for $designator sessionId=$sessionId")
+                if (!FfmpegBridge.attachSurface(sessionId, surface)) {
+                    CTWarn(tag, "Unable to attach rebound render surface for $designator sessionId=$sessionId")
                 }
             }
+            applyAnomalyConfigToSession(designator, sessionId)
             return sessionId
         }
-        Log.w(tag, "Unable to start FFmpeg render for $designator")
+        synchronized(stateLock) {
+            startingRenderDesignators.remove(designator)
+        }
+        CTWarn(tag, "Unable to start FFmpeg render for $designator")
         return null
+    }
+
+    private fun recordDecodedFrameLocked(sessionState: ManagedRenderSession, now: Long) {
+        val previousFrameAt = sessionState.lastFrameAtMs
+        val frameGapMs = previousFrameAt?.let { now - it }
+        val recentReaderWait =
+            sessionState.lastReaderWaitAtMs != null &&
+                now - sessionState.lastReaderWaitAtMs!! <= recentReaderWaitPenaltyMs
+        sessionState.recoveryFrameStreak = when {
+            !recentReaderWait -> 0
+            frameGapMs == null || frameGapMs <= recoveryFrameContinuityGapMs -> sessionState.recoveryFrameStreak + 1
+            else -> 1
+        }
+        if (recentReaderWait &&
+            sessionState.recoveryFrameStreak >= readerWaitRecoveryFramesToClear
+        ) {
+            sessionState.lastReaderWaitAtMs = null
+        }
+        sessionState.decodedFrameCount += 1
+        sessionState.lastFrameAtMs = now
+    }
+
+    private fun recordRenderedFrameLocked(sessionState: ManagedRenderSession) {
+        sessionState.renderedFrameCount += 1
+    }
+
+    private fun updateSessionPollProgressLocked(
+        sessionState: ManagedRenderSession,
+        useRenderedProgress: Boolean,
+    ) {
+        val currentDecodedCount = sessionState.decodedFrameCount
+        val currentRenderedCount = sessionState.renderedFrameCount
+        val previousObservedCount =
+            if (useRenderedProgress) {
+                sessionState.lastObservedRenderedFrameCount
+            } else {
+                sessionState.lastObservedDecodedFrameCount
+            }
+        val currentObservedCount =
+            if (useRenderedProgress) {
+                currentRenderedCount
+            } else {
+                currentDecodedCount
+            }
+        val progressed = currentObservedCount > previousObservedCount
+        if (progressed) {
+            sessionState.idlePollCount = 0
+        } else {
+            sessionState.idlePollCount += 1
+        }
+        sessionState.lastObservedDecodedFrameCount = currentDecodedCount
+        sessionState.lastObservedRenderedFrameCount = currentRenderedCount
+    }
+
+    private fun classifySessionHealthLocked(
+        sessionState: ManagedRenderSession,
+        useRenderedProgress: Boolean,
+    ): RenderSessionHealth {
+        if (sessionState.idlePollCount == 0) return RenderSessionHealth.HEALTHY
+        if (useRenderedProgress &&
+            sessionState.renderedFrameCount > 0L &&
+            sessionState.idlePollCount >= longIdlePollsBeforeCleanup
+        ) {
+            return RenderSessionHealth.LONG_IDLE
+        }
+        return RenderSessionHealth.STALLED
+    }
+
+    private fun retireLongIdleRenderLocked(designator: String, idlePollCount: Int): Pair<Long, Int>? {
+        val activeSessionId = renderSessions[designator] ?: return null
+        val activeSession = managedRenderSessions[activeSessionId] ?: return null
+        if (activeSession.renderedFrameCount == 0L) return null
+        if (idlePollCount < longIdlePollsBeforeCleanup) return null
+        renderSessions.remove(designator)
+        lastFrameAtMs.remove(designator)
+        managedRenderSessions[activeSessionId]?.let { session ->
+            setSessionPhaseLocked(
+                session = session,
+                phase = RenderSessionPhase.RETIRING,
+                nowMs = System.currentTimeMillis(),
+            )
+        }
+        return activeSessionId to idlePollCount
+    }
+
+    private fun handleDecodedFrameEventLocked(
+        sessionId: Long,
+        now: Long,
+        sourceTimestampUs: Long?,
+    ) {
+        val sessionState = managedRenderSessions[sessionId] ?: return
+        recordDecodedFrameLocked(sessionState, now)
+        if (sessionState.pendingRepublishMarker != null) {
+            sessionState.sourceClockOffsetMs = null
+            sessionState.lastSourceTimestampUs = null
+        }
+        updateSourceLagEstimateLocked(sessionState, sourceTimestampUs, now)
+        sessionState.pendingRepublishMarker?.let { marker ->
+            val republishToDecodedMs = now - marker.observedAtMs
+            val upstreamBoundaryToRepublishMs = marker.upstreamBoundaryObservedAtMs?.let { marker.observedAtMs - it } ?: -1L
+            val upstreamBoundaryToDecodedMs = marker.upstreamBoundaryObservedAtMs?.let { now - it } ?: -1L
+            CTDebug(
+                tag,
+                "Upstream republish recovery designator=${sessionState.designator} sessionId=$sessionId " +
+                    "republishToDecodedMs=$republishToDecodedMs prevPublisherConnId=${marker.previousPublisherConnId} " +
+                    "publisherConnId=${marker.publisherConnId} upstreamBoundary=${marker.upstreamBoundary} " +
+                    "upstreamBoundaryOutcome=${marker.upstreamBoundaryOutcome} " +
+                    "upstreamBoundaryPublisherConnId=${marker.upstreamBoundaryPublisherConnId} " +
+                    "upstreamBoundaryRotationSeq=${marker.upstreamBoundaryRotationSeq} " +
+                    "upstreamBoundaryToRepublishMs=$upstreamBoundaryToRepublishMs " +
+                    "upstreamBoundaryToDecodedMs=$upstreamBoundaryToDecodedMs"
+            )
+            sessionState.pendingRepublishMarker = null
+        }
+        val waitWindowStartedAt = sessionState.readerWaitWindowStartedAtMs
+        if (waitWindowStartedAt != null) {
+            val waitWindowDurationMs = now - waitWindowStartedAt
+            val waitEvents = sessionState.readerWaitEventCountInWindow
+            CTDebug(
+                tag,
+                "Reader wait resolved designator=${sessionState.designator} sessionId=$sessionId " +
+                    "waitWindowMs=$waitWindowDurationMs waitEvents=$waitEvents " +
+                    pipelineCorrelationSummary(sessionId, now)
+            )
+            sessionState.readerWaitWindowStartedAtMs = null
+            sessionState.readerWaitEventCountInWindow = 0
+        }
+        setSessionPhaseLocked(
+            session = sessionState,
+            phase = RenderSessionPhase.LIVE,
+            nowMs = now,
+        )
+    }
+
+    private fun handleRenderedFrameEventLocked(
+        designator: String,
+        sessionId: Long,
+        now: Long,
+        sourceTimestampUs: Long?,
+        renderLatencyMs: Long?,
+    ) {
+        val sessionState = managedRenderSessions[sessionId] ?: return
+        recordRenderedFrameLocked(sessionState)
+        if (renderSessions[designator] == sessionId) {
+            lastFrameAtMs[designator] = now
+            val sourceLagMs = updateSourceLagEstimateLocked(sessionState, sourceTimestampUs, now).estimatedLagMs
+            val effectiveLagMs = when {
+                sourceLagMs != null && renderLatencyMs != null -> max(sourceLagMs, renderLatencyMs)
+                else -> sourceLagMs ?: renderLatencyMs
+            }
+            updateRenderDelayLocked(designator, effectiveLagMs, now)
+        }
+    }
+
+    private fun handleSessionStopped(designator: String, sessionId: Long) {
+        synchronized(stateLock) {
+            if (renderSessions[designator] == sessionId) {
+                renderSessions.remove(designator)
+                lastFrameAtMs.remove(designator)
+                clearRenderDelayLocked(designator)
+            }
+            managedRenderSessions.remove(sessionId)
+        }
+    }
+
+    private fun updateRenderDelayLocked(
+        designator: String,
+        renderLatencyMs: Long?,
+        observedAtMs: Long,
+    ) {
+        val latencyMs = renderLatencyMs ?: return
+        if (latencyMs < 0L) return
+        renderDelayBaseMsByDesignator[designator] = latencyMs
+        renderDelayMeasuredAtMsByDesignator[designator] = observedAtMs
+        publishRenderDelayLocked(designator, latencyMs, observedAtMs)
+    }
+
+    private fun publishRenderDelayLocked(
+        designator: String,
+        baseLagMs: Long,
+        nowMs: Long,
+    ) {
+        val measuredAtMs = renderDelayMeasuredAtMsByDesignator[designator] ?: nowMs
+        val agedLagMs = baseLagMs + maxOf(0L, nowMs - measuredAtMs)
+        val quantizedLatencyMs = quantizeRenderDelayMs(agedLagMs)
+        if (renderDelayMsByDesignator[designator] == quantizedLatencyMs) return
+        renderDelayMsByDesignator[designator] = quantizedLatencyMs
+        _renderDelayMsByDesignator.value = renderDelayMsByDesignator.toMap()
+    }
+
+    private fun refreshRenderDelayLocked(nowMs: Long) {
+        renderDelayBaseMsByDesignator.forEach { (designator, baseLagMs) ->
+            publishRenderDelayLocked(designator, baseLagMs, nowMs)
+        }
+    }
+
+    private fun clearRenderDelayLocked(designator: String) {
+        renderDelayBaseMsByDesignator.remove(designator)
+        renderDelayMeasuredAtMsByDesignator.remove(designator)
+        if (renderDelayMsByDesignator.remove(designator) != null) {
+            _renderDelayMsByDesignator.value = renderDelayMsByDesignator.toMap()
+        }
+    }
+
+    private fun updateSourceLagEstimateLocked(
+        sessionState: ManagedRenderSession,
+        sourceTimestampUs: Long?,
+        observedAtMs: Long,
+    ): SourceLagEstimate {
+        val estimate = updateSourceLagEstimate(
+            sourceClockOffsetMs = sessionState.sourceClockOffsetMs,
+            lastSourceTimestampUs = sessionState.lastSourceTimestampUs,
+            sourceTimestampUs = sourceTimestampUs,
+            observedAtMs = observedAtMs,
+            resetThresholdMs = sourceTimestampResetThresholdMs,
+        )
+        sessionState.sourceClockOffsetMs = estimate.sourceClockOffsetMs
+        sessionState.lastSourceTimestampUs = estimate.lastSourceTimestampUs
+        return estimate
     }
 
     private fun pollForNoFrameSessions() {
         val now = System.currentTimeMillis()
-        val restartPlan = mutableListOf<Pair<String, Boolean>>()
+        logRuntimePerformance(now)
+        val retireActivePlan = mutableListOf<Triple<String, Long, Int>>()
+        val startupRecoveryPlan = mutableListOf<Triple<String, Long, Long>>()
         synchronized(stateLock) {
-            val activeDesignators = (renderSessions.keys + probeSessions.keys).toSet()
-            activeDesignators.forEach { designator ->
-                val decision = NoFrameRestartPolicy.evaluate(
-                    nowMs = now,
-                    liveAtMs = streamLiveAtMs[designator],
-                    lastFrameAtMs = lastFrameAtMs[designator],
-                    lastRestartAtMs = lastRestartAtMs[designator],
-                    startupGraceMs = startupGraceMs,
-                    noFrameTimeoutMs = noFrameTimeoutMs,
-                    restartCooldownMs = restartCooldownMs,
+            refreshRenderDelayLocked(now)
+            val activeRenderDesignators = renderSessions.keys.toList()
+            activeRenderDesignators.forEach { designator ->
+                val activeSessionId = renderSessions[designator] ?: return@forEach
+                val activeSession = managedRenderSessions[activeSessionId] ?: return@forEach
+                if (activeSession.phase == RenderSessionPhase.RETIRING) {
+                    return@forEach
+                }
+                if (activeSession.phase == RenderSessionPhase.STARTING ||
+                    activeSession.phase == RenderSessionPhase.PRIMED
+                ) {
+                    val hasAnyFrames = activeSession.decodedFrameCount > 0L || activeSession.renderedFrameCount > 0L
+                    val phaseAgeMs = now - activeSession.phaseChangedAtMs
+                    val hasRecentReaderWait = activeSession.lastReaderWaitAtMs?.let { now - it <= recentReaderWaitPenaltyMs } == true
+                    val upstreamBoundary = latestUpstreamBoundary(designator)
+                    val upstreamTransientClose =
+                        upstreamBoundary?.boundary == "stream_error" &&
+                            upstreamBoundary.outcome == "deferred_transient_close"
+                    val deferStartupRecovery = hasRecentReaderWait || upstreamTransientClose
+                    val allowForcedRecovery = phaseAgeMs >= startupNoFrameAbsoluteRecoveryMs
+                    if (!hasAnyFrames &&
+                        phaseAgeMs >= startupNoFrameRecoveryMs &&
+                        !activeSession.startupRecoveryAttempted
+                    ) {
+                        if (deferStartupRecovery && !allowForcedRecovery) {
+                            if (now - activeSession.lastStartupRecoveryDeferredLogAtMs >= startupNoFrameDeferralLogMs) {
+                                activeSession.lastStartupRecoveryDeferredLogAtMs = now
+                                CTDebug(
+                                    tag,
+                                    "Deferring startup no-frame recovery designator=$designator " +
+                                        "sessionId=$activeSessionId phaseAgeMs=$phaseAgeMs " +
+                                        "recentReaderWait=$hasRecentReaderWait " +
+                                        "upstreamBoundary=${upstreamBoundary?.boundary} " +
+                                        "upstreamOutcome=${upstreamBoundary?.outcome}"
+                                )
+                            }
+                            return@forEach
+                        }
+                        activeSession.startupRecoveryAttempted = true
+                        renderSessions.remove(designator)
+                        setSessionPhaseLocked(
+                            session = activeSession,
+                            phase = RenderSessionPhase.RETIRING,
+                            nowMs = now,
+                        )
+                        startupRecoveryPlan += Triple(designator, activeSessionId, phaseAgeMs)
+                    }
+                    return@forEach
+                }
+                val useRenderedProgress = boundRenderSurfaces.containsKey(designator)
+                updateSessionPollProgressLocked(
+                    sessionState = activeSession,
+                    useRenderedProgress = useRenderedProgress,
                 )
-                if (!decision.shouldRestart) return@forEach
-                lastRestartAtMs[designator] = now
-                when {
-                    renderSessions.containsKey(designator) -> restartPlan += designator to true
-                    probeSessions.containsKey(designator) -> restartPlan += designator to false
+                when (classifySessionHealthLocked(activeSession, useRenderedProgress)) {
+                    RenderSessionHealth.HEALTHY,
+                    RenderSessionHealth.STALLED,
+                    -> Unit
+                    RenderSessionHealth.LONG_IDLE -> {
+                        retireLongIdleRenderLocked(designator, activeSession.idlePollCount)?.let { (sessionId, idlePolls) ->
+                            retireActivePlan += Triple(designator, sessionId, idlePolls)
+                        }
+                    }
                 }
             }
         }
-        restartPlan.forEach { (designator, isRender) ->
-            if (isRender) restartRenderSession(designator) else restartProbeSession(designator)
+        retireActivePlan.forEach { (designator, sessionId, idlePolls) ->
+            stopSessionAsync(
+                sessionId,
+                "Stopped long-idle FFmpeg render for $designator sessionId=$sessionId idlePolls=$idlePolls"
+            )
+        }
+        startupRecoveryPlan.forEach { (designator, sessionId, phaseAgeMs) ->
+            CTWarn(
+                tag,
+                "Startup no-frame recovery designator=$designator sessionId=$sessionId phaseAgeMs=$phaseAgeMs " +
+                    upstreamCorrelationSummary(designator, now)
+            )
+            stopSessionAsync(
+                sessionId,
+                "Stopped startup-stalled FFmpeg render for $designator sessionId=$sessionId phaseAgeMs=$phaseAgeMs"
+            )
+            sessionControlExecutor.execute {
+                val upstreamBoundary = latestUpstreamBoundary(designator)
+                val upstreamTransientClose =
+                    upstreamBoundary?.boundary == "stream_error" &&
+                        upstreamBoundary.outcome == "deferred_transient_close"
+                if (upstreamTransientClose) {
+                    CTDebug(
+                        tag,
+                        "Deferring FFmpeg startup-recovery restart for $designator sessionId=$sessionId " +
+                            "while upstream is transiently closed " +
+                            "boundary=${upstreamBoundary?.boundary} outcome=${upstreamBoundary?.outcome}"
+                    )
+                    return@execute
+                }
+                if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
+                    ensureRenderSession(designator)
+                }
+            }
         }
     }
 
-    private fun restartProbeSession(designator: String) {
-        val sessionId = synchronized(stateLock) {
-            probeSessions.remove(designator)
+    private fun logRuntimePerformance(nowMs: Long) {
+        val activeSnapshot = synchronized(stateLock) {
+            Pair(renderSessions.keys.toSet(), lastFrameAtMs.toMap())
         }
-        sessionId?.let {
-            FfmpegBridge.stop(sessionId)
-            Log.w(tag, "No frames for $designator probe -> restarting sessionId=$sessionId")
+        val renderActive = activeSnapshot.first
+        val hasActiveSessions = renderActive.isNotEmpty()
+
+        val pollGapMs = if (lastPollAtMs == 0L) 0L else nowMs - lastPollAtMs
+        lastPollAtMs = nowMs
+        if (!hasActiveSessions) {
+            lastPerfSampleAtMs = nowMs
+            lastPerfProcessCpuMs = Process.getElapsedCpuTime()
+            lastPerfMainThreadCpuNs = Debug.threadCpuTimeNanos()
+            return
         }
-        ensureProbeSession(designator)
+
+        if (lastPerfSampleAtMs == 0L) {
+            lastPerfSampleAtMs = nowMs
+            lastPerfProcessCpuMs = Process.getElapsedCpuTime()
+            lastPerfMainThreadCpuNs = Debug.threadCpuTimeNanos()
+            return
+        }
+
+        val elapsedMs = nowMs - lastPerfSampleAtMs
+        if (elapsedMs < 5_000L) return
+
+        val processCpuMs = Process.getElapsedCpuTime()
+        val mainThreadCpuNs = Debug.threadCpuTimeNanos()
+        val processCpuDeltaMs = processCpuMs - lastPerfProcessCpuMs
+        val mainThreadCpuDeltaMs = (mainThreadCpuNs - lastPerfMainThreadCpuNs) / 1_000_000L
+        val maxFrameAgeMs = activeSnapshot.second
+            .keys
+            .filter { it in renderActive }
+            .mapNotNull { designator -> activeSnapshot.second[designator]?.let { nowMs - it } }
+            .maxOrNull() ?: -1L
+
+        CTDebug(
+            tag,
+            "Perf sample active(render=${renderActive.size}) " +
+                "elapsedMs=$elapsedMs pollGapMs=$pollGapMs processCpuDeltaMs=$processCpuDeltaMs " +
+                "mainThreadCpuDeltaMs=$mainThreadCpuDeltaMs maxFrameAgeMs=$maxFrameAgeMs"
+        )
+
+        lastPerfSampleAtMs = nowMs
+        lastPerfProcessCpuMs = processCpuMs
+        lastPerfMainThreadCpuNs = mainThreadCpuNs
     }
 
-    private fun restartRenderSession(designator: String) {
-        val sessionId = synchronized(stateLock) {
-            renderSessions.remove(designator)
+    private fun stopSessionAsync(sessionId: Long, completionLog: String) {
+        if (sessionId <= 0L) return
+        synchronized(stateLock) {
+            retiringSessionIds += sessionId
+            managedRenderSessions[sessionId]?.let { session ->
+                setSessionPhaseLocked(
+                    session = session,
+                    phase = RenderSessionPhase.RETIRING,
+                    nowMs = System.currentTimeMillis(),
+                )
+            }
         }
-        sessionId?.let {
-            FfmpegBridge.stop(sessionId)
-            Log.w(tag, "No frames for $designator render -> restarting sessionId=$sessionId")
+        if (closing) return
+        sessionControlExecutor.execute {
+            try {
+                FfmpegBridge.stop(sessionId)
+                CTDebug(tag, completionLog)
+            } finally {
+                synchronized(stateLock) {
+                    retiringSessionIds.remove(sessionId)
+                }
+            }
         }
-        ensureRenderSession(designator)
+    }
+
+    private fun handleDecoderOpenError(designator: String, sessionId: Long) {
+        val wasActive = synchronized(stateLock) {
+            if (sessionId == renderSessions[designator]) {
+                renderSessions.remove(designator)
+                lastFrameAtMs.remove(designator)
+                managedRenderSessions[sessionId]?.let { session ->
+                    setSessionPhaseLocked(
+                        session = session,
+                        phase = RenderSessionPhase.RETIRING,
+                        nowMs = System.currentTimeMillis(),
+                    )
+                }
+                true
+            } else {
+                false
+            }
+        }
+        if (wasActive) {
+            CTWarn(tag, "Decoder open failed for $designator sessionId=$sessionId; waiting for a fresh live signal before retrying.")
+        }
     }
 
     private fun mergeTelemetry(designator: String, incoming: FfmpegTelemetry) {
@@ -365,7 +1059,76 @@ class FfmpegProbeService {
             mergedResult
         }
         result.addedRemoteId?.let { rid ->
-            Log.i(tag, "Telemetry remoteId candidate for $designator: $rid")
+            CTDebug(tag, "Telemetry remoteId candidate for $designator: $rid")
         }
     }
+
+    private fun applyAnomalyConfig(designator: String) {
+        val snapshot = synchronized(stateLock) {
+            val config = anomalyConfigByDesignator[designator] ?: return
+            val sessionIds = listOfNotNull(renderSessions[designator]).distinct()
+            Pair(sessionIds, config)
+        }
+        snapshot.first.forEach { sessionId ->
+            FfmpegBridge.updateAnomalyConfig(sessionId, snapshot.second)
+        }
+    }
+
+    private fun applyAnomalyConfigToSession(designator: String, sessionId: Long) {
+        val config = synchronized(stateLock) {
+            anomalyConfigByDesignator[designator]
+        } ?: return
+        FfmpegBridge.updateAnomalyConfig(sessionId, config)
+    }
+}
+
+internal fun quantizeRenderDelayMs(renderLatencyMs: Long): Long {
+    if (renderLatencyMs <= 0L) return 0L
+    val bucketMs = when {
+        renderLatencyMs < 1_000L -> 100L
+        renderLatencyMs < 10_000L -> 250L
+        else -> 500L
+    }
+    return max(bucketMs, ((renderLatencyMs + (bucketMs / 2)) / bucketMs) * bucketMs)
+}
+
+internal data class SourceLagEstimate(
+    val sourceClockOffsetMs: Long?,
+    val lastSourceTimestampUs: Long?,
+    val estimatedLagMs: Long?,
+)
+
+internal fun updateSourceLagEstimate(
+    sourceClockOffsetMs: Long?,
+    lastSourceTimestampUs: Long?,
+    sourceTimestampUs: Long?,
+    observedAtMs: Long,
+    resetThresholdMs: Long = 1_000L,
+): SourceLagEstimate {
+    if (sourceTimestampUs == null || sourceTimestampUs <= 0L) {
+        return SourceLagEstimate(
+            sourceClockOffsetMs = sourceClockOffsetMs,
+            lastSourceTimestampUs = lastSourceTimestampUs,
+            estimatedLagMs = null,
+        )
+    }
+
+    val sourceTimestampMs = sourceTimestampUs / 1_000L
+    val lastSourceTimestampMs = lastSourceTimestampUs?.takeIf { it > 0L }?.div(1_000L)
+    val resetClock =
+        lastSourceTimestampMs != null &&
+            sourceTimestampMs + resetThresholdMs < lastSourceTimestampMs
+    val anchoredOffsetMs = if (resetClock) null else sourceClockOffsetMs
+    val observedOffsetMs = observedAtMs - sourceTimestampMs
+    val nextOffsetMs = when {
+        anchoredOffsetMs == null -> observedOffsetMs
+        observedOffsetMs < anchoredOffsetMs -> observedOffsetMs
+        else -> anchoredOffsetMs
+    }
+    val estimatedLagMs = max(0L, observedAtMs - (nextOffsetMs + sourceTimestampMs))
+    return SourceLagEstimate(
+        sourceClockOffsetMs = nextOffsetMs,
+        lastSourceTimestampUs = sourceTimestampUs,
+        estimatedLagMs = estimatedLagMs,
+    )
 }

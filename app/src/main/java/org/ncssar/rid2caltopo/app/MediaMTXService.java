@@ -36,6 +36,8 @@ import java.util.Locale;
 
 public class MediaMTXService extends Service {
     private static final String TAG = "MediaMTXService";
+    private static final String ACTION_STOP_SERVICE = "STOP_SERVICE";
+    private static final String ACTION_RESTART_SERVICE = "RESTART_SERVICE";
     private static final String CHANNEL_ID = "streaming";
     private static final int MEDIA_MTX_NOTIFICATION_ID = 2;
     private static boolean listenersRegistered = false;
@@ -87,10 +89,18 @@ public class MediaMTXService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && "STOP_SERVICE".equals(intent.getAction())) {
+        String action = intent != null ? intent.getAction() : null;
+        if (ACTION_STOP_SERVICE.equals(action)) {
             CTDebug(TAG, "MediaMTXService shutting down.");
             stopForeground(true);
             stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (ACTION_RESTART_SERVICE.equals(action)) {
+            CTDebug(TAG, "MediaMTXService restarting native server.");
+            ensureListenersRegistered();
+            processPid = Process.myPid();
+            restartNativeServer();
             return START_NOT_STICKY;
         }
 
@@ -100,14 +110,36 @@ public class MediaMTXService extends Service {
             CTInfo(TAG, "MediaMTX already running in pid " + processPid);
             return START_NOT_STICKY;
         }
-        if (!listenersRegistered) {
-            MediaMTXBootstrap.init();
-            listenersRegistered = true;
-        }
+        ensureListenersRegistered();
 
         processPid = Process.myPid();
         CTDebug(TAG, "MediaMTX service started in pid " + processPid);
 
+        startNativeServer();
+
+        return START_NOT_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        processPid = 0;
+        MediaMTXNative.stop();
+        super.onDestroy();
+    }
+
+    private void ensureListenersRegistered() {
+        if (!listenersRegistered) {
+            MediaMTXBootstrap.init();
+            listenersRegistered = true;
+        }
+    }
+
+    private void restartNativeServer() {
+        MediaMTXNative.stop();
+        startNativeServer();
+    }
+
+    private void startNativeServer() {
         try {
             File bin = extractAsset("mediamtx");
             File cfg = extractAsset("mediamtx.yml");
@@ -121,14 +153,6 @@ public class MediaMTXService extends Service {
         } catch (Exception e) {
             CTError(TAG, "MediaMTX_Start() raised", e);
         }
-
-        return START_NOT_STICKY;
-    }
-
-    @Override
-    public void onDestroy() {
-        MediaMTXNative.stop();
-        super.onDestroy();
     }
 
     @Nullable

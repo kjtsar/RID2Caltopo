@@ -17,7 +17,7 @@ export GOARCH=arm64
 export CGO_ENABLED=1 ;# 1 for debug, 0 for production
 export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
 
-go build -tags nowebrtc -o mediamtx
+go build -o mediamtx
 
 # readelf missing
 # readelf -l libmediamtx.so | grep LOAD

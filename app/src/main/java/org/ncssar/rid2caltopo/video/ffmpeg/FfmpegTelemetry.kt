@@ -5,6 +5,7 @@ data class FfmpegTelemetry(
     val confidence: Double? = null,
     val remoteId: String? = null,
     val sourceTimestampUs: Long? = null,
+    val renderLatencyMs: Long? = null,
     val latitude: Double? = null,
     val longitude: Double? = null,
     val altitudeMeters: Double? = null,

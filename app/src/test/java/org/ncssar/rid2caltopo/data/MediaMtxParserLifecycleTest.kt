@@ -19,25 +19,17 @@ class MediaMtxParserLifecycleTest {
     }
 
     @Test
-    fun parseLine_singlePendingCanBeReplacedByNextPathBeforeStarted() {
-        var state = MediaMtxParserState()
+    fun parseLine_runOnReadyTransitions_doNotEmitLifecycleEvents() {
+        val events = parseEvents(
+            listOf(
+                "[path alpha] runOnReady command",
+                "started",
+                "[path alpha] runOnReady command started",
+                "[path alpha] runOnReady command stopped",
+            )
+        )
 
-        val step1 = MediaMtxLogParser.parseLine(state, "[path alpha] runOnReady command")
-        state = step1.state
-        assertNull(step1.event)
-
-        val step2 = MediaMtxLogParser.parseLine(state, "[path bravo] runOnReady command")
-        state = step2.state
-        assertNull(step2.event)
-
-        val step3 = MediaMtxLogParser.parseLine(state, "started")
-        state = step3.state
-        val bravoStarted = step3.event as MediaMTXEvent.StreamStarted
-        assertEquals("bravo", bravoStarted.path)
-
-        val step4 = MediaMtxLogParser.parseLine(state, "[path alpha] runOnReady command started")
-        val started = step4.event as MediaMTXEvent.StreamStarted
-        assertEquals("alpha", started.path)
+        assertTrue(events.isEmpty())
     }
 
     @Test
@@ -70,5 +62,68 @@ class MediaMtxParserLifecycleTest {
         val hlsStarted = events[1] as MediaMTXEvent.HlsStreamStarted
         assertEquals("v1.8.2", serverStarted.version)
         assertEquals("scout2", hlsStarted.path)
+    }
+
+    @Test
+    fun dispatch_multilineChunk_splitsAndEmitsLifecycleEvents() {
+        MediaMTXLogDispatcher.resetForTests()
+        val recorder = EventRecorder<MediaMTXEvent>()
+        MediaMTXLogDispatcher.addListener(recorder::record)
+
+        MediaMTXLogDispatcher.dispatchChunk(
+            """
+            [path scout3] runOnReady command started
+            [RTMP] [conn 10.0.0.1:12000] is publishing to path 'scout3'
+            [HLS] [muxer scout3] created automatically
+            """.trimIndent(),
+            shouldLog = false,
+        )
+
+        assertEquals(2, recorder.events.size)
+        assertTrue(recorder.events[0] is MediaMTXEvent.StreamStarted)
+        assertTrue(recorder.events[1] is MediaMTXEvent.HlsStreamStarted)
+    }
+
+    @Test
+    fun dispatch_splitPublishingLineAcrossChunks_reassemblesBeforeParsing() {
+        MediaMTXLogDispatcher.resetForTests()
+        val recorder = EventRecorder<MediaMTXEvent>()
+        MediaMTXLogDispatcher.addListener(recorder::record)
+
+        MediaMTXLogDispatcher.dispatchChunk(
+            "[path autel/1SAR7EvMx4n] created\n[RTMP] [conn 10.0.0.1:12000] is publishing to p",
+            shouldLog = false,
+            flushTrailingFragment = false,
+        )
+        MediaMTXLogDispatcher.dispatchChunk(
+            "ath 'autel/1SAR7EvMx4n'\n",
+            shouldLog = false,
+            flushTrailingFragment = false,
+        )
+
+        assertEquals(2, recorder.events.size)
+        assertTrue(recorder.events[0] is MediaMTXEvent.StreamConnecting)
+        assertTrue(recorder.events[1] is MediaMTXEvent.StreamStarted)
+        assertEquals(
+            "autel/1SAR7EvMx4n",
+            (recorder.events[1] as MediaMTXEvent.StreamStarted).path,
+        )
+    }
+
+    @Test
+    fun parseLine_publisherRotation_emitsHandoffWithoutError() {
+        val events = parseEvents(
+            listOf(
+                "[RTMP] [conn 10.0.0.1:12000] is publishing to path 'scout4'",
+                "[path scout4] closing existing publisher",
+                "[RTMP] [conn 10.0.0.1:12000] closed: terminated",
+                "[RTMP] [conn 10.0.0.1:12001] is publishing to path 'scout4'",
+            )
+        )
+
+        assertEquals(3, events.size)
+        assertTrue(events[0] is MediaMTXEvent.StreamStarted)
+        assertTrue(events[1] is MediaMTXEvent.StreamPublisherHandoff)
+        assertTrue(events[2] is MediaMTXEvent.StreamStarted)
     }
 }

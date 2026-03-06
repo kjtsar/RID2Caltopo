@@ -20,6 +20,12 @@ public final class MediaMTXNative {
     }
 
     public static void onMediaMTXLogLine(String line) {
-        MediaMTXLogDispatcher.dispatch(line);
+        // Raw MediaMTX stdout/stderr is debug-only. Structured JSON remains the
+        // authoritative signaling path for lifecycle events.
+        CTDebug("MediaMTXService", "MediaMTX: " + line);
+    }
+
+    public static void onMediaMTXEventJson(String json) {
+        MediaMTXStructuredDispatcher.dispatchEventJson(json);
     }
 }

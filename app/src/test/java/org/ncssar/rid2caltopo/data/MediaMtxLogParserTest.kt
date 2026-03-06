@@ -7,21 +7,18 @@ import org.junit.Test
 
 class MediaMtxLogParserTest {
     @Test
-    fun parseLine_runOnReadyTwoLine_startedEmitsStarted() {
-        val step1 = MediaMtxLogParser.parseLine(
+    fun parseLine_runOnReadyCommand_isIgnored() {
+        val result = MediaMtxLogParser.parseLine(
             MediaMtxParserState(),
             "[path alpha] runOnReady command",
         )
-        assertNull(step1.event)
-        assertEquals(setOf("alpha"), step1.state.pendingRunOnReadyPaths)
-
-        val step2 = MediaMtxLogParser.parseLine(step1.state, "started")
-        assertEquals(MediaMTXEvent.StreamStarted("alpha").path, (step2.event as MediaMTXEvent.StreamStarted).path)
-        assertEquals(emptySet<String>(), step2.state.pendingRunOnReadyPaths)
+        assertNull(result.event)
+        assertEquals(emptySet<String>(), result.state.pendingRunOnReadyPaths)
+        assertEquals(emptySet<String>(), result.state.pendingRunOnReadyVerbPaths)
     }
 
     @Test
-    fun parseLine_rtmpPublishing_emitsStartedAndClearsPendingPath() {
+    fun parseLine_rtmpPublishing_emitsStartedAndClearsSuppressionState() {
         val preState = MediaMtxParserState(
             pendingRunOnReadyPaths = linkedSetOf("alpha"),
             pendingRunOnReadyVerbPaths = linkedSetOf("alpha"),
@@ -36,6 +33,24 @@ class MediaMtxLogParserTest {
         assertEquals(emptySet<String>(), result.state.pendingRunOnReadyPaths)
         assertEquals(emptySet<String>(), result.state.pendingRunOnReadyVerbPaths)
         assertEquals("alpha", result.state.rtmpConnPathMap["127.0.0.1:5555"])
+    }
+
+    @Test
+    fun parseLine_duplicateRtmpPublishingForSameConnection_isIgnored() {
+        val first = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 127.0.0.1:5555] is publishing to path 'alpha'",
+        )
+        assertTrue(first.event is MediaMTXEvent.StreamStarted)
+
+        val duplicate = MediaMtxLogParser.parseLine(
+            first.state,
+            "[RTMP] [conn 127.0.0.1:5555] is publishing to path 'alpha'",
+        )
+
+        assertNull(duplicate.event)
+        assertEquals("alpha", duplicate.state.rtmpConnPathMap["127.0.0.1:5555"])
+        assertEquals("127.0.0.1:5555", duplicate.state.pathPublisherConnMap["alpha"])
     }
 
     @Test
@@ -72,5 +87,96 @@ class MediaMtxLogParserTest {
             "[path alpha] runOnReady command stopped",
         )
         assertNull(stopped.event)
+    }
+
+    @Test
+    fun parseLine_rtmpExtendedChunkIdsError_isRetainedAcrossTeardownLines() {
+        val start = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.10:5000] is publishing to path 'alpha'",
+        )
+
+        val closed = MediaMtxLogParser.parseLine(
+            start.state,
+            "[RTMP] [conn 192.168.1.10:5000] closed: extended chunk stream IDs are not supported (yet)",
+        )
+        val error = closed.event as MediaMTXEvent.StreamError
+        assertEquals("alpha", error.path)
+        assertEquals(
+            "RTMP closed: publisher uses extended chunk stream IDs unsupported by current MediaMTX",
+            error.reason,
+        )
+
+        val hlsDestroyed = MediaMtxLogParser.parseLine(
+            closed.state,
+            "[HLS] [muxer alpha] destroyed: terminated",
+        )
+        assertNull(hlsDestroyed.event)
+
+        val pathDestroyed = MediaMtxLogParser.parseLine(
+            hlsDestroyed.state,
+            "[path alpha] destroyed: terminated",
+        )
+        assertNull(pathDestroyed.event)
+    }
+
+    @Test
+    fun parseLine_runOnReadyCommandStopped_isIgnoredWithoutRtmpState() {
+        val result = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[path alpha] runOnReady command stopped",
+        )
+        assertNull(result.event)
+    }
+
+    @Test
+    fun parseLine_publisherHandoff_suppressesTerminatedCloseError() {
+        val started = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.10:5000] is publishing to path 'alpha'",
+        )
+        assertTrue(started.event is MediaMTXEvent.StreamStarted)
+
+        val handoff = MediaMtxLogParser.parseLine(
+            started.state,
+            "[path alpha] closing existing publisher",
+        )
+        assertEquals(
+            "alpha",
+            (handoff.event as MediaMTXEvent.StreamPublisherHandoff).path,
+        )
+
+        val closed = MediaMtxLogParser.parseLine(
+            handoff.state,
+            "[RTMP] [conn 192.168.1.10:5000] closed: terminated",
+        )
+        assertNull(closed.event)
+    }
+
+    @Test
+    fun parseLine_publisherHandoffWithNewPublisherFirst_suppressesOldTerminatedCloseError() {
+        val initial = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.10:5000] is publishing to path 'alpha'",
+        )
+        assertTrue(initial.event is MediaMTXEvent.StreamStarted)
+
+        val handoff = MediaMtxLogParser.parseLine(
+            initial.state,
+            "[path alpha] closing existing publisher",
+        )
+        assertTrue(handoff.event is MediaMTXEvent.StreamPublisherHandoff)
+
+        val replacement = MediaMtxLogParser.parseLine(
+            handoff.state,
+            "[RTMP] [conn 192.168.1.10:5001] is publishing to path 'alpha'",
+        )
+        assertTrue(replacement.event is MediaMTXEvent.StreamStarted)
+
+        val oldClosed = MediaMtxLogParser.parseLine(
+            replacement.state,
+            "[RTMP] [conn 192.168.1.10:5000] closed: terminated",
+        )
+        assertNull(oldClosed.event)
     }
 }

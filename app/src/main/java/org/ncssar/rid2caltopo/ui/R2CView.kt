@@ -250,7 +250,7 @@ fun RidmapHeader() {
                     fontSize = 18.sp
                 )
                 Text(
-                    text = "Filtered:",
+                    text = "Good:",
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)

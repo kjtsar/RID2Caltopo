@@ -36,9 +36,20 @@ internal object MapCacheDebug {
     }
 
     fun isEnabled(): Boolean {
+        return isDebugEnabled()
+    }
+
+    fun isDebugEnabled(): Boolean {
         ensureRegistered()
         return CTDebugEnabled(TAG) || CTDebugEnabled(TAG_TILE) || CTDebugEnabled(TAG_DEM) ||
             CTDebugEnabled(TAG_ICON) || CTDebugEnabled(TAG_STORE)
+    }
+
+    fun isLudicrousEnabled(): Boolean {
+        ensureRegistered()
+        if (CaltopoClient.DebugLevel < CaltopoClient.DebugLevelInfo) return false
+        return isTagEnabled(TAG) || isTagEnabled(TAG_TILE) || isTagEnabled(TAG_DEM) ||
+            isTagEnabled(TAG_ICON) || isTagEnabled(TAG_STORE)
     }
 
     fun setEnabled(value: Boolean) {
@@ -47,7 +58,7 @@ internal object MapCacheDebug {
     }
 
     fun log(message: String) {
-        debug(TAG, message)
+        info(TAG, message)
     }
 
     fun debug(tag: String, message: String) {

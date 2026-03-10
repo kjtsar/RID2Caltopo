@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
@@ -100,6 +101,17 @@ class OpenArchiveDir() : ActivityResultContracts.OpenDocumentTree() {
         }
     }
 }
+
+private fun restartMediaMtxServer(context: android.content.Context) {
+    val appContext = context.applicationContext
+    val restartIntent = Intent(appContext, MediaMTXService::class.java).apply {
+        action = "RESTART_SERVICE"
+    }
+    appContext.startForegroundService(restartIntent)
+    CaltopoClient.ShowToast("Streams server restarted. Connected publishers will reconnect if supported.")
+    CTDebug("MainMenu", "User requested MediaMTXService restart from menu.")
+}
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -380,6 +392,12 @@ fun MainScreen(
                         DropdownMenuItem(text = { Text("Status")}, onClick = {
                             localViewModel.showScanner()
                             CaltopoClient.CTEvent(tag,"ScannersDisplayed", null)
+                            menuExpanded = false
+                        })
+
+                        DropdownMenuItem(text = { Text("Restart MediaMtx Server")}, onClick = {
+                           restartMediaMtxServer(context)
+                            CaltopoClient.CTEvent(tag,"RestartMediaMtxServer", null)
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {

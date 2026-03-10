@@ -713,12 +713,14 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     private static void SetMapStatus(MapStatusListener.mapStatus mapStatus, @Nullable String optEmsg) {
 
-        Bundle parameters = new Bundle();
-        parameters.putString("r2c_mapId", MapNode != null ? MapNode.getTitle(): "");
-        parameters.putInt("r2c_listenerCount", MapListeners.size());
-        parameters.putInt("r2c_featDeletePending", RogueFeaturesPendingDeletes.size());
-        CaltopoClient.CTEvent(TAG, "MapIs_" + mapStatus.toString(), parameters);
-        CTDebug(TAG, "XYZZY: Changing map status from: " + MapStatus.name() + " to: " + mapStatus.name());
+        if (!MapStatus.name().equals(mapStatus.name())) {
+            Bundle parameters = new Bundle();
+            parameters.putString("r2c_mapId", MapNode != null ? MapNode.getTitle(): "");
+            parameters.putInt("r2c_listenerCount", MapListeners.size());
+            parameters.putInt("r2c_featDeletePending", RogueFeaturesPendingDeletes.size());
+            CaltopoClient.CTEvent(TAG, "MapIs_" + mapStatus.toString(), parameters);
+            CTDebug(TAG, "XYZZY: Changing map status from: " + MapStatus.name() + " to: " + mapStatus.name());
+        }
         MapStatus = mapStatus;
         if (!MapListeners.isEmpty()) {
             for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(MapStatus, MapNode, optEmsg);

@@ -96,16 +96,18 @@ class TileCacheMapProvider private constructor(
                     pFilesystemCache,
                     pTileSource
                 )
-                if (MapCacheDebug.isEnabled() && redirectCount == 0) {
+                if (MapCacheDebug.isDebugEnabled() && redirectCount == 0) {
                     val z = MapTileIndex.getZoom(pMapTileIndex)
                     val x = MapTileIndex.getX(pMapTileIndex)
                     val y = MapTileIndex.getY(pMapTileIndex)
                     if (drawable == null) {
-                        MapCacheDebug.log(
+                        MapCacheDebug.debug(
+                            MapCacheDebug.TAG_TILE,
                             "tile net-null source=${pTileSource.name()} z=$z x=$x y=$y url=$targetUrl"
                         )
                     } else {
-                        MapCacheDebug.log(
+                        MapCacheDebug.debug(
+                            MapCacheDebug.TAG_TILE,
                             "tile net-ok source=${pTileSource.name()} z=$z x=$x y=$y url=$targetUrl"
                         )
                     }
@@ -132,7 +134,7 @@ class TileCacheMapProvider private constructor(
     }
 
     override fun mapTileRequestCompleted(pState: MapTileRequestState, pDrawable: Drawable?) {
-        if (MapCacheDebug.isEnabled()) {
+        if (MapCacheDebug.isLudicrousEnabled()) {
             val idx = pState.mapTile
             MapCacheDebug.log(
                 "tile req-complete z=${MapTileIndex.getZoom(idx)} x=${MapTileIndex.getX(idx)} y=${MapTileIndex.getY(idx)} drawable=${pDrawable != null}"
@@ -142,7 +144,7 @@ class TileCacheMapProvider private constructor(
     }
 
     override fun mapTileRequestFailed(pState: MapTileRequestState) {
-        if (MapCacheDebug.isEnabled()) {
+        if (MapCacheDebug.isLudicrousEnabled()) {
             val idx = pState.mapTile
             val provider = pState.currentProvider?.javaClass?.simpleName ?: "unknown"
             val isDownloader = pState.currentProvider is MapTileDownloader
@@ -159,7 +161,7 @@ class TileCacheMapProvider private constructor(
     }
 
     override fun mapTileRequestFailedExceedsMaxQueueSize(pState: MapTileRequestState) {
-        if (MapCacheDebug.isEnabled()) {
+        if (MapCacheDebug.isLudicrousEnabled()) {
             val idx = pState.mapTile
             val provider = pState.currentProvider?.javaClass?.simpleName ?: "unknown"
             MapCacheDebug.log(

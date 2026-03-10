@@ -23,6 +23,8 @@ object MediaMTXBootstrap {
                 is MediaMTXEvent.StreamError ->
                     StreamRegistry.onStreamError(event.path, event.reason, event.publisherConnId)
 
+                is MediaMTXEvent.RtmpSessionClosed -> {}
+
                 is MediaMTXEvent.ServerStarted ->
                     MediaMTXStatus.onServerStarted(event.version)
 

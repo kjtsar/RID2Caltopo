@@ -6,6 +6,7 @@ object MediaMTXStructuredDispatcher {
     private val listeners = mutableSetOf<(MediaMTXEvent) -> Unit>()
     private val fieldRegexTemplate = "\"%s\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\""
 
+    @JvmStatic
     fun addListener(listener: (MediaMTXEvent) -> Unit) {
         listeners += listener
     }
@@ -44,6 +45,14 @@ object MediaMTXStructuredDispatcher {
             "stream_error" -> {
                 val reason = extractStringField(json, "reason")?.takeIf { it.isNotBlank() }
                 MediaMTXEvent.StreamError(
+                    path = extractStringField(json, "path") ?: return null,
+                    publisherConnId = extractStringField(json, "publisherConnId")?.takeIf { it.isNotBlank() },
+                    reason = reason,
+                )
+            }
+            "rtmp_session_closed" -> {
+                val reason = extractStringField(json, "reason")?.takeIf { it.isNotBlank() }
+                MediaMTXEvent.RtmpSessionClosed(
                     path = extractStringField(json, "path") ?: return null,
                     publisherConnId = extractStringField(json, "publisherConnId")?.takeIf { it.isNotBlank() },
                     reason = reason,

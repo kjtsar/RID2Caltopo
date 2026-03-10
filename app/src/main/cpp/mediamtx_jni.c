@@ -361,6 +361,13 @@ static void emit_structured_event_for_line(JNIEnv *reader_env, const char *line)
                     return;
                 }
                 normalize_rtmp_close_reason(closed_reason, normalized_reason, sizeof(normalized_reason));
+                emit_event_json_type_path_reason_conn(
+                        reader_env,
+                        "rtmp_session_closed",
+                        value,
+                        normalized_reason,
+                        key
+                );
                 emit_event_json_type_path_reason_conn(reader_env, "stream_error", value, normalized_reason, key);
                 return;
             }

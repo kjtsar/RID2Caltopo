@@ -26,25 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class OpenDroneIdDataManager {
     static final double RID_INVALID_ALTITUDE_METERS = -1000.0;
-    static final String ICON_LATENCY_TAG = "RidIconLatency";
 
     public final ConcurrentHashMap<Long, AircraftObject> aircraft = new ConcurrentHashMap<>();
-    private static class LastReportedLocation {
-        final long droneTimestampMsec;
-        final double lat;
-        final double lng;
-        final long altitudeMeters;
-
-        LastReportedLocation(long droneTimestampMsec, double lat, double lng, long altitudeMeters) {
-            this.droneTimestampMsec = droneTimestampMsec;
-            this.lat = lat;
-            this.lng = lng;
-            this.altitudeMeters = altitudeMeters;
-        }
-    }
-    private static class AltitudeReferenceState {
-        Double geodeticMinusRidHeightMeters;
-    }
 
     static class SelectedTrackAltitude {
         final long roundedMeters;
@@ -55,10 +38,6 @@ public class OpenDroneIdDataManager {
             this.geodeticMinusRidHeightMeters = geodeticMinusRidHeightMeters;
         }
     }
-    private final ConcurrentHashMap<String, LastReportedLocation> lastReportedLocationByRemoteId =
-            new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, AltitudeReferenceState> altitudeReferenceByRemoteId =
-            new ConcurrentHashMap<>();
 
     private static final String TAG = "OpenDroneIdDataManager";
 
@@ -175,6 +154,28 @@ public class OpenDroneIdDataManager {
             return;
         receiveData(timeNano, mac, macLong, rssi, message, transportType);
     }
+
+    // So many standards to choose from.  Pick them in priority order and hope the drone
+    // doesn't vacillate between measurement types.
+    double getAltitudeInMeters(LocationData location) {
+        double altitudeInMeters = -1000.0;
+        double atmoAltMeters = location.getAltitudePressure();           // use first if valid.
+        if (isRidAltitudeValid(atmoAltMeters)) {
+            altitudeInMeters = atmoAltMeters;
+        } else {
+            double altitudeMslMeters = location.getAltitudeGeodetic();   // use only if atmo invalid.
+            if (isRidAltitudeValid(altitudeMslMeters)) {
+                altitudeInMeters = altitudeMslMeters;
+            } else {
+                double ridHeightMeters = location.getHeight();           // use only if atmo and geo invalid.
+                if (isRidAltitudeValid(ridHeightMeters)) {
+                    altitudeInMeters = ridHeightMeters;
+                }
+            }
+        }
+        return altitudeInMeters;
+    }
+
     void updateCaltopo(AircraftObject ac, CtDroneSpec.TransportTypeEnum transportType) {
         Identification acId = ac.getIdentification1();
 
@@ -193,86 +194,49 @@ public class OpenDroneIdDataManager {
             return;
         }
 
-        CaltopoClient client = CaltopoClient.ClientForRemoteId(idStr);
         LocationData location = ac.getLocation();
-        if (null != location) {
-            long nowWallMsec = System.currentTimeMillis();
-            long timestampInMilliseconds = ridTimestampTenthsToUtcMsec(location.getLocationTimestamp(), nowWallMsec);
-            double lat = location.getLatitude();
-            double lng = location.getLongitude();
-            double altitudeMslMeters = location.getAltitudeGeodetic();
-            double ridHeightMeters = location.getHeight();
-            LastReportedLocation prior = lastReportedLocationByRemoteId.get(idStr);
-            AltitudeReferenceState altitudeRef = altitudeReferenceByRemoteId.computeIfAbsent(
-                    idStr, k -> new AltitudeReferenceState()
+        if (null == location) return;
+
+        CaltopoClient client = CaltopoClient.ClientForRemoteId(idStr);
+        CtDroneSpec droneSpec = client.getDroneSpec();
+
+        long nowWallMsec = System.currentTimeMillis();
+        long timestampInMilliseconds = ridTimestampTenthsToUtcMsec(location.getLocationTimestamp(), nowWallMsec);
+        double lat = location.getLatitude();
+        double lng = location.getLongitude();
+        double altitudeInMeters = getAltitudeInMeters(location);
+        LocationData.StatusEnum status = location.getStatus();
+        Boolean airborne = (status == LocationData.StatusEnum.Airborne || status == LocationData.StatusEnum.Ground)
+                ? status == LocationData.StatusEnum.Airborne
+                : null;
+
+        // let the droneSpec be final arbiter of what constitutes a reasonable waypoint.
+        if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, nowWallMsec, airborne, transportType)) return;
+
+        // Telemetry is always optional:
+        double speedVerticalMps = location.getSpeedVertical();
+        double speedGroundMps = location.getSpeedHorizontal();
+        double directionDeg = location.getDirection();
+        Double aircraftAltitudeRateFpm = (speedVerticalMps != 63.0)
+                ? speedVerticalMps * 196.850394
+                : null;
+        Double aircraftGsKnots = (speedGroundMps != 255.0)
+                ? speedGroundMps * 1.94384449
+                : null;
+        Double aircraftTrackDeg = (directionDeg >= 0.0 && directionDeg <= 360.0)
+                ? directionDeg
+                : null;
+        // ASTM RID does not provide true nose heading, so use direction as a heading proxy.
+        if (aircraftAltitudeRateFpm != null || aircraftGsKnots != null || aircraftTrackDeg != null) {
+            CtDroneSpec.PositionTelemetry telemetry = new CtDroneSpec.PositionTelemetry(
+                    aircraftAltitudeRateFpm,
+                    aircraftGsKnots,
+                    aircraftTrackDeg
             );
-            SelectedTrackAltitude selectedAltitude = selectTrackAltitudeMeters(
-                    ridHeightMeters,
-                    altitudeMslMeters,
-                    altitudeRef.geodeticMinusRidHeightMeters
-            );
-            altitudeRef.geodeticMinusRidHeightMeters = selectedAltitude.geodeticMinusRidHeightMeters;
-            long altitudeInMeters = selectedAltitude.roundedMeters;
-            if (prior != null &&
-                    prior.droneTimestampMsec == timestampInMilliseconds &&
-                    Double.compare(prior.lat, lat) == 0 &&
-                    Double.compare(prior.lng, lng) == 0 &&
-                    prior.altitudeMeters == altitudeInMeters) {
-                CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
-                        "rid_drop remoteId=%s reason=dedupe wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%d transport=%s",
-                        idStr, nowWallMsec, timestampInMilliseconds, lat, lng, altitudeInMeters, transportType));
-                return;
-            }
-            lastReportedLocationByRemoteId.put(
-                    idStr,
-                    new LastReportedLocation(timestampInMilliseconds, lat, lng, altitudeInMeters)
-            );
-            CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
-                    "rid_rx remoteId=%s wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%d transport=%s",
-                    idStr, nowWallMsec, timestampInMilliseconds, lat, lng, altitudeInMeters, transportType));
-            CtDroneSpec.PositionTelemetry telemetry = null;
-            double speedVerticalMps = location.getSpeedVertical();
-            double speedGroundMps = location.getSpeedHorizontal();
-            double directionDeg = location.getDirection();
-            Double aircraftAltitudeFt = (altitudeMslMeters != -1000.0)
-                    ? altitudeMslMeters * 3.28084
-                    : null;
-            Double aircraftAltitudeRateFpm = (speedVerticalMps != 63.0)
-                    ? speedVerticalMps * 196.850394
-                    : null;
-            Double aircraftGsKnots = (speedGroundMps != 255.0)
-                    ? speedGroundMps * 1.94384449
-                    : null;
-            Double aircraftTrackDeg = (directionDeg >= 0.0 && directionDeg <= 360.0)
-                    ? directionDeg
-                    : null;
-            if (aircraftAltitudeFt != null || aircraftAltitudeRateFpm != null ||
-                    aircraftGsKnots != null || aircraftTrackDeg != null) {
-                // ASTM RID does not provide true nose heading, so use direction as a heading proxy.
-                telemetry = new CtDroneSpec.PositionTelemetry(
-                        aircraftAltitudeFt,
-                        aircraftAltitudeRateFpm,
-                        aircraftGsKnots,
-                        aircraftTrackDeg,
-                        aircraftTrackDeg,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null
-                );
-            }
-            /*
-            Log.i(TAG, String.format(Locale.US,
-                    "Processing new waypoint from %s on transport:%s, " +
-                            "TimestampIn:%d, Altitude:%d at %.5f,%.5f",
-                    idStr, transportType, timestampInSeconds, altitudeInMeters, lat, lng));
-             */
-            client.newWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, transportType, telemetry);
+            droneSpec.setLastPositionTelemetry(telemetry);
+
         }
+        client.newWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, transportType, airborne);
     }
 
     @SuppressWarnings("unchecked")

@@ -1,6 +1,5 @@
 # MediaMTX config for Android-embedded RTMP ingest / RTSP local playback.
 # Keep settings conservative for DJI reconnect tolerance.
-logLevel: debug
 logDestinations: [stdout]
 logStructured: no
 api: true

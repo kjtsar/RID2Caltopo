@@ -31,49 +31,21 @@ import java.util.regex.Pattern;
 
 public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
+    // telemetry is optional information that some drones might provide.
     public static class PositionTelemetry {
-        @Nullable public final Double aircraftAltitudeFt;      //  (height above MSL in feet, if both elevation and altitude are specified, altitude wins)
         @Nullable public final Double aircraftAltitudeRateFpm; // (rate of climb in ft/min)
         @Nullable public final Double aircraftGsKnots;         // (speed over the ground in knots)
-        @Nullable public final Double aircraftHeadingDeg;      // (direction the nose is pointing)
         @Nullable public final Double aircraftTrackDeg;        // (direction of travel over the ground)
-        @Nullable public final Double aircraftPitchDeg;        // (in degrees, positive is nose up)
-        @Nullable public final Double aircraftRollDeg;         // (posiitive is left wing up)
-        @Nullable public final Double cameraAzimuthDeg;        // (angle the camera is facing, degrees true north)
-        @Nullable public final Double cameraTiltDeg;           // (up/down angle relative to horizon, -90 is straight down)
-        @Nullable public final Double cameraFovWidthDeg;       // (horizontal field of view in degrees)
-        @Nullable public final Double cameraFovHeightDeg;      // (vertical field of view in degrees)
-        @Nullable public final String cameraExternalUrl;       // (link to an external website showing the camera livestream)
-        @Nullable public final String cameraThumbnailUrl;      //  (direct link to camera thumbnail image)
+
 
         public PositionTelemetry(
-                @Nullable Double aircraftAltitudeFt,
                 @Nullable Double aircraftAltitudeRateFpm,
                 @Nullable Double aircraftGsKnots,
-                @Nullable Double aircraftHeadingDeg,
-                @Nullable Double aircraftTrackDeg,
-                @Nullable Double aircraftPitchDeg,
-                @Nullable Double aircraftRollDeg,
-                @Nullable Double cameraAzimuthDeg,
-                @Nullable Double cameraTiltDeg,
-                @Nullable Double cameraFovWidthDeg,
-                @Nullable Double cameraFovHeightDeg,
-                @Nullable String cameraExternalUrl,
-                @Nullable String cameraThumbnailUrl
+                @Nullable Double aircraftTrackDeg
         ) {
-            this.aircraftAltitudeFt = aircraftAltitudeFt;
             this.aircraftAltitudeRateFpm = aircraftAltitudeRateFpm;
             this.aircraftGsKnots = aircraftGsKnots;
-            this.aircraftHeadingDeg = aircraftHeadingDeg;
             this.aircraftTrackDeg = aircraftTrackDeg;
-            this.aircraftPitchDeg = aircraftPitchDeg;
-            this.aircraftRollDeg = aircraftRollDeg;
-            this.cameraAzimuthDeg = cameraAzimuthDeg;
-            this.cameraTiltDeg = cameraTiltDeg;
-            this.cameraFovWidthDeg = cameraFovWidthDeg;
-            this.cameraFovHeightDeg = cameraFovHeightDeg;
-            this.cameraExternalUrl = cameraExternalUrl;
-            this.cameraThumbnailUrl = cameraThumbnailUrl;
         }
     }
 
@@ -88,6 +60,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public interface CtDroneSpecListener {
         void mappedIdChanged(@NonNull CtDroneSpec droneSpec, @NonNull String oldVal, @NonNull String newVal);
+        void droneTakingOff(@NonNull CtDroneSpec droneSpec);
+        void droneLanded(@NonNull CtDroneSpec droneSpec);
     }
 
     public interface DroneSpecsChangedListener {
@@ -97,12 +71,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     @Serial
     private static final long serialVersionUID = 2L;
     private static final String TAG = "CtDroneSpec";
+    static final String ICON_LATENCY_TAG = "RidIconLatency";
+    static final float FT_TO_METERS = 0.3048f;
+    static final double LAT_LNG_EPSILON = 0.000002;  // less than a foot.
     private static final String EMPTY_STRING = "";
     private static final String RID_FILTER_REGEX = "[^A-Z0-9]";
     private static final String MAPPED_ID_FILTER_REGEX = "[^_a-zA-Z0-9]";
     private static final String CALLSIGN_OPT_MODEL_REGEX = "^([0-9]?[a-zA-Z]+[0-9]+)([_a-zA-Z0-9]{1,8})?$";
     private static final Pattern CallsignOptModelPattern = Pattern.compile(CALLSIGN_OPT_MODEL_REGEX);
-    private static final float MAX_SPEED_METERS_PER_SECOND = 45f;
     private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
     private static long InvalidWaypointCount = 0;
 
@@ -127,7 +103,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient PositionTelemetry lastPositionTelemetry;
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
-    private boolean okToLog = true;
+    private transient int nonCount;  // bad or duplicate waypoints.
+    private boolean okToLog;
+    @Nullable private transient Boolean airborne = Boolean.FALSE;
 
     @NonNull
     public String trackLabel() { return trackLabel;}
@@ -172,9 +150,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return transportCount[tt.ordinal()];
     }
 
+    public double getAltitudeInFeet() {return lastAlt / FT_TO_METERS;}
+
+
     public void reset() {
         if (trackLabel.isEmpty()) return;
-        CTDebug(TAG, "checkNewWaypoint(): Advising dronespec inactive: " + trackLabel);
+        CTDebug(TAG, "reset(): Advising dronespec inactive: " + trackLabel);
         trackLabel = EMPTY_STRING;
         goodCount = 0;
         totalCount = 0;
@@ -183,6 +164,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastLng = 0.0F;
         lastPositionTelemetry = null;
         okToLog = true;
+        airborne = Boolean.FALSE;
         startMsecTimestamp = mostRecentMsecTimestamp = 0;
         int length = TransportTypeEnum.values().length;
         for (int i = 0; i < length; i++) transportCount[i] = 0;
@@ -197,7 +179,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     //  If 1 is present, but 2 is absent, but model is present, then try to extract abbreviated info from the Model field..
     //  If 1 is present, but 2 is absent and model is absent, tack on the remoteID.
     private void updateTrackLabel() {
-        String lModel, lMappedId = "", lCallsign = null;
+        String lModel, lMappedId, lCallsign;
         Matcher rexMatch = CallsignOptModelPattern.matcher(mappedId);
         if (!rexMatch.matches()) {
             lMappedId = mappedId; // assume we're adults and there is a reason to not follow protocol.
@@ -221,7 +203,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public boolean okToLog() {return okToLog;}
 
-    public long getStartMsecTimestamp() { return startMsecTimestamp; }
     public String getDurationInSecAsString() {
         long durationInMsec = 0;
         if (startMsecTimestamp > 0 && (startMsecTimestamp < mostRecentMsecTimestamp)) {
@@ -230,9 +211,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return SimpleTimer.DurationAsString(durationInMsec);
     }
 
-    public double getLastLat() {return lastLat;}
-    public double getLastLng() {return lastLng;}
-    public double getLastAlt() {return lastAlt;}
     @Nullable
     public PositionTelemetry getLastPositionTelemetry() { return lastPositionTelemetry; }
     public void setLastPositionTelemetry(@Nullable PositionTelemetry telemetry) {
@@ -338,8 +316,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public static double MyLat = 0.0F;
     public static double MyLng = 0.0F;
     // Reject altitude spikes/drops that imply unrealistic vertical rates for small UAS.
-    private static final double MAX_REASONABLE_VERTICAL_SPEED_MPS = 20.0;
-    private static final double MIN_ALTITUDE_DELTA_FILTER_M = 8.0;
 
     /** checkNewWaypoint()
      * FIXME: Need to include check of change in distance over change in time to see if waypoint
@@ -352,91 +328,109 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      * @return returns true if the waypoint is far enough away from the previous waypoint
      *         to be recorded.
      */
-    public boolean checkNewWaypoint(double lat, double lng, long altitudeInMeters, TransportTypeEnum transportType) {
+    public boolean checkNewWaypoint(double lat, double lng, double altitudeInMeters, long timestampInMilliseconds, long nowWallMsec, @Nullable Boolean airborne, TransportTypeEnum transportType) {
         bumpTransportCount(transportType);
         if (null == trackLabel) trackLabel = EMPTY_STRING;
         if (trackLabel.isEmpty()) {
             trackLabel = mappedId;
         }
-        if (-1000 == altitudeInMeters || (0.0 == lat && 0.0 == lng)) {
-            InvalidWaypointCount++;
-            if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
-                CTInfo(TAG, String.format(Locale.US,
-                        "checkNewWaypoint(%s/%s) w/Invalid altitude %d and/or coordinates %.7f, %.7f - ignoring.",
-                        trackLabel, transportType, altitudeInMeters, lat, lng));
+
+        if (null != this.airborne && this.airborne && null != airborne && !airborne) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "checkNewWaypoint(): %s landed.", mappedId));
+            if (null != myListener) {
+                myListener.droneLanded(this);
+            } else {
+                CaltopoClient.DroneSpecStatusChanged(this, true);
             }
-            return false; // only interested in recording real waypoints thank-you very much
+            return false;
+        }
+
+        // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints
+        // that are right on top of each other, but at the same time we do want to let the world
+        // know that we're still active.
+        // Note that most remoteID modules will send out dozens of RemoteID updates with the exact
+        // same lat,long & timestamp many times while in transit.
+        // efficiently filter out bogus or duplicate location updates because there will be a lot of them.
+        if (0.0 == lat || 0.0 == lng) {
+            if (false && CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {            // We see a lot of these.
+                CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                        "rid_drop remoteId=%s reason=invalid wall=%d droneTs=%d lat=%.6f lng=%.6f transport=%s",
+                        mappedId, nowWallMsec, timestampInMilliseconds, lat, lng, transportType));
+            }
+            nonCount++;
+            return false;
+        }
+
+        if (Double.compare(lastLat, lat) == 0 && Double.compare(lastLng, lng) == 0) {
+            if (false && CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {            // these too.
+                CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                        "rid_drop remoteId=%s reason=dedup wall=%d droneTs=%d lat=%.6f lng=%.6f transport=%s",
+                        mappedId, nowWallMsec, timestampInMilliseconds, lat, lng, transportType));
+            }
+            nonCount++;
+            return false;
         }
 
         if (MyLat == 0.0F && null != CaltopoMap.MyLocation && CaltopoMap.MyLocation.hasAccuracy()) {
             MyLat = CaltopoMap.MyLocation.getLatitude();
             MyLng = CaltopoMap.MyLocation.getLongitude();
         }
-        // N.B: Autel Evo Max 4N has demonstrated willingness to publish bogus coordinates,
+
+        // N.B: Autel Evo Max 4N has demonstrated willingness to publish wild coordinates,
         //   resulting in a 30,000mi 15 minute flight, so should filter them out... Once we have
         //   our lat,lon w/reasonable accuracy, compare to incoming lat,lng to see if we're even
         //   in the same ballpark.
         if (MyLat != 0.0F) { // 0.1 degrees about 6 miles at 40 degrees latitude
             if ((Math.abs(MyLat - lat) > 0.1F) || (Math.abs(MyLng - lng) > 0.1F)) {
-                if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
-                    CTInfo(TAG, String.format(Locale.US,
-                            "checkNewWaypoint(%s/%s) Ignoring spurious waypoint %.7f, %.7f.",
-                            trackLabel, transportType, lat, lng));
-                }
-                return false; // only interested in recording real waypoints thank-you very much
-            }
-        }
-
-        // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints
-        // that are right on top of each other, but at the same time we do want to let the world
-        // know that we're still active.
-        // Note that some remoteID modules will send out dozens of RemoteID updates with the exact same
-        // lat & long & timestamp even though they are moving.
-        final float FeetPerMeter = 3.28084f;
-        final long MinMsecInterval = 1000 * 3;
-        float[] dbResult = {Float.NaN};
-        float lDistanceInFeet = 0.0F ;
-        long msecTimestamp = System.currentTimeMillis();
-        long priorTimestamp = mostRecentMsecTimestamp;
-        if (lastLat != 0.0F) {
-            Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
-            lDistanceInFeet = dbResult[0] * FeetPerMeter;
-            if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet() ||
-                    (msecTimestamp - mostRecentMsecTimestamp) < MinMsecInterval) return false;
-            distanceInFeet += lDistanceInFeet;
-        }
-        if (goodCount > 0 && priorTimestamp > 0) {
-            long dtMs = Math.max(1L, msecTimestamp - priorTimestamp);
-            double dtSec = dtMs / 1000.0;
-            double maxAllowedAltitudeDeltaM = Math.max(
-                    MIN_ALTITUDE_DELTA_FILTER_M,
-                    MAX_REASONABLE_VERTICAL_SPEED_MPS * dtSec
-            );
-            double altitudeDeltaM = Math.abs(((double) altitudeInMeters) - lastAlt);
-            if (altitudeDeltaM > maxAllowedAltitudeDeltaM) {
-                if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
-                    CTInfo(TAG, String.format(
-                            Locale.US,
-                            "checkNewWaypoint(%s/%s) ignoring spurious altitude jump: prior=%.1fm new=%dm dt=%.2fs (delta=%.1fm > %.1fm)",
-                            trackLabel, transportType, lastAlt, altitudeInMeters, dtSec, altitudeDeltaM, maxAllowedAltitudeDeltaM
-                    ));
-                }
+                if (CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) CTDebug(TAG, String.format(Locale.US,
+                        "checkNewWaypoint(%s/%s) Ignoring spurious waypoint %.7f, %.7f.",
+                        trackLabel, transportType, lat, lng));
+                nonCount++;
                 return false;
             }
         }
-        MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = msecTimestamp;
+
+
+        float[] dbResult = {Float.NaN};
+        float lDistanceInFeet = 0.0F ;
+
+        if (lastLat != 0.0F) {
+            Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
+            lDistanceInFeet = dbResult[0] / FT_TO_METERS;
+            if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet()) {
+                // let a waypoint update thru every now and then if hovering in place...
+                long minMsecInterval = 1000 * CaltopoClient.GetNewTrackDelayInSeconds() / 2;
+                if (nowWallMsec - mostRecentMsecTimestamp < minMsecInterval) return false;
+            }
+            distanceInFeet += lDistanceInFeet;
+        }
+
+        nowWallMsec = System.currentTimeMillis();
+        MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = nowWallMsec;
+
         goodCount++;
-        if (goodCount == 1) {  // Start the flight duration clock with first 'good' waypoint.
-            startMsecTimestamp = msecTimestamp;
-            updateTrackLabel();
-            CTDebug(TAG, "checkNewWaypoint(): Advising dronespec active: " + trackLabel);
-            CaltopoClient.DroneSpecStatusChanged(this, true);
+        if (null == airborne || airborne != this.airborne) {
+            this.airborne = airborne;
+            if (airborne) {
+                CTDebug(TAG, String.format(Locale.US,
+                        "checkNewWaypoint(): %s taking off.", mappedId));
+                startMsecTimestamp = nowWallMsec;
+                updateTrackLabel();
+                if (null != myListener) {
+                    myListener.droneTakingOff(this);
+                } else {
+                    CaltopoClient.DroneSpecStatusChanged(this, true);
+                }
+            }
         }
         lastLat = lat; lastLng = lng; lastAlt = altitudeInMeters;
-        if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) {
-            CTInfo(TAG, String.format(Locale.US, "Distance in feet: %.3f, total:%.3f",
-                    lDistanceInFeet, distanceInFeet));
+        if (CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {
+            CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                    "rid_rx remoteId=%s waypoint=%d wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%.1f transport=%s airborne=%s distance: %.3f, totalDistance: %.3f, duration: %s",
+                    mappedId, goodCount, nowWallMsec, timestampInMilliseconds, lat, lng, altitudeInMeters, transportType, airborne, lDistanceInFeet, distanceInFeet, getDurationInSecAsString()));
         }
+
         return true;
     }
 

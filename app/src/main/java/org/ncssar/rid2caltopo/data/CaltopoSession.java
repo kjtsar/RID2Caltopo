@@ -833,20 +833,9 @@ public class CaltopoSession {
         JSONObject aircraft = new JSONObject();
         JSONObject camera = new JSONObject();
         try {
-            putFinite(aircraft, "altitude", telemetry.aircraftAltitudeFt);
             putFinite(aircraft, "altitude_rate", telemetry.aircraftAltitudeRateFpm);
             putFinite(aircraft, "gs", telemetry.aircraftGsKnots);
-            putFinite(aircraft, "heading", telemetry.aircraftHeadingDeg);
             putFinite(aircraft, "track", telemetry.aircraftTrackDeg);
-            putFinite(aircraft, "pitch", telemetry.aircraftPitchDeg);
-            putFinite(aircraft, "roll", telemetry.aircraftRollDeg);
-
-            putFinite(camera, "azimuth", telemetry.cameraAzimuthDeg);
-            putFinite(camera, "tilt", telemetry.cameraTiltDeg);
-            putFinite(camera, "fov_width", telemetry.cameraFovWidthDeg);
-            putFinite(camera, "fov_height", telemetry.cameraFovHeightDeg);
-            putString(camera, "external_url", telemetry.cameraExternalUrl);
-            putString(camera, "thumbnail_url", telemetry.cameraThumbnailUrl);
         } catch (Exception e) {
             CTError(TAG, "appendTelemetryJson() JSON put raised", e);
             return;

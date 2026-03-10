@@ -7,7 +7,6 @@ import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
-import java.io.IOException
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
@@ -19,7 +18,19 @@ internal class SafBlobCacheStore(
     private val maxBytes: Long,
     private val defaultTtlMs: Long
 ) : BlobCacheStore {
+    private enum class ReadableLayoutKind {
+        NONE,
+        TILE,
+        DEM
+    }
+
     private val appContext = context.applicationContext
+    private val storageNamespace = "$namespace@${digestHex(rootDir.uri.toString()).take(16)}"
+    private val readableLayoutKind = when {
+        namespace.startsWith("tile_cache_v") -> ReadableLayoutKind.TILE
+        namespace.startsWith("dem_point_v") -> ReadableLayoutKind.DEM
+        else -> ReadableLayoutKind.NONE
+    }
     private val dbLock = Any()
     private val hitCount = AtomicLong(0)
     private val missCount = AtomicLong(0)
@@ -56,8 +67,8 @@ internal class SafBlobCacheStore(
 
     override fun put(cacheKey: String, bytes: ByteArray, expiresAtMs: Long) {
         val nsDir = getOrCreateNamespaceDir() ?: return
-        val fileName = keyToFileName(cacheKey)
-        val target = ensureWritableFile(nsDir, fileName) ?: return
+        val relativePath = keyToRelativePath(cacheKey)
+        val target = ensureWritableFile(nsDir, relativePath) ?: return
         if (!writeBytes(Uri.parse(target.uri.toString()), bytes)) {
             MapCacheDebug.log("saf put-failed ns=$namespace key=$cacheKey uri=${target.uri}")
             return
@@ -65,10 +76,10 @@ internal class SafBlobCacheStore(
 
         val now = System.currentTimeMillis()
         val cv = ContentValues().apply {
-            put("namespace", namespace)
+            put("namespace", storageNamespace)
             put("cache_key", cacheKey)
             put("file_uri", target.uri.toString())
-            put("file_name", fileName)
+            put("file_name", relativePath)
             put("size_bytes", bytes.size)
             put("created_at", now)
             put("accessed_at", now)
@@ -76,7 +87,7 @@ internal class SafBlobCacheStore(
         }
         synchronized(dbLock) {
             db.replaceOrThrow("saf_entries", null, cv)
-            namespaceFileIndex?.set(fileName, target)
+            namespaceFileIndex?.set(relativePath, target)
         }
         MapCacheDebug.log("saf put ns=$namespace key=$cacheKey bytes=${bytes.size} uri=${target.uri}")
         evictToCap()
@@ -110,7 +121,7 @@ internal class SafBlobCacheStore(
         synchronized(dbLock) {
             db.execSQL(
                 "UPDATE saf_entries SET accessed_at = ? WHERE namespace = ? AND cache_key = ?",
-                arrayOf<Any>(now, namespace, cacheKey)
+                arrayOf<Any>(now, storageNamespace, cacheKey)
             )
         }
         if (countHitMiss) hitCount.incrementAndGet()
@@ -124,23 +135,15 @@ internal class SafBlobCacheStore(
 
     override fun getExpiration(cacheKey: String): Long? {
         synchronized(dbLock) {
-            val c = db.query(
-                "saf_entries",
-                arrayOf("expires_at"),
-                "namespace = ? AND cache_key = ?",
-                arrayOf(namespace, cacheKey),
-                null,
-                null,
-                null
-            )
-            c.use {
-                if (!it.moveToFirst()) return null
-                return it.getLong(0)
-            }
+            return (queryRow(cacheKey) ?: recoverRowFromFileLocked(cacheKey))?.expiresAt
         }
     }
 
-    override fun exists(cacheKey: String): Boolean = getExpiration(cacheKey) != null
+    override fun exists(cacheKey: String): Boolean {
+        synchronized(dbLock) {
+            return (queryRow(cacheKey) ?: recoverRowFromFileLocked(cacheKey)) != null
+        }
+    }
 
     override fun remove(cacheKey: String): Boolean {
         val (row, deletedRows) = synchronized(dbLock) {
@@ -148,7 +151,7 @@ internal class SafBlobCacheStore(
             val deleted = db.delete(
                 "saf_entries",
                 "namespace = ? AND cache_key = ?",
-                arrayOf(namespace, cacheKey)
+                arrayOf(storageNamespace, cacheKey)
             )
             existing to deleted
         }
@@ -160,7 +163,8 @@ internal class SafBlobCacheStore(
             }
         }
         synchronized(dbLock) {
-            namespaceFileIndex?.remove(keyToFileName(cacheKey))
+            namespaceFileIndex?.remove(row?.fileName ?: keyToRelativePath(cacheKey))
+            namespaceFileIndex?.remove(legacyFileNameForKey(cacheKey))
         }
         return deletedRows > 0
     }
@@ -168,10 +172,10 @@ internal class SafBlobCacheStore(
     override fun clear() {
         val nsDir = getNamespaceDir()
         synchronized(dbLock) {
-            db.delete("saf_entries", "namespace = ?", arrayOf(namespace))
+            db.delete("saf_entries", "namespace = ?", arrayOf(storageNamespace))
             namespaceFileIndex?.clear()
         }
-        nsDir?.listFiles()?.forEach { it.delete() }
+        nsDir?.listFiles()?.forEach { deleteRecursively(it) }
     }
 
     override fun snapshot(): CacheStatsSnapshot {
@@ -197,7 +201,8 @@ internal class SafBlobCacheStore(
                 MapCacheDebug.log("saf prewarm ns=$namespace skipped(no namespace dir)")
                 return
             }
-            ensureNamespaceFileIndexLocked(nsDir)
+            val fileIndex = ensureNamespaceFileIndexLocked(nsDir)
+            maybeRebuildIndexLocked(fileIndex)
             MapCacheDebug.log("saf prewarm ns=$namespace ready files=${namespaceFileIndex?.size ?: 0}")
         }
     }
@@ -211,7 +216,7 @@ internal class SafBlobCacheStore(
                     "saf_entries",
                     arrayOf("cache_key", "file_uri", "size_bytes"),
                     "namespace = ?",
-                    arrayOf(namespace),
+                    arrayOf(storageNamespace),
                     null,
                     null,
                     "accessed_at ASC",
@@ -234,11 +239,12 @@ internal class SafBlobCacheStore(
                     MapCacheDebug.log("saf evict delete-failed ns=$namespace key=$key uri=$uri err=${e.javaClass.simpleName}")
                 }
                 val rows = synchronized(dbLock) {
-                    namespaceFileIndex?.remove(keyToFileName(key))
+                    namespaceFileIndex?.remove(keyToRelativePath(key))
+                    namespaceFileIndex?.remove(legacyFileNameForKey(key))
                     db.delete(
                         "saf_entries",
                         "namespace = ? AND cache_key = ?",
-                        arrayOf(namespace, key)
+                        arrayOf(storageNamespace, key)
                     )
                 }
                 if (rows > 0) {
@@ -251,7 +257,7 @@ internal class SafBlobCacheStore(
     private fun bytesUsedLocked(): Long {
         val cursor = db.rawQuery(
             "SELECT COALESCE(SUM(size_bytes), 0) FROM saf_entries WHERE namespace = ?",
-            arrayOf(namespace)
+            arrayOf(storageNamespace)
         )
         cursor.use {
             if (!it.moveToFirst()) return 0L
@@ -264,7 +270,7 @@ internal class SafBlobCacheStore(
             "saf_entries",
             arrayOf("file_uri", "file_name", "expires_at"),
             "namespace = ? AND cache_key = ?",
-            arrayOf(namespace, cacheKey),
+            arrayOf(storageNamespace, cacheKey),
             null,
             null,
             null
@@ -279,21 +285,56 @@ internal class SafBlobCacheStore(
         }
     }
 
+    private fun queryRowsLocked(): List<Row> {
+        val c = db.query(
+            "saf_entries",
+            arrayOf("file_uri", "file_name", "expires_at"),
+            "namespace = ?",
+            arrayOf(storageNamespace),
+            null,
+            null,
+            null
+        )
+        c.use {
+            val rows = ArrayList<Row>(it.count.coerceAtLeast(0))
+            while (it.moveToNext()) {
+                rows += Row(
+                    fileUri = it.getString(0),
+                    fileName = it.getString(1),
+                    expiresAt = it.getLong(2)
+                )
+            }
+            return rows
+        }
+    }
+
     private fun deleteRow(cacheKey: String) {
-        db.delete("saf_entries", "namespace = ? AND cache_key = ?", arrayOf(namespace, cacheKey))
+        db.delete("saf_entries", "namespace = ? AND cache_key = ?", arrayOf(storageNamespace, cacheKey))
     }
 
     private fun recoverRowFromFileLocked(cacheKey: String): Row? {
         val nsDir = getNamespaceDir() ?: return null
-        val fileName = keyToFileName(cacheKey)
-        val existing = ensureNamespaceFileIndexLocked(nsDir)[fileName] ?: return null
+        val fileIndex = ensureNamespaceFileIndexLocked(nsDir)
+        val relativePath = keyToRelativePath(cacheKey)
+        val legacyPath = legacyFileNameForKey(cacheKey)
+        val existing = fileIndex[relativePath] ?: fileIndex[legacyPath] ?: return null
         if (!existing.isFile) return null
+        val resolvedFile = if (relativePath != legacyPath && fileIndex[relativePath] == null && fileIndex[legacyPath] != null) {
+            migrateLegacyFileLocked(nsDir, legacyPath, relativePath, existing, fileIndex)
+        } else {
+            existing
+        } ?: return null
         val now = System.currentTimeMillis()
         val expiresAt = defaultExpiry(now)
-        val size = existing.length().coerceAtLeast(0L)
-        val uriString = existing.uri.toString()
+        val size = resolvedFile.length().coerceAtLeast(0L)
+        val uriString = resolvedFile.uri.toString()
+        val fileName = if (relativePath != legacyPath && fileIndex[relativePath] != null) {
+            relativePath
+        } else {
+            fileIndex.entries.firstOrNull { it.value.uri == resolvedFile.uri }?.key ?: relativePath
+        }
         val cv = ContentValues().apply {
-            put("namespace", namespace)
+            put("namespace", storageNamespace)
             put("cache_key", cacheKey)
             put("file_uri", uriString)
             put("file_name", fileName)
@@ -313,17 +354,32 @@ internal class SafBlobCacheStore(
         )
     }
 
+    private fun migrateLegacyFileLocked(
+        nsDir: DocumentFile,
+        legacyPath: String,
+        relativePath: String,
+        legacyFile: DocumentFile,
+        fileIndex: MutableMap<String, DocumentFile>
+    ): DocumentFile? {
+        val bytes = readBytes(legacyFile.uri) ?: return legacyFile
+        val migratedFile = ensureWritableFile(nsDir, relativePath) ?: return legacyFile
+        if (!writeBytes(migratedFile.uri, bytes)) return legacyFile
+        try {
+            legacyFile.delete()
+        } catch (_: Exception) {
+        }
+        fileIndex.remove(legacyPath)
+        fileIndex[relativePath] = migratedFile
+        MapCacheDebug.log("saf migrate ns=$namespace from=$legacyPath to=$relativePath uri=${migratedFile.uri}")
+        return migratedFile
+    }
+
     private fun ensureNamespaceFileIndexLocked(nsDir: DocumentFile): MutableMap<String, DocumentFile> {
         namespaceFileIndex?.let { return it }
         val startNs = System.nanoTime()
         val index = HashMap<String, DocumentFile>()
         try {
-            nsDir.listFiles().forEach { file ->
-                val name = file.name
-                if (name != null && file.isFile) {
-                    index[name] = file
-                }
-            }
+            indexNamespaceFiles(nsDir, "", index)
         } catch (e: Exception) {
             MapCacheDebug.log("saf index-build list-failed ns=$namespace err=${e.javaClass.simpleName}")
         }
@@ -333,6 +389,82 @@ internal class SafBlobCacheStore(
         )
         namespaceFileIndex = index
         return index
+    }
+
+    private fun maybeRebuildIndexLocked(fileIndex: MutableMap<String, DocumentFile>) {
+        if (readableLayoutKind == ReadableLayoutKind.NONE) return
+        val readableFiles = fileIndex.keys.count { relativePathToCacheKey(it) != null }
+        if (readableFiles <= 0) return
+
+        val dbRows = queryRowsLocked()
+        val missingIndex = dbRows.isEmpty()
+        val inconsistentIndex = !missingIndex && isIndexInconsistent(fileIndex, dbRows, readableFiles)
+        if (!missingIndex && !inconsistentIndex) return
+
+        rebuildIndexFromFilesystemLocked(
+            fileIndex = fileIndex,
+            dbRowCount = dbRows.size,
+            readableFileCount = readableFiles,
+            reason = if (missingIndex) "missing" else "inconsistent"
+        )
+    }
+
+    private fun isIndexInconsistent(
+        fileIndex: Map<String, DocumentFile>,
+        dbRows: List<Row>,
+        readableFileCount: Int
+    ): Boolean {
+        val readableDbRows = dbRows.count { relativePathToCacheKey(it.fileName) != null }
+        if (readableDbRows != readableFileCount) return true
+        for (row in dbRows) {
+            val file = fileIndex[row.fileName] ?: continue
+            if (!file.isFile) return true
+            if (file.uri.toString() != row.fileUri) return true
+        }
+        return false
+    }
+
+    private fun rebuildIndexFromFilesystemLocked(
+        fileIndex: Map<String, DocumentFile>,
+        dbRowCount: Int,
+        readableFileCount: Int,
+        reason: String
+    ) {
+        val startedNs = System.nanoTime()
+        val now = System.currentTimeMillis()
+        var rebuilt = 0
+        var skipped = 0
+        db.beginTransaction()
+        try {
+            db.delete("saf_entries", "namespace = ?", arrayOf(storageNamespace))
+            for ((relativePath, file) in fileIndex) {
+                val cacheKey = relativePathToCacheKey(relativePath)
+                if (cacheKey == null || !file.isFile) {
+                    skipped += 1
+                    continue
+                }
+                val size = file.length().coerceAtLeast(0L)
+                val cv = ContentValues().apply {
+                    put("namespace", storageNamespace)
+                    put("cache_key", cacheKey)
+                    put("file_uri", file.uri.toString())
+                    put("file_name", relativePath)
+                    put("size_bytes", size)
+                    put("created_at", now)
+                    put("accessed_at", now)
+                    put("expires_at", defaultExpiry(now))
+                }
+                db.replaceOrThrow("saf_entries", null, cv)
+                rebuilt += 1
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000.0
+        MapCacheDebug.log(
+            "saf reindex-full ns=$namespace reason=$reason dbRows=$dbRowCount readableFiles=$readableFileCount rebuilt=$rebuilt skipped=$skipped elapsedMs=${"%.1f".format(Locale.US, elapsedMs)}"
+        )
     }
 
     private fun getNamespaceDir(): DocumentFile? {
@@ -355,11 +487,18 @@ internal class SafBlobCacheStore(
         }
     }
 
-    private fun ensureWritableFile(nsDir: DocumentFile, fileName: String): DocumentFile? {
+    private fun ensureWritableFile(nsDir: DocumentFile, relativePath: String): DocumentFile? {
+        val segments = relativePath.split('/').filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return null
+        var parent = nsDir
+        for (segment in segments.dropLast(1)) {
+            parent = getOrCreateChildDirectory(parent, segment) ?: return null
+        }
+        val fileName = segments.last()
         val existing = try {
-            nsDir.findFile(fileName)
+            parent.findFile(fileName)
         } catch (e: Exception) {
-            MapCacheDebug.log("saf findFile failed ns=$namespace file=$fileName err=${e.javaClass.simpleName}")
+            MapCacheDebug.log("saf findFile failed ns=$namespace file=$relativePath err=${e.javaClass.simpleName}")
             null
         }
         if (existing != null) {
@@ -370,11 +509,53 @@ internal class SafBlobCacheStore(
             }
         }
         return try {
-            nsDir.createFile("application/octet-stream", fileName)
+            parent.createFile("application/octet-stream", fileName)
         } catch (e: Exception) {
-            MapCacheDebug.log("saf createFile failed ns=$namespace file=$fileName err=${e.javaClass.simpleName}")
+            MapCacheDebug.log("saf createFile failed ns=$namespace file=$relativePath err=${e.javaClass.simpleName}")
             null
         }
+    }
+
+    private fun getOrCreateChildDirectory(parent: DocumentFile, dirName: String): DocumentFile? {
+        val existing = try {
+            parent.findFile(dirName)
+        } catch (e: Exception) {
+            MapCacheDebug.log("saf findDir failed ns=$namespace dir=$dirName err=${e.javaClass.simpleName}")
+            null
+        }
+        if (existing != null) {
+            if (existing.isDirectory) return existing
+            existing.delete()
+        }
+        return try {
+            parent.createDirectory(dirName)
+        } catch (e: Exception) {
+            MapCacheDebug.log("saf createDir failed ns=$namespace dir=$dirName err=${e.javaClass.simpleName}")
+            null
+        }
+    }
+
+    private fun indexNamespaceFiles(
+        dir: DocumentFile,
+        prefix: String,
+        index: MutableMap<String, DocumentFile>
+    ) {
+        dir.listFiles().forEach { file ->
+            val name = file.name ?: return@forEach
+            val relative = if (prefix.isEmpty()) name else "$prefix/$name"
+            if (file.isFile) {
+                index[relative] = file
+            } else if (file.isDirectory) {
+                indexNamespaceFiles(file, relative, index)
+            }
+        }
+    }
+
+    private fun deleteRecursively(file: DocumentFile) {
+        if (file.isDirectory) {
+            file.listFiles().forEach { child -> deleteRecursively(child) }
+        }
+        file.delete()
     }
 
     private fun writeBytes(uri: Uri, bytes: ByteArray): Boolean {
@@ -406,13 +587,109 @@ internal class SafBlobCacheStore(
         }
     }
 
-    private fun keyToFileName(cacheKey: String): String {
+    private fun keyToRelativePath(cacheKey: String): String {
+        when (readableLayoutKind) {
+            ReadableLayoutKind.TILE -> {
+                val parts = cacheKey.split('|')
+                if (parts.size == 5) {
+                    val version = parts[0]
+                    val source = sanitizePathSegment(parts[1])
+                    val zoom = sanitizePathSegment(parts[2])
+                    val x = sanitizePathSegment(parts[3])
+                    val y = sanitizePathSegment(parts[4])
+                    if (version.startsWith("v") &&
+                        source.isNotEmpty() &&
+                        zoom.isNotEmpty() &&
+                        x.isNotEmpty() &&
+                        y.isNotEmpty()
+                    ) {
+                        return "$source/$zoom/$x/$y.bin"
+                    }
+                }
+            }
+            ReadableLayoutKind.DEM -> {
+                val parts = cacheKey.split('|')
+                if (parts.size == 4) {
+                    val version = parts[0]
+                    val qLat = sanitizePathSegment(parts[1])
+                    val qLng = sanitizePathSegment(parts[2])
+                    val units = sanitizePathSegment(parts[3])
+                    if (version.startsWith("v") &&
+                        qLat.isNotEmpty() &&
+                        qLng.isNotEmpty() &&
+                        units.isNotEmpty()
+                    ) {
+                        return "$qLat/$qLng/$units.bin"
+                    }
+                }
+            }
+            ReadableLayoutKind.NONE -> Unit
+        }
+        val parts = cacheKey.split('|')
+        return legacyFileNameForKey(cacheKey)
+    }
+
+    private fun relativePathToCacheKey(relativePath: String): String? {
+        if (readableLayoutKind == ReadableLayoutKind.NONE || !relativePath.endsWith(".bin")) return null
+        val trimmed = relativePath.removeSuffix(".bin")
+        val parts = trimmed.split('/').filter { it.isNotEmpty() }
+        return when (readableLayoutKind) {
+            ReadableLayoutKind.TILE -> {
+                if (parts.size != 4) return null
+                val source = parts[0]
+                val zoom = parts[1]
+                val x = parts[2]
+                val y = parts[3]
+                if (!zoom.all(Char::isDigit) || !x.all(Char::isDigit) || !y.all(Char::isDigit)) return null
+                "v${namespaceVersion()}|$source|$zoom|$x|$y"
+            }
+            ReadableLayoutKind.DEM -> {
+                if (parts.size != 3) return null
+                val qLat = parts[0]
+                val qLng = parts[1]
+                val units = parts[2]
+                if (!isSignedDigits(qLat) || !isSignedDigits(qLng) || units.isEmpty()) return null
+                "v${namespaceVersion()}|$qLat|$qLng|$units"
+            }
+            ReadableLayoutKind.NONE -> null
+        }
+    }
+
+    private fun namespaceVersion(): String {
+        return namespace.substringAfterLast("_v", "")
+            .takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
+            ?: "1"
+    }
+
+    private fun legacyFileNameForKey(cacheKey: String): String {
+        return "${digestHex(cacheKey)}.bin"
+    }
+
+    private fun sanitizePathSegment(value: String): String {
+        return buildString(value.length) {
+            value.forEach { ch ->
+                when {
+                    ch.isLetterOrDigit() || ch == '.' || ch == '_' || ch == '-' -> append(ch)
+                    else -> append('_')
+                }
+            }
+        }.trim('_')
+    }
+
+    private fun isSignedDigits(value: String): Boolean {
+        if (value.isEmpty()) return false
+        if (value[0] == '-') {
+            return value.length > 1 && value.substring(1).all(Char::isDigit)
+        }
+        return value.all(Char::isDigit)
+    }
+
+    private fun digestHex(text: String): String {
         val md = MessageDigest.getInstance("SHA-256")
-        val digest = md.digest(cacheKey.toByteArray(Charsets.UTF_8))
-        val hex = buildString(digest.size * 2) {
+        val digest = md.digest(text.toByteArray(Charsets.UTF_8))
+        return buildString(digest.size * 2) {
             digest.forEach { append("%02x".format(it)) }
         }
-        return "$hex.bin"
     }
 
     private data class Row(

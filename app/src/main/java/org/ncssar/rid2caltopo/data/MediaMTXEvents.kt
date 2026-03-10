@@ -28,6 +28,12 @@ sealed class MediaMTXEvent {
         val reason: String? = null,
         val timestamp: Instant = Instant.now()
     ) : MediaMTXEvent()
+    data class RtmpSessionClosed(
+        val path: String,
+        val publisherConnId: String? = null,
+        val reason: String? = null,
+        val timestamp: Instant = Instant.now()
+    ) : MediaMTXEvent()
     data class ServerStarted(
         val version: String,
         val timestamp: Instant = Instant.now()

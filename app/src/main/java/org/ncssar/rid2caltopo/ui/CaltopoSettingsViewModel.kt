@@ -9,6 +9,8 @@ package org.ncssar.rid2caltopo.ui
 import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.ncssar.rid2caltopo.app.MediaMTXService
+import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.data.CaltopoClient
 class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
 
@@ -25,6 +27,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     private val _usePeers = MutableStateFlow(CaltopoClient.GetUsePeersFlag())
     val usePeers = _usePeers.asStateFlow()
+
+    private val _captureIncomingVideo = MutableStateFlow(CaltopoClient.GetCaptureVideoStreamsFlag())
+    val captureIncomingVideo = _captureIncomingVideo.asStateFlow()
 
     private val _maxIdleTimeInMinutes = MutableStateFlow(CaltopoClient.GetMaxIdleTimeInMinutes().toString())
     val maxIdleTimeInMinutes = _maxIdleTimeInMinutes.asStateFlow()
@@ -48,6 +53,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     override fun settingsChanged() {
         _goLiveFlag.value = CaltopoClient.GetGoLiveFlag()
         _usePeers.value = CaltopoClient.GetUsePeersFlag()
+        _captureIncomingVideo.value = CaltopoClient.GetCaptureVideoStreamsFlag()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
@@ -73,15 +79,23 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onUsePeersChanged(usePeers: Boolean) {
         _usePeers.value = usePeers
     }
+    fun onCaptureIncomingVideoChanged(enabled: Boolean) {
+        _captureIncomingVideo.value = enabled
+    }
     fun onCaltopoDomainAndPortChanged(url: String) {
         _caltopoDomainAndPort.value = url
     }
     fun saveSettings() {
+        val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetGoLiveFlag(_goLiveFlag.value)
         CaltopoClient.SetUsePeers(_usePeers.value)
+        CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
         CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)
+        if (restartMediaMtx) {
+            R2CApplication.getAppCtxt()?.let { MediaMTXService.requestRestart(it) }
+        }
     }
 }

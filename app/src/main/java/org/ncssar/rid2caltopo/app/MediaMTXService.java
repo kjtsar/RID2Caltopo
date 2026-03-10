@@ -12,6 +12,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.os.Process;
 
 import android.content.Intent;
@@ -23,15 +24,24 @@ import androidx.core.app.NotificationCompat;
 
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.MediaMTXBootstrap;
+import org.ncssar.rid2caltopo.data.MediaMTXConfig;
+import org.ncssar.rid2caltopo.data.MediaMTXEvent;
 import org.ncssar.rid2caltopo.data.MediaMTXNative;
+import org.ncssar.rid2caltopo.data.MediaMTXRecordingSync;
 import org.ncssar.rid2caltopo.data.MediaMTXStatus;
+import org.ncssar.rid2caltopo.data.MediaMTXStructuredDispatcher;
+import org.ncssar.rid2caltopo.data.CaltopoClient;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+
+import kotlin.Unit;
 
 
 public class MediaMTXService extends Service {
@@ -41,6 +51,7 @@ public class MediaMTXService extends Service {
     private static final String CHANNEL_ID = "streaming";
     private static final int MEDIA_MTX_NOTIFICATION_ID = 2;
     private static boolean listenersRegistered = false;
+    private static boolean recordingListenerRegistered = false;
     private static int processPid = 0;
 
     public static void onNativeProcessExit(int pid, int status, int signaled) {
@@ -124,6 +135,7 @@ public class MediaMTXService extends Service {
     public void onDestroy() {
         processPid = 0;
         MediaMTXNative.stop();
+        MediaMTXRecordingSync.syncAll(getApplicationContext(), null);
         super.onDestroy();
     }
 
@@ -132,17 +144,30 @@ public class MediaMTXService extends Service {
             MediaMTXBootstrap.init();
             listenersRegistered = true;
         }
+        if (!recordingListenerRegistered) {
+            final Context appContext = getApplicationContext();
+            MediaMTXStructuredDispatcher.addListener(event -> {
+                if (!CaltopoClient.GetCaptureVideoStreamsFlag()) return Unit.INSTANCE;
+                if (event instanceof MediaMTXEvent.StreamStopped) {
+                    MediaMTXRecordingSync.syncAll(appContext, ((MediaMTXEvent.StreamStopped) event).getPath());
+                }
+                return Unit.INSTANCE;
+            });
+            recordingListenerRegistered = true;
+        }
     }
 
     private void restartNativeServer() {
+        MediaMTXRecordingSync.syncAll(getApplicationContext(), null);
         MediaMTXNative.stop();
         startNativeServer();
     }
 
     private void startNativeServer() {
         try {
+            MediaMTXRecordingSync.syncAll(getApplicationContext(), null);
             File bin = extractAsset("mediamtx");
-            File cfg = extractAsset("mediamtx.yml");
+            File cfg = buildConfigAsset("mediamtx.yml");
             CTDebug(TAG, "Starting MediaMTX Server...");
 
             int rc = MediaMTXNative.start(bin.getAbsolutePath(), cfg.getAbsolutePath());
@@ -152,6 +177,16 @@ public class MediaMTXService extends Service {
             }
         } catch (Exception e) {
             CTError(TAG, "MediaMTX_Start() raised", e);
+        }
+    }
+
+    public static void requestRestart(Context context) {
+        Intent restartIntent = new Intent(context, MediaMTXService.class);
+        restartIntent.setAction(ACTION_RESTART_SERVICE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(restartIntent);
+        } else {
+            context.startService(restartIntent);
         }
     }
 
@@ -214,5 +249,41 @@ public class MediaMTXService extends Service {
         CTDebug(TAG, String.format(Locale.US, "Wrote %.3f KB into %s", bytesWritten / 1024F, outFile));
         checkFile(outFile);
         return outFile;
+    }
+
+    private File buildConfigAsset(String assetName) throws IOException {
+        File etcDir = new File(getFilesDir(), "etc");
+        checkFile(etcDir);
+        etcDir.mkdirs();
+        File outFile = new File(etcDir, assetName);
+        String baseConfig = loadAssetText(assetName);
+        File recordingRoot = MediaMTXRecordingSync.getRecordingStagingDir(getApplicationContext());
+        if (!recordingRoot.exists() && !recordingRoot.mkdirs()) {
+            CTError(TAG, "Unable to create MediaMTX recording staging dir " + recordingRoot);
+        }
+        String runtimeConfig = MediaMTXConfig.buildRuntimeConfig(
+                baseConfig,
+                CaltopoClient.GetCaptureVideoStreamsFlag(),
+                recordingRoot
+        );
+        try (OutputStream out = new FileOutputStream(outFile)) {
+            out.write(runtimeConfig.getBytes(StandardCharsets.UTF_8));
+        }
+        outFile.setReadable(true, false);
+        outFile.setWritable(true, true);
+        checkFile(outFile);
+        return outFile;
+    }
+
+    private String loadAssetText(String assetName) throws IOException {
+        try (InputStream in = getAssets().open(assetName);
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            return out.toString(StandardCharsets.UTF_8.name());
+        }
     }
 }

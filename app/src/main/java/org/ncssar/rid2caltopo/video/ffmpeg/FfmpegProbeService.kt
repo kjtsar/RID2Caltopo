@@ -121,7 +121,7 @@ class FfmpegProbeService {
     private val startupNoFrameAbsoluteRecoveryMs = 45_000L
     private val startupNoFrameDeferralLogMs = 5_000L
     private val noFrameCheckMs = 1_000L
-    private val longIdlePollsBeforeCleanup = 60
+    private val renderedNoProgressRecoveryPolls = 8
     private val renderSessions = mutableMapOf<String, Long>()
     private val lastFrameAtMs = mutableMapOf<String, Long>()
     private val sourcePathByDesignator = mutableMapOf<String, String>()
@@ -353,11 +353,15 @@ class FfmpegProbeService {
             upstreamBoundaryPublisherConnId = upstreamBoundary?.publisherConnId,
         )
         var activeSessionId: Long? = null
+        var keepActiveRender = false
         synchronized(stateLock) {
             val sessionId = renderSessions[designator]
             if (sessionId != null) {
                 activeSessionId = sessionId
-                managedRenderSessions[sessionId]?.pendingRepublishMarker = marker
+                managedRenderSessions[sessionId]?.let { session ->
+                    session.pendingRepublishMarker = marker
+                    keepActiveRender = session.renderedFrameCount > 0L
+                }
             } else {
                 pendingRepublishByDesignator[designator] = marker
             }
@@ -370,12 +374,38 @@ class FfmpegProbeService {
                 upstreamCorrelationSummary(designator, now)
         )
         val hasActiveRender = activeSessionId != null
-        if (hasActiveRender) {
+        if (hasActiveRender && keepActiveRender) {
             CTDebug(
                 tag,
                 "Republish for $designator -> keeping active render session (publisherChanged=$publisherChanged)"
             )
             return
+        }
+        if (hasActiveRender) {
+            CTDebug(
+                tag,
+                "Republish for $designator -> restarting non-rendering session (publisherChanged=$publisherChanged)"
+            )
+            activeSessionId?.let { sessionId ->
+                synchronized(stateLock) {
+                    if (renderSessions[designator] == sessionId) {
+                        renderSessions.remove(designator)
+                        lastFrameAtMs.remove(designator)
+                        clearRenderDelayLocked(designator)
+                        managedRenderSessions[sessionId]?.let { session ->
+                            setSessionPhaseLocked(
+                                session = session,
+                                phase = RenderSessionPhase.RETIRING,
+                                nowMs = System.currentTimeMillis(),
+                            )
+                        }
+                    }
+                }
+                stopSessionAsync(
+                    sessionId,
+                    "Stopped non-rendering FFmpeg render for $designator sessionId=$sessionId during republish"
+                )
+            }
         }
         CTDebug(tag, "Republish for $designator -> no active render session; ensuring FFmpeg render is started")
         sessionControlExecutor.execute {
@@ -679,12 +709,23 @@ class FfmpegProbeService {
     private fun classifySessionHealthLocked(
         sessionState: ManagedRenderSession,
         useRenderedProgress: Boolean,
+        nowMs: Long,
     ): RenderSessionHealth {
         if (sessionState.idlePollCount == 0) return RenderSessionHealth.HEALTHY
         if (useRenderedProgress &&
             sessionState.renderedFrameCount > 0L &&
-            sessionState.idlePollCount >= longIdlePollsBeforeCleanup
+            sessionState.idlePollCount >= renderedNoProgressRecoveryPolls
         ) {
+            // Suppress LONG_IDLE restart while the C reader is actively blocked in
+            // ETIMEDOUT (av_read_frame stall).  In that state the C side fires
+            // "reader_wait_long" every ~2.5 s and HOLD mode is stretching the last
+            // good frames.  Killing and restarting the session here would only add a
+            // cold-start delay (find_stream_info ≈ 2-3 s) on top of the ongoing stall.
+            // We let the C side manage the visual freeze; recovery happens naturally
+            // when the controller resumes sending data.
+            val hasRecentReaderWait =
+                sessionState.lastReaderWaitAtMs?.let { nowMs - it <= recentReaderWaitPenaltyMs } == true
+            if (hasRecentReaderWait) return RenderSessionHealth.STALLED
             return RenderSessionHealth.LONG_IDLE
         }
         return RenderSessionHealth.STALLED
@@ -694,7 +735,7 @@ class FfmpegProbeService {
         val activeSessionId = renderSessions[designator] ?: return null
         val activeSession = managedRenderSessions[activeSessionId] ?: return null
         if (activeSession.renderedFrameCount == 0L) return null
-        if (idlePollCount < longIdlePollsBeforeCleanup) return null
+        if (idlePollCount < renderedNoProgressRecoveryPolls) return null
         renderSessions.remove(designator)
         lastFrameAtMs.remove(designator)
         managedRenderSessions[activeSessionId]?.let { session ->
@@ -749,11 +790,6 @@ class FfmpegProbeService {
             sessionState.readerWaitWindowStartedAtMs = null
             sessionState.readerWaitEventCountInWindow = 0
         }
-        setSessionPhaseLocked(
-            session = sessionState,
-            phase = RenderSessionPhase.LIVE,
-            nowMs = now,
-        )
     }
 
     private fun handleRenderedFrameEventLocked(
@@ -765,6 +801,11 @@ class FfmpegProbeService {
     ) {
         val sessionState = managedRenderSessions[sessionId] ?: return
         recordRenderedFrameLocked(sessionState)
+        setSessionPhaseLocked(
+            session = sessionState,
+            phase = RenderSessionPhase.LIVE,
+            nowMs = now,
+        )
         if (renderSessions[designator] == sessionId) {
             lastFrameAtMs[designator] = now
             val sourceLagMs = updateSourceLagEstimateLocked(sessionState, sourceTimestampUs, now).estimatedLagMs
@@ -846,7 +887,7 @@ class FfmpegProbeService {
     private fun pollForNoFrameSessions() {
         val now = System.currentTimeMillis()
         logRuntimePerformance(now)
-        val retireActivePlan = mutableListOf<Triple<String, Long, Int>>()
+        val activeRecoveryPlan = mutableListOf<Triple<String, Long, Int>>()
         val startupRecoveryPlan = mutableListOf<Triple<String, Long, Long>>()
         synchronized(stateLock) {
             refreshRenderDelayLocked(now)
@@ -903,23 +944,46 @@ class FfmpegProbeService {
                     sessionState = activeSession,
                     useRenderedProgress = useRenderedProgress,
                 )
-                when (classifySessionHealthLocked(activeSession, useRenderedProgress)) {
+                when (classifySessionHealthLocked(activeSession, useRenderedProgress, now)) {
                     RenderSessionHealth.HEALTHY,
                     RenderSessionHealth.STALLED,
                     -> Unit
                     RenderSessionHealth.LONG_IDLE -> {
                         retireLongIdleRenderLocked(designator, activeSession.idlePollCount)?.let { (sessionId, idlePolls) ->
-                            retireActivePlan += Triple(designator, sessionId, idlePolls)
+                            activeRecoveryPlan += Triple(designator, sessionId, idlePolls)
                         }
                     }
                 }
             }
         }
-        retireActivePlan.forEach { (designator, sessionId, idlePolls) ->
+        activeRecoveryPlan.forEach { (designator, sessionId, idlePolls) ->
+            CTWarn(
+                tag,
+                "Rendered-session recovery designator=$designator sessionId=$sessionId idlePolls=$idlePolls " +
+                    upstreamCorrelationSummary(designator, now)
+            )
             stopSessionAsync(
                 sessionId,
-                "Stopped long-idle FFmpeg render for $designator sessionId=$sessionId idlePolls=$idlePolls"
+                "Stopped stalled FFmpeg render for $designator sessionId=$sessionId idlePolls=$idlePolls"
             )
+            sessionControlExecutor.execute {
+                val upstreamBoundary = latestUpstreamBoundary(designator)
+                val upstreamTransientClose =
+                    upstreamBoundary?.boundary == "stream_error" &&
+                        upstreamBoundary.outcome == "deferred_transient_close"
+                if (upstreamTransientClose) {
+                    CTDebug(
+                        tag,
+                        "Deferring FFmpeg rendered-session recovery restart for $designator sessionId=$sessionId " +
+                            "while upstream is transiently closed " +
+                            "boundary=${upstreamBoundary?.boundary} outcome=${upstreamBoundary?.outcome}"
+                    )
+                    return@execute
+                }
+                if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
+                    ensureRenderSession(designator)
+                }
+            }
         }
         startupRecoveryPlan.forEach { (designator, sessionId, phaseAgeMs) ->
             CTWarn(

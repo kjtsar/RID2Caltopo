@@ -256,7 +256,7 @@ internal data class DroneMapPoint(
     val altitudeM: Double,
     val timestampMsec: Long,
     val receivedAtMsec: Long? = null,
-    val telemetry: CtDroneSpec.PositionTelemetry? = null
+    val droneSpec: CtDroneSpec? = null
 )
 
 internal data class DroneAglState(
@@ -382,7 +382,7 @@ internal fun configureOsmdroid(context: Context) {
     cfg.tileDownloadMaxQueueSize = OSM_TILE_DOWNLOAD_MAX_QUEUE
     cfg.tileFileSystemThreads = TILE_FS_THREADS
     cfg.tileFileSystemMaxQueueSize = TILE_FS_MAX_QUEUE
-    cfg.isDebugMapTileDownloader = MapCacheDebug.isEnabled()
+    cfg.isDebugMapTileDownloader = MapCacheDebug.isLudicrousEnabled()
     cfg.tileFileSystemCacheMaxBytes = tileCacheMaxBytes
     cfg.tileFileSystemCacheTrimBytes = (tileCacheMaxBytes * 9L) / 10L
     cfg.expirationOverrideDuration = MapCachePolicy.TILE_TTL_MS
@@ -526,7 +526,7 @@ internal fun SplitMapPane(
                     altitudeM = altitudeM,
                     timestampMsec = timestampMsec,
                     receivedAtMsec = receivedAtMsec,
-                    telemetry = state.source.lastPositionTelemetry
+                    droneSpec = state.source
                 ),
                 usingLocalTail
             )
@@ -637,7 +637,7 @@ internal fun SplitMapPane(
 
     fun calibrateDroneAto50(target: DroneMapPoint) {
         val targetAtoM = CALIBRATE_ATO_TARGET_FT * FT_TO_METERS
-        val aircraftAltitudeMslM = aircraftAltitudeMslMeters(target.telemetry)
+        val aircraftAltitudeMslM = aircraftAltitudeMslMeters(target.droneSpec)
         val priorGroundM = demAglByDesignator[target.designator]?.groundM
             ?: autoTakeoffGroundByDesignator[target.designator]
             ?: 0.0
@@ -1126,6 +1126,92 @@ internal fun SplitMapPane(
         )
     }
 
+    openBubbleDesignator?.let { designator ->
+        val point = dronePoints.firstOrNull { it.designator == designator }
+        if (point != null) {
+            val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
+            var coordinateMenuExpanded by remember(designator, coordinateDisplayFormat) { mutableStateOf(false) }
+            val aglState = demAglByDesignator[designator]
+            val freshAglState = aglState?.takeUnless { it.stale }
+            val calibration = demCalibrationByDesignator[designator]
+            val manualCalibrationPending = manualCalibrationPendingByDesignator[designator] == true
+            val aircraftAltitudeMslM = aircraftAltitudeMslMeters(point.droneSpec)
+            val autoTakeoffGroundM = autoTakeoffGroundByDesignator[designator]
+            val aglFeet = when {
+                calibration != null && freshAglState != null ->
+                    manualAglMeters(point, calibration, freshAglState.groundM)?.times(METERS_TO_FEET)
+                !manualCalibrationPending -> freshAglState?.aglM?.times(METERS_TO_FEET)
+                else -> null
+            }
+            val atoFeet = when {
+                calibration != null ->
+                    manualAtoMeters(point, calibration)?.times(METERS_TO_FEET)
+                !manualCalibrationPending && aircraftAltitudeMslM != null && autoTakeoffGroundM != null ->
+                    (aircraftAltitudeMslM - autoTakeoffGroundM) * METERS_TO_FEET
+                else -> null
+            }
+            val rangeFeet = if (CaltopoMap.MyLocation != null &&
+                CaltopoMap.MyLocation.latitude.isFinite() &&
+                CaltopoMap.MyLocation.longitude.isFinite()
+            ) {
+                val out = FloatArray(1)
+                Location.distanceBetween(
+                    CaltopoMap.MyLocation.latitude,
+                    CaltopoMap.MyLocation.longitude,
+                    point.lat,
+                    point.lng,
+                    out
+                )
+                if (out[0].isFinite()) out[0].toDouble() * METERS_TO_FEET else null
+            } else {
+                null
+            }
+            val detailLines = buildList {
+                add("Location: ${CoordinateFormatter.format(point.lat, point.lng, coordinateDisplayFormat)} (${coordinateDisplayFormat.label})")
+                add("AGL: ${aglFeet?.let { "%.0f'".format(it) } ?: "--"}")
+                add("ATO: ${atoFeet?.let { "%.0f'".format(it) } ?: "--"}")
+                add("Distance: ${rangeFeet?.let { "%.0f'".format(it) } ?: "--"}")
+                val telemetry = point.droneSpec?.lastPositionTelemetry
+                telemetry?.aircraftGsKnots?.let { add(String.format(Locale.US, "Speed: %.1f kt", it)) }
+                telemetry?.aircraftTrackDeg?.let { add(String.format(Locale.US, "Track: %.1f°", it)) }
+                telemetry?.aircraftAltitudeRateFpm?.let { add(String.format(Locale.US, "Climb: %.0f fpm", it)) }
+            }
+            AlertDialog(
+                onDismissRequest = { openBubbleDesignator = null },
+                title = { Text(point.designator) },
+                text = {
+                    Column {
+                        Text(
+                            text = detailLines.first(),
+                            modifier = Modifier.clickable { coordinateMenuExpanded = true }
+                        )
+                        DropdownMenu(
+                            expanded = coordinateMenuExpanded,
+                            onDismissRequest = { coordinateMenuExpanded = false }
+                        ) {
+                            CoordinateDisplayFormat.values().forEach { format ->
+                                DropdownMenuItem(
+                                    text = { Text(format.label) },
+                                    onClick = {
+                                        coordinateMenuExpanded = false
+                                        viewModel.setCoordinateDisplayFormat(format)
+                                    }
+                                )
+                            }
+                        }
+                        detailLines.drop(1).forEach { line ->
+                            Text(line)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { openBubbleDesignator = null }) { Text("Close") }
+                },
+                dismissButton = {}
+            )
+        }
+    }
+
     DisposableEffect(Unit) {
         hydrateArtifactsFromCaltopoSnapshot("listener-init")
         val listener = CaltopoMap.ArtifactListener { feature, source, _ ->
@@ -1463,19 +1549,10 @@ internal fun SplitMapPane(
                     }
                     val renderLat = predictedHead?.lat ?: point.lat
                     val renderLng = predictedHead?.lng ?: point.lng
-                    val displayAltitudeM = point.altitudeM
-                    val aircraftAltitudeMslM = aircraftAltitudeMslMeters(point.telemetry)
-                    val telemetryHeadingDeg = point.telemetry?.aircraftHeadingDeg
-                        ?.takeIf { it.isFinite() }
-                        ?.let(::normalizeDegrees)
-                    if (telemetryHeadingDeg != null) {
-                        telemetryHeadingByDesignator[point.designator] = telemetryHeadingDeg
-                    }
+                    val aircraftAltitudeMslM = aircraftAltitudeMslMeters(point.droneSpec)
                     val cachedTelemetryHeadingDeg = telemetryHeadingByDesignator[point.designator]
                     val headingDeg = cachedTelemetryHeadingDeg
                         ?: fallbackHeadingByDesignator[point.designator]
-                    val cameraAzimuthDeg = point.telemetry?.cameraAzimuthDeg
-                    val cameraFovWidthDeg = point.telemetry?.cameraFovWidthDeg ?: DEFAULT_CAMERA_FOV_WIDTH_DEG
                     val demKey = demElevationService.cacheKey(point.lat, point.lng)
                     val priorKey = demKeyByDesignator[point.designator]
                     val aglState = demAglByDesignator[point.designator]
@@ -1569,34 +1646,11 @@ internal fun SplitMapPane(
                             baseIcon = droneMarkerIcon,
                             tint = markerTint,
                             headingDeg = headingDeg,
-                            cameraAzimuthDeg = cameraAzimuthDeg,
-                            cameraFovWidthDeg = cameraFovWidthDeg
                         )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         val aglText = labelAglFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
                         val atoText = labelAtoFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
                         val distanceText = labelRangeFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
-                        val bubbleLines = mutableListOf(
-                            "${point.designator}  |  AGL: $aglText  ATO: $atoText  dist: $distanceText"
-                        )
-                        bubbleLines += String.format(Locale.US, "Lat: %.6f  Lng: %.6f", point.lat, point.lng)
-                        point.telemetry?.let { t ->
-                            t.aircraftGsKnots?.let { bubbleLines += String.format(Locale.US, "Speed: %.1f kt", it) }
-                            t.aircraftHeadingDeg?.let { bubbleLines += String.format(Locale.US, "Heading: %.1f\u00B0", it) }
-                            t.aircraftTrackDeg?.let { bubbleLines += String.format(Locale.US, "Track: %.1f\u00B0", it) }
-                            t.aircraftAltitudeRateFpm?.let { bubbleLines += String.format(Locale.US, "Climb: %.0f fpm", it) }
-                            t.aircraftPitchDeg?.let { bubbleLines += String.format(Locale.US, "Pitch: %.1f\u00B0", it) }
-                            t.aircraftRollDeg?.let { bubbleLines += String.format(Locale.US, "Roll: %.1f\u00B0", it) }
-                            t.cameraAzimuthDeg?.let { bubbleLines += String.format(Locale.US, "Cam azimuth: %.1f\u00B0", it) }
-                            t.cameraTiltDeg?.let { bubbleLines += String.format(Locale.US, "Cam tilt: %.1f\u00B0", it) }
-                            t.cameraFovWidthDeg?.let { w ->
-                                val hText = t.cameraFovHeightDeg?.let { String.format(Locale.US, "x%.1f\u00B0", it) } ?: ""
-                                bubbleLines += String.format(Locale.US, "Cam FOV: %.1f\u00B0%s", w, hText)
-                            }
-                            t.cameraExternalUrl?.let { bubbleLines += "Stream: $it" }
-                        }
-                        title = bubbleLines.joinToString("\n")
-                        subDescription = "Use Settings -> Calibrate 50' ATO... to set altitude reference"
                         setOnMarkerClickListener { tappedMarker, _ ->
                             if (focusedPath != point.designator) {
                                 viewModel.toggleFocus(point.designator)
@@ -1605,7 +1659,6 @@ internal fun SplitMapPane(
                                 tappedMarker.closeInfoWindow()
                                 openBubbleDesignator = null
                             } else {
-                                tappedMarker.showInfoWindow()
                                 openBubbleDesignator = point.designator
                             }
                             true
@@ -1613,15 +1666,12 @@ internal fun SplitMapPane(
                     }
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
-                    // Reopen the info window if this drone's bubble was open before the overlay rebuild.
-                    if (openBubbleDesignator == point.designator) {
-                        marker.showInfoWindow()
-                    }
 
                     val nameMarker = Marker(mapView).apply {
                         position = GeoPoint(renderLat, renderLng)
                         icon = buildDroneNameLabelDrawable(context.resources, point.designator)
                         setAnchor(Marker.ANCHOR_CENTER, DRONE_NAME_LABEL_ANCHOR_Y)
+                        setOnMarkerClickListener { _, _ -> true }
                     }
                     mapView.overlays.add(nameMarker)
                     managedOverlays.add(nameMarker)
@@ -1638,6 +1688,7 @@ internal fun SplitMapPane(
                         position = GeoPoint(renderLat, renderLng)
                         icon = buildDroneStatusLabelDrawable(context.resources, labelText)
                         setAnchor(Marker.ANCHOR_CENTER, DRONE_STATUS_LABEL_ANCHOR_Y)
+                        setOnMarkerClickListener { _, _ -> true }
                     }
                     mapView.overlays.add(labelMarker)
                     managedOverlays.add(labelMarker)
@@ -1829,7 +1880,7 @@ internal fun SplitMapPane(
                                 lastCacheStats = statsLine
                                 CTDebug(MAP_PANE_TAG, statsLine)
                             }
-                            if (MapCacheDebug.isEnabled()) {
+                            if (MapCacheDebug.isLudicrousEnabled()) {
                                 val iconDeltaHits = (iconStats.hits - prevIconHits).coerceAtLeast(0L)
                                 val iconDeltaMisses = (iconStats.misses - prevIconMisses).coerceAtLeast(0L)
                                 val tileDeltaHits = (tileStats.hits - prevTileHits).coerceAtLeast(0L)
@@ -2931,8 +2982,9 @@ private fun nearestLocalTrackTailDistanceMeters(
     return best
 }
 
-private fun aircraftAltitudeMslMeters(telemetry: CtDroneSpec.PositionTelemetry?): Double? {
-    val altitudeFt = telemetry?.aircraftAltitudeFt ?: return null
+private fun aircraftAltitudeMslMeters(droneSpec: CtDroneSpec?): Double? {
+
+    val altitudeFt = droneSpec?.altitudeInFeet ?: return null
     return altitudeFt.takeIf { it.isFinite() }?.times(FT_TO_METERS)
 }
 
@@ -2940,7 +2992,7 @@ private fun manualAtoMeters(
     point: DroneMapPoint,
     calibration: DroneAltitudeCalibration
 ): Double? {
-    val aircraftAltitudeMslM = aircraftAltitudeMslMeters(point.telemetry)
+    val aircraftAltitudeMslM = aircraftAltitudeMslMeters(point.droneSpec)
     if (aircraftAltitudeMslM != null && calibration.takeoffMslAltitudeM != null) {
         return aircraftAltitudeMslM - calibration.takeoffMslAltitudeM
     }
@@ -2956,7 +3008,7 @@ private fun manualAglMeters(
     if (atoM != null) {
         return calibration.takeoffGroundM + atoM - currentGroundM
     }
-    val aircraftAltitudeMslM = aircraftAltitudeMslMeters(point.telemetry) ?: return null
+    val aircraftAltitudeMslM = aircraftAltitudeMslMeters(point.droneSpec) ?: return null
     return aircraftAltitudeMslM - currentGroundM
 }
 
@@ -3142,9 +3194,7 @@ private fun buildDroneMarkerDrawable(
     resources: android.content.res.Resources,
     baseIcon: Drawable?,
     tint: Int?,
-    headingDeg: Double?,
-    cameraAzimuthDeg: Double?,
-    cameraFovWidthDeg: Double
+    headingDeg: Double?
 ): Drawable? {
     if (baseIcon == null) return null
     val density = resources.displayMetrics.density
@@ -3214,23 +3264,6 @@ private fun buildDroneMarkerDrawable(
         canvas.drawLine(startX, startY, tipX, tipY, headingPaint)
         canvas.drawLine(leftX, leftY, tipX, tipY, headingPaint)
         canvas.drawLine(rightX, rightY, tipX, tipY, headingPaint)
-    }
-
-    cameraAzimuthDeg?.takeIf { it.isFinite() }?.let { azimuth ->
-        val clampedFovWidth = cameraFovWidthDeg
-            .takeIf { it.isFinite() && it > 0.0 }
-            ?.coerceAtMost(180.0)
-            ?: DEFAULT_CAMERA_FOV_WIDTH_DEG
-        val leftBearing = normalizeDegrees(azimuth - (clampedFovWidth / 2.0))
-        val rightBearing = normalizeDegrees(azimuth + (clampedFovWidth / 2.0))
-        val (leftStartX, leftStartY) = polarPoint(cx, cy, cameraStart, leftBearing)
-        val (leftEndX, leftEndY) = polarPoint(cx, cy, cameraEnd, leftBearing)
-        val (rightStartX, rightStartY) = polarPoint(cx, cy, cameraStart, rightBearing)
-        val (rightEndX, rightEndY) = polarPoint(cx, cy, cameraEnd, rightBearing)
-        canvas.drawLine(leftStartX, leftStartY, leftEndX, leftEndY, overlayHalo)
-        canvas.drawLine(rightStartX, rightStartY, rightEndX, rightEndY, overlayHalo)
-        canvas.drawLine(leftStartX, leftStartY, leftEndX, leftEndY, cameraPaint)
-        canvas.drawLine(rightStartX, rightStartY, rightEndX, rightEndY, cameraPaint)
     }
 
     canvas.drawCircle(cx, cy, radius, haloFill)

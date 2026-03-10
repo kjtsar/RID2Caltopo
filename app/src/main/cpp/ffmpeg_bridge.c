@@ -59,10 +59,12 @@
 #define RENDER_CADENCE_LOCK_MAX_SAMPLE_MS 80
 #define RENDER_BUFFER_TARGET_MS 250
 #define RENDER_BUFFER_HIGH_WATERMARK_MS 500
-#define RENDER_BUFFER_HIGH_WATERMARK_MAX_MS 12000
+#define RENDER_BUFFER_HIGH_WATERMARK_MAX_MS 4000
 #define RENDER_BUFFER_STARTUP_HIGH_MS 2000
 #define RENDER_BUFFER_STARTUP_TARGET_MS (RENDER_BUFFER_STARTUP_HIGH_MS / 2)
+#define RENDER_STARTUP_STALL_MIN_PRIME_MS 1000
 #define RENDER_STARTUP_STALL_PRIME_PERCENT 90
+#define RENDER_STARTUP_MIN_PRIME_FRAMES 8
 #define RENDER_HOLD_SLOWDOWN_PERCENT 6
 #define RENDER_FILL_SLOWDOWN_PERCENT 12
 #define RENDER_CATCHUP_SPEEDUP_PERCENT 8
@@ -76,7 +78,11 @@
 #define RENDER_HOLD_MAX_INTERVAL_MS 100
 #define RENDER_RATE_MODE_LOG_INTERVAL_MS 2000
 #define RENDER_STARVATION_TUNE_MIN_GAP_MS 500
-#define RENDER_STARVATION_TUNE_MAX_GAP_MS 12000
+// Gaps beyond this are protocol-level idle periods (e.g. DJI "LiveStream error" pauses),
+// not bufferable starvation events.  Capping the tune input keeps the adaptive buffer
+// sized for real WiFi-level jitter (~2-3 s) rather than expanding to cover 15-second
+// controller idle cycles that can never practically be buffered.
+#define RENDER_STARVATION_TUNE_MAX_GAP_MS 3000
 #define RENDER_BUFFER_DECAY_GRACE_MS 3000
 #define RENDER_BUFFER_DECAY_INTERVAL_MS 1000
 #define RENDER_BUFFER_DECAY_STEP_MS 1000
@@ -84,7 +90,6 @@
 #define RENDER_BUFFER_DECAY_ACTIVITY_WINDOW_MS 1000
 #define RENDER_NO_SURFACE_LOG_INTERVAL_MS 2000
 #define IO_STARTUP_INTERRUPT_MS 4000
-#define IO_SOCKET_TIMEOUT_US 2500000
 #define ANOMALY_MAX_BOXES_PER_FRAME 3
 
 #if HAVE_FFMPEG && HAVE_SWSCALE
@@ -157,6 +162,9 @@ typedef struct {
     int64_t last_reader_stall_log_at_ms;
     int64_t reader_stall_timeout_events;
     int64_t reader_stall_error_events;
+    int64_t reader_waiting_since_ms;      // nonzero while decode thread is blocked in av_read_frame
+    int64_t reader_reconnecting_since_ms; // nonzero while decode thread is between close and re-open
+    int64_t last_reader_wait_event_ms;    // render thread: timestamp of last "reader_wait_long" probe
     bool packet_metadata_keys_logged;
     bool frame_metadata_keys_logged;
     int64_t io_interrupt_deadline_ms;
@@ -1554,6 +1562,21 @@ static int64_t render_interval_with_buffer_control_ms(ffmpeg_session_t *session,
     int catchup_entry_depth = buffer_depth_for_ms(catchup_entry_ms, base_interval_ms);
     if (catchup_entry_depth <= high_depth) catchup_entry_depth = high_depth + 1;
     bool reader_stalled = session->reader_stall_started_at_ms > 0;
+    // Also treat the reader as stalled if av_read_frame has been blocking for
+    // longer than ~3 frame intervals without delivering a packet.  This lets
+    // HOLD mode activate well before the 2.5-second socket timeout fires.
+    if (!reader_stalled && session->reader_waiting_since_ms > 0) {
+        int64_t implicit_stall_threshold_ms = base_interval_ms * 3;
+        if (implicit_stall_threshold_ms < 100) implicit_stall_threshold_ms = 100;
+        if ((now_ms - session->reader_waiting_since_ms) >= implicit_stall_threshold_ms) {
+            reader_stalled = true;
+        }
+    }
+    // Treat an in-progress reconnect (close→reopen after EOF) exactly like a
+    // stall: hold the last good frame while the new mediamtx session opens.
+    if (!reader_stalled && session->reader_reconnecting_since_ms > 0) {
+        reader_stalled = true;
+    }
 
     int mode = RENDER_RATE_MODE_SOURCE;
     int64_t interval_ms = base_interval_ms;
@@ -1842,8 +1865,13 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
         startup_stall_prime_ms =
                 (startup_stall_prime_ms * RENDER_STARTUP_STALL_PRIME_PERCENT + 99) / 100;
     }
+    if (startup_stall_prime_ms > RENDER_STARTUP_STALL_MIN_PRIME_MS) {
+        startup_stall_prime_ms = RENDER_STARTUP_STALL_MIN_PRIME_MS;
+    }
     if (startup_stall_prime_ms < target_ms) {
-        startup_stall_prime_ms = target_ms;
+        startup_stall_prime_ms = target_ms < RENDER_STARTUP_STALL_MIN_PRIME_MS
+                ? target_ms
+                : RENDER_STARTUP_STALL_MIN_PRIME_MS;
     }
     int startup_stall_prime_depth = buffer_depth_for_ms(startup_stall_prime_ms, base_interval_ms);
     bool startup_stall_prime_by_span =
@@ -1855,8 +1883,14 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
             session->last_render_post_at_ms <= 0 &&
             session->reader_stall_started_at_ms > 0 &&
             session->render_queue_depth >= startup_stall_prime_depth;
+    bool startup_stall_prime_by_age =
+            session->last_render_post_at_ms <= 0 &&
+            session->render_queue_depth >= RENDER_STARTUP_MIN_PRIME_FRAMES &&
+            queue_age_ms >= startup_stall_prime_ms;
     bool startup_stall_prime_ready =
-            startup_stall_prime_by_span || startup_stall_prime_by_depth;
+            startup_stall_prime_by_span ||
+            startup_stall_prime_by_depth ||
+            startup_stall_prime_by_age;
     if (!session->render_buffer_primed) {
         bool periodic_log = (now_ms - session->last_render_rate_mode_log_at_ms) >= RENDER_RATE_MODE_LOG_INTERVAL_MS;
         if (session->render_queue_depth < prime_depth &&
@@ -1893,7 +1927,9 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
                  prebuffer_ready_by_span
                  ? (prime_to_high ? "high-span" : "target-span")
                  : (startup_stall_prime_ready
-                    ? (startup_stall_prime_by_span ? "startup-stall-span" : "startup-stall-depth")
+                    ? (startup_stall_prime_by_span
+                       ? "startup-stall-span"
+                       : (startup_stall_prime_by_age ? "startup-stall-age" : "startup-stall-depth"))
                     : (prime_to_high ? "high-depth" : "target-depth")),
                  (long long) queue_age_ms);
     }
@@ -2019,6 +2055,33 @@ static void *render_thread_main(void *arg) {
             should_stop = session->render_thread_stop;
         }
         pthread_mutex_unlock(&session->render_lock);
+
+        // Monitor the decode thread for reader stalls and notify the Java side periodically.
+        // With no socket timeout the decode thread blocks silently in av_read_frame() while
+        // mediamtx is alive but the RTMP publisher is idle.  The render thread can see
+        // reader_waiting_since_ms (written by the decode thread without the render lock; a
+        // stale read is harmless here) and fires "reader_wait_long" events so the Java health-
+        // classifier knows to suppress unnecessary session restarts.
+        {
+            int64_t now_ms = monotonic_ms();
+            int64_t waiting_since = session->reader_waiting_since_ms; // lock-free read: acceptable
+            if (waiting_since > 0) {
+                int64_t wait_duration_ms = now_ms - waiting_since;
+                int64_t last_event = session->last_reader_wait_event_ms;
+                // First event after the stall has lasted 1 s; then every ~2.5 s thereafter.
+                bool first_event  = (last_event == 0 && wait_duration_ms >= 1000);
+                bool repeat_event = (last_event > 0  && (now_ms - last_event) >= 2500);
+                if (first_event || repeat_event) {
+                    session->last_reader_wait_event_ms = now_ms;
+                    dispatch_probe_event(session->designator, "reader_wait_long",
+                                         session->session_id, 0,
+                                         NAN, NAN, NAN, NAN, NAN, NAN);
+                }
+            } else {
+                // Stall ended – reset so the next stall gets its own first-event at 1 s.
+                session->last_reader_wait_event_ms = 0;
+            }
+        }
 
         if (should_stop) break;
     }
@@ -2279,7 +2342,6 @@ static int64_t provisional_interval_from_stream(const AVStream *stream,
 
 static int open_input_with_profile(ffmpeg_session_t *session, bool low_latency) {
     AVDictionary *opts = NULL;
-    char io_timeout_us[32];
     if (session == NULL) return AVERROR(EINVAL);
 
     if (session->fmt == NULL) {
@@ -2293,11 +2355,13 @@ static int open_input_with_profile(ffmpeg_session_t *session, bool low_latency) 
 
     // Keep transport deterministic for loopback stability.
     av_dict_set(&opts, "rtsp_transport", "tcp", 0);
-    snprintf(io_timeout_us, sizeof(io_timeout_us), "%d", IO_SOCKET_TIMEOUT_US);
-    // Use protocol-level socket timeouts so blocking reads wake periodically without thread interruption.
-    av_dict_set(&opts, "rw_timeout", io_timeout_us, 0);
-    av_dict_set(&opts, "stimeout", io_timeout_us, 0);
-    av_dict_set(&opts, "timeout", io_timeout_us, 0);
+    // No rw_timeout/stimeout/timeout: we connect to localhost mediamtx which keeps the RTSP
+    // TCP session alive even when the RTMP publisher is idle (via RTSP keepalives).
+    // av_read_frame() will block until data arrives, the connection closes (EOF), or the
+    // interrupt_callback fires (session->running = false).  ffmpeg's network loop polls every
+    // ~100 ms and checks the interrupt_callback, so stop() is still responsive without a
+    // per-socket timeout.  The render thread monitors reader_waiting_since_ms and emits
+    // "reader_wait_long" probe events so the Java health-classifier stays informed.
     // The render path only needs video; subscribing to audio as well can add interleave stalls.
     if (session != NULL && session->is_render) {
         av_dict_set(&opts, "allowed_media_types", "video", 0);
@@ -2516,22 +2580,6 @@ static void run_decode_loop(ffmpeg_session_t *session) {
     memset(errbuf, 0, sizeof(errbuf));
 
     avformat_network_init();
-    int rc = open_decoder(session);
-    if (rc < 0) {
-        av_strerror(rc, errbuf, sizeof(errbuf));
-        ct_error(TAG,
-                 "open_decoder failed id=%lld designator=%s rc=%d err=%s",
-                 (long long) session->session_id,
-                 session->designator,
-                 rc,
-                 errbuf);
-        dispatch_probe_event(session->designator, "decoder_open_error", session->session_id, 0,
-                             NAN, NAN, NAN, NAN, NAN, NAN);
-        return;
-    }
-
-    dispatch_probe_event(session->designator, "decoder_opened", session->session_id, 0,
-                         NAN, NAN, NAN, NAN, NAN, NAN);
 
     AVPacket *pkt = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
@@ -2540,10 +2588,12 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                              NAN, NAN, NAN, NAN, NAN, NAN);
         if (pkt != NULL) av_packet_free(&pkt);
         if (frame != NULL) av_frame_free(&frame);
-        close_decoder(session);
         return;
     }
 
+    // Full render-state reset and render-thread startup happen only once, before
+    // the first connection attempt.  Subsequent reconnects skip the EMA/buffer
+    // fields so the tuned gap history survives the 20-second DJI session rotation.
     if (session->is_render) {
         session->cadence_locked = false;
         session->locked_render_fps = 0;
@@ -2568,7 +2618,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         session->adaptive_buffer_high_ms = RENDER_BUFFER_STARTUP_HIGH_MS;
         session->starvation_gap_ema_ms = 0;
         session->starvation_gap_sample_count = 0;
-        session->last_starvation_tune_at_ms = monotonic_ms();
+        // Only start decay after a real starvation-driven retune; startup should
+        // keep its initial reserve until we actually observe a gap.
+        session->last_starvation_tune_at_ms = 0;
         session->last_decode_activity_at_ms = 0;
         session->last_render_buffer_decay_at_ms = 0;
         session->last_render_buffer_tune_log_at_ms = 0;
@@ -2576,6 +2628,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         session->last_reader_stall_log_at_ms = 0;
         session->reader_stall_timeout_events = 0;
         session->reader_stall_error_events = 0;
+        session->reader_waiting_since_ms = 0;
+        session->reader_reconnecting_since_ms = 0;
+        session->last_reader_wait_event_ms = 0;
 #if HAVE_SWSCALE
         if (session->render_sync_ready) {
             pthread_mutex_lock(&session->render_lock);
@@ -2604,14 +2659,119 @@ static void run_decode_loop(ffmpeg_session_t *session) {
 #endif
     }
 
+    // ── Outer reconnect loop ────────────────────────────────────────────────
+    // When mediamtx kicks an old RTMP publisher and accepts a new one (which
+    // the DJI controller does every ~20 s), the RTSP stream signals EOF.
+    // Rather than waiting for the Java layer to call stop/start, we close the
+    // decoder, wait briefly for mediamtx to be ready, and reopen it ourselves.
+    // The render thread stays alive throughout; reader_reconnecting_since_ms
+    // tells it to hold the current frame instead of draining the queue.
+    bool first_open = true;
+    int64_t reconnect_delay_ms = 150; // head-start: DJI media arrives ~220 ms after connect
+    int reconnect_failures = 0;
+
+    while (session_running(session)) {
+
+        if (!first_open) {
+            // Signal the render thread to hold the last good frame.
+            session->reader_reconnecting_since_ms = monotonic_ms();
+
+            // Brief delay so mediamtx can accept the new DJI publisher before
+            // we hammer it with avformat_open_input.
+            usleep((useconds_t)(reconnect_delay_ms * 1000));
+            if (!session_running(session)) break;
+        }
+
+        int rc = open_decoder(session);
+        session->reader_reconnecting_since_ms = 0; // connected (or failed)
+        session->reader_stall_started_at_ms = 0;
+        session->last_reader_stall_log_at_ms = 0;
+        session->reader_stall_timeout_events = 0;
+        session->reader_stall_error_events = 0;
+        session->reader_waiting_since_ms = 0;
+        session->last_reader_wait_event_ms = 0;
+
+        if (rc < 0) {
+            av_strerror(rc, errbuf, sizeof(errbuf));
+            if (first_open) {
+                // Initial open failed: bad URL or server not running.
+                // Emit error and stop — there is nothing useful to retry here.
+                ct_error(TAG,
+                         "open_decoder failed id=%lld designator=%s rc=%d err=%s",
+                         (long long) session->session_id,
+                         session->designator,
+                         rc,
+                         errbuf);
+                dispatch_probe_event(session->designator, "decoder_open_error", session->session_id, 0,
+                                     NAN, NAN, NAN, NAN, NAN, NAN);
+                break;
+            }
+            // Reconnect failed — mediamtx may not have a publisher yet.
+            // Back off slightly and try again, up to a limit.
+            reconnect_failures++;
+            reconnect_delay_ms = (reconnect_delay_ms < 1000) ? reconnect_delay_ms + 100 : 1000;
+            ct_debug(TAG,
+                     "reconnect open failed id=%lld designator=%s attempt=%d rc=%d err=%s",
+                     (long long) session->session_id,
+                     session->designator,
+                     reconnect_failures,
+                     rc,
+                     errbuf);
+            if (reconnect_failures > 20) {
+                ct_error(TAG,
+                         "reconnect giving up id=%lld designator=%s after %d attempts",
+                         (long long) session->session_id,
+                         session->designator,
+                         reconnect_failures);
+                dispatch_probe_event(session->designator, "decoder_open_error", session->session_id, 0,
+                                     NAN, NAN, NAN, NAN, NAN, NAN);
+                break;
+            }
+            continue;
+        }
+
+        // Successful (re)connect.
+        reconnect_failures = 0;
+        reconnect_delay_ms = 150;
+
+        dispatch_probe_event(session->designator,
+                             first_open ? "decoder_opened" : "decoder_reconnected",
+                             session->session_id, 0,
+                             NAN, NAN, NAN, NAN, NAN, NAN);
+
+        if (!first_open) {
+            // On reconnect, reset only the timing/cadence fields that are
+            // stream-specific.  Deliberately preserve starvation_gap_ema_ms
+            // and adaptive_buffer_* so the tuned gap history survives the
+            // DJI session rotation.
+            if (session->is_render) {
+                session->cadence_locked = false;
+                session->locked_render_fps = 0;
+                session->locked_render_interval_ms = 0;
+                session->next_render_due_ms = 0;
+                session->cadence_last_source_ts_us = 0;
+                session->cadence_last_sample_at_ms = 0;
+                session->cadence_lock_sample_count = 0;
+                memset(session->cadence_lock_samples_ms, 0, sizeof(session->cadence_lock_samples_ms));
+                session->last_decode_activity_at_ms = 0;
+                session->render_require_high_reprime = true; // need a fresh prime burst
+            }
+        }
+        first_open = false;
+
+    // ── Inner decode loop ───────────────────────────────────────────────────
     int64_t last_video_packet_at_ms = 0;
     int64_t last_decoded_frame_at_ms = 0;
 
     while (session_running(session)) {
         int64_t read_started_at_ms = monotonic_ms();
+        // Expose blocking start time so the render thread can detect an implicit stall
+        // before ETIMEDOUT fires on the socket timeout.
+        session->reader_waiting_since_ms = read_started_at_ms;
         // Let ordinary source stalls block here until packets resume.
         // Explicit stop() still interrupts via ffmpeg_interrupt_cb when running=false.
         rc = av_read_frame(session->fmt, pkt);
+        session->reader_waiting_since_ms = 0;
         int64_t read_elapsed_ms = monotonic_ms() - read_started_at_ms;
         if (read_elapsed_ms >= 500) {
             const char *err_suffix = "";
@@ -2639,8 +2799,11 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
         }
         if (rc == AVERROR_EOF) {
+            // Stream ended (publisher disconnected from mediamtx).
+            // Break out of the inner loop so the outer reconnect loop can
+            // close and reopen the decoder rather than spinning on a dead socket.
             av_packet_unref(pkt);
-            continue;
+            break;
         }
         if (rc < 0) {
             int64_t now_ms = monotonic_ms();
@@ -2806,7 +2969,16 @@ static void run_decode_loop(ffmpeg_session_t *session) {
 #endif
             av_frame_unref(frame);
         }
-    }
+    } // ── end inner decode loop ───────────────────────────────────────────
+
+    // Close the decoder so we can reopen it cleanly on the next iteration.
+    // The render thread stays alive between reconnects.
+    close_decoder(session);
+
+    } // ── end outer reconnect loop ─────────────────────────────────────────
+
+    // Ensure reconnecting flag is cleared on any exit path.
+    session->reader_reconnecting_since_ms = 0;
 
 #if HAVE_SWSCALE
     if (session->is_render && session->render_thread_started && session->render_sync_ready) {
@@ -2825,7 +2997,8 @@ static void run_decode_loop(ffmpeg_session_t *session) {
 #endif
     av_frame_free(&frame);
     av_packet_free(&pkt);
-    close_decoder(session);
+    // Note: close_decoder is called inside the outer loop on each iteration,
+    // so we do NOT call it again here.
 }
 #endif
 

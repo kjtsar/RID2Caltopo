@@ -30,6 +30,7 @@ fun CaltopoSettingsScreen(
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val goLiveFlag by settingsViewModel.goLiveFlag.collectAsState()
     val usePeers by settingsViewModel.usePeers.collectAsState()
+    val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
     val caltopoUrl by settingsViewModel.caltopoUrl.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
@@ -83,6 +84,15 @@ fun CaltopoSettingsScreen(
                         onCheckedChange = { settingsViewModel.onUsePeersChanged(it) }
                     )
                     Text(if (usePeers) "Yes" else "No")
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Capture Streams:")
+                    Switch(
+                        checked = captureIncomingVideo,
+                        onCheckedChange = { settingsViewModel.onCaptureIncomingVideoChanged(it) }
+                    )
+                    Text(if (captureIncomingVideo) "Yes" else "No")
                 }
 
 

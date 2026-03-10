@@ -9,11 +9,17 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import org.ncssar.rid2caltopo.data.DesignatorState
@@ -34,6 +40,8 @@ fun DesignatorIndicator(
 ) {
     val errorSummary = formatStreamErrorDetail(streamErrorDetail)
     val renderDelayMs = viewModel.renderDelayMsFor(streamDesignator)
+    val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
+    var coordinateMenuExpanded by remember(streamDesignator) { mutableStateOf(false) }
     val streamStateText = when (streamState) {
         StreamState.CONNECTING -> "Connecting..."
         StreamState.LIVE -> formatLiveState(renderDelayMs)
@@ -47,39 +55,86 @@ fun DesignatorIndicator(
     }
     val designatorState = viewModel.designatorStateFor(streamDesignator)
 
-    val (color, subtitle) = when (designatorState) {
+    val (color, locationText, detailText) = when (designatorState) {
         is DesignatorState.Green -> {
             val ds = viewModel.droneStates[streamDesignator]
-            val lat: String
-            val lng: String
             val feet: String
             val dur: String
+            val location: String
             if (ds != null) {
                 val feetPerMeter: Double = (ds.lastAlt * 3.28084F)
-                lat = "%.5f".format(ds.lastLat)
-                lng = "%.5f".format(ds.lastLng)
+                location = CoordinateFormatter.format(ds.lastLat, ds.lastLng, coordinateDisplayFormat)
                 feet = "%.0f".format(feetPerMeter)
                 dur = ds.lastTimestamp
             } else {
-                lat = "0.0"; lng = "0.0"; feet = "0.0"; dur = "unknown"
+                location = "loc:unknown"
+                feet = "0.0"
+                dur = "unknown"
             }
-            Color(0xFF00FF00) to "loc:${lat},${lng}, alt:${feet}', duration:${dur}, (mapStatus:${mapStatus})"
+            Triple(
+                Color(0xFF00FF00),
+                "$location (${coordinateDisplayFormat.label})",
+                "alt:${feet}', duration:${dur}, (mapStatus:${mapStatus})"
+            )
         }
-        is DesignatorState.Yellow ->
-            Color(0xFFFFFF00) to "Long-press to match telemetry (mapStatus:${mapStatus})"
+        is DesignatorState.Yellow -> Triple(
+            Color(0xFFFFFF00),
+            null,
+            "Long-press to match telemetry (mapStatus:${mapStatus})"
+        )
 
-        DesignatorState.Red ->
-            Color(0xFFFF0000) to "No telemetry available (mapStatus:${mapStatus})"
+        DesignatorState.Red -> Triple(
+            Color(0xFFFF0000),
+            null,
+            "No telemetry available (mapStatus:${mapStatus})"
+        )
     }
     Column {
         Text(
-            text = "$streamDesignator - $streamStateText - $subtitle",
+            text = "$streamDesignator - $streamStateText",
             color = color,
             style = MaterialTheme.typography.titleLarge,
             maxLines = if (streamState == StreamState.ERROR) 2 else 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .padding(10.dp)
+                .background(Color.Transparent)
+        )
+        if (locationText != null) {
+            Text(
+                text = locationText,
+                color = color,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .padding(horizontal = 10.dp)
+                    .background(Color.Transparent)
+                    .clickable { coordinateMenuExpanded = true }
+            )
+            DropdownMenu(
+                expanded = coordinateMenuExpanded,
+                onDismissRequest = { coordinateMenuExpanded = false }
+            ) {
+                CoordinateDisplayFormat.values().forEach { format ->
+                    DropdownMenuItem(
+                        text = { Text(format.label) },
+                        onClick = {
+                            coordinateMenuExpanded = false
+                            viewModel.setCoordinateDisplayFormat(format)
+                        }
+                    )
+                }
+            }
+        }
+        Text(
+            text = detailText,
+            color = color,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = if (streamState == StreamState.ERROR) 3 else 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .padding(horizontal = 10.dp)
                 .background(Color.Transparent)
         )
         if (streamState == StreamState.ERROR && streamErrorDetail != null) {

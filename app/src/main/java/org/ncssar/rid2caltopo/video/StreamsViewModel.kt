@@ -31,6 +31,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
+import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
@@ -114,6 +115,11 @@ class StreamsViewModel(
 
     private val _mapName = mutableStateOf<String?>(null)
     val mapName: String? by _mapName
+    private val _coordinateDisplayFormat = mutableStateOf<CoordinateDisplayFormat>(
+        CoordinateDisplayFormat.fromStorage(CaltopoClient.GetCoordinateDisplayFormat())
+    )
+    val coordinateDisplayFormat: CoordinateDisplayFormat
+        get() = _coordinateDisplayFormat.value
 
     private var lastLiveRevisions: Map<String, Long> = emptyMap()
     private var lastLivePublisherConnIds: Map<String, String?> = emptyMap()
@@ -179,12 +185,14 @@ class StreamsViewModel(
     override fun mapStatusUpdate(status: mapStatus?, mapNode: CaltopoNode.MapNode?, optErrmsg: String?) {
         val newName = mapNode?.title;
         val oldName = _mapName.value;
-        if (status == CaltopoMap.MapStatusListener.mapStatus.up && !oldName.equals(newName)) {
-            CTDebug(tag, "XYZZY: Connected to ${newName}")
-            _mapName.value = newName
+        if (status == CaltopoMap.MapStatusListener.mapStatus.up) {
+            if (!oldName.equals(newName)) {
+                CTDebug(tag, "Connected to ${newName}")
+                _mapName.value = newName
+            }
         } else if (_mapName.value != null) {
             _mapName.value = null
-            CTDebug(tag, "XYZZY: Disconnected from map")
+            CTDebug(tag, "Disconnected from ${oldName} map")
         }
     }
 
@@ -201,6 +209,12 @@ class StreamsViewModel(
 
     fun renderDelayMsFor(designator: String): Long? {
         return _renderDelayMsByDesignator[designator]
+    }
+
+    fun setCoordinateDisplayFormat(format: CoordinateDisplayFormat) {
+        if (_coordinateDisplayFormat.value == format) return
+        _coordinateDisplayFormat.value = format
+        CaltopoClient.SetCoordinateDisplayFormat(format.storageValue)
     }
 
     fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {
@@ -347,10 +361,8 @@ class StreamsViewModel(
 
         ridTelemetry?.let { rid ->
             lines += "[RID Telemetry]"
-            rid.aircraftAltitudeFt?.let { lines += String.format(Locale.US, "Aircraft altitude: %.0f ft", it) }
             rid.aircraftAltitudeRateFpm?.let { lines += String.format(Locale.US, "Aircraft vertical rate: %.0f fpm", it) }
             rid.aircraftGsKnots?.let { lines += String.format(Locale.US, "Aircraft ground speed: %.1f kt", it) }
-            rid.aircraftHeadingDeg?.let { lines += String.format(Locale.US, "Aircraft heading: %.1f deg", it) }
             rid.aircraftTrackDeg?.let { lines += String.format(Locale.US, "Aircraft track: %.1f deg", it) }
         }
 

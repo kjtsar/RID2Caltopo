@@ -34,4 +34,21 @@ class MediaMTXStructuredDispatcherTest {
         assertEquals("127.0.0.1:5555", event.publisherConnId)
         assertEquals("RTMP closed: publisher disconnected unexpectedly", event.reason)
     }
+
+    @Test
+    fun dispatchEventJson_rtmpSessionClosed_emitsListenerEvent() {
+        MediaMTXStructuredDispatcher.resetForTests()
+        val recorder = EventRecorder<MediaMTXEvent>()
+        MediaMTXStructuredDispatcher.addListener(recorder::record)
+
+        MediaMTXStructuredDispatcher.dispatchEventJson(
+            """{"type":"rtmp_session_closed","path":"autel/1SAR7EvMx4n","publisherConnId":"127.0.0.1:5555","reason":"RTMP closed: EOF"}"""
+        )
+
+        assertEquals(1, recorder.events.size)
+        val event = recorder.events.single() as MediaMTXEvent.RtmpSessionClosed
+        assertEquals("autel/1SAR7EvMx4n", event.path)
+        assertEquals("127.0.0.1:5555", event.publisherConnId)
+        assertEquals("RTMP closed: EOF", event.reason)
+    }
 }

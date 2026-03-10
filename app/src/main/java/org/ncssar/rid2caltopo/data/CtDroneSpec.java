@@ -73,7 +73,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final String TAG = "CtDroneSpec";
     static final String ICON_LATENCY_TAG = "RidIconLatency";
     static final float FT_TO_METERS = 0.3048f;
-    static final double LAT_LNG_EPSILON = 0.000002;  // less than a foot.
     private static final String EMPTY_STRING = "";
     private static final String RID_FILTER_REGEX = "[^A-Z0-9]";
     private static final String MAPPED_ID_FILTER_REGEX = "[^_a-zA-Z0-9]";
@@ -96,9 +95,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
     private transient int totalCount; // all waypoints, including those with bad coords and altitude.
     private transient String trackLabel;
-    public transient double lastLat;
-    public transient double lastLng;
-    public transient double lastAlt;
+    public volatile transient double lastLat;  // may get updated by BLE thread
+    public volatile transient double lastLng;
+    public volatile transient double lastAlt;
     @Nullable
     private transient PositionTelemetry lastPositionTelemetry;
     private transient double distanceInFeet;
@@ -406,7 +405,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             distanceInFeet += lDistanceInFeet;
         }
 
-        nowWallMsec = System.currentTimeMillis();
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = nowWallMsec;
 
         goodCount++;
@@ -428,7 +426,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {
             CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
                     "rid_rx remoteId=%s waypoint=%d wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%.1f transport=%s airborne=%s distance: %.3f, totalDistance: %.3f, duration: %s",
-                    mappedId, goodCount, nowWallMsec, timestampInMilliseconds, lat, lng, altitudeInMeters, transportType, airborne, lDistanceInFeet, distanceInFeet, getDurationInSecAsString()));
+                    mappedId, goodCount, System.currentTimeMillis(), timestampInMilliseconds, lat, lng, altitudeInMeters, transportType, airborne, lDistanceInFeet, distanceInFeet, getDurationInSecAsString()));
         }
 
         return true;

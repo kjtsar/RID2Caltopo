@@ -20,6 +20,8 @@ import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Process;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
@@ -49,6 +51,7 @@ import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.*;
@@ -222,7 +225,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static OutputStream DebugOutputStream;
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
-    private static ArrayList<CtDroneSpec.DroneSpecsChangedListener> DroneSpecsChangedListeners = new ArrayList<>();
+    private static CopyOnWriteArrayList<CtDroneSpec.DroneSpecsChangedListener> DroneSpecsChangedListeners = new CopyOnWriteArrayList<>();
     private static Uri DebugLogPath = null;
     private static DelayedExec AppIdleDelay = new DelayedExec();
     private static FirebaseAnalytics FBAnalytics;
@@ -329,8 +332,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CtDroneSpec ds = GetDroneSpec(rid);
         if (null != ds) ds.removeMyR2cOwner();
     }
+    private static final Handler MainHandler = new Handler(Looper.getMainLooper());
 
     private static void UpdateDroneSpecs() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            MainHandler.post(() -> ProcessSortedCurrentDroneSpecArray(true));
+            return;
+        }
         ProcessSortedCurrentDroneSpecArray(true);
     }
 

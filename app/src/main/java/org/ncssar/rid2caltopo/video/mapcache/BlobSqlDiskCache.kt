@@ -23,6 +23,7 @@ internal class BlobSqlDiskCache(
     private val missCount = AtomicLong(0)
     private val evictionCount = AtomicLong(0)
     private val staleServedCount = AtomicLong(0)
+    private val bytesUsedAtomic = AtomicLong(0L)
 
     private val db: SQLiteDatabase by lazy {
         if (!cacheDir.exists()) {
@@ -50,6 +51,8 @@ internal class BlobSqlDiskCache(
     init {
         // Fail fast so callers can choose a fallback cache root if opening this DB path is invalid.
         db
+        // Prime the bytes counter so snapshot() is always lock-free.
+        bytesUsedAtomic.set(synchronized(lock) { bytesUsedLocked() })
     }
 
     override fun defaultExpiry(nowMs: Long): Long = nowMs + defaultTtlMs
@@ -68,6 +71,7 @@ internal class BlobSqlDiskCache(
             db.replaceOrThrow("entries", null, cv)
             MapCacheDebug.log("sql put db=$dbName key=$cacheKey bytes=${bytes.size} expiresAt=$expiresAtMs dir=${cacheDir.absolutePath}")
             evictToCapLocked()
+            bytesUsedAtomic.set(bytesUsedLocked())
         }
     }
 
@@ -129,27 +133,27 @@ internal class BlobSqlDiskCache(
 
     override fun remove(cacheKey: String): Boolean {
         synchronized(lock) {
-            return db.delete("entries", "cache_key = ?", arrayOf(cacheKey)) > 0
+            val result = db.delete("entries", "cache_key = ?", arrayOf(cacheKey)) > 0
+            if (result) bytesUsedAtomic.set(bytesUsedLocked())
+            return result
         }
     }
 
     override fun clear() {
         synchronized(lock) {
             db.delete("entries", null, null)
+            bytesUsedAtomic.set(0L)
         }
     }
 
-    override fun snapshot(): CacheStatsSnapshot {
-        synchronized(lock) {
-            return CacheStatsSnapshot(
-                hits = hitCount.get(),
-                misses = missCount.get(),
-                bytesUsed = bytesUsedLocked(),
-                evictions = evictionCount.get(),
-                staleServed = staleServedCount.get()
-            )
-        }
-    }
+    // Lock-free: all fields are AtomicLong; bytesUsedAtomic is kept current by put/remove/clear.
+    override fun snapshot(): CacheStatsSnapshot = CacheStatsSnapshot(
+        hits = hitCount.get(),
+        misses = missCount.get(),
+        bytesUsed = bytesUsedAtomic.get(),
+        evictions = evictionCount.get(),
+        staleServed = staleServedCount.get()
+    )
 
     override fun markStaleServed() {
         staleServedCount.incrementAndGet()

@@ -36,6 +36,7 @@ internal class SafBlobCacheStore(
     private val missCount = AtomicLong(0)
     private val evictionCount = AtomicLong(0)
     private val staleServedCount = AtomicLong(0)
+    private val bytesUsedAtomic = AtomicLong(0L)
     private var namespaceFileIndex: MutableMap<String, DocumentFile>? = null
 
     private val db: SQLiteDatabase by lazy {
@@ -88,6 +89,7 @@ internal class SafBlobCacheStore(
         synchronized(dbLock) {
             db.replaceOrThrow("saf_entries", null, cv)
             namespaceFileIndex?.set(relativePath, target)
+            bytesUsedAtomic.set(bytesUsedLocked())
         }
         MapCacheDebug.log("saf put ns=$namespace key=$cacheKey bytes=${bytes.size} uri=${target.uri}")
         evictToCap()
@@ -165,6 +167,7 @@ internal class SafBlobCacheStore(
         synchronized(dbLock) {
             namespaceFileIndex?.remove(row?.fileName ?: keyToRelativePath(cacheKey))
             namespaceFileIndex?.remove(legacyFileNameForKey(cacheKey))
+            if (deletedRows > 0) bytesUsedAtomic.set(bytesUsedLocked())
         }
         return deletedRows > 0
     }
@@ -174,21 +177,19 @@ internal class SafBlobCacheStore(
         synchronized(dbLock) {
             db.delete("saf_entries", "namespace = ?", arrayOf(storageNamespace))
             namespaceFileIndex?.clear()
+            bytesUsedAtomic.set(0L)
         }
         nsDir?.listFiles()?.forEach { deleteRecursively(it) }
     }
 
-    override fun snapshot(): CacheStatsSnapshot {
-        synchronized(dbLock) {
-            return CacheStatsSnapshot(
-                hits = hitCount.get(),
-                misses = missCount.get(),
-                bytesUsed = bytesUsedLocked(),
-                evictions = evictionCount.get(),
-                staleServed = staleServedCount.get()
-            )
-        }
-    }
+    // Lock-free: all fields are AtomicLong; bytesUsedAtomic is kept current by put/remove/clear/evict.
+    override fun snapshot(): CacheStatsSnapshot = CacheStatsSnapshot(
+        hits = hitCount.get(),
+        misses = missCount.get(),
+        bytesUsed = bytesUsedAtomic.get(),
+        evictions = evictionCount.get(),
+        staleServed = staleServedCount.get()
+    )
 
     override fun markStaleServed() {
         staleServedCount.incrementAndGet()
@@ -203,6 +204,7 @@ internal class SafBlobCacheStore(
             }
             val fileIndex = ensureNamespaceFileIndexLocked(nsDir)
             maybeRebuildIndexLocked(fileIndex)
+            bytesUsedAtomic.set(bytesUsedLocked())
             MapCacheDebug.log("saf prewarm ns=$namespace ready files=${namespaceFileIndex?.size ?: 0}")
         }
     }
@@ -211,6 +213,7 @@ internal class SafBlobCacheStore(
         while (true) {
             val victims: List<Triple<String, String, Long>> = synchronized(dbLock) {
                 val current = bytesUsedLocked()
+                bytesUsedAtomic.set(current)
                 if (current <= maxBytes) return
                 val cursor: Cursor = db.query(
                     "saf_entries",

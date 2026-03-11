@@ -396,7 +396,7 @@ internal fun SplitMapPane(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val uiScope = rememberCoroutineScope()
-    var baseLayer by remember { mutableStateOf(BaseLayerOption.OpenStreetMap) }
+    val baseLayer = viewModel.baseLayer
     var settingsMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
     var calibrateMenuExpanded by remember { mutableStateOf(false) }
@@ -1968,7 +1968,7 @@ internal fun SplitMapPane(
                             Text("${option.label}$selected")
                         },
                         onClick = {
-                            baseLayer = option
+                            viewModel.setBaseLayer(option)
                             baseLayerMenuExpanded = false
                         }
                     )

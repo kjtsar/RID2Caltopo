@@ -57,6 +57,14 @@
 #define RENDER_CADENCE_LOCK_BURST_GAP_MS 200
 #define RENDER_CADENCE_LOCK_MIN_SAMPLE_MS 10
 #define RENDER_CADENCE_LOCK_MAX_SAMPLE_MS 80
+// Cadence re-lock: refine the locked interval from the queue's PTS span at
+// three checkpoints — initial buffer prime, 75% fill (queue accumulating),
+// and 25% fill (queue draining).  A minimum spacing prevents thrashing when
+// the queue level hovers near a threshold.
+#define RENDER_CADENCE_RELOCK_MIN_INTERVAL_MS  3000
+#define RENDER_CADENCE_RELOCK_MIN_QUEUE_FRAMES 8
+#define RENDER_CADENCE_RELOCK_FILL_HIGH_PCT    75
+#define RENDER_CADENCE_RELOCK_FILL_LOW_PCT     25
 #define RENDER_BUFFER_TARGET_MS 250
 #define RENDER_BUFFER_HIGH_WATERMARK_MS 500
 #define RENDER_BUFFER_HIGH_WATERMARK_MAX_MS 4000
@@ -66,11 +74,39 @@
 #define RENDER_STARTUP_STALL_PRIME_PERCENT 90
 #define RENDER_STARTUP_MIN_PRIME_FRAMES 8
 #define RENDER_HOLD_SLOWDOWN_PERCENT 6
-#define RENDER_FILL_SLOWDOWN_PERCENT 12
-#define RENDER_CATCHUP_SPEEDUP_PERCENT 8
-// Entry overshoot is intentionally lower than the speedup percent so the burst
-// threshold is easier to cross, decoupling catchup entry sensitivity from the
-// in-catchup drain rate.
+// RC#2 progressive rate adjustment.
+// Fill-level (fill_pct = queue_depth * 100 / high_depth) drives two symmetric
+// three-tier progressions — one that speeds up rendering when the queue is
+// filling, one that slows it when the queue is draining.
+//
+//  Speedup tiers (queue filling — buffer above neutral band):
+//    fill_pct ≥ 75 % → T1: 40 % faster    (aggressive drain)
+//    fill_pct ≥ 65 % → T2: 20 % faster    (moderate drain)
+//    fill_pct ≥ 55 % → T3: 10 % faster    (mild drain)
+//  Slowdown tiers (queue draining — buffer below neutral band):
+//    fill_pct ≤ 45 % → T3: 10 % slower    (mild fill)
+//    fill_pct ≤ 35 % → T2: 20 % slower    (moderate fill)
+//    fill_pct ≤ 25 % → T1: 40 % slower    (aggressive fill)
+//  50 % fill is the neutral (SOURCE) band — no adjustment.
+#define RENDER_RATE_SPEEDUP_PCT_T3  55   /* ≥ 55 %: mild speedup  → 10 % faster */
+#define RENDER_RATE_SPEEDUP_PCT_T2  65   /* ≥ 65 %: mid  speedup  → 20 % faster */
+#define RENDER_RATE_SPEEDUP_PCT_T1  75   /* ≥ 75 %: aggr speedup  → 40 % faster */
+#define RENDER_RATE_SLOWDOWN_PCT_T3 45   /* ≤ 45 %: mild slowdown → 10 % slower */
+#define RENDER_RATE_SLOWDOWN_PCT_T2 35   /* ≤ 35 %: mid  slowdown → 20 % slower */
+#define RENDER_RATE_SLOWDOWN_PCT_T1 25   /* ≤ 25 %: aggr slowdown → 40 % slower */
+#define RENDER_RATE_ADJ_PCT_T1      40   /* T1 adjustment (aggressive) */
+#define RENDER_RATE_ADJ_PCT_T2      20   /* T2 adjustment (moderate)   */
+#define RENDER_RATE_ADJ_PCT_T3      10   /* T3 adjustment (mild)       */
+// RC#2 source-rate learning: while the render tier is not SOURCE/HOLD, nudge
+// locked_render_interval_ms toward the true encoder delivery rate once per
+// RENDER_SOURCE_TUNE_INTERVAL_MS.  The interval is adjusted directly by 1 ms
+// per firing — finer-grained than the previous fps-step approach, which could
+// only express integer fps values and caused a ±2 ms overshoot at ~24 fps.
+// Direction: CATCHUP → shorten interval (render faster); FILL → lengthen it.
+#define RENDER_SOURCE_TUNE_INTERVAL_MS  1000  /* ms between interval adjustments  */
+#define RENDER_SOURCE_TUNE_MS_STEP         1  /* interval nudge per firing (ms)   */
+// Entry overshoot constant is kept for HOLD-mode catchup_entry_ms computation;
+// it no longer governs CATCHUP mode entry (fill_pct does that now).
 #define RENDER_CATCHUP_ENTRY_OVERSHOOT_PERCENT 4
 // Maximum inter-frame interval during HOLD mode.  Intervals beyond this are
 // perceptually indistinguishable from a frozen display, so we cap the stretch
@@ -139,6 +175,9 @@ typedef struct {
     int64_t cadence_last_sample_at_ms;
     int cadence_lock_sample_count;
     int64_t cadence_lock_samples_ms[RENDER_CADENCE_LOCK_MAX_SAMPLES];
+    int64_t last_cadence_relock_at_ms;    // monotonic ms of last cadence re-lock (0 = never)
+    int     cadence_relock_prev_fill_pct; // fill% at last crossing check (-1 = crossings not yet active)
+    int64_t last_source_rate_tune_at_ms;  // monotonic ms of last source-rate tune (0 = never)
     int64_t render_drop_count;
     int last_logged_render_queue_depth;
     int64_t last_logged_render_drop_count;
@@ -1157,6 +1196,92 @@ static int64_t current_render_interval_ms(ffmpeg_session_t *session) {
             RENDER_MAX_INTERVAL_MS);
 }
 
+/*
+ * Compute the average inter-frame interval (ms) from the PTS span of frames
+ * currently sitting in the render queue.  Must be called under render_lock.
+ * Returns 0 if there are too few valid-PTS frames for a reliable estimate.
+ */
+#if HAVE_FFMPEG && HAVE_SWSCALE
+static int64_t compute_cadence_from_queue_locked(const ffmpeg_session_t *session,
+                                                  int queue_depth) {
+    if (session == NULL ||
+        session->render_queue == NULL ||
+        session->render_queue_capacity <= 0 ||
+        queue_depth < RENDER_CADENCE_RELOCK_MIN_QUEUE_FRAMES) {
+        return 0;
+    }
+
+    int64_t first_pts_us = 0, last_pts_us = 0;
+    int valid_count = 0;
+    for (int i = 0; i < queue_depth; i++) {
+        int idx = (session->render_queue_head + i) % session->render_queue_capacity;
+        int64_t pts = session->render_queue[idx].source_ts_us;
+        if (pts <= 0) continue;
+        if (valid_count == 0) first_pts_us = pts;
+        last_pts_us = pts;
+        valid_count++;
+    }
+
+    if (valid_count < RENDER_CADENCE_RELOCK_MIN_QUEUE_FRAMES) return 0;
+    if (last_pts_us <= first_pts_us) return 0;
+
+    int64_t span_us = last_pts_us - first_pts_us;
+    /* Round to nearest ms: (span_us + (intervals/2 * 1000)) / (intervals * 1000) */
+    int64_t intervals = valid_count - 1;
+    int64_t avg_interval_ms = (span_us + intervals * 500LL) / (intervals * 1000LL);
+
+    if (avg_interval_ms < RENDER_MIN_INTERVAL_MS ||
+        avg_interval_ms > RENDER_MAX_INTERVAL_MS) {
+        return 0;
+    }
+    return avg_interval_ms;
+}
+
+/*
+ * Attempt a cadence re-lock using the PTS span of frames in the render queue.
+ * Must be called under render_lock.  Returns true if the interval was updated.
+ * Enforces a minimum spacing of RENDER_CADENCE_RELOCK_MIN_INTERVAL_MS between
+ * re-locks so the queue level hovering near a threshold cannot thrash.
+ */
+static bool try_relock_cadence_from_queue_locked(ffmpeg_session_t *session,
+                                                  int queue_depth,
+                                                  int64_t now_ms,
+                                                  const char *reason) {
+    if (session == NULL || !session->cadence_locked) return false;
+
+    /* Enforce minimum spacing (skip check if never re-locked before). */
+    if (session->last_cadence_relock_at_ms > 0 &&
+        (now_ms - session->last_cadence_relock_at_ms) < RENDER_CADENCE_RELOCK_MIN_INTERVAL_MS) {
+        return false;
+    }
+
+    int64_t new_interval_ms = compute_cadence_from_queue_locked(session, queue_depth);
+    if (new_interval_ms <= 0) return false;
+
+    int64_t old_interval_ms = session->locked_render_interval_ms;
+    int old_fps = session->locked_render_fps;
+    int new_fps = (int) lround(1000.0 / (double) new_interval_ms);
+
+    session->locked_render_interval_ms = new_interval_ms;
+    session->source_render_interval_ms = new_interval_ms;
+    session->locked_render_fps         = new_fps;
+    session->last_cadence_relock_at_ms = now_ms;
+
+    ct_debug(TAG,
+             "render cadence relocked id=%lld designator=%s reason=%s "
+             "oldIntervalMs=%lld oldFps=%d newIntervalMs=%lld newFps=%d queueDepth=%d",
+             (long long) session->session_id,
+             session->designator,
+             reason != NULL ? reason : "unknown",
+             (long long) old_interval_ms,
+             old_fps,
+             (long long) new_interval_ms,
+             new_fps,
+             queue_depth);
+    return true;
+}
+#endif /* HAVE_FFMPEG && HAVE_SWSCALE */
+
 static void lock_render_cadence(ffmpeg_session_t *session,
                                 int64_t avg_sample_delta_ms,
                                 int sample_count,
@@ -1561,6 +1686,49 @@ static int64_t render_interval_with_buffer_control_ms(ffmpeg_session_t *session,
     int64_t catchup_entry_ms = high_ms + catchup_entry_headroom_ms(high_ms);
     int catchup_entry_depth = buffer_depth_for_ms(catchup_entry_ms, base_interval_ms);
     if (catchup_entry_depth <= high_depth) catchup_entry_depth = high_depth + 1;
+
+    /* fill_pct: queue depth as a percentage of high_depth.
+     * Computed once here; shared by the RC#1 cadence re-lock crossing checks
+     * below and the RC#2 progressive rate selection further down.
+     * Guarded against high_depth == 0 (should never occur in practice). */
+    int fill_pct = (high_depth > 0) ? (queue_depth * 100) / high_depth : 0;
+
+    /* Cadence re-lock on fill-level crossings.
+     * cadence_relock_prev_fill_pct is seeded to a valid value when the buffer
+     * first primes; while it remains -1 (pre-prime) these checks are skipped.
+     * We check for:
+     *   - queue crossing UP through FILL_HIGH_PCT (75 %): source is faster
+     *     than the locked cadence; re-lock to the actual inter-frame PTS rate.
+     *   - queue crossing DOWN through FILL_LOW_PCT (25 %): source is slower
+     *     (or render ran ahead); re-lock to prevent render from over-correcting.
+     */
+#if HAVE_FFMPEG && HAVE_SWSCALE
+    if (session->cadence_relock_prev_fill_pct >= 0 && high_depth > 0) {
+        /* fill_pct is declared above; reference it here for the crossing check. */
+        int prev_fill_pct = session->cadence_relock_prev_fill_pct;
+        session->cadence_relock_prev_fill_pct = fill_pct;
+
+        bool crossed_high = (prev_fill_pct <  RENDER_CADENCE_RELOCK_FILL_HIGH_PCT &&
+                              fill_pct      >= RENDER_CADENCE_RELOCK_FILL_HIGH_PCT);
+        bool crossed_low  = (prev_fill_pct >  RENDER_CADENCE_RELOCK_FILL_LOW_PCT  &&
+                              fill_pct      <= RENDER_CADENCE_RELOCK_FILL_LOW_PCT);
+        if (crossed_high || crossed_low) {
+            const char *relock_reason = crossed_high ? "fill-cross-75pct" : "drain-cross-25pct";
+            if (try_relock_cadence_from_queue_locked(session, queue_depth,
+                                                      now_ms, relock_reason)) {
+                /* base_interval_ms may have changed; refresh it so the rest of
+                 * this function uses the newly locked rate. */
+                base_interval_ms = current_render_interval_ms(session);
+                target_depth = buffer_depth_for_ms(target_ms, base_interval_ms);
+                high_depth   = buffer_depth_for_ms(high_ms,   base_interval_ms);
+                if (high_depth <= target_depth) high_depth = target_depth + 1;
+                catchup_entry_depth = buffer_depth_for_ms(catchup_entry_ms, base_interval_ms);
+                if (catchup_entry_depth <= high_depth) catchup_entry_depth = high_depth + 1;
+            }
+        }
+    }
+#endif /* HAVE_FFMPEG && HAVE_SWSCALE */
+
     bool reader_stalled = session->reader_stall_started_at_ms > 0;
     // Also treat the reader as stalled if av_read_frame has been blocking for
     // longer than ~3 frame intervals without delivering a packet.  This lets
@@ -1588,12 +1756,17 @@ static int64_t render_interval_with_buffer_control_ms(ffmpeg_session_t *session,
     if (reader_stalled) {
         session->render_catchup_active = false;
     }
-    if (session->render_catchup_active && queue_depth <= high_depth) {
+    /* RC#2: CATCHUP mode is entered / exited on fill_pct thresholds, not on the
+     * old depth-based catchup_entry_depth.  T3 (55 %) is the entry boundary;
+     * the exit boundary is the same value to avoid chattering at exactly 55 %.
+     * catchup_entry_depth is preserved because HOLD mode still uses it to size
+     * the hold-stretch target (it no longer controls CATCHUP entry). */
+    if (session->render_catchup_active && fill_pct < RENDER_RATE_SPEEDUP_PCT_T3) {
         session->render_catchup_active = false;
     }
     if (!reader_stalled &&
         !session->render_catchup_active &&
-        queue_depth >= catchup_entry_depth) {
+        fill_pct >= RENDER_RATE_SPEEDUP_PCT_T3) {
         session->render_catchup_active = true;
     }
 
@@ -1629,16 +1802,73 @@ static int64_t render_interval_with_buffer_control_ms(ffmpeg_session_t *session,
         interval_ms = stretched_interval_ms;
     } else if (session->render_catchup_active) {
         mode = RENDER_RATE_MODE_CATCHUP;
-        applied_speedup_percent = RENDER_CATCHUP_SPEEDUP_PERCENT;
+        /* RC#2: select speedup tier from fill_pct (T1 = most aggressive). */
+        applied_speedup_percent =
+                (fill_pct >= RENDER_RATE_SPEEDUP_PCT_T1) ? RENDER_RATE_ADJ_PCT_T1 :
+                (fill_pct >= RENDER_RATE_SPEEDUP_PCT_T2) ? RENDER_RATE_ADJ_PCT_T2 :
+                                                           RENDER_RATE_ADJ_PCT_T3;
         interval_ms =
                 (base_interval_ms * (100 - applied_speedup_percent) + 99) / 100;
-    } else if (queue_depth < target_depth) {
+    } else if (high_depth > 0 && fill_pct <= RENDER_RATE_SLOWDOWN_PCT_T3) {
         mode = RENDER_RATE_MODE_FILL;
-        applied_slowdown_percent = RENDER_FILL_SLOWDOWN_PERCENT;
+        /* RC#2: select slowdown tier from fill_pct (T1 = most aggressive). */
+        applied_slowdown_percent =
+                (fill_pct <= RENDER_RATE_SLOWDOWN_PCT_T1) ? RENDER_RATE_ADJ_PCT_T1 :
+                (fill_pct <= RENDER_RATE_SLOWDOWN_PCT_T2) ? RENDER_RATE_ADJ_PCT_T2 :
+                                                            RENDER_RATE_ADJ_PCT_T3;
         interval_ms =
                 (base_interval_ms * (100 + applied_slowdown_percent) + 99) / 100;
     }
     interval_ms = clamp_i64(interval_ms, RENDER_MIN_INTERVAL_MS, RENDER_MAX_INTERVAL_MS);
+
+    /* RC#2 source-rate learning.
+     * When the render is persistently in CATCHUP or FILL, it means the locked
+     * base interval doesn't match the true encoder delivery rate.  Once per
+     * RENDER_SOURCE_TUNE_INTERVAL_MS we nudge locked_render_interval_ms by
+     * RENDER_SOURCE_TUNE_MS_STEP directly so the base converges on the real
+     * source rate:
+     *   CATCHUP → source is faster → shorten interval by 1 ms
+     *   FILL    → source is slower → lengthen interval by 1 ms
+     * Working in ms rather than fps avoids the ±2 ms overshoot that arose
+     * when integer-fps steps straddled the true fractional equilibrium.
+     * SOURCE and HOLD carry no reliable signal so they are skipped; the timer
+     * keeps accumulating and fires on the next CATCHUP or FILL call. */
+#if HAVE_FFMPEG && HAVE_SWSCALE
+    if (session->cadence_locked &&
+        (mode == RENDER_RATE_MODE_CATCHUP || mode == RENDER_RATE_MODE_FILL) &&
+        (now_ms - session->last_source_rate_tune_at_ms) >= RENDER_SOURCE_TUNE_INTERVAL_MS) {
+
+        int64_t delta_ms        = (mode == RENDER_RATE_MODE_CATCHUP)
+                                  ? -RENDER_SOURCE_TUNE_MS_STEP
+                                  :  RENDER_SOURCE_TUNE_MS_STEP;
+        int64_t old_interval_ms = session->locked_render_interval_ms;
+        int64_t new_interval_ms = clamp_i64(old_interval_ms + delta_ms,
+                                            RENDER_MIN_INTERVAL_MS,
+                                            RENDER_MAX_INTERVAL_MS);
+
+        if (new_interval_ms != old_interval_ms) {
+            int old_fps = (int) lround(1000.0 / (double) old_interval_ms);
+            int new_fps = (int) lround(1000.0 / (double) new_interval_ms);
+            session->locked_render_interval_ms = new_interval_ms;
+            session->source_render_interval_ms = new_interval_ms;
+            session->locked_render_fps         = new_fps;
+            ct_debug(TAG,
+                     "render source rate tuned id=%lld designator=%s "
+                     "oldIntervalMs=%lld newIntervalMs=%lld deltaMs=%+lld "
+                     "oldFps=%d newFps=%d fillPct=%d mode=%s",
+                     (long long) session->session_id, session->designator,
+                     (long long) old_interval_ms,
+                     (long long) new_interval_ms,
+                     (long long) delta_ms,
+                     old_fps, new_fps,
+                     fill_pct,
+                     mode == RENDER_RATE_MODE_CATCHUP ? "catchup" : "fill");
+        }
+        /* Always reset the timer so we don't re-fire on the very next frame
+         * if the interval clamp prevented any actual change. */
+        session->last_source_rate_tune_at_ms = now_ms;
+    }
+#endif /* HAVE_FFMPEG && HAVE_SWSCALE */
 
     bool mode_changed = mode != session->render_rate_mode;
     bool periodic_log =
@@ -1932,6 +2162,15 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
                        : (startup_stall_prime_by_age ? "startup-stall-age" : "startup-stall-depth"))
                     : (prime_to_high ? "high-depth" : "target-depth")),
                  (long long) queue_age_ms);
+        /* Re-lock cadence from the PTS span of the primed buffer, then seed the
+         * fill-level tracker so crossing checks have a valid baseline from the
+         * first render decision onward. */
+        try_relock_cadence_from_queue_locked(session, session->render_queue_depth,
+                                             now_ms, "buffer-prime");
+        int relock_high_depth = buffer_depth_for_ms(high_ms, current_render_interval_ms(session));
+        if (relock_high_depth <= 0) relock_high_depth = 1;
+        session->cadence_relock_prev_fill_pct =
+                (session->render_queue_depth * 100) / relock_high_depth;
     }
     int64_t interval_ms = render_interval_with_buffer_control_ms(
             session,
@@ -2614,6 +2853,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         session->render_catchup_active = false;
         session->render_rate_mode = RENDER_RATE_MODE_SOURCE;
         session->last_render_rate_mode_log_at_ms = 0;
+        session->last_cadence_relock_at_ms = 0;
+        session->cadence_relock_prev_fill_pct = -1; /* -1: crossings inactive until first prime */
+        session->last_source_rate_tune_at_ms = 0;
         session->adaptive_buffer_target_ms = RENDER_BUFFER_STARTUP_TARGET_MS;
         session->adaptive_buffer_high_ms = RENDER_BUFFER_STARTUP_HIGH_MS;
         session->starvation_gap_ema_ms = 0;
@@ -2754,6 +2996,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                 session->cadence_lock_sample_count = 0;
                 memset(session->cadence_lock_samples_ms, 0, sizeof(session->cadence_lock_samples_ms));
                 session->last_decode_activity_at_ms = 0;
+                session->last_cadence_relock_at_ms = 0;
+                session->cadence_relock_prev_fill_pct = -1; /* re-seed after next prime */
+                session->last_source_rate_tune_at_ms = 0;
                 session->render_require_high_reprime = true; // need a fresh prime burst
             }
         }

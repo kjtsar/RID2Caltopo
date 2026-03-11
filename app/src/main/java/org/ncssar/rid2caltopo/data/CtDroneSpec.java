@@ -390,17 +390,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             }
         }
 
-
-        float[] dbResult = {Float.NaN};
         float lDistanceInFeet = 0.0F ;
-
         if (lastLat != 0.0F) {
+            float[] dbResult = {Float.NaN};
             Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
             lDistanceInFeet = dbResult[0] / FT_TO_METERS;
             if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet()) {
                 // let a waypoint update thru every now and then if hovering in place...
-                long minMsecInterval = 1000 * CaltopoClient.GetNewTrackDelayInSeconds() / 2;
-                if (nowWallMsec - mostRecentMsecTimestamp < minMsecInterval) return false;
+                if (System.currentTimeMillis() - mostRecentMsecTimestamp < 1000) return false;
             }
             distanceInFeet += lDistanceInFeet;
         }

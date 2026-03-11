@@ -120,6 +120,9 @@ class StreamsViewModel(
     )
     val coordinateDisplayFormat: CoordinateDisplayFormat
         get() = _coordinateDisplayFormat.value
+    private val _baseLayer = mutableStateOf(org.ncssar.rid2caltopo.video.BaseLayerOption.OpenStreetMap)
+    internal val baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption
+        get() = _baseLayer.value
 
     private var lastLiveRevisions: Map<String, Long> = emptyMap()
     private var lastLivePublisherConnIds: Map<String, String?> = emptyMap()
@@ -215,6 +218,11 @@ class StreamsViewModel(
         if (_coordinateDisplayFormat.value == format) return
         _coordinateDisplayFormat.value = format
         CaltopoClient.SetCoordinateDisplayFormat(format.storageValue)
+    }
+
+    internal fun setBaseLayer(baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption) {
+        if (_baseLayer.value == baseLayer) return
+        _baseLayer.value = baseLayer
     }
 
     fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {

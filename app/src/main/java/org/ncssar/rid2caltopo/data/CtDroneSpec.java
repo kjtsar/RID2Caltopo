@@ -49,6 +49,17 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
     }
 
+    public enum AltSourceEnum { BARO, GEODETIC, NONE }
+
+    // Minimum ridHeight (metres) required before a sample contributes to impliedTakeoffAltM.
+    // Filters out near-ground packets (ridHeight ≈ 0) where absAlt − ridHeight ≈ absAlt,
+    // which would seed the EMA with an inflated value and cause it to converge slowly.
+    private static final double MIN_RIDHEIGHT_FOR_ATO_SAMPLE_M = 2.0;  // ~6.5 ft
+    // EMA sealing: require this many qualifying samples AND a per-step delta below the
+    // threshold before the estimate is considered stable enough to lock in.
+    private static final int    IMPLIED_TAKEOFF_STABLE_SAMPLES = 6;
+    private static final double IMPLIED_TAKEOFF_STABLE_DELTA_M = 0.4;  // ~1.3 ft
+
     public enum TransportTypeEnum {
         BT4,
         BT5,
@@ -100,6 +111,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public volatile transient double lastAlt;
     @Nullable
     private transient PositionTelemetry lastPositionTelemetry;
+
+    // Per-flight altitude tracking — transient, cleared on reset().
+    @Nullable private volatile transient Double impliedTakeoffAltM = null;
+    private transient int     impliedTakeoffSampleCount = 0;
+    private transient boolean impliedTakeoffSealed      = false;
+    private transient double lastRidHeightM = -1000.0;   // drone-reported ATO or AGL, -1000 if not valid
+    private transient boolean lastRidHeightIsAto = false; // true=ATO, false=AGL
+    @Nullable private transient AltSourceEnum lastAltSource = null; // detect mid-flight source switch
+
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
     private transient int nonCount;  // bad or duplicate waypoints.
@@ -136,6 +156,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastLat = 0.0F;
         lastLng = 0.0F;
         okToLog = true;
+        impliedTakeoffAltM        = null;
+        impliedTakeoffSampleCount = 0;
+        impliedTakeoffSealed      = false;
+        lastRidHeightM            = -1000.0;
+        lastRidHeightIsAto        = false;
+        lastAltSource             = null;
         transportCount = new int[TransportTypeEnum.values().length];
     }
 
@@ -161,7 +187,13 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         distanceInFeet = 0.0F;
         lastLat = 0.0F;
         lastLng = 0.0F;
-        lastPositionTelemetry = null;
+        lastPositionTelemetry     = null;
+        impliedTakeoffAltM        = null;
+        impliedTakeoffSampleCount = 0;
+        impliedTakeoffSealed      = false;
+        lastRidHeightM            = -1000.0;
+        lastRidHeightIsAto        = false;
+        lastAltSource             = null;
         okToLog = true;
         airborne = Boolean.FALSE;
         startMsecTimestamp = mostRecentMsecTimestamp = 0;
@@ -215,6 +247,91 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public void setLastPositionTelemetry(@Nullable PositionTelemetry telemetry) {
         lastPositionTelemetry = telemetry;
     }
+    /**
+     * Called by OpenDroneIdDataManager once per accepted Location/Vector message.
+     * Maintains per-drone altitude context across a sequence of RID broadcasts:
+     *   - Logs any mid-flight baro↔geodetic source switches.
+     *   - Tracks the drone's own reported height (ATO or AGL).
+     *   - Accumulates an implied takeoff baro altitude when the drone broadcasts
+     *     height-above-takeoff: impliedTakeoffAltM = absAlt − ridHeight(ATO).
+     *     This is correct whether the drone is on the ground or already airborne
+     *     when first observed, and is a stable value throughout the flight.
+     *
+     * @param absAltM    Selected absolute altitude in metres (−1000 if unavailable).
+     * @param source     Which RID field was used (BARO / GEODETIC / NONE).
+     * @param ridHeightM Drone-reported height in metres; −1000 if not broadcast/valid.
+     * @param isAtoType  true = height is above-takeoff, false = above-ground-level.
+     */
+    public void updateAltitudeContext(double absAltM, @NonNull AltSourceEnum source,
+                                      double ridHeightM, boolean isAtoType) {
+        // Log source switches (baro→geodetic or vice-versa) mid-flight.
+        if (lastAltSource != null
+                && lastAltSource != AltSourceEnum.NONE
+                && source != AltSourceEnum.NONE
+                && source != lastAltSource) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "updateAltitudeContext(%s): altitude source changed %s→%s",
+                    mappedId, lastAltSource, source));
+        }
+        lastAltSource = source;
+
+        // Track the drone's own reported relative height.
+        if (ridHeightM != -1000.0) {
+            lastRidHeightM  = ridHeightM;
+            lastRidHeightIsAto = isAtoType;
+        }
+
+        // Maintain implied takeoff baro altitude from ATO-typed height reports.
+        // absAlt − ridHeight(ATO) = baro altitude at the takeoff site — a constant
+        // throughout the flight regardless of the drone's current elevation.
+        //
+        // Gate: skip packets where ridHeight < 2 m (~6.5 ft).  When the drone has
+        // just lifted off, ridHeight ≈ 0 while absAlt already reflects the baro bias
+        // of the launch site, so the estimate absAlt − ridHeight ≈ absAlt is inflated
+        // and would force many EMA iterations to correct.  Waiting for ridHeight to
+        // reach a modest flight altitude gives an accurate first sample immediately.
+        if (absAltM != -1000.0 && ridHeightM != -1000.0 && isAtoType
+                && ridHeightM >= MIN_RIDHEIGHT_FOR_ATO_SAMPLE_M
+                && !impliedTakeoffSealed) {
+            double sample = absAltM - ridHeightM;
+            if (impliedTakeoffAltM == null) {
+                impliedTakeoffAltM = sample;
+                impliedTakeoffSampleCount = 1;
+            } else {
+                // EMA α = 0.25: converges in ~6 samples while still smoothing noise.
+                double newVal = impliedTakeoffAltM * 0.75 + sample * 0.25;
+                double delta  = Math.abs(newVal - impliedTakeoffAltM);
+                impliedTakeoffAltM = newVal;
+                impliedTakeoffSampleCount++;
+                if (impliedTakeoffSampleCount >= IMPLIED_TAKEOFF_STABLE_SAMPLES
+                        && delta < IMPLIED_TAKEOFF_STABLE_DELTA_M) {
+                    impliedTakeoffSealed = true;
+                    CTDebug(TAG, String.format(Locale.US,
+                            "updateAltitudeContext(%s): implied takeoff alt sealed at %.1fm (%.0fft) after %d samples",
+                            mappedId, impliedTakeoffAltM,
+                            impliedTakeoffAltM * 3.28084, impliedTakeoffSampleCount));
+                }
+            }
+        }
+    }
+
+    /** Baro altitude of the drone's takeoff point (metres), derived from
+     *  broadcast height-above-takeoff. Null until the first qualifying ATO height
+     *  (ridHeight ≥ 2 m) is received. Stable throughout the flight once established. */
+    @Nullable
+    public Double getImpliedTakeoffAltM() { return impliedTakeoffAltM; }
+
+    /** True once the EMA has accumulated enough stable samples that the implied
+     *  takeoff altitude is considered converged.  Once sealed, the EMA stops
+     *  updating and MapPane should stop re-seeding the ATO calibration. */
+    public boolean isImpliedTakeoffAltSealed() { return impliedTakeoffSealed; }
+
+    /** Drone-reported relative height in metres (−1000 if not valid/broadcast). */
+    public double getLastRidHeightM()    { return lastRidHeightM; }
+
+    /** True if the last valid ridHeight was above-takeoff; false if AGL. */
+    public boolean isLastRidHeightAto() { return lastRidHeightIsAto; }
+
     public double getDistanceInFeet() { return distanceInFeet;}
 
     public int getTotalCount() {

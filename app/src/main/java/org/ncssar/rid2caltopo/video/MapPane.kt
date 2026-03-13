@@ -267,9 +267,18 @@ internal data class DroneAglState(
     val stale: Boolean
 )
 
+
+internal enum class AtoSeedSource {
+    AUTO,        // RID-height EMA is still converging; calibration will keep updating
+    AUTO_SEALED, // EMA has converged; calibration is locked until user manually overrides
+    MANUAL,      // User pressed "Calibrate ATO at 50'"; never auto-update
+}
+
 internal data class DroneAltitudeCalibration(
-    val takeoffTrackAltitudeM: Double
+    val takeoffTrackAltitudeM: Double,
+    val seedSource: AtoSeedSource = AtoSeedSource.AUTO
 )
+
 
 internal data class DroneComplianceState(
     val aglM: Double?,
@@ -643,7 +652,8 @@ internal fun SplitMapPane(
         // ATO: purely altitude-based. takeoffTrackAltitudeM is fixed until next calibration.
         val calibratedTakeoffTrackAltM = target.altitudeM - (CALIBRATE_ATO_TARGET_FT * FT_TO_METERS)
         demCalibrationByDesignator[target.designator] = DroneAltitudeCalibration(
-            takeoffTrackAltitudeM = calibratedTakeoffTrackAltM
+            takeoffTrackAltitudeM = calibratedTakeoffTrackAltM,
+            seedSource = AtoSeedSource.MANUAL
         )
         // AGL correction factor F: the systematic error in the DEM at this location.
         // F = (droneAlt - 50ft) - demGround
@@ -1048,8 +1058,16 @@ internal fun SplitMapPane(
         demPendingByDesignator.clear()
         demLastAttemptAtByDesignator.clear()
         demKeyByDesignator.clear()
-        demCalibrationByDesignator.clear()
-        demAglCorrectionByDesignator.clear()
+        // Preserve MANUAL calibrations (and their AGL corrections) across map reconnects.
+        // The user explicitly set these; wiping them on reconnect would force a re-calibration
+        // and cause a discontinuity in the ATO/AGL display. AUTO/AUTO_SEALED entries are
+        // derived from live RID data and will be re-derived from the next incoming packets.
+        demCalibrationByDesignator.keys.retainAll { key ->
+            demCalibrationByDesignator[key]?.seedSource == AtoSeedSource.MANUAL
+        }
+        demAglCorrectionByDesignator.keys.retainAll { key ->
+            demCalibrationByDesignator.containsKey(key)
+        }
         telemetryHeadingByDesignator.clear()
         fallbackHeadingByDesignator.clear()
         fallbackHeadingAnchorByDesignator.clear()
@@ -1257,19 +1275,63 @@ internal fun SplitMapPane(
                 if (trackDeg != null && trackDeg.isFinite()) {
                     telemetryHeadingByDesignator[key] = normalizeDegrees(trackDeg)
                 }
-                // On the first position report for a new drone, seed an initial ATO calibration from
-                // its current altitude so ATO shows a value rather than '--'. The user can override
-                // this at any time via "Calibrate ATO at 50'".
-                if (!demCalibrationByDesignator.containsKey(key) && altitudeMeters.isFinite() && altitudeMeters != 0.0) {
-                    demCalibrationByDesignator[key] = DroneAltitudeCalibration(
-                        takeoffTrackAltitudeM = altitudeMeters
-                    )
-                    if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
-                        MAP_PANE_TAG,
-                        "Initial ATO seed for $key: " +
-                            "droneAlt=${"%.1f".format(altitudeMeters)}m (${"%.0f".format(altitudeMeters * METERS_TO_FEET)}ft)"
-                    )
+
+                // Seed or refine ATO calibration automatically.
+                // State machine:
+                //   null        → AUTO       first fix or first RID-height estimate
+                //   AUTO        → AUTO       EMA still converging (no log, no display change needed)
+                //   AUTO        → AUTO_SEALED EMA converged; lock calibration, log once
+                //   AUTO_SEALED → (skip)     locked until user manual-calibrates
+                //   MANUAL      → (skip)     user override, never touch
+                val existingCal = demCalibrationByDesignator[key]
+                val seedSource  = existingCal?.seedSource
+                if (seedSource != AtoSeedSource.AUTO_SEALED && seedSource != AtoSeedSource.MANUAL) {
+                    val droneSpec  = viewModel.droneStates[key]?.source
+                    val ridTakeoff = droneSpec?.getImpliedTakeoffAltM()
+                    val isSealed   = droneSpec?.isImpliedTakeoffAltSealed() ?: false
+                    when {
+                        ridTakeoff != null -> {
+                            // Drone broadcasts height-above-takeoff.
+                            // absAlt − ridHeight = baro altitude at takeoff, correct even if
+                            // the drone was already airborne when first observed.
+                            // Only write + log on meaningful transitions:
+                            //   • existingCal == null  → first application (was using nothing)
+                            //   • isSealed             → EMA has converged; apply final value and lock
+                            // Between those two events the EMA is still converging, so we update
+                            // the calibration silently on every packet to keep ATO tracking accurate
+                            // during the ascent.
+                            val newSource = if (isSealed) AtoSeedSource.AUTO_SEALED else AtoSeedSource.AUTO
+                            demCalibrationByDesignator[key] = DroneAltitudeCalibration(
+                                takeoffTrackAltitudeM = ridTakeoff,
+                                seedSource = newSource
+                            )
+                            if (CTDebugEnabled(MAP_PANE_TAG) && (existingCal == null || isSealed)) {
+                                val event = if (existingCal == null) "first" else "converged"
+                                CTDebug(
+                                    MAP_PANE_TAG,
+                                    "ATO auto-seed ($event RID height) for $key: " +
+                                        "takeoffAlt=${"%.1f".format(ridTakeoff)}m " +
+                                        "(${"%.0f".format(ridTakeoff * METERS_TO_FEET)}ft)"
+                                )
+                            }
+                        }
+                        existingCal == null && altitudeMeters.isFinite() && altitudeMeters != 0.0 -> {
+                            // Fallback: drone doesn't broadcast ATO height; use first fix.
+                            // Runs only once. Replaced the moment a valid ridTakeoff arrives.
+                            demCalibrationByDesignator[key] = DroneAltitudeCalibration(
+                                takeoffTrackAltitudeM = altitudeMeters,
+                                seedSource = AtoSeedSource.AUTO
+                            )
+                            if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
+                                MAP_PANE_TAG,
+                                "ATO auto-seed (first fix) for $key: " +
+                                    "alt=${"%.1f".format(altitudeMeters)}m " +
+                                    "(${"%.0f".format(altitudeMeters * METERS_TO_FEET)}ft)"
+                            )
+                        }
+                    }
                 }
+
                 if (CTDebugEnabled(ICON_LATENCY_TAG))  CTDebug(
                     ICON_LATENCY_TAG,
                     "track_ingest designator=$key wall=$nowWallMsec droneTs=$timestampMsec " +
@@ -1608,6 +1670,25 @@ internal fun SplitMapPane(
                                         stale = sample.stale
                                     )
                                     demKeyByDesignator[point.designator] = demKey
+                                    // Lazy AGL correction: if the user calibrated ("Calibrate ATO at 50'")
+                                    // before DEM data was available, the correction factor was skipped.
+                                    // Now that DEM has arrived, compute it from the stored takeoff altitude.
+                                    // correctionF = takeoffTrackAltM - demGround reproduces the same formula
+                                    // as calibrateDroneAto50 (where correctionF = (droneAlt - 50ft) - demGround
+                                    // and takeoffTrackAltM = droneAlt - 50ft).
+                                    val calEntry = demCalibrationByDesignator[point.designator]
+                                    if (calEntry?.seedSource == AtoSeedSource.MANUAL
+                                            && !demAglCorrectionByDesignator.containsKey(point.designator)) {
+                                        val correctionF = calEntry.takeoffTrackAltitudeM - sample.elevationMeters
+                                        demAglCorrectionByDesignator[point.designator] = correctionF
+                                        if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
+                                            MAP_PANE_TAG,
+                                            "AGL correction deferred for ${point.designator}: " +
+                                                "takeoffTrackAlt=${"%.1f".format(calEntry.takeoffTrackAltitudeM)}m " +
+                                                "demGround=${"%.1f".format(sample.elevationMeters)}m " +
+                                                "correctionF=${"%.1f".format(correctionF)}m"
+                                        )
+                                    }
                                 } else {
                                     val priorAgl = demAglByDesignator[point.designator]
                                     if (priorAgl != null) {

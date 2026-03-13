@@ -205,6 +205,19 @@ public class OpenDroneIdDataManager {
         double lat = location.getLatitude();
         double lng = location.getLongitude();
         double altitudeInMeters = getAltitudeInMeters(location);
+
+        // feed altitude context into droneSpec for cross-broadcast tracking.
+        CtDroneSpec.AltSourceEnum altSource =
+                isRidAltitudeValid(location.getAltitudePressure())  ? CtDroneSpec.AltSourceEnum.BARO
+                        : isRidAltitudeValid(location.getAltitudeGeodetic())  ? CtDroneSpec.AltSourceEnum.GEODETIC
+                        : CtDroneSpec.AltSourceEnum.NONE;
+        double ridHeightM = location.getHeight();
+        boolean isAtoType = location.getHeightType() == LocationData.heightTypeEnum.Takeoff;
+        droneSpec.updateAltitudeContext(
+                altitudeInMeters, altSource,
+                isRidAltitudeValid(ridHeightM) ? ridHeightM : -1000.0,
+                isAtoType);
+
         LocationData.StatusEnum status = location.getStatus();
         Boolean airborne = (status == LocationData.StatusEnum.Airborne || status == LocationData.StatusEnum.Ground)
                 ? status == LocationData.StatusEnum.Airborne

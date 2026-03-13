@@ -1,6 +1,7 @@
 import android.app.Application
 import android.graphics.Bitmap
 import android.view.Surface
+import org.osmdroid.api.IGeoPoint
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -48,6 +49,12 @@ data class PendingClue(
     val title: String,
     val description: String,
     val streamTelemetrySummary: String? = null
+)
+
+data class MapViewportState(
+    val latitude: Double,
+    val longitude: Double,
+    val zoom: Double
 )
 
 @Stable
@@ -123,6 +130,7 @@ class StreamsViewModel(
     private val _baseLayer = mutableStateOf(org.ncssar.rid2caltopo.video.BaseLayerOption.OpenStreetMap)
     internal val baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption
         get() = _baseLayer.value
+    private var persistedMapViewportState: MapViewportState? = null
 
     private var lastLiveRevisions: Map<String, Long> = emptyMap()
     private var lastLivePublisherConnIds: Map<String, String?> = emptyMap()
@@ -190,6 +198,7 @@ class StreamsViewModel(
         val oldName = _mapName.value;
         if (status == CaltopoMap.MapStatusListener.mapStatus.up) {
             if (!oldName.equals(newName)) {
+                persistedMapViewportState = null
                 CTDebug(tag, "Connected to ${newName}")
                 _mapName.value = newName
             }
@@ -223,6 +232,19 @@ class StreamsViewModel(
     internal fun setBaseLayer(baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption) {
         if (_baseLayer.value == baseLayer) return
         _baseLayer.value = baseLayer
+    }
+
+    fun mapViewportState(): MapViewportState? = persistedMapViewportState
+
+    fun persistMapViewportState(center: IGeoPoint?, zoom: Double) {
+        val lat = center?.latitude ?: return
+        val lng = center.longitude
+        if (!lat.isFinite() || !lng.isFinite() || !zoom.isFinite()) return
+        persistedMapViewportState = MapViewportState(
+            latitude = lat,
+            longitude = lng,
+            zoom = zoom
+        )
     }
 
     fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {

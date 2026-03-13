@@ -99,7 +99,10 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapListener
 import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
@@ -396,6 +399,7 @@ internal fun SplitMapPane(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val uiScope = rememberCoroutineScope()
+    val restoredViewport = viewModel.mapViewportState()
     val baseLayer = viewModel.baseLayer
     var settingsMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
@@ -426,7 +430,7 @@ internal fun SplitMapPane(
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
     var lastRenderStats by remember { mutableStateOf("") }
     var lastAlignmentStats by remember { mutableStateOf("") }
-    var initialViewportApplied by remember { mutableStateOf(false) }
+    var initialViewportApplied by remember(restoredViewport) { mutableStateOf(restoredViewport != null) }
     var initialViewportArtifactCount by remember { mutableStateOf(-1) }
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
     val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
@@ -1034,6 +1038,7 @@ internal fun SplitMapPane(
     }
 
     LaunchedEffect(mapName) {
+        val persistedViewport = viewModel.mapViewportState()
         hydrateArtifactsFromCaltopoSnapshot("mapName=$mapName")
         localTrackPointsByMappedId.clear()
         lastRenderStats = ""
@@ -1052,7 +1057,7 @@ internal fun SplitMapPane(
         complianceByDesignator.clear()
         lastAlertSeverity = AlertSeverity.None
         lastAlertToneAtMs = 0L
-        initialViewportApplied = false
+        initialViewportApplied = persistedViewport != null
         initialViewportArtifactCount = -1
     }
 
@@ -1299,7 +1304,26 @@ internal fun SplitMapPane(
                     setUseDataConnection(true)
                     tileMapProvider.setUseDataConnection(true)
                     setMaxZoomLevel(OSM_MAX_ZOOM)
-                    controller.setZoom(14.0)
+                    val initialViewport = restoredViewport
+                    if (initialViewport != null) {
+                        controller.setCenter(GeoPoint(initialViewport.latitude, initialViewport.longitude))
+                        controller.setZoom(initialViewport.zoom)
+                    } else {
+                        controller.setZoom(14.0)
+                    }
+                    addMapListener(
+                        object : MapListener {
+                            override fun onScroll(event: ScrollEvent?): Boolean {
+                                viewModel.persistMapViewportState(mapCenter, zoomLevelDouble)
+                                return false
+                            }
+
+                            override fun onZoom(event: ZoomEvent?): Boolean {
+                                viewModel.persistMapViewportState(mapCenter, zoomLevelDouble)
+                                return false
+                            }
+                        }
+                    )
                 }
             },
             update = { mapView ->
@@ -1782,7 +1806,11 @@ internal fun SplitMapPane(
 
                 val shouldApplyInitialViewport =
                     !initialViewportApplied ||
-                        (initialViewportArtifactCount == 0 && artifactOverlayState.totalFeatures > 0)
+                        (
+                            initialViewportArtifactCount == 0 &&
+                                artifactOverlayState.totalFeatures > 0 &&
+                                viewModel.mapViewportState() == null
+                            )
                 if (shouldApplyInitialViewport) {
                     val myLocation = CaltopoMap.MyLocation
                     val artifactPoints = allArtifactGeoPoints(artifactOverlayState)
@@ -1794,6 +1822,7 @@ internal fun SplitMapPane(
                         viewportPoints.size >= 2 -> {
                             val bounds = boundingBoxFromPoints(viewportPoints)
                             mapView.zoomToBoundingBox(bounds, true, 96)
+                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
                             if (MAP_PANE_VERBOSE_LOGS) {
                                 CTDebug(
                                     MAP_PANE_TAG,
@@ -1805,6 +1834,7 @@ internal fun SplitMapPane(
                         myLocation != null -> {
                             mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
                             mapView.controller.setZoom(15.0)
+                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
                             if (MAP_PANE_VERBOSE_LOGS) {
                                 CTDebug(MAP_PANE_TAG, "Initial viewport: centered on MyLocation.")
                             }
@@ -1813,6 +1843,7 @@ internal fun SplitMapPane(
                         focusPoint != null -> {
                             mapView.controller.setCenter(GeoPoint(focusPoint.lat, focusPoint.lng))
                             mapView.controller.setZoom(14.0)
+                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
                             if (MAP_PANE_VERBOSE_LOGS) {
                                 CTDebug(MAP_PANE_TAG, "Initial viewport: fallback to focused drone point.")
                             }

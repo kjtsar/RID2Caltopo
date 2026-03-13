@@ -23,6 +23,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.net.wifi.ScanResult;
+import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.net.wifi.aware.AttachCallback;
 import android.net.wifi.aware.DiscoverySessionCallback;
@@ -87,6 +88,12 @@ public class WiFiScanner {
             scanKickHandler.postDelayed(this, WIFI_SCAN_KICK_INTERVAL_MS);
         }
     };
+
+    public static String WiFiSSID(Context context) {
+        WifiManager wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        WifiInfo info = wifiManager.getConnectionInfo();
+        return info.getSSID();
+    }
 
     public WiFiScanner(Context context, OpenDroneIdDataManager dataManager) {
         this.dataManager = dataManager;

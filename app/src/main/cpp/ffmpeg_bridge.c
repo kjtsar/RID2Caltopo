@@ -51,79 +51,32 @@
 #define RENDER_QUEUE_WARN_INTERVAL_MS 2000
 #define RENDER_QUEUE_WARN_DEPTH 100
 #define RENDER_LAG_LOG_INTERVAL_MS 1000
-#define RENDER_CADENCE_LOCK_MIN_SAMPLES 6
-#define RENDER_CADENCE_LOCK_MAX_SAMPLES 18
-#define RENDER_CADENCE_LOCK_STABILITY_PERCENT 25
-#define RENDER_CADENCE_LOCK_BURST_GAP_MS 200
-#define RENDER_CADENCE_LOCK_MIN_SAMPLE_MS 10
-#define RENDER_CADENCE_LOCK_MAX_SAMPLE_MS 80
-// Cadence re-lock: refine the locked interval from the queue's PTS span at
-// three checkpoints — initial buffer prime, 75% fill (queue accumulating),
-// and 25% fill (queue draining).  A minimum spacing prevents thrashing when
-// the queue level hovers near a threshold.
-#define RENDER_CADENCE_RELOCK_MIN_INTERVAL_MS  3000
-#define RENDER_CADENCE_RELOCK_MIN_QUEUE_FRAMES 8
-#define RENDER_CADENCE_RELOCK_FILL_HIGH_PCT    75
-#define RENDER_CADENCE_RELOCK_FILL_LOW_PCT     25
-#define RENDER_BUFFER_TARGET_MS 250
-#define RENDER_BUFFER_HIGH_WATERMARK_MS 500
-#define RENDER_BUFFER_HIGH_WATERMARK_MAX_MS 4000
-#define RENDER_BUFFER_STARTUP_HIGH_MS 2000
-#define RENDER_BUFFER_STARTUP_TARGET_MS (RENDER_BUFFER_STARTUP_HIGH_MS / 2)
-#define RENDER_STARTUP_STALL_MIN_PRIME_MS 1000
-#define RENDER_STARTUP_STALL_PRIME_PERCENT 90
-#define RENDER_STARTUP_MIN_PRIME_FRAMES 8
-#define RENDER_HOLD_SLOWDOWN_PERCENT 6
-// RC#2 progressive rate adjustment.
-// Fill-level (fill_pct = queue_depth * 100 / high_depth) drives two symmetric
-// three-tier progressions — one that speeds up rendering when the queue is
-// filling, one that slows it when the queue is draining.
-//
-//  Speedup tiers (queue filling — buffer above neutral band):
-//    fill_pct ≥ 75 % → T1: 40 % faster    (aggressive drain)
-//    fill_pct ≥ 65 % → T2: 20 % faster    (moderate drain)
-//    fill_pct ≥ 55 % → T3: 10 % faster    (mild drain)
-//  Slowdown tiers (queue draining — buffer below neutral band):
-//    fill_pct ≤ 45 % → T3: 10 % slower    (mild fill)
-//    fill_pct ≤ 35 % → T2: 20 % slower    (moderate fill)
-//    fill_pct ≤ 25 % → T1: 40 % slower    (aggressive fill)
-//  50 % fill is the neutral (SOURCE) band — no adjustment.
-#define RENDER_RATE_SPEEDUP_PCT_T3  55   /* ≥ 55 %: mild speedup  → 10 % faster */
-#define RENDER_RATE_SPEEDUP_PCT_T2  65   /* ≥ 65 %: mid  speedup  → 20 % faster */
-#define RENDER_RATE_SPEEDUP_PCT_T1  75   /* ≥ 75 %: aggr speedup  → 40 % faster */
-#define RENDER_RATE_SLOWDOWN_PCT_T3 45   /* ≤ 45 %: mild slowdown → 10 % slower */
-#define RENDER_RATE_SLOWDOWN_PCT_T2 35   /* ≤ 35 %: mid  slowdown → 20 % slower */
-#define RENDER_RATE_SLOWDOWN_PCT_T1 25   /* ≤ 25 %: aggr slowdown → 40 % slower */
-#define RENDER_RATE_ADJ_PCT_T1      40   /* T1 adjustment (aggressive) */
-#define RENDER_RATE_ADJ_PCT_T2      20   /* T2 adjustment (moderate)   */
-#define RENDER_RATE_ADJ_PCT_T3      10   /* T3 adjustment (mild)       */
-// RC#2 source-rate learning: while the render tier is not SOURCE/HOLD, nudge
-// locked_render_interval_ms toward the true encoder delivery rate once per
-// RENDER_SOURCE_TUNE_INTERVAL_MS.  The interval is adjusted directly by 1 ms
-// per firing — finer-grained than the previous fps-step approach, which could
-// only express integer fps values and caused a ±2 ms overshoot at ~24 fps.
-// Direction: CATCHUP → shorten interval (render faster); FILL → lengthen it.
-#define RENDER_SOURCE_TUNE_INTERVAL_MS  1000  /* ms between interval adjustments  */
-#define RENDER_SOURCE_TUNE_MS_STEP         1  /* interval nudge per firing (ms)   */
-// Entry overshoot constant is kept for HOLD-mode catchup_entry_ms computation;
-// it no longer governs CATCHUP mode entry (fill_pct does that now).
-#define RENDER_CATCHUP_ENTRY_OVERSHOOT_PERCENT 4
-// Maximum inter-frame interval during HOLD mode.  Intervals beyond this are
-// perceptually indistinguishable from a frozen display, so we cap the stretch
-// and accept a slightly earlier queue drain on very long stalls.
-#define RENDER_HOLD_MAX_INTERVAL_MS 100
-#define RENDER_RATE_MODE_LOG_INTERVAL_MS 2000
-#define RENDER_STARVATION_TUNE_MIN_GAP_MS 500
-// Gaps beyond this are protocol-level idle periods (e.g. DJI "LiveStream error" pauses),
-// not bufferable starvation events.  Capping the tune input keeps the adaptive buffer
-// sized for real WiFi-level jitter (~2-3 s) rather than expanding to cover 15-second
-// controller idle cycles that can never practically be buffered.
-#define RENDER_STARVATION_TUNE_MAX_GAP_MS 3000
-#define RENDER_BUFFER_DECAY_GRACE_MS 3000
-#define RENDER_BUFFER_DECAY_INTERVAL_MS 1000
-#define RENDER_BUFFER_DECAY_STEP_MS 1000
-#define RENDER_BUFFER_DECAY_LOG_INTERVAL_MS 5000
-#define RENDER_BUFFER_DECAY_ACTIVITY_WINDOW_MS 1000
+#define RENDER_STARTUP_OBSERVE_MS 2000
+#define RENDER_SAMPLE_WINDOW_CAPACITY 16
+#define RENDER_SOURCE_INTERVAL_DEFAULT_MS 33
+#define RENDER_STALL_ESTIMATE_FLOOR_MS 300
+#define RENDER_TARGET_LATENCY_MIN_MS 700
+#define RENDER_TARGET_LATENCY_MAX_MS 1800
+#define RENDER_PROCESSING_MARGIN_MS 100
+#define RENDER_CADENCE_SAMPLE_MIN_MS 10
+#define RENDER_CADENCE_SAMPLE_MAX_MS 120
+#define RENDER_GAP_FLOOR_MS 150
+#define RENDER_INTERVAL_ADJUST_MAX_PCT 40
+#define RENDER_INTERVAL_ADJUST_BASE_PCT 12
+#define RENDER_INTERVAL_SMOOTHING_PCT 15
+#define RENDER_SOURCE_ESTIMATE_EMA_PCT 6
+#define RENDER_SOURCE_ESTIMATE_UPDATE_INTERVAL_MS 1000
+#define RENDER_SOURCE_ESTIMATE_MIN_PCT 65
+#define RENDER_SOURCE_ESTIMATE_MAX_PCT 150
+#define RENDER_STALL_RISE_EMA_PCT 30
+#define RENDER_STALL_DECAY_EMA_PCT 4
+#define RENDER_STALL_DECAY_GRACE_MS 5000
+#define RENDER_STALL_DECAY_INTERVAL_MS 1000
+#define RENDER_PROVEN_GAP_TRIGGER_MS 900
+#define RENDER_PROVEN_GAP_DECAY_EMA_PCT 2
+#define RENDER_PROVEN_GAP_DECAY_GRACE_MS 30000
+#define RENDER_PROVEN_GAP_DECAY_INTERVAL_MS 5000
+#define RENDER_CONTROL_LOG_INTERVAL_MS 1000
 #define RENDER_NO_SURFACE_LOG_INTERVAL_MS 2000
 #define IO_STARTUP_INTERRUPT_MS 4000
 #define ANOMALY_MAX_BOXES_PER_FRAME 3
@@ -166,37 +119,36 @@ typedef struct {
     int64_t anomaly_frame_counter;
     int64_t last_render_post_at_ms;
     int64_t last_no_surface_log_at_ms;
-    bool cadence_locked;
-    int locked_render_fps;
-    int64_t locked_render_interval_ms;
     int64_t source_render_interval_ms;
+    int64_t render_interval_smoothed_ms;
     int64_t next_render_due_ms;
-    int64_t cadence_last_source_ts_us;
-    int64_t cadence_last_sample_at_ms;
-    int cadence_lock_sample_count;
-    int64_t cadence_lock_samples_ms[RENDER_CADENCE_LOCK_MAX_SAMPLES];
-    int64_t last_cadence_relock_at_ms;    // monotonic ms of last cadence re-lock (0 = never)
-    int     cadence_relock_prev_fill_pct; // fill% at last crossing check (-1 = crossings not yet active)
-    int64_t last_source_rate_tune_at_ms;  // monotonic ms of last source-rate tune (0 = never)
     int64_t render_drop_count;
     int last_logged_render_queue_depth;
     int64_t last_logged_render_drop_count;
     int64_t last_render_queue_log_at_ms;
     int64_t last_render_queue_warn_at_ms;
     int64_t last_render_lag_log_at_ms;
-    bool render_buffer_primed;
-    bool render_require_high_reprime;
-    bool render_catchup_active;
-    int render_rate_mode;
-    int64_t last_render_rate_mode_log_at_ms;
-    int64_t adaptive_buffer_target_ms;
-    int64_t adaptive_buffer_high_ms;
-    int64_t starvation_gap_ema_ms;
-    int starvation_gap_sample_count;
-    int64_t last_starvation_tune_at_ms;
-    int64_t last_decode_activity_at_ms;
-    int64_t last_render_buffer_decay_at_ms;
-    int64_t last_render_buffer_tune_log_at_ms;
+    int64_t last_render_control_log_at_ms;
+    bool startup_observation_active;
+    int64_t startup_started_at_ms;
+    int source_interval_confidence;
+    int64_t stall_estimate_ms;
+    int64_t target_latency_ms;
+    bool stall_active;
+    int64_t last_decode_at_ms;
+    int64_t last_valid_pts_us;
+    int64_t last_source_estimate_update_at_ms;
+    int64_t last_source_pts_relock_at_ms;
+    int64_t last_gap_at_ms;
+    int64_t last_stall_decay_at_ms;
+    int64_t proven_gap_ms;
+    int64_t last_proven_gap_decay_at_ms;
+    int64_t cadence_samples_ms[RENDER_SAMPLE_WINDOW_CAPACITY];
+    int cadence_sample_count;
+    int cadence_sample_head;
+    int64_t gap_samples_ms[RENDER_SAMPLE_WINDOW_CAPACITY];
+    int gap_sample_count;
+    int gap_sample_head;
     int64_t reader_stall_started_at_ms;
     int64_t last_reader_stall_log_at_ms;
     int64_t reader_stall_timeout_events;
@@ -1178,9 +1130,9 @@ static int64_t clamp_i64(int64_t value, int64_t min_value, int64_t max_value) {
 
 static int64_t current_render_interval_ms(ffmpeg_session_t *session) {
     if (session == NULL) return 0;
-    if (session->locked_render_interval_ms > 0) {
+    if (session->render_interval_smoothed_ms > 0) {
         return clamp_i64(
-                session->locked_render_interval_ms,
+                session->render_interval_smoothed_ms,
                 RENDER_MIN_INTERVAL_MS,
                 RENDER_MAX_INTERVAL_MS);
     }
@@ -1196,203 +1148,572 @@ static int64_t current_render_interval_ms(ffmpeg_session_t *session) {
             RENDER_MAX_INTERVAL_MS);
 }
 
-/*
- * Compute the average inter-frame interval (ms) from the PTS span of frames
- * currently sitting in the render queue.  Must be called under render_lock.
- * Returns 0 if there are too few valid-PTS frames for a reliable estimate.
- */
-#if HAVE_FFMPEG && HAVE_SWSCALE
-static int64_t compute_cadence_from_queue_locked(const ffmpeg_session_t *session,
-                                                  int queue_depth) {
+static void push_sample_i64(int64_t *buf,
+                            int *head,
+                            int *count,
+                            int capacity,
+                            int64_t value) {
+    if (buf == NULL || head == NULL || count == NULL || capacity <= 0) return;
+    buf[*head] = value;
+    *head = (*head + 1) % capacity;
+    if (*count < capacity) {
+        *count += 1;
+    }
+}
+
+static int cmp_i64_asc(const void *a, const void *b) {
+    int64_t av = *(const int64_t *) a;
+    int64_t bv = *(const int64_t *) b;
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+    return 0;
+}
+
+static int64_t median_i64_copy(const int64_t *buf, int count) {
+    if (buf == NULL || count <= 0) return 0;
+    int64_t tmp[RENDER_SAMPLE_WINDOW_CAPACITY];
+    if (count > RENDER_SAMPLE_WINDOW_CAPACITY) {
+        count = RENDER_SAMPLE_WINDOW_CAPACITY;
+    }
+    memcpy(tmp, buf, (size_t) count * sizeof(int64_t));
+    qsort(tmp, (size_t) count, sizeof(int64_t), cmp_i64_asc);
+    if ((count & 1) != 0) {
+        return tmp[count / 2];
+    }
+    return (tmp[(count / 2) - 1] + tmp[count / 2] + 1) / 2;
+}
+
+static bool decode_delta_is_gap(int64_t delta_ms, int64_t source_interval_ms) {
+    if (delta_ms < RENDER_GAP_FLOOR_MS) return false;
+    int64_t reference_ms = source_interval_ms > 0 ? source_interval_ms : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    int64_t threshold_ms = (reference_ms * 7 + 3) / 4;
+    if (threshold_ms < RENDER_GAP_FLOOR_MS) threshold_ms = RENDER_GAP_FLOOR_MS;
+    return delta_ms >= threshold_ms;
+}
+
+static bool decode_delta_is_plausible_cadence(int64_t delta_ms, int64_t source_interval_ms) {
+    if (delta_ms < RENDER_CADENCE_SAMPLE_MIN_MS ||
+        delta_ms > RENDER_CADENCE_SAMPLE_MAX_MS) {
+        return false;
+    }
+    int64_t reference_ms = source_interval_ms > 0 ? source_interval_ms : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    int64_t min_ms = (reference_ms * RENDER_SOURCE_ESTIMATE_MIN_PCT + 99) / 100;
+    int64_t max_ms = (reference_ms * RENDER_SOURCE_ESTIMATE_MAX_PCT + 99) / 100;
+    if (min_ms < RENDER_CADENCE_SAMPLE_MIN_MS) min_ms = RENDER_CADENCE_SAMPLE_MIN_MS;
+    if (max_ms > RENDER_CADENCE_SAMPLE_MAX_MS) max_ms = RENDER_CADENCE_SAMPLE_MAX_MS;
+    return delta_ms >= min_ms && delta_ms <= max_ms;
+}
+
+static int64_t buffered_span_ms_locked(const ffmpeg_session_t *session) {
     if (session == NULL ||
         session->render_queue == NULL ||
         session->render_queue_capacity <= 0 ||
-        queue_depth < RENDER_CADENCE_RELOCK_MIN_QUEUE_FRAMES) {
+        session->render_queue_depth <= 1) {
         return 0;
     }
 
-    int64_t first_pts_us = 0, last_pts_us = 0;
-    int valid_count = 0;
-    for (int i = 0; i < queue_depth; i++) {
+    int64_t first_pts_us = 0;
+    int64_t last_pts_us = 0;
+    bool found = false;
+    for (int i = 0; i < session->render_queue_depth; i++) {
         int idx = (session->render_queue_head + i) % session->render_queue_capacity;
-        int64_t pts = session->render_queue[idx].source_ts_us;
-        if (pts <= 0) continue;
-        if (valid_count == 0) first_pts_us = pts;
-        last_pts_us = pts;
-        valid_count++;
+        int64_t pts_us = session->render_queue[idx].source_ts_us;
+        if (pts_us <= 0) continue;
+        if (!found) {
+            first_pts_us = pts_us;
+            last_pts_us = pts_us;
+            found = true;
+            continue;
+        }
+        if (pts_us < last_pts_us) {
+            return 0;
+        }
+        last_pts_us = pts_us;
     }
+    if (!found || last_pts_us <= first_pts_us) return 0;
+    return (last_pts_us - first_pts_us) / 1000;
+}
 
-    if (valid_count < RENDER_CADENCE_RELOCK_MIN_QUEUE_FRAMES) return 0;
-    if (last_pts_us <= first_pts_us) return 0;
-
-    int64_t span_us = last_pts_us - first_pts_us;
-    /* Round to nearest ms: (span_us + (intervals/2 * 1000)) / (intervals * 1000) */
-    int64_t intervals = valid_count - 1;
-    int64_t avg_interval_ms = (span_us + intervals * 500LL) / (intervals * 1000LL);
-
-    if (avg_interval_ms < RENDER_MIN_INTERVAL_MS ||
-        avg_interval_ms > RENDER_MAX_INTERVAL_MS) {
+static int64_t queue_pts_interval_ms_locked(const ffmpeg_session_t *session,
+                                            int max_samples) {
+    if (session == NULL ||
+        session->render_queue == NULL ||
+        session->render_queue_capacity <= 0 ||
+        session->render_queue_depth <= 1) {
         return 0;
     }
-    return avg_interval_ms;
-}
 
-/*
- * Attempt a cadence re-lock using the PTS span of frames in the render queue.
- * Must be called under render_lock.  Returns true if the interval was updated.
- * Enforces a minimum spacing of RENDER_CADENCE_RELOCK_MIN_INTERVAL_MS between
- * re-locks so the queue level hovering near a threshold cannot thrash.
- */
-static bool try_relock_cadence_from_queue_locked(ffmpeg_session_t *session,
-                                                  int queue_depth,
-                                                  int64_t now_ms,
-                                                  const char *reason) {
-    if (session == NULL || !session->cadence_locked) return false;
-
-    /* Enforce minimum spacing (skip check if never re-locked before). */
-    if (session->last_cadence_relock_at_ms > 0 &&
-        (now_ms - session->last_cadence_relock_at_ms) < RENDER_CADENCE_RELOCK_MIN_INTERVAL_MS) {
-        return false;
+    if (max_samples < 2 || max_samples > session->render_queue_depth) {
+        max_samples = session->render_queue_depth;
     }
 
-    int64_t new_interval_ms = compute_cadence_from_queue_locked(session, queue_depth);
-    if (new_interval_ms <= 0) return false;
-
-    int64_t old_interval_ms = session->locked_render_interval_ms;
-    int old_fps = session->locked_render_fps;
-    int new_fps = (int) lround(1000.0 / (double) new_interval_ms);
-
-    session->locked_render_interval_ms = new_interval_ms;
-    session->source_render_interval_ms = new_interval_ms;
-    session->locked_render_fps         = new_fps;
-    session->last_cadence_relock_at_ms = now_ms;
-
-    ct_debug(TAG,
-             "render cadence relocked id=%lld designator=%s reason=%s "
-             "oldIntervalMs=%lld oldFps=%d newIntervalMs=%lld newFps=%d queueDepth=%d",
-             (long long) session->session_id,
-             session->designator,
-             reason != NULL ? reason : "unknown",
-             (long long) old_interval_ms,
-             old_fps,
-             (long long) new_interval_ms,
-             new_fps,
-             queue_depth);
-    return true;
+    int start_offset = session->render_queue_depth - max_samples;
+    int64_t first_pts_us = 0;
+    int64_t last_pts_us = 0;
+    int valid_count = 0;
+    for (int i = start_offset; i < session->render_queue_depth; i++) {
+        int idx = (session->render_queue_head + i) % session->render_queue_capacity;
+        int64_t pts_us = session->render_queue[idx].source_ts_us;
+        if (pts_us <= 0) continue;
+        if (valid_count == 0) {
+            first_pts_us = pts_us;
+            last_pts_us = pts_us;
+            valid_count = 1;
+            continue;
+        }
+        if (pts_us < last_pts_us) {
+            return 0;
+        }
+        last_pts_us = pts_us;
+        valid_count += 1;
+    }
+    if (valid_count < 2 || last_pts_us <= first_pts_us) {
+        return 0;
+    }
+    int64_t span_us = last_pts_us - first_pts_us;
+    int64_t interval_ms = (span_us + ((int64_t) (valid_count - 1) * 500LL)) /
+                          ((int64_t) (valid_count - 1) * 1000LL);
+    return clamp_i64(interval_ms, RENDER_MIN_INTERVAL_MS, RENDER_MAX_INTERVAL_MS);
 }
-#endif /* HAVE_FFMPEG && HAVE_SWSCALE */
 
-static void lock_render_cadence(ffmpeg_session_t *session,
-                                int64_t avg_sample_delta_ms,
-                                int sample_count,
-                                const char *reason) {
-    if (session == NULL || session->cadence_locked) return;
-    if (avg_sample_delta_ms <= 0) avg_sample_delta_ms = (1000 / RENDER_DEFAULT_FPS);
+static int64_t compute_target_latency_ms_locked(ffmpeg_session_t *session) {
+    if (session == NULL) return 1000;
+    int64_t stall_ms = session->stall_estimate_ms > 0
+            ? session->stall_estimate_ms
+            : RENDER_STALL_ESTIMATE_FLOOR_MS;
+    if (session->proven_gap_ms > stall_ms) {
+        stall_ms = session->proven_gap_ms;
+    }
+    int64_t target_ms = (stall_ms * 2) + RENDER_PROCESSING_MARGIN_MS;
+    return clamp_i64(
+            target_ms,
+            RENDER_TARGET_LATENCY_MIN_MS,
+            RENDER_TARGET_LATENCY_MAX_MS);
+}
 
-    double estimated_fps = 1000.0 / (double) avg_sample_delta_ms;
-    int locked_fps = (int) lround(estimated_fps);
-    if (locked_fps < 1) locked_fps = 1;
-    int64_t locked_interval_ms = clamp_i64(
-            avg_sample_delta_ms,
+static void update_source_interval_estimate_locked(ffmpeg_session_t *session,
+                                                   int64_t decode_delta_ms) {
+    if (session == NULL || decode_delta_ms <= 0) return;
+    int64_t old_interval_ms = session->source_render_interval_ms > 0
+            ? session->source_render_interval_ms
+            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    int64_t new_interval_ms;
+    if (session->source_interval_confidence <= 0) {
+        new_interval_ms = decode_delta_ms;
+    } else {
+        new_interval_ms =
+                ((old_interval_ms * (100 - RENDER_SOURCE_ESTIMATE_EMA_PCT)) +
+                 (decode_delta_ms * RENDER_SOURCE_ESTIMATE_EMA_PCT) + 50) / 100;
+    }
+    new_interval_ms = clamp_i64(new_interval_ms, RENDER_MIN_INTERVAL_MS, RENDER_MAX_INTERVAL_MS);
+    session->source_render_interval_ms = new_interval_ms;
+    if (session->source_interval_confidence < 100) {
+        session->source_interval_confidence += 5;
+        if (session->source_interval_confidence > 100) {
+            session->source_interval_confidence = 100;
+        }
+    }
+}
+
+static void apply_pts_source_interval_locked(ffmpeg_session_t *session,
+                                             int64_t pts_interval_ms,
+                                             bool force_direct) {
+    if (session == NULL || pts_interval_ms <= 0) return;
+
+    int64_t old_interval_ms = session->source_render_interval_ms > 0
+            ? session->source_render_interval_ms
+            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    int64_t new_interval_ms;
+    if (force_direct || session->source_interval_confidence < 70) {
+        new_interval_ms = pts_interval_ms;
+    } else {
+        int blend_pct = llabs(pts_interval_ms - old_interval_ms) >= 4 ? 35 : 20;
+        new_interval_ms =
+                ((old_interval_ms * (100 - blend_pct)) +
+                 (pts_interval_ms * blend_pct) + 50) / 100;
+        if (new_interval_ms == old_interval_ms && pts_interval_ms != old_interval_ms) {
+            new_interval_ms += pts_interval_ms > old_interval_ms ? 1 : -1;
+        }
+    }
+
+    session->source_render_interval_ms = clamp_i64(
+            new_interval_ms,
             RENDER_MIN_INTERVAL_MS,
             RENDER_MAX_INTERVAL_MS);
-
-    session->cadence_locked = true;
-    session->locked_render_fps = locked_fps;
-    session->locked_render_interval_ms = locked_interval_ms;
-    session->source_render_interval_ms = locked_interval_ms;
-    session->next_render_due_ms = 0;
-
-    ct_debug(TAG,
-             "render cadence locked id=%lld designator=%s reason=%s estimatedFps=%.2f lockedFps=%d intervalMs=%lld samples=%d avgSampleDeltaMs=%lld",
-             (long long) session->session_id,
-             session->designator,
-             reason != NULL ? reason : "unknown",
-             estimated_fps,
-             locked_fps,
-             (long long) locked_interval_ms,
-             sample_count,
-             (long long) avg_sample_delta_ms);
+    if (session->source_interval_confidence < 80) {
+        session->source_interval_confidence = 80;
+    }
 }
 
-static void update_startup_cadence_lock(ffmpeg_session_t *session,
-                                        int64_t source_ts_us,
-                                        int64_t decoded_at_ms) {
-    if (session == NULL || !session->is_render || session->cadence_locked) return;
-    if (decoded_at_ms <= 0 && source_ts_us <= 0) return;
-
-    int64_t decode_delta_ms = 0;
-    if (source_ts_us > 0) {
-        int64_t previous_source_ts_us = session->cadence_last_source_ts_us;
-        session->cadence_last_source_ts_us = source_ts_us;
-        if (previous_source_ts_us > 0 && source_ts_us > previous_source_ts_us) {
-            decode_delta_ms = (source_ts_us - previous_source_ts_us + 500) / 1000;
-        }
-    }
-    if (decode_delta_ms <= 0 && decoded_at_ms > 0) {
-        int64_t previous_sample_at_ms = session->cadence_last_sample_at_ms;
-        session->cadence_last_sample_at_ms = decoded_at_ms;
-        if (previous_sample_at_ms > 0 && decoded_at_ms > previous_sample_at_ms) {
-            decode_delta_ms = decoded_at_ms - previous_sample_at_ms;
-        }
-    }
-    if (decode_delta_ms <= 0) return;
-
-    if (decode_delta_ms > RENDER_CADENCE_LOCK_BURST_GAP_MS) {
-        session->cadence_lock_sample_count = 0;
-        return;
-    }
-    if (decode_delta_ms < RENDER_CADENCE_LOCK_MIN_SAMPLE_MS ||
-        decode_delta_ms > RENDER_CADENCE_LOCK_MAX_SAMPLE_MS) {
-        return;
-    }
-    if (session->source_render_interval_ms <= 0) {
-        session->source_render_interval_ms = decode_delta_ms;
+static void update_stall_estimate_locked(ffmpeg_session_t *session, int64_t gap_ms) {
+    if (session == NULL || gap_ms < RENDER_GAP_FLOOR_MS) return;
+    int64_t old_stall_ms = session->stall_estimate_ms > 0
+            ? session->stall_estimate_ms
+            : RENDER_STALL_ESTIMATE_FLOOR_MS;
+    int64_t new_stall_ms;
+    if (gap_ms >= old_stall_ms) {
+        new_stall_ms =
+                ((old_stall_ms * (100 - RENDER_STALL_RISE_EMA_PCT)) +
+                 (gap_ms * RENDER_STALL_RISE_EMA_PCT) + 50) / 100;
     } else {
+        new_stall_ms =
+                ((old_stall_ms * (100 - RENDER_STALL_DECAY_EMA_PCT)) +
+                 (gap_ms * RENDER_STALL_DECAY_EMA_PCT) + 50) / 100;
+    }
+    session->stall_estimate_ms = clamp_i64(
+            new_stall_ms,
+            RENDER_STALL_ESTIMATE_FLOOR_MS,
+            RENDER_TARGET_LATENCY_MAX_MS);
+    session->last_gap_at_ms = session->last_decode_at_ms;
+    session->last_stall_decay_at_ms = session->last_decode_at_ms;
+}
+
+static void update_proven_gap_locked(ffmpeg_session_t *session, int64_t gap_ms) {
+    if (session == NULL || gap_ms < RENDER_PROVEN_GAP_TRIGGER_MS) return;
+
+    int64_t old_proven_gap_ms = session->proven_gap_ms > 0
+            ? session->proven_gap_ms
+            : RENDER_STALL_ESTIMATE_FLOOR_MS;
+    int64_t new_proven_gap_ms = old_proven_gap_ms;
+    if (gap_ms > old_proven_gap_ms) {
+        new_proven_gap_ms = gap_ms;
+    } else {
+        new_proven_gap_ms =
+                ((old_proven_gap_ms * 85) + (gap_ms * 15) + 50) / 100;
+    }
+    session->proven_gap_ms = clamp_i64(
+            new_proven_gap_ms,
+            RENDER_STALL_ESTIMATE_FLOOR_MS,
+            RENDER_TARGET_LATENCY_MAX_MS);
+    session->last_proven_gap_decay_at_ms = session->last_decode_at_ms;
+}
+
+static void maybe_decay_stall_estimate_locked(ffmpeg_session_t *session, int64_t now_ms) {
+    if (session == NULL) return;
+    if (session->stall_estimate_ms <= RENDER_STALL_ESTIMATE_FLOOR_MS) return;
+    if (session->last_gap_at_ms <= 0) return;
+    if ((now_ms - session->last_gap_at_ms) < RENDER_STALL_DECAY_GRACE_MS) return;
+    if ((now_ms - session->last_stall_decay_at_ms) < RENDER_STALL_DECAY_INTERVAL_MS) return;
+
+    int64_t old_stall_ms = session->stall_estimate_ms;
+    session->stall_estimate_ms =
+            ((session->stall_estimate_ms * (100 - RENDER_STALL_DECAY_EMA_PCT)) +
+             (RENDER_STALL_ESTIMATE_FLOOR_MS * RENDER_STALL_DECAY_EMA_PCT) + 50) / 100;
+    if (session->stall_estimate_ms < RENDER_STALL_ESTIMATE_FLOOR_MS) {
+        session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+    }
+    session->last_stall_decay_at_ms = now_ms;
+    if (llabs(session->stall_estimate_ms - old_stall_ms) >= 20) {
+        ct_debug(TAG,
+                 "render stall estimate decayed id=%lld designator=%s oldMs=%lld newMs=%lld",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) old_stall_ms,
+                 (long long) session->stall_estimate_ms);
+    }
+}
+
+static void maybe_decay_proven_gap_locked(ffmpeg_session_t *session, int64_t now_ms) {
+    if (session == NULL) return;
+    if (session->proven_gap_ms <= RENDER_STALL_ESTIMATE_FLOOR_MS) return;
+    if (session->last_gap_at_ms <= 0) return;
+    if ((now_ms - session->last_gap_at_ms) < RENDER_PROVEN_GAP_DECAY_GRACE_MS) return;
+    if ((now_ms - session->last_proven_gap_decay_at_ms) < RENDER_PROVEN_GAP_DECAY_INTERVAL_MS) return;
+
+    int64_t old_proven_gap_ms = session->proven_gap_ms;
+    session->proven_gap_ms =
+            ((session->proven_gap_ms * (100 - RENDER_PROVEN_GAP_DECAY_EMA_PCT)) +
+             (RENDER_STALL_ESTIMATE_FLOOR_MS * RENDER_PROVEN_GAP_DECAY_EMA_PCT) + 50) / 100;
+    if (session->proven_gap_ms < RENDER_STALL_ESTIMATE_FLOOR_MS) {
+        session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+    }
+    session->last_proven_gap_decay_at_ms = now_ms;
+    if (llabs(session->proven_gap_ms - old_proven_gap_ms) >= 20) {
+        ct_debug(TAG,
+                 "render proven gap decayed id=%lld designator=%s oldMs=%lld newMs=%lld",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) old_proven_gap_ms,
+                 (long long) session->proven_gap_ms);
+    }
+}
+
+static void log_startup_estimates(ffmpeg_session_t *session, const char *reason) {
+    if (session == NULL) return;
+    ct_debug(TAG,
+             "render startup complete id=%lld designator=%s reason=%s sourceIntervalMs=%lld stallEstimateMs=%lld provenGapMs=%lld targetLatencyMs=%lld cadenceSamples=%d gapSamples=%d",
+             (long long) session->session_id,
+             session->designator,
+             reason != NULL ? reason : "startup",
+             (long long) session->source_render_interval_ms,
+             (long long) session->stall_estimate_ms,
+             (long long) session->proven_gap_ms,
+             (long long) session->target_latency_ms,
+             session->cadence_sample_count,
+             session->gap_sample_count);
+}
+
+static void finalize_startup_estimates_locked(ffmpeg_session_t *session) {
+    if (session == NULL) return;
+    int64_t pts_interval_ms = queue_pts_interval_ms_locked(session, 24);
+    if (session->cadence_sample_count > 0) {
         session->source_render_interval_ms = clamp_i64(
-                ((session->source_render_interval_ms * 3) + decode_delta_ms + 2) / 4,
+                median_i64_copy(session->cadence_samples_ms, session->cadence_sample_count),
                 RENDER_MIN_INTERVAL_MS,
                 RENDER_MAX_INTERVAL_MS);
+        session->source_interval_confidence = 60;
+    } else if (session->source_render_interval_ms <= 0) {
+        session->source_render_interval_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+        session->source_interval_confidence = 10;
     }
-
-    if (session->cadence_lock_sample_count < RENDER_CADENCE_LOCK_MAX_SAMPLES) {
-        session->cadence_lock_samples_ms[session->cadence_lock_sample_count] = decode_delta_ms;
-        session->cadence_lock_sample_count += 1;
-    } else {
-        memmove(
-                session->cadence_lock_samples_ms,
-                session->cadence_lock_samples_ms + 1,
-                sizeof(int64_t) * (RENDER_CADENCE_LOCK_MAX_SAMPLES - 1));
-        session->cadence_lock_samples_ms[RENDER_CADENCE_LOCK_MAX_SAMPLES - 1] = decode_delta_ms;
+    if (pts_interval_ms > 0) {
+        apply_pts_source_interval_locked(session, pts_interval_ms, true);
+        session->last_source_pts_relock_at_ms = monotonic_ms();
     }
+    if (session->gap_sample_count > 0) {
+        int64_t startup_gap_ms = median_i64_copy(session->gap_samples_ms, session->gap_sample_count);
+        if (startup_gap_ms < RENDER_STALL_ESTIMATE_FLOOR_MS) {
+            startup_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+        }
+        session->stall_estimate_ms = startup_gap_ms;
+        if (startup_gap_ms >= RENDER_PROVEN_GAP_TRIGGER_MS) {
+            session->proven_gap_ms = startup_gap_ms;
+        }
+    } else if (session->stall_estimate_ms <= 0) {
+        session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+    }
+    if (session->proven_gap_ms <= 0) {
+        session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+    }
+    session->target_latency_ms = compute_target_latency_ms_locked(session);
+    session->render_interval_smoothed_ms = session->source_render_interval_ms;
+    log_startup_estimates(session, "observe-window");
+}
 
-    if (session->cadence_lock_sample_count < RENDER_CADENCE_LOCK_MIN_SAMPLES) {
+static void record_decode_timing_sample_locked(ffmpeg_session_t *session,
+                                               int64_t decoded_at_ms,
+                                               int64_t source_ts_us) {
+    if (session == NULL || decoded_at_ms <= 0) return;
+
+    int64_t previous_decode_at_ms = session->last_decode_at_ms;
+    session->last_decode_at_ms = decoded_at_ms;
+    if (source_ts_us > 0) {
+        session->last_valid_pts_us = source_ts_us;
+    }
+    if (previous_decode_at_ms <= 0 || decoded_at_ms <= previous_decode_at_ms) {
         return;
     }
 
-    int sample_count = session->cadence_lock_sample_count;
-    int64_t min_delta_ms = session->cadence_lock_samples_ms[0];
-    int64_t max_delta_ms = session->cadence_lock_samples_ms[0];
-    int64_t sum_delta_ms = 0;
-    for (int i = 0; i < sample_count; i++) {
-        int64_t sample_ms = session->cadence_lock_samples_ms[i];
-        if (sample_ms < min_delta_ms) min_delta_ms = sample_ms;
-        if (sample_ms > max_delta_ms) max_delta_ms = sample_ms;
-        sum_delta_ms += sample_ms;
+    int64_t decode_delta_ms = decoded_at_ms - previous_decode_at_ms;
+    bool gap_sample = decode_delta_is_gap(decode_delta_ms, session->source_render_interval_ms);
+    if (session->startup_observation_active) {
+        if (gap_sample) {
+            push_sample_i64(
+                    session->gap_samples_ms,
+                    &session->gap_sample_head,
+                    &session->gap_sample_count,
+                    RENDER_SAMPLE_WINDOW_CAPACITY,
+                    decode_delta_ms);
+        } else if (decode_delta_ms >= RENDER_CADENCE_SAMPLE_MIN_MS &&
+                   decode_delta_ms <= RENDER_CADENCE_SAMPLE_MAX_MS) {
+            push_sample_i64(
+                    session->cadence_samples_ms,
+                    &session->cadence_sample_head,
+                    &session->cadence_sample_count,
+                    RENDER_SAMPLE_WINDOW_CAPACITY,
+                    decode_delta_ms);
+        }
+        return;
     }
-    int64_t avg_delta_ms = sum_delta_ms / sample_count;
-    int64_t stability_window_ms = (avg_delta_ms * RENDER_CADENCE_LOCK_STABILITY_PERCENT) / 100;
-    if (stability_window_ms < 3) stability_window_ms = 3;
 
-    bool stable_burst = (max_delta_ms - min_delta_ms) <= stability_window_ms;
-    bool force_lock = sample_count >= RENDER_CADENCE_LOCK_MAX_SAMPLES;
-    if (stable_burst || force_lock) {
-        lock_render_cadence(
-                session,
-                avg_delta_ms,
-                sample_count,
-                stable_burst ? "stable-burst" : "max-sample-fallback");
+    if (gap_sample) {
+        push_sample_i64(
+                session->gap_samples_ms,
+                &session->gap_sample_head,
+                &session->gap_sample_count,
+                RENDER_SAMPLE_WINDOW_CAPACITY,
+                decode_delta_ms);
+        int64_t old_stall_ms = session->stall_estimate_ms;
+        int64_t old_proven_gap_ms = session->proven_gap_ms;
+        update_stall_estimate_locked(session, decode_delta_ms);
+        update_proven_gap_locked(session, decode_delta_ms);
+        session->target_latency_ms = compute_target_latency_ms_locked(session);
+        if (llabs(session->stall_estimate_ms - old_stall_ms) >= 50) {
+            ct_debug(TAG,
+                     "render stall estimate updated id=%lld designator=%s oldMs=%lld newMs=%lld provenGapMs=%lld targetLatencyMs=%lld gapMs=%lld",
+                     (long long) session->session_id,
+                     session->designator,
+                     (long long) old_stall_ms,
+                     (long long) session->stall_estimate_ms,
+                     (long long) session->proven_gap_ms,
+                     (long long) session->target_latency_ms,
+                     (long long) decode_delta_ms);
+        } else if (llabs(session->proven_gap_ms - old_proven_gap_ms) >= 50) {
+            ct_debug(TAG,
+                     "render proven gap updated id=%lld designator=%s oldMs=%lld newMs=%lld targetLatencyMs=%lld gapMs=%lld",
+                     (long long) session->session_id,
+                     session->designator,
+                     (long long) old_proven_gap_ms,
+                     (long long) session->proven_gap_ms,
+                     (long long) session->target_latency_ms,
+                     (long long) decode_delta_ms);
+        }
+        return;
     }
+
+    if (!decode_delta_is_plausible_cadence(decode_delta_ms, session->source_render_interval_ms)) {
+        return;
+    }
+    push_sample_i64(
+            session->cadence_samples_ms,
+            &session->cadence_sample_head,
+            &session->cadence_sample_count,
+            RENDER_SAMPLE_WINDOW_CAPACITY,
+            decode_delta_ms);
+
+    if ((decoded_at_ms - session->last_source_estimate_update_at_ms) <
+        RENDER_SOURCE_ESTIMATE_UPDATE_INTERVAL_MS) {
+        return;
+    }
+
+    int sample_count = session->cadence_sample_count;
+    if (sample_count < 4) {
+        return;
+    }
+    int64_t robust_interval_ms = median_i64_copy(session->cadence_samples_ms, sample_count);
+    if (!decode_delta_is_plausible_cadence(robust_interval_ms, session->source_render_interval_ms)) {
+        return;
+    }
+
+    int64_t old_interval_ms = session->source_render_interval_ms;
+    update_source_interval_estimate_locked(session, robust_interval_ms);
+    session->target_latency_ms = compute_target_latency_ms_locked(session);
+    session->last_source_estimate_update_at_ms = decoded_at_ms;
+    if (llabs(session->source_render_interval_ms - old_interval_ms) >= 2) {
+        ct_debug(TAG,
+                 "render source estimate updated id=%lld designator=%s oldIntervalMs=%lld newIntervalMs=%lld targetLatencyMs=%lld robustSampleMs=%lld confidence=%d samples=%d",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) old_interval_ms,
+                 (long long) session->source_render_interval_ms,
+                 (long long) session->target_latency_ms,
+                 (long long) robust_interval_ms,
+                 session->source_interval_confidence,
+                 sample_count);
+    }
+}
+
+static int64_t compute_desired_render_interval_ms_locked(ffmpeg_session_t *session,
+                                                         int64_t buffered_span_ms,
+                                                         int64_t now_ms) {
+    if (session == NULL) {
+        return RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    }
+
+    int64_t source_interval_ms = session->source_render_interval_ms > 0
+            ? session->source_render_interval_ms
+            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    maybe_decay_stall_estimate_locked(session, now_ms);
+    maybe_decay_proven_gap_locked(session, now_ms);
+    session->target_latency_ms = compute_target_latency_ms_locked(session);
+    int64_t target_latency_ms = session->target_latency_ms > 0
+            ? session->target_latency_ms
+            : compute_target_latency_ms_locked(session);
+    if (session->last_decode_at_ms > 0) {
+        int64_t stall_threshold_ms = source_interval_ms * 3;
+        if (stall_threshold_ms < RENDER_GAP_FLOOR_MS) {
+            stall_threshold_ms = RENDER_GAP_FLOOR_MS;
+        }
+        session->stall_active = (now_ms - session->last_decode_at_ms) >= stall_threshold_ms;
+    } else {
+        session->stall_active = false;
+    }
+    if (!session->stall_active &&
+        (now_ms - session->last_source_pts_relock_at_ms) >= RENDER_SOURCE_ESTIMATE_UPDATE_INTERVAL_MS) {
+        int64_t pts_interval_ms = queue_pts_interval_ms_locked(session, 24);
+        if (pts_interval_ms > 0 &&
+            decode_delta_is_plausible_cadence(pts_interval_ms, source_interval_ms)) {
+            int64_t old_interval_ms = session->source_render_interval_ms;
+            apply_pts_source_interval_locked(session, pts_interval_ms, false);
+            source_interval_ms = session->source_render_interval_ms;
+            session->last_source_pts_relock_at_ms = now_ms;
+            if (llabs(session->source_render_interval_ms - old_interval_ms) >= 2) {
+                ct_debug(TAG,
+                         "render source estimate relocked id=%lld designator=%s oldIntervalMs=%lld newIntervalMs=%lld ptsIntervalMs=%lld targetLatencyMs=%lld",
+                         (long long) session->session_id,
+                         session->designator,
+                         (long long) old_interval_ms,
+                         (long long) session->source_render_interval_ms,
+                         (long long) pts_interval_ms,
+                         (long long) session->target_latency_ms);
+            }
+        }
+    }
+
+    double error_ratio = 0.0;
+    if (target_latency_ms > 0) {
+        error_ratio = (double) (buffered_span_ms - target_latency_ms) / (double) target_latency_ms;
+    }
+    if (error_ratio < -0.5) error_ratio = -0.5;
+    if (error_ratio > 4.0) error_ratio = 4.0;
+
+    double adjust_pct = error_ratio * 12.0;
+    double backlog_ratio = target_latency_ms > 0
+            ? (double) buffered_span_ms / (double) target_latency_ms
+            : 1.0;
+    double max_adjust_pct = RENDER_INTERVAL_ADJUST_BASE_PCT;
+    if (backlog_ratio >= 1.5) max_adjust_pct = 20.0;
+    if (backlog_ratio >= 2.0) max_adjust_pct = 28.0;
+    if (backlog_ratio >= 3.0) max_adjust_pct = 35.0;
+    if (backlog_ratio >= 5.0) max_adjust_pct = 40.0;
+    if (adjust_pct < -RENDER_INTERVAL_ADJUST_BASE_PCT) adjust_pct = -RENDER_INTERVAL_ADJUST_BASE_PCT;
+    if (adjust_pct > max_adjust_pct) adjust_pct = max_adjust_pct;
+
+    int64_t desired_interval_ms =
+            (int64_t) llround((double) source_interval_ms * (100.0 - adjust_pct) / 100.0);
+    bool preserve_during_stall =
+            session->stall_active &&
+            buffered_span_ms <= ((target_latency_ms * 5) / 4);
+    if (preserve_during_stall) {
+        int64_t preserve_interval_ms = (source_interval_ms * 108 + 99) / 100;
+        if (desired_interval_ms < preserve_interval_ms) {
+            desired_interval_ms = preserve_interval_ms;
+        }
+    }
+
+    int64_t min_interval_ms = (source_interval_ms * (100 - RENDER_INTERVAL_ADJUST_MAX_PCT) + 99) / 100;
+    int64_t max_interval_ms = (source_interval_ms * (100 + RENDER_INTERVAL_ADJUST_BASE_PCT) + 99) / 100;
+    desired_interval_ms = clamp_i64(desired_interval_ms, min_interval_ms, max_interval_ms);
+
+    int64_t previous_interval_ms = session->render_interval_smoothed_ms > 0
+            ? session->render_interval_smoothed_ms
+            : source_interval_ms;
+    int64_t smoothed_interval_ms =
+            ((previous_interval_ms * (100 - RENDER_INTERVAL_SMOOTHING_PCT)) +
+             (desired_interval_ms * RENDER_INTERVAL_SMOOTHING_PCT) + 50) / 100;
+    smoothed_interval_ms = clamp_i64(smoothed_interval_ms, min_interval_ms, max_interval_ms);
+    session->render_interval_smoothed_ms = smoothed_interval_ms;
+
+    bool periodic_log =
+            (now_ms - session->last_render_control_log_at_ms) >= RENDER_CONTROL_LOG_INTERVAL_MS;
+    if (periodic_log) {
+        session->last_render_control_log_at_ms = now_ms;
+        ct_debug(TAG,
+                 "render control id=%lld designator=%s bufferedSpanMs=%lld targetLatencyMs=%lld stallEstimateMs=%lld provenGapMs=%lld sourceIntervalMs=%lld renderIntervalMs=%lld desiredIntervalMs=%lld stallActive=%d queueDepth=%d",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) buffered_span_ms,
+                 (long long) target_latency_ms,
+                 (long long) session->stall_estimate_ms,
+                 (long long) session->proven_gap_ms,
+                 (long long) source_interval_ms,
+                 (long long) smoothed_interval_ms,
+                 (long long) desired_interval_ms,
+                 session->stall_active ? 1 : 0,
+                 session->render_queue_depth);
+    }
+
+    return smoothed_interval_ms;
 }
 
 #if HAVE_SWSCALE
@@ -1437,14 +1758,6 @@ static void log_render_queue_state(ffmpeg_session_t *session, int queue_depth, b
     session->last_logged_render_queue_depth = queue_depth;
     session->last_logged_render_drop_count = session->render_drop_count;
     session->last_render_queue_log_at_ms = now_ms;
-    ct_debug(TAG,
-             "render queue id=%lld designator=%s depth=%d dropped=%lld cadence=%s intervalMs=%lld",
-             (long long) session->session_id,
-             session->designator,
-             queue_depth,
-             (long long) session->render_drop_count,
-             session->cadence_locked ? "locked" : "locking",
-             (long long) current_render_interval_ms(session));
 }
 
 static void clear_render_queue_slot(render_queue_slot_t *slot) {
@@ -1518,466 +1831,6 @@ static int render_queue_tail_index(const ffmpeg_session_t *session) {
     return (session->render_queue_head + session->render_queue_depth) % session->render_queue_capacity;
 }
 
-enum {
-    RENDER_RATE_MODE_SOURCE = 0,
-    RENDER_RATE_MODE_HOLD = 1,
-    RENDER_RATE_MODE_FILL = 2,
-    RENDER_RATE_MODE_CATCHUP = 3,
-};
-
-static const char *render_rate_mode_name(int mode) {
-    switch (mode) {
-        case RENDER_RATE_MODE_HOLD:
-            return "hold";
-        case RENDER_RATE_MODE_FILL:
-            return "fill";
-        case RENDER_RATE_MODE_CATCHUP:
-            return "catchup";
-        default:
-            return "source";
-    }
-}
-
-static int buffer_depth_for_ms(int64_t buffer_ms, int64_t interval_ms) {
-    if (interval_ms <= 0) return 1;
-    int depth = (int) ((buffer_ms + interval_ms - 1) / interval_ms);
-    if (depth < 1) depth = 1;
-    return depth;
-}
-
-static int64_t effective_buffer_target_ms(const ffmpeg_session_t *session) {
-    if (session == NULL) return RENDER_BUFFER_TARGET_MS;
-    int64_t target_ms =
-            session->adaptive_buffer_target_ms > 0 ? session->adaptive_buffer_target_ms : RENDER_BUFFER_TARGET_MS;
-    if (session->last_render_post_at_ms <= 0 && target_ms < RENDER_BUFFER_STARTUP_TARGET_MS) {
-        target_ms = RENDER_BUFFER_STARTUP_TARGET_MS;
-    }
-    return target_ms;
-}
-
-static int64_t effective_buffer_high_ms(const ffmpeg_session_t *session, int64_t target_ms) {
-    int64_t high_ms = RENDER_BUFFER_HIGH_WATERMARK_MS;
-    if (session != NULL && session->adaptive_buffer_high_ms > 0) {
-        high_ms = session->adaptive_buffer_high_ms;
-    }
-    if (session != NULL &&
-        session->last_render_post_at_ms <= 0 &&
-        high_ms < RENDER_BUFFER_STARTUP_HIGH_MS) {
-        high_ms = RENDER_BUFFER_STARTUP_HIGH_MS;
-    }
-    if (high_ms < (target_ms * 2)) high_ms = target_ms * 2;
-    return high_ms;
-}
-
-static bool should_reprime_after_queue_drain(const ffmpeg_session_t *session) {
-    if (session == NULL) return true;
-    if (session->last_render_post_at_ms <= 0) return true;
-    // Low-latency sources can resume immediately after a brief drain, but once the
-    // controller has taught us to expect multi-second starvation windows we should
-    // rebuild a buffer before rendering again.
-    return session->adaptive_buffer_high_ms > RENDER_BUFFER_HIGH_WATERMARK_MS;
-}
-
-static void decay_render_buffer_targets_locked(ffmpeg_session_t *session,
-                                               int64_t now_ms,
-                                               int64_t base_interval_ms) {
-    if (session == NULL) return;
-    if (session->adaptive_buffer_high_ms <= RENDER_BUFFER_HIGH_WATERMARK_MS) return;
-    if (session->last_starvation_tune_at_ms <= 0) return;
-    if (session->reader_stall_started_at_ms > 0) return;
-    int64_t recent_decode_window_ms = RENDER_BUFFER_DECAY_ACTIVITY_WINDOW_MS;
-    int64_t cadence_window_ms = base_interval_ms > 0 ? (base_interval_ms * 4) : 0;
-    if (cadence_window_ms > recent_decode_window_ms) {
-        recent_decode_window_ms = cadence_window_ms;
-    }
-    if (session->last_decode_activity_at_ms <= 0 ||
-        (now_ms - session->last_decode_activity_at_ms) > recent_decode_window_ms) {
-        return;
-    }
-    int64_t since_starvation_ms = now_ms - session->last_starvation_tune_at_ms;
-    int64_t decay_grace_ms = session->adaptive_buffer_high_ms;
-    if (decay_grace_ms < RENDER_BUFFER_DECAY_GRACE_MS) {
-        decay_grace_ms = RENDER_BUFFER_DECAY_GRACE_MS;
-    }
-    if (since_starvation_ms < decay_grace_ms) return;
-    int64_t decay_interval_ms = RENDER_BUFFER_DECAY_INTERVAL_MS;
-    int64_t adaptive_decay_interval_ms = session->adaptive_buffer_high_ms / 2;
-    if (adaptive_decay_interval_ms > decay_interval_ms) {
-        decay_interval_ms = adaptive_decay_interval_ms;
-    }
-    if ((now_ms - session->last_render_buffer_decay_at_ms) < decay_interval_ms) return;
-
-    int64_t previous_high_ms = session->adaptive_buffer_high_ms;
-    int64_t previous_target_ms = session->adaptive_buffer_target_ms;
-    int64_t ema_floor_high_ms = RENDER_BUFFER_HIGH_WATERMARK_MS;
-    if (session->starvation_gap_ema_ms > 0) {
-        ema_floor_high_ms = (session->starvation_gap_ema_ms * 12 + 9) / 10;
-        if (ema_floor_high_ms < RENDER_BUFFER_HIGH_WATERMARK_MS) {
-            ema_floor_high_ms = RENDER_BUFFER_HIGH_WATERMARK_MS;
-        }
-    }
-    if (previous_high_ms <= ema_floor_high_ms) return;
-    int64_t next_high_ms = previous_high_ms - RENDER_BUFFER_DECAY_STEP_MS;
-    if (next_high_ms < ema_floor_high_ms) {
-        next_high_ms = ema_floor_high_ms;
-    }
-    int64_t next_target_ms = next_high_ms / 2;
-    if (next_target_ms < RENDER_BUFFER_TARGET_MS) {
-        next_target_ms = RENDER_BUFFER_TARGET_MS;
-    }
-    session->adaptive_buffer_high_ms = next_high_ms;
-    session->adaptive_buffer_target_ms = next_target_ms;
-    session->last_render_buffer_decay_at_ms = now_ms;
-
-    bool significant_change =
-            llabs(next_high_ms - previous_high_ms) >= RENDER_BUFFER_DECAY_STEP_MS ||
-            llabs(next_target_ms - previous_target_ms) >= (RENDER_BUFFER_DECAY_STEP_MS / 2);
-    bool periodic_log =
-            (now_ms - session->last_render_buffer_tune_log_at_ms) >= RENDER_BUFFER_DECAY_LOG_INTERVAL_MS;
-    if (significant_change || periodic_log) {
-        session->last_render_buffer_tune_log_at_ms = now_ms;
-        ct_debug(TAG,
-                 "render buffer decayed id=%lld designator=%s sinceStarvationMs=%lld targetMs=%lld highMs=%lld",
-                 (long long) session->session_id,
-                 session->designator,
-                 (long long) since_starvation_ms,
-                 (long long) session->adaptive_buffer_target_ms,
-                 (long long) session->adaptive_buffer_high_ms);
-    }
-}
-
-/*
- * Buffer controller:
- * - Startup does not render until the high watermark is accumulated.
- * - During an active reader stall, if backlog has fallen below the starvation
- *   reserve, dynamically slow rendering so the remaining frames stretch toward
- *   that reserve instead of draining to zero at near-source cadence.
- * - Below the target buffer size (TBS), render slightly slower than source cadence
- *   so the queue rebuilds toward the starvation reserve.
- * - Between TBS and the starvation reserve, run at source cadence to avoid
- *   growing or shrinking latency unnecessarily.
- * - Only enter catchup when backlog is safely above the starvation reserve, then
- *   stop catchup as soon as the queue settles back to that reserve.
- */
-static int64_t catchup_entry_headroom_ms(int64_t starvation_reserve_ms) {
-    if (starvation_reserve_ms <= 0) return 0;
-    int64_t percent = RENDER_CATCHUP_ENTRY_OVERSHOOT_PERCENT;
-    int64_t remaining_percent = 100 - percent;
-    if (remaining_percent <= 0) return starvation_reserve_ms;
-    return (starvation_reserve_ms * percent + remaining_percent - 1) / remaining_percent;
-}
-
-static int64_t render_interval_with_buffer_control_ms(ffmpeg_session_t *session,
-                                                      int queue_depth,
-                                                      int64_t now_ms) {
-    int64_t base_interval_ms = current_render_interval_ms(session);
-    if (session == NULL || queue_depth <= 0) {
-        return base_interval_ms;
-    }
-
-    decay_render_buffer_targets_locked(session, now_ms, base_interval_ms);
-
-    int64_t target_ms = effective_buffer_target_ms(session);
-    int64_t high_ms = effective_buffer_high_ms(session, target_ms);
-
-    int target_depth = buffer_depth_for_ms(target_ms, base_interval_ms);
-    int high_depth = buffer_depth_for_ms(high_ms, base_interval_ms);
-    if (high_depth <= target_depth) high_depth = target_depth + 1;
-    int64_t catchup_entry_ms = high_ms + catchup_entry_headroom_ms(high_ms);
-    int catchup_entry_depth = buffer_depth_for_ms(catchup_entry_ms, base_interval_ms);
-    if (catchup_entry_depth <= high_depth) catchup_entry_depth = high_depth + 1;
-
-    /* fill_pct: queue depth as a percentage of high_depth.
-     * Computed once here; shared by the RC#1 cadence re-lock crossing checks
-     * below and the RC#2 progressive rate selection further down.
-     * Guarded against high_depth == 0 (should never occur in practice). */
-    int fill_pct = (high_depth > 0) ? (queue_depth * 100) / high_depth : 0;
-
-    /* Cadence re-lock on fill-level crossings.
-     * cadence_relock_prev_fill_pct is seeded to a valid value when the buffer
-     * first primes; while it remains -1 (pre-prime) these checks are skipped.
-     * We check for:
-     *   - queue crossing UP through FILL_HIGH_PCT (75 %): source is faster
-     *     than the locked cadence; re-lock to the actual inter-frame PTS rate.
-     *   - queue crossing DOWN through FILL_LOW_PCT (25 %): source is slower
-     *     (or render ran ahead); re-lock to prevent render from over-correcting.
-     */
-#if HAVE_FFMPEG && HAVE_SWSCALE
-    if (session->cadence_relock_prev_fill_pct >= 0 && high_depth > 0) {
-        /* fill_pct is declared above; reference it here for the crossing check. */
-        int prev_fill_pct = session->cadence_relock_prev_fill_pct;
-        session->cadence_relock_prev_fill_pct = fill_pct;
-
-        bool crossed_high = (prev_fill_pct <  RENDER_CADENCE_RELOCK_FILL_HIGH_PCT &&
-                              fill_pct      >= RENDER_CADENCE_RELOCK_FILL_HIGH_PCT);
-        bool crossed_low  = (prev_fill_pct >  RENDER_CADENCE_RELOCK_FILL_LOW_PCT  &&
-                              fill_pct      <= RENDER_CADENCE_RELOCK_FILL_LOW_PCT);
-        if (crossed_high || crossed_low) {
-            const char *relock_reason = crossed_high ? "fill-cross-75pct" : "drain-cross-25pct";
-            if (try_relock_cadence_from_queue_locked(session, queue_depth,
-                                                      now_ms, relock_reason)) {
-                /* base_interval_ms may have changed; refresh it so the rest of
-                 * this function uses the newly locked rate. */
-                base_interval_ms = current_render_interval_ms(session);
-                target_depth = buffer_depth_for_ms(target_ms, base_interval_ms);
-                high_depth   = buffer_depth_for_ms(high_ms,   base_interval_ms);
-                if (high_depth <= target_depth) high_depth = target_depth + 1;
-                catchup_entry_depth = buffer_depth_for_ms(catchup_entry_ms, base_interval_ms);
-                if (catchup_entry_depth <= high_depth) catchup_entry_depth = high_depth + 1;
-            }
-        }
-    }
-#endif /* HAVE_FFMPEG && HAVE_SWSCALE */
-
-    bool reader_stalled = session->reader_stall_started_at_ms > 0;
-    // Also treat the reader as stalled if av_read_frame has been blocking for
-    // longer than ~3 frame intervals without delivering a packet.  This lets
-    // HOLD mode activate well before the 2.5-second socket timeout fires.
-    if (!reader_stalled && session->reader_waiting_since_ms > 0) {
-        int64_t implicit_stall_threshold_ms = base_interval_ms * 3;
-        if (implicit_stall_threshold_ms < 100) implicit_stall_threshold_ms = 100;
-        if ((now_ms - session->reader_waiting_since_ms) >= implicit_stall_threshold_ms) {
-            reader_stalled = true;
-        }
-    }
-    // Treat an in-progress reconnect (close→reopen after EOF) exactly like a
-    // stall: hold the last good frame while the new mediamtx session opens.
-    if (!reader_stalled && session->reader_reconnecting_since_ms > 0) {
-        reader_stalled = true;
-    }
-
-    int mode = RENDER_RATE_MODE_SOURCE;
-    int64_t interval_ms = base_interval_ms;
-    int applied_speedup_percent = 0;
-    int applied_slowdown_percent = 0;
-    // Tracks EMA-derived stretch target for HOLD mode; exposed in the log.
-    int64_t hold_target_ms = 0;
-
-    if (reader_stalled) {
-        session->render_catchup_active = false;
-    }
-    /* RC#2: CATCHUP mode is entered / exited on fill_pct thresholds, not on the
-     * old depth-based catchup_entry_depth.  T3 (55 %) is the entry boundary;
-     * the exit boundary is the same value to avoid chattering at exactly 55 %.
-     * catchup_entry_depth is preserved because HOLD mode still uses it to size
-     * the hold-stretch target (it no longer controls CATCHUP entry). */
-    if (session->render_catchup_active && fill_pct < RENDER_RATE_SPEEDUP_PCT_T3) {
-        session->render_catchup_active = false;
-    }
-    if (!reader_stalled &&
-        !session->render_catchup_active &&
-        fill_pct >= RENDER_RATE_SPEEDUP_PCT_T3) {
-        session->render_catchup_active = true;
-    }
-
-    if (reader_stalled && queue_depth < high_depth) {
-        mode = RENDER_RATE_MODE_HOLD;
-        // Stretch remaining frames to cover the EMA stall duration rather than
-        // the worst-case high watermark.  This keeps the rendered frame rate
-        // proportional to what the controller actually delivers, so typical
-        // stalls play at a visually acceptable rate while the hard cap below
-        // prevents any stall from dropping below the minimum visible frame rate.
-        hold_target_ms = session->starvation_gap_ema_ms > 0
-                ? session->starvation_gap_ema_ms : high_ms;
-        if (hold_target_ms < target_ms) hold_target_ms = target_ms;
-        int64_t stretched_interval_ms = base_interval_ms;
-        if (queue_depth > 0) {
-            int hold_target_depth = buffer_depth_for_ms(hold_target_ms, base_interval_ms);
-            if (hold_target_depth <= 0) hold_target_depth = high_depth;
-            stretched_interval_ms =
-                    (base_interval_ms * hold_target_depth + queue_depth - 1) / queue_depth;
-        }
-        int64_t minimum_hold_interval_ms =
-                (base_interval_ms * (100 + RENDER_HOLD_SLOWDOWN_PERCENT) + 99) / 100;
-        if (stretched_interval_ms < minimum_hold_interval_ms) {
-            stretched_interval_ms = minimum_hold_interval_ms;
-        }
-        // Hard cap: intervals beyond RENDER_HOLD_MAX_INTERVAL_MS are
-        // perceptually indistinguishable from a frozen display.  Accept
-        // a slightly earlier queue drain on unusually long stalls rather
-        // than presenting what looks like a hung stream to the operator.
-        if (stretched_interval_ms > RENDER_HOLD_MAX_INTERVAL_MS) {
-            stretched_interval_ms = RENDER_HOLD_MAX_INTERVAL_MS;
-        }
-        interval_ms = stretched_interval_ms;
-    } else if (session->render_catchup_active) {
-        mode = RENDER_RATE_MODE_CATCHUP;
-        /* RC#2: select speedup tier from fill_pct (T1 = most aggressive). */
-        applied_speedup_percent =
-                (fill_pct >= RENDER_RATE_SPEEDUP_PCT_T1) ? RENDER_RATE_ADJ_PCT_T1 :
-                (fill_pct >= RENDER_RATE_SPEEDUP_PCT_T2) ? RENDER_RATE_ADJ_PCT_T2 :
-                                                           RENDER_RATE_ADJ_PCT_T3;
-        interval_ms =
-                (base_interval_ms * (100 - applied_speedup_percent) + 99) / 100;
-    } else if (high_depth > 0 && fill_pct <= RENDER_RATE_SLOWDOWN_PCT_T3) {
-        mode = RENDER_RATE_MODE_FILL;
-        /* RC#2: select slowdown tier from fill_pct (T1 = most aggressive). */
-        applied_slowdown_percent =
-                (fill_pct <= RENDER_RATE_SLOWDOWN_PCT_T1) ? RENDER_RATE_ADJ_PCT_T1 :
-                (fill_pct <= RENDER_RATE_SLOWDOWN_PCT_T2) ? RENDER_RATE_ADJ_PCT_T2 :
-                                                            RENDER_RATE_ADJ_PCT_T3;
-        interval_ms =
-                (base_interval_ms * (100 + applied_slowdown_percent) + 99) / 100;
-    }
-    interval_ms = clamp_i64(interval_ms, RENDER_MIN_INTERVAL_MS, RENDER_MAX_INTERVAL_MS);
-
-    /* RC#2 source-rate learning.
-     * When the render is persistently in CATCHUP or FILL, it means the locked
-     * base interval doesn't match the true encoder delivery rate.  Once per
-     * RENDER_SOURCE_TUNE_INTERVAL_MS we nudge locked_render_interval_ms by
-     * RENDER_SOURCE_TUNE_MS_STEP directly so the base converges on the real
-     * source rate:
-     *   CATCHUP → source is faster → shorten interval by 1 ms
-     *   FILL    → source is slower → lengthen interval by 1 ms
-     * Working in ms rather than fps avoids the ±2 ms overshoot that arose
-     * when integer-fps steps straddled the true fractional equilibrium.
-     * SOURCE and HOLD carry no reliable signal so they are skipped; the timer
-     * keeps accumulating and fires on the next CATCHUP or FILL call. */
-#if HAVE_FFMPEG && HAVE_SWSCALE
-    if (session->cadence_locked &&
-        (mode == RENDER_RATE_MODE_CATCHUP || mode == RENDER_RATE_MODE_FILL) &&
-        (now_ms - session->last_source_rate_tune_at_ms) >= RENDER_SOURCE_TUNE_INTERVAL_MS) {
-
-        int64_t delta_ms        = (mode == RENDER_RATE_MODE_CATCHUP)
-                                  ? -RENDER_SOURCE_TUNE_MS_STEP
-                                  :  RENDER_SOURCE_TUNE_MS_STEP;
-        int64_t old_interval_ms = session->locked_render_interval_ms;
-        int64_t new_interval_ms = clamp_i64(old_interval_ms + delta_ms,
-                                            RENDER_MIN_INTERVAL_MS,
-                                            RENDER_MAX_INTERVAL_MS);
-
-        if (new_interval_ms != old_interval_ms) {
-            int old_fps = (int) lround(1000.0 / (double) old_interval_ms);
-            int new_fps = (int) lround(1000.0 / (double) new_interval_ms);
-            session->locked_render_interval_ms = new_interval_ms;
-            session->source_render_interval_ms = new_interval_ms;
-            session->locked_render_fps         = new_fps;
-            ct_debug(TAG,
-                     "render source rate tuned id=%lld designator=%s "
-                     "oldIntervalMs=%lld newIntervalMs=%lld deltaMs=%+lld "
-                     "oldFps=%d newFps=%d fillPct=%d mode=%s",
-                     (long long) session->session_id, session->designator,
-                     (long long) old_interval_ms,
-                     (long long) new_interval_ms,
-                     (long long) delta_ms,
-                     old_fps, new_fps,
-                     fill_pct,
-                     mode == RENDER_RATE_MODE_CATCHUP ? "catchup" : "fill");
-        }
-        /* Always reset the timer so we don't re-fire on the very next frame
-         * if the interval clamp prevented any actual change. */
-        session->last_source_rate_tune_at_ms = now_ms;
-    }
-#endif /* HAVE_FFMPEG && HAVE_SWSCALE */
-
-    bool mode_changed = mode != session->render_rate_mode;
-    bool periodic_log =
-            (now_ms - session->last_render_rate_mode_log_at_ms) >= RENDER_RATE_MODE_LOG_INTERVAL_MS;
-    if (mode_changed || periodic_log) {
-        session->last_render_rate_mode_log_at_ms = now_ms;
-        session->render_rate_mode = mode;
-        ct_debug(TAG,
-                 "render rate mode id=%lld designator=%s mode=%s queueDepth=%d targetDepth=%d highDepth=%d catchupEntryDepth=%d targetMs=%lld highMs=%lld catchupEntryMs=%lld holdTargetMs=%lld intervalMs=%lld baseIntervalMs=%lld catchupPct=%d fillPct=%d",
-                 (long long) session->session_id,
-                 session->designator,
-                 render_rate_mode_name(mode),
-                 queue_depth,
-                 target_depth,
-                 high_depth,
-                 catchup_entry_depth,
-                 (long long) target_ms,
-                 (long long) high_ms,
-                 (long long) catchup_entry_ms,
-                 (long long) hold_target_ms,
-                 (long long) interval_ms,
-                 (long long) base_interval_ms,
-                 applied_speedup_percent,
-                 applied_slowdown_percent);
-    }
-    return interval_ms;
-}
-
-static void tune_render_buffer_from_gap_ms(ffmpeg_session_t *session,
-                                           int64_t gap_ms,
-                                           const char *reason) {
-    if (session == NULL || !session->is_render || !session->render_sync_ready) return;
-    if (gap_ms < RENDER_STARVATION_TUNE_MIN_GAP_MS) return;
-
-    pthread_mutex_lock(&session->render_lock);
-    int64_t tuned_at_ms = monotonic_ms();
-    int64_t tuned_gap_ms = gap_ms;
-    if (tuned_gap_ms > RENDER_STARVATION_TUNE_MAX_GAP_MS) {
-        tuned_gap_ms = RENDER_STARVATION_TUNE_MAX_GAP_MS;
-    }
-    session->last_starvation_tune_at_ms = tuned_at_ms;
-    if (session->starvation_gap_ema_ms <= 0) {
-        session->starvation_gap_ema_ms = tuned_gap_ms;
-    } else if (tuned_gap_ms >= session->starvation_gap_ema_ms) {
-        // Raise slowly on larger gaps so a single outage does not dominate.
-        session->starvation_gap_ema_ms =
-                ((session->starvation_gap_ema_ms * 8) + (tuned_gap_ms * 2) + 5) / 10;
-    } else {
-        // Drop faster when gaps improve so latency recovers quickly.
-        session->starvation_gap_ema_ms =
-                ((session->starvation_gap_ema_ms * 4) + (tuned_gap_ms * 6) + 5) / 10;
-    }
-    session->starvation_gap_sample_count += 1;
-
-    int64_t next_high_ms = (session->starvation_gap_ema_ms * 12 + 9) / 10;
-    if (reason != NULL && strcmp(reason, "stall-recovered") == 0) {
-        int64_t observed_high_ms = (tuned_gap_ms * 11 + 9) / 10;
-        if (observed_high_ms > next_high_ms) {
-            next_high_ms = observed_high_ms;
-        }
-    }
-    if (next_high_ms < RENDER_BUFFER_HIGH_WATERMARK_MS) {
-        next_high_ms = RENDER_BUFFER_HIGH_WATERMARK_MS;
-    }
-    if (next_high_ms > RENDER_BUFFER_HIGH_WATERMARK_MAX_MS) {
-        next_high_ms = RENDER_BUFFER_HIGH_WATERMARK_MAX_MS;
-    }
-    int64_t next_target_ms = next_high_ms / 2;
-    if (next_target_ms < RENDER_BUFFER_TARGET_MS) {
-        next_target_ms = RENDER_BUFFER_TARGET_MS;
-    }
-    if (next_high_ms < session->adaptive_buffer_high_ms) {
-        next_high_ms = session->adaptive_buffer_high_ms;
-    }
-    if (next_target_ms < session->adaptive_buffer_target_ms) {
-        next_target_ms = session->adaptive_buffer_target_ms;
-    }
-
-    bool changed =
-            llabs(next_high_ms - session->adaptive_buffer_high_ms) >= 50 ||
-            llabs(next_target_ms - session->adaptive_buffer_target_ms) >= 25;
-    session->adaptive_buffer_high_ms = next_high_ms;
-    session->adaptive_buffer_target_ms = next_target_ms;
-    bool periodic_log =
-            (tuned_at_ms - session->last_render_buffer_tune_log_at_ms) >= 2000;
-    bool should_log = changed || periodic_log;
-    int64_t ema_gap_ms = session->starvation_gap_ema_ms;
-    int sample_count = session->starvation_gap_sample_count;
-    int64_t target_ms = session->adaptive_buffer_target_ms;
-    int64_t high_ms = session->adaptive_buffer_high_ms;
-    if (changed || periodic_log) {
-        session->last_render_buffer_tune_log_at_ms = tuned_at_ms;
-    }
-    pthread_mutex_unlock(&session->render_lock);
-    if (should_log) {
-        ct_debug(TAG,
-                 "render buffer tuned id=%lld designator=%s reason=%s gapMs=%lld tunedGapMs=%lld emaGapMs=%lld targetMs=%lld highMs=%lld samples=%d",
-                 (long long) session->session_id,
-                 session->designator,
-                 reason != NULL ? reason : "gap",
-                 (long long) gap_ms,
-                 (long long) tuned_gap_ms,
-                 (long long) ema_gap_ms,
-                 (long long) target_ms,
-                 (long long) high_ms,
-                 sample_count);
-    }
-}
-
 static bool enqueue_render_frame(ffmpeg_session_t *session,
                                  AVFrame *decoded,
                                  int64_t source_ts_us,
@@ -1997,64 +1850,6 @@ static bool enqueue_render_frame(ffmpeg_session_t *session,
     return true;
 }
 
-static bool buffered_source_span_ms_locked(const ffmpeg_session_t *session,
-                                           int64_t *out_span_ms) {
-    if (out_span_ms != NULL) *out_span_ms = 0;
-    if (session == NULL ||
-        session->render_queue == NULL ||
-        session->render_queue_capacity <= 0 ||
-        session->render_queue_depth <= 1) {
-        return false;
-    }
-
-    bool found_first = false;
-    int64_t first_ts_us = 0;
-    int64_t last_ts_us = 0;
-    for (int i = 0; i < session->render_queue_depth; i++) {
-        int idx = (session->render_queue_head + i) % session->render_queue_capacity;
-        int64_t ts_us = session->render_queue[idx].source_ts_us;
-        if (ts_us <= 0) {
-            continue;
-        }
-        if (!found_first) {
-            found_first = true;
-            first_ts_us = ts_us;
-            last_ts_us = ts_us;
-            continue;
-        }
-        if (ts_us < last_ts_us) {
-            return false;
-        }
-        last_ts_us = ts_us;
-    }
-
-    if (!found_first || last_ts_us <= first_ts_us) {
-        return false;
-    }
-
-    int64_t span_ms = (last_ts_us - first_ts_us) / 1000;
-    if (span_ms <= 0) {
-        return false;
-    }
-    if (out_span_ms != NULL) *out_span_ms = span_ms;
-    return true;
-}
-
-static bool source_span_matches_queue_depth(int queue_depth,
-                                            int64_t base_interval_ms,
-                                            int64_t source_span_ms) {
-    if (queue_depth <= 1 || base_interval_ms <= 0 || source_span_ms <= 0) {
-        return false;
-    }
-
-    int64_t queue_span_ms = (int64_t) (queue_depth - 1) * base_interval_ms;
-    int64_t tolerance_ms = base_interval_ms * 12;
-    if (tolerance_ms < 1000) {
-        tolerance_ms = 1000;
-    }
-    return source_span_ms <= (queue_span_ms + tolerance_ms);
-}
-
 static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
                                             AVFrame **out_frame,
                                             int64_t *out_source_ts_us,
@@ -2070,112 +1865,37 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
     }
 
     int64_t now_ms = monotonic_ms();
-    int64_t base_interval_ms = current_render_interval_ms(session);
     int oldest_index = session->render_queue_head;
     int64_t queue_age_ms = now_ms - session->render_queue[oldest_index].enqueued_at_ms;
-    int64_t target_ms = effective_buffer_target_ms(session);
-    int64_t high_ms = effective_buffer_high_ms(session, target_ms);
-    int target_depth = buffer_depth_for_ms(target_ms, base_interval_ms);
-    int prime_depth = target_depth;
-    int64_t prime_ms = target_ms;
-    bool prime_to_high =
-            session->last_render_post_at_ms <= 0 || session->render_require_high_reprime;
-    if (prime_to_high) {
-        prime_ms = high_ms;
-        prime_depth = buffer_depth_for_ms(prime_ms, base_interval_ms);
-    }
-    int64_t source_span_ms = 0;
-    bool source_span_valid = buffered_source_span_ms_locked(session, &source_span_ms);
-    bool source_span_contiguous =
-            source_span_valid &&
-            source_span_matches_queue_depth(session->render_queue_depth, base_interval_ms, source_span_ms);
-    bool prebuffer_ready_by_span = source_span_contiguous && source_span_ms >= prime_ms;
-    int64_t startup_stall_prime_ms = prime_ms;
-    if (startup_stall_prime_ms > 0) {
-        startup_stall_prime_ms =
-                (startup_stall_prime_ms * RENDER_STARTUP_STALL_PRIME_PERCENT + 99) / 100;
-    }
-    if (startup_stall_prime_ms > RENDER_STARTUP_STALL_MIN_PRIME_MS) {
-        startup_stall_prime_ms = RENDER_STARTUP_STALL_MIN_PRIME_MS;
-    }
-    if (startup_stall_prime_ms < target_ms) {
-        startup_stall_prime_ms = target_ms < RENDER_STARTUP_STALL_MIN_PRIME_MS
-                ? target_ms
-                : RENDER_STARTUP_STALL_MIN_PRIME_MS;
-    }
-    int startup_stall_prime_depth = buffer_depth_for_ms(startup_stall_prime_ms, base_interval_ms);
-    bool startup_stall_prime_by_span =
-            session->last_render_post_at_ms <= 0 &&
-            session->reader_stall_started_at_ms > 0 &&
-            source_span_contiguous &&
-            source_span_ms >= startup_stall_prime_ms;
-    bool startup_stall_prime_by_depth =
-            session->last_render_post_at_ms <= 0 &&
-            session->reader_stall_started_at_ms > 0 &&
-            session->render_queue_depth >= startup_stall_prime_depth;
-    bool startup_stall_prime_by_age =
-            session->last_render_post_at_ms <= 0 &&
-            session->render_queue_depth >= RENDER_STARTUP_MIN_PRIME_FRAMES &&
-            queue_age_ms >= startup_stall_prime_ms;
-    bool startup_stall_prime_ready =
-            startup_stall_prime_by_span ||
-            startup_stall_prime_by_depth ||
-            startup_stall_prime_by_age;
-    if (!session->render_buffer_primed) {
-        bool periodic_log = (now_ms - session->last_render_rate_mode_log_at_ms) >= RENDER_RATE_MODE_LOG_INTERVAL_MS;
-        if (session->render_queue_depth < prime_depth &&
-            !prebuffer_ready_by_span &&
-            !startup_stall_prime_ready) {
+    int64_t buffered_span_ms = buffered_span_ms_locked(session);
+
+    if (session->startup_observation_active) {
+        int64_t observe_elapsed_ms = now_ms - session->startup_started_at_ms;
+        if (observe_elapsed_ms < RENDER_STARTUP_OBSERVE_MS) {
+            bool periodic_log =
+                    (now_ms - session->last_render_control_log_at_ms) >= RENDER_CONTROL_LOG_INTERVAL_MS;
             if (periodic_log) {
-                session->last_render_rate_mode_log_at_ms = now_ms;
+                session->last_render_control_log_at_ms = now_ms;
                 ct_debug(TAG,
-                         "render prebuffering id=%lld designator=%s depth=%d targetDepth=%d targetMs=%lld highMs=%lld sourceSpanMs=%lld intervalMs=%lld",
+                         "render startup observing id=%lld designator=%s elapsedMs=%lld queueDepth=%d bufferedSpanMs=%lld queueAgeMs=%lld",
                          (long long) session->session_id,
                          session->designator,
+                         (long long) observe_elapsed_ms,
                          session->render_queue_depth,
-                         prime_depth,
-                         (long long) prime_ms,
-                         (long long) high_ms,
-                         (long long) source_span_ms,
-                         (long long) base_interval_ms);
+                         (long long) buffered_span_ms,
+                         (long long) queue_age_ms);
             }
             return false;
         }
-        session->render_buffer_primed = true;
-        session->render_require_high_reprime = false;
+        finalize_startup_estimates_locked(session);
+        session->startup_observation_active = false;
         session->next_render_due_ms = now_ms;
-        ct_debug(TAG,
-                 "render prebuffer primed id=%lld designator=%s depth=%d targetDepth=%d targetMs=%lld highMs=%lld sourceSpanMs=%lld intervalMs=%lld reason=%s queueAgeMs=%lld",
-                 (long long) session->session_id,
-                 session->designator,
-                 session->render_queue_depth,
-                 prime_depth,
-                 (long long) prime_ms,
-                 (long long) high_ms,
-                 (long long) source_span_ms,
-                 (long long) base_interval_ms,
-                 prebuffer_ready_by_span
-                 ? (prime_to_high ? "high-span" : "target-span")
-                 : (startup_stall_prime_ready
-                    ? (startup_stall_prime_by_span
-                       ? "startup-stall-span"
-                       : (startup_stall_prime_by_age ? "startup-stall-age" : "startup-stall-depth"))
-                    : (prime_to_high ? "high-depth" : "target-depth")),
-                 (long long) queue_age_ms);
-        /* Re-lock cadence from the PTS span of the primed buffer, then seed the
-         * fill-level tracker so crossing checks have a valid baseline from the
-         * first render decision onward. */
-        try_relock_cadence_from_queue_locked(session, session->render_queue_depth,
-                                             now_ms, "buffer-prime");
-        int relock_high_depth = buffer_depth_for_ms(high_ms, current_render_interval_ms(session));
-        if (relock_high_depth <= 0) relock_high_depth = 1;
-        session->cadence_relock_prev_fill_pct =
-                (session->render_queue_depth * 100) / relock_high_depth;
     }
-    int64_t interval_ms = render_interval_with_buffer_control_ms(
-            session,
-            session->render_queue_depth,
-            now_ms);
+
+    int64_t interval_ms = compute_desired_render_interval_ms_locked(session, buffered_span_ms, now_ms);
+    int64_t base_interval_ms = session->source_render_interval_ms > 0
+            ? session->source_render_interval_ms
+            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
     if (session->next_render_due_ms <= 0) {
         session->next_render_due_ms = now_ms;
     }
@@ -2186,48 +1906,25 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
     int64_t scheduled_due_ms = session->next_render_due_ms;
     int64_t lag_ms = now_ms - scheduled_due_ms;
     int64_t lag_budget_ms = interval_ms - lag_ms;
-    int remaining_depth_after_render = session->render_queue_depth - 1;
-    if (remaining_depth_after_render < 0) remaining_depth_after_render = 0;
-    int64_t playout_backlog_ms = (int64_t) remaining_depth_after_render * interval_ms;
     bool periodic_lag_log = (now_ms - session->last_render_lag_log_at_ms) >= RENDER_LAG_LOG_INTERVAL_MS;
     bool severe_lag = lag_ms >= (base_interval_ms * 2);
     if (severe_lag || periodic_lag_log) {
         session->last_render_lag_log_at_ms = now_ms;
-        ct_debug(TAG,
-                 "render lag budget id=%lld designator=%s lagMs=%lld lagBudgetMs=%lld queueDepth=%d dropped=%lld queueAgeMs=%lld playoutBacklogMs=%lld intervalMs=%lld baseIntervalMs=%lld",
-                 (long long) session->session_id,
-                 session->designator,
-                 (long long) lag_ms,
-                 (long long) lag_budget_ms,
-                 session->render_queue_depth,
-                 (long long) session->render_drop_count,
-                 (long long) queue_age_ms,
-                 (long long) playout_backlog_ms,
-                 (long long) interval_ms,
-                 (long long) base_interval_ms);
     }
 
     *out_frame = session->render_queue[oldest_index].frame;
     *out_source_ts_us = session->render_queue[oldest_index].source_ts_us;
-    *out_render_latency_ms = playout_backlog_ms;
     session->render_queue[oldest_index].frame = NULL;
     session->render_queue[oldest_index].source_ts_us = 0;
     session->render_queue[oldest_index].enqueued_at_ms = 0;
     session->render_queue_head = (session->render_queue_head + 1) % session->render_queue_capacity;
     session->render_queue_depth -= 1;
+    int64_t remaining_buffered_span_ms = buffered_span_ms_locked(session);
+    *out_render_latency_ms = remaining_buffered_span_ms;
     if (session->render_queue_depth <= 0) {
         session->render_queue_depth = 0;
         session->render_queue_head = 0;
-        if (session->last_render_post_at_ms <= 0 && should_reprime_after_queue_drain(session)) {
-            session->render_buffer_primed = false;
-            session->render_require_high_reprime = true;
-        } else {
-            // After playback has begun, draining the queue should not force another
-            // full starvation-window reprime. Render the next recovered frame immediately.
-            session->render_buffer_primed = (session->last_render_post_at_ms > 0);
-            session->render_require_high_reprime = false;
-        }
-        session->render_catchup_active = false;
+        *out_render_latency_ms = 0;
         session->next_render_due_ms = 0;
     }
     log_render_queue_state(session, session->render_queue_depth, false);
@@ -2524,12 +2221,6 @@ static void log_dict_keys_once(ffmpeg_session_t *session,
         keys[sizeof(keys) - 1] = '\0';
     }
 
-    ct_debug(TAG,
-             "telemetry keys id=%lld designator=%s source=%s keys=%s",
-             (long long) session->session_id,
-             session->designator,
-             source_tag,
-             keys);
     *already_logged = true;
 }
 
@@ -2718,13 +2409,7 @@ static int open_decoder(ffmpeg_session_t *session) {
             provisional_interval_from_stream(stream, &provisional_fps, &provisional_source);
     if (provisional_interval_ms > 0) {
         session->source_render_interval_ms = provisional_interval_ms;
-        ct_debug(TAG,
-                 "render cadence provisional id=%lld designator=%s source=%s fps=%.2f intervalMs=%lld",
-                 (long long) session->session_id,
-                 session->designator,
-                 provisional_source,
-                 provisional_fps,
-                 (long long) provisional_interval_ms);
+        session->render_interval_smoothed_ms = provisional_interval_ms;
     }
 
     const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
@@ -2834,38 +2519,35 @@ static void run_decode_loop(ffmpeg_session_t *session) {
     // the first connection attempt.  Subsequent reconnects skip the EMA/buffer
     // fields so the tuned gap history survives the 20-second DJI session rotation.
     if (session->is_render) {
-        session->cadence_locked = false;
-        session->locked_render_fps = 0;
-        session->locked_render_interval_ms = 0;
+        session->source_render_interval_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+        session->render_interval_smoothed_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
         session->next_render_due_ms = 0;
-        session->cadence_last_source_ts_us = 0;
-        session->cadence_last_sample_at_ms = 0;
-        session->cadence_lock_sample_count = 0;
-        memset(session->cadence_lock_samples_ms, 0, sizeof(session->cadence_lock_samples_ms));
         session->render_drop_count = 0;
         session->last_logged_render_queue_depth = -1;
         session->last_logged_render_drop_count = -1;
         session->last_render_queue_log_at_ms = 0;
         session->last_render_queue_warn_at_ms = 0;
         session->last_render_lag_log_at_ms = 0;
-        session->render_buffer_primed = false;
-        session->render_require_high_reprime = false;
-        session->render_catchup_active = false;
-        session->render_rate_mode = RENDER_RATE_MODE_SOURCE;
-        session->last_render_rate_mode_log_at_ms = 0;
-        session->last_cadence_relock_at_ms = 0;
-        session->cadence_relock_prev_fill_pct = -1; /* -1: crossings inactive until first prime */
-        session->last_source_rate_tune_at_ms = 0;
-        session->adaptive_buffer_target_ms = RENDER_BUFFER_STARTUP_TARGET_MS;
-        session->adaptive_buffer_high_ms = RENDER_BUFFER_STARTUP_HIGH_MS;
-        session->starvation_gap_ema_ms = 0;
-        session->starvation_gap_sample_count = 0;
-        // Only start decay after a real starvation-driven retune; startup should
-        // keep its initial reserve until we actually observe a gap.
-        session->last_starvation_tune_at_ms = 0;
-        session->last_decode_activity_at_ms = 0;
-        session->last_render_buffer_decay_at_ms = 0;
-        session->last_render_buffer_tune_log_at_ms = 0;
+        session->last_render_control_log_at_ms = 0;
+        session->startup_observation_active = true;
+        session->startup_started_at_ms = monotonic_ms();
+        session->source_interval_confidence = 0;
+        session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+        session->target_latency_ms = 1000;
+        session->stall_active = false;
+        session->last_decode_at_ms = 0;
+        session->last_valid_pts_us = 0;
+        session->last_source_estimate_update_at_ms = 0;
+        session->last_gap_at_ms = 0;
+        session->last_stall_decay_at_ms = 0;
+        session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+        session->last_proven_gap_decay_at_ms = 0;
+        memset(session->cadence_samples_ms, 0, sizeof(session->cadence_samples_ms));
+        session->cadence_sample_count = 0;
+        session->cadence_sample_head = 0;
+        memset(session->gap_samples_ms, 0, sizeof(session->gap_samples_ms));
+        session->gap_sample_count = 0;
+        session->gap_sample_head = 0;
         session->reader_stall_started_at_ms = 0;
         session->last_reader_stall_log_at_ms = 0;
         session->reader_stall_timeout_events = 0;
@@ -2873,6 +2555,11 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         session->reader_waiting_since_ms = 0;
         session->reader_reconnecting_since_ms = 0;
         session->last_reader_wait_event_ms = 0;
+        ct_debug(TAG,
+                 "render startup observe begin id=%lld designator=%s observeMs=%d",
+                 (long long) session->session_id,
+                 session->designator,
+                 RENDER_STARTUP_OBSERVE_MS);
 #if HAVE_SWSCALE
         if (session->render_sync_ready) {
             pthread_mutex_lock(&session->render_lock);
@@ -2982,24 +2669,35 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                              NAN, NAN, NAN, NAN, NAN, NAN);
 
         if (!first_open) {
-            // On reconnect, reset only the timing/cadence fields that are
-            // stream-specific.  Deliberately preserve starvation_gap_ema_ms
-            // and adaptive_buffer_* so the tuned gap history survives the
-            // DJI session rotation.
             if (session->is_render) {
-                session->cadence_locked = false;
-                session->locked_render_fps = 0;
-                session->locked_render_interval_ms = 0;
+                session->source_render_interval_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+                session->render_interval_smoothed_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
                 session->next_render_due_ms = 0;
-                session->cadence_last_source_ts_us = 0;
-                session->cadence_last_sample_at_ms = 0;
-                session->cadence_lock_sample_count = 0;
-                memset(session->cadence_lock_samples_ms, 0, sizeof(session->cadence_lock_samples_ms));
-                session->last_decode_activity_at_ms = 0;
-                session->last_cadence_relock_at_ms = 0;
-                session->cadence_relock_prev_fill_pct = -1; /* re-seed after next prime */
-                session->last_source_rate_tune_at_ms = 0;
-                session->render_require_high_reprime = true; // need a fresh prime burst
+                session->last_render_control_log_at_ms = 0;
+                session->startup_observation_active = true;
+                session->startup_started_at_ms = monotonic_ms();
+                session->source_interval_confidence = 0;
+                session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+                session->target_latency_ms = 1000;
+                session->stall_active = false;
+                session->last_decode_at_ms = 0;
+                session->last_valid_pts_us = 0;
+                session->last_source_estimate_update_at_ms = 0;
+                session->last_gap_at_ms = 0;
+                session->last_stall_decay_at_ms = 0;
+                session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+                session->last_proven_gap_decay_at_ms = 0;
+                memset(session->cadence_samples_ms, 0, sizeof(session->cadence_samples_ms));
+                session->cadence_sample_count = 0;
+                session->cadence_sample_head = 0;
+                memset(session->gap_samples_ms, 0, sizeof(session->gap_samples_ms));
+                session->gap_sample_count = 0;
+                session->gap_sample_head = 0;
+                ct_debug(TAG,
+                         "render startup observe begin id=%lld designator=%s observeMs=%d reconnect=1",
+                         (long long) session->session_id,
+                         session->designator,
+                         RENDER_STARTUP_OBSERVE_MS);
             }
         }
         first_open = false;
@@ -3018,11 +2716,11 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         rc = av_read_frame(session->fmt, pkt);
         session->reader_waiting_since_ms = 0;
         int64_t read_elapsed_ms = monotonic_ms() - read_started_at_ms;
-        if (read_elapsed_ms >= 500) {
-            const char *err_suffix = "";
-            if (rc < 0) {
-                av_strerror(rc, errbuf, sizeof(errbuf));
-                err_suffix = errbuf;
+            if (read_elapsed_ms >= 500) {
+                const char *err_suffix = "";
+                if (rc < 0) {
+                    av_strerror(rc, errbuf, sizeof(errbuf));
+                    err_suffix = errbuf;
             }
             ct_debug(TAG,
                      "av_read_frame wait id=%lld designator=%s elapsedMs=%lld rc=%d%s%s",
@@ -3032,17 +2730,11 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                      rc,
                      rc < 0 ? " err=" : "",
                      rc < 0 ? err_suffix : "");
-            if (read_elapsed_ms >= 1000) {
-                dispatch_probe_event(session->designator, "reader_wait_long", session->session_id, 0,
-                                     NAN, NAN, NAN, NAN, NAN, NAN);
-                if (rc >= 0) {
-                    tune_render_buffer_from_gap_ms(
-                            session,
-                            read_elapsed_ms,
-                            "read-gap");
+                if (read_elapsed_ms >= 1000) {
+                    dispatch_probe_event(session->designator, "reader_wait_long", session->session_id, 0,
+                                         NAN, NAN, NAN, NAN, NAN, NAN);
                 }
             }
-        }
         if (rc == AVERROR_EOF) {
             // Stream ended (publisher disconnected from mediamtx).
             // Break out of the inner loop so the outer reconnect loop can
@@ -3090,7 +2782,6 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                      (long long) session->reader_stall_timeout_events,
                      (long long) session->reader_stall_error_events,
                      pkt->stream_index);
-            tune_render_buffer_from_gap_ms(session, stall_ms, "stall-recovered");
             session->reader_stall_started_at_ms = 0;
             session->last_reader_stall_log_at_ms = 0;
             session->reader_stall_timeout_events = 0;
@@ -3106,7 +2797,6 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         if (last_video_packet_at_ms != 0) {
             int64_t packet_gap_ms = now_ms - last_video_packet_at_ms;
             if (packet_gap_ms >= 500) {
-                tune_render_buffer_from_gap_ms(session, packet_gap_ms, "video-gap");
                 int64_t pkt_pts_us = pts_to_us(pkt->pts, session->video_time_base);
                 ct_debug(TAG,
                          "video packet gap id=%lld designator=%s gapMs=%lld ptsUs=%lld",
@@ -3163,8 +2853,6 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     &session->frame_metadata_keys_logged);
             telemetry_values_t frame_tv = collect_dict_telemetry_values(frame->metadata, pts_us);
             int64_t decoded_at_ms = monotonic_ms();
-            session->last_decode_activity_at_ms = decoded_at_ms;
-            update_startup_cadence_lock(session, pts_us, decoded_at_ms);
             if (last_decoded_frame_at_ms != 0) {
                 int64_t frame_gap_ms = decoded_at_ms - last_decoded_frame_at_ms;
                 if (frame_gap_ms >= 500) {
@@ -3189,6 +2877,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                 if (session->render_thread_started && session->render_sync_ready) {
                     bool enqueued = false;
                     pthread_mutex_lock(&session->render_lock);
+                    record_decode_timing_sample_locked(session, decoded_at_ms, pts_us);
                     enqueued = enqueue_render_frame(
                             session,
                             frame,
@@ -3249,11 +2938,6 @@ static void run_decode_loop(ffmpeg_session_t *session) {
 
 static void *session_thread_main(void *arg) {
     ffmpeg_session_t *session = (ffmpeg_session_t *) arg;
-    ct_debug(TAG,
-             "session thread start id=%lld render=%d designator=%s",
-             (long long) session->session_id,
-             session->is_render ? 1 : 0,
-             session->designator);
 
     dispatch_probe_event(session->designator, "session_started", session->session_id, 0,
                          NAN, NAN, NAN, NAN, NAN, NAN);
@@ -3276,10 +2960,6 @@ static void *session_thread_main(void *arg) {
 
     dispatch_probe_event(session->designator, "session_stopped", session->session_id, 0,
                          NAN, NAN, NAN, NAN, NAN, NAN);
-    ct_debug(TAG,
-             "session thread stop id=%lld designator=%s",
-             (long long) session->session_id,
-             session->designator);
     return NULL;
 }
 
@@ -3382,13 +3062,6 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
 
     jlong session_id = slot->session_id;
     pthread_mutex_unlock(&g_lock);
-
-    ct_debug(TAG,
-             "startSession(id=%lld render=%d designator=%s url=%s)",
-             (long long) session_id,
-             is_render ? 1 : 0,
-             d,
-             u);
 
     (*env)->ReleaseStringUTFChars(env, designator, d);
     (*env)->ReleaseStringUTFChars(env, url, u);
@@ -3543,7 +3216,6 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeAttachSurface(
     session->window = window;
     pthread_mutex_unlock(&g_lock);
 
-    ct_debug(TAG, "attachSurface(id=%lld)", (long long) session_id);
     dispatch_probe_event(session->designator, "surface_attached", session->session_id, 0,
                          NAN, NAN, NAN, NAN, NAN, NAN);
     return JNI_TRUE;
@@ -3573,7 +3245,6 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeDetachSurface(
     }
     pthread_mutex_unlock(&g_lock);
 
-    ct_debug(TAG, "detachSurface(id=%lld)", (long long) session_id);
 }
 
 JNIEXPORT void JNICALL
@@ -3647,7 +3318,6 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStop(
     memset(session, 0, sizeof(*session));
     pthread_mutex_unlock(&g_lock);
 
-    ct_debug(TAG, "stop(session=%lld)", (long long) session_id);
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {

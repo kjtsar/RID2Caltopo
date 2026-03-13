@@ -59,6 +59,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
 import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
+import org.opendroneid.android.bluetooth.WiFiScanner
 
 private enum class ScreenLayoutMode {
     Both,
@@ -420,7 +421,8 @@ private fun EmptyStreamsView(mapStatus: String, modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.Center
         ) {
             val myIpAddress: String = R2CPeer.GetMyIpAddress(false)
-            Text("Waiting for drone to attach at rtmp://$myIpAddress/<droneDesig>")
+            val ssid = WiFiScanner.WiFiSSID(LocalContext.current)
+            Text("Stream video to: 'rtmp://$myIpAddress/<droneDesig>' on $ssid network")
             Text(
                 text = mapStatus,
                 style = MaterialTheme.typography.titleLarge

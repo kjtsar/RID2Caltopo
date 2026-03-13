@@ -362,13 +362,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
 
         if (Double.compare(lastLat, lat) == 0 && Double.compare(lastLng, lng) == 0) {
-            if (false && CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {            // these too.
-                CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
-                        "rid_drop remoteId=%s reason=dedup wall=%d droneTs=%d lat=%.6f lng=%.6f transport=%s",
-                        mappedId, nowWallMsec, timestampInMilliseconds, lat, lng, transportType));
-            }
-            nonCount++;
-            return false;
+            if (System.currentTimeMillis() - mostRecentMsecTimestamp < 3000) {
+                if (false && CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {            // these too.
+                    CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
+                            "rid_drop remoteId=%s reason=dedup wall=%d droneTs=%d lat=%.6f lng=%.6f transport=%s",
+                            mappedId, nowWallMsec, timestampInMilliseconds, lat, lng, transportType));
+                }
+                return false;
+            } // OK to let dupes thru at a rate of once every three seconds just to keep the wheels on.
         }
 
         if (MyLat == 0.0F && null != CaltopoMap.MyLocation && CaltopoMap.MyLocation.hasAccuracy()) {
@@ -382,7 +383,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         //   in the same ballpark.
         if (MyLat != 0.0F) { // 0.1 degrees about 6 miles at 40 degrees latitude
             if ((Math.abs(MyLat - lat) > 0.1F) || (Math.abs(MyLng - lng) > 0.1F)) {
-                if (CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) CTDebug(TAG, String.format(Locale.US,
+                CTDebug(TAG, String.format(Locale.US,
                         "checkNewWaypoint(%s/%s) Ignoring spurious waypoint %.7f, %.7f.",
                         trackLabel, transportType, lat, lng));
                 nonCount++;
@@ -395,7 +396,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             float[] dbResult = {Float.NaN};
             Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
             lDistanceInFeet = dbResult[0] / FT_TO_METERS;
-            if (lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet()) {
+            if (false && lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet()) {
                 // let a waypoint update thru every now and then if hovering in place...
                 if (System.currentTimeMillis() - mostRecentMsecTimestamp < 1000) return false;
             }
@@ -405,7 +406,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = nowWallMsec;
 
         goodCount++;
-        if (null == airborne || airborne != this.airborne) {
+        if (null != airborne && airborne != this.airborne) {
             this.airborne = airborne;
             if (airborne) {
                 CTDebug(TAG, String.format(Locale.US,

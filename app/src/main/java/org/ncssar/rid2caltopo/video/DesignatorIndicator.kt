@@ -13,20 +13,29 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import org.ncssar.rid2caltopo.data.DesignatorState
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.util.Locale
-import org.ncssar.rid2caltopo.data.CtDroneSpec
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.Text
+
+internal data class IndicatorPalette(
+    val fillColor: Color,
+    val outlineColor: Color
+)
 
 @Suppress("UNUSED_PARAMETER")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,7 +64,7 @@ fun DesignatorIndicator(
     }
     val designatorState = viewModel.designatorStateFor(streamDesignator)
 
-    val (color, locationText, detailText) = when (designatorState) {
+    val (palette, locationText, detailText) = when (designatorState) {
         is DesignatorState.Green -> {
             val ds = viewModel.droneStates[streamDesignator]
             val feet: String
@@ -72,41 +81,41 @@ fun DesignatorIndicator(
                 dur = "unknown"
             }
             Triple(
-                Color(0xFF00FF00),
+                indicatorPaletteFor(designatorState),
                 "$location (${coordinateDisplayFormat.label})",
                 "alt:${feet}', duration:${dur}, (mapStatus:${mapStatus})"
             )
         }
         is DesignatorState.Yellow -> Triple(
-            Color(0xFFFFFF00),
+            indicatorPaletteFor(designatorState),
             null,
             "Long-press to match telemetry (mapStatus:${mapStatus})"
         )
 
         DesignatorState.Red -> Triple(
-            Color(0xFFFF0000),
+            indicatorPaletteFor(designatorState),
             null,
             "No telemetry available (mapStatus:${mapStatus})"
         )
     }
     Column {
-        Text(
+        OutlinedIndicatorText(
             text = "$streamDesignator - $streamStateText",
-            color = color,
             style = MaterialTheme.typography.titleLarge,
             maxLines = if (streamState == StreamState.ERROR) 2 else 1,
             overflow = TextOverflow.Ellipsis,
+            palette = palette,
             modifier = Modifier
                 .padding(10.dp)
                 .background(Color.Transparent)
         )
         if (locationText != null) {
-            Text(
+            OutlinedIndicatorText(
                 text = locationText,
-                color = color,
                 style = MaterialTheme.typography.bodyLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                palette = palette,
                 modifier = Modifier
                     .padding(horizontal = 10.dp)
                     .background(Color.Transparent)
@@ -127,29 +136,74 @@ fun DesignatorIndicator(
                 }
             }
         }
-        Text(
+        OutlinedIndicatorText(
             text = detailText,
-            color = color,
             style = MaterialTheme.typography.bodyMedium,
             maxLines = if (streamState == StreamState.ERROR) 3 else 1,
             overflow = TextOverflow.Ellipsis,
+            palette = palette,
             modifier = Modifier
                 .padding(horizontal = 10.dp)
                 .background(Color.Transparent)
         )
         if (streamState == StreamState.ERROR && streamErrorDetail != null) {
-            Text(
+            OutlinedIndicatorText(
                 text = streamErrorDetail,
-                color = color,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
+                palette = palette,
                 modifier = Modifier
                     .padding(horizontal = 10.dp)
                     .background(Color.Transparent)
             )
         }
     }
+}
+
+@Composable
+private fun OutlinedIndicatorText(
+    text: String,
+    palette: IndicatorPalette,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip
+) {
+    val outlinedStyle = style.copy(fontWeight = FontWeight.Black)
+    Box(modifier = modifier) {
+        Text(
+            text = text,
+            color = palette.outlineColor,
+            style = outlinedStyle.copy(drawStyle = Stroke(width = 4f, miter = 2f)),
+            maxLines = maxLines,
+            overflow = overflow,
+            modifier = Modifier.align(Alignment.CenterStart)
+        )
+        Text(
+            text = text,
+            color = palette.fillColor,
+            style = outlinedStyle,
+            maxLines = maxLines,
+            overflow = overflow,
+            modifier = Modifier.align(Alignment.CenterStart)
+        )
+    }
+}
+
+internal fun indicatorPaletteFor(designatorState: DesignatorState): IndicatorPalette = when (designatorState) {
+    is DesignatorState.Green -> IndicatorPalette(
+        fillColor = Color(0xFF00FF00),
+        outlineColor = Color(0xFFFF4FD8)
+    )
+    is DesignatorState.Yellow -> IndicatorPalette(
+        fillColor = Color(0xFFFFFF00),
+        outlineColor = Color(0xFF1F4BFF)
+    )
+    DesignatorState.Red -> IndicatorPalette(
+        fillColor = Color(0xFFFF0000),
+        outlineColor = Color(0xFF00D4FF)
+    )
 }
 
 internal fun formatLiveState(renderDelayMs: Long?): String {

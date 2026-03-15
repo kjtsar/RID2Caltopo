@@ -89,6 +89,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
+import androidx.documentfile.provider.DocumentFile
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayInputStream
@@ -480,6 +481,14 @@ internal fun SplitMapPane(
     val demLastAttemptAtByDesignator = remember { HashMap<String, Long>() }
     val demKeyByDesignator = remember { LinkedHashMap<String, String>() }
     val demCalibrationByDesignator = remember { mutableStateMapOf<String, DroneAltitudeCalibration>() }
+    // Auto-download: GeoTIFF tiles already initiated (prevents redundant re-downloads).
+    val autoFetchedDemTiles = remember { HashSet<String>() }
+    val demAutoFetchClient = remember {
+        OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.MINUTES)
+            .build()
+    }
     // AGL correction factor F per drone, set at calibration time.
     // F = (droneAlt_cal - 50ft) - demGround_cal
     // AGL_corrected = droneAlt_new - demGround_new - F
@@ -547,6 +556,11 @@ internal fun SplitMapPane(
     }
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
+    // GeoTIFF tile names covering all currently-visible drone positions.
+    // Used to trigger proactive background downloads so DEM lookups are served locally.
+    val neededDemTileNames: Set<String> = remember(dronePoints) {
+        dronePoints.mapTo(LinkedHashSet()) { tileNameForLocation(it.lat, it.lng) }
+    }
     val offlineBoundaryOptions = remember(artifactOverlayState) {
         buildOfflineBoundaryOptions(artifactOverlayState)
     }
@@ -588,6 +602,29 @@ internal fun SplitMapPane(
             }
         }
     }
+    // Proactive DEM tile download from device GPS. Fires once at startup (after a brief GPS-lock
+    // delay) so the tile is ready before any drone takes off.
+    LaunchedEffect(Unit) {
+        delay(3_000L) // give FusedLocationProvider a moment to deliver its first fix
+        val loc = CaltopoMap.MyLocation ?: return@LaunchedEffect
+        if (!loc.latitude.isFinite() || !loc.longitude.isFinite()) return@LaunchedEffect
+        val tileName = tileNameForLocation(loc.latitude, loc.longitude)
+        if (!autoFetchedDemTiles.add(tileName)) return@LaunchedEffect
+        uiScope.launch(Dispatchers.IO) {
+            autoDownloadDemTile(tileName, context, demAutoFetchClient, demElevationService)
+        }
+    }
+    // Proactive DEM tile download keyed on active drone positions. Fires whenever the set of
+    // required 1° tiles changes (new drone, drone crossing a tile boundary). Each unique tile
+    // is downloaded at most once per session; already-present files are skipped quickly.
+    LaunchedEffect(neededDemTileNames) {
+        for (tileName in neededDemTileNames) {
+            if (!autoFetchedDemTiles.add(tileName)) continue
+            uiScope.launch(Dispatchers.IO) {
+                autoDownloadDemTile(tileName, context, demAutoFetchClient, demElevationService)
+            }
+        }
+    }
     LaunchedEffect(
         showOfflinePrepDialog,
         offlinePrepAreaMode,
@@ -619,17 +656,11 @@ internal fun SplitMapPane(
                 maxZoom = offlinePrepPreset.maxZoom,
                 clipBoundary = selectedBoundary
             )
-            val demEstimate = if (offlinePrepIncludeDem) {
-                estimateDemSamplesApproximate(
-                    bounds = estimateBounds,
-                    stepMeters = offlinePrepPreset.demStepMeters,
-                    clipBoundary = selectedBoundary
-                )
-            } else {
-                0
-            }
+            // DEM download fetches whole USGS 1° GeoTIFF tiles, not EPQS point samples.
+            val demEstimate = if (offlinePrepIncludeDem) demTileNamesForBounds(estimateBounds).size else 0
             val tileCacheMb = (tileEstimate.toLong() * 20_000L) / (1024.0 * 1024.0)
-            val demCacheMb = (demEstimate.toLong() * 200L) / (1024.0 * 1024.0)
+            // Each USGS 1° GeoTIFF tile is ~25–54 MB; use 54 MB as a conservative upper bound.
+            val demCacheMb = demEstimate * 54.0
             OfflinePrepEstimate(
                 tileEstimate = tileEstimate,
                 demEstimate = demEstimate,
@@ -667,10 +698,15 @@ internal fun SplitMapPane(
         if (correctionF != null) {
             demAglCorrectionByDesignator[target.designator] = correctionF
         }
+        val ridH = target.droneSpec?.getLastRidHeightM()
+        val ridHAto = target.droneSpec?.isLastRidHeightAto() ?: false
+        val ridHDisplay = if (ridH != null && ridH != -1000.0 && ridHAto)
+            "${"%.1f".format(ridH)}m (${"%.0f".format(ridH * METERS_TO_FEET)}ft, USED)" else "n/a (fallback to absAlt)"
         if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
             MAP_PANE_TAG,
             "ATO+AGL calibrated for ${target.designator}: " +
                 "droneAlt=${"%.1f".format(target.altitudeM)}m (${"%.0f".format(target.altitudeM * METERS_TO_FEET)}ft) " +
+                "ridHeight=$ridHDisplay " +
                 "takeoffTrackAlt=${"%.1f".format(calibratedTakeoffTrackAltM)}m " +
                 "demGround=${demGround?.let { "%.1f".format(it) } ?: "n/a"}m " +
                 "correctionF=${correctionF?.let { "%.1f".format(it) } ?: "n/a (no DEM)"}m"
@@ -695,8 +731,10 @@ internal fun SplitMapPane(
         val preset = offlinePrepPreset
         val includeDem = offlinePrepIncludeDem
         val maximizeThroughput = offlinePrepMaxThroughput
+        // Compute 1° GeoTIFF tile names for the area now (on the main thread, before the IO job).
+        val demTileNames = if (includeDem) demTileNamesForBounds(bounds) else emptyList<String>()
         val estimatedTileOps = offlinePrepEstimate.tileEstimate
-        val estimatedDemOps = if (includeDem) offlinePrepEstimate.demEstimate else 0
+        val estimatedDemOps = demTileNames.size
         val estimatedTotalOps = (estimatedTileOps + estimatedDemOps).coerceAtLeast(1)
         val tileSource = selectedTileSource()
         offlinePrepJob = uiScope.launch(Dispatchers.IO) {
@@ -709,6 +747,18 @@ internal fun SplitMapPane(
                 }
                 return@launch
             }
+            // Resolve the GeoTIFF DEM storage directory once for this download job.
+            // archiveDemDir is null when no archive directory is configured.
+            val archiveDemDir: DocumentFile? = if (includeDem) {
+                val archiveRoot = CaltopoClient.GetArchiveDir()
+                val cacheDir = archiveRoot?.findFile("cache")
+                cacheDir?.findFile("dem") ?: cacheDir?.createDirectory("dem")
+            } else null
+            // Dedicated HTTP client for large file downloads (USGS GeoTIFF tiles are 25–54 MB each).
+            val geoTiffHttpClient = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.MINUTES)
+                .build()
             val completed = AtomicInteger(0)
             val tileCompleted = AtomicInteger(0)
             val demCompleted = AtomicInteger(0)
@@ -852,6 +902,68 @@ internal fun SplitMapPane(
                         completed.incrementAndGet()
                     }
 
+                    // Downloads a single USGS 1° GeoTIFF tile to archiveDir/cache/dem/.
+                    // Skips tiles that are already present on disk (> 5 MB = clearly not truncated).
+                    // Streams the response body directly to disk to avoid loading 25–54 MB into RAM.
+                    suspend fun processGeoTiffTile(tileName: String) {
+                        ensureActive()
+                        val demDir = archiveDemDir
+                        if (demDir == null) {
+                            demFailed.incrementAndGet()
+                            totalFailed.incrementAndGet()
+                            demCompleted.incrementAndGet()
+                            completed.incrementAndGet()
+                            return
+                        }
+                        val fileName = "USGS_1_$tileName.tif"
+                        val existing = demDir.findFile(fileName)
+                        if (existing != null && existing.isFile && existing.length() > 5_000_000L) {
+                            demHits.incrementAndGet()
+                            demCompleted.incrementAndGet()
+                            completed.incrementAndGet()
+                            MapCacheDebug.log("geotiff dem hit tile=$tileName bytes=${existing.length()}")
+                            return
+                        }
+                        val url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/$tileName/USGS_1_$tileName.tif"
+                        var failureDetail = "unknown"
+                        val ok = try {
+                            val req = Request.Builder().url(url).build()
+                            geoTiffHttpClient.newCall(req).execute().use { resp ->
+                                if (!resp.isSuccessful) {
+                                    failureDetail = "http=${resp.code}"
+                                    return@use false
+                                }
+                                val body = resp.body ?: run { failureDetail = "no-body"; return@use false }
+                                val destFile = demDir.findFile(fileName) ?: demDir.createFile("image/tiff", fileName)
+                                if (destFile == null) { failureDetail = "create-failed"; return@use false }
+                                context.contentResolver.openOutputStream(destFile.uri, "wt")?.use { out ->
+                                    body.byteStream().copyTo(out)
+                                } ?: run { failureDetail = "stream-open-failed"; return@use false }
+                                MapCacheDebug.log("geotiff dem fetched tile=$tileName uri=${destFile.uri}")
+                                true
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            failureDetail = "ex=${e.javaClass.simpleName}:${e.message}"
+                            false
+                        }
+                        if (ok) {
+                            demFetched.incrementAndGet()
+                        } else {
+                            demFailed.incrementAndGet()
+                            totalFailed.incrementAndGet()
+                            val n = demFailureLogCount.incrementAndGet()
+                            if (n <= 12 || (n % 50) == 0) {
+                                val msg = "GeoTIFF download failure#$n tile=$tileName reason=$failureDetail"
+                                CTError(MAP_PANE_TAG, "DownloadMap DEM $msg")
+                                MapCacheDebug.warn(MapCacheDebug.TAG_DEM, msg)
+                            }
+                        }
+                        demCompleted.incrementAndGet()
+                        completed.incrementAndGet()
+                    }
+
                     if (!maximizeThroughput) {
                         val workerCount = 3
                         val tileQueue = Channel<Long>(capacity = workerCount * 3)
@@ -870,16 +982,24 @@ internal fun SplitMapPane(
                         workers.forEach { it.join() }
 
                         if (includeDem) {
-                            phase = "Sampling DEM"
-                            forEachDemSamplePointForBounds(bounds, preset.demStepMeters, clipBoundary) { lat, lng ->
-                                processDem(lat, lng)
+                            if (archiveDemDir == null) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    CaltopoClient.ShowToast("DEM tile download requires a configured archive directory.")
+                                }
+                            } else {
+                                phase = "Downloading DEM tiles"
+                                for (tileName in demTileNames) {
+                                    currentCoroutineContext().ensureActive()
+                                    processGeoTiffTile(tileName)
+                                }
+                                if (demFetched.get() > 0) demElevationService.refreshGeoTiffCatalog()
                             }
                         }
                     } else {
                         val maxWorkers = 16
                         val minWorkers = 2
                         val tileQueue = Channel<Long>(capacity = maxWorkers * 4)
-                        val demQueue = Channel<Pair<Double, Double>>(capacity = maxWorkers * 3)
+                        val demQueue = Channel<String>(capacity = maxWorkers * 3)
                         val tileWorkers = mutableListOf<Job>()
                         val demWorkers = mutableListOf<Job>()
 
@@ -890,15 +1010,21 @@ internal fun SplitMapPane(
                             }
                             tileQueue.close()
                         }
-                        val demProducer = if (includeDem) {
+                        val demProducer = if (includeDem && archiveDemDir != null) {
                             launch {
-                                forEachDemSamplePointForBounds(bounds, preset.demStepMeters, clipBoundary) { lat, lng ->
+                                for (tileName in demTileNames) {
                                     currentCoroutineContext().ensureActive()
-                                    demQueue.send(Pair(lat, lng))
+                                    demQueue.send(tileName)
                                 }
                                 demQueue.close()
                             }
                         } else {
+                            if (includeDem && archiveDemDir == null) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    CaltopoClient.ShowToast("DEM tile download requires a configured archive directory.")
+                                }
+                            }
+                            demQueue.close()
                             null
                         }
 
@@ -911,8 +1037,8 @@ internal fun SplitMapPane(
                         }
                         fun addDemWorker() {
                             demWorkers += launch {
-                                for ((lat, lng) in demQueue) {
-                                    processDem(lat, lng)
+                                for (tileName in demQueue) {
+                                    processGeoTiffTile(tileName)
                                 }
                             }
                         }
@@ -926,7 +1052,8 @@ internal fun SplitMapPane(
                         }
 
                         var initialTileWorkers = if (includeDem) 6 else 10
-                        var initialDemWorkers = if (includeDem) 4 else 0
+                        // GeoTIFF tiles are large (25–54 MB each); 2 concurrent downloads is plenty.
+                        var initialDemWorkers = if (includeDem && archiveDemDir != null) 2 else 0
                         if (initialTileWorkers + initialDemWorkers > maxWorkers) {
                             initialTileWorkers = maxWorkers - initialDemWorkers
                         }
@@ -979,9 +1106,10 @@ internal fun SplitMapPane(
                         tileProducer.join()
                         tileWorkers.toList().forEach { it.join() }
                         if (includeDem && demProducer != null) {
-                            phase = "Sampling DEM"
+                            phase = "Downloading DEM tiles"
                             demProducer.join()
                             demWorkers.toList().forEach { it.join() }
+                            if (demFetched.get() > 0) demElevationService.refreshGeoTiffCatalog()
                         }
                         adaptiveManager.cancel()
                     }
@@ -1140,9 +1268,24 @@ internal fun SplitMapPane(
             // AGL = droneAlt - demGround - F, computed dynamically with current altitude.
             // Use fresh (non-stale) groundM when available; fall back to stale (shown with ? suffix).
             val aglFeet = (freshAglState ?: aglState)?.let { (point.altitudeM - it.groundM - aglCorrectionM) * METERS_TO_FEET }
-            val aglStale = freshAglState == null && aglState != null
-            // ATO is purely altitude-based (no DEM). Shows -- until manually calibrated.
-            val atoFeet = calibration?.let { manualAtoMeters(point, it) * METERS_TO_FEET }
+            // Show ? when: data is stale, drone has moved to a new position (old DEM no longer valid),
+            // or a fetch is actively in flight.
+            val demKeyDetail = demElevationService.cacheKey(point.lat, point.lng)
+            val priorKeyDetail = demKeyByDesignator[designator]
+            val locationChangedDetail = priorKeyDetail != null && priorKeyDetail != demKeyDetail
+            val demPendingDetail = demPendingByDesignator.contains(designator)
+            val aglStale = aglState != null && (freshAglState == null || locationChangedDetail || demPendingDetail)
+            // ATO: prefer the drone's own ridHeight (relative baro, drift-resistant) when it
+            // is ATO-typed and valid.  The absolute baro field (altitudeM) drifts with
+            // atmospheric pressure changes; ridHeight cancels that drift because it is a
+            // difference (current pressure − home pressure), not an absolute measurement.
+            // Fall back to manual calibration math only when ridHeight is unavailable.
+            val ridHeightAtoM = point.droneSpec?.let { spec ->
+                val h = spec.getLastRidHeightM()
+                if (spec.isLastRidHeightAto() && h != -1000.0) h else null
+            }
+            val atoFeet = (ridHeightAtoM?.let { it * METERS_TO_FEET })
+                ?: calibration?.let { manualAtoMeters(point, it) * METERS_TO_FEET }
             val rangeFeet = if (CaltopoMap.MyLocation != null &&
                 CaltopoMap.MyLocation.latitude.isFinite() &&
                 CaltopoMap.MyLocation.longitude.isFinite()
@@ -1647,9 +1790,19 @@ internal fun SplitMapPane(
                     // AGL = droneAlt - demGround - F, computed dynamically with current altitude.
                     // Fall back to stale groundM with ? suffix when fresh DEM unavailable.
                     val labelAglFeet = (freshAglState ?: aglState)?.let { (point.altitudeM - it.groundM - aglCorrectionM) * METERS_TO_FEET }
-                    val labelAglStale = freshAglState == null && aglState != null
-                    // ATO is purely altitude-based (no DEM). Shows -- until manually calibrated.
-                    val labelAtoFeet = calibration?.let { manualAtoMeters(point, it) * METERS_TO_FEET }
+                    // Show ? when: data is stale, drone has moved to a new position (old DEM no longer
+                    // valid for current location), or a fetch is actively in flight for this drone.
+                    val demPending = demPendingByDesignator.contains(point.designator)
+                    val locationChanged = priorKey != null && priorKey != demKey
+                    val labelAglStale = aglState != null && (freshAglState == null || locationChanged || demPending)
+                    // ATO: prefer the drone's own ridHeight (relative baro, drift-resistant) when
+                    // ATO-typed and valid.  Same logic as the bubble display above.
+                    val labelRidHeightAtoM = point.droneSpec?.let { spec ->
+                        val h = spec.getLastRidHeightM()
+                        if (spec.isLastRidHeightAto() && h != -1000.0) h else null
+                    }
+                    val labelAtoFeet = (labelRidHeightAtoM?.let { it * METERS_TO_FEET })
+                        ?: calibration?.let { manualAtoMeters(point, it) * METERS_TO_FEET }
                     val lastDemAttemptAt = demLastAttemptAtByDesignator[point.designator] ?: 0L
                     val shouldRetryDem =
                         priorKey == demKey &&
@@ -2201,7 +2354,7 @@ internal fun SplitMapPane(
                             }
                         }
                         Text(
-                            "DEM spacing above is cache sampling interval, not native USGS DEM raster resolution.",
+                            "DEM spacing above reflects runtime query granularity. Downloading fetches whole USGS 1° GeoTIFF tiles.",
                             fontSize = 11.sp
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2210,7 +2363,7 @@ internal fun SplitMapPane(
                                 onCheckedChange = { if (!offlinePrepInFlight) offlinePrepIncludeDem = it },
                                 enabled = !offlinePrepInFlight
                             )
-                            Text("Include DEM sampling")
+                            Text("Include DEM tiles (USGS 1° GeoTIFF, ~25–54 MB/tile)")
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
@@ -2230,14 +2383,14 @@ internal fun SplitMapPane(
                             if (offlinePrepEstimateRunning || !offlinePrepEstimate.ready) {
                                 "Estimate: calculating..."
                             } else {
-                                "Estimate (cache footprint): " +
+                                "Estimate: " +
                                     "tiles=${offlinePrepEstimate.tileEstimate} (~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedTileCacheMb)} MB), " +
-                                    "dem=${offlinePrepEstimate.demEstimate} (~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedDemCacheMb)} MB)"
+                                    "dem=${offlinePrepEstimate.demEstimate} tile(s) (~${"%.0f".format(Locale.US, offlinePrepEstimate.estimatedDemCacheMb)} MB)"
                             },
                             fontSize = 12.sp
                         )
                         Text(
-                            "Note: runtime is often dominated by DEM query latency, not tile MB size.",
+                            "Note: GeoTIFF tiles provide instant local DEM lookups with no network queries for covered areas.",
                             fontSize = 11.sp
                         )
                         if (offlinePrepEstimate.ready) {
@@ -2602,6 +2755,90 @@ private suspend fun forEachDemSamplePointForBounds(
         }
         lat += latStepDeg
     }
+}
+
+/** Returns the USGS 3DEP 1° tile name (e.g. "n40w122") that covers the given coordinate. */
+private fun tileNameForLocation(lat: Double, lng: Double): String {
+    val tileNorth = kotlin.math.floor(lat).toInt() + 1
+    val tileLonBlock = kotlin.math.floor(lng).toInt()
+    val latPart = if (tileNorth >= 0) "n%02d".format(tileNorth) else "s%02d".format(-tileNorth)
+    val lonPart = if (tileLonBlock < 0) "w%03d".format(-tileLonBlock) else "e%03d".format(tileLonBlock + 1)
+    return "$latPart$lonPart"
+}
+
+/**
+ * Background helper: downloads one USGS 3DEP 1° GeoTIFF tile into the archive DEM cache if it
+ * is not already present (or is incomplete). After a successful download the GeoTiffDemSource
+ * catalog is invalidated so subsequent DEM queries are served from the new local file.
+ *
+ * Must be called from an IO coroutine. Swallows non-cancellation exceptions.
+ */
+private suspend fun autoDownloadDemTile(
+    tileName: String,
+    context: Context,
+    client: OkHttpClient,
+    service: DemElevationService
+) {
+    val archiveRoot = CaltopoClient.GetArchiveDir() ?: run {
+        MapCacheDebug.log("auto-dem: no archive dir, skipping tile=$tileName")
+        return
+    }
+    val cacheDir = archiveRoot.findFile("cache") ?: archiveRoot.createDirectory("cache") ?: return
+    val demDir = cacheDir.findFile("dem") ?: cacheDir.createDirectory("dem") ?: return
+    val fileName = "USGS_1_$tileName.tif"
+    val existing = demDir.findFile(fileName)
+    if (existing != null && existing.isFile && existing.length() > 5_000_000L) {
+        MapCacheDebug.log("auto-dem: already present tile=$tileName bytes=${existing.length()}")
+        service.refreshGeoTiffCatalog()
+        return
+    }
+    val url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/$tileName/USGS_1_$tileName.tif"
+    CTDebug(MAP_PANE_TAG, "auto-dem: downloading tile=$tileName")
+    try {
+        val ok = client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                CTError(MAP_PANE_TAG, "auto-dem http-fail code=${resp.code} tile=$tileName")
+                return@use false
+            }
+            val body = resp.body ?: run { CTError(MAP_PANE_TAG, "auto-dem no-body tile=$tileName"); return@use false }
+            val destFile = demDir.findFile(fileName) ?: demDir.createFile("image/tiff", fileName)
+                ?: run { CTError(MAP_PANE_TAG, "auto-dem create-failed tile=$tileName"); return@use false }
+            context.contentResolver.openOutputStream(destFile.uri, "wt")?.use { out ->
+                body.byteStream().copyTo(out)
+            } ?: run { CTError(MAP_PANE_TAG, "auto-dem stream-open-failed tile=$tileName"); return@use false }
+            true
+        }
+        if (ok) {
+            CTDebug(MAP_PANE_TAG, "auto-dem: complete tile=$tileName")
+            service.refreshGeoTiffCatalog()
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        CTError(MAP_PANE_TAG, "auto-dem ex tile=$tileName: ${e.javaClass.simpleName}:${e.message}")
+    }
+}
+
+private fun demTileNamesForBounds(bounds: BoundingBox): List<String> {
+    val latMin = minOf(bounds.latNorth, bounds.latSouth)
+    val latMax = maxOf(bounds.latNorth, bounds.latSouth)
+    val lonMin = minOf(bounds.lonWest, bounds.lonEast)
+    val lonMax = maxOf(bounds.lonWest, bounds.lonEast)
+    // USGS 3DEP 1° tile naming: "n40w122" means NW corner at 40°N, 122°W → covers 39–40°N, 121–122°W.
+    val latSouthBlock = kotlin.math.floor(latMin).toInt()
+    val latNorthBlock = kotlin.math.ceil(latMax).toInt() - 1
+    val lonWestBlock = kotlin.math.floor(lonMin).toInt()
+    val lonEastBlock = kotlin.math.ceil(lonMax).toInt() - 1
+    val names = mutableListOf<String>()
+    for (latBlock in latSouthBlock..latNorthBlock) {
+        val tileNorth = latBlock + 1
+        val latPart = if (tileNorth >= 0) "n%02d".format(tileNorth) else "s%02d".format(-tileNorth)
+        for (lonBlock in lonWestBlock..lonEastBlock) {
+            val lonPart = if (lonBlock < 0) "w%03d".format(-lonBlock) else "e%03d".format(lonBlock + 1)
+            names += "$latPart$lonPart"
+        }
+    }
+    return names
 }
 
 private fun lonToTileX(lon: Double, zoom: Int): Int {

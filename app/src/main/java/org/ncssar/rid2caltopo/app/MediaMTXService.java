@@ -135,7 +135,13 @@ public class MediaMTXService extends Service {
     public void onDestroy() {
         processPid = 0;
         MediaMTXNative.stop();
-        MediaMTXRecordingSync.syncAll(getApplicationContext(), null);
+        // Run syncAll on a background thread to avoid ForegroundServiceDidNotStopInTimeException.
+        // Android 14+ enforces a ~20 s shutdown timeout on the main thread; copying large video
+        // files to the SAF archive can easily exceed that.  Any fragments not synced here will
+        // be picked up by the syncAll() call at the next startNativeServer() invocation.
+        final Context appContext = getApplicationContext();
+        new Thread(() -> MediaMTXRecordingSync.syncAll(appContext, null),
+                "mediamtx-sync-shutdown").start();
         super.onDestroy();
     }
 

@@ -83,7 +83,7 @@ internal class DemElevationService(context: Context) {
         }
 
         val localTiff = localGeoTiff.sampleElevationMeters(lat, lng)
-        if (localTiff != null && localTiff.isFinite()) {
+        if (localTiff != null && localTiff.isFinite() && localTiff >= -500.0 && localTiff <= 10_000.0) {
             val sample = DemElevationSample(
                 elevationMeters = localTiff,
                 stale = false,
@@ -93,6 +93,13 @@ internal class DemElevationService(context: Context) {
             synchronized(mem) { mem[key] = sample }
             MapCacheDebug.log("dem local-geotiff key=$key elevM=${"%.2f".format(Locale.US, sample.elevationMeters)}")
             return@withContext sample
+        }
+        if (localTiff != null) {
+            // Decoded value is out of plausible terrain range — decoder bug or corrupt tile.
+            // Log and fall through to EPQS rather than caching the garbage value.
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                "dem local-geotiff-range-reject key=$key elevM=$localTiff " +
+                    "lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)}")
         }
         MapCacheDebug.log("dem local-geotiff-miss key=$key")
 
@@ -125,6 +132,11 @@ internal class DemElevationService(context: Context) {
         cache.prewarm()
     }
 
+    /** Force GeoTiffDemSource to reload its tile catalog from disk on the next query. */
+    fun refreshGeoTiffCatalog() {
+        localGeoTiff.invalidateCatalog()
+    }
+
     fun hasCachedSample(lat: Double, lng: Double): Boolean {
         if (!lat.isFinite() || !lng.isFinite()) return false
         val key = cacheKey(lat, lng)
@@ -139,11 +151,16 @@ internal class DemElevationService(context: Context) {
     fun cacheKey(lat: Double, lng: Double): String {
         val qLat = quantize(lat)
         val qLng = quantize(lng)
-        return "v1|$qLat|$qLng|m"
+        // v5: same 1 arc-second (≈30 m) quantization as v4, but v4 entries were corrupted
+        //     by a predictor=3 decode bug (tile-level cumsum instead of per-row, per-plane).
+        //     Bumping to v5 forces a clean re-fetch with the corrected row-level decoder.
+        return "v5|$qLat|$qLng|m"
     }
 
     private fun quantize(value: Double): Int {
-        return kotlin.math.round(value * 100_000.0).toInt()
+        // 3600 arc-seconds per degree → each cache cell is ≈1 arc-second ≈ 30 m,
+        // matching the native resolution of USGS 3DEP 1" data used by EPQS and GeoTIFF tiles.
+        return kotlin.math.round(value * 3_600.0).toInt()
     }
 
     private suspend fun fetchSample(lat: Double, lng: Double): DemElevationSample? {

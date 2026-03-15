@@ -479,7 +479,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
 
         if (Double.compare(lastLat, lat) == 0 && Double.compare(lastLng, lng) == 0) {
-            if (System.currentTimeMillis() - mostRecentMsecTimestamp < 3000) {
+            if ((goodCount == 0) || (System.currentTimeMillis() - mostRecentMsecTimestamp < 3000)) {
                 if (false && CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {            // these too.
                     CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
                             "rid_drop remoteId=%s reason=dedup wall=%d droneTs=%d lat=%.6f lng=%.6f transport=%s",

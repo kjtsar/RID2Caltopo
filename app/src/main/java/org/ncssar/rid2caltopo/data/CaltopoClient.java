@@ -901,7 +901,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         boolean replaceFlag = false;
         try {
             mapJson = json.optJSONArray("map");
-            if (json.optString("load_type").equals("replace")) {
+            if (!json.optString("load_type").equals("merge")) {
                 replaceFlag = true;
             }
             CTDebug(TAG, "readRidmapFileContent(): setting load_type to " +

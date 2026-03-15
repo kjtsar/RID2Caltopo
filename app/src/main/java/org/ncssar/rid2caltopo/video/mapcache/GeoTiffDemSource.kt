@@ -35,6 +35,12 @@ internal class GeoTiffDemSource(context: Context) {
             return size > 12
         }
     }
+    @Volatile private var pred3DiagCount = 0
+
+    /** Force the next call to [sampleElevationMeters] to rebuild the tile catalog from disk. */
+    fun invalidateCatalog() {
+        synchronized(lock) { catalogRefreshedAtMs = 0L }
+    }
 
     fun sampleElevationMeters(lat: Double, lng: Double): Double? {
         if (!lat.isFinite() || !lng.isFinite()) return null
@@ -103,6 +109,19 @@ internal class GeoTiffDemSource(context: Context) {
         synchronized(lock) {
             metadataCache[tile.id] = loaded
         }
+        // Log key metadata once per tile on first load to aid decoder diagnostics.
+        MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+            "dem meta ${tile.displayName}: " +
+                "size=${loaded.width}x${loaded.height} " +
+                "tile=${loaded.tileWidth}x${loaded.tileHeight} " +
+                "rowsPerStrip=${loaded.rowsPerStrip} " +
+                "isTiled=${loaded.isTiled} blocks=${loaded.blockOffsets.size} " +
+                "comp=${loaded.compression} pred=${loaded.predictor} " +
+                "bps=${loaded.bitsPerSample} fmt=${loaded.sampleFormat} " +
+                "bo=${loaded.byteOrder} spp=${loaded.samplesPerPixel} " +
+                "nodata=${loaded.noDataValue} " +
+                "tieIJ=${loaded.tieI},${loaded.tieJ} tieXY=${"%.6f".format(Locale.US, loaded.tieX)},${"%.6f".format(Locale.US, loaded.tieY)} " +
+                "scaleXY=${"%.8f".format(Locale.US, loaded.scaleX)},${"%.8f".format(Locale.US, loaded.scaleY)}")
         return loaded
     }
 
@@ -135,7 +154,13 @@ internal class GeoTiffDemSource(context: Context) {
 
             val s00 = sampleAtPixel(source, metadata, c0, r0, blockCache) ?: return@use null
             if (isNoData(s00, metadata.noDataValue)) return@use null
-            if (c0 == c1 && r0 == r1) return@use s00
+            if (c0 == c1 && r0 == r1) {
+                MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                    "dem sample lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)} " +
+                        "colF=${"%.2f".format(Locale.US, colF)} rowF=${"%.2f".format(Locale.US, rowF)} " +
+                        "c0=$c0 r0=$r0 s00=${"%.2f".format(Locale.US, s00)} -> exact")
+                return@use s00
+            }
 
             val s10 = sampleAtPixel(source, metadata, c1, r0, blockCache) ?: return@use null
             val s01 = sampleAtPixel(source, metadata, c0, r1, blockCache) ?: return@use null
@@ -149,7 +174,13 @@ internal class GeoTiffDemSource(context: Context) {
 
             val dx = (colF - c0.toDouble()).coerceIn(0.0, 1.0)
             val dy = (rowF - r0.toDouble()).coerceIn(0.0, 1.0)
-            bilinearInterpolate(s00, s10, s01, s11, dx, dy)
+            val result = bilinearInterpolate(s00, s10, s01, s11, dx, dy)
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                "dem sample lat=${"%.5f".format(Locale.US, lat)} lng=${"%.5f".format(Locale.US, lng)} " +
+                    "colF=${"%.2f".format(Locale.US, colF)} rowF=${"%.2f".format(Locale.US, rowF)} " +
+                    "c0=$c0 r0=$r0 s00=${"%.2f".format(Locale.US, s00)} s10=${"%.2f".format(Locale.US, s10)} " +
+                    "s01=${"%.2f".format(Locale.US, s01)} s11=${"%.2f".format(Locale.US, s11)} -> ${"%.2f".format(Locale.US, result)}")
+            result
         }
     }
 
@@ -228,18 +259,139 @@ internal class GeoTiffDemSource(context: Context) {
             else -> return null
         }
         val predictor = metadata.predictor
-        return if (predictor != null && predictor > 1) {
-            Predictor.decode(
-                decoded,
-                blockWidth,
-                blockHeight,
-                metadata.samplesPerPixel,
-                metadata.bitsPerSample,
-                predictor
-            )
-        } else {
-            decoded
+        return when {
+            predictor == null || predictor <= 1 -> decoded
+            predictor == 2 -> {
+                // Integer horizontal differencing – supported by the library.
+                try {
+                    Predictor.decode(decoded, blockWidth, blockHeight,
+                        metadata.samplesPerPixel, metadata.bitsPerSample, predictor)
+                } catch (e: Exception) {
+                    MapCacheDebug.warn(MapCacheDebug.TAG_DEM, "decodeBlock predictor2 failed: ${e.message}")
+                    null
+                }
+            }
+            predictor == 3 -> {
+                // Floating-point horizontal differencing (TIFF Supplement 2 §14).
+                // The library version in use does not support this, so we implement it here.
+                try {
+                    applyFloatPredictor3Decode(decoded, blockWidth, blockHeight,
+                        metadata.samplesPerPixel, metadata.bitsPerSample.firstOrNull() ?: return null,
+                        metadata.byteOrder)
+                } catch (e: Exception) {
+                    MapCacheDebug.warn(MapCacheDebug.TAG_DEM, "decodeBlock predictor3 failed: ${e.message}")
+                    null
+                }
+            }
+            else -> {
+                MapCacheDebug.warn(MapCacheDebug.TAG_DEM, "decodeBlock unsupported predictor=$predictor")
+                null
+            }
         }
+    }
+
+    /**
+     * Undo TIFF floating-point horizontal differencing predictor (Predictor = 3).
+     *
+     * libtiff (GDAL's encoder) applies predictor=3 PER ROW, independently for every row
+     * within a tile or strip — not across the whole tile as a single block.
+     *
+     * Per TIFF Supplement 2 §14, the byte planes are ALWAYS stored in MSB-first order,
+     * regardless of the file's byte order ("II" or "MM"):
+     *   plane 0 = most-significant byte of each sample
+     *   plane M = least-significant byte of each sample
+     *
+     * For each row of N = blockWidth × samplesPerPixel samples:
+     *   Encode:
+     *     1. Convert each sample to its bytes in MSB-first order.
+     *     2. Arrange as M planes of N bytes each:
+     *          [MSB(px0..pxN-1) | next-byte(px0..pxN-1) | … | LSB(px0..pxN-1)]
+     *     3. Apply forward horizontal differencing WITHIN each plane independently.
+     *
+     *   Decode (inverse), for each row independently:
+     *     1. For each byte-plane k: cumulative-sum across that plane's N bytes.
+     *     2. De-interleave, mapping each plane back to the correct byte position in
+     *        the file's native byte order (reversed for LE files, direct for BE files).
+     *
+     * Cross-row accumulation does NOT happen; every row resets.
+     */
+    private fun applyFloatPredictor3Decode(
+        data: ByteArray,
+        blockWidth: Int,
+        blockHeight: Int,
+        samplesPerPixel: Int,
+        bitsPerSampleFirst: Int,
+        byteOrder: ByteOrder
+    ): ByteArray? {
+        if (bitsPerSampleFirst != 32 && bitsPerSampleFirst != 64) return null
+        val bytesPerSample = bitsPerSampleFirst / 8
+        val samplesPerRow = blockWidth * samplesPerPixel   // N — pixels × bands per row
+        val bytesPerRow = samplesPerRow * bytesPerSample   // encoded bytes per row
+        val totalBytes = blockHeight * bytesPerRow
+        if (data.size < totalBytes) {
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                "dem pred3 size-mismatch data=${data.size} expected=$totalBytes " +
+                    "bw=$blockWidth bh=$blockHeight bps=$bitsPerSampleFirst spp=$samplesPerPixel")
+            return null
+        }
+
+        val doLog = pred3DiagCount < 3
+        if (doLog) {
+            pred3DiagCount++
+            val rawHex = (0 until minOf(16, data.size)).joinToString(" ") {
+                "%02X".format(data[it].toInt() and 0xFF)
+            }
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                "dem pred3 bw=$blockWidth bh=$blockHeight bps=$bitsPerSampleFirst " +
+                    "spp=$samplesPerPixel bytesPerRow=$bytesPerRow totalBytes=$totalBytes " +
+                    "dataSize=${data.size} raw[0..15]=$rawHex")
+        }
+
+        val result = data.copyOf()
+
+        for (row in 0 until blockHeight) {
+            val rowBase = row * bytesPerRow
+
+            // Step 1: cumulative-sum within each byte-plane of this row independently.
+            // Each plane spans samplesPerRow consecutive bytes within the row's block.
+            for (plane in 0 until bytesPerSample) {
+                val planeBase = rowBase + plane * samplesPerRow
+                for (i in 1 until samplesPerRow) {
+                    result[planeBase + i] = (result[planeBase + i] + result[planeBase + i - 1]).toByte()
+                }
+            }
+
+            // Step 2: de-interleave this row's byte-planes into pixel-interleaved bytes.
+            // Planes are always MSB-first (TIFF Supplement 2 §14):
+            //   planeIdx=0 → MSB of each sample
+            //   planeIdx=M-1 → LSB of each sample
+            // For LE files ("II"): MSB lives at bytePos = bytesPerSample-1, so plane order reverses.
+            // For BE files ("MM"): MSB lives at bytePos = 0, so plane order is direct.
+            val isBE = byteOrder == ByteOrder.BIG_ENDIAN
+            val rowSrc = result.copyOfRange(rowBase, rowBase + bytesPerRow)
+            for (pxIdx in 0 until samplesPerRow) {
+                for (planeIdx in 0 until bytesPerSample) {
+                    val bytePos = if (isBE) planeIdx else bytesPerSample - 1 - planeIdx
+                    result[rowBase + pxIdx * bytesPerSample + bytePos] =
+                        rowSrc[planeIdx * samplesPerRow + pxIdx]
+                }
+            }
+        }
+
+        if (doLog) {
+            val outHex = (0 until minOf(16, result.size)).joinToString(" ") {
+                "%02X".format(result[it].toInt() and 0xFF)
+            }
+            // Peek at first decoded value for a sanity check.
+            val firstValStr = if (bytesPerSample >= 4 && result.size >= 4) {
+                val bits = readInt(result, 0, byteOrder)
+                "%.4f".format(Locale.US, Float.fromBits(bits).toDouble())
+            } else "n/a"
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                "dem pred3 result[0..15]=$outHex firstFloat=$firstValStr")
+        }
+
+        return result
     }
 
     private fun extractSample(
@@ -541,9 +693,12 @@ internal class GeoTiffDemSource(context: Context) {
         val minLat: Double
         val maxLat: Double
         if (ns == "n") {
-            minLat = latDeg.toDouble()
-            maxLat = minLat + 1.0
+            // USGS 3DEP convention: the number in the tile name is the NORTH (NW corner) edge.
+            // e.g. n40w122 covers 39–40°N, 121–122°W — NOT 40–41°N.
+            maxLat = latDeg.toDouble()
+            minLat = maxLat - 1.0
         } else {
+            // Southern hemisphere: sXX = NW corner latitude (negative). e.g. s38 → -38°N..−39°N.
             maxLat = -latDeg.toDouble()
             minLat = maxLat - 1.0
         }

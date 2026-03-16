@@ -31,6 +31,9 @@ internal class DemElevationService(context: Context) {
         private const val EPQS_BASE_BACKOFF_MS = 500L
         private const val EPQS_MAX_BACKOFF_MS = 8_000L
 
+        /** One arc-second ≈ 30 m — the native resolution of USGS 3DEP 1" data. */
+        private const val ARC_SEC = 1.0 / 3600.0
+
         private val epqsRateGateLock = Any()
         @Volatile
         private var nextEpqsRequestAtMs = 0L
@@ -56,6 +59,37 @@ internal class DemElevationService(context: Context) {
         .readTimeout(3, TimeUnit.SECONDS)
         .callTimeout(6, TimeUnit.SECONDS)
         .build()
+
+    init {
+        // One-time migration: purge the old per-point blob cache (thousands of ~60-byte JSON
+        // .bin files in dem_point_v1/<qLat>/<qLng>/m.bin).  GeoTiffDemSource now keeps a
+        // persistent decoded-block cache (.f32raw files) that is far more efficient — a single
+        // 1 MB block file covers 512×512 = 262 144 elevation points with O(1) seek access and
+        // no LZW/pred3 work after first decode.
+        //
+        // Run on a daemon background thread so the constructor (called from the Compose
+        // composition thread via remember{}) never stalls the UI, even if the old cache
+        // contains many SAF files to delete.
+        Thread({
+            val prefs = context.applicationContext
+                .getSharedPreferences("dem_cache_prefs", android.content.Context.MODE_PRIVATE)
+            if (!prefs.getBoolean("block_cache_migrated_v1", false)) {
+                // Delay cleanup so the prewarm has time to run first.  The v6 cache-key
+                // bump above ensures old v5 blob entries are invisible to new queries even
+                // while they still exist on disk — so this sleep has no correctness impact.
+                Thread.sleep(30_000L)
+                try {
+                    cache.clear()
+                    MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                        "dem point-cache cleared: one-time migration to block-level cache")
+                } catch (e: Exception) {
+                    MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                        "dem point-cache clear-failed: ${e.message}")
+                }
+                prefs.edit().putBoolean("block_cache_migrated_v1", true).apply()
+            }
+        }, "dem-migration").apply { isDaemon = true; start() }
+    }
 
     suspend fun sampleElevationMeters(lat: Double, lng: Double): DemElevationSample? = withContext(Dispatchers.IO) {
         if (!lat.isFinite() || !lng.isFinite()) return@withContext null
@@ -89,7 +123,8 @@ internal class DemElevationService(context: Context) {
                 stale = false,
                 source = "usgs-geotiff-local"
             )
-            cache.put(key, sampleToBytes(sample), cache.defaultExpiry())
+            // Do not write to the point blob cache here — GeoTiffDemSource's decoded-block
+            // cache (.f32raw files) already persists the data far more efficiently.
             synchronized(mem) { mem[key] = sample }
             MapCacheDebug.log("dem local-geotiff key=$key elevM=${"%.2f".format(Locale.US, sample.elevationMeters)}")
             return@withContext sample
@@ -137,6 +172,21 @@ internal class DemElevationService(context: Context) {
         localGeoTiff.invalidateCatalog()
     }
 
+    /**
+     * Pre-decodes the TIFF block(s) covering [lat]/[lng] into the persistent .f32raw block
+     * cache so that subsequent elevation queries during a flight are instant (O(1) seek,
+     * no LZW/pred3).  Call this once after GPS lock — well before the first drone takes off.
+     *
+     * Samples the given point and a one-arc-second diagonal neighbour; this ensures both the
+     * primary block and any adjacent block needed by bilinear interpolation are decoded and
+     * saved.  Each unique block is decoded only once and reused across all future app sessions.
+     */
+    suspend fun prewarmForLocation(lat: Double, lng: Double) {
+        if (!lat.isFinite() || !lng.isFinite()) return
+        sampleElevationMeters(lat, lng)
+        sampleElevationMeters(lat + ARC_SEC, lng + ARC_SEC)
+    }
+
     fun hasCachedSample(lat: Double, lng: Double): Boolean {
         if (!lat.isFinite() || !lng.isFinite()) return false
         val key = cacheKey(lat, lng)
@@ -151,10 +201,12 @@ internal class DemElevationService(context: Context) {
     fun cacheKey(lat: Double, lng: Double): String {
         val qLat = quantize(lat)
         val qLng = quantize(lng)
-        // v5: same 1 arc-second (≈30 m) quantization as v4, but v4 entries were corrupted
-        //     by a predictor=3 decode bug (tile-level cumsum instead of per-row, per-plane).
-        //     Bumping to v5 forces a clean re-fetch with the corrected row-level decoder.
-        return "v5|$qLat|$qLng|m"
+        // v6: same quantization as v5, but v5 entries in the point blob cache could shadow
+        //     the new block-level GeoTIFF cache (GeoTiffDemSource .f32raw files) — the old
+        //     blob entries were returned before localGeoTiff was ever consulted, so block
+        //     files were never written.  Bumping to v6 orphans all v5 blobs immediately;
+        //     they are cleaned up by LRU eviction or the one-time migration thread.
+        return "v6|$qLat|$qLng|m"
     }
 
     private fun quantize(value: Double): Int {

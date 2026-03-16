@@ -37,6 +37,18 @@ internal class GeoTiffDemSource(context: Context) {
     }
     @Volatile private var pred3DiagCount = 0
 
+    /**
+     * Directory for pre-decoded block binaries: {noBackupFilesDir}/dem_blocks/{tileName}/{blockIndex}.f32raw
+     * Each file is a flat little-endian float32 array of (blockWidth × blockHeight) samples.
+     * Reading elevation from a cached block is O(1): seek to offset, read 4 bytes — no LZW/pred3.
+     */
+    private val blockCacheDir = File(appContext.noBackupFilesDir, "dem_blocks")
+
+    /** In-memory LRU of recently decoded blocks (max 8 ≈ 8 MB). Keyed by "$tileName|$blockIndex". */
+    private val blockMemCache = object : LinkedHashMap<String, ByteArray>(16, 0.75f, true) {
+        override fun removeEldestEntry(e: MutableMap.MutableEntry<String, ByteArray>?) = size > 8
+    }
+
     /** Force the next call to [sampleElevationMeters] to rebuild the tile catalog from disk. */
     fun invalidateCatalog() {
         synchronized(lock) { catalogRefreshedAtMs = 0L }
@@ -110,6 +122,12 @@ internal class GeoTiffDemSource(context: Context) {
             metadataCache[tile.id] = loaded
         }
         // Log key metadata once per tile on first load to aid decoder diagnostics.
+        val vertUnit = when (loaded.verticalUnitCode) {
+            9001 -> "m(9001)"
+            9002 -> "ft(9002)"
+            9003 -> "ftUS(9003)"
+            else -> "?(${loaded.verticalUnitCode})"
+        }
         MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
             "dem meta ${tile.displayName}: " +
                 "size=${loaded.width}x${loaded.height} " +
@@ -119,7 +137,7 @@ internal class GeoTiffDemSource(context: Context) {
                 "comp=${loaded.compression} pred=${loaded.predictor} " +
                 "bps=${loaded.bitsPerSample} fmt=${loaded.sampleFormat} " +
                 "bo=${loaded.byteOrder} spp=${loaded.samplesPerPixel} " +
-                "nodata=${loaded.noDataValue} " +
+                "vertUnit=$vertUnit nodata=${loaded.noDataValue} " +
                 "tieIJ=${loaded.tieI},${loaded.tieJ} tieXY=${"%.6f".format(Locale.US, loaded.tieX)},${"%.6f".format(Locale.US, loaded.tieY)} " +
                 "scaleXY=${"%.8f".format(Locale.US, loaded.scaleX)},${"%.8f".format(Locale.US, loaded.scaleY)}")
         return loaded
@@ -146,13 +164,12 @@ internal class GeoTiffDemSource(context: Context) {
         if (metadata.planarConfiguration != 1) return null
 
         return openDataSource(tile.uri)?.use { source ->
-            val blockCache = HashMap<Int, ByteArray>()
             val c0 = floor(colF).toInt().coerceIn(0, metadata.width - 1)
             val r0 = floor(rowF).toInt().coerceIn(0, metadata.height - 1)
             val c1 = (c0 + 1).coerceAtMost(metadata.width - 1)
             val r1 = (r0 + 1).coerceAtMost(metadata.height - 1)
 
-            val s00 = sampleAtPixel(source, metadata, c0, r0, blockCache) ?: return@use null
+            val s00 = sampleAtPixel(source, metadata, tile.displayName, c0, r0) ?: return@use null
             if (isNoData(s00, metadata.noDataValue)) return@use null
             if (c0 == c1 && r0 == r1) {
                 MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
@@ -162,9 +179,9 @@ internal class GeoTiffDemSource(context: Context) {
                 return@use s00
             }
 
-            val s10 = sampleAtPixel(source, metadata, c1, r0, blockCache) ?: return@use null
-            val s01 = sampleAtPixel(source, metadata, c0, r1, blockCache) ?: return@use null
-            val s11 = sampleAtPixel(source, metadata, c1, r1, blockCache) ?: return@use null
+            val s10 = sampleAtPixel(source, metadata, tile.displayName, c1, r0) ?: return@use null
+            val s01 = sampleAtPixel(source, metadata, tile.displayName, c0, r1) ?: return@use null
+            val s11 = sampleAtPixel(source, metadata, tile.displayName, c1, r1) ?: return@use null
             if (isNoData(s10, metadata.noDataValue) ||
                 isNoData(s01, metadata.noDataValue) ||
                 isNoData(s11, metadata.noDataValue)
@@ -187,45 +204,99 @@ internal class GeoTiffDemSource(context: Context) {
     private fun sampleAtPixel(
         source: RandomAccessDataSource,
         metadata: GeoTiffMetadata,
+        tileName: String,
         col: Int,
-        row: Int,
-        decodedBlockCache: MutableMap<Int, ByteArray>
+        row: Int
     ): Double? {
-        val decoded = readDecodedBlockBytes(source, metadata, col, row, decodedBlockCache) ?: return null
+        val decoded = readDecodedBlockBytes(tileName, source, metadata, col, row) ?: return null
         return extractSample(decoded, metadata, col, row)
     }
 
+    /**
+     * Returns the decoded byte array for the TIFF block containing pixel (col, row).
+     *
+     * Three-tier cache (fastest → slowest):
+     *   1. [blockMemCache] — in-memory LRU, O(1), no I/O.
+     *   2. Block file on disk — flat float32 binary written after first decode; O(1) seek+read,
+     *      no LZW/pred3.  Survives app restarts.
+     *   3. TIFF decode — LZW decompress + pred3 undo (expensive).  Result is saved to the block
+     *      file and mem cache so it is never repeated for this block.
+     */
     private fun readDecodedBlockBytes(
+        tileName: String,
         source: RandomAccessDataSource,
         metadata: GeoTiffMetadata,
         col: Int,
-        row: Int,
-        decodedBlockCache: MutableMap<Int, ByteArray>
+        row: Int
     ): ByteArray? {
+        val blockIndex: Int
+        val blockWidth: Int
+        val blockHeight: Int
+
         if (metadata.isTiled) {
             val tw = metadata.tileWidth ?: return null
             val th = metadata.tileHeight ?: return null
             val tileCols = ceil(metadata.width.toDouble() / tw.toDouble()).toInt()
             val tileCol = floor(col.toDouble() / tw.toDouble()).toInt()
             val tileRow = floor(row.toDouble() / th.toDouble()).toInt()
-            val tileIndex = tileRow * tileCols + tileCol
-            if (tileIndex !in metadata.blockOffsets.indices || tileIndex !in metadata.blockByteCounts.indices) return null
-            decodedBlockCache[tileIndex]?.let { return it }
-            val raw = source.readFully(metadata.blockOffsets[tileIndex], metadata.blockByteCounts[tileIndex].toInt())
-            val decoded = decodeBlock(raw, metadata, tw, th) ?: return null
-            decodedBlockCache[tileIndex] = decoded
-            return decoded
+            blockIndex = tileRow * tileCols + tileCol
+            if (blockIndex !in metadata.blockOffsets.indices || blockIndex !in metadata.blockByteCounts.indices) return null
+            blockWidth = tw
+            blockHeight = th
+        } else {
+            val rowsPerStrip = metadata.rowsPerStrip ?: return null
+            val strip = floor(row.toDouble() / rowsPerStrip.toDouble()).toInt()
+            if (strip !in metadata.blockOffsets.indices || strip !in metadata.blockByteCounts.indices) return null
+            blockIndex = strip
+            blockWidth = metadata.width
+            blockHeight = minOf(rowsPerStrip, metadata.height - (strip * rowsPerStrip))
         }
 
-        val rowsPerStrip = metadata.rowsPerStrip ?: return null
-        val strip = floor(row.toDouble() / rowsPerStrip.toDouble()).toInt()
-        if (strip !in metadata.blockOffsets.indices || strip !in metadata.blockByteCounts.indices) return null
-        decodedBlockCache[strip]?.let { return it }
-        val stripHeight = minOf(rowsPerStrip, metadata.height - (strip * rowsPerStrip))
-        val raw = source.readFully(metadata.blockOffsets[strip], metadata.blockByteCounts[strip].toInt())
-        val decoded = decodeBlock(raw, metadata, metadata.width, stripHeight) ?: return null
-        decodedBlockCache[strip] = decoded
+        val memKey = "$tileName|$blockIndex"
+
+        // 1. Memory cache — no I/O
+        synchronized(lock) { blockMemCache[memKey] }?.let { return it }
+
+        // 2. Pre-decoded block file — cheap read, no LZW/pred3
+        val bf = blockFile(tileName, blockIndex)
+        if (bf.exists() && bf.length() > 0L) {
+            try {
+                val bytes = bf.readBytes()
+                synchronized(lock) { blockMemCache[memKey] = bytes }
+                MapCacheDebug.log("dem block-file-hit $tileName #$blockIndex (${bf.length()}B)")
+                return bytes
+            } catch (e: Exception) {
+                MapCacheDebug.warn(MapCacheDebug.TAG_DEM, "dem block-file-read-fail $bf: ${e.message}")
+            }
+        }
+
+        // 3. Decode from TIFF (expensive: LZW decompress + pred3 undo)
+        val raw = try {
+            source.readFully(metadata.blockOffsets[blockIndex], metadata.blockByteCounts[blockIndex].toInt())
+        } catch (e: Exception) {
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM, "dem block-raw-read-fail idx=$blockIndex: ${e.message}")
+            return null
+        }
+        val decoded = decodeBlock(raw, metadata, blockWidth, blockHeight) ?: return null
+
+        // Persist decoded block — future sessions skip the LZW+pred3 work entirely.
+        try {
+            bf.parentFile?.mkdirs()
+            bf.writeBytes(decoded)
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM,
+                "dem block-saved $tileName #$blockIndex (${decoded.size}B)")
+        } catch (e: Exception) {
+            MapCacheDebug.warn(MapCacheDebug.TAG_DEM, "dem block-file-write-fail $bf: ${e.message}")
+        }
+
+        synchronized(lock) { blockMemCache[memKey] = decoded }
         return decoded
+    }
+
+    /** Returns the File path for a pre-decoded block binary. */
+    private fun blockFile(tileName: String, blockIndex: Int): File {
+        val safeName = tileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        return File(File(blockCacheDir, safeName), "$blockIndex.f32raw")
     }
 
     private fun isNoData(value: Double, noDataValue: Double?): Boolean {
@@ -424,7 +495,7 @@ internal class GeoTiffDemSource(context: Context) {
         val offset = ((localRow * blockWidth) + localCol) * bytesPerPixel
         if (offset + bytesPerSample > decodedBlock.size) return null
 
-        return when (metadata.sampleFormat) {
+        val rawValue: Double? = when (metadata.sampleFormat) {
             3 -> {
                 if (bits == 32) {
                     val i = readInt(decodedBlock, offset, metadata.byteOrder)
@@ -446,6 +517,12 @@ internal class GeoTiffDemSource(context: Context) {
                 else if (bits == 32) readUInt(decodedBlock, offset, metadata.byteOrder).toDouble()
                 else null
             }
+        }
+
+        // Convert elevation to metres if the file uses a foot-based vertical unit.
+        return when (metadata.verticalUnitCode) {
+            9002, 9003 -> rawValue?.let { it * 0.3048 }  // International or US Survey foot → m
+            else        -> rawValue                        // 9001 (metre) or unknown → pass through
         }
     }
 
@@ -510,6 +587,24 @@ internal class GeoTiffDemSource(context: Context) {
 
         val noDataValue = parseNoData(values[42113])
 
+        // GeoKeyDirectoryTag (34735): array of SHORTs laid out as:
+        //   [version, revision, minor, numKeys, key0_id, key0_tagLoc, key0_count, key0_valueOrIdx, ...]
+        // We extract GeoKey 4099 (VerticalUnitsGeoKey) to know the elevation unit.
+        // When tagLoc == 0, the value is stored directly in the valueOrIdx field.
+        val geoKeyDir = toIntList(values[34735])
+        val numGeoKeys = geoKeyDir.getOrElse(3) { 0 }
+        var verticalUnitCode = 9001  // default: Linear_Meter
+        for (k in 0 until numGeoKeys) {
+            val base = 4 + k * 4
+            val keyId    = geoKeyDir.getOrElse(base)     { 0 }
+            val tagLoc   = geoKeyDir.getOrElse(base + 1) { 0 }
+            val valueOrIdx = geoKeyDir.getOrElse(base + 3) { 0 }
+            if (keyId == 4099 && tagLoc == 0) {
+                verticalUnitCode = valueOrIdx
+                break
+            }
+        }
+
         return GeoTiffMetadata(
             width = width,
             height = height,
@@ -532,7 +627,8 @@ internal class GeoTiffDemSource(context: Context) {
             rowsPerStrip = rowsPerStrip,
             blockOffsets = offsets,
             blockByteCounts = counts,
-            noDataValue = noDataValue
+            noDataValue = noDataValue,
+            verticalUnitCode = verticalUnitCode
         )
     }
 
@@ -756,7 +852,15 @@ internal class GeoTiffDemSource(context: Context) {
         val rowsPerStrip: Int?,
         val blockOffsets: List<Long>,
         val blockByteCounts: List<Long>,
-        val noDataValue: Double?
+        val noDataValue: Double?,
+        /**
+         * GeoKey 4099 (VerticalUnitsGeoKey): EPSG unit code for elevation values.
+         *   9001 = Linear_Meter (default; assumed when key is absent)
+         *   9002 = Linear_Foot
+         *   9003 = Linear_Foot_US_Survey
+         * Stored so that [extractSample] can convert to metres without re-parsing.
+         */
+        val verticalUnitCode: Int = 9001
     )
 
     private interface RandomAccessDataSource : Closeable {
@@ -789,7 +893,8 @@ internal class GeoTiffDemSource(context: Context) {
             var offset = 0
             while (offset < length) {
                 val read = channel.read(bb, position + offset)
-                if (read <= 0) throw EOFException("short read")
+                if (read < 0) throw EOFException("short read at offset $offset of $length")
+                // read == 0 is theoretically possible on a FileChannel; just retry
                 offset += read
             }
             return bb.array()

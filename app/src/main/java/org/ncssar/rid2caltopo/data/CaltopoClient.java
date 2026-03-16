@@ -531,7 +531,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTLog(String type, String tag, String msg) {
-        if (null == DebugOutputStream) return;
+        OutputStream os = DebugOutputStream;  // capture reference before null check to avoid TOCTOU race
+        if (null == os) return;
         if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) return;
 
         try {
@@ -542,8 +543,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
             byte[] bytes = msg.getBytes();
             BytesWrittenToDebugOutputStream += bytes.length;
-            DebugOutputStream.write(bytes);
-            DebugOutputStream.flush();
+            os.write(bytes);
+            os.flush();
         } catch (IOException e) {
             Log.e(TAG, String.format(Locale.US, "CTError: CTLog(): Not able to write '%s' - %s", LogFilePath, e));
         }

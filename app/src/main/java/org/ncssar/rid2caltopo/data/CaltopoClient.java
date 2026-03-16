@@ -789,6 +789,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         if (!CaltopoCredentials.credentialsAreEqual(cred, ccs.caltopoCredentials)) {
             ccs.caltopoCredentials = cred;
+            NotifySettingsChanged();
+            ArchiveState("caltopo credentials changed");
         }
     }
 
@@ -802,6 +804,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             // FIXME: Should probably check valid format...
         }
         ccs.caltopoDomainAndPort = dAndP;
+        NotifySettingsChanged();
+        ArchiveState("caltopo domain changed");
     }
 
     public static String GetCaltopoDomainAndPort() {
@@ -981,11 +985,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTDebug(TAG, String.format(Locale.US, "Reading v%s %s config file last updated by %s on %s",
                     fileVersion, type, editor, updated));
 
-            // append record to log
-            SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy-HHmmss", Locale.US);
-            String rec = String.format(Locale.US,
-                    "type:%s, editor:%s, dated:%s loaded at %s\n",type, editor, updated, sdf.format(new Date()));;
-            ccs.configFilesLoaded += rec;
+            Context ctxt = R2CApplication.getAppCtxt();
+            if (ctxt != null) {
+                ccs.configFilesLoaded = AppConfigStore.recordLoadedConfigFile(ctxt, type, editor, updated);
+            }
 
             if (type.equals("ct_ridmap")) {
                 readRidmapFileContent(json);
@@ -1260,9 +1263,26 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static ClientClassState GetState() {
         InitializeDebugTagRegistry();
         if (null == Ccstate) {
-            ClientClassState ccs = RestoreState();
-            if (null == ccs) ccs = new ClientClassState();
             Context ctxt = R2CApplication.getAppCtxt();
+            ClientClassState legacyState = null;
+            if (ctxt != null) {
+                AppConfigStore.initialize(ctxt);
+                if (!AppConfigStore.isLegacyImportComplete(ctxt)) {
+                    CTDebug(TAG, "GetState(): legacy import incomplete; attempting restore/import.");
+                    legacyState = RestoreState();
+                    AppConfigStore.importLegacyStateIfNeeded(ctxt, legacyState);
+                } else {
+                    CTDebug(TAG, "GetState(): legacy import already complete; reading proto store.");
+                }
+            }
+            ClientClassState ccs = null;
+            if (ctxt != null) {
+                ccs = (ClientClassState) AppConfigStore.restoreClientState(ctxt);
+                ArchivePermissionMissingFlag = AppConfigStore.getArchiveRequiresRegrant(ctxt);
+                CTDebug(TAG, "GetState(): restored ClientClassState from proto store.");
+            }
+            if (null == ccs) ccs = legacyState;
+            if (null == ccs) ccs = new ClientClassState();
             if (ctxt != null) {
                 applyArchivePathBackupPrefs(ctxt, ccs);
             }
@@ -1293,7 +1313,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 return;
             }
             Ccstate.debugLevel = DebugLevel;
-            archiveSecureState(ctxt, Ccstate);
+            AppConfigStore.persistState(ctxt, Ccstate, ArchivePermissionMissingFlag);
             CTDebug(TAG, String.format(Locale.US, "ArchiveState(%s):\n%s", reason, Ccstate));
             SetFBDefaults();
             Bundle parameters = new Bundle();
@@ -1419,6 +1439,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static Uri GetArchiveUriSelectionHint() {
         Context ctxt = R2CApplication.getAppCtxt();
         if (ctxt == null) return null;
+        String appConfigHint = AppConfigStore.getArchiveSelectionHint(ctxt);
+        if (appConfigHint != null && !appConfigHint.isEmpty()) {
+            try {
+                return Uri.parse(appConfigHint);
+            } catch (Exception e) {
+                CTWarn(TAG, "GetArchiveUriSelectionHint(): app config hint parse failed.", e);
+            }
+        }
         String hint = ctxt.getSharedPreferences(BACKUP_PREFS_NAME, Context.MODE_PRIVATE)
                 .getString(BACKUP_KEY_ARCHIVE_HINT, "");
         if (hint == null || hint.isEmpty()) return null;
@@ -1444,6 +1472,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         if (!ccs.trackerApiKey.equals(apiKey)) {
             ccs.trackerApiKey = apiKey;
+            NotifySettingsChanged();
+            ArchiveState("tracker api key changed");
         }
     }
 
@@ -1457,6 +1487,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         if (!ccs.trackerUrlPfx.equals(urlPfx)) {
             ccs.trackerUrlPfx = urlPfx;
+            NotifySettingsChanged();
+            ArchiveState("tracker url prefix changed");
         }
     }
 
@@ -1678,6 +1710,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ShutdownInProgress = true;
         }
         try {
+            if (Ccstate != null) {
+                ArchiveState("shutdown");
+            }
             WaypointTrack.ArchiveTracks();
             ShutdownExecutorPool(LivePublishExecutorPool, true);
             LivePublishExecutorPool = null;

@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+option java_package = "org.ncssar.rid2caltopo.data";
+option java_multiple_files = true;
+
+message AppConfig {
+  int32 schema_version = 1;
+  bool legacy_import_complete = 2;
+
+  message CaltopoCredentialsConfig {
+    string team_id = 1;
+    string credential_id = 2;
+    string credential_secret = 3;
+  }
+
+  message RidMapping {
+    string remote_id = 1;
+    string mapped_id = 2;
+    string org = 3;
+    string model = 4;
+    string owner = 5;
+  }
+
+  message LoadedConfigFileRecord {
+    string dedupe_key = 1;
+    string display_text = 2;
+    int64 loaded_at_epoch_ms = 3;
+  }
+
+  message ArchiveLocation {
+    string tree_uri = 1;
+    string selection_hint_uri = 2;
+    bool requires_regrant = 3;
+  }
+
+  int64 min_distance_feet = 20;
+  int64 new_track_delay_seconds = 21;
+  int64 max_idle_time_minutes = 22;
+  int32 debug_level = 23;
+
+  string coordinate_display_format = 30;
+  bool capture_video_streams = 31;
+  bool use_peers = 32;
+
+  string caltopo_track_folder = 40;
+  string caltopo_domain_and_port = 41;
+  CaltopoCredentialsConfig caltopo_credentials = 42;
+
+  string incident = 50;
+  string op_period = 51;
+  string tracker_api_key = 52;
+  string tracker_url_prefix = 53;
+
+  ArchiveLocation archive_location = 60;
+
+  repeated RidMapping rid_mappings = 70;
+  repeated LoadedConfigFileRecord loaded_config_files = 80;
+}

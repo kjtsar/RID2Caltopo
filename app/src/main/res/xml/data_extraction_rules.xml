@@ -5,9 +5,11 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <include domain="file" path="datastore/app_config.pb"/>
         <exclude domain="file" path="CaltopoClient.state"/>
     </cloud-backup>
     <device-transfer>
+        <include domain="file" path="datastore/app_config.pb"/>
         <exclude domain="file" path="CaltopoClient.state"/>
     </device-transfer>
 </data-extraction-rules>

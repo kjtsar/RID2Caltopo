@@ -7,9 +7,6 @@
 -->
 <full-backup-content>
 
-   <include domain="file" path="." requireFlags="clientSideEncryption"/>
+   <include domain="file" path="datastore/app_config.pb" requireFlags="clientSideEncryption"/>
    <exclude domain="file" path="CaltopoClient.state"/>
-<!--
-   <exclude domain="sharedpref" path="device.xml"/>
--->
 </full-backup-content>

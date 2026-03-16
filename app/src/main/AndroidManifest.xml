@@ -34,6 +34,7 @@
         android:name="org.ncssar.rid2caltopo.app.R2CApplication"
         android:networkSecurityConfig="@xml/network_security_config"
         android:allowBackup="true"
+        android:backupAgent="org.ncssar.rid2caltopo.data.AppConfigBackupAgent"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@drawable/r2c"

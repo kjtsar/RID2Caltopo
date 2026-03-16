@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.app
 
 import android.app.Application
+import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 
@@ -15,7 +16,7 @@ class R2CApplication : Application() {
         System.setProperty("java.net.preferIPv4Stack", "true");
         System.setProperty("java.net.preferIPv6Addresses", "false");
 
-        // DataStoreBridge.init(this)
+        AppConfigStore.initialize(this)
         CaltopoClient.InitArchiveDir()
         CTDebug(TAG, "onCreate().")
     }

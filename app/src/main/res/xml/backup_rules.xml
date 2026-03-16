@@ -8,5 +8,4 @@
 <full-backup-content>
 
    <include domain="file" path="datastore/app_config.pb" requireFlags="clientSideEncryption"/>
-   <exclude domain="file" path="CaltopoClient.state"/>
 </full-backup-content>

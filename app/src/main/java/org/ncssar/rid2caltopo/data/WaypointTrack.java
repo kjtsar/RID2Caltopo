@@ -16,7 +16,9 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.GetTodaysTrackDir;
 import org.json.*;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 
+import android.graphics.Bitmap;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -27,11 +29,15 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.time.Instant;
 import java.time.ZoneId;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.net.Uri;
@@ -86,6 +92,27 @@ import androidx.documentfile.provider.DocumentFile;
 
 public class WaypointTrack {
 
+    /** Holds one locally-archived clue for a track. */
+    public static class ArchivedClue {
+        public final double lat, lng, alt;
+        public final long timestampMs;
+        @NonNull public final String title;
+        @NonNull public final String description;
+        @Nullable public final Bitmap bitmap;
+
+        public ArchivedClue(double lat, double lng, double alt, long timestampMs,
+                            @NonNull String title, @NonNull String description,
+                            @Nullable Bitmap bitmap) {
+            this.lat = lat;
+            this.lng = lng;
+            this.alt = alt;
+            this.timestampMs = timestampMs;
+            this.title = title;
+            this.description = description;
+            this.bitmap = bitmap;
+        }
+    }
+
 	public static int WaypointCount = 0;
 	private static final String TAG = "WaypointTrack";
     private static final String ReportedFilenames = "r2c_reported.txt";
@@ -110,6 +137,7 @@ public class WaypointTrack {
 	private DocumentFile dataFilepath;
     private String fileName;
 	private OutputStream outputStream = null;
+    private final List<ArchivedClue> clues = new ArrayList<>();
 
 	public WaypointTrack(@NonNull String trackLabel, @NonNull CtDroneSpec droneSpec) {
 		SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy-HHmmss", Locale.US);
@@ -472,6 +500,7 @@ public class WaypointTrack {
                         "archive(%s): server returned %d", fileName, responseCode));
                 if (responseCode != 408 && responseCode < 500) statsReported();
             }
+            if (!clues.isEmpty()) archiveKmz();
             // don't report finished for some kind of timeout:
         } catch (Exception e) {
 			CTError(TAG, String.format("archive(%s): raised.", dataFilepath.getUri()), e);
@@ -491,4 +520,159 @@ public class WaypointTrack {
 		WaypointCount++;
 		if (null == outputStream) setupOutputStream();
 	}
+
+    /** Associates a clue with this track for inclusion in the KMZ archive. */
+    public void addClue(@NonNull ArchivedClue clue) {
+        clues.add(clue);
+        CTDebug(TAG, String.format(Locale.US, "addClue(%s): '%s' at %.6f,%.6f",
+                trackLabel, clue.title, clue.lat, clue.lng));
+    }
+
+    /**
+     * Associates a clue with the active WaypointTrack for the given drone.
+     * Mirrors {@link #AddWaypointForTrack}.  If no track is active for the
+     * drone, the clue is logged as a warning and dropped — consistent with
+     * existing offline behaviour.
+     */
+    public static void AddClueForTrack(@NonNull CtDroneSpec droneSpec,
+            double lat, double lng, double alt, long timestampMs,
+            @NonNull String title, @NonNull String description,
+            @Nullable Bitmap bitmap) {
+        String trackLabel = droneSpec.trackLabel();
+        WaypointTrack track = TrackMap.get(trackLabel);
+        if (null != track) {
+            track.addClue(new ArchivedClue(lat, lng, alt, timestampMs,
+                    title, description, bitmap));
+        } else {
+            CTWarn(TAG, String.format(Locale.US,
+                    "AddClueForTrack(): no active track for '%s', clue '%s' not archived.",
+                    trackLabel, title));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // KMZ archival
+    // -----------------------------------------------------------------------
+
+    /**
+     * Writes a .kmz file (KML + embedded JPEG images) to today's track
+     * directory.  Called from {@link #archive()} when at least one clue is
+     * present.
+     */
+    private void archiveKmz() {
+        Context ctxt = R2CApplication.getAppCtxt();
+        DocumentFile todaysArchiveDir = GetTodaysTrackDir();
+        if (null == ctxt || null == todaysArchiveDir) {
+            CTError(TAG, "archiveKmz(): missing context or archive dir.");
+            return;
+        }
+        String kmzFileName = trackLabel + ".kmz";
+        try {
+            DocumentFile kmzFile = todaysArchiveDir.createFile(
+                    "application/vnd.google-earth.kmz", kmzFileName);
+            if (null == kmzFile) {
+                CTError(TAG, "archiveKmz(): could not create KMZ file.");
+                return;
+            }
+            ContentResolver resolver = ctxt.getContentResolver();
+            OutputStream os = resolver.openOutputStream(kmzFile.getUri());
+            if (null == os) {
+                CTError(TAG, "archiveKmz(): could not open output stream.");
+                return;
+            }
+            ZipOutputStream zos = new ZipOutputStream(os);
+
+            // --- build KML ---------------------------------------------------
+            StringBuilder kml = new StringBuilder();
+            kml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+            kml.append("<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n");
+            kml.append("  <Document>\n");
+            kml.append("    <name>").append(escapeXml(trackLabel)).append("</name>\n");
+
+            // Track style (blue line)
+            kml.append("    <Style id=\"trackStyle\">\n");
+            kml.append("      <LineStyle><color>ffff0000</color><width>3</width></LineStyle>\n");
+            kml.append("    </Style>\n");
+
+            // Track LineString placemark
+            kml.append("    <Placemark>\n");
+            kml.append("      <name>").append(escapeXml(trackLabel)).append("</name>\n");
+            kml.append("      <styleUrl>#trackStyle</styleUrl>\n");
+            kml.append("      <LineString>\n");
+            kml.append("        <tessellate>1</tessellate>\n");
+            kml.append("        <coordinates>\n");
+            for (int i = 0; i < coordinates.length(); i++) {
+                JSONArray pt = coordinates.getJSONArray(i);
+                // GeoJSON stores [lng, lat, alt, timestamp]
+                kml.append(String.format(Locale.US, "          %.6f,%.6f,%.0f\n",
+                        Double.parseDouble(pt.getString(0)),
+                        Double.parseDouble(pt.getString(1)),
+                        Double.parseDouble(pt.getString(2))));
+            }
+            kml.append("        </coordinates>\n");
+            kml.append("      </LineString>\n");
+            kml.append("    </Placemark>\n");
+
+            // Clue placemarks
+            for (int i = 0; i < clues.size(); i++) {
+                ArchivedClue clue = clues.get(i);
+                String isoTime = Instant.ofEpochMilli(clue.timestampMs).toString();
+                kml.append("    <Placemark>\n");
+                kml.append("      <name>").append(escapeXml(clue.title)).append("</name>\n");
+                kml.append("      <TimeStamp><when>").append(isoTime).append("</when></TimeStamp>\n");
+                if (clue.bitmap != null) {
+                    kml.append("      <description><![CDATA[")
+                       .append(clue.description)
+                       .append("<br/><img src=\"files/clue_").append(i).append(".jpg\"/>")
+                       .append("]]></description>\n");
+                } else if (!clue.description.isEmpty()) {
+                    kml.append("      <description>")
+                       .append(escapeXml(clue.description))
+                       .append("</description>\n");
+                }
+                kml.append("      <Point>\n");
+                kml.append(String.format(Locale.US,
+                        "        <coordinates>%.6f,%.6f,%.1f</coordinates>\n",
+                        clue.lng, clue.lat, clue.alt));
+                kml.append("      </Point>\n");
+                kml.append("    </Placemark>\n");
+            }
+            kml.append("  </Document>\n");
+            kml.append("</kml>\n");
+
+            // Write doc.kml entry
+            zos.putNextEntry(new ZipEntry("doc.kml"));
+            zos.write(kml.toString().getBytes("UTF-8"));
+            zos.closeEntry();
+
+            // Write image files
+            for (int i = 0; i < clues.size(); i++) {
+                ArchivedClue clue = clues.get(i);
+                if (clue.bitmap != null) {
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    clue.bitmap.compress(Bitmap.CompressFormat.JPEG, 85, baos);
+                    byte[] jpegBytes = baos.toByteArray();
+                    zos.putNextEntry(new ZipEntry("files/clue_" + i + ".jpg"));
+                    zos.write(jpegBytes);
+                    zos.closeEntry();
+                }
+            }
+            zos.finish();
+            zos.close();
+            CTDebug(TAG, String.format(Locale.US,
+                    "archiveKmz(): wrote %s with %d clue(s).", kmzFileName, clues.size()));
+        } catch (Exception e) {
+            CTError(TAG, "archiveKmz(): raised.", e);
+        }
+    }
+
+    /** Escapes special XML characters in a string value. */
+    @NonNull
+    private static String escapeXml(@NonNull String s) {
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;");
+    }
 }

@@ -11,11 +11,18 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.ShowToast;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
+
+import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.ScanningService;
 import org.opendroneid.android.data.Util;
-
-import java.net.NetworkInterface;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -25,13 +32,15 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.net.InetAddress;
+import java.net.Inet4Address;
 import java.util.ArrayList;
-import java.util.Enumeration;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -79,10 +88,13 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     private static final Hashtable<String, CaltopoLiveTrack> OurDroneLiveTracks = new Hashtable<>(16);
 
     private static final DelayedExec StatusUpdatePoll = new DelayedExec();
+    private static final Object AddressSnapshotLock = new Object();
+    private static volatile List<IpAddrRecord> CurrentIpAddressSnapshot = Collections.emptyList();
+    private static volatile boolean NetworkAddressMonitorStarted = false;
+    private static ConnectivityManager.NetworkCallback NetworkAddressCallback;
 
     // instance variables:
     private final ArrayList <CaltopoLiveTrack> liveTracksUsingThisPeer = new ArrayList<>(16);
-    private static final JSONArray MyIpAddresses = new JSONArray();
     private static int R2CPeerCount = 0; // track active instancess
     private final int R2CPeerId;
     private JSONArray remoteIpAddrs; // may be more than one to choose from (cell, wireless)
@@ -109,6 +121,29 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     // Table to map remoteIDs owned by this peer to their corresponding data.
     private final Hashtable<String, CtDroneSpec> droneSpecTable = new Hashtable<>(4);
     private boolean outstandingSeen = false;
+
+    private static final class IpAddrRecord {
+        final String intf;
+        final String ipaddr;
+
+        IpAddrRecord(@NonNull String intf, @NonNull String ipaddr) {
+            this.intf = intf;
+            this.ipaddr = ipaddr;
+        }
+
+        @NonNull
+        JSONObject toJson() throws JSONException {
+            JSONObject obj = new JSONObject();
+            obj.put("intf", intf);
+            obj.put("ipaddr", ipaddr);
+            return obj;
+        }
+
+        @NonNull
+        String key() {
+            return intf + ":" + ipaddr;
+        }
+    }
 
     public interface remoteUpdateListener {
         void onRemoteAppConfig(String remoteAppVers);
@@ -1062,11 +1097,12 @@ public class R2CPeer implements WsPipe.WsMsgListener {
     }
 
     public void sayHello() {
-        if (0 != MyIpAddresses.length()) {
+        JSONArray myIpAddresses = GetMyIpAddresses();
+        if (0 != myIpAddresses.length()) {
             Util.SafeJSONObject payload = new Util.SafeJSONObject();
             payload.put("type", "hello");
             payload.put("my-id", CaltopoMap.GetMyUUID());
-            payload.put("my-addrs", MyIpAddresses);
+            payload.put("my-addrs", myIpAddresses);
             payload.put("app-vers", R2CActivity.getMyAppVersion());
             payload.put("start-timestamp", ScanningService.ScannerUptime.getStartTimeInMsec());
             wsPipe.sendMessage(payload, 0, false);
@@ -1111,6 +1147,50 @@ public class R2CPeer implements WsPipe.WsMsgListener {
         GetMyIpAddresses();
     }
 
+    public static void InitializeNetworkAddressMonitor(@Nullable Context context) {
+        if (context == null) return;
+        synchronized (AddressSnapshotLock) {
+            if (NetworkAddressMonitorStarted) return;
+            ConnectivityManager connectivityManager = context.getSystemService(ConnectivityManager.class);
+            if (connectivityManager == null) {
+                CTError(TAG, "InitializeNetworkAddressMonitor(): missing ConnectivityManager");
+                return;
+            }
+            NetworkAddressCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(@NonNull Network network) {
+                    refreshMyIpAddresses("onAvailable");
+                }
+
+                @Override
+                public void onLost(@NonNull Network network) {
+                    refreshMyIpAddresses("onLost");
+                }
+
+                @Override
+                public void onLinkPropertiesChanged(@NonNull Network network, @NonNull LinkProperties linkProperties) {
+                    refreshMyIpAddresses("onLinkPropertiesChanged");
+                }
+
+                @Override
+                public void onCapabilitiesChanged(@NonNull Network network, @NonNull NetworkCapabilities networkCapabilities) {
+                    refreshMyIpAddresses("onCapabilitiesChanged");
+                }
+            };
+            try {
+                NetworkRequest request = new NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
+                connectivityManager.registerNetworkCallback(request, NetworkAddressCallback);
+                NetworkAddressMonitorStarted = true;
+                CTDebug(TAG, "InitializeNetworkAddressMonitor(): registered network callback.");
+            } catch (Exception e) {
+                CTError(TAG, "InitializeNetworkAddressMonitor(): registerNetworkCallback() raised.", e);
+            }
+        }
+        refreshMyIpAddresses("InitializeNetworkAddressMonitor");
+    }
+
     @NonNull
     public static String GetMyIpAddress(boolean tunnelFlag) {
         JSONArray addresses = GetMyIpAddresses();
@@ -1133,55 +1213,93 @@ public class R2CPeer implements WsPipe.WsMsgListener {
 
     @NonNull
     public static JSONArray GetMyIpAddresses() {
-        HashMap<String,JSONObject> map = new HashMap<>();
-        boolean tunnelFound = false;
+        if (!NetworkAddressMonitorStarted) {
+            InitializeNetworkAddressMonitor(R2CApplication.getAppCtxt());
+        }
+        if (CurrentIpAddressSnapshot.isEmpty()) {
+            refreshMyIpAddresses("GetMyIpAddresses");
+        }
+        JSONArray addresses = new JSONArray();
+        for (IpAddrRecord record : CurrentIpAddressSnapshot) {
+            try {
+                addresses.put(record.toJson());
+            } catch (Exception e) {
+                CTError(TAG, "GetMyIpAddresses(): bad address record.", e);
+            }
+        }
+        return addresses;
+    }
 
-        if (0 != MyIpAddresses.length()) return MyIpAddresses;
+    private static void refreshMyIpAddresses(@NonNull String reason) {
+        Context context = R2CApplication.getAppCtxt();
+        if (context == null) return;
+        ConnectivityManager connectivityManager = context.getSystemService(ConnectivityManager.class);
+        if (connectivityManager == null) {
+            CTError(TAG, "refreshMyIpAddresses(): missing ConnectivityManager");
+            return;
+        }
+        ArrayList<IpAddrRecord> updated = new ArrayList<>();
         try {
-            Enumeration<NetworkInterface> networkInterfaces = NetworkInterface.getNetworkInterfaces();
-            while (networkInterfaces.hasMoreElements()) {
-                NetworkInterface networkInterface = networkInterfaces.nextElement();
-                String netName = networkInterface.getName();
-                Enumeration<InetAddress> inetAddresses = networkInterface.getInetAddresses();
-                while (inetAddresses.hasMoreElements()) {
-                    InetAddress inetAddress = inetAddresses.nextElement();
+            Network[] networks = connectivityManager.getAllNetworks();
+            for (Network network : networks) {
+                LinkProperties linkProperties = connectivityManager.getLinkProperties(network);
+                if (linkProperties == null) continue;
+                String interfaceName = linkProperties.getInterfaceName();
+                if (interfaceName == null || interfaceName.isEmpty()) continue;
+                for (LinkAddress linkAddress : linkProperties.getLinkAddresses()) {
+                    if (linkAddress == null) continue;
+                    InetAddress inetAddress = linkAddress.getAddress();
+                    if (!(inetAddress instanceof Inet4Address) || inetAddress.isLoopbackAddress()) continue;
                     String ipaddr = inetAddress.getHostAddress();
-                    // Check for valid, non-loopback IPv4 address
-                    if (inetAddress.isLoopbackAddress() || !(inetAddress instanceof java.net.Inet4Address)) continue;
-                    String key = netName + ":" + ipaddr;
-                    JSONObject obj = new JSONObject();
-                    obj.put("intf", netName);
-                    obj.put("ipaddr", ipaddr);
-                    map.put(key, obj);
-                    CTDebug(TAG, "GetMyIpAddresses() found new address: " + "'" + key + "'" );
+                    if (ipaddr == null || ipaddr.isEmpty()) continue;
+                    IpAddrRecord record = new IpAddrRecord(interfaceName, ipaddr);
+                    if (!containsAddress(updated, record)) {
+                        updated.add(record);
+                    }
                 }
             }
         } catch (Exception e) {
-            CTError(TAG, "GetMyIpAddreses() raised. ", e);
+            CTError(TAG, "refreshMyIpAddresses() raised.", e);
+            return;
         }
+        updated.sort(
+                Comparator.comparing((IpAddrRecord rec) -> !rec.intf.startsWith("tun"))
+                        .thenComparing(rec -> rec.intf)
+                        .thenComparing(rec -> rec.ipaddr)
+        );
+        List<IpAddrRecord> previous = CurrentIpAddressSnapshot;
+        if (!sameAddresses(previous, updated)) {
+            CurrentIpAddressSnapshot = Collections.unmodifiableList(new ArrayList<>(updated));
+            CTDebug(TAG, String.format(Locale.US,
+                    "refreshMyIpAddresses(%s): now tracking %d addresses %s",
+                    reason, updated.size(), addressesToDebugString(updated)));
+        }
+    }
 
-        // FIXME: If we find an address on a tun* interface, we want to move it to the
-        //  front of the list, because it's likely to be our private subnet connection
-        //  to our peer.
-        Set<String> keySet = map.keySet();
-        String[] keyList = keySet.toArray(new String[0]);
-        String[] remainderKeys = new String[keyList.length];
-        int remainderCount = 0;
-        for (String key : keyList) {
-            if (key.startsWith("tun")) {
-                tunnelFound = true;
-                MyIpAddresses.put(map.get(key));
-            } else {
-                remainderKeys[remainderCount++] = key;
-            }
+    private static boolean containsAddress(@NonNull List<IpAddrRecord> records, @NonNull IpAddrRecord candidate) {
+        for (IpAddrRecord record : records) {
+            if (record.key().equals(candidate.key())) return true;
         }
-        for (int i=0; i< remainderCount; i++) {
-            MyIpAddresses.put(map.get(remainderKeys[i]));
+        return false;
+    }
+
+    private static boolean sameAddresses(@NonNull List<IpAddrRecord> left, @NonNull List<IpAddrRecord> right) {
+        if (left.size() != right.size()) return false;
+        for (int i = 0; i < left.size(); i++) {
+            if (!Objects.equals(left.get(i).key(), right.get(i).key())) return false;
         }
-        if (!tunnelFound) {
-        //    ShowToast("No VPN tunnel found - ZeroTier network is down.");
+        return true;
+    }
+
+    @NonNull
+    private static String addressesToDebugString(@NonNull List<IpAddrRecord> records) {
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < records.size(); i++) {
+            if (i > 0) builder.append(", ");
+            builder.append(records.get(i).key());
         }
-        return MyIpAddresses;
+        builder.append("]");
+        return builder.toString();
     }
 
     public void shutdown(R2CListener.r2cState state) {

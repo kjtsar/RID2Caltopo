@@ -222,7 +222,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final String BACKUP_KEY_ARCHIVE_PATH = "archive_path_uri";
     private static final String BACKUP_KEY_ARCHIVE_HINT = "archive_hint_uri";
     private static String LogFilePath;
-    private static OutputStream DebugOutputStream;
+    private static final int STARTUP_LOG_BUFFER_BYTES = 256 * 1024;
+    private static OutputStream DebugOutputStream = new DeferredLogOutputStream(STARTUP_LOG_BUFFER_BYTES);
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
     private static CopyOnWriteArrayList<CtDroneSpec.DroneSpecsChangedListener> DroneSpecsChangedListeners = new CopyOnWriteArrayList<>();
@@ -246,6 +247,82 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final ArrayList<CtDroneSpec> DsArray = new ArrayList<>(16);
     private static long DroneSpecsArraySize = DsArray.size();
     private static boolean NotifySettingsChangedFlag;
+
+    private static final class DeferredLogOutputStream extends OutputStream {
+        private final Object lock = new Object();
+        private final int maxBufferedBytes;
+        private ByteArrayOutputStream startupBuffer;
+        private OutputStream delegate;
+
+        DeferredLogOutputStream(int maxBufferedBytes) {
+            this.maxBufferedBytes = maxBufferedBytes;
+            this.startupBuffer = new ByteArrayOutputStream(Math.min(maxBufferedBytes, 16 * 1024));
+        }
+
+        void attach(@NonNull OutputStream target) throws IOException {
+            synchronized (lock) {
+                if (delegate == target) return;
+                if (startupBuffer != null && startupBuffer.size() > 0) {
+                    startupBuffer.writeTo(target);
+                    target.flush();
+                    startupBuffer.reset();
+                    startupBuffer = null;
+                }
+                delegate = target;
+            }
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            synchronized (lock) {
+                if (delegate != null) {
+                    delegate.write(b);
+                    return;
+                }
+                if (startupBuffer != null && startupBuffer.size() < maxBufferedBytes) {
+                    startupBuffer.write(b);
+                }
+            }
+        }
+
+        @Override
+        public void write(@NonNull byte[] b, int off, int len) throws IOException {
+            synchronized (lock) {
+                if (delegate != null) {
+                    delegate.write(b, off, len);
+                    return;
+                }
+                if (startupBuffer == null || len <= 0) return;
+                int remaining = maxBufferedBytes - startupBuffer.size();
+                if (remaining <= 0) return;
+                startupBuffer.write(b, off, Math.min(len, remaining));
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            synchronized (lock) {
+                if (delegate != null) {
+                    delegate.flush();
+                }
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            synchronized (lock) {
+                if (delegate != null) {
+                    delegate.flush();
+                    delegate.close();
+                    delegate = null;
+                }
+                if (startupBuffer != null) {
+                    startupBuffer.reset();
+                    startupBuffer = null;
+                }
+            }
+        }
+    }
 
     public CaltopoClient(String rid) throws RuntimeException {
         ClientClassState ccs = GetState();
@@ -527,6 +604,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     ) {
         CTDebug(TAG, String.format(Locale.US, "SubmitClue() received for %s(%s):%s",
                 droneSpec.getMappedId(), droneSpec.getRemoteId(), clueTitle));
+        WaypointTrack.AddClueForTrack(droneSpec, clueLat, clueLng, clueAlt,
+                clueTimestamp, clueTitle, clueDescription, clueImage);
         CaltopoMap.SubmitClueWithPhoto(droneSpec, clueLat, clueLng, clueAlt, clueTitle, clueDescription, clueTimestamp, clueImage);
     }
 
@@ -1541,7 +1620,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTError(TAG, "InitArchiveDir(): archive dir is mia.");
             return;
         }
-        if (null == DebugOutputStream) try {
+        if (DebugLogPath == null) try {
             CTDebug(TAG, "InitArchiveDir(): Initializing log stream...");
             String filepath = "Log_" + TimeDatestampString(ScanningService.GetStartTimeInMsec());
             Context ctxt = R2CApplication.getAppCtxt();
@@ -1550,7 +1629,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 ContentResolver resolver = ctxt.getContentResolver();
                 if (null != dataFilepath) {
                     DebugLogPath = dataFilepath.getUri();
-                    DebugOutputStream = (resolver.openOutputStream(DebugLogPath));
+                    OutputStream fileOutputStream = resolver.openOutputStream(DebugLogPath);
+                    if (fileOutputStream != null && DebugOutputStream instanceof DeferredLogOutputStream) {
+                        ((DeferredLogOutputStream) DebugOutputStream).attach(fileOutputStream);
+                    } else if (fileOutputStream != null) {
+                        DebugOutputStream = fileOutputStream;
+                    }
                 }
             } catch (Exception e) {
                 CTError(TAG, "InitArchiveDir() raised: ", e);

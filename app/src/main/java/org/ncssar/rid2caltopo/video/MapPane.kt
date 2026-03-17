@@ -46,6 +46,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -91,10 +92,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
 import androidx.documentfile.provider.DocumentFile
 import okhttp3.OkHttpClient
+import okhttp3.Call
 import okhttp3.Request
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
@@ -414,7 +417,9 @@ internal fun SplitMapPane(
     val baseLayer = viewModel.baseLayer
     var settingsMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
+    var badTilesMenuExpanded by remember { mutableStateOf(false) }
     var calibrateMenuExpanded by remember { mutableStateOf(false) }
+    var showBadTilesHowToDialog by remember { mutableStateOf(false) }
     var showOfflinePrepDialog by remember { mutableStateOf(false) }
     var offlinePrepInFlight by remember { mutableStateOf(false) }
     var offlinePrepPreset by remember { mutableStateOf(OFFLINE_PREP_PRESETS[1]) }
@@ -423,13 +428,16 @@ internal fun SplitMapPane(
     var offlinePrepAreaMode by remember { mutableStateOf(OfflinePrepAreaMode.Viewport) }
     var offlinePrepBoundaryId by remember { mutableStateOf<String?>(null) }
     var offlinePrepProgress by remember { mutableStateOf(OfflinePrepProgress()) }
+    var offlinePrepCancelRequested by remember { mutableStateOf(false) }
     var offlinePrepEstimate by remember { mutableStateOf(OfflinePrepEstimate()) }
     var offlinePrepEstimateRunning by remember { mutableStateOf(false) }
     var offlinePrepAvailableBytes by remember { mutableStateOf<Long?>(null) }
     var offlinePrepTileCacheCapBytes by remember { mutableStateOf(MapCachePolicy.tileCacheMaxBytes(context)) }
     var offlinePrepJob by remember { mutableStateOf<Job?>(null) }
+    var offlinePrepAutoCloseJob by remember { mutableStateOf<Job?>(null) }
+    val offlinePrepActiveCalls = remember { ConcurrentHashMap.newKeySet<Call>() }
     var mapBounds by remember { mutableStateOf<BoundingBox?>(null) }
-    val downloadMapBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
+    val maximizeThroughputBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
     var predictiveHeadEnabled by remember { mutableStateOf(true) }
     var autoRemoveBadTiles by remember { mutableStateOf(BadTilePolicy.isAutoRemoveEnabled(context)) }
     var badTileDialogState by remember { mutableStateOf<BadTileDialogState?>(null) }
@@ -735,15 +743,16 @@ internal fun SplitMapPane(
 
     fun startOfflinePrep(bounds: BoundingBox, clipBoundary: GeoBoundary?) {
         if (offlinePrepInFlight) return
-        if (baseLayer == BaseLayerOption.OpenStreetMap) {
-            CaltopoClient.ShowToast("Download Map is disabled for OpenStreetMap due to tile usage policy.")
-            return
-        }
+        offlinePrepAutoCloseJob?.cancel()
+        offlinePrepAutoCloseJob = null
+        offlinePrepActiveCalls.clear()
+        offlinePrepCancelRequested = false
         offlinePrepInFlight = true
         offlinePrepProgress = OfflinePrepProgress(phase = "Preparing", total = 0, completed = 0)
         val preset = offlinePrepPreset
         val includeDem = offlinePrepIncludeDem
-        val maximizeThroughput = offlinePrepMaxThroughput
+        val isOsmDownload = baseLayer == BaseLayerOption.OpenStreetMap
+        val maximizeThroughput = offlinePrepMaxThroughput && !isOsmDownload
         // Compute 1° GeoTIFF tile names for the area now (on the main thread, before the IO job).
         val demTileNames = if (includeDem) demTileNamesForBounds(bounds) else emptyList<String>()
         val estimatedTileOps = offlinePrepEstimate.tileEstimate
@@ -851,19 +860,31 @@ internal fun SplitMapPane(
                             val ok = try {
                                 val url = onlineTileSource.getTileURLString(tileIndex)
                                 val req = Request.Builder().url(url).build()
-                                offlineHttpClient.newCall(req).execute().use { resp ->
-                                    if (!resp.isSuccessful) {
-                                        failureDetail = "http=${resp.code} z=$z x=$x y=$y source=${tileSource.name()}"
-                                        return@use false
+                                val call = offlineHttpClient.newCall(req)
+                                offlinePrepActiveCalls += call
+                                try {
+                                    call.execute().use { resp ->
+                                        if (!resp.isSuccessful) {
+                                            failureDetail = "http=${resp.code} z=$z x=$x y=$y source=${tileSource.name()}"
+                                            return@use false
+                                        }
+                                        val body = resp.body ?: return@use false
+                                        val bytes = body.bytes()
+                                        val saved = tileCacheWriter.saveFile(
+                                            tileSource,
+                                            tileIndex,
+                                            ByteArrayInputStream(bytes),
+                                            null
+                                        )
+                                        if (!saved && failureDetail.isBlank()) {
+                                            val rejection = tileCacheWriter.describeRejectedWrite(tileSource, tileIndex, bytes)
+                                            failureDetail =
+                                                (rejection ?: "save-rejected") + " z=$z x=$x y=$y source=${tileSource.name()}"
+                                        }
+                                        saved
                                     }
-                                    val body = resp.body ?: return@use false
-                                    val bytes = body.bytes()
-                                    tileCacheWriter.saveFile(
-                                        tileSource,
-                                        tileIndex,
-                                        ByteArrayInputStream(bytes),
-                                        null
-                                    )
+                                } finally {
+                                    offlinePrepActiveCalls.remove(call)
                                 }
                             } catch (e: CancellationException) {
                                 throw e
@@ -941,19 +962,25 @@ internal fun SplitMapPane(
                         var failureDetail = "unknown"
                         val ok = try {
                             val req = Request.Builder().url(url).build()
-                            geoTiffHttpClient.newCall(req).execute().use { resp ->
-                                if (!resp.isSuccessful) {
-                                    failureDetail = "http=${resp.code}"
-                                    return@use false
+                            val call = geoTiffHttpClient.newCall(req)
+                            offlinePrepActiveCalls += call
+                            try {
+                                call.execute().use { resp ->
+                                    if (!resp.isSuccessful) {
+                                        failureDetail = "http=${resp.code}"
+                                        return@use false
+                                    }
+                                    val body = resp.body ?: run { failureDetail = "no-body"; return@use false }
+                                    val destFile = demDir.findFile(fileName) ?: demDir.createFile("image/tiff", fileName)
+                                    if (destFile == null) { failureDetail = "create-failed"; return@use false }
+                                    context.contentResolver.openOutputStream(destFile.uri, "wt")?.use { out ->
+                                        body.byteStream().copyTo(out)
+                                    } ?: run { failureDetail = "stream-open-failed"; return@use false }
+                                    MapCacheDebug.log("geotiff dem fetched tile=$tileName uri=${destFile.uri}")
+                                    true
                                 }
-                                val body = resp.body ?: run { failureDetail = "no-body"; return@use false }
-                                val destFile = demDir.findFile(fileName) ?: demDir.createFile("image/tiff", fileName)
-                                if (destFile == null) { failureDetail = "create-failed"; return@use false }
-                                context.contentResolver.openOutputStream(destFile.uri, "wt")?.use { out ->
-                                    body.byteStream().copyTo(out)
-                                } ?: run { failureDetail = "stream-open-failed"; return@use false }
-                                MapCacheDebug.log("geotiff dem fetched tile=$tileName uri=${destFile.uri}")
-                                true
+                            } finally {
+                                offlinePrepActiveCalls.remove(call)
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -978,7 +1005,7 @@ internal fun SplitMapPane(
                     }
 
                     if (!maximizeThroughput) {
-                        val workerCount = 3
+                        val workerCount = if (isOsmDownload) 1 else 3
                         val tileQueue = Channel<Long>(capacity = workerCount * 3)
                         val workers = List(workerCount) {
                             launch {
@@ -1130,25 +1157,47 @@ internal fun SplitMapPane(
                 }
 
                 val elapsedMs = System.currentTimeMillis() - startedAt
-                phase = "Complete"
+                val failTotal = totalFailed.get()
+                phase = if (failTotal > 0) "Complete with failures" else "Complete"
                 pushProgress(force = true)
                 val hit = hits.get()
                 val fetch = fetched.get()
                 val tileFail = tileFailed.get()
                 val demFail = demFailed.get()
-                val failTotal = totalFailed.get()
                 withContext(Dispatchers.Main.immediate) {
                     offlinePrepInFlight = false
                     offlinePrepJob = null
-                    val doneMsg = "Download map done: hit=$hit fetched=$fetch tileFail=$tileFail demFail=$demFail totalFail=$failTotal in ${elapsedMs}ms"
+                    offlinePrepActiveCalls.clear()
+                    offlinePrepCancelRequested = false
+                    val doneMsg =
+                        if (failTotal > 0) {
+                            "Download map finished with failures: hit=$hit fetched=$fetch tileFail=$tileFail demFail=$demFail totalFail=$failTotal in ${elapsedMs}ms"
+                        } else {
+                            "Download map done: hit=$hit fetched=$fetch tileFail=$tileFail demFail=$demFail totalFail=$failTotal in ${elapsedMs}ms"
+                        }
                     CaltopoClient.ShowToast(doneMsg)
                     MapCacheDebug.log(doneMsg)
+                    offlinePrepAutoCloseJob?.cancel()
+                    if (failTotal == 0) {
+                        offlinePrepAutoCloseJob = uiScope.launch {
+                            delay(1500L)
+                            if (!offlinePrepInFlight && offlinePrepProgress.phase == "Complete") {
+                                showOfflinePrepDialog = false
+                            }
+                        }
+                    } else {
+                        offlinePrepAutoCloseJob = null
+                    }
                 }
             } catch (_: CancellationException) {
                 withContext(NonCancellable + Dispatchers.Main.immediate) {
                     phase = "Cancelled"
                     offlinePrepInFlight = false
                     offlinePrepJob = null
+                    offlinePrepActiveCalls.clear()
+                    offlinePrepCancelRequested = false
+                    offlinePrepAutoCloseJob?.cancel()
+                    offlinePrepAutoCloseJob = null
                     offlinePrepProgress = offlinePrepProgress.copy(phase = "Cancelled")
                     CaltopoClient.ShowToast("Download map cancelled.")
                 }
@@ -1158,6 +1207,10 @@ internal fun SplitMapPane(
                     phase = "Failed"
                     offlinePrepInFlight = false
                     offlinePrepJob = null
+                    offlinePrepActiveCalls.clear()
+                    offlinePrepCancelRequested = false
+                    offlinePrepAutoCloseJob?.cancel()
+                    offlinePrepAutoCloseJob = null
                     offlinePrepProgress = offlinePrepProgress.copy(phase = "Failed")
                     CaltopoClient.ShowToast("Download map failed: ${e.javaClass.simpleName}")
                 }
@@ -1265,6 +1318,29 @@ internal fun SplitMapPane(
             },
             dismissButton = {
                 TextButton(onClick = { badTileDialogState = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showBadTilesHowToDialog) {
+        AlertDialog(
+            onDismissRequest = { showBadTilesHowToDialog = false },
+            title = { Text("Bad Tiles How To") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Use this when map tiles show a cached error page such as OpenStreetMap's \"Access blocked\" tile.")
+                    Text("1. Turn on Auto Remove Bad Tiles if you want quarantined tiles removed automatically when encountered.")
+                    Text("2. Long-press a bad tile on the map.")
+                    Text("3. In the Remove Bad Tile dialog, leave \"Also quarantine same-hash tiles\" checked and press Remove.")
+                    Text("4. The selected tile is removed from cache, and matching bad tiles can be suppressed across the map.")
+                    Text("Clear Bad Tile Flags removes the quarantine list only. It does not remove tiles already cached.")
+                    Text("Export Bad Tile Hashes saves the quarantined hashes for troubleshooting or sharing.")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showBadTilesHowToDialog = false }) {
+                    Text("OK")
+                }
             }
         )
     }
@@ -1604,14 +1680,15 @@ internal fun SplitMapPane(
                     lastViewportSignature = viewportSignature
                     tileIoActiveUntilMs = uiNowWallMsec + TILE_IO_ACTIVE_GRACE_MS
                 }
-                val tileIoActive = offlinePrepInFlight || (uiNowWallMsec <= tileIoActiveUntilMs)
-                if (mapView.useDataConnection() != tileIoActive) {
-                    mapView.setUseDataConnection(tileIoActive)
+                val suppressLiveMapNetwork = offlinePrepInFlight && baseLayer == BaseLayerOption.OpenStreetMap
+                val tileNetworkActive = !suppressLiveMapNetwork && (uiNowWallMsec <= tileIoActiveUntilMs)
+                if (mapView.useDataConnection() != tileNetworkActive) {
+                    mapView.setUseDataConnection(tileNetworkActive)
                 }
-                if (tileMapProvider.useDataConnection() != tileIoActive) {
-                    tileMapProvider.setUseDataConnection(tileIoActive)
+                if (tileMapProvider.useDataConnection() != tileNetworkActive) {
+                    tileMapProvider.setUseDataConnection(tileNetworkActive)
                 }
-                tileMapProvider.setCacheLookupEnabled(tileIoActive)
+                tileMapProvider.setCacheLookupEnabled(true)
 
                 if (managedOverlays.isNotEmpty()) {
                     mapView.overlays.removeAll(managedOverlays)
@@ -2227,6 +2304,7 @@ internal fun SplitMapPane(
                 onDismissRequest = {
                     settingsMenuExpanded = false
                     baseLayerMenuExpanded = false
+                    badTilesMenuExpanded = false
                     calibrateMenuExpanded = false
                 }
             ) {
@@ -2253,10 +2331,36 @@ internal fun SplitMapPane(
                     }
                 )
                 DropdownMenuItem(
+                    text = { Text("Bad Tiles...") },
+                    onClick = {
+                        settingsMenuExpanded = false
+                        badTilesMenuExpanded = true
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Download Map...") },
+                    onClick = {
+                        settingsMenuExpanded = false
+                        showOfflinePrepDialog = true
+                    }
+                )
+            }
+            DropdownMenu(
+                expanded = badTilesMenuExpanded,
+                onDismissRequest = { badTilesMenuExpanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("How To") },
+                    onClick = {
+                        badTilesMenuExpanded = false
+                        showBadTilesHowToDialog = true
+                    }
+                )
+                DropdownMenuItem(
                     text = { Text(if (autoRemoveBadTiles) "Auto Remove Bad Tiles: On" else "Auto Remove Bad Tiles: Off") },
                     onClick = {
                         autoRemoveBadTiles = !autoRemoveBadTiles
-                        settingsMenuExpanded = false
+                        badTilesMenuExpanded = false
                     }
                 )
                 DropdownMenuItem(
@@ -2264,7 +2368,7 @@ internal fun SplitMapPane(
                     onClick = {
                         BadTilePolicy.clearBlockedHashes(context)
                         CaltopoClient.ShowToast("Bad tile flags cleared.")
-                        settingsMenuExpanded = false
+                        badTilesMenuExpanded = false
                     }
                 )
                 DropdownMenuItem(
@@ -2276,14 +2380,7 @@ internal fun SplitMapPane(
                         } else {
                             CaltopoClient.ShowToast("Bad tile hash export failed.")
                         }
-                        settingsMenuExpanded = false
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Download Map...") },
-                    onClick = {
-                        settingsMenuExpanded = false
-                        showOfflinePrepDialog = true
+                        badTilesMenuExpanded = false
                     }
                 )
             }
@@ -2343,6 +2440,75 @@ internal fun SplitMapPane(
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        if (offlinePrepInFlight || offlinePrepProgress.phase != "Idle") {
+                            val pct = if (offlinePrepProgress.total > 0) {
+                                (offlinePrepProgress.completed.toDouble() * 100.0 / offlinePrepProgress.total.toDouble())
+                                    .coerceIn(0.0, 100.0)
+                            } else if (offlinePrepProgress.phase == "Complete" || offlinePrepProgress.phase == "Complete with failures") {
+                                100.0
+                            } else {
+                                0.0
+                            }
+                            val progressFraction = (pct / 100.0).toFloat()
+                            val etaText = offlinePrepProgress.etaSeconds?.let { formatDurationShort(it) } ?: "--:--"
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    "${String.format(Locale.US, "%.0f", pct)}% complete",
+                                    fontSize = 18.sp
+                                )
+                                if (offlinePrepInFlight && offlinePrepProgress.total <= 0) {
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                } else {
+                                    LinearProgressIndicator(
+                                        progress = { progressFraction },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                Text(
+                                    "Progress: ${offlinePrepProgress.phase} ${offlinePrepProgress.completed}/${offlinePrepProgress.total} " +
+                                        "(${String.format(Locale.US, "%.2f", pct)}%) " +
+                                        "rate=${String.format(Locale.US, "%.1f", offlinePrepProgress.opsPerSec)}/s " +
+                                        "ETA=$etaText",
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    "Tiles: ${offlinePrepProgress.tileCompleted}/${offlinePrepProgress.tileTotal} " +
+                                        "(hit=${offlinePrepProgress.hits} fetched=${offlinePrepProgress.fetched} failed=${offlinePrepProgress.failed})",
+                                    fontSize = 12.sp
+                                )
+                                if (offlinePrepProgress.demTotal > 0) {
+                                    Text(
+                                        "DEM: ${offlinePrepProgress.demCompleted}/${offlinePrepProgress.demTotal} " +
+                                            "(hit=${offlinePrepProgress.demHits} fetched=${offlinePrepProgress.demFetched} failed=${offlinePrepProgress.demFailed})",
+                                        fontSize = 12.sp
+                                    )
+                                }
+                                if (offlinePrepProgress.totalFailed > 0) {
+                                    Text(
+                                        "Total failures: ${offlinePrepProgress.totalFailed}",
+                                        fontSize = 12.sp
+                                    )
+                                }
+                                if (!offlinePrepInFlight && offlinePrepProgress.phase == "Complete") {
+                                    Text(
+                                        "Closing automatically...",
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                if (!offlinePrepInFlight && offlinePrepProgress.phase == "Complete with failures") {
+                                    Text(
+                                        "Download finished with failures. Review the counts above before retrying.",
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
                         Text("Area")
                         OfflinePrepAreaMode.entries.forEach { area ->
                             val enabled = area != OfflinePrepAreaMode.MapBoundary || offlineBoundaryOptions.isNotEmpty()
@@ -2434,13 +2600,13 @@ internal fun SplitMapPane(
                             Checkbox(
                                 checked = offlinePrepMaxThroughput,
                                 onCheckedChange = { if (!offlinePrepInFlight) offlinePrepMaxThroughput = it },
-                                enabled = !offlinePrepInFlight && !downloadMapBlockedForOsm
+                                enabled = !offlinePrepInFlight && !maximizeThroughputBlockedForOsm
                             )
-                            Text(if (downloadMapBlockedForOsm) "Maximize throughput (Imagery only)" else "Maximize throughput")
+                            Text(if (maximizeThroughputBlockedForOsm) "Maximize throughput (Imagery only)" else "Maximize throughput")
                         }
-                        if (downloadMapBlockedForOsm) {
+                        if (maximizeThroughputBlockedForOsm) {
                             Text(
-                                "OpenStreetMap bulk download is disabled to comply with OSM tile server usage policy. Switch Base layer to Imagery for Download Map.",
+                                "OpenStreetMap downloads are allowed, but Maximize throughput is disabled to comply with OSM tile server usage policy.",
                                 fontSize = 11.sp
                             )
                         }
@@ -2481,40 +2647,6 @@ internal fun SplitMapPane(
                                 }
                             }
                         }
-                        if (offlinePrepInFlight) {
-                            val pct = if (offlinePrepProgress.total > 0) {
-                                (offlinePrepProgress.completed.toDouble() * 100.0 / offlinePrepProgress.total.toDouble())
-                                    .coerceIn(0.0, 100.0)
-                            } else {
-                                0.0
-                            }
-                            val etaText = offlinePrepProgress.etaSeconds?.let { formatDurationShort(it) } ?: "--:--"
-                            Text(
-                                "Progress: ${offlinePrepProgress.phase} ${offlinePrepProgress.completed}/${offlinePrepProgress.total} " +
-                                    "(${String.format(Locale.US, "%.2f", pct)}%) " +
-                                    "rate=${String.format(Locale.US, "%.1f", offlinePrepProgress.opsPerSec)}/s " +
-                                    "ETA=$etaText",
-                                fontSize = 12.sp
-                            )
-                            Text(
-                                "Tiles: ${offlinePrepProgress.tileCompleted}/${offlinePrepProgress.tileTotal} " +
-                                    "(hit=${offlinePrepProgress.hits} fetched=${offlinePrepProgress.fetched} failed=${offlinePrepProgress.failed})",
-                                fontSize = 12.sp
-                            )
-                            if (offlinePrepProgress.demTotal > 0) {
-                                Text(
-                                    "DEM: ${offlinePrepProgress.demCompleted}/${offlinePrepProgress.demTotal} " +
-                                        "(hit=${offlinePrepProgress.demHits} fetched=${offlinePrepProgress.demFetched} failed=${offlinePrepProgress.demFailed})",
-                                    fontSize = 12.sp
-                                )
-                            }
-                            if (offlinePrepProgress.totalFailed > 0) {
-                                Text(
-                                    "Total failures: ${offlinePrepProgress.totalFailed}",
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
                     }
                 },
                 confirmButton = {
@@ -2532,10 +2664,6 @@ internal fun SplitMapPane(
                                 CaltopoClient.ShowToast("Offline prep needs visible map bounds.")
                                 return@TextButton
                             }
-                            if (downloadMapBlockedForOsm) {
-                                CaltopoClient.ShowToast("Download Map is disabled for OpenStreetMap. Switch to Imagery.")
-                                return@TextButton
-                            }
                             if (offlinePrepEstimate.ready) {
                                 val estimateMb = offlinePrepEstimate.estimatedTileCacheMb + offlinePrepEstimate.estimatedDemCacheMb
                                 val estimateBytes = (estimateMb * 1024.0 * 1024.0).toLong()
@@ -2547,19 +2675,34 @@ internal fun SplitMapPane(
                             }
                             startOfflinePrep(prepBounds, boundary)
                         },
-                        enabled = !offlinePrepInFlight && !downloadMapBlockedForOsm && (mapBounds != null || selectedBoundary != null)
+                        enabled = !offlinePrepInFlight && (mapBounds != null || selectedBoundary != null)
                     ) { Text("Start") }
                 },
                 dismissButton = {
                     TextButton(
                         onClick = {
                             if (offlinePrepInFlight) {
+                                if (offlinePrepCancelRequested) return@TextButton
+                                offlinePrepCancelRequested = true
+                                offlinePrepProgress = offlinePrepProgress.copy(phase = "Cancelling")
+                                offlinePrepActiveCalls.forEach { it.cancel() }
                                 offlinePrepJob?.cancel()
                             } else {
+                                offlinePrepAutoCloseJob?.cancel()
+                                offlinePrepCancelRequested = false
                                 showOfflinePrepDialog = false
                             }
-                        }
-                    ) { Text(if (offlinePrepInFlight) "Cancel" else "Close") }
+                        },
+                        enabled = !offlinePrepCancelRequested || !offlinePrepInFlight
+                    ) {
+                        Text(
+                            when {
+                                offlinePrepInFlight && offlinePrepCancelRequested -> "Cancelling..."
+                                offlinePrepInFlight -> "Cancel"
+                                else -> "Close"
+                            }
+                        )
+                    }
                 }
             )
         }

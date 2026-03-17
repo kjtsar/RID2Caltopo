@@ -46,16 +46,10 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
         return try {
             val bytes = pStream.readAllBytesCompat()
             val key = tileKey(pTileSourceInfo, pMapTileIndex)
-            val hash = sha256Hex(bytes)
-            if (BadTilePolicy.isHashBlocked(appContext, hash)) {
+            val rejectionReason = rejectionReason(pTileSourceInfo, pMapTileIndex, bytes, updateTracker = true)
+            if (rejectionReason != null) {
                 MapCacheDebug.log(
-                    "tile put skipped source=${pTileSourceInfo.name()} key=$key reason=blocked-hash hash=${hash.take(12)}"
-                )
-                return false
-            }
-            if (pTileSourceInfo.name() == OSM_STANDARD_SOURCE && isLikelyUniformOsmBlock(bytes, pMapTileIndex)) {
-                MapCacheDebug.log(
-                    "tile put skipped source=${pTileSourceInfo.name()} key=$key reason=suspect-uniform-block"
+                    "tile put skipped source=${pTileSourceInfo.name()} key=$key reason=$rejectionReason"
                 )
                 return false
             }
@@ -161,6 +155,12 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
 
     fun statsSnapshot(): CacheStatsSnapshot = diskCache.snapshot()
 
+    fun describeRejectedWrite(
+        tileSource: ITileSource,
+        mapTileIndex: Long,
+        bytes: ByteArray
+    ): String? = rejectionReason(tileSource, mapTileIndex, bytes, updateTracker = false)
+
     private fun tileKey(tileSource: ITileSource, mapTileIndex: Long): String {
         val z = MapTileIndex.getZoom(mapTileIndex)
         val x = MapTileIndex.getX(mapTileIndex)
@@ -186,7 +186,23 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
         return keys
     }
 
-    private fun isLikelyUniformOsmBlock(bytes: ByteArray, mapTileIndex: Long): Boolean {
+    private fun rejectionReason(
+        tileSource: ITileSource,
+        mapTileIndex: Long,
+        bytes: ByteArray,
+        updateTracker: Boolean
+    ): String? {
+        val hash = sha256Hex(bytes)
+        if (BadTilePolicy.isHashBlocked(appContext, hash)) {
+            return "blocked-hash hash=${hash.take(12)}"
+        }
+        if (tileSource.name() == OSM_STANDARD_SOURCE && isLikelyUniformOsmBlock(bytes, mapTileIndex, updateTracker)) {
+            return "suspect-uniform-block hash=${hash.take(12)}"
+        }
+        return null
+    }
+
+    private fun isLikelyUniformOsmBlock(bytes: ByteArray, mapTileIndex: Long, updateTracker: Boolean): Boolean {
         if (bytes.isEmpty()) return false
         val now = System.currentTimeMillis()
         val hash = sha256Hex(bytes)
@@ -199,13 +215,30 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
                     it.remove()
                 }
             }
-            val window = osmHashTracker.getOrPut(hash) { OsmHashWindow(firstSeenMs = now, tileIds = LinkedHashSet()) }
+            val existingWindow = osmHashTracker[hash]
+            val window =
+                if (existingWindow != null) {
+                    existingWindow
+                } else if (updateTracker) {
+                    OsmHashWindow(firstSeenMs = now, tileIds = LinkedHashSet()).also { osmHashTracker[hash] = it }
+                } else {
+                    null
+                }
+            if (window == null) return false
             if ((now - window.firstSeenMs) > OSM_UNIFORM_WINDOW_MS) {
+                if (!updateTracker) return false
                 window.firstSeenMs = now
                 window.tileIds.clear()
             }
-            window.tileIds.add(tileId)
-            val count = window.tileIds.size
+            if (updateTracker) {
+                window.tileIds.add(tileId)
+            }
+            val count =
+                if (updateTracker) {
+                    window.tileIds.size
+                } else {
+                    if (window.tileIds.contains(tileId)) window.tileIds.size else window.tileIds.size + 1
+                }
             if (count >= OSM_UNIFORM_TILE_THRESHOLD) {
                 MapCacheDebug.log("tile uniform-signature hash=${hash.take(12)} count=$count windowMs=$OSM_UNIFORM_WINDOW_MS")
                 return true

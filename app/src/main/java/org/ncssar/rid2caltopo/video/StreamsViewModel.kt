@@ -84,6 +84,13 @@ class DroneSpecState(
     }
 }
 
+/** Display-ready values pushed by SplitMapPane's render loop for use in clue descriptions. */
+data class DroneDisplayState(
+    val headingDeg: Double?,
+    val aglFt: Double?,
+    val atoFt: Double?,
+)
+
 class StreamsViewModel(
     application: Application
 ) : AndroidViewModel(application),
@@ -115,6 +122,12 @@ class StreamsViewModel(
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
     private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
     private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
+    private val droneDisplayStateMap = HashMap<String, DroneDisplayState>()
+
+    /** Called by SplitMapPane's render loop to push computed display values for use in clue descriptions. */
+    fun updateDroneDisplayState(designator: String, headingDeg: Double?, aglFt: Double?, atoFt: Double?) {
+        droneDisplayStateMap[designator] = DroneDisplayState(headingDeg, aglFt, atoFt)
+    }
 
     private val _pendingClue = mutableStateOf<PendingClue?>(null)
     val pendingClue: PendingClue?
@@ -386,35 +399,48 @@ class StreamsViewModel(
 
         val lines = mutableListOf<String>()
         lines += "Designator: $designator"
-        lines += "Mapped ID: ${droneSpec.mappedId}"
-        lines += "RID (track): ${droneSpec.remoteId}"
+        lines += "RID: ${droneSpec.remoteId}"
+        lines += "Telemetry:"
 
+        // First three: Heading, AGL, ATO — use values already computed by SplitMapPane's render loop
+        val display = droneDisplayStateMap[designator]
+        lines += if (display?.headingDeg != null)
+            String.format(Locale.US, "  Heading: %.1f\u00b0", display.headingDeg)
+        else
+            "  Heading: N/A"
+        lines += if (display?.aglFt != null)
+            String.format(Locale.US, "  AGL: %.0f'", display.aglFt)
+        else
+            "  AGL: N/A"
+        lines += if (display?.atoFt != null)
+            String.format(Locale.US, "  ATO: %.0f'", display.atoFt)
+        else
+            "  ATO: N/A"
+
+        // Remaining RID telemetry
         ridTelemetry?.let { rid ->
-            lines += "[RID Telemetry]"
-            rid.aircraftAltitudeRateFpm?.let { lines += String.format(Locale.US, "Aircraft vertical rate: %.0f fpm", it) }
-            rid.aircraftGsKnots?.let { lines += String.format(Locale.US, "Aircraft ground speed: %.1f kt", it) }
-            rid.aircraftTrackDeg?.let { lines += String.format(Locale.US, "Aircraft track: %.1f deg", it) }
+            rid.aircraftAltitudeRateFpm?.let { lines += String.format(Locale.US, "  Vertical rate: %.0f fpm", it) }
+            rid.aircraftGsKnots?.let { lines += String.format(Locale.US, "  Ground speed: %.1f kt", it) }
+            rid.aircraftTrackDeg?.let { lines += String.format(Locale.US, "  Track: %.1f\u00b0", it) }
         }
 
+        // Stream telemetry
         telemetry?.let {
-            lines += "[Stream Telemetry]"
-
-            telemetry.latestRemoteId?.let { lines += "RID (stream): $it" }
+            telemetry.latestRemoteId?.let { lines += "  RID (stream): $it" }
             if (telemetry.remoteIdCandidates.isNotEmpty()) {
-                lines += "RID candidates: ${telemetry.remoteIdCandidates.joinToString(",")}" 
+                lines += "  RID candidates: ${telemetry.remoteIdCandidates.joinToString(",")}"
             }
             if (telemetry.latitude != null && telemetry.longitude != null) {
                 val altText = telemetry.altitudeMeters?.let { String.format(Locale.US, ", alt=%.1fm", it) } ?: ""
-                lines += String.format(Locale.US, "Stream position: %.6f, %.6f%s", telemetry.latitude, telemetry.longitude, altText)
+                lines += String.format(Locale.US, "  Stream position: %.6f, %.6f%s", telemetry.latitude, telemetry.longitude, altText)
             }
-            telemetry.headingDeg?.let { lines += String.format(Locale.US, "Heading: %.1f deg", it) }
-            telemetry.gimbalPitchDeg?.let { lines += String.format(Locale.US, "Gimbal pitch: %.1f deg", it) }
-            telemetry.cameraYawDeg?.let { lines += String.format(Locale.US, "Camera yaw: %.1f deg", it) }
+            telemetry.gimbalPitchDeg?.let { lines += String.format(Locale.US, "  Gimbal pitch: %.1f\u00b0", it) }
+            telemetry.cameraYawDeg?.let { lines += String.format(Locale.US, "  Camera yaw: %.1f\u00b0", it) }
             telemetry.sourceTag?.let { src ->
                 val confidenceText = telemetry.confidence?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"
-                lines += "Telemetry source: $src (confidence=$confidenceText)"
+                lines += "  Telemetry source: $src (confidence=$confidenceText)"
             }
-            telemetry.sourceTimestampUs?.let { lines += "Telemetry timestamp(us): $it" }
+            telemetry.sourceTimestampUs?.let { lines += "  Telemetry timestamp(us): $it" }
         }
         return lines.joinToString("\n")
     }
@@ -422,8 +448,7 @@ class StreamsViewModel(
     private fun appendTelemetrySummary(description: String, summary: String?): String {
         if (summary.isNullOrBlank()) return description
         if (description.trim() == summary.trim()) return description
-        if (description.contains("[Stream Telemetry]")) return description
-        if (description.contains("[RID Telemetry]")) return description
+        if (description.contains("Telemetry:")) return description
         if (description.isBlank()) return summary
         return "$description\n\n$summary"
     }

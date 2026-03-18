@@ -651,8 +651,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         if (updateMapOp == null || updateMapOp.fail()) {
             CTError(TAG, String.format(Locale.US, "Not able to update map '%s':\n  %s",
                     GetMapId(), updateMapOp));
-            MapCheckerDelay.stop();
-            return;
+            return;  // keep timer running; next poll will retry
         }
 
         if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {

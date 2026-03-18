@@ -213,8 +213,20 @@ public class OpenDroneIdDataManager {
                         : CtDroneSpec.AltSourceEnum.NONE;
         double ridHeightM = location.getHeight();
         boolean isAtoType = location.getHeightType() == LocationData.heightTypeEnum.Takeoff;
+        // Avoid feeding ridHeight as absAltM: if neither baro nor geodetic alt is available,
+        // getAltitudeInMeters() fell back to ridHeight, making absAltM == ridHeightM → sample=0.
+        // Pass -1000.0 in that case so updateAltitudeContext's validity check short-circuits.
+        boolean absAltFromRidFallback = !isRidAltitudeValid(location.getAltitudePressure())
+                && !isRidAltitudeValid(location.getAltitudeGeodetic());
+        if (CaltopoClient.CTDebugEnabled("AltContext")) {
+            CaltopoClient.CTDebug(TAG, String.format(Locale.US,
+                    "updateCaltopo(%s): atmoAlt=%.1f geodeticAlt=%.1f ridHeight=%.1f isAto=%b ridFallback=%b",
+                    idStr,
+                    location.getAltitudePressure(), location.getAltitudeGeodetic(),
+                    ridHeightM, isAtoType, absAltFromRidFallback));
+        }
         droneSpec.updateAltitudeContext(
-                altitudeInMeters, altSource,
+                absAltFromRidFallback ? -1000.0 : altitudeInMeters, altSource,
                 isRidAltitudeValid(ridHeightM) ? ridHeightM : -1000.0,
                 isAtoType);
 

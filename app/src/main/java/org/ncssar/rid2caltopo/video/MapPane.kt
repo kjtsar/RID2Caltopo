@@ -60,9 +60,13 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import org.ncssar.rid2caltopo.ui.MapFoldersDialog
+import org.ncssar.rid2caltopo.ui.MapFolderUiState
+import org.ncssar.rid2caltopo.ui.MapItemUiState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -419,6 +423,10 @@ internal fun SplitMapPane(
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
     var badTilesMenuExpanded by remember { mutableStateOf(false) }
     var calibrateMenuExpanded by remember { mutableStateOf(false) }
+    var showMapFoldersDialog by remember { mutableStateOf(false) }
+    val hiddenFolderIds = remember { mutableStateSetOf<String>() }
+    val hiddenItemIds = remember { mutableStateSetOf<String>() }
+    val seenFolderIds = remember { HashSet<String>() }
     var showBadTilesHowToDialog by remember { mutableStateOf(false) }
     var showOfflinePrepDialog by remember { mutableStateOf(false) }
     var offlinePrepInFlight by remember { mutableStateOf(false) }
@@ -1230,9 +1238,15 @@ internal fun SplitMapPane(
             val featureId = feature.optString("id")
             if (featureId.isNotBlank()) {
                 artifactStoreById[featureId] = feature
+                // Auto-hide folders the server marks as not visible, on first encounter
+                val props = feature.optJSONObject("properties")
+                if (props?.optString("class") == "Folder" && featureId !in seenFolderIds) {
+                    seenFolderIds.add(featureId)
+                    if (!props.optBoolean("visible", true)) hiddenFolderIds.add(featureId)
+                }
             }
         }
-        artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values)
+        artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
         if (MAP_PANE_VERBOSE_LOGS || snapshot.isNotEmpty() || artifactOverlayState.totalFeatures > 0) {
             if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
                 MAP_PANE_TAG,
@@ -1319,6 +1333,31 @@ internal fun SplitMapPane(
             dismissButton = {
                 TextButton(onClick = { badTileDialogState = null }) { Text("Cancel") }
             }
+        )
+    }
+
+    if (showMapFoldersDialog) {
+        MapFoldersDialog(
+            folders = buildMapFolderUiStates(artifactStoreById),
+            hiddenFolderIds = hiddenFolderIds,
+            hiddenItemIds = hiddenItemIds,
+            onFolderVisibilityChanged = { folderId, visible ->
+                if (visible) hiddenFolderIds.remove(folderId) else hiddenFolderIds.add(folderId)
+                artifactOverlayState = buildArtifactOverlayState(
+                    artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
+            },
+            onItemVisibilityChanged = { itemId, visible ->
+                if (visible) hiddenItemIds.remove(itemId) else hiddenItemIds.add(itemId)
+                artifactOverlayState = buildArtifactOverlayState(
+                    artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
+            },
+            onAllItemsToggled = { itemIds, visible ->
+                if (visible) hiddenItemIds.removeAll(itemIds.toSet())
+                else hiddenItemIds.addAll(itemIds)
+                artifactOverlayState = buildArtifactOverlayState(
+                    artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
+            },
+            onDismiss = { showMapFoldersDialog = false }
         )
     }
 
@@ -1457,9 +1496,15 @@ internal fun SplitMapPane(
                     artifactStoreById.remove(featureId)
                 } else {
                     artifactStoreById[featureId] = feature
+                    // Auto-hide folders the server marks as not visible, on first encounter
+                    val props = feature.optJSONObject("properties")
+                    if (props?.optString("class") == "Folder" && featureId !in seenFolderIds) {
+                        seenFolderIds.add(featureId)
+                        if (!props.optBoolean("visible", true)) hiddenFolderIds.add(featureId)
+                    }
                 }
 
-                artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values)
+                artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
                 if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
                     MAP_PANE_TAG,
                     "Artifact ingest source=$source id=$featureId total=${artifactOverlayState.totalFeatures} " +
@@ -1928,6 +1973,7 @@ internal fun SplitMapPane(
                     }
                     val labelAtoFeet = (labelRidHeightAtoM?.let { it * METERS_TO_FEET })
                         ?: calibration?.let { manualAtoMeters(point, it) * METERS_TO_FEET }
+                    viewModel.updateDroneDisplayState(point.designator, headingDeg, labelAglFeet, labelAtoFeet)
                     val lastDemAttemptAt = demLastAttemptAtByDesignator[point.remoteId] ?: 0L
                     val shouldRetryDem =
                         priorKey == demKey &&
@@ -2344,6 +2390,14 @@ internal fun SplitMapPane(
                         showOfflinePrepDialog = true
                     }
                 )
+                DropdownMenuItem(
+                    text = { Text("Map Folders...") },
+                    onClick = {
+                        settingsMenuExpanded = false
+                        showMapFoldersDialog = true
+                    },
+                    enabled = buildMapFolderUiStates(artifactStoreById).isNotEmpty()
+                )
             }
             DropdownMenu(
                 expanded = badTilesMenuExpanded,
@@ -2735,7 +2789,38 @@ internal fun SplitMapPane(
         }
     }
 }
-private fun buildArtifactOverlayState(features: Collection<JSONObject>): ArtifactOverlayState {
+private fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapFolderUiState> {
+    val folderItems = mutableMapOf<String, MutableList<MapItemUiState>>()
+    val folderMeta = mutableMapOf<String, Pair<String, Boolean>>()  // id -> (title, visible)
+    for (feature in features.values) {
+        val props = feature.optJSONObject("properties") ?: continue
+        val id = feature.optString("id").takeIf { it.isNotBlank() } ?: continue
+        val title = props.optString("title").ifBlank { id }
+        val className = props.optString("class")
+        if (className == "Folder") {
+            folderMeta[id] = Pair(title, props.optBoolean("visible", true))
+        } else {
+            val folderId = props.optString("folderId").takeIf { it.isNotBlank() } ?: continue
+            folderItems.getOrPut(folderId) { mutableListOf() }.add(MapItemUiState(id, title))
+        }
+    }
+    return folderMeta.entries
+        .sortedBy { it.value.first }
+        .map { (folderId, meta) ->
+            MapFolderUiState(
+                folderId = folderId,
+                title = meta.first,
+                initiallyVisible = meta.second,
+                items = (folderItems[folderId] ?: emptyList()).sortedBy { it.title }
+            )
+        }
+}
+
+private fun buildArtifactOverlayState(
+    features: Collection<JSONObject>,
+    hiddenFolderIds: Set<String> = emptySet(),
+    hiddenItemIds: Set<String> = emptySet()
+): ArtifactOverlayState {
     val points = mutableListOf<ArtifactPointSpec>()
     val lines = mutableListOf<ArtifactLineSpec>()
     val polygons = mutableListOf<ArtifactPolygonSpec>()
@@ -2748,6 +2833,9 @@ private fun buildArtifactOverlayState(features: Collection<JSONObject>): Artifac
         if (className == "Folder") continue
 
         val featureId = feature.optString("id")
+        val folderId = properties?.optString("folderId").orEmpty()
+        if (folderId.isNotBlank() && folderId in hiddenFolderIds) continue
+        if (featureId.isNotBlank() && featureId in hiddenItemIds) continue
         val featureTitle = properties?.optString("title")
             ?.takeIf { it.isNotBlank() }
             ?: "$className:$featureId"

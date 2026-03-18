@@ -35,12 +35,6 @@ object AppConfigStore {
     }
 
     @JvmStatic
-    fun isLegacyImportComplete(context: Context): Boolean {
-        initialize(context)
-        return readConfigBlocking().legacyImportComplete
-    }
-
-    @JvmStatic
     fun restoreClientState(context: Context): Any {
         initialize(context)
         val config = readConfigBlocking()
@@ -52,21 +46,11 @@ object AppConfigStore {
     }
 
     @JvmStatic
-    fun importLegacyStateIfNeeded(context: Context, legacyState: Any?) {
-        initialize(context)
-        val typedState = legacyState as? ClientClassState ?: return
-        val current = readConfigBlocking()
-        if (current.legacyImportComplete) return
-        CaltopoClient.CTDebug(TAG, "importLegacyStateIfNeeded(): importing legacy ClientClassState into proto store.")
-        writeConfigBlocking(mergeStateIntoConfig(current, typedState, false, true))
-    }
-
-    @JvmStatic
     fun persistState(context: Context, state: Any, archivePermissionMissing: Boolean) {
         initialize(context)
         val typedState = state as? ClientClassState ?: return
         val current = readConfigBlocking()
-        val updated = mergeStateIntoConfig(current, typedState, archivePermissionMissing, current.legacyImportComplete)
+        val updated = mergeStateIntoConfig(current, typedState, archivePermissionMissing)
         writeConfigBlocking(updated)
         requestBackup(context, "persistState")
     }
@@ -190,12 +174,11 @@ object AppConfigStore {
     private fun mergeStateIntoConfig(
         current: AppConfig,
         state: ClientClassState,
-        archivePermissionMissing: Boolean,
-        legacyImportComplete: Boolean
+        archivePermissionMissing: Boolean
     ): AppConfig {
         val builder = current.toBuilder()
             .setSchemaVersion(SCHEMA_VERSION)
-            .setLegacyImportComplete(legacyImportComplete)
+            .setLegacyImportComplete(true)
             .setMinDistanceFeet(state.minDistanceInFeet)
             .setNewTrackDelaySeconds(state.newTrackDelayInSeconds)
             .setMaxIdleTimeMinutes(state.maxIdleTimeInMinutes)

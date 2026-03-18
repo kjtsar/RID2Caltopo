@@ -23,10 +23,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
 import android.provider.OpenableColumns;
-import android.util.AtomicFile;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -55,15 +52,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.*;
-import java.security.GeneralSecurityException;
-import java.security.KeyStore;
 import java.util.concurrent.Future;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
-import javax.crypto.Cipher;
-import javax.crypto.KeyGenerator;
-import javax.crypto.SecretKey;
-import javax.crypto.spec.GCMParameterSpec;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -84,8 +75,7 @@ import okhttp3.Response;
 /*
  * Persistent state management for CaltopoClient
  */
-class ClientClassState implements Serializable {
-    private static final long SerialVersionUID = 30L; // Serializable version.
+class ClientClassState {
     public long minDistanceInFeet;
     public String archivePath;
     public String caltopoTrackFolder;
@@ -129,18 +119,6 @@ class ClientClassState implements Serializable {
         cachedDroneSpecTable = new Hashtable<>(16);
         droneSpecTable = new Hashtable<>(16);
     }
-    @Serial
-    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
-        in.defaultReadObject();
-        if (null == caltopoDomainAndPort) caltopoDomainAndPort = "";
-        if (null == archivePath) archivePath = "";
-        if (null == trackerApiKey) trackerApiKey = "";
-        if (null == trackerUrlPfx) trackerUrlPfx = "";
-        if (null == coordinateDisplayFormat) coordinateDisplayFormat = "decimal";
-        if (null == configFilesLoaded) configFilesLoaded = "";
-        if (null == droneSpecTable) droneSpecTable = new Hashtable<>(16);
-    }
-
     @Override
     @NonNull
     public String toString() {
@@ -173,7 +151,7 @@ class ClientClassState implements Serializable {
                         newTrackDelayInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
-                SerialVersionUID, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
+                AppConfigStore.SCHEMA_VERSION, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
                 newTrackDelayInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
                 incident, opPeriod, coordinateDisplayFormat, archivePath, caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
                 CaltopoClient.DroneSpecStringRep(cachedDroneSpecTable),
@@ -213,11 +191,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static ExecutorService GeoJsonStatsExecutorPool = null;
     private static ExecutorService ArchiveScanExecutorPool = null;
     private static ClientClassState Ccstate = null;
-    private static final String LEGACY_STATE_FILE_NAME = TAG + ".ser";
-    private static final String SECURE_STATE_FILE_NAME = TAG + ".state";
-    private static final String SECURE_STATE_KEY_ALIAS = "RID2Caltopo.StateKey.v1";
-    private static final String SECURE_STATE_HEADER = "R2CS2";
-    private static final int SECURE_STATE_VERSION = 1;
     private static final String BACKUP_PREFS_NAME = "rid2caltopo_public_state";
     private static final String BACKUP_KEY_ARCHIVE_PATH = "archive_path_uri";
     private static final String BACKUP_KEY_ARCHIVE_HINT = "archive_hint_uri";
@@ -1147,163 +1120,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return retval.toString();
     }
 
-    // can return null if no stored state available or the app isn't initialized yet.
-    @Nullable
-    private static ClientClassState RestoreState() {
-        Context ctxt = R2CApplication.getAppCtxt();
-        if (null == ctxt) return null;
-
-        ClientClassState secureState = restoreSecureState(ctxt);
-        if (secureState != null) {
-            applyArchivePathBackupPrefs(ctxt, secureState);
-            if (secureState.debugLevel >= 0) DebugLevel = secureState.debugLevel;
-            return secureState;
-        }
-
-        ClientClassState ccs = restoreLegacyState(ctxt);
-        if (ccs != null) {
-            applyArchivePathBackupPrefs(ctxt, ccs);
-            // Best-effort migration to encrypted-at-rest state storage.
-            archiveSecureState(ctxt, ccs);
-            if (ccs.debugLevel >= 0) DebugLevel = ccs.debugLevel;
-        }
-        return ccs;
-    }
-
-    @Nullable
-    private static ClientClassState restoreSecureState(@NonNull Context ctxt) {
-        AtomicFile stateFile = new AtomicFile(new File(ctxt.getFilesDir(), SECURE_STATE_FILE_NAME));
-        byte[] payload;
+    private static void cleanupLegacyStateFiles(@NonNull Context ctxt) {
         try {
-            payload = stateFile.readFully();
-        } catch (FileNotFoundException e) {
-            return null;
-        } catch (Exception e) {
-            CTError(TAG, "RestoreState() unable to read secure state archive.", e);
-            return null;
+            ctxt.deleteFile(TAG + ".ser");
+        } catch (Exception ignored) {
         }
-
-        try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(payload))) {
-            String header = dis.readUTF();
-            int version = dis.readInt();
-            if (!SECURE_STATE_HEADER.equals(header) || version != SECURE_STATE_VERSION) {
-                CTWarn(TAG, String.format(Locale.US,
-                        "RestoreState() secure state format mismatch. header=%s version=%d", header, version));
-                return null;
-            }
-            int ivLength = dis.readInt();
-            if (ivLength < 12 || ivLength > 32) {
-                CTWarn(TAG, "RestoreState() invalid secure state IV length: " + ivLength);
-                return null;
-            }
-            byte[] iv = new byte[ivLength];
-            dis.readFully(iv);
-            int cipherLength = dis.readInt();
-            if (cipherLength <= 0 || cipherLength > 32 * 1024 * 1024) {
-                CTWarn(TAG, "RestoreState() invalid secure state cipher length: " + cipherLength);
-                return null;
-            }
-            byte[] cipherText = new byte[cipherLength];
-            dis.readFully(cipherText);
-
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateStateKey(), new GCMParameterSpec(128, iv));
-            byte[] serializedState = cipher.doFinal(cipherText);
-            try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(serializedState))) {
-                return (ClientClassState) ois.readObject();
-            }
-        } catch (InvalidClassException e) {
-            CTWarn(TAG, "RestoreState() secure state incompatible version. Resetting.", e);
-        } catch (GeneralSecurityException e) {
-            CTWarn(TAG, "RestoreState() secure state decryption failed. Resetting.", e);
-        } catch (Exception e) {
-            CTError(TAG, "RestoreState() secure state decode failed.", e);
-        }
-        return null;
-    }
-
-    @Nullable
-    private static ClientClassState restoreLegacyState(@NonNull Context ctxt) {
         try {
-            CTDebug(TAG, "RestoreState() Opening legacy state " + LEGACY_STATE_FILE_NAME);
-            try (FileInputStream fis = ctxt.openFileInput(LEGACY_STATE_FILE_NAME);
-                 ObjectInputStream ois = new ObjectInputStream(fis)) {
-                return (ClientClassState) ois.readObject();
-            }
-        } catch (FileNotFoundException e) {
-            CTWarn(TAG, "RestoreState() no archive to restore from:", e);
-        } catch (InvalidClassException e) {
-            CTWarn(TAG, "RestoreState() not able to restore incompatible legacy state. Resetting.", e);
-        } catch (Exception e) {
-            CTError(TAG, "RestoreState() legacy decode raised:", e);
-        }
-        return null;
-    }
-
-    private static SecretKey getOrCreateStateKey() throws GeneralSecurityException, IOException {
-        try {
-            KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
-            keyStore.load(null);
-            KeyStore.Entry entry = keyStore.getEntry(SECURE_STATE_KEY_ALIAS, null);
-            if (entry instanceof KeyStore.SecretKeyEntry) {
-                return ((KeyStore.SecretKeyEntry) entry).getSecretKey();
-            }
-            KeyGenerator keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-            KeyGenParameterSpec keySpec = new KeyGenParameterSpec.Builder(
-                    SECURE_STATE_KEY_ALIAS,
-                    KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
-            )
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                    .setKeySize(256)
-                    .setUserAuthenticationRequired(false)
-                    .build();
-            keyGenerator.init(keySpec);
-            return keyGenerator.generateKey();
-        } catch (GeneralSecurityException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new GeneralSecurityException("Unable to create/open Android Keystore key", e);
-        }
-    }
-
-    private static void archiveSecureState(@NonNull Context ctxt, @NonNull ClientClassState state) {
-        AtomicFile stateFile = new AtomicFile(new File(ctxt.getFilesDir(), SECURE_STATE_FILE_NAME));
-        FileOutputStream fos = null;
-        try {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            try (ObjectOutputStream oos = new ObjectOutputStream(bos)) {
-                oos.writeObject(state);
-                oos.flush();
-            }
-            byte[] serializedState = bos.toByteArray();
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateStateKey());
-            byte[] iv = cipher.getIV();
-            if (iv == null || iv.length == 0) {
-                throw new GeneralSecurityException("ArchiveState(): secure cipher generated empty IV.");
-            }
-            byte[] cipherText = cipher.doFinal(serializedState);
-
-            fos = stateFile.startWrite();
-            DataOutputStream dos = new DataOutputStream(fos);
-            dos.writeUTF(SECURE_STATE_HEADER);
-            dos.writeInt(SECURE_STATE_VERSION);
-            dos.writeInt(iv.length);
-            dos.write(iv);
-            dos.writeInt(cipherText.length);
-            dos.write(cipherText);
-            dos.flush();
-            stateFile.finishWrite(fos);
-            try {
-                ctxt.deleteFile(LEGACY_STATE_FILE_NAME);
-            } catch (Exception ignored) {
-            }
-        } catch (Exception e) {
-            if (fos != null) {
-                stateFile.failWrite(fos);
-            }
-            CTError(TAG, "ArchiveState() secure write failed:", e);
+            ctxt.deleteFile(TAG + ".state");
+        } catch (Exception ignored) {
         }
     }
 
@@ -1343,24 +1167,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         InitializeDebugTagRegistry();
         if (null == Ccstate) {
             Context ctxt = R2CApplication.getAppCtxt();
-            ClientClassState legacyState = null;
-            if (ctxt != null) {
-                AppConfigStore.initialize(ctxt);
-                if (!AppConfigStore.isLegacyImportComplete(ctxt)) {
-                    CTDebug(TAG, "GetState(): legacy import incomplete; attempting restore/import.");
-                    legacyState = RestoreState();
-                    AppConfigStore.importLegacyStateIfNeeded(ctxt, legacyState);
-                } else {
-                    CTDebug(TAG, "GetState(): legacy import already complete; reading proto store.");
-                }
-            }
             ClientClassState ccs = null;
             if (ctxt != null) {
+                AppConfigStore.initialize(ctxt);
                 ccs = (ClientClassState) AppConfigStore.restoreClientState(ctxt);
                 ArchivePermissionMissingFlag = AppConfigStore.getArchiveRequiresRegrant(ctxt);
+                cleanupLegacyStateFiles(ctxt);
                 CTDebug(TAG, "GetState(): restored ClientClassState from proto store.");
             }
-            if (null == ccs) ccs = legacyState;
             if (null == ccs) ccs = new ClientClassState();
             if (ctxt != null) {
                 applyArchivePathBackupPrefs(ctxt, ccs);

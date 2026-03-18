@@ -60,7 +60,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -424,9 +423,8 @@ internal fun SplitMapPane(
     var badTilesMenuExpanded by remember { mutableStateOf(false) }
     var calibrateMenuExpanded by remember { mutableStateOf(false) }
     var showMapFoldersDialog by remember { mutableStateOf(false) }
-    val hiddenFolderIds = remember { mutableStateSetOf<String>() }
-    val hiddenItemIds = remember { mutableStateSetOf<String>() }
-    val seenFolderIds = remember { HashSet<String>() }
+    val hiddenFolderIds = viewModel.hiddenFolderIds
+    val hiddenItemIds = viewModel.hiddenItemIds
     var showBadTilesHowToDialog by remember { mutableStateOf(false) }
     var showOfflinePrepDialog by remember { mutableStateOf(false) }
     var offlinePrepInFlight by remember { mutableStateOf(false) }
@@ -1238,11 +1236,11 @@ internal fun SplitMapPane(
             val featureId = feature.optString("id")
             if (featureId.isNotBlank()) {
                 artifactStoreById[featureId] = feature
-                // Auto-hide folders the server marks as not visible, on first encounter
+                // Auto-hide folders the server marks as not visible, on first encounter.
+                // Delegates to ViewModel so the choice persists across navigation.
                 val props = feature.optJSONObject("properties")
-                if (props?.optString("class") == "Folder" && featureId !in seenFolderIds) {
-                    seenFolderIds.add(featureId)
-                    if (!props.optBoolean("visible", true)) hiddenFolderIds.add(featureId)
+                if (props?.optString("class") == "Folder") {
+                    viewModel.applyCaltopoFolderDefault(featureId, props.optBoolean("visible", true))
                 }
             }
         }
@@ -1496,11 +1494,11 @@ internal fun SplitMapPane(
                     artifactStoreById.remove(featureId)
                 } else {
                     artifactStoreById[featureId] = feature
-                    // Auto-hide folders the server marks as not visible, on first encounter
+                    // Auto-hide folders the server marks as not visible, on first encounter.
+                    // Delegates to ViewModel so the choice persists across navigation.
                     val props = feature.optJSONObject("properties")
-                    if (props?.optString("class") == "Folder" && featureId !in seenFolderIds) {
-                        seenFolderIds.add(featureId)
-                        if (!props.optBoolean("visible", true)) hiddenFolderIds.add(featureId)
+                    if (props?.optString("class") == "Folder") {
+                        viewModel.applyCaltopoFolderDefault(featureId, props.optBoolean("visible", true))
                     }
                 }
 
@@ -3357,13 +3355,16 @@ private fun geoBoundaryFromPoints(points: List<GeoPoint>): GeoBoundary? {
 }
 
 private fun isTrackLikeFeature(properties: JSONObject?, className: String): Boolean {
+    // Active drone tracks (className="LiveTrack") are rendered by the drone tracking system;
+    // suppress them here to avoid double-rendering.
     if (className == "LiveTrack") return true
+    // Features in the active track folder (not yet archived) are also managed by the drone
+    // tracking system.  The archive folder is intentionally excluded: completed/archived drone
+    // tracks are static line features that should be renderable via the Map Folders dialog when
+    // the user enables their folder.  Their default-hidden state is handled by hiddenFolderIds.
     val folderId = properties?.optString("folderId").orEmpty()
     val mapTrackFolderId = CaltopoMap.GetFolderId().orEmpty()
-    val mapArchiveFolderId = CaltopoMap.GetArchiveFolderId().orEmpty()
-    if (folderId.isNotBlank() && (folderId == mapTrackFolderId || folderId == mapArchiveFolderId)) {
-        return true
-    }
+    if (folderId.isNotBlank() && folderId == mapTrackFolderId) return true
     return false
 }
 

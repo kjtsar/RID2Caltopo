@@ -6,6 +6,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
@@ -129,6 +130,39 @@ class StreamsViewModel(
         droneDisplayStateMap[designator] = DroneDisplayState(headingDeg, aglFt, atoFt)
     }
 
+    // --- Map Folders visibility state ---
+    // Persisted in the ViewModel so user selections survive navigation away and back.
+
+    /** Folder IDs whose contents should be hidden on the local map. */
+    val hiddenFolderIds = mutableStateSetOf<String>()
+
+    /** Individual feature IDs hidden regardless of their folder's visibility. */
+    val hiddenItemIds = mutableStateSetOf<String>()
+
+    /**
+     * Tracks which folder IDs have already had their Caltopo default visibility applied,
+     * so we don't override the user's manual selections on re-entry.
+     */
+    private val seenFolderIds = HashSet<String>()
+
+    /**
+     * Called when a Folder feature is first encountered in the artifact stream.
+     * Applies the Caltopo server's `visible` flag as the initial default, but only once
+     * per folder ID so that user overrides survive map reconnects and screen navigation.
+     */
+    fun applyCaltopoFolderDefault(folderId: String, caltopoVisible: Boolean) {
+        if (folderId in seenFolderIds) return
+        seenFolderIds.add(folderId)
+        if (!caltopoVisible) hiddenFolderIds.add(folderId)
+    }
+
+    /** Clears all folder/item visibility state and the seen-folder registry (e.g. on map disconnect). */
+    fun resetFolderVisibility() {
+        hiddenFolderIds.clear()
+        hiddenItemIds.clear()
+        seenFolderIds.clear()
+    }
+
     private val _pendingClue = mutableStateOf<PendingClue?>(null)
     val pendingClue: PendingClue?
         get() = _pendingClue.value
@@ -218,6 +252,7 @@ class StreamsViewModel(
         } else if (_mapName.value != null) {
             _mapName.value = null
             CTDebug(tag, "Disconnected from ${oldName} map")
+            resetFolderVisibility()
         }
     }
 

@@ -218,7 +218,7 @@ public class OpenDroneIdDataManager {
         // Pass -1000.0 in that case so updateAltitudeContext's validity check short-circuits.
         boolean absAltFromRidFallback = !isRidAltitudeValid(location.getAltitudePressure())
                 && !isRidAltitudeValid(location.getAltitudeGeodetic());
-        if (CaltopoClient.CTDebugEnabled("AltContext")) {
+        if (false) {
             CaltopoClient.CTDebug(TAG, String.format(Locale.US,
                     "updateCaltopo(%s): atmoAlt=%.1f geodeticAlt=%.1f ridHeight=%.1f isAto=%b ridFallback=%b",
                     idStr,

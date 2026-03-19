@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
@@ -35,7 +36,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
@@ -58,6 +61,12 @@ fun StreamTile(
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
     var showSensitivityDialog by remember { mutableStateOf(false) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
+
+    // Keep the altitude coordinator active while this tile is on screen.
+    DisposableEffect(viewModel) {
+        val removeConsumer = viewModel.addAltitudeConsumer()
+        onDispose { removeConsumer() }
+    }
     val isFocused = (focusedPath == streamDesignator)
     CTDebug(tag, "StreamTile(): isFocused:${isFocused}, designator:${streamDesignator}, focusedPath:$focusedPath")
     val designatorState = viewModel.designatorStateFor(streamDesignator)
@@ -83,6 +92,35 @@ fun StreamTile(
             viewModel = viewModel,
             onTextureViewReady = { tv -> textureViewRef.value = tv }
         )
+
+        // ATO / AGL / HDG overlay — shown whenever the stream is live and we have a linked drone.
+        if (streamState == StreamState.LIVE) {
+            val displayState = viewModel.droneDisplayStateFor(streamDesignator)
+            val atoStr = displayState?.atoFt
+                ?.let { "${"%.0f".format(it)}ATO" } ?: "--ATO"
+            val aglStr = displayState?.aglFt
+                ?.let { "${"%.0f".format(it)}${if (displayState.aglStale) "?" else ""}AGL" } ?: "--AGL"
+            val hdgStr = displayState?.headingDeg
+                ?.let { "${"%.0f".format(it)}°" } ?: "--°"
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 6.dp, top = 6.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                for (label in listOf(atoStr, aglStr, hdgStr)) {
+                    Text(
+                        text = label,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .matchParentSize()

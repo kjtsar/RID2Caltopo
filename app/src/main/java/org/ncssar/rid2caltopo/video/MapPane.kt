@@ -270,23 +270,7 @@ internal data class DroneMapPoint(
     val droneSpec: CtDroneSpec? = null
 )
 
-internal data class DroneAglState(
-    val groundM: Double,
-    val stale: Boolean
-)
-
-
-internal enum class AtoSeedSource {
-    AUTO,        // RID-height EMA is still converging; calibration will keep updating
-    AUTO_SEALED, // EMA has converged; calibration is locked until user manually overrides
-    MANUAL,      // User pressed "Calibrate ATO at 50'"; never auto-update
-}
-
-internal data class DroneAltitudeCalibration(
-    val takeoffTrackAltitudeM: Double,
-    val seedSource: AtoSeedSource = AtoSeedSource.AUTO
-)
-
+// DroneAglState, AtoSeedSource, DroneAltitudeCalibration — defined in DroneAltitudeModels.kt
 
 internal data class DroneComplianceState(
     val aglM: Double?,
@@ -463,7 +447,13 @@ internal fun SplitMapPane(
     val caltopoMarkerPending = remember { HashSet<String>() }
     val unknownSymbolsSeen = remember { LinkedHashSet<String>() }
     val iconCacheService = remember(context) { CaltopoIconCacheService(context) }
-    val demElevationService = remember(context) { DemElevationService(context) }
+    // DemElevationService is owned by the coordinator (created once at ViewModel init).
+    val demElevationService = viewModel.altitudeCoordinator.demElevationService
+    // Register MapPane as an altitude consumer so the coordinator's update loop stays active.
+    DisposableEffect(viewModel) {
+        val removeConsumer = viewModel.addAltitudeConsumer()
+        onDispose { removeConsumer() }
+    }
     val tileCacheWriter = remember(context) { TileDiskCacheWriter(context) }
     val tileMapProvider = remember(context) {
         configureOsmdroid(context)
@@ -491,11 +481,6 @@ internal fun SplitMapPane(
     var prevDemMisses by remember { mutableStateOf(0L) }
     var tileIoActiveUntilMs by remember { mutableStateOf(System.currentTimeMillis() + 12_000L) }
     var lastViewportSignature by remember { mutableStateOf<String?>(null) }
-    val demAglByDesignator = remember { mutableStateMapOf<String, DroneAglState>() }
-    val demPendingByDesignator = remember { HashSet<String>() }
-    val demLastAttemptAtByDesignator = remember { HashMap<String, Long>() }
-    val demKeyByDesignator = remember { LinkedHashMap<String, String>() }
-    val demCalibrationByDesignator = remember { mutableStateMapOf<String, DroneAltitudeCalibration>() }
     // Auto-download: GeoTIFF tiles already initiated (prevents redundant re-downloads).
     val autoFetchedDemTiles = remember { HashSet<String>() }
     val demAutoFetchClient = remember {
@@ -504,14 +489,6 @@ internal fun SplitMapPane(
             .readTimeout(5, TimeUnit.MINUTES)
             .build()
     }
-    // AGL correction factor F per drone, set at calibration time.
-    // F = (droneAlt_cal - 50ft) - demGround_cal
-    // AGL_corrected = droneAlt_new - demGround_new - F
-    // This lets the DEM loop run freely while keeping AGL accurate relative to the calibration point.
-    val demAglCorrectionByDesignator = remember { mutableStateMapOf<String, Double>() }
-    val telemetryHeadingByDesignator = remember { mutableStateMapOf<String, Double>() }
-    val fallbackHeadingByDesignator = remember { mutableStateMapOf<String, Double>() }
-    val fallbackHeadingAnchorByDesignator = remember { mutableStateMapOf<String, LocalTrackPoint>() }
     val renderLatencyKeyByDesignator = remember { mutableStateMapOf<String, String>() }
     val complianceByDesignator = remember { mutableStateMapOf<String, DroneComplianceState>() }
     // Tracks which drone's info-window bubble is open so it can be restored after each overlay rebuild.
@@ -609,7 +586,6 @@ internal fun SplitMapPane(
                 val startMs = System.currentTimeMillis()
                 tileCacheWriter.prewarm()
                 iconCacheService.prewarm()
-                demElevationService.prewarm()
                 prefs.edit().putString(MAP_CACHE_PREWARM_SIG_KEY, signature).apply()
                 val elapsedMs = System.currentTimeMillis() - startMs
                 MapCacheDebug.log("prewarm auto complete elapsedMs=$elapsedMs sig=$signature")
@@ -707,37 +683,7 @@ internal fun SplitMapPane(
     }
 
     fun calibrateDroneAto50(target: DroneMapPoint) {
-        // ATO: purely altitude-based. takeoffTrackAltitudeM is fixed until next calibration.
-        val calibratedTakeoffTrackAltM = target.altitudeM - (CALIBRATE_ATO_TARGET_FT * FT_TO_METERS)
-        demCalibrationByDesignator[target.remoteId] = DroneAltitudeCalibration(
-            takeoffTrackAltitudeM = calibratedTakeoffTrackAltM,
-            seedSource = AtoSeedSource.MANUAL
-        )
-        // AGL correction factor F: the systematic error in the DEM at this location.
-        // F = (droneAlt - 50ft) - demGround
-        // At render time: AGL = droneAlt_new - demGround_new - F
-        // This allows the DEM loop to keep updating groundM freely while AGL stays
-        // calibrated. F persists until the next calibration call.
-        val demGround = demAglByDesignator[target.remoteId]?.groundM
-        val correctionF = if (demGround != null) {
-            (target.altitudeM - (CALIBRATE_ATO_TARGET_FT * FT_TO_METERS)) - demGround
-        } else null
-        if (correctionF != null) {
-            demAglCorrectionByDesignator[target.remoteId] = correctionF
-        }
-        val ridH = target.droneSpec?.getLastRidHeightM()
-        val ridHAto = target.droneSpec?.isLastRidHeightAto() ?: false
-        val ridHDisplay = if (ridH != null && ridH != -1000.0 && ridHAto)
-            "${"%.1f".format(ridH)}m (${"%.0f".format(ridH * METERS_TO_FEET)}ft, USED)" else "n/a (fallback to absAlt)"
-        if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
-            MAP_PANE_TAG,
-            "ATO+AGL calibrated for ${target.designator}: " +
-                "droneAlt=${"%.1f".format(target.altitudeM)}m (${"%.0f".format(target.altitudeM * METERS_TO_FEET)}ft) " +
-                "ridHeight=$ridHDisplay " +
-                "takeoffTrackAlt=${"%.1f".format(calibratedTakeoffTrackAltM)}m " +
-                "demGround=${demGround?.let { "%.1f".format(it) } ?: "n/a"}m " +
-                "correctionF=${correctionF?.let { "%.1f".format(it) } ?: "n/a (no DEM)"}m"
-        )
+        viewModel.altitudeCoordinator.manualCalibrate(target.remoteId, target.altitudeM, target.designator)
     }
 
     fun selectedTileSource(): org.osmdroid.tileprovider.tilesource.ITileSource {
@@ -1260,23 +1206,7 @@ internal fun SplitMapPane(
         lastRenderStats = ""
         lastAlignmentStats = ""
         lastCacheStats = ""
-        demAglByDesignator.clear()
-        demPendingByDesignator.clear()
-        demLastAttemptAtByDesignator.clear()
-        demKeyByDesignator.clear()
-        // Preserve MANUAL calibrations (and their AGL corrections) across map reconnects.
-        // The user explicitly set these; wiping them on reconnect would force a re-calibration
-        // and cause a discontinuity in the ATO/AGL display. AUTO/AUTO_SEALED entries are
-        // derived from live RID data and will be re-derived from the next incoming packets.
-        demCalibrationByDesignator.keys.retainAll { key ->
-            demCalibrationByDesignator[key]?.seedSource == AtoSeedSource.MANUAL
-        }
-        demAglCorrectionByDesignator.keys.retainAll { key ->
-            demCalibrationByDesignator.containsKey(key)
-        }
-        telemetryHeadingByDesignator.clear()
-        fallbackHeadingByDesignator.clear()
-        fallbackHeadingAnchorByDesignator.clear()
+        viewModel.altitudeCoordinator.onMapReconnect()
         renderLatencyKeyByDesignator.clear()
         complianceByDesignator.clear()
         lastAlertSeverity = AlertSeverity.None
@@ -1387,38 +1317,11 @@ internal fun SplitMapPane(
         if (point != null) {
             val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
             var coordinateMenuExpanded by remember(designator, coordinateDisplayFormat) { mutableStateOf(false) }
-            // Use remoteId as the stable state key — mappedId (designator) can change mid-flight.
-            val stateKey = point.remoteId
-            val aglState = demAglByDesignator[stateKey]
-            val freshAglState = aglState?.takeUnless { it.stale }
-            val calibration = demCalibrationByDesignator[stateKey]
-            val aglCorrectionM = demAglCorrectionByDesignator[stateKey]
-            // Show ? when: data is stale, drone has moved to a new position (old DEM no longer valid),
-            // or a fetch is actively in flight.
-            val demKeyDetail = demElevationService.cacheKey(point.lat, point.lng)
-            val priorKeyDetail = demKeyByDesignator[stateKey]
-            val locationChangedDetail = priorKeyDetail != null && priorKeyDetail != demKeyDetail
-            val demPendingDetail = demPendingByDesignator.contains(stateKey)
-            val aglStale = aglState != null && (freshAglState == null || locationChangedDetail || demPendingDetail)
-            // ATO: prefer the drone's own ridHeight (relative baro, drift-resistant) when it
-            // is ATO-typed and valid.  The absolute baro field (altitudeM) drifts with
-            // atmospheric pressure changes; ridHeight cancels that drift because it is a
-            // difference (current pressure − home pressure), not an absolute measurement.
-            // Fall back to manual calibration math only when ridHeight is unavailable.
-            val ridHeightAtoM = point.droneSpec?.let { spec ->
-                val h = spec.getLastRidHeightM()
-                if (spec.isLastRidHeightAto() && h != -1000.0) h else null
-            }
-            // AGL = droneAlt - demGround - correctionF when calibrated (aglCorrectionM != null).
-            // Before calibration, fall back to the drone's own ridHeight (relative baro from
-            // takeoff point) — a safe ATO approximation that requires no manual step.
-            val aglFeet = if (aglCorrectionM != null) {
-                (freshAglState ?: aglState)?.let { (point.altitudeM - it.groundM - aglCorrectionM) * METERS_TO_FEET }
-            } else {
-                ridHeightAtoM?.let { it * METERS_TO_FEET }
-            }
-            val atoFeet = displayAtoMeters(point, calibration, ridHeightAtoM)
-                ?.times(METERS_TO_FEET)
+            // AGL, ATO — read from coordinator (same values shown in the map label).
+            val bubbleDisplayState = viewModel.droneDisplayStateFor(point.designator)
+            val aglFeet  = bubbleDisplayState?.aglFt
+            val aglStale = bubbleDisplayState?.aglStale ?: false
+            val atoFeet  = bubbleDisplayState?.atoFt
             val rangeFeet = if (CaltopoMap.MyLocation != null &&
                 CaltopoMap.MyLocation.latitude.isFinite() &&
                 CaltopoMap.MyLocation.longitude.isFinite()
@@ -1437,7 +1340,7 @@ internal fun SplitMapPane(
             }
             val detailLines = buildList {
                 add("Location: ${CoordinateFormatter.format(point.lat, point.lng, coordinateDisplayFormat)} (${coordinateDisplayFormat.label})")
-                add("AGL: ${aglFeet?.let { "${"%.0f".format(it)}'${if (aglStale && aglCorrectionM != null) "?" else ""}" } ?: "--"}")
+                add("AGL: ${aglFeet?.let { "${"%.0f".format(it)}'${if (aglStale) "?" else ""}" } ?: "--"}")
                 add("ATO: ${atoFeet?.let { "%.0f'".format(it) } ?: "--"}")
                 add("Distance: ${rangeFeet?.let { "%.0f'".format(it) } ?: "--"}")
                 val telemetry = point.droneSpec?.lastPositionTelemetry
@@ -1526,8 +1429,6 @@ internal fun SplitMapPane(
                 if (lat == 0.0 && lng == 0.0) return@launch
                 val nowWallMsec = System.currentTimeMillis()
                 val key = mappedId.ifBlank { "unmapped" }
-                // Resolve stable remoteId for DEM/calibration state that must survive mappedId changes.
-                val remoteKey = viewModel.droneStates[key]?.source?.remoteId ?: key
                 val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
                 val point = LocalTrackPoint(
                     mappedId = key,
@@ -1538,108 +1439,6 @@ internal fun SplitMapPane(
                     receivedAtMsec = nowWallMsec
                 )
                 list.add(point)
-                val priorAnchor = fallbackHeadingAnchorByDesignator[key]
-                if (priorAnchor == null) {
-                    fallbackHeadingAnchorByDesignator[key] = point
-                } else {
-                    val distanceAndBearing = FloatArray(2)
-                    Location.distanceBetween(
-                        priorAnchor.lat, priorAnchor.lng,
-                        point.lat, point.lng,
-                        distanceAndBearing
-                    )
-                    val segmentDistanceM = distanceAndBearing[0].toDouble()
-                    if (segmentDistanceM.isFinite() && segmentDistanceM >= SIGNIFICANT_HEADING_MOVE_M) {
-                        fallbackHeadingByDesignator[key] = normalizeDegrees(distanceAndBearing[1].toDouble())
-                        fallbackHeadingAnchorByDesignator[key] = point
-                    }
-                }
-                // Telemetry track degree is the higher-priority heading source when the drone provides it.
-                val trackDeg = viewModel.droneStates[key]?.source?.lastPositionTelemetry?.aircraftTrackDeg
-                if (trackDeg != null && trackDeg.isFinite()) {
-                    telemetryHeadingByDesignator[key] = normalizeDegrees(trackDeg)
-                }
-
-                // Seed or refine ATO calibration automatically.
-                // State machine:
-                //   null        → AUTO       first fix or first RID-height estimate
-                //   AUTO        → AUTO       EMA still converging (no log, no display change needed)
-                //   AUTO        → AUTO_SEALED EMA converged; lock calibration, log once
-                //   AUTO_SEALED → (skip)     locked until user manual-calibrates
-                //   MANUAL      → (skip)     user override, never touch
-                val existingCal = demCalibrationByDesignator[remoteKey]
-                val seedSource  = existingCal?.seedSource
-                if (seedSource != AtoSeedSource.AUTO_SEALED && seedSource != AtoSeedSource.MANUAL) {
-                    val droneSpec  = viewModel.droneStates[key]?.source
-                    val ridTakeoff = droneSpec?.getImpliedTakeoffAltM()
-                    val isSealed   = droneSpec?.isImpliedTakeoffAltSealed() ?: false
-                    when {
-                        ridTakeoff != null -> {
-                            // Drone broadcasts height-above-takeoff.
-                            // absAlt − ridHeight = baro altitude at takeoff, correct even if
-                            // the drone was already airborne when first observed.
-                            // Only write + log on meaningful transitions:
-                            //   • existingCal == null  → first application (was using nothing)
-                            //   • isSealed             → EMA has converged; apply final value and lock
-                            // Between those two events the EMA is still converging, so we update
-                            // the calibration silently on every packet to keep ATO tracking accurate
-                            // during the ascent.
-                            val newSource = if (isSealed) AtoSeedSource.AUTO_SEALED else AtoSeedSource.AUTO
-                            demCalibrationByDesignator[remoteKey] = DroneAltitudeCalibration(
-                                takeoffTrackAltitudeM = ridTakeoff,
-                                seedSource = newSource
-                            )
-                            // When the EMA seals, refresh correctionF with the final takeoffAlt.
-                            // DEM ground at seal time (~9s after takeoff) still approximates the
-                            // takeoff terrain, so the refreshed correctionF is more accurate than
-                            // the one set during the still-converging AUTO phase.
-                            // Do NOT refresh if seedSource was already MANUAL — user owns that.
-                            if (isSealed) {
-                                val demGroundAtSeal = demAglByDesignator[remoteKey]?.groundM
-                                if (demGroundAtSeal != null &&
-                                        demCalibrationByDesignator[remoteKey]?.seedSource != AtoSeedSource.MANUAL) {
-                                    val refinedCorrF = ridTakeoff - demGroundAtSeal
-                                    demAglCorrectionByDesignator[remoteKey] = refinedCorrF
-                                    if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
-                                        MAP_PANE_TAG,
-                                        "AGL correctionF refined at seal for $key: " +
-                                            "takeoffAlt=${"%.1f".format(ridTakeoff)}m " +
-                                            "demGround=${"%.1f".format(demGroundAtSeal)}m " +
-                                            "correctionF=${"%.1f".format(refinedCorrF)}m"
-                                    )
-                                }
-                            }
-                            if (CTDebugEnabled(MAP_PANE_TAG) && (existingCal == null || isSealed)) {
-                                val event = if (existingCal == null) "first" else "converged"
-                                CTDebug(
-                                    MAP_PANE_TAG,
-                                    "ATO auto-seed ($event RID height) for $key: " +
-                                        "takeoffAlt=${"%.1f".format(ridTakeoff)}m " +
-                                        "(${"%.0f".format(ridTakeoff * METERS_TO_FEET)}ft)"
-                                )
-                            }
-                        }
-                        existingCal == null && altitudeMeters.isFinite()
-                                && altitudeMeters > -999.0 && altitudeMeters != 0.0 -> {
-                            // Fallback: drone doesn't broadcast ATO height; use first fix.
-                            // altitudeMeters > -999.0 excludes the RID invalid sentinel (-1000.0),
-                            // which updateCaltopo passes when only ridHeight was available — a
-                            // relative value that must not be treated as an MSL baro reference.
-                            // Runs only once. Replaced the moment a valid ridTakeoff arrives.
-                            demCalibrationByDesignator[remoteKey] = DroneAltitudeCalibration(
-                                takeoffTrackAltitudeM = altitudeMeters,
-                                seedSource = AtoSeedSource.AUTO
-                            )
-                            if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
-                                MAP_PANE_TAG,
-                                "ATO auto-seed (first fix) for $key: " +
-                                    "alt=${"%.1f".format(altitudeMeters)}m " +
-                                    "(${"%.0f".format(altitudeMeters * METERS_TO_FEET)}ft)"
-                            )
-                        }
-                    }
-                }
-
                 if (CTDebugEnabled(ICON_LATENCY_TAG))  CTDebug(
                     ICON_LATENCY_TAG,
                     "track_ingest designator=$key wall=$nowWallMsec droneTs=$timestampMsec " +
@@ -1953,14 +1752,12 @@ internal fun SplitMapPane(
                     }
                     val renderLat = predictedHead?.lat ?: point.lat
                     val renderLng = predictedHead?.lng ?: point.lng
-                    val headingDeg = telemetryHeadingByDesignator[point.designator]
-                        ?: fallbackHeadingByDesignator[point.designator]
-                    val demKey = demElevationService.cacheKey(point.lat, point.lng)
-                    // Use remoteId as the stable state key — mappedId (designator) can change mid-flight.
-                    val priorKey = demKeyByDesignator[point.remoteId]
-                    val aglState = demAglByDesignator[point.remoteId]
-                    val freshAglState = aglState?.takeUnless { it.stale }
-                    val calibration = demCalibrationByDesignator[point.remoteId]
+                    // AGL, ATO, heading — all computed by DroneAltitudeCoordinator.
+                    val displayState = viewModel.droneDisplayStateFor(point.designator)
+                    val headingDeg  = displayState?.headingDeg
+                    val labelAglFeet = displayState?.aglFt
+                    val labelAglStale = displayState?.aglStale ?: false
+                    val labelAtoFeet = displayState?.atoFt
                     val labelRangeFeet = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
                         val out = FloatArray(1)
                         Location.distanceBetween(
@@ -1974,98 +1771,10 @@ internal fun SplitMapPane(
                     } else {
                         null
                     }
-                    val aglCorrectionM = demAglCorrectionByDesignator[point.remoteId]
-                    // Show ? when: data is stale, drone has moved to a new position (old DEM no longer
-                    // valid for current location), or a fetch is actively in flight for this drone.
-                    val demPending = demPendingByDesignator.contains(point.remoteId)
-                    val locationChanged = priorKey != null && priorKey != demKey
-                    val labelAglStale = aglState != null && (freshAglState == null || locationChanged || demPending)
-                    // ATO: prefer the drone's own ridHeight (relative baro, drift-resistant) when
-                    // ATO-typed and valid.  Same logic as the bubble display above.
-                    val labelRidHeightAtoM = point.droneSpec?.let { spec ->
-                        val h = spec.getLastRidHeightM()
-                        if (spec.isLastRidHeightAto() && h != -1000.0) h else null
-                    }
-                    // AGL = droneAlt - demGround - correctionF when calibrated (aglCorrectionM != null).
-                    // Before calibration, fall back to the drone's own ridHeight (relative baro from
-                    // takeoff point) — a safe ATO approximation that requires no manual step.
-                    val labelAglFeet = if (aglCorrectionM != null) {
-                        (freshAglState ?: aglState)?.let { (point.altitudeM - it.groundM - aglCorrectionM) * METERS_TO_FEET }
-                    } else {
-                        labelRidHeightAtoM?.let { it * METERS_TO_FEET }
-                    }
-                    val labelAtoFeet = displayAtoMeters(point, calibration, labelRidHeightAtoM)
-                        ?.times(METERS_TO_FEET)
-                    viewModel.updateDroneDisplayState(point.designator, headingDeg, labelAglFeet, labelAtoFeet)
-                    val lastDemAttemptAt = demLastAttemptAtByDesignator[point.remoteId] ?: 0L
-                    val shouldRetryDem =
-                        priorKey == demKey &&
-                            (aglState == null || aglState.stale) &&
-                            (uiNowWallMsec - lastDemAttemptAt >= DEM_RETRY_INTERVAL_MS)
-                    if ((priorKey != demKey || shouldRetryDem) && !demPendingByDesignator.contains(point.remoteId)) {
-                        demPendingByDesignator.add(point.remoteId)
-                        demLastAttemptAtByDesignator[point.remoteId] = uiNowWallMsec
-                        uiScope.launch(Dispatchers.IO) {
-                            val sample = demElevationService.sampleElevationMeters(point.lat, point.lng)
-                            withContext(Dispatchers.Main.immediate) {
-                                if (sample != null) {
-                                    // Store only the DEM ground elevation. AGL is computed dynamically
-                                    // at render time as point.altitudeM - groundM so it always reflects
-                                    // the live drone altitude rather than the altitude at fetch time.
-                                    demAglByDesignator[point.remoteId] = DroneAglState(
-                                        groundM = sample.elevationMeters,
-                                        stale = sample.stale
-                                    )
-                                    demKeyByDesignator[point.remoteId] = demKey
-                                    // Derive AGL correction factor as soon as both DEM ground and any
-                                    // calibration (AUTO, AUTO_SEALED, or MANUAL) are available.
-                                    //
-                                    // correctionF bridges the gap between the drone's baro frame and MSL:
-                                    //   correctionF = takeoffTrackAltM - demGround_at_takeoff
-                                    // At render time: AGL = altitudeM - demGround_current - correctionF
-                                    //
-                                    // AUTO/AUTO_SEALED: takeoffTrackAltM = absAlt - ridHeight at takeoff,
-                                    //   so correctionF absorbs the drone's baro offset from MSL.  This is
-                                    //   computed once at the first DEM fetch (drone near takeoff) so the
-                                    //   reference demGround approximates the actual takeoff terrain.
-                                    // MANUAL: takeoffTrackAltM = droneAlt - 50ft at calibration point, so
-                                    //   correctionF absorbs both the baro offset and any DEM error there.
-                                    //
-                                    // In both cases: AGL = altitudeM - demGround_current - correctionF
-                                    //   = (altitudeM - takeoffTrackAltM) - (demGround_current - demGround_takeoff)
-                                    //   = ridHeight - terrain_change_from_takeoff   ✓
-                                    val calEntry = demCalibrationByDesignator[point.remoteId]
-                                    if (calEntry != null
-                                            && !demAglCorrectionByDesignator.containsKey(point.remoteId)) {
-                                        val correctionF = calEntry.takeoffTrackAltitudeM - sample.elevationMeters
-                                        demAglCorrectionByDesignator[point.remoteId] = correctionF
-                                        if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
-                                            MAP_PANE_TAG,
-                                            "AGL correctionF set for ${point.designator} " +
-                                                "(${calEntry.seedSource}): " +
-                                                "takeoffTrackAlt=${"%.1f".format(calEntry.takeoffTrackAltitudeM)}m " +
-                                                "demGround=${"%.1f".format(sample.elevationMeters)}m " +
-                                                "correctionF=${"%.1f".format(correctionF)}m"
-                                        )
-                                    }
-                                } else {
-                                    val priorAgl = demAglByDesignator[point.remoteId]
-                                    if (priorAgl != null) {
-                                        demAglByDesignator[point.remoteId] = priorAgl.copy(stale = true)
-                                    }
-                                }
-                                demPendingByDesignator.remove(point.remoteId)
-                            }
-                        }
-                    }
                     val marker = Marker(mapView).apply {
                         position = GeoPoint(renderLat, renderLng)
-                        val effectiveAglM = if (aglCorrectionM != null) {
-                            (freshAglState ?: aglState)?.let { point.altitudeM - it.groundM - aglCorrectionM }
-                                ?: Double.NEGATIVE_INFINITY
-                        } else {
-                            labelRidHeightAtoM ?: Double.NEGATIVE_INFINITY
-                        }
+                        val effectiveAglM = labelAglFeet?.let { it / METERS_TO_FEET }
+                            ?: Double.NEGATIVE_INFINITY
                         val markerTint = when {
                             effectiveAglM >= iconLimitAglM -> AndroidColor.parseColor("#D32F2F")
                             effectiveAglM >= nearIconAglM -> AndroidColor.parseColor("#FBC02D")
@@ -2135,25 +1844,10 @@ internal fun SplitMapPane(
                         complianceByDesignator.remove(key)
                     }
                 }
-                fallbackHeadingByDesignator.keys.toList().forEach { key ->
-                    if (!activeDesignators.contains(key)) {
-                        fallbackHeadingByDesignator.remove(key)
-                    }
-                }
-                fallbackHeadingAnchorByDesignator.keys.toList().forEach { key ->
-                    if (!activeDesignators.contains(key)) {
-                        fallbackHeadingAnchorByDesignator.remove(key)
-                    }
-                }
-                telemetryHeadingByDesignator.keys.toList().forEach { key ->
-                    if (!activeDesignators.contains(key)) {
-                        telemetryHeadingByDesignator.remove(key)
-                    }
-                }
-
                 dronePoints.forEach { point ->
-                    val agl = demAglByDesignator[point.remoteId]
-                    val freshAgl = agl?.takeUnless { it.stale }
+                    val compDisplayState = viewModel.droneDisplayStateFor(point.designator)
+                    val aglM    = compDisplayState?.aglFt?.let { it / METERS_TO_FEET }
+                    val staleDem = compDisplayState?.aglStale ?: false
                     val rangeM = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
                         val out = FloatArray(1)
                         Location.distanceBetween(
@@ -2167,11 +1861,8 @@ internal fun SplitMapPane(
                     } else {
                         null
                     }
-
-                    val aglCorrM = demAglCorrectionByDesignator[point.remoteId] ?: 0.0
-                    val aglM = freshAgl?.let { point.altitudeM - it.groundM - aglCorrM }
-                    val nearAgl = aglM != null && aglM >= nearAglM
-                    val overAgl = aglM != null && aglM >= limitAglM
+                    val nearAgl  = aglM != null && aglM >= nearAglM
+                    val overAgl  = aglM != null && aglM >= limitAglM
                     val nearRange = rangeM != null && rangeM >= nearRangeM
                     val overRange = rangeM != null && rangeM >= limitRangeM
                     complianceByDesignator[point.designator] = DroneComplianceState(
@@ -2181,7 +1872,7 @@ internal fun SplitMapPane(
                         nearRange = nearRange,
                         overAgl = overAgl,
                         overRange = overRange,
-                        staleDem = agl?.stale ?: false
+                        staleDem = staleDem
                     )
                 }
 
@@ -3615,23 +3306,6 @@ private fun nearestLocalTrackTailDistanceMeters(
     return best
 }
 
-
-private fun manualAtoMeters(
-    point: DroneMapPoint,
-    calibration: DroneAltitudeCalibration
-): Double = point.altitudeM - calibration.takeoffTrackAltitudeM
-
-private fun displayAtoMeters(
-    point: DroneMapPoint,
-    calibration: DroneAltitudeCalibration?,
-    ridHeightAtoM: Double?
-): Double? {
-    // Manual calibration is an explicit user override, so it owns the displayed ATO value.
-    if (calibration?.seedSource == AtoSeedSource.MANUAL) {
-        return manualAtoMeters(point, calibration)
-    }
-    return ridHeightAtoM ?: calibration?.let { manualAtoMeters(point, it) }
-}
 
 private fun predictedHeadPoint(
     designator: String,

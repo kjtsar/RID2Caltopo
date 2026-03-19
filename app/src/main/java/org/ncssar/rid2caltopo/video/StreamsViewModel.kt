@@ -85,10 +85,12 @@ class DroneSpecState(
     }
 }
 
-/** Display-ready values pushed by SplitMapPane's render loop for use in clue descriptions. */
+/** Display-ready values computed by [DroneAltitudeCoordinator] for use in labels and clues. */
 data class DroneDisplayState(
     val headingDeg: Double?,
     val aglFt: Double?,
+    /** True when the AGL value is DEM-sourced but the DEM data is stale or the drone has moved. */
+    val aglStale: Boolean = false,
     val atoFt: Double?,
 )
 
@@ -123,14 +125,28 @@ class StreamsViewModel(
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
     private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
     private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
-    private val droneDisplayStateMap = mutableStateMapOf<String, DroneDisplayState>()
+    /** Coordinator that owns all DEM / AGL / ATO / heading computation. */
+    internal val altitudeCoordinator = DroneAltitudeCoordinator(
+        scope = viewModelScope,
+        appContext = application.applicationContext,
+        droneStates = _droneStates,
+    )
 
-    /** Called by SplitMapPane's render loop to push computed display values for use in clue descriptions. */
-    fun updateDroneDisplayState(designator: String, headingDeg: Double?, aglFt: Double?, atoFt: Double?) {
-        droneDisplayStateMap[designator] = DroneDisplayState(headingDeg, aglFt, atoFt)
-    }
+    /**
+     * Register a UI consumer so the coordinator's update loop stays alive.
+     * Call from a [DisposableEffect] and invoke the returned lambda from [onDispose].
+     */
+    fun addAltitudeConsumer(): () -> Unit = altitudeCoordinator.addConsumer()
 
-    fun droneDisplayStateFor(designator: String): DroneDisplayState? = droneDisplayStateMap[designator]
+    fun droneDisplayStateFor(designator: String): DroneDisplayState? =
+        altitudeCoordinator.displayStateByDesignator[designator]
+
+    /**
+     * No-op stub retained for any call sites not yet migrated.
+     * @deprecated Coordinator now owns display state; callers should be removed.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun updateDroneDisplayState(designator: String, headingDeg: Double?, aglFt: Double?, atoFt: Double?) = Unit
 
     // --- Map Folders visibility state ---
     // Persisted in the ViewModel so user selections survive navigation away and back.
@@ -439,8 +455,8 @@ class StreamsViewModel(
         lines += "RID: ${droneSpec.remoteId}"
         lines += "Telemetry:"
 
-        // First three: Heading, AGL, ATO — use values already computed by SplitMapPane's render loop
-        val display = droneDisplayStateMap[designator]
+        // First three: Heading, AGL, ATO — use values computed by DroneAltitudeCoordinator
+        val display = altitudeCoordinator.displayStateByDesignator[designator]
         lines += if (display?.headingDeg != null)
             String.format(Locale.US, "  Heading: %.1f\u00b0", display.headingDeg)
         else

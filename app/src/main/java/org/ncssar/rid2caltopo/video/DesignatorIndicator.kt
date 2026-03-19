@@ -1,13 +1,16 @@
 package org.ncssar.rid2caltopo.video
 
 import DroneSpecState
+import DroneDisplayState
 import StreamsViewModel
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -26,6 +29,7 @@ import org.ncssar.rid2caltopo.data.DesignatorState
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.util.Locale
@@ -49,6 +53,7 @@ fun DesignatorIndicator(
 ) {
     val errorSummary = formatStreamErrorDetail(streamErrorDetail)
     val renderDelayMs = viewModel.renderDelayMsFor(streamDesignator)
+    val droneDisplayState = viewModel.droneDisplayStateFor(streamDesignator)
     val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
     var coordinateMenuExpanded by remember(streamDesignator) { mutableStateOf(false) }
     val streamStateText = when (streamState) {
@@ -63,27 +68,21 @@ fun DesignatorIndicator(
         mapStatus = "Connected to $mapName"
     }
     val designatorState = viewModel.designatorStateFor(streamDesignator)
+    val showCompactTopTelemetry = designatorState is DesignatorState.Green && streamState == StreamState.LIVE
 
     val (palette, locationText, detailText) = when (designatorState) {
         is DesignatorState.Green -> {
             val ds = viewModel.droneStates[streamDesignator]
-            val feet: String
-            val dur: String
             val location: String
             if (ds != null) {
-                val feetPerMeter: Double = (ds.lastAlt * 3.28084F)
                 location = CoordinateFormatter.format(ds.lastLat, ds.lastLng, coordinateDisplayFormat)
-                feet = "%.0f".format(feetPerMeter)
-                dur = ds.lastTimestamp
             } else {
                 location = "loc:unknown"
-                feet = "0.0"
-                dur = "unknown"
             }
             Triple(
                 indicatorPaletteFor(designatorState),
                 "$location (${coordinateDisplayFormat.label})",
-                "alt:${feet}', duration:${dur}, (mapStatus:${mapStatus})"
+                if (showCompactTopTelemetry) "" else formatCompactTelemetry(droneDisplayState)
             )
         }
         is DesignatorState.Yellow -> Triple(
@@ -99,16 +98,49 @@ fun DesignatorIndicator(
         )
     }
     Column {
-        OutlinedIndicatorText(
-            text = "$streamDesignator - $streamStateText",
-            style = MaterialTheme.typography.titleLarge,
-            maxLines = if (streamState == StreamState.ERROR) 2 else 1,
-            overflow = TextOverflow.Ellipsis,
-            palette = palette,
-            modifier = Modifier
-                .padding(10.dp)
-                .background(Color.Transparent)
-        )
+        if (showCompactTopTelemetry) {
+            Row(
+                modifier = Modifier
+                    .padding(10.dp)
+                    .background(Color.Transparent),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedIndicatorText(
+                    text = "$streamDesignator -",
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    palette = palette
+                )
+                OutlinedIndicatorText(
+                    text = streamStateText,
+                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    palette = palette,
+                    modifier = Modifier.requiredWidth(84.dp)
+                )
+                OutlinedIndicatorText(
+                    text = formatCompactTelemetry(droneDisplayState),
+                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    palette = palette
+                )
+            }
+        } else {
+            OutlinedIndicatorText(
+                text = "$streamDesignator - $streamStateText",
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = if (streamState == StreamState.ERROR) 2 else 1,
+                overflow = TextOverflow.Ellipsis,
+                palette = palette,
+                modifier = Modifier
+                    .padding(10.dp)
+                    .background(Color.Transparent)
+            )
+        }
         if (locationText != null) {
             OutlinedIndicatorText(
                 text = locationText,
@@ -136,16 +168,18 @@ fun DesignatorIndicator(
                 }
             }
         }
-        OutlinedIndicatorText(
-            text = detailText,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = if (streamState == StreamState.ERROR) 3 else 1,
-            overflow = TextOverflow.Ellipsis,
-            palette = palette,
-            modifier = Modifier
-                .padding(horizontal = 10.dp)
-                .background(Color.Transparent)
-        )
+        if (detailText.isNotBlank()) {
+            OutlinedIndicatorText(
+                text = detailText,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = if (streamState == StreamState.ERROR) 3 else 1,
+                overflow = TextOverflow.Ellipsis,
+                palette = palette,
+                modifier = Modifier
+                    .padding(horizontal = 10.dp)
+                    .background(Color.Transparent)
+            )
+        }
         if (streamState == StreamState.ERROR && streamErrorDetail != null) {
             OutlinedIndicatorText(
                 text = streamErrorDetail,
@@ -211,6 +245,27 @@ internal fun formatLiveState(renderDelayMs: Long?): String {
     if (delayMs < 500L) return "Live"
     if (delayMs < 1_000L) return "lag:${delayMs}ms"
     return String.format(Locale.US, "lag:%.1fs", delayMs / 1000.0)
+}
+
+private fun formatCompactTelemetry(display: DroneDisplayState?): String {
+    if (display == null) return "HDG --  AGL --  ATO --"
+
+    val heading = display.headingDeg
+        ?.takeIf { it.isFinite() }
+        ?.let {
+            val normalized = ((it % 360.0) + 360.0) % 360.0
+            String.format(Locale.US, "HDG %.0f\u00b0", normalized)
+        }
+        ?: "HDG --"
+    val agl = display.aglFt
+        ?.takeIf { it.isFinite() }
+        ?.let { String.format(Locale.US, "AGL %.0f'", it) }
+        ?: "AGL --"
+    val ato = display.atoFt
+        ?.takeIf { it.isFinite() }
+        ?.let { String.format(Locale.US, "ATO %.0f'", it) }
+        ?: "ATO --"
+    return "$heading  $agl  $ato"
 }
 
 private fun formatStreamErrorDetail(streamErrorDetail: String?): String? {

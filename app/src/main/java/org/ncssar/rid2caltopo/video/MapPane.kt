@@ -1417,8 +1417,8 @@ internal fun SplitMapPane(
             } else {
                 ridHeightAtoM?.let { it * METERS_TO_FEET }
             }
-            val atoFeet = (ridHeightAtoM?.let { it * METERS_TO_FEET })
-                ?: calibration?.let { manualAtoMeters(point, it) * METERS_TO_FEET }
+            val atoFeet = displayAtoMeters(point, calibration, ridHeightAtoM)
+                ?.times(METERS_TO_FEET)
             val rangeFeet = if (CaltopoMap.MyLocation != null &&
                 CaltopoMap.MyLocation.latitude.isFinite() &&
                 CaltopoMap.MyLocation.longitude.isFinite()
@@ -1994,8 +1994,8 @@ internal fun SplitMapPane(
                     } else {
                         labelRidHeightAtoM?.let { it * METERS_TO_FEET }
                     }
-                    val labelAtoFeet = (labelRidHeightAtoM?.let { it * METERS_TO_FEET })
-                        ?: calibration?.let { manualAtoMeters(point, it) * METERS_TO_FEET }
+                    val labelAtoFeet = displayAtoMeters(point, calibration, labelRidHeightAtoM)
+                        ?.times(METERS_TO_FEET)
                     viewModel.updateDroneDisplayState(point.designator, headingDeg, labelAglFeet, labelAtoFeet)
                     val lastDemAttemptAt = demLastAttemptAtByDesignator[point.remoteId] ?: 0L
                     val shouldRetryDem =
@@ -3620,6 +3620,18 @@ private fun manualAtoMeters(
     point: DroneMapPoint,
     calibration: DroneAltitudeCalibration
 ): Double = point.altitudeM - calibration.takeoffTrackAltitudeM
+
+private fun displayAtoMeters(
+    point: DroneMapPoint,
+    calibration: DroneAltitudeCalibration?,
+    ridHeightAtoM: Double?
+): Double? {
+    // Manual calibration is an explicit user override, so it owns the displayed ATO value.
+    if (calibration?.seedSource == AtoSeedSource.MANUAL) {
+        return manualAtoMeters(point, calibration)
+    }
+    return ridHeightAtoM ?: calibration?.let { manualAtoMeters(point, it) }
+}
 
 private fun predictedHeadPoint(
     designator: String,

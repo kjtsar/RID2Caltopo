@@ -123,12 +123,14 @@ class StreamsViewModel(
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
     private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
     private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
-    private val droneDisplayStateMap = HashMap<String, DroneDisplayState>()
+    private val droneDisplayStateMap = mutableStateMapOf<String, DroneDisplayState>()
 
     /** Called by SplitMapPane's render loop to push computed display values for use in clue descriptions. */
     fun updateDroneDisplayState(designator: String, headingDeg: Double?, aglFt: Double?, atoFt: Double?) {
         droneDisplayStateMap[designator] = DroneDisplayState(headingDeg, aglFt, atoFt)
     }
+
+    fun droneDisplayStateFor(designator: String): DroneDisplayState? = droneDisplayStateMap[designator]
 
     // --- Map Folders visibility state ---
     // Persisted in the ViewModel so user selections survive navigation away and back.

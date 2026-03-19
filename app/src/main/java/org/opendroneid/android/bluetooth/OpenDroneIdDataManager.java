@@ -45,6 +45,10 @@ public class OpenDroneIdDataManager {
 
     private final Callback callback;
 
+    // Tracks the last-logged altitude-source key per drone to suppress duplicate log spam.
+    // Logged once on first contact and again whenever the key changes (altSource, isAtoType, fallback).
+    private final ConcurrentHashMap<String, String> lastLoggedAltKey = new ConcurrentHashMap<>();
+
     public static class Callback {
         public void onNewAircraft(AircraftObject object) {}
     }
@@ -218,18 +222,17 @@ public class OpenDroneIdDataManager {
         // Pass -1000.0 in that case so updateAltitudeContext's validity check short-circuits.
         boolean absAltFromRidFallback = !isRidAltitudeValid(location.getAltitudePressure())
                 && !isRidAltitudeValid(location.getAltitudeGeodetic());
-        if (false) {
-            CaltopoClient.CTDebug(TAG, String.format(Locale.US,
-                    "updateCaltopo(%s): atmoAlt=%.1f geodeticAlt=%.1f ridHeight=%.1f isAto=%b ridFallback=%b",
-                    idStr,
-                    location.getAltitudePressure(), location.getAltitudeGeodetic(),
-                    ridHeightM, isAtoType, absAltFromRidFallback));
+        // Log altitude source context once on first contact and again on any change — not every packet.
+        if (CaltopoClient.CTDebugEnabled(TAG)) {
+            String altKey = altSource + ":" + isAtoType + ":" + absAltFromRidFallback;
+            if (!altKey.equals(lastLoggedAltKey.put(idStr, altKey))) {
+                CaltopoClient.CTDebug(TAG, String.format(Locale.US,
+                        "updateCaltopo(%s): atmoAlt=%.1f geodeticAlt=%.1f ridHeight=%.1f isAto=%b ridFallback=%b",
+                        idStr,
+                        location.getAltitudePressure(), location.getAltitudeGeodetic(),
+                        ridHeightM, isAtoType, absAltFromRidFallback));
+            }
         }
-        droneSpec.updateAltitudeContext(
-                absAltFromRidFallback ? -1000.0 : altitudeInMeters, altSource,
-                isRidAltitudeValid(ridHeightM) ? ridHeightM : -1000.0,
-                isAtoType);
-
         LocationData.StatusEnum status = location.getStatus();
         Boolean airborne = (status == LocationData.StatusEnum.Airborne || status == LocationData.StatusEnum.Ground)
                 ? status == LocationData.StatusEnum.Airborne
@@ -237,6 +240,12 @@ public class OpenDroneIdDataManager {
 
         // let the droneSpec be final arbiter of what constitutes a reasonable waypoint.
         if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, nowWallMsec, airborne, transportType)) return;
+
+        // Only update altitude context for waypoints that passed all validity checks.
+        droneSpec.updateAltitudeContext(
+                absAltFromRidFallback ? -1000.0 : altitudeInMeters, altSource,
+                isRidAltitudeValid(ridHeightM) ? ridHeightM : -1000.0,
+                isAtoType);
 
         // Telemetry is always optional:
         double speedVerticalMps = location.getSpeedVertical();
@@ -261,7 +270,15 @@ public class OpenDroneIdDataManager {
             droneSpec.setLastPositionTelemetry(telemetry);
 
         }
-        client.newWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, transportType, airborne);
+        // When only ridHeight is available (absAltFromRidFallback), altitudeInMeters is a
+        // relative ATO/AGL value, not an MSL reference.  Sending it to Caltopo as an absolute
+        // altitude would mislead the server and — more critically — MapPane's fallback
+        // calibration would store ridHeight as takeoffTrackAltitudeM, producing a garbage
+        // correctionF (e.g. 518 m ridHeight vs 1569 m DEM → -1051 m error).
+        // Pass -1000.0 (RID invalid sentinel) so MapPane skips the fallback calibration.
+        // Position (lat/lng) is still recorded; ATO display uses spec.getLastRidHeightM() directly.
+        double trackAltitudeM = absAltFromRidFallback ? -1000.0 : altitudeInMeters;
+        client.newWaypoint(lat, lng, trackAltitudeM, timestampInMilliseconds, transportType, airborne);
     }
 
     @SuppressWarnings("unchecked")

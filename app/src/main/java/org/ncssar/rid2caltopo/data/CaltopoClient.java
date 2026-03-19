@@ -1166,25 +1166,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static ClientClassState GetState() {
         InitializeDebugTagRegistry();
         if (null == Ccstate) {
-            Context ctxt = R2CApplication.getAppCtxt();
-            ClientClassState ccs = null;
-            if (ctxt != null) {
-                AppConfigStore.initialize(ctxt);
-                ccs = (ClientClassState) AppConfigStore.restoreClientState(ctxt);
-                ArchivePermissionMissingFlag = AppConfigStore.getArchiveRequiresRegrant(ctxt);
-                cleanupLegacyStateFiles(ctxt);
-                CTDebug(TAG, "GetState(): restored ClientClassState from proto store.");
-            }
-            if (null == ccs) ccs = new ClientClassState();
-            if (ctxt != null) {
-                applyArchivePathBackupPrefs(ctxt, ccs);
-            }
-            if (null == ccs.droneSpecTable) ccs.droneSpecTable = new Hashtable<>(16);
-            if (null == ccs.cachedDroneSpecTable) ccs.cachedDroneSpecTable = new Hashtable<>(16);
-            Ccstate = ccs;
-            CTDebug(TAG, "GetState(): " + Ccstate);
-            SetFBDefaults();
-            if (!ccs.cachedDroneSpecTable.isEmpty()) {
+            reloadPersistedStateInternal(false);
+            ClientClassState ccs = Ccstate;
+            if (ccs != null && !ccs.cachedDroneSpecTable.isEmpty()) {
                 Bundle parameters = new Bundle();
                 ArrayList<String> mappedIds = new ArrayList<>();
                 for (CtDroneSpec ds : ccs.cachedDroneSpecTable.values()) {
@@ -1195,6 +1179,35 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
         }
         return Ccstate;
+    }
+
+    public static synchronized boolean ReloadStateFromStore() {
+        return reloadPersistedStateInternal(true);
+    }
+
+    private static boolean reloadPersistedStateInternal(boolean notifySettings) {
+        Context ctxt = R2CApplication.getAppCtxt();
+        ClientClassState ccs = null;
+        if (ctxt != null) {
+            AppConfigStore.initialize(ctxt);
+            ccs = (ClientClassState) AppConfigStore.restoreClientState(ctxt);
+            ArchivePermissionMissingFlag = AppConfigStore.getArchiveRequiresRegrant(ctxt);
+            cleanupLegacyStateFiles(ctxt);
+            CTDebug(TAG, "reloadPersistedStateInternal(): restored ClientClassState from proto store.");
+        }
+        if (null == ccs) ccs = new ClientClassState();
+        if (ctxt != null) {
+            applyArchivePathBackupPrefs(ctxt, ccs);
+        }
+        if (null == ccs.droneSpecTable) ccs.droneSpecTable = new Hashtable<>(16);
+        if (null == ccs.cachedDroneSpecTable) ccs.cachedDroneSpecTable = new Hashtable<>(16);
+        Ccstate = ccs;
+        CTDebug(TAG, "reloadPersistedStateInternal(): " + Ccstate);
+        SetFBDefaults();
+        if (notifySettings) {
+            NotifySettingsChanged();
+        }
+        return true;
     }
 
     private static void ArchiveState(@NonNull String reason) {

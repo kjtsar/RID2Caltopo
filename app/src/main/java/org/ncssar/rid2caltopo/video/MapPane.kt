@@ -1619,8 +1619,12 @@ internal fun SplitMapPane(
                                 )
                             }
                         }
-                        existingCal == null && altitudeMeters.isFinite() && altitudeMeters != 0.0 -> {
+                        existingCal == null && altitudeMeters.isFinite()
+                                && altitudeMeters > -999.0 && altitudeMeters != 0.0 -> {
                             // Fallback: drone doesn't broadcast ATO height; use first fix.
+                            // altitudeMeters > -999.0 excludes the RID invalid sentinel (-1000.0),
+                            // which updateCaltopo passes when only ridHeight was available — a
+                            // relative value that must not be treated as an MSL baro reference.
                             // Runs only once. Replaced the moment a valid ridTakeoff arrives.
                             demCalibrationByDesignator[remoteKey] = DroneAltitudeCalibration(
                                 takeoffTrackAltitudeM = altitudeMeters,
@@ -1643,6 +1647,27 @@ internal fun SplitMapPane(
                 )
                 if (list.size > 500) {
                     list.removeAt(0)
+                }
+            }
+        }
+        // Seed localTrackPointsByMappedId from current droneStates so drones already known
+        // appear immediately without waiting for the next broadcast notification.
+        val seedTimeMs = System.currentTimeMillis()
+        viewModel.droneStates.forEach { (key, state) ->
+            val seedLat = state.lastLat
+            val seedLng = state.lastLng
+            if (seedLat.isFinite() && seedLng.isFinite() && !(seedLat == 0.0 && seedLng == 0.0)
+                    && state.source.mostRecentMsecTimestamp > 0) {
+                val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+                if (list.isEmpty()) {
+                    list.add(LocalTrackPoint(
+                        mappedId = key,
+                        lat = seedLat,
+                        lng = seedLng,
+                        altitudeM = state.lastAlt,
+                        timestampMsec = state.source.mostRecentMsecTimestamp,
+                        receivedAtMsec = seedTimeMs
+                    ))
                 }
             }
         }

@@ -84,6 +84,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final String TAG = "CtDroneSpec";
     static final String ICON_LATENCY_TAG = "RidIconLatency";
     static final float FT_TO_METERS = 0.3048f;
+    /** Maximum plausible drone speed in ft/sec (~200 mph). Waypoints implying greater speed are rejected. */
+    private static final float MAX_WAYPOINT_SPEED_FPS = 293.3f;
     private static final String EMPTY_STRING = "";
     private static final String RID_FILTER_REGEX = "[^A-Z0-9]";
     private static final String MAPPED_ID_FILTER_REGEX = "[^_a-zA-Z0-9]";
@@ -450,7 +452,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (trackLabel.isEmpty()) {
             trackLabel = mappedId;
         }
-
+/***    Some RID modules not doing a good job of differentiating airborne.
         if (null != this.airborne && this.airborne && null != airborne && !airborne) {
             CTDebug(TAG, String.format(Locale.US,
                     "checkNewWaypoint(): %s landed.", mappedId));
@@ -461,7 +463,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             }
             return false;
         }
-
+***/
         // We don't want to waste resources (storage/bandwidth) recording a bunch of waypoints
         // that are right on top of each other, but at the same time we do want to let the world
         // know that we're still active.
@@ -513,9 +515,19 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             float[] dbResult = {Float.NaN};
             Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
             lDistanceInFeet = dbResult[0] / FT_TO_METERS;
-            if (false && lDistanceInFeet < CaltopoClient.GetMinDistanceInFeet()) {
-                // let a waypoint update thru every now and then if hovering in place...
-                if (System.currentTimeMillis() - mostRecentMsecTimestamp < 1000) return false;
+            // Speed sanity check: rejects implausible coordinate jumps even without a phone GPS fix.
+            // Catches startup coordinate bounces (e.g. Autel EVO Max: 30,000 mi in 15 min).
+            long elapsedMsec = nowWallMsec - mostRecentMsecTimestamp;
+            if (elapsedMsec > 0) {
+                float speedFps = lDistanceInFeet / (elapsedMsec / 1000.0f);
+                if (speedFps > MAX_WAYPOINT_SPEED_FPS) {
+                    CTDebug(TAG, String.format(Locale.US,
+                            "checkNewWaypoint(%s/%s) Ignoring implausible speed: %.0f fps (%.0f mph) from %.7f,%.7f to %.7f,%.7f",
+                            trackLabel, transportType, speedFps, speedFps * 3600.0f / 5280.0f,
+                            lastLat, lastLng, lat, lng));
+                    nonCount++;
+                    return false;
+                }
             }
             distanceInFeet += lDistanceInFeet;
         }

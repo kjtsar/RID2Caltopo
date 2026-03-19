@@ -123,7 +123,7 @@ internal class GeoTiffDemSource(context: Context) {
         }
         // Log key metadata once per tile on first load to aid decoder diagnostics.
         val vertUnit = when (loaded.verticalUnitCode) {
-            9001 -> "m(9001)"
+            9001 -> if (loaded.verticalUnitCodeExplicit) "m(9001)" else "m(9001-default)"
             9002 -> "ft(9002)"
             9003 -> "ftUS(9003)"
             else -> "?(${loaded.verticalUnitCode})"
@@ -594,6 +594,7 @@ internal class GeoTiffDemSource(context: Context) {
         val geoKeyDir = toIntList(values[34735])
         val numGeoKeys = geoKeyDir.getOrElse(3) { 0 }
         var verticalUnitCode = 9001  // default: Linear_Meter
+        var verticalUnitCodeExplicit = false
         for (k in 0 until numGeoKeys) {
             val base = 4 + k * 4
             val keyId    = geoKeyDir.getOrElse(base)     { 0 }
@@ -601,6 +602,7 @@ internal class GeoTiffDemSource(context: Context) {
             val valueOrIdx = geoKeyDir.getOrElse(base + 3) { 0 }
             if (keyId == 4099 && tagLoc == 0) {
                 verticalUnitCode = valueOrIdx
+                verticalUnitCodeExplicit = true
                 break
             }
         }
@@ -628,7 +630,8 @@ internal class GeoTiffDemSource(context: Context) {
             blockOffsets = offsets,
             blockByteCounts = counts,
             noDataValue = noDataValue,
-            verticalUnitCode = verticalUnitCode
+            verticalUnitCode = verticalUnitCode,
+            verticalUnitCodeExplicit = verticalUnitCodeExplicit,
         )
     }
 
@@ -860,7 +863,9 @@ internal class GeoTiffDemSource(context: Context) {
          *   9003 = Linear_Foot_US_Survey
          * Stored so that [extractSample] can convert to metres without re-parsing.
          */
-        val verticalUnitCode: Int = 9001
+        val verticalUnitCode: Int = 9001,
+        /** True when GeoKey 4099 was explicitly present in the tile; false when 9001 is a default. */
+        val verticalUnitCodeExplicit: Boolean = false,
     )
 
     private interface RandomAccessDataSource : Closeable {

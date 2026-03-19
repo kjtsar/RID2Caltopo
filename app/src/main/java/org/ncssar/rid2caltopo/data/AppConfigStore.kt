@@ -46,6 +46,31 @@ object AppConfigStore {
     }
 
     @JvmStatic
+    fun exportConfigBytes(context: Context): ByteArray {
+        initialize(context)
+        return readConfigBlocking().toByteArray()
+    }
+
+    @JvmStatic
+    fun importConfigBytes(context: Context, bytes: ByteArray): Boolean {
+        initialize(context)
+        return try {
+            val imported = AppConfig.parseFrom(bytes)
+            writeConfigBlocking(imported)
+            true
+        } catch (e: Exception) {
+            CaltopoClient.CTWarn(TAG, "importConfigBytes(): unable to parse imported config.", e)
+            false
+        }
+    }
+
+    @JvmStatic
+    fun hasMeaningfulConfig(context: Context): Boolean {
+        initialize(context)
+        return hasMeaningfulConfig(readConfigBlocking())
+    }
+
+    @JvmStatic
     fun persistState(context: Context, state: Any, archivePermissionMissing: Boolean) {
         initialize(context)
         val typedState = state as? ClientClassState ?: return
@@ -131,6 +156,33 @@ object AppConfigStore {
             TAG,
             "writeConfigBlocking(): exists=${dataStoreFile.exists()} size=${if (dataStoreFile.exists()) dataStoreFile.length() else 0}, ridMappings=${config.ridMappingsCount}, loadedConfigFiles=${config.loadedConfigFilesCount}"
         )
+    }
+
+    private fun hasMeaningfulConfig(config: AppConfig): Boolean {
+        if (config.schemaVersion != 0) return true
+        if (config.legacyImportComplete) return true
+        if (config.minDistanceFeet != 0L) return true
+        if (config.newTrackDelaySeconds != 0L) return true
+        if (config.maxIdleTimeMinutes != 0L) return true
+        if (config.debugLevel != 0) return true
+        if (config.coordinateDisplayFormat.isNotBlank()) return true
+        if (config.captureVideoStreams) return true
+        if (config.usePeers) return true
+        if (config.caltopoTrackFolder.isNotBlank()) return true
+        if (config.caltopoDomainAndPort.isNotBlank()) return true
+        if (config.caltopoCredentials.teamId.isNotBlank()) return true
+        if (config.caltopoCredentials.credentialId.isNotBlank()) return true
+        if (config.caltopoCredentials.credentialSecret.isNotBlank()) return true
+        if (config.incident.isNotBlank()) return true
+        if (config.opPeriod.isNotBlank()) return true
+        if (config.trackerApiKey.isNotBlank()) return true
+        if (config.trackerUrlPrefix.isNotBlank()) return true
+        if (config.archiveLocation.treeUri.isNotBlank()) return true
+        if (config.archiveLocation.selectionHintUri.isNotBlank()) return true
+        if (config.archiveLocation.requiresRegrant) return true
+        if (config.ridMappingsCount > 0) return true
+        if (config.loadedConfigFilesCount > 0) return true
+        return false
     }
 
     private fun toClientState(config: AppConfig): ClientClassState {
@@ -289,5 +341,6 @@ object AppConfigStore {
         } catch (e: Exception) {
             CaltopoClient.CTWarn(TAG, "requestBackup(): unable to signal BackupManager after $reason", e)
         }
+        GoogleDriveConfigSync.scheduleUpload(context, reason)
     }
 }

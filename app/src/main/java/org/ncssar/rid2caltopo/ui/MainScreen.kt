@@ -12,6 +12,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -33,11 +34,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.common.api.ApiException
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
+import org.ncssar.rid2caltopo.data.DriveSyncAction
+import org.ncssar.rid2caltopo.data.AppConfigStore
 
 private fun parseCsvTags(csv: String): List<String> {
     val tags = linkedSetOf<String>()
@@ -69,6 +75,10 @@ sealed interface MainScreenItem {
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
     data class RemoteView(val viewModel: R2CPeerViewModel) : MainScreenItem
     data class SpacerView(val height: Dp) : MainScreenItem
+}
+
+private fun shouldOfferDriveRestore(context: Context): Boolean {
+    return !AppConfigStore.hasMeaningfulConfig(context) && CaltopoClient.GetArchiveUri() == null
 }
 
 // Try to bust thru Google Drive's cache to get the latest version of requested
@@ -131,6 +141,102 @@ fun MainScreen(
     var customDebugTagsText by remember { mutableStateOf("") }
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
     val context =  LocalContext.current
+    var pendingDriveAction by remember { mutableStateOf<DriveSyncAction?>(null) }
+    var driveSyncInProgress by remember { mutableStateOf(false) }
+    var showDriveRestoreDialog by remember { mutableStateOf(shouldOfferDriveRestore(context)) }
+    var linkedDriveEmail by remember { mutableStateOf(GoogleDriveConfigSync.getLinkedAccountEmail(context)) }
+
+    fun refreshDriveState() {
+        linkedDriveEmail = GoogleDriveConfigSync.getLinkedAccountEmail(context)
+        showDriveRestoreDialog = shouldOfferDriveRestore(context)
+    }
+
+    fun runDriveAction(accountResult: ActivityResult? = null, requestedAction: DriveSyncAction) {
+        val account = if (accountResult != null) {
+            try {
+                GoogleSignIn.getSignedInAccountFromIntent(accountResult.data)
+                    .getResult(ApiException::class.java)
+            } catch (e: ApiException) {
+                CaltopoClient.ShowToast("Google sign-in failed: ${e.statusCode}")
+                CTError(tag, "Google sign-in failed.", e)
+                null
+            }
+        } else {
+            GoogleDriveConfigSync.getAuthorizedAccount(context)
+        }
+
+        if (account == null) {
+            pendingDriveAction = requestedAction
+            return
+        }
+
+        driveSyncInProgress = true
+        GoogleDriveConfigSync.performAction(context, account, requestedAction) { success, message ->
+            driveSyncInProgress = false
+            CaltopoClient.ShowToast(message)
+            refreshDriveState()
+        }
+    }
+
+    val driveSignInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+        onResult = { result ->
+            val requestedAction = pendingDriveAction
+            pendingDriveAction = null
+            if (requestedAction != null && result.data != null) {
+                runDriveAction(result, requestedAction)
+            } else if (requestedAction != null) {
+                driveSyncInProgress = false
+                CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
+            }
+        }
+    )
+
+    fun startDriveAction(requestedAction: DriveSyncAction) {
+        val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
+        if (account != null) {
+            runDriveAction(requestedAction = requestedAction)
+        } else {
+            pendingDriveAction = requestedAction
+            driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+        }
+    }
+
+    fun disconnectDrive() {
+        driveSyncInProgress = true
+        GoogleDriveConfigSync.disconnect(context) { _, message ->
+            driveSyncInProgress = false
+            CaltopoClient.ShowToast(message)
+            refreshDriveState()
+        }
+    }
+
+    if (showDriveRestoreDialog) {
+        AlertDialog(
+            onDismissRequest = { showDriveRestoreDialog = false },
+            title = { Text("Restore From Google Drive") },
+            text = {
+                Text("This install looks unconfigured. Restore your saved RID2Caltopo settings from Google Drive before setting the app up again?")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDriveRestoreDialog = false
+                        startDriveAction(DriveSyncAction.RESTORE)
+                    }
+                ) {
+                    Text("Restore")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showDriveRestoreDialog = false }
+                ) {
+                    Text("Skip")
+                }
+            }
+        )
+    }
 
     if (showConfirmExitDialog) {
         AlertDialog(
@@ -309,8 +415,8 @@ fun MainScreen(
             }
         }
     )
-    LaunchedEffect(Unit) {
-        if (null == CaltopoClient.GetArchiveUri()) {
+    LaunchedEffect(showDriveRestoreDialog, driveSyncInProgress) {
+        if (!showDriveRestoreDialog && !driveSyncInProgress && null == CaltopoClient.GetArchiveUri()) {
             val initialUri = CaltopoClient.GetArchiveUriSelectionHint()
             val prompt = if (CaltopoClient.WasArchiveUriPermissionMissing()) {
                 "Archive folder access expired. Please re-select the archive directory for tracks and map cache."
@@ -350,6 +456,45 @@ fun MainScreen(
                             localViewModel.showSettings()
                             menuExpanded = false
                         })
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (linkedDriveEmail.isBlank()) {
+                                        "Restore config from Google Drive"
+                                    } else {
+                                        "Restore config from Google Drive ($linkedDriveEmail)"
+                                    }
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                startDriveAction(DriveSyncAction.RESTORE)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (linkedDriveEmail.isBlank()) {
+                                        "Back up config to Google Drive"
+                                    } else {
+                                        "Back up config to Google Drive ($linkedDriveEmail)"
+                                    }
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                startDriveAction(DriveSyncAction.BACKUP)
+                            }
+                        )
+                        if (linkedDriveEmail.isNotBlank()) {
+                            DropdownMenuItem(
+                                text = { Text("Disconnect Google Drive") },
+                                onClick = {
+                                    menuExpanded = false
+                                    disconnectDrive()
+                                }
+                            )
+                        }
                         DropdownMenuItem(text = { Text("Load config file") }, onClick = {
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false

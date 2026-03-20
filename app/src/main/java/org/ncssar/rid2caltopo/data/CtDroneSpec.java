@@ -614,6 +614,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // and trigger an infinite terminate-and-revive loop in ProcessSortedCurrentDroneSpecArray.
         if (trackLabel.isEmpty()) {
             trackLabel = mappedId;
+            // Notify CaltopoClient so it (re)starts UiUpdatePoll and the drone appears in R2CView.
+            // Without this, drones that never broadcast airborne=true are silently ignored: the
+            // airborne-transition path below is the only other place that calls DroneSpecStatusChanged,
+            // so UiUpdatePoll would stay stopped and the drone row would never render.
+            CaltopoClient.DroneSpecStatusChanged(this, false);
         }
         bumpTransportCount(transportType);
         goodCount++;

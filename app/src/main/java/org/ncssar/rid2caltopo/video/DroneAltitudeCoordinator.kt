@@ -71,7 +71,7 @@ internal class DroneAltitudeCoordinator(
         return { _consumerCount.value -= 1 }
     }
 
-    // ── LocalTrackListener: heading + calibration seeding ───────────────────────────────────
+    // ── LocalTrackListener: heading + calibration seeding + DEM refresh ─────────────────────
     private val localTrackListener = CaltopoLiveTrack.LocalTrackListener {
         _, mappedId, lat, lng, altitudeMeters, _ ->
         if (!lat.isFinite() || !lng.isFinite()) return@LocalTrackListener
@@ -79,6 +79,14 @@ internal class DroneAltitudeCoordinator(
         scope.launch(Dispatchers.Main.immediate) {
             updateHeading(mappedId, lat, lng)
             updateCalibration(mappedId, lat, lng, altitudeMeters)
+            // Schedule DEM fetch using the fresh lat/lng from this position update.
+            // The snapshotFlow loop only fires on drone add/remove, not on lat/lng changes,
+            // so this is the primary DEM refresh path for in-flight position updates and
+            // for re-fetching after onMapReconnect() clears the DEM cache.
+            val remoteId = droneStates[mappedId]?.remoteId
+            if (remoteId != null) {
+                scheduleDemIfNeeded(remoteId, mappedId, lat, lng, System.currentTimeMillis())
+            }
             recomputeDisplayState(mappedId)
         }
     }
@@ -106,9 +114,10 @@ internal class DroneAltitudeCoordinator(
                 }
         }
 
-        // Position-change loop: reacts to every drone-state update while consumers > 0.
-        // snapshotFlow fires whenever any Compose State inside droneStates changes
-        // (position, altitude, mappedId) so display state stays in sync without polling.
+        // Position-change loop: handles drone add/remove and initial DEM scheduling.
+        // snapshotFlow fires when the _droneStates map structure changes (drone added or removed).
+        // Per-position DEM refresh is handled by the localTrackListener path above, which has
+        // access to the fresh lat/lng coordinates on every position update.
         scope.launch {
             _consumerCount
                 .map { it > 0 }
@@ -293,9 +302,16 @@ internal class DroneAltitudeCoordinator(
     // ── DEM lookup ───────────────────────────────────────────────────────────────────────────
 
     private fun scheduleDemIfNeeded(state: DroneSpecState, nowMs: Long) {
-        val remoteId = state.remoteId
-        val lat = state.lastLat
-        val lng = state.lastLng
+        scheduleDemIfNeeded(state.remoteId, state.mappedId, state.lastLat, state.lastLng, nowMs)
+    }
+
+    private fun scheduleDemIfNeeded(
+        remoteId: String,
+        designator: String,
+        lat: Double,
+        lng: Double,
+        nowMs: Long,
+    ) {
         if (lat == 0.0 && lng == 0.0) return
         if (!lat.isFinite() || !lng.isFinite()) return
 
@@ -347,7 +363,7 @@ internal class DroneAltitudeCoordinator(
                             demGroundByRemoteId[remoteId] = it.copy(stale = true)
                         }
                     }
-                    recomputeDisplayState(state.mappedId)
+                    recomputeDisplayState(designator)
                 }
             }
         }

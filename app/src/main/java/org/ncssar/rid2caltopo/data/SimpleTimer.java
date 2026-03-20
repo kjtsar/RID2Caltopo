@@ -22,11 +22,26 @@ public class SimpleTimer {
         msecs = msecDuration % 1000;
         minutes = seconds / 60;
         seconds = seconds % 60;
+        if (msecs > 500) seconds++;
+        hours = minutes / 60;
+        minutes = minutes % 60;
+        return String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
+    }
+    public String durationAsString() {
+        return DurationAsString(System.currentTimeMillis() - startTimeInMsec);
+    }
+
+    public static String DurationAsStringMsec(long msecDuration) {
+        long hours=0, minutes=0, seconds=0, msecs;
+        seconds = msecDuration / 1000;
+        msecs = msecDuration % 1000;
+        minutes = seconds / 60;
+        seconds = seconds % 60;
         hours = minutes / 60;
         minutes = minutes % 60;
         return String.format(Locale.US, "%02d:%02d:%02d.%03d", hours, minutes, seconds, msecs);
     }
-    public String durationAsString() {
-        return DurationAsString(System.currentTimeMillis() - startTimeInMsec);
+    public String durationAsStringMsec() {
+        return DurationAsStringMsec(System.currentTimeMillis() - startTimeInMsec);
     }
 }

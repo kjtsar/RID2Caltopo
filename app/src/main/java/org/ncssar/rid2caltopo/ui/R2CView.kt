@@ -190,7 +190,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(560.dp)
+            modifier = Modifier.width(640.dp)
         ) {
             Text(
                 text = "Waypoints Received",
@@ -213,6 +213,7 @@ fun RidmapHeader() {
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
+                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "BT5:",
                     modifier = Modifier
@@ -222,6 +223,7 @@ fun RidmapHeader() {
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
+                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "WiFi:",
                     modifier = Modifier
@@ -231,6 +233,7 @@ fun RidmapHeader() {
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
+                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "NaN:",
                     modifier = Modifier
@@ -240,17 +243,9 @@ fun RidmapHeader() {
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
+                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "R2C:",
-                    modifier = Modifier
-                        .width(80.dp)
-                        .height(25.dp)
-                        .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Right,
-                    fontSize = 18.sp
-                )
-                Text(
-                    text = "Good:",
                     modifier = Modifier
                         .width(80.dp)
                         .height(25.dp)

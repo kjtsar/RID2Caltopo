@@ -685,11 +685,6 @@ public class CaltopoSession {
 			CTError(TAG, "AddMarker() raised.", e);
 			return null;
 		}
-		try {
-			CTDebug(TAG, "AddMarker(): adding:\n" + top.toString(4));
-		} catch (Exception e) {
-			CTError(TAG, "keeping compiler happy.", e);
-		}
 		String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/Marker" + objid;
 		CaltopoOp op = new CaltopoOp(onComplete);
 		SendRequest(op, CtsMethod_t.POST, urlEnd, top, false);

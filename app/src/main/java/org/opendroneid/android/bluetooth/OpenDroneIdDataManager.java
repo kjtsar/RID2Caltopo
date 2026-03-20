@@ -183,6 +183,19 @@ public class OpenDroneIdDataManager {
     void updateCaltopo(AircraftObject ac, CtDroneSpec.TransportTypeEnum transportType) {
         Identification acId = ac.getIdentification1();
 
+        // Some drones (e.g. DS154) broadcast TWO BASIC_ID messages in the same message pack:
+        // one with IdType = Serial_Number and one with IdType = UTM_Assigned_ID / Session_ID.
+        // Depending on the order they appear in the pack, either type can land in identification1.
+        // Always prefer the Serial_Number for stable, long-lived drone tracking; if identification1
+        // is a non-serial type but identification2 is a serial number, promote identification2.
+        Identification acId2 = ac.getIdentification2();
+        if (acId != null
+                && acId.getIdType() != Identification.IdTypeEnum.Serial_Number
+                && acId2 != null
+                && acId2.getIdType() == Identification.IdTypeEnum.Serial_Number) {
+            acId = acId2;
+        }
+
         if (null == acId) return;
         String rawStr = acId.getUasIdAsString();
         if (null == rawStr) return;
@@ -240,6 +253,10 @@ public class OpenDroneIdDataManager {
 
         // let the droneSpec be final arbiter of what constitutes a reasonable waypoint.
         if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, nowWallMsec, airborne, transportType)) return;
+
+        // Update signal strength only for accepted waypoints so that the displayed RSSI is
+        // always consistent with the transport counts (both reflect valid position updates only).
+        droneSpec.updateLastRssi(ac.getConnection().rssi, transportType);
 
         // Only update altitude context for waypoints that passed all validity checks.
         droneSpec.updateAltitudeContext(

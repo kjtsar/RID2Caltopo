@@ -14,8 +14,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,15 +35,65 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 
+
+/**
+ * Draws a row of 4 signal-strength bars (classic staircase style) based on an RSSI value in dBm.
+ *
+ * Bar thresholds (matches Android's WifiManager.calculateSignalLevel convention):
+ *   4 bars : rssi ≥ -60 dBm  (excellent)
+ *   3 bars : rssi ≥ -70 dBm  (good)
+ *   2 bars : rssi ≥ -80 dBm  (fair)
+ *   1 bar  : rssi ≥ -90 dBm  (poor)
+ *   0 bars : rssi == 0        (no RF measurement — NaN / R2C relay)
+ *
+ * @param rssi Signal strength in dBm; 0 means "not available".
+ */
+@Composable
+fun SignalStrengthBars(rssi: Int, modifier: Modifier = Modifier) {
+    val filledBars = when {
+        rssi == 0       -> 0
+        rssi >= -60     -> 4
+        rssi >= -70     -> 3
+        rssi >= -80     -> 2
+        rssi >= -90     -> 1
+        else            -> 0
+    }
+    val filledColor   = Color(0xFF4CAF50)   // Material green
+    val emptyColor    = Color(0x554CAF50)   // same green, faded
+
+    // 4 bars, each slightly taller than the previous (staircase).
+    // Heights: 25%, 45%, 65%, 85% of the available vertical space.
+    val fractions = listOf(0.25f, 0.45f, 0.65f, 0.85f)
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        fractions.forEachIndexed { index, fraction ->
+            val filled = index < filledBars
+            Box(
+                modifier = Modifier
+                    .width(5.dp)
+                    .fillMaxHeight(fraction)
+                    .background(
+                        color = if (filled) filledColor else emptyColor,
+                        shape = RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp)
+                    )
+            )
+        }
+    }
+}
 
 @Composable
 fun DroneItem(drone: CtDroneSpec,
@@ -61,7 +113,7 @@ fun DroneItem(drone: CtDroneSpec,
             modifier = Modifier
                 .background(MaterialTheme.colorScheme.secondary)
                 .padding(1.dp)
-                .height(32.dp)
+                .defaultMinSize(minHeight = 32.dp)
                 .height(IntrinsicSize.Min)
         ) {
             Column(
@@ -133,8 +185,10 @@ fun DroneItem(drone: CtDroneSpec,
                 modifier = Modifier.width(200.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
-                Text(text = drone.remoteId, textAlign = TextAlign.End)
+                Text(text = drone.remoteId, textAlign = TextAlign.End,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            // BT4 count
             Column(
                 modifier = Modifier
                     .width(80.dp)
@@ -148,9 +202,24 @@ fun DroneItem(drone: CtDroneSpec,
                     text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT4)}",
                     textAlign = TextAlign.Right)
             }
+            // BT4 signal bars
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width(40.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 2.dp, vertical = 2.dp)
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                SignalStrengthBars(
+                    rssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.BT4),
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight()
+                )
+            }
+            // BT5 count
+            Column(
+                modifier = Modifier
+                    .width(80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -161,9 +230,24 @@ fun DroneItem(drone: CtDroneSpec,
                     text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT5)}",
                     textAlign = TextAlign.Right)
             }
+            // BT5 signal bars
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width(40.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 2.dp, vertical = 2.dp)
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                SignalStrengthBars(
+                    rssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.BT5),
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight()
+                )
+            }
+            // WiFi count
+            Column(
+                modifier = Modifier
+                    .width(80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -174,9 +258,24 @@ fun DroneItem(drone: CtDroneSpec,
                     text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WIFI)}",
                     textAlign = TextAlign.Right)
             }
+            // WiFi signal bars
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width(40.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 2.dp, vertical = 2.dp)
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                SignalStrengthBars(
+                    rssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.WIFI),
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight()
+                )
+            }
+            // NaN (WNAN) count
+            Column(
+                modifier = Modifier
+                    .width(80.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -186,6 +285,20 @@ fun DroneItem(drone: CtDroneSpec,
                     modifier = Modifier.align(Alignment.End),
                     text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WNAN)}",
                     textAlign = TextAlign.Right)
+            }
+            // NaN signal bars
+            Column(
+                modifier = Modifier
+                    .width(40.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 2.dp, vertical = 2.dp)
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                SignalStrengthBars(
+                    rssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.WNAN),
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight()
+                )
             }
             Column(
                 modifier = Modifier
@@ -198,19 +311,6 @@ fun DroneItem(drone: CtDroneSpec,
                 Text(
                     modifier = Modifier.align(Alignment.End),
                     text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.R2C)}",
-                    textAlign = TextAlign.Right)
-            }
-            Column(
-                modifier = Modifier
-                    .width( 80.dp)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(1.dp)
-                    .fillMaxHeight(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    modifier = Modifier.align(Alignment.End),
-                    text = "${drone.goodCount}",
                     textAlign = TextAlign.Right)
             }
             Column(

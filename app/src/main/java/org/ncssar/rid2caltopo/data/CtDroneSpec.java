@@ -122,6 +122,13 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient boolean lastRidHeightIsAto = false; // true=ATO, false=AGL
     @Nullable private transient AltSourceEnum lastAltSource = null; // detect mid-flight source switch
 
+    /**
+     * Per-transport RF signal strength in dBm, indexed by {@link TransportTypeEnum#ordinal()}.
+     * 0 = no measurement received yet for that transport (R2C relay never has a real RSSI).
+     * Updated by {@link #updateLastRssi} on every accepted packet from an RF transport.
+     */
+    private transient int[] lastRssiByTransport = new int[TransportTypeEnum.values().length];
+
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
     private transient int nonCount;  // bad or duplicate waypoints.
@@ -164,6 +171,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastRidHeightM            = -1000.0;
         lastRidHeightIsAto        = false;
         lastAltSource             = null;
+        lastRssiByTransport       = new int[TransportTypeEnum.values().length];
         transportCount = new int[TransportTypeEnum.values().length];
     }
 
@@ -196,6 +204,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastRidHeightM            = -1000.0;
         lastRidHeightIsAto        = false;
         lastAltSource             = null;
+        int rssiLen = TransportTypeEnum.values().length;
+        for (int i = 0; i < rssiLen; i++) lastRssiByTransport[i] = 0;
         okToLog = true;
         airborne = Boolean.FALSE;
         startMsecTimestamp = mostRecentMsecTimestamp = 0;
@@ -334,6 +344,70 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     /** True if the last valid ridHeight was above-takeoff; false if AGL. */
     public boolean isLastRidHeightAto() { return lastRidHeightIsAto; }
 
+    /**
+     * Records the most recent RF signal strength for the given transport.
+     * R2C-relayed packets carry no real RF measurement (rssi == 0) and are ignored.
+     *
+     * <p>Each transport maintains its own last-seen RSSI so the UI can reflect per-transport
+     * signal quality for drones that broadcast over multiple RF interfaces simultaneously
+     * (e.g. a DS154 transmitting on both BT4 and BT5).</p>
+     *
+     * @param rssi      Signal strength in dBm; 0 means not available (NaN / R2C relay).
+     * @param transport Transport type that produced this reading.
+     */
+    public void updateLastRssi(int rssi, @NonNull TransportTypeEnum transport) {
+        // R2C is a relay protocol — rssi=0 conveys no useful RF measurement.
+        if (transport == TransportTypeEnum.R2C || rssi == 0) return;
+        if (null == lastRssiByTransport)
+            lastRssiByTransport = new int[TransportTypeEnum.values().length];
+        lastRssiByTransport[transport.ordinal()] = rssi;
+    }
+
+    /**
+     * Returns the strongest (highest dBm — least negative) RSSI across all RF transports.
+     * This is the value used by the signal-strength bar indicator.
+     * Returns 0 if no RF measurement has been received on any transport.
+     */
+    public int getLastRssi() {
+        if (null == lastRssiByTransport) return 0;
+        int best = 0;
+        for (TransportTypeEnum t : TransportTypeEnum.values()) {
+            if (t == TransportTypeEnum.R2C || t == TransportTypeEnum.UNKNOWN) continue;
+            int v = lastRssiByTransport[t.ordinal()];
+            if (v != 0 && (best == 0 || v > best)) best = v;
+        }
+        return best;
+    }
+
+    /**
+     * Returns the most recent RSSI reading (dBm) for the specified transport.
+     * Returns 0 if no measurement has been received on that transport.
+     */
+    public int getLastRssi(@NonNull TransportTypeEnum transport) {
+        if (null == lastRssiByTransport) return 0;
+        return lastRssiByTransport[transport.ordinal()];
+    }
+
+    /**
+     * Returns the transport type that currently has the strongest (highest dBm) RSSI.
+     * Returns {@link TransportTypeEnum#UNKNOWN} if no RF measurement has been received.
+     */
+    @NonNull
+    public TransportTypeEnum getLastRssiTransport() {
+        if (null == lastRssiByTransport) return TransportTypeEnum.UNKNOWN;
+        int best = 0;
+        TransportTypeEnum bestTransport = TransportTypeEnum.UNKNOWN;
+        for (TransportTypeEnum t : TransportTypeEnum.values()) {
+            if (t == TransportTypeEnum.R2C || t == TransportTypeEnum.UNKNOWN) continue;
+            int v = lastRssiByTransport[t.ordinal()];
+            if (v != 0 && (best == 0 || v > best)) {
+                best = v;
+                bestTransport = t;
+            }
+        }
+        return bestTransport;
+    }
+
     public double getDistanceInFeet() { return distanceInFeet;}
 
     public int getTotalCount() {
@@ -447,11 +521,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      *         to be recorded.
      */
     public boolean checkNewWaypoint(double lat, double lng, double altitudeInMeters, long timestampInMilliseconds, long nowWallMsec, @Nullable Boolean airborne, TransportTypeEnum transportType) {
-        bumpTransportCount(transportType);
         if (null == trackLabel) trackLabel = EMPTY_STRING;
-        if (trackLabel.isEmpty()) {
-            trackLabel = mappedId;
-        }
+        // NOTE: do NOT set trackLabel = mappedId here — that must wait until the waypoint passes
+        // all validity checks below.  Setting it early causes a "ghost active" state: even a
+        // packet with lat=0/lng=0 or all-invalid altitude would make isActive() return true,
+        // triggering a repeated terminate-and-revive loop in ProcessSortedCurrentDroneSpecArray.
 /***    Some RID modules not doing a good job of differentiating airborne.
         if (null != this.airborne && this.airborne && null != airborne && !airborne) {
             CTDebug(TAG, String.format(Locale.US,
@@ -504,7 +578,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             if ((Math.abs(MyLat - lat) > 0.1F) || (Math.abs(MyLng - lng) > 0.1F)) {
                 CTDebug(TAG, String.format(Locale.US,
                         "checkNewWaypoint(%s/%s) Ignoring spurious waypoint %.7f, %.7f.",
-                        trackLabel, transportType, lat, lng));
+                        mappedId, transportType, lat, lng));
                 nonCount++;
                 return false;
             }
@@ -523,7 +597,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
                 if (speedFps > MAX_WAYPOINT_SPEED_FPS) {
                     CTDebug(TAG, String.format(Locale.US,
                             "checkNewWaypoint(%s/%s) Ignoring implausible speed: %.0f fps (%.0f mph) from %.7f,%.7f to %.7f,%.7f",
-                            trackLabel, transportType, speedFps, speedFps * 3600.0f / 5280.0f,
+                            mappedId, transportType, speedFps, speedFps * 3600.0f / 5280.0f,
                             lastLat, lastLng, lat, lng));
                     nonCount++;
                     return false;
@@ -534,7 +608,23 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = nowWallMsec;
 
+        // All validity checks passed — this is an accepted waypoint.
+        // Activate the drone (set the trackLabel) only now, so that invalid/filtered packets
+        // (lat=0, dedup, spurious coordinates, implausible speed) cannot ghost-activate it
+        // and trigger an infinite terminate-and-revive loop in ProcessSortedCurrentDroneSpecArray.
+        if (trackLabel.isEmpty()) {
+            trackLabel = mappedId;
+        }
+        bumpTransportCount(transportType);
         goodCount++;
+        // Seed the flight start time on the first accepted waypoint so that drones
+        // that never report airborne=true (e.g. test modules sitting on a bench,
+        // or modules that simply don't broadcast the airborne flag) still show a
+        // meaningful Flight Duration.  The airborne-transition block below will
+        // overwrite this with the actual takeoff time if the drone later goes airborne.
+        if (startMsecTimestamp == 0) {
+            startMsecTimestamp = nowWallMsec;
+        }
         if (null != airborne && airborne != this.airborne) {
             this.airborne = airborne;
             if (airborne) {
@@ -552,8 +642,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastLat = lat; lastLng = lng; lastAlt = altitudeInMeters;
         if (CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {
             CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
-                    "rid_rx remoteId=%s waypoint=%d wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%.1f transport=%s airborne=%s distance: %.3f, totalDistance: %.3f, duration: %s",
-                    mappedId, goodCount, System.currentTimeMillis(), timestampInMilliseconds, lat, lng, altitudeInMeters, transportType, airborne, lDistanceInFeet, distanceInFeet, getDurationInSecAsString()));
+                    "rid_rx remoteId=%s waypoint=%d wall=%d droneTs=%d lat=%.6f lng=%.6f alt=%.1f transport=%s rssi=%d airborne=%s distance: %.3f, totalDistance: %.3f, duration: %s",
+                    mappedId, goodCount, System.currentTimeMillis(), timestampInMilliseconds, lat, lng, altitudeInMeters, transportType, getLastRssi(transportType), airborne, lDistanceInFeet, distanceInFeet, getDurationInSecAsString()));
         }
 
         return true;

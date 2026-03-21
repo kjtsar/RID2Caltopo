@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.notam.NotamAuthManager
+import org.ncssar.rid2caltopo.notam.NotamCenter
 class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
 
     // --- Live Data for UI --- //
@@ -43,6 +45,21 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _caltopoDomainAndPort = MutableStateFlow( CaltopoClient.GetCaltopoDomainAndPort())
     val caltopoUrl = _caltopoDomainAndPort.asStateFlow()
 
+    private val _notamEnabled = MutableStateFlow(CaltopoClient.GetNotamEnabled())
+    val notamEnabled = _notamEnabled.asStateFlow()
+
+    private val _notamRadiusNm = MutableStateFlow(CaltopoClient.GetNotamRadiusNm().toString())
+    val notamRadiusNm = _notamRadiusNm.asStateFlow()
+
+    private val _notamRefreshIntervalSeconds = MutableStateFlow(CaltopoClient.GetNotamRefreshIntervalSeconds().toString())
+    val notamRefreshIntervalSeconds = _notamRefreshIntervalSeconds.asStateFlow()
+
+    private val _notamAutoRefresh = MutableStateFlow(CaltopoClient.GetNotamAutoRefresh())
+    val notamAutoRefresh = _notamAutoRefresh.asStateFlow()
+
+    private val _notamStatus = MutableStateFlow(buildNotamStatus())
+    val notamStatus = _notamStatus.asStateFlow()
+
 
 
     init {
@@ -57,6 +74,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
+        _caltopoDomainAndPort.value = CaltopoClient.GetCaltopoDomainAndPort()
+        _notamEnabled.value = CaltopoClient.GetNotamEnabled()
+        _notamRadiusNm.value = CaltopoClient.GetNotamRadiusNm().toString()
+        _notamRefreshIntervalSeconds.value = CaltopoClient.GetNotamRefreshIntervalSeconds().toString()
+        _notamAutoRefresh.value = CaltopoClient.GetNotamAutoRefresh()
+        _notamStatus.value = buildNotamStatus()
     }
 
     // --- UI Event Handlers --- //
@@ -85,6 +108,23 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onCaltopoDomainAndPortChanged(url: String) {
         _caltopoDomainAndPort.value = url
     }
+
+    fun onNotamEnabledChanged(enabled: Boolean) {
+        _notamEnabled.value = enabled
+    }
+
+    fun onNotamRadiusNmChanged(radiusNm: String) {
+        _notamRadiusNm.value = radiusNm
+    }
+
+    fun onNotamRefreshIntervalSecondsChanged(seconds: String) {
+        _notamRefreshIntervalSeconds.value = seconds
+    }
+
+    fun onNotamAutoRefreshChanged(enabled: Boolean) {
+        _notamAutoRefresh.value = enabled
+    }
+
     fun saveSettings() {
         val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
@@ -94,8 +134,25 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
         CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)
+        CaltopoClient.SetNotamEnabled(_notamEnabled.value)
+        _notamRadiusNm.value.toIntOrNull()?.let { CaltopoClient.SetNotamRadiusNm(it) }
+        _notamRefreshIntervalSeconds.value.toIntOrNull()?.let { CaltopoClient.SetNotamRefreshIntervalSeconds(it) }
+        CaltopoClient.SetNotamAutoRefresh(_notamAutoRefresh.value)
+        _notamStatus.value = buildNotamStatus()
+        NotamCenter.requestImmediateRefresh()
         if (restartMediaMtx) {
             R2CApplication.getAppCtxt()?.let { MediaMTXService.requestRestart(it) }
+        }
+    }
+
+    private fun buildNotamStatus(): String {
+        val authConfigured = NotamAuthManager.isConfigured()
+        val enabled = CaltopoClient.GetNotamEnabled()
+        val radius = CaltopoClient.GetNotamRadiusNm()
+        return when {
+            !enabled -> "Disabled"
+            authConfigured -> "Enabled, credentials loaded, ${radius} NM radius"
+            else -> "Enabled, waiting for FAA credentials, ${radius} NM radius"
         }
     }
 }

@@ -90,6 +90,17 @@ class ClientClassState {
     public String trackerUrlPfx;
     public String coordinateDisplayFormat;
     public boolean captureVideoStreamsFlag;
+    public boolean notamEnabled;
+    public int notamRadiusNm;
+    public boolean notamAutoRefresh;
+    public int notamRefreshIntervalSeconds;
+    public boolean notamWarnInsideOneNm;
+    public String notamApiBaseUrl;
+    public String notamTokenUrl;
+    public String notamClientId;
+    public String notamClientSecret;
+    public String notamScope;
+    public long notamLastUpdatedEpochMs;
     public Hashtable<String, CtDroneSpec> cachedDroneSpecTable;  // Table to map remoteIDs to their data
     public String configFilesLoaded;
     transient public boolean goLiveFlag;
@@ -115,6 +126,17 @@ class ClientClassState {
         trackerUrlPfx = "";
         coordinateDisplayFormat = "decimal";
         captureVideoStreamsFlag = false;
+        notamEnabled = false;
+        notamRadiusNm = 2;
+        notamAutoRefresh = true;
+        notamRefreshIntervalSeconds = 90;
+        notamWarnInsideOneNm = true;
+        notamApiBaseUrl = "";
+        notamTokenUrl = "";
+        notamClientId = "";
+        notamClientSecret = "";
+        notamScope = "";
+        notamLastUpdatedEpochMs = 0L;
         configFilesLoaded = "";
         cachedDroneSpecTable = new Hashtable<>(16);
         droneSpecTable = new Hashtable<>(16);
@@ -149,11 +171,17 @@ class ClientClassState {
                 """
                         vers:'%d', minDist:'%d' ft, usePeersFlag:'%s', captureVideoStreamsFlag:'%s'
                         newTrackDelayInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
+                        notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
+                        notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
                 AppConfigStore.SCHEMA_VERSION, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
                 newTrackDelayInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
-                incident, opPeriod, coordinateDisplayFormat, archivePath, caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
+                incident, opPeriod, coordinateDisplayFormat,
+                notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
+                notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
+                notamClientSecret.isEmpty() ? "" : "###########", notamScope, notamLastUpdatedEpochMs,
+                archivePath, caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
                 CaltopoClient.DroneSpecStringRep(cachedDroneSpecTable),
                 configFilesLoaded.replaceAll("\\n", "  \n"));
     }
@@ -936,12 +964,32 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String opPeriod = json.optString("op_period");
         String trackerApiKey = json.optString("tracker_api_key");
         String trackerUrlPfx = json.optString("tracker_url_pfx");
+        boolean notamEnabled = json.optBoolean("notam_enabled", false);
+        int notamRadiusNm = json.optInt("notam_radius_nm", 2);
+        boolean notamAutoRefresh = json.optBoolean("notam_auto_refresh", true);
+        int notamRefreshIntervalSeconds = json.optInt("notam_refresh_interval_seconds", 90);
+        boolean notamWarnInsideOneNm = json.optBoolean("notam_warn_inside_one_nm", true);
+        String notamApiBaseUrl = json.optString("notam_api_base_url");
+        String notamTokenUrl = json.optString("notam_token_url");
+        String notamClientId = json.optString("notam_client_id");
+        String notamClientSecret = json.optString("notam_client_secret");
+        String notamScope = json.optString("notam_scope");
         if (!trackFolder.isEmpty()) SetTrackFolderName(trackFolder);
         if (!incident.isEmpty()) SetIncident(incident);
         if (!opPeriod.isEmpty()) SetOpPeriod(opPeriod);
         if (!trackerApiKey.isEmpty()) SetTrackerApiKey(trackerApiKey);
         if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
         if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
+        SetNotamEnabled(notamEnabled);
+        SetNotamRadiusNm(notamRadiusNm);
+        SetNotamAutoRefresh(notamAutoRefresh);
+        SetNotamRefreshIntervalSeconds(notamRefreshIntervalSeconds);
+        SetNotamWarnInsideOneNm(notamWarnInsideOneNm);
+        if (!notamApiBaseUrl.isEmpty()) SetNotamApiBaseUrl(notamApiBaseUrl);
+        if (!notamTokenUrl.isEmpty()) SetNotamTokenUrl(notamTokenUrl);
+        if (!notamClientId.isEmpty()) SetNotamClientId(notamClientId);
+        if (!notamClientSecret.isEmpty()) SetNotamClientSecret(notamClientSecret);
+        if (!notamScope.isEmpty()) SetNotamScope(notamScope);
         if (!teamId.isEmpty() || !credentialId.isEmpty() || !credentialSecret.isEmpty()) {
             SetCaltopoCredentials(new CaltopoCredentials(teamId, credentialId, credentialSecret));
         }
@@ -1148,11 +1196,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         try {
             Bundle parameters = new Bundle();
             parameters.putString("r2c_map", CaltopoMap.GetMapName());
-            parameters.putBoolean("r2c_ctCred", CaltopoCredentials.sniffTest(ccs.caltopoCredentials));
-            parameters.putBoolean("r2c_goLiveFlag", ccs.goLiveFlag);
+            parameters.putLong("r2c_ctCred", CaltopoCredentials.sniffTest(ccs.caltopoCredentials) ? 1L : 0L);
+            parameters.putLong("r2c_goLiveFlag", ccs.goLiveFlag ? 1L : 0L);
             parameters.putLong("r2c_newTrackDelayInSeconds", ccs.newTrackDelayInSeconds);
             parameters.putLong("r2c_minDistanceInFeet", ccs.minDistanceInFeet);
-            parameters.putBoolean("r2c_usePeers", ccs.usePeersFlag);
+            parameters.putLong("r2c_usePeers", ccs.usePeersFlag ? 1L : 0L);
             parameters.putLong("r2c_maxIdleTimeInMinutes", ccs.maxIdleTimeInMinutes);
             parameters.putLong("r2c_debugLevel", ccs.debugLevel);
             fbAnalytics.setDefaultEventParameters(parameters);
@@ -1438,6 +1486,164 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!ccs.coordinateDisplayFormat.equals(format)) {
             ccs.coordinateDisplayFormat = format;
             ArchiveState("coordinate display format changed");
+        }
+    }
+
+    public static boolean GetNotamEnabled() {
+        return GetState().notamEnabled;
+    }
+
+    public static void SetNotamEnabled(boolean enabled) {
+        ClientClassState ccs = GetState();
+        if (ccs.notamEnabled != enabled) {
+            ccs.notamEnabled = enabled;
+            NotifySettingsChanged();
+            ArchiveState("notam enabled changed");
+        }
+    }
+
+    public static int GetNotamRadiusNm() {
+        return GetState().notamRadiusNm;
+    }
+
+    public static void SetNotamRadiusNm(int radiusNm) {
+        int normalized;
+        if (radiusNm <= 2) normalized = 2;
+        else if (radiusNm <= 4) normalized = 4;
+        else if (radiusNm <= 8) normalized = 8;
+        else normalized = 16;
+        ClientClassState ccs = GetState();
+        if (ccs.notamRadiusNm != normalized) {
+            ccs.notamRadiusNm = normalized;
+            NotifySettingsChanged();
+            ArchiveState("notam radius changed");
+        }
+    }
+
+    public static boolean GetNotamAutoRefresh() {
+        return GetState().notamAutoRefresh;
+    }
+
+    public static void SetNotamAutoRefresh(boolean enabled) {
+        ClientClassState ccs = GetState();
+        if (ccs.notamAutoRefresh != enabled) {
+            ccs.notamAutoRefresh = enabled;
+            NotifySettingsChanged();
+            ArchiveState("notam auto refresh changed");
+        }
+    }
+
+    public static int GetNotamRefreshIntervalSeconds() {
+        return GetState().notamRefreshIntervalSeconds;
+    }
+
+    public static void SetNotamRefreshIntervalSeconds(int seconds) {
+        int normalized = Math.max(30, seconds);
+        ClientClassState ccs = GetState();
+        if (ccs.notamRefreshIntervalSeconds != normalized) {
+            ccs.notamRefreshIntervalSeconds = normalized;
+            NotifySettingsChanged();
+            ArchiveState("notam refresh interval changed");
+        }
+    }
+
+    public static boolean GetNotamWarnInsideOneNm() {
+        return GetState().notamWarnInsideOneNm;
+    }
+
+    public static void SetNotamWarnInsideOneNm(boolean enabled) {
+        ClientClassState ccs = GetState();
+        if (ccs.notamWarnInsideOneNm != enabled) {
+            ccs.notamWarnInsideOneNm = enabled;
+            NotifySettingsChanged();
+            ArchiveState("notam warn inside one nm changed");
+        }
+    }
+
+    @NonNull
+    public static String GetNotamApiBaseUrl() {
+        return GetState().notamApiBaseUrl;
+    }
+
+    public static void SetNotamApiBaseUrl(@NonNull String value) {
+        value = value.trim();
+        ClientClassState ccs = GetState();
+        if (!ccs.notamApiBaseUrl.equals(value)) {
+            ccs.notamApiBaseUrl = value;
+            NotifySettingsChanged();
+            ArchiveState("notam api base url changed");
+        }
+    }
+
+    @NonNull
+    public static String GetNotamTokenUrl() {
+        return GetState().notamTokenUrl;
+    }
+
+    public static void SetNotamTokenUrl(@NonNull String value) {
+        value = value.trim();
+        ClientClassState ccs = GetState();
+        if (!ccs.notamTokenUrl.equals(value)) {
+            ccs.notamTokenUrl = value;
+            NotifySettingsChanged();
+            ArchiveState("notam token url changed");
+        }
+    }
+
+    @NonNull
+    public static String GetNotamClientId() {
+        return GetState().notamClientId;
+    }
+
+    public static void SetNotamClientId(@NonNull String value) {
+        value = value.trim();
+        ClientClassState ccs = GetState();
+        if (!ccs.notamClientId.equals(value)) {
+            ccs.notamClientId = value;
+            NotifySettingsChanged();
+            ArchiveState("notam client id changed");
+        }
+    }
+
+    @NonNull
+    public static String GetNotamClientSecret() {
+        return GetState().notamClientSecret;
+    }
+
+    public static void SetNotamClientSecret(@NonNull String value) {
+        value = value.trim();
+        ClientClassState ccs = GetState();
+        if (!ccs.notamClientSecret.equals(value)) {
+            ccs.notamClientSecret = value;
+            NotifySettingsChanged();
+            ArchiveState("notam client secret changed");
+        }
+    }
+
+    @NonNull
+    public static String GetNotamScope() {
+        return GetState().notamScope;
+    }
+
+    public static void SetNotamScope(@NonNull String value) {
+        value = value.trim();
+        ClientClassState ccs = GetState();
+        if (!ccs.notamScope.equals(value)) {
+            ccs.notamScope = value;
+            NotifySettingsChanged();
+            ArchiveState("notam scope changed");
+        }
+    }
+
+    public static long GetNotamLastUpdatedEpochMs() {
+        return GetState().notamLastUpdatedEpochMs;
+    }
+
+    public static void SetNotamLastUpdatedEpochMs(long value) {
+        ClientClassState ccs = GetState();
+        if (ccs.notamLastUpdatedEpochMs != value) {
+            ccs.notamLastUpdatedEpochMs = value;
+            ArchiveState("notam last updated changed");
         }
     }
 

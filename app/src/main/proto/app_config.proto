@@ -33,6 +33,20 @@ message AppConfig {
     bool requires_regrant = 3;
   }
 
+  message NotamConfig {
+    bool enabled = 1;
+    int32 radius_nm = 2;
+    bool auto_refresh = 3;
+    int32 refresh_interval_seconds = 4;
+    bool warn_inside_one_nm = 5;
+    string api_base_url = 6;
+    string token_url = 7;
+    string client_id = 8;
+    string client_secret = 9;
+    string scope = 10;
+    int64 last_updated_epoch_ms = 11;
+  }
+
   int64 min_distance_feet = 20;
   int64 new_track_delay_seconds = 21;
   int64 max_idle_time_minutes = 22;
@@ -52,6 +66,7 @@ message AppConfig {
   string tracker_url_prefix = 53;
 
   ArchiveLocation archive_location = 60;
+  NotamConfig notam = 61;
 
   repeated RidMapping rid_mappings = 70;
   repeated LoadedConfigFileRecord loaded_config_files = 80;

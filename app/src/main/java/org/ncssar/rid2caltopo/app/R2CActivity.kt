@@ -310,6 +310,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         checkWiFiSupport()
         CTDebug(TAG, "initialize()")
         InitializedCalled = true
+        CaltopoClient.InitArchiveDir()
 
         locationRequest = LocationRequest.Builder((10 * 1000).toLong()) // 10 seconds
             .setPriority(Priority.PRIORITY_HIGH_ACCURACY)

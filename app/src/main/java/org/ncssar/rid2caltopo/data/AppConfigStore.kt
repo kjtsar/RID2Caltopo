@@ -21,7 +21,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 1
+    const val SCHEMA_VERSION = 2
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
 
@@ -180,6 +180,17 @@ object AppConfigStore {
         if (config.archiveLocation.treeUri.isNotBlank()) return true
         if (config.archiveLocation.selectionHintUri.isNotBlank()) return true
         if (config.archiveLocation.requiresRegrant) return true
+        if (config.notam.enabled) return true
+        if (config.notam.radiusNm != 0) return true
+        if (config.notam.autoRefresh) return true
+        if (config.notam.refreshIntervalSeconds != 0) return true
+        if (config.notam.warnInsideOneNm) return true
+        if (config.notam.apiBaseUrl.isNotBlank()) return true
+        if (config.notam.tokenUrl.isNotBlank()) return true
+        if (config.notam.clientId.isNotBlank()) return true
+        if (config.notam.clientSecret.isNotBlank()) return true
+        if (config.notam.scope.isNotBlank()) return true
+        if (config.notam.lastUpdatedEpochMs != 0L) return true
         if (config.ridMappingsCount > 0) return true
         if (config.loadedConfigFilesCount > 0) return true
         return false
@@ -206,6 +217,23 @@ object AppConfigStore {
         state.coordinateDisplayFormat = config.coordinateDisplayFormat.ifBlank { "decimal" }
         state.captureVideoStreamsFlag = config.captureVideoStreams
         state.usePeersFlag = config.usePeers
+        state.notamEnabled = config.notam.enabled
+        state.notamRadiusNm = when {
+            config.notam.radiusNm >= 2 -> config.notam.radiusNm
+            else -> 2
+        }
+        state.notamAutoRefresh = if (config.schemaVersion >= 2) config.notam.autoRefresh else true
+        state.notamRefreshIntervalSeconds = when {
+            config.notam.refreshIntervalSeconds > 0 -> config.notam.refreshIntervalSeconds
+            else -> 90
+        }
+        state.notamWarnInsideOneNm = if (config.schemaVersion >= 2) config.notam.warnInsideOneNm else true
+        state.notamApiBaseUrl = config.notam.apiBaseUrl
+        state.notamTokenUrl = config.notam.tokenUrl
+        state.notamClientId = config.notam.clientId
+        state.notamClientSecret = config.notam.clientSecret
+        state.notamScope = config.notam.scope
+        state.notamLastUpdatedEpochMs = config.notam.lastUpdatedEpochMs
         state.cachedDroneSpecTable = Hashtable<String, CtDroneSpec>(16)
         for (mapping in config.ridMappingsList) {
             val spec = CtDroneSpec(
@@ -244,6 +272,21 @@ object AppConfigStore {
             .setOpPeriod(state.opPeriod ?: "")
             .setTrackerApiKey(state.trackerApiKey ?: "")
             .setTrackerUrlPrefix(state.trackerUrlPfx ?: "")
+            .setNotam(
+                AppConfig.NotamConfig.newBuilder()
+                    .setEnabled(state.notamEnabled)
+                    .setRadiusNm(state.notamRadiusNm)
+                    .setAutoRefresh(state.notamAutoRefresh)
+                    .setRefreshIntervalSeconds(state.notamRefreshIntervalSeconds)
+                    .setWarnInsideOneNm(state.notamWarnInsideOneNm)
+                    .setApiBaseUrl(state.notamApiBaseUrl ?: "")
+                    .setTokenUrl(state.notamTokenUrl ?: "")
+                    .setClientId(state.notamClientId ?: "")
+                    .setClientSecret(state.notamClientSecret ?: "")
+                    .setScope(state.notamScope ?: "")
+                    .setLastUpdatedEpochMs(state.notamLastUpdatedEpochMs)
+                    .build()
+            )
             .setCaltopoCredentials(
                 AppConfig.CaltopoCredentialsConfig.newBuilder()
                     .setTeamId(state.caltopoCredentials?.teamId ?: "")

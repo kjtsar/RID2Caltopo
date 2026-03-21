@@ -20,6 +20,15 @@ object AppConfigSerializer : Serializer<AppConfig> {
         .setCaltopoDomainAndPort("caltopo.com")
         .setIncident("Training")
         .setOpPeriod("1")
+        .setNotam(
+            AppConfig.NotamConfig.newBuilder()
+                .setEnabled(false)
+                .setRadiusNm(2)
+                .setAutoRefresh(true)
+                .setRefreshIntervalSeconds(90)
+                .setWarnInsideOneNm(true)
+                .build()
+        )
         .build()
 
     override suspend fun readFrom(input: InputStream): AppConfig {

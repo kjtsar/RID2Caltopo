@@ -32,6 +32,11 @@ fun CaltopoSettingsScreen(
     val usePeers by settingsViewModel.usePeers.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
     val caltopoUrl by settingsViewModel.caltopoUrl.collectAsState()
+    val notamEnabled by settingsViewModel.notamEnabled.collectAsState()
+    val notamRadiusNm by settingsViewModel.notamRadiusNm.collectAsState()
+    val notamRefreshIntervalSeconds by settingsViewModel.notamRefreshIntervalSeconds.collectAsState()
+    val notamAutoRefresh by settingsViewModel.notamAutoRefresh.collectAsState()
+    val notamStatus by settingsViewModel.notamStatus.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
         Card (modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -97,6 +102,54 @@ fun CaltopoSettingsScreen(
 
 
                 Spacer(modifier = Modifier.height(16.dp))
+
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text("NOTAM Admin", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = notamStatus,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Enable Nearby NOTAMs:")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = notamEnabled,
+                        onCheckedChange = { settingsViewModel.onNotamEnabledChanged(it) }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (notamEnabled) "Yes" else "No")
+                }
+
+                OutlinedTextField(
+                    value = notamRadiusNm,
+                    onValueChange = { settingsViewModel.onNotamRadiusNmChanged(it.filter { ch -> ch.isDigit() }) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("NOTAM Radius (2, 4, 8, 16 NM)") }
+                )
+
+                OutlinedTextField(
+                    value = notamRefreshIntervalSeconds,
+                    onValueChange = { settingsViewModel.onNotamRefreshIntervalSecondsChanged(it.filter { ch -> ch.isDigit() }) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("NOTAM Refresh Interval (s)") }
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Auto Refresh:")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = notamAutoRefresh,
+                        onCheckedChange = { settingsViewModel.onNotamAutoRefreshChanged(it) }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (notamAutoRefresh) "Yes" else "No")
+                }
 
                 Row {
                     Button(onClick = {

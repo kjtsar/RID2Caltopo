@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
 import org.ncssar.rid2caltopo.app.MediaMTXService
@@ -44,6 +45,9 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
 import org.ncssar.rid2caltopo.data.DriveSyncAction
 import org.ncssar.rid2caltopo.data.AppConfigStore
+import org.ncssar.rid2caltopo.notam.NotamCenter
+import org.ncssar.rid2caltopo.notam.NotamPanel
+import org.ncssar.rid2caltopo.notam.NotamStatusChip
 
 private fun parseCsvTags(csv: String): List<String> {
     val tags = linkedSetOf<String>()
@@ -145,6 +149,8 @@ fun MainScreen(
     var driveSyncInProgress by remember { mutableStateOf(false) }
     var showDriveRestoreDialog by remember { mutableStateOf(shouldOfferDriveRestore(context)) }
     var linkedDriveEmail by remember { mutableStateOf(GoogleDriveConfigSync.getLinkedAccountEmail(context)) }
+    var showNotamPanel by remember { mutableStateOf(false) }
+    val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
 
     fun refreshDriveState() {
         linkedDriveEmail = GoogleDriveConfigSync.getLinkedAccountEmail(context)
@@ -235,6 +241,13 @@ fun MainScreen(
                     Text("Skip")
                 }
             }
+        )
+    }
+
+    if (showNotamPanel) {
+        NotamPanel(
+            state = notamUiState,
+            onDismiss = { showNotamPanel = false }
         )
     }
 
@@ -565,6 +578,12 @@ fun MainScreen(
             modifier = Modifier.horizontalScroll(rememberScrollState())
         ) {
             LazyColumn(modifier = Modifier.padding(paddingValues)) {
+                item(key = "notam_chip") {
+                    NotamStatusChip(
+                        state = notamUiState,
+                        onClick = { showNotamPanel = true }
+                    )
+                }
                 items(
                     items = screenItems,
                     key = { item ->

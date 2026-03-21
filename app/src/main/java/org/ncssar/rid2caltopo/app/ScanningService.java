@@ -167,8 +167,7 @@ public class ScanningService extends Service {
                 .build();
 
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE |
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
         startScanning();
         return START_STICKY;
     }

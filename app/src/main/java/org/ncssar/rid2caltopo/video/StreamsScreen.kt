@@ -58,6 +58,9 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
 import org.ncssar.rid2caltopo.data.R2CPeer
+import org.ncssar.rid2caltopo.notam.NotamCenter
+import org.ncssar.rid2caltopo.notam.NotamPanel
+import org.ncssar.rid2caltopo.notam.NotamStatusChip
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
 import org.opendroneid.android.bluetooth.WiFiScanner
 
@@ -85,6 +88,7 @@ fun StreamsScreen(
 ) {
     val serverStatus = MediaMTXStatus.serverStatus
     val mapName = viewModel.mapName
+    val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val mapStatus by remember(mapName) {
         derivedStateOf {
             if (mapName != null) {
@@ -97,6 +101,7 @@ fun StreamsScreen(
 
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
     var layoutMode by remember { mutableStateOf(ScreenLayoutMode.Both) }
+    var showNotamPanel by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -141,6 +146,11 @@ fun StreamsScreen(
                 }
             )
 
+            NotamStatusChip(
+                state = notamUiState,
+                onClick = { showNotamPanel = true }
+            )
+
             Box(Modifier.fillMaxSize()) {
                 when (layoutMode) {
                     ScreenLayoutMode.Both -> {
@@ -173,6 +183,13 @@ fun StreamsScreen(
                 }
             }
         }
+    }
+
+    if (showNotamPanel) {
+        NotamPanel(
+            state = notamUiState,
+            onDismiss = { showNotamPanel = false }
+        )
     }
 }
 

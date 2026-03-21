@@ -39,12 +39,13 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CActivity
+import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
-import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
 import org.ncssar.rid2caltopo.data.DriveSyncAction
-import org.ncssar.rid2caltopo.data.AppConfigStore
+import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
+import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
@@ -146,9 +147,12 @@ fun MainScreen(
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
     val context =  LocalContext.current
     var pendingDriveAction by remember { mutableStateOf<DriveSyncAction?>(null) }
+    var pendingOrgExport by remember { mutableStateOf<String?>(null) }  // org name awaiting Drive auth
     var driveSyncInProgress by remember { mutableStateOf(false) }
     var showDriveRestoreDialog by remember { mutableStateOf(shouldOfferDriveRestore(context)) }
     var linkedDriveEmail by remember { mutableStateOf(GoogleDriveConfigSync.getLinkedAccountEmail(context)) }
+    var showOrgExportDialog by remember { mutableStateOf(false) }
+    var showOrgJoinDialog by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
 
@@ -188,12 +192,34 @@ fun MainScreen(
         contract = ActivityResultContracts.StartActivityForResult(),
         onResult = { result ->
             val requestedAction = pendingDriveAction
+            val orgExport = pendingOrgExport
             pendingDriveAction = null
-            if (requestedAction != null && result.data != null) {
-                runDriveAction(result, requestedAction)
-            } else if (requestedAction != null) {
-                driveSyncInProgress = false
-                CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
+            pendingOrgExport = null
+
+            val account = if (result.data != null) {
+                try {
+                    GoogleSignIn.getSignedInAccountFromIntent(result.data)
+                        .getResult(ApiException::class.java)
+                } catch (e: ApiException) {
+                    null
+                }
+            } else null
+
+            when {
+                requestedAction != null && account != null ->
+                    runDriveAction(result, requestedAction)
+                requestedAction != null ->
+                    CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
+                orgExport != null && account != null -> {
+                    // Resume the org-config export after sign-in by re-opening the
+                    // dialog. The org name was stored in prefs before sign-in so the
+                    // dialog pre-fills it via getStoredOrgName().
+                    showOrgExportDialog = true
+                    CaltopoClient.ShowToast("Signed in. Tap Generate to upload your org config.")
+                    refreshDriveState()
+                }
+                orgExport != null ->
+                    CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
             }
         }
     )
@@ -215,6 +241,41 @@ fun MainScreen(
             CaltopoClient.ShowToast(message)
             refreshDriveState()
         }
+    }
+
+    if (showOrgExportDialog) {
+        OrgConfigExportDialog(
+            onDismiss = { showOrgExportDialog = false },
+            onUploadRequested = { orgName, callback ->
+                val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
+                if (account != null) {
+                    OrgConfigManager.uploadOrgConfig(context, account, orgName) { success, message, token ->
+                        refreshDriveState()
+                        callback(success, message, token)
+                    }
+                } else {
+                    // No Drive auth yet — store the org name, close the dialog, and
+                    // trigger sign-in. The launcher reopens the dialog after auth.
+                    OrgConfigManager.storeOrgName(context, orgName)
+                    showOrgExportDialog = false
+                    pendingOrgExport = orgName
+                    driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                    callback(false, "Signing in to Google Drive…", null)
+                }
+            }
+        )
+    }
+
+    if (showOrgJoinDialog) {
+        OrgConfigJoinDialog(
+            onDismiss = { showOrgJoinDialog = false },
+            onJoin = { token ->
+                showOrgJoinDialog = false
+                OrgConfigManager.joinFromToken(context, token) { _, message ->
+                    CaltopoClient.ShowToast(message)
+                }
+            }
+        )
     }
 
     if (showDriveRestoreDialog) {
@@ -512,6 +573,17 @@ fun MainScreen(
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
                         })
+                        DropdownMenuItem(text = { Text("Generate Org Join QR") }, onClick = {
+                            menuExpanded = false
+                            showOrgExportDialog = true
+                        })
+                        DropdownMenuItem(
+                            text = { Text("Join Org") },
+                            onClick = {
+                                menuExpanded = false
+                                showOrgJoinDialog = true
+                            }
+                        )
                         DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
                             onEmailLog()
                             CaltopoClient.CTEvent(tag,"LogEmailed", null)

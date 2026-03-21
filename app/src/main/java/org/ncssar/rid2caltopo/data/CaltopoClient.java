@@ -1104,6 +1104,135 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return true;
     }
 
+    /**
+     * Serialize the current app state (ridmap + credentials) into an org-config
+     * bundle JSON string suitable for uploading to Drive and sharing via QR token.
+     *
+     * The bundle contains two child config objects in the same format as the
+     * existing ct_ridmap and ct_credentials files so they can be applied using
+     * the same parsing paths.  The caller (OrgConfigManager) is responsible for
+     * encrypting the credentials block before upload.
+     *
+     * @param orgName display name for the SAR organisation (included in the bundle).
+     * @return pretty-printed JSON string, or null on error.
+     */
+    public static String BuildOrgConfigBundle(String orgName) {
+        try {
+            ClientClassState ccs = GetState();
+            JSONObject bundle = new JSONObject();
+            bundle.put("format", "rid2caltopo_org_config");
+            bundle.put("version", 1);
+            bundle.put("org_name", orgName != null ? orgName : "");
+            bundle.put("generated", TimeDatestampString(System.currentTimeMillis()));
+
+            JSONArray configs = new JSONArray();
+
+            // ── ct_ridmap ──────────────────────────────────────────────────────
+            JSONObject ridmap = new JSONObject();
+            ridmap.put("type", "ct_ridmap");
+            ridmap.put("file_version", "1.0");
+            ridmap.put("load_type", "replace");
+            JSONArray mapArray = new JSONArray();
+            for (Map.Entry<String, CtDroneSpec> entry : ccs.cachedDroneSpecTable.entrySet()) {
+                CtDroneSpec spec = entry.getValue();
+                JSONObject mapEntry = new JSONObject();
+                mapEntry.put("remoteId", spec.getRemoteId());
+                mapEntry.put("mappedId", spec.getMappedId());
+                mapEntry.put("org",      spec.getOrg());
+                mapEntry.put("model",    spec.getModel());
+                mapEntry.put("owner",    spec.getOwner());
+                mapArray.put(mapEntry);
+            }
+            ridmap.put("map", mapArray);
+            configs.put(ridmap);
+
+            // ── ct_credentials ────────────────────────────────────────────────
+            JSONObject credentials = new JSONObject();
+            credentials.put("type", "ct_credentials");
+            credentials.put("file_version", "1.0");
+            CaltopoCredentials cred = ccs.caltopoCredentials;
+            if (cred != null) {
+                if (cred.teamId != null && !cred.teamId.isEmpty())
+                    credentials.put("team_id", cred.teamId);
+                if (cred.credentialId != null && !cred.credentialId.isEmpty())
+                    credentials.put("credential_id", cred.credentialId);
+                if (cred.credentialSecret != null && !cred.credentialSecret.isEmpty())
+                    credentials.put("credential_secret", cred.credentialSecret);
+            }
+            if (ccs.caltopoDomainAndPort != null && !ccs.caltopoDomainAndPort.isEmpty())
+                credentials.put("domain_and_port", ccs.caltopoDomainAndPort);
+            if (ccs.caltopoTrackFolder != null && !ccs.caltopoTrackFolder.isEmpty())
+                credentials.put("track_folder", ccs.caltopoTrackFolder);
+            if (ccs.incident != null && !ccs.incident.isEmpty())
+                credentials.put("incident", ccs.incident);
+            if (ccs.opPeriod != null && !ccs.opPeriod.isEmpty())
+                credentials.put("op_period", ccs.opPeriod);
+            if (ccs.trackerApiKey != null && !ccs.trackerApiKey.isEmpty())
+                credentials.put("tracker_api_key", ccs.trackerApiKey);
+            if (ccs.trackerUrlPfx != null && !ccs.trackerUrlPfx.isEmpty())
+                credentials.put("tracker_url_pfx", ccs.trackerUrlPfx);
+            configs.put(credentials);
+
+            bundle.put("configs", configs);
+            return bundle.toString(2);
+
+        } catch (JSONException e) {
+            CTError(TAG, "BuildOrgConfigBundle() failed.", e);
+            return null;
+        }
+    }
+
+    /**
+     * Parse an org-config bundle JSON string (produced by {@link #BuildOrgConfigBundle},
+     * with credentials already decrypted by OrgConfigManager) and apply its child
+     * configs using the existing ct_ridmap and ct_credentials parsing paths.
+     *
+     * @param json the bundle JSON string (credentials already in plaintext).
+     * @return true if at least one child config was applied without error.
+     */
+    public static boolean ApplyOrgConfigBundle(String json) {
+        if (null == json || json.isEmpty()) return false;
+        try {
+            JSONObject bundle = new JSONObject(json);
+            String format = bundle.optString("format");
+            if (!format.equals("rid2caltopo_org_config")) {
+                CTWarn(TAG, "ApplyOrgConfigBundle(): unexpected format: " + format);
+                return false;
+            }
+            JSONArray configs = bundle.optJSONArray("configs");
+            if (null == configs || configs.length() == 0) {
+                CTWarn(TAG, "ApplyOrgConfigBundle(): configs array is empty.");
+                return false;
+            }
+            Context ctxt = R2CApplication.getAppCtxt();
+            int applied = 0;
+            for (int i = 0; i < configs.length(); i++) {
+                JSONObject config = configs.getJSONObject(i);
+                String type    = config.optString("type").trim().toLowerCase();
+                String editor  = config.optString("editor", "org_config");
+                String updated = config.optString("updated", "");
+                if (ctxt != null) {
+                    GetState().configFilesLoaded =
+                        AppConfigStore.recordLoadedConfigFile(ctxt, type, editor, updated);
+                }
+                if (type.equals("ct_ridmap")) {
+                    readRidmapFileContent(config);
+                    applied++;
+                } else if (type.equals("ct_credentials")) {
+                    readCredentialsFileContent(config);
+                    applied++;
+                } else {
+                    CTWarn(TAG, "ApplyOrgConfigBundle(): unknown config type ignored: " + type);
+                }
+            }
+            if (applied > 0) NotifySettingsChanged();
+            return applied > 0;
+        } catch (JSONException e) {
+            CTError(TAG, "ApplyOrgConfigBundle() failed.", e);
+            return false;
+        }
+    }
+
     public static int GetRidmapCount() {
         ClientClassState ccs = GetState();
         return ccs.cachedDroneSpecTable.size();

@@ -213,6 +213,7 @@ internal class NotamRepository {
         }.ifBlank { "Nearby NOTAM" }
 
         val rawText = extractRawText(translations)
+        val geometries = geometry?.toNotamGeometries().orEmpty()
         val proximity = geometry?.let { distanceToGeometry(current, it) }
         val distanceNm = proximity?.distanceNm
         val intersectsPilotBubble = distanceNm != null && distanceNm <= 1.0
@@ -234,7 +235,8 @@ internal class NotamRepository {
             effectiveText = effectiveText,
             details = "Classification ${notam?.optString("classification").orEmpty().ifBlank { "unknown" }}",
             rawText = rawText,
-            severity = severity
+            severity = severity,
+            geometries = geometries
         ).also {
             if (CTDebugEnabled(TAG)) {
                 CTDebug(
@@ -367,6 +369,68 @@ internal class NotamRepository {
         val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
         val bearing = (Math.toDegrees(atan2(y, x)) + 360.0) % 360.0
         return GeometryProximity((earthRadiusMeters * c) / 1852.0, bearing)
+    }
+
+    private fun JSONObject.toNotamGeometries(): List<NotamGeometry> {
+        return when (optString("type")) {
+            "Point" -> optJSONArray("coordinates")?.toPointGeometry()?.let(::listOf).orEmpty()
+            "LineString" -> optJSONArray("coordinates")?.toCoordinateList()
+                ?.takeIf { it.size >= 2 }
+                ?.let { listOf(NotamGeometry.Line(it)) }
+                .orEmpty()
+            "Polygon" -> optJSONArray("coordinates")?.toPolygonGeometry()?.let(::listOf).orEmpty()
+            "MultiPolygon" -> {
+                val polygons = optJSONArray("coordinates") ?: return emptyList()
+                buildList {
+                    for (i in 0 until polygons.length()) {
+                        polygons.optJSONArray(i)?.toPolygonGeometry()?.let(::add)
+                    }
+                }
+            }
+            "GeometryCollection" -> {
+                val geometries = optJSONArray("geometries") ?: return emptyList()
+                buildList {
+                    for (i in 0 until geometries.length()) {
+                        geometries.optJSONObject(i)?.toNotamGeometries()?.forEach(::add)
+                    }
+                }
+            }
+            else -> emptyList()
+        }
+    }
+
+    private fun JSONArray.toPointGeometry(): NotamGeometry.Point? {
+        if (length() < 2) return null
+        return NotamGeometry.Point(
+            NotamLatLng(
+                latitude = optDouble(1),
+                longitude = optDouble(0)
+            )
+        )
+    }
+
+    private fun JSONArray.toPolygonGeometry(): NotamGeometry.Polygon? {
+        val rings = buildList {
+            for (i in 0 until length()) {
+                optJSONArray(i)?.toCoordinateList()?.takeIf { it.size >= 3 }?.let(::add)
+            }
+        }
+        return rings.takeIf { it.isNotEmpty() }?.let { NotamGeometry.Polygon(it) }
+    }
+
+    private fun JSONArray.toCoordinateList(): List<NotamLatLng> {
+        return buildList {
+            for (i in 0 until length()) {
+                val item = optJSONArray(i) ?: continue
+                if (item.length() < 2) continue
+                add(
+                    NotamLatLng(
+                        latitude = item.optDouble(1),
+                        longitude = item.optDouble(0)
+                    )
+                )
+            }
+        }
     }
 
     private fun minOfNullable(a: GeometryProximity?, b: GeometryProximity): GeometryProximity =

@@ -131,6 +131,9 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.notam.NearbyNotam
+import org.ncssar.rid2caltopo.notam.NotamCenter
+import org.ncssar.rid2caltopo.notam.NotamMapOverlayAdapter
 import org.ncssar.rid2caltopo.video.mapcache.CaltopoIconCacheService
 import org.ncssar.rid2caltopo.video.mapcache.BadTilePolicy
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
@@ -503,7 +506,9 @@ internal fun SplitMapPane(
         }
     }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
+    val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
+    var selectedNotam by remember { mutableStateOf<NearbyNotam?>(null) }
     val dronePointEntries = viewModel.droneStates.mapNotNull { (designator, state) ->
         val stateTs = state.source.mostRecentMsecTimestamp
         var lat = state.lastLat
@@ -546,6 +551,55 @@ internal fun SplitMapPane(
                 usingLocalTail
             )
         }
+    }
+
+    selectedNotam?.let { notice ->
+        AlertDialog(
+            onDismissRequest = { selectedNotam = null },
+            title = { Text("NOTAM Detail") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (notice.proximityText.isNotBlank()) {
+                        Text(notice.proximityText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text(notice.title, style = MaterialTheme.typography.titleMedium)
+                    val metaText = buildString {
+                        if (notice.intersectsPilotBubble) append("intersects 1 NM operating area")
+                        if (notice.effectiveText.isNotBlank()) {
+                            if (isNotBlank()) append(" • ")
+                            append(notice.effectiveText)
+                        }
+                    }
+                    if (metaText.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(metaText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (notice.summary.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(notice.summary)
+                    }
+                    if (notice.details.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(notice.details)
+                    }
+                    if (notice.rawText.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Raw: ${notice.rawText}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedNotam = null }) { Text("Close") }
+            },
+            dismissButton = {}
+        )
     }
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
@@ -1608,12 +1662,46 @@ internal fun SplitMapPane(
                     managedOverlays.add(polygon)
                 }
 
+                val notamOverlayState = NotamMapOverlayAdapter.build(notamUiState, CaltopoMap.MyLocation)
+                notamOverlayState.polygons.forEach { polygonSpec ->
+                    val polygon = Polygon(mapView).apply {
+                        points = polygonSpec.points
+                        title = polygonSpec.title
+                        strokeColor = polygonSpec.strokeColor
+                        fillColor = polygonSpec.fillColor
+                        strokeWidth = polygonSpec.strokeWidth
+                        polygonSpec.notice?.let { notice ->
+                            setOnClickListener { _, _, _ ->
+                                selectedNotam = notice
+                                true
+                            }
+                        }
+                    }
+                    mapView.overlays.add(polygon)
+                    managedOverlays.add(polygon)
+                }
+
                 artifactOverlayState.lines.forEach { lineSpec ->
                     val line = Polyline(mapView).apply {
                         setPoints(lineSpec.points)
                         title = lineSpec.title
                         color = lineSpec.color
                         width = lineSpec.width
+                    }
+                    mapView.overlays.add(line)
+                    managedOverlays.add(line)
+                }
+
+                notamOverlayState.lines.forEach { lineSpec ->
+                    val line = Polyline(mapView).apply {
+                        setPoints(lineSpec.points)
+                        title = lineSpec.title
+                        color = lineSpec.color
+                        width = lineSpec.width
+                        setOnClickListener { _, _, _ ->
+                            selectedNotam = lineSpec.notice
+                            true
+                        }
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -1676,6 +1764,21 @@ internal fun SplitMapPane(
                     }
                     if (!isKnownArtifactSymbol(point.markerSymbol) && unknownSymbolsSeen.add(point.markerSymbol)) {
                         if (CTDebugEnabled(MAP_PANE_TAG))  CTDebug(MAP_PANE_TAG, "Unknown marker-symbol encountered: '${point.markerSymbol}'")
+                    }
+                    mapView.overlays.add(marker)
+                    managedOverlays.add(marker)
+                }
+
+                notamOverlayState.points.forEach { point ->
+                    val marker = Marker(mapView).apply {
+                        position = point.point
+                        icon = buildNotamMarkerIcon(context, point.color)
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        title = point.title
+                        setOnMarkerClickListener { _, _ ->
+                            selectedNotam = point.notice
+                            true
+                        }
                     }
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
@@ -3567,6 +3670,29 @@ private fun buildDroneMarkerDrawable(
     icon.setBounds(pad, pad, pad + iconW, pad + iconH)
     icon.draw(canvas)
     return BitmapDrawable(resources, bitmap)
+}
+
+private fun buildNotamMarkerIcon(
+    context: Context,
+    fillColor: Int
+): Drawable {
+    val sizePx = 44
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val radius = sizePx * 0.22f
+    val center = sizePx / 2f
+    val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = fillColor
+    }
+    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = AndroidColor.WHITE
+        strokeWidth = 3f
+    }
+    canvas.drawCircle(center, center, radius, fill)
+    canvas.drawCircle(center, center, radius, border)
+    return BitmapDrawable(context.resources, bitmap)
 }
 
 private fun isKnownArtifactSymbol(symbol: String): Boolean {

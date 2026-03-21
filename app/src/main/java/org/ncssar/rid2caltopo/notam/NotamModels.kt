@@ -1,5 +1,17 @@
 package org.ncssar.rid2caltopo.notam
 
+data class NotamLatLng(
+    val latitude: Double,
+    val longitude: Double
+)
+
+sealed interface NotamGeometry {
+    data class Point(val coordinate: NotamLatLng) : NotamGeometry
+    data class Line(val coordinates: List<NotamLatLng>) : NotamGeometry
+    data class Polygon(val rings: List<List<NotamLatLng>>) : NotamGeometry
+    data class Collection(val geometries: List<NotamGeometry>) : NotamGeometry
+}
+
 enum class NotamChipSeverity {
     Neutral,
     Normal,
@@ -18,7 +30,8 @@ data class NearbyNotam(
     val effectiveText: String = "",
     val details: String = "",
     val rawText: String = "",
-    val severity: NotamChipSeverity = NotamChipSeverity.Normal
+    val severity: NotamChipSeverity = NotamChipSeverity.Normal,
+    val geometries: List<NotamGeometry> = emptyList()
 )
 
 data class NotamUiState(

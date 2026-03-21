@@ -1171,6 +1171,22 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 credentials.put("tracker_api_key", ccs.trackerApiKey);
             if (ccs.trackerUrlPfx != null && !ccs.trackerUrlPfx.isEmpty())
                 credentials.put("tracker_url_pfx", ccs.trackerUrlPfx);
+            // ── NOTAM settings ───────────────────────────────────────────────
+            credentials.put("notam_enabled",                   ccs.notamEnabled);
+            credentials.put("notam_radius_nm",                 ccs.notamRadiusNm);
+            credentials.put("notam_auto_refresh",              ccs.notamAutoRefresh);
+            credentials.put("notam_refresh_interval_seconds",  ccs.notamRefreshIntervalSeconds);
+            credentials.put("notam_warn_inside_one_nm",        ccs.notamWarnInsideOneNm);
+            if (ccs.notamApiBaseUrl != null && !ccs.notamApiBaseUrl.isEmpty())
+                credentials.put("notam_api_base_url",   ccs.notamApiBaseUrl);
+            if (ccs.notamTokenUrl != null && !ccs.notamTokenUrl.isEmpty())
+                credentials.put("notam_token_url",      ccs.notamTokenUrl);
+            if (ccs.notamClientId != null && !ccs.notamClientId.isEmpty())
+                credentials.put("notam_client_id",      ccs.notamClientId);
+            if (ccs.notamClientSecret != null && !ccs.notamClientSecret.isEmpty())
+                credentials.put("notam_client_secret",  ccs.notamClientSecret);
+            if (ccs.notamScope != null && !ccs.notamScope.isEmpty())
+                credentials.put("notam_scope",          ccs.notamScope);
             configs.put(credentials);
 
             bundle.put("configs", configs);

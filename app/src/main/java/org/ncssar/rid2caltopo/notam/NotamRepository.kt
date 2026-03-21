@@ -212,6 +212,16 @@ internal class NotamRepository {
             }
         }.ifBlank { "Nearby NOTAM" }
 
+        val reference = buildString {
+            val locationCode = notam?.optString("icaoLocation").orEmpty().ifBlank { notam?.optString("location").orEmpty() }
+            val number = buildNotamNumber(notam)
+            if (locationCode.isNotBlank()) append(locationCode)
+            if (number.isNotBlank()) {
+                if (isNotEmpty()) append(" ")
+                append(number)
+            }
+        }
+        val notamText = notam?.optString("text").orEmpty()
         val rawText = extractRawText(translations)
         val geometries = geometry?.toNotamGeometries().orEmpty()
         val proximity = geometry?.let { distanceToGeometry(current, it) }
@@ -219,22 +229,31 @@ internal class NotamRepository {
         val intersectsPilotBubble = distanceNm != null && distanceNm <= 1.0
         val severity = inferSeverity(title, rawText, intersectsPilotBubble)
         val effectiveText = buildEffectiveText(notam)
-        val summary = when {
-            intersectsPilotBubble -> "This notice appears to intersect the pilot's 1 NM operating area."
-            distanceNm != null -> "Closest geometry is %.1f NM from current device location.".format(Locale.US, distanceNm)
-            else -> "Geometry was not sufficient to calculate distance."
-        }
+        val proximityText = proximityText(distanceNm, proximity?.bearingDeg)
+        val classification = notam?.optString("classification").orEmpty().ifBlank { "unknown" }
+        val humanized = NotamHumanizer.humanize(
+            reference = reference,
+            notamText = notamText,
+            rawText = rawText,
+            effectiveText = effectiveText,
+            proximityText = proximityText,
+            intersectsPilotBubble = intersectsPilotBubble,
+            classification = classification,
+            scheduleText = notam?.optString("schedule").orEmpty()
+        )
         return NearbyNotam(
             id = notam?.optString("id").orEmpty().ifBlank { title },
-            title = title,
-            summary = summary,
+            title = humanized.title,
+            summary = humanized.summary,
             distanceNm = distanceNm,
             bearingText = proximity?.bearingDeg?.let(::compassDirection),
-            proximityText = proximityText(distanceNm, proximity?.bearingDeg),
+            proximityText = proximityText,
             intersectsPilotBubble = intersectsPilotBubble,
             effectiveText = effectiveText,
-            details = "Classification ${notam?.optString("classification").orEmpty().ifBlank { "unknown" }}",
+            details = humanized.details,
             rawText = rawText,
+            rawTitle = title,
+            rawReference = reference,
             severity = severity,
             geometries = geometries
         ).also {

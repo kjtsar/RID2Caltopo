@@ -567,6 +567,10 @@ internal fun SplitMapPane(
                         Text(notice.proximityText, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Text(notice.title, style = MaterialTheme.typography.titleMedium)
+                    notice.rawReference.takeIf { it.isNotBlank() }?.let {
+                        Spacer(Modifier.height(6.dp))
+                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     val metaText = buildString {
                         if (notice.intersectsPilotBubble) append("intersects 1 NM operating area")
                         if (notice.effectiveText.isNotBlank()) {
@@ -589,7 +593,14 @@ internal fun SplitMapPane(
                     if (notice.rawText.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "Raw: ${notice.rawText}",
+                            "FAA text: ${notice.rawTitle.ifBlank { notice.rawText }}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (notice.rawText.isNotBlank() && notice.rawText != notice.rawTitle) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Translation: ${notice.rawText}",
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }

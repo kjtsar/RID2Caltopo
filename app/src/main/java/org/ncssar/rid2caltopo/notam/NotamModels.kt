@@ -30,6 +30,8 @@ data class NearbyNotam(
     val effectiveText: String = "",
     val details: String = "",
     val rawText: String = "",
+    val rawTitle: String = "",
+    val rawReference: String = "",
     val severity: NotamChipSeverity = NotamChipSeverity.Normal,
     val geometries: List<NotamGeometry> = emptyList()
 )

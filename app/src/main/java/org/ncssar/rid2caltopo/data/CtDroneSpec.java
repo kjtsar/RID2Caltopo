@@ -100,8 +100,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String org;
     private String owner;
     private String model; /* This is the concise text description of the drone. */
-    public transient long mostRecentMsecTimestamp; /* timestamp of most recent good packet received */
-    private transient long startMsecTimestamp;
+    public transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good packet was received */
+    private transient long startMsecTimestamp; /* timestamp carried by the first accepted waypoint in the current flight */
+    private transient long mostRecentFlightMsecTimestamp; /* timestamp carried by the most recent accepted waypoint */
     private transient R2CPeer ownerR2c;
     private transient CtDroneSpecListener myListener;
     private transient CaltopoLiveTrack myLiveTrack;
@@ -147,6 +148,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         retval.put("model", model);
         retval.put("startTimeInMsec", startMsecTimestamp);
         retval.put("mostRecentTimeInMsec", mostRecentMsecTimestamp);
+        retval.put("mostRecentFlightTimeInMsec", mostRecentFlightMsecTimestamp);
         retval.put("goodCount", goodCount);
         retval.put(TransportTypeEnum.BT4.name(), transportCount[TransportTypeEnum.BT4.ordinal()]);
         retval.put(TransportTypeEnum.BT5.name(), transportCount[TransportTypeEnum.BT5.ordinal()]);
@@ -161,6 +163,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         in.defaultReadObject();
         trackLabel = EMPTY_STRING;
         startMsecTimestamp = 0;
+        mostRecentFlightMsecTimestamp = 0;
         distanceInFeet = 0.0F;
         lastLat = 0.0F;
         lastLng = 0.0F;
@@ -208,7 +211,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         for (int i = 0; i < rssiLen; i++) lastRssiByTransport[i] = 0;
         okToLog = true;
         airborne = Boolean.FALSE;
-        startMsecTimestamp = mostRecentMsecTimestamp = 0;
+        startMsecTimestamp = mostRecentMsecTimestamp = mostRecentFlightMsecTimestamp = 0;
         int length = TransportTypeEnum.values().length;
         for (int i = 0; i < length; i++) transportCount[i] = 0;
         CaltopoClient.DroneSpecStatusChanged(this, false);
@@ -248,8 +251,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public String getDurationInSecAsString() {
         long durationInMsec = 0;
-        if (startMsecTimestamp > 0 && (startMsecTimestamp < mostRecentMsecTimestamp)) {
-            durationInMsec = mostRecentMsecTimestamp - startMsecTimestamp;
+        if (startMsecTimestamp > 0 && (startMsecTimestamp < mostRecentFlightMsecTimestamp)) {
+            durationInMsec = mostRecentFlightMsecTimestamp - startMsecTimestamp;
         }
         return SimpleTimer.DurationAsString(durationInMsec);
     }
@@ -453,6 +456,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         trackLabel = EMPTY_STRING;
         startMsecTimestamp = jo.optLong("startTimeInMsec");
         mostRecentMsecTimestamp = jo.optLong("mostRecentTimeInMsec");
+        mostRecentFlightMsecTimestamp = jo.optLong("mostRecentFlightTimeInMsec", startMsecTimestamp);
         transportCount[TransportTypeEnum.BT4.ordinal()] = jo.optInt(TransportTypeEnum.BT4.name(), 0);
         transportCount[TransportTypeEnum.BT5.ordinal()] = jo.optInt(TransportTypeEnum.BT5.name(), 0);
         transportCount[TransportTypeEnum.WIFI.ordinal()] = jo.optInt(TransportTypeEnum.WIFI.name(), 0);
@@ -607,6 +611,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
 
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = nowWallMsec;
+        long acceptedWaypointTimestampMsec =
+                (timestampInMilliseconds > 0) ? timestampInMilliseconds : nowWallMsec;
 
         // All validity checks passed — this is an accepted waypoint.
         // Activate the drone (set the trackLabel) only now, so that invalid/filtered packets
@@ -622,27 +628,19 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
         bumpTransportCount(transportType);
         goodCount++;
-        // Seed the flight start time on the first accepted waypoint so that drones
-        // that never report airborne=true (e.g. test modules sitting on a bench,
-        // or modules that simply don't broadcast the airborne flag) still show a
-        // meaningful Flight Duration.  The airborne-transition block below will
-        // overwrite this with the actual takeoff time if the drone later goes airborne.
+        // The flight starts with the first accepted waypoint that survives the filters above.
+        // "airborne" is logged for visibility only and must not drive flight timing.
         if (startMsecTimestamp == 0) {
-            startMsecTimestamp = nowWallMsec;
+            startMsecTimestamp = acceptedWaypointTimestampMsec;
+            updateTrackLabel();
+        }
+        if (acceptedWaypointTimestampMsec > mostRecentFlightMsecTimestamp) {
+            mostRecentFlightMsecTimestamp = acceptedWaypointTimestampMsec;
         }
         if (null != airborne && airborne != this.airborne) {
             this.airborne = airborne;
-            if (airborne) {
-                CTDebug(TAG, String.format(Locale.US,
-                        "checkNewWaypoint(): %s taking off.", mappedId));
-                startMsecTimestamp = nowWallMsec;
-                updateTrackLabel();
-                if (null != myListener) {
-                    myListener.droneTakingOff(this);
-                } else {
-                    CaltopoClient.DroneSpecStatusChanged(this, true);
-                }
-            }
+            CTDebug(TAG, String.format(Locale.US,
+                    "checkNewWaypoint(): %s airborne changed to %s.", mappedId, airborne));
         }
         lastLat = lat; lastLng = lng; lastAlt = altitudeInMeters;
         if (CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {

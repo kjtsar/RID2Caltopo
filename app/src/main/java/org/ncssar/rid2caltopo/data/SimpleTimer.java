@@ -17,14 +17,10 @@ public class SimpleTimer {
     public long getStartTimeInMsec() {return startTimeInMsec;}
 
     public static String DurationAsString(long msecDuration) {
-        long hours=0, minutes=0, seconds=0, msecs;
-        seconds = msecDuration / 1000;
-        msecs = msecDuration % 1000;
-        minutes = seconds / 60;
-        seconds = seconds % 60;
-        if (msecs > 500) seconds++;
-        hours = minutes / 60;
-        minutes = minutes % 60;
+        long totalSeconds = (msecDuration + 500) / 1000;
+        long hours = totalSeconds / 3600;
+        long minutes = (totalSeconds % 3600) / 60;
+        long seconds = totalSeconds % 60;
         return String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
     }
     public String durationAsString() {

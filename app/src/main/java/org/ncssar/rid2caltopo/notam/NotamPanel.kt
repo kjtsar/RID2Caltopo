@@ -86,6 +86,9 @@ fun NotamPanel(
                                     )
                                 }
                                 Text(nearestHidden.title, fontWeight = FontWeight.SemiBold)
+                                nearestHidden.rawReference.takeIf { it.isNotBlank() }?.let {
+                                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                                 val metaText = buildString {
                                     if (nearestHidden.intersectsPilotBubble) append("intersects 1 NM operating area")
                                     if (nearestHidden.effectiveText.isNotBlank()) {
@@ -104,7 +107,14 @@ fun NotamPanel(
                                 }
                                 if (nearestHidden.rawText.isNotBlank()) {
                                     Text(
-                                        "Raw: ${nearestHidden.rawText}",
+                                        "FAA text: ${nearestHidden.rawTitle.ifBlank { nearestHidden.rawText }}",
+                                        modifier = Modifier.padding(top = 2.dp),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (nearestHidden.rawText.isNotBlank() && nearestHidden.rawText != nearestHidden.rawTitle) {
+                                    Text(
+                                        "Translation: ${nearestHidden.rawText}",
                                         modifier = Modifier.padding(top = 2.dp),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -128,6 +138,9 @@ fun NotamPanel(
                             )
                         }
                         Text(notice.title, fontWeight = FontWeight.SemiBold)
+                        notice.rawReference.takeIf { it.isNotBlank() }?.let {
+                            Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         val metaText = buildString {
                             if (notice.intersectsPilotBubble) append("intersects 1 NM operating area")
                             if (notice.effectiveText.isNotBlank()) {
@@ -159,7 +172,14 @@ fun NotamPanel(
                             }
                             if (notice.rawText.isNotBlank()) {
                                 Text(
-                                    "Raw: ${notice.rawText}",
+                                    "FAA text: ${notice.rawTitle.ifBlank { notice.rawText }}",
+                                    modifier = Modifier.padding(top = 2.dp),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (notice.rawText.isNotBlank() && notice.rawText != notice.rawTitle) {
+                                Text(
+                                    "Translation: ${notice.rawText}",
                                     modifier = Modifier.padding(top = 2.dp),
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

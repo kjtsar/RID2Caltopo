@@ -111,13 +111,20 @@ fun StreamsScreen(
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "$serverStatus - $mapStatus",
-                            fontSize = 14.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                        NotamStatusChip(
+                            state = notamUiState,
+                            onClick = { showNotamPanel = true },
+                            outerPadding = PaddingValues(0.dp)
                         )
+                        Spacer(Modifier.width(8.dp))
+                        Box(modifier = Modifier.weight(1f, fill = false)) {
+                            Text(
+                                text = "$serverStatus - $mapStatus",
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 },
                 navigationIcon = {
@@ -144,11 +151,6 @@ fun StreamsScreen(
                         }
                     }
                 }
-            )
-
-            NotamStatusChip(
-                state = notamUiState,
-                onClick = { showNotamPanel = true }
             )
 
             Box(Modifier.fillMaxSize()) {

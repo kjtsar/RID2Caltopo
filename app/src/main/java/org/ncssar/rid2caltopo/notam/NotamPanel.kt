@@ -59,10 +59,65 @@ fun NotamPanel(
                     Spacer(Modifier.height(10.dp))
                 }
                 if (state.notices.isEmpty()) {
-                    Text(
-                        if (state.configured) "No nearby NOTAM restrictions were found in the current state."
-                        else "NOTAM monitoring is enabled, but credentials have not been loaded yet."
-                    )
+                    val nearestHidden = state.nearestHiddenNotice
+                    when {
+                        nearestHidden != null -> {
+                            Text(
+                                "Nearest NOTAM is ${nearestHidden.proximityText.ifBlank { nearestHidden.distanceNm?.let { "${"%.1f".format(it)} NM" } ?: "unavailable" }} away.",
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            TextButton(
+                                onClick = {
+                                    if (expandedIds.contains(nearestHidden.id)) {
+                                        expandedIds.remove(nearestHidden.id)
+                                    } else {
+                                        expandedIds.add(nearestHidden.id)
+                                    }
+                                }
+                            ) {
+                                Text(if (expandedIds.contains(nearestHidden.id)) "Hide nearest NOTAM" else "Show nearest NOTAM")
+                            }
+                            if (expandedIds.contains(nearestHidden.id)) {
+                                if (nearestHidden.proximityText.isNotBlank()) {
+                                    Text(
+                                        nearestHidden.proximityText,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(nearestHidden.title, fontWeight = FontWeight.SemiBold)
+                                val metaText = buildString {
+                                    if (nearestHidden.intersectsPilotBubble) append("intersects 1 NM operating area")
+                                    if (nearestHidden.effectiveText.isNotBlank()) {
+                                        if (isNotBlank()) append(" • ")
+                                        append(nearestHidden.effectiveText)
+                                    }
+                                }
+                                if (metaText.isNotBlank()) {
+                                    Text(metaText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (nearestHidden.summary.isNotBlank()) {
+                                    Text(nearestHidden.summary, modifier = Modifier.padding(top = 2.dp))
+                                }
+                                if (nearestHidden.details.isNotBlank()) {
+                                    Text(nearestHidden.details, modifier = Modifier.padding(top = 2.dp))
+                                }
+                                if (nearestHidden.rawText.isNotBlank()) {
+                                    Text(
+                                        "Raw: ${nearestHidden.rawText}",
+                                        modifier = Modifier.padding(top = 2.dp),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        state.configured -> {
+                            Text("No nearby NOTAM restrictions were found in the current state.")
+                        }
+                        else -> {
+                            Text("NOTAM monitoring is enabled, but credentials have not been loaded yet.")
+                        }
+                    }
                 } else {
                     state.notices.forEach { notice ->
                         val expanded = expandedIds.contains(notice.id)

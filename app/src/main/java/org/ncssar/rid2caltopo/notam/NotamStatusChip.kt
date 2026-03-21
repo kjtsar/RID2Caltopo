@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.notam
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AssistChip
@@ -17,7 +18,8 @@ import androidx.compose.ui.unit.dp
 fun NotamStatusChip(
     state: NotamUiState,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    outerPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
 ) {
     if (!state.visible) return
     val colors = when (state.chipSeverity) {
@@ -39,7 +41,7 @@ fun NotamStatusChip(
         )
     }
     Row(
-        modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier = modifier.padding(outerPadding),
         horizontalArrangement = Arrangement.Start
     ) {
         AssistChip(
@@ -49,4 +51,3 @@ fun NotamStatusChip(
         )
     }
 }
-

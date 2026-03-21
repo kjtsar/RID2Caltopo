@@ -65,20 +65,22 @@ internal class NotamRepository {
             if (CTDebugEnabled(TAG)) {
                 CTDebug(TAG, "Skipping refresh due to debounce/stability thresholds.")
             }
+            val retainedNotices = if (lastFetchedNotices.isNotEmpty()) lastFetchedNotices else _uiState.value.notices
             _uiState.value = buildUiState(
                 location = location,
                 configured = configured,
                 loading = false,
-                notices = _uiState.value.notices
+                notices = retainedNotices
             )
             return
         }
 
+        val retainedNotices = if (lastFetchedNotices.isNotEmpty()) lastFetchedNotices else _uiState.value.notices
         _uiState.value = buildUiState(
             location = location,
             configured = configured,
             loading = true,
-            notices = _uiState.value.notices
+            notices = retainedNotices
         )
         val now = System.currentTimeMillis()
         val notices = if (configured) {
@@ -381,6 +383,9 @@ internal class NotamRepository {
 
         val sorted = NotamPolicy.sort(notices)
         val (visibleNotices, suppressedNoticeCount) = NotamPolicy.filterWithinRadius(sorted, CaltopoClient.GetNotamRadiusNm())
+        val nearestHiddenNotice = sorted.firstOrNull { notice ->
+            notice !in visibleNotices
+        }
         val lastUpdatedMs = maxOf(CaltopoClient.GetNotamLastUpdatedEpochMs(), lastRefreshAtMs)
         val stale = if (lastUpdatedMs == 0L) false else System.currentTimeMillis() - lastUpdatedMs > 180_000L
         val chipSeverity = when {
@@ -425,6 +430,7 @@ internal class NotamRepository {
             radiusNm = CaltopoClient.GetNotamRadiusNm(),
             notices = visibleNotices,
             suppressedNoticeCount = suppressedNoticeCount,
+            nearestHiddenNotice = nearestHiddenNotice,
             errorMessage = lastErrorMessage
         )
     }

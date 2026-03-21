@@ -34,5 +34,6 @@ data class NotamUiState(
     val radiusNm: Int = 2,
     val notices: List<NearbyNotam> = emptyList(),
     val suppressedNoticeCount: Int = 0,
+    val nearestHiddenNotice: NearbyNotam? = null,
     val errorMessage: String? = null
 )

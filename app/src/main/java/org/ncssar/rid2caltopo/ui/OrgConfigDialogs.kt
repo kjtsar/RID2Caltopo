@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,6 +28,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
@@ -165,7 +170,7 @@ fun OrgConfigExportDialog(
                     is ExportStep.ShowQr -> {
                         Text(
                             "Share this QR with your team. Each member scans it once " +
-                                "using Menu → Join Org Config.",
+                                "using Menu → Join Org.",
                             style = MaterialTheme.typography.bodySmall,
                             textAlign = TextAlign.Center
                         )
@@ -263,16 +268,22 @@ fun OrgConfigJoinDialog(
     val isValid = remember(tokenText) { OrgConfigToken.isValidToken(tokenText) }
     val decoded = remember(tokenText) { OrgConfigToken.decode(tokenText.trim()) }
 
+    val scanner = remember(context) {
+        GmsBarcodeScanning.getClient(
+            context,
+            GmsBarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
+        )
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Join Org Config") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Paste the join token provided by your org admin " +
-                        "(starts with \"${OrgConfigToken.MAGIC_PREFIX}\"). " +
-                        "The app will download and apply your org's ridmap and credentials. " +
-                        "No Google sign-in required.",
+                    "Scan the QR code from your org admin, or paste the join token below.",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Spacer(Modifier.height(12.dp))
@@ -283,9 +294,27 @@ fun OrgConfigJoinDialog(
                     placeholder = { Text("${OrgConfigToken.MAGIC_PREFIX}…") },
                     singleLine = false,
                     isError = tokenText.isNotBlank() && !isValid,
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            scanner.startScan()
+                                .addOnSuccessListener { barcode ->
+                                    val raw = barcode.rawValue ?: return@addOnSuccessListener
+                                    // Convert r2c1://payload → R2C1:payload
+                                    tokenText = if (raw.startsWith("r2c1://")) {
+                                        OrgConfigToken.MAGIC_PREFIX + raw.removePrefix("r2c1://")
+                                    } else raw
+                                }
+                                .addOnFailureListener { /* user cancelled or scan failed — leave field as-is */ }
+                        }) {
+                            Icon(
+                                imageVector = Icons.Filled.QrCodeScanner,
+                                contentDescription = "Scan QR code"
+                            )
+                        }
+                    },
                     supportingText = {
                         when {
-                            tokenText.isBlank()        -> Text("Paste or type the token from your admin")
+                            tokenText.isBlank()        -> Text("Scan QR or paste token from your admin")
                             isValid && decoded != null -> Text("Org: ${decoded.orgName}")
                             else                       -> Text(
                                 "Token not recognised",

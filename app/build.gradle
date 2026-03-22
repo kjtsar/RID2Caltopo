@@ -184,6 +184,8 @@ dependencies {
     implementation("mil.nga:tiff:3.0.0")
     // QR code generation for org-config join tokens (core only — no camera/Activity dependency)
     implementation("com.google.zxing:core:3.5.3")
+    // QR code scanning in the Join Org dialog (no camera permission required)
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }
 
 protobuf {

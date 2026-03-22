@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModelProvider
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -62,6 +63,8 @@ import org.opendroneid.android.bluetooth.BluetoothScanner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -101,22 +104,42 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         })
     }
 
-    fun zipAndEmailLog(context: Context, logUri: Uri) {
-        // 1. Create the destination zip in private cache
-        val zipFile = File(context.cacheDir, "R2C_Log_Package.zip")
+    /**
+     * Zip all log files (text/plain entries) from today's track directory into a
+     * single archive and fire a share intent so the user can email the bundle.
+     * Collects every session's log from the current calendar day, not just the
+     * active one, so a multi-battery day produces one complete submission.
+     */
+    fun zipAndEmailAllLogs(context: Context) {
+        val todaysDir: DocumentFile = CaltopoClient.GetTodaysTrackDir() ?: run {
+            CTError(TAG, "zipAndEmailAllLogs(): today's track dir unavailable")
+            return
+        }
+
+        // Log files are created as text/plain; other files in the dir are
+        // GeoJSON tracks, JPEG snapshots, KMZ exports, etc.
+        val logFiles = todaysDir.listFiles().filter { it.type == "text/plain" }
+        if (logFiles.isEmpty()) {
+            CTError(TAG, "zipAndEmailAllLogs(): no log files found in today's dir")
+            return
+        }
+
+        val dateTag = SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
+        val zipFile = File(context.cacheDir, "R2C_Logs_$dateTag.zip")
 
         try {
             ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-                // Use openInputStream for content:// URIs from the picker
-                context.contentResolver.openInputStream(logUri)?.use { inputStream ->
-                    val entry = ZipEntry("r2c_log.txt")
-                    zos.putNextEntry(entry)
-                    inputStream.copyTo(zos)
-                    zos.closeEntry()
+                val resolver = context.contentResolver
+                for (logDoc in logFiles) {
+                    val entryName = (logDoc.name ?: "log_unknown") + ".txt"
+                    resolver.openInputStream(logDoc.uri)?.use { inputStream ->
+                        zos.putNextEntry(ZipEntry(entryName))
+                        inputStream.copyTo(zos)
+                        zos.closeEntry()
+                    }
                 }
             }
 
-            // 2. Share using FileProvider (make sure manifest is set up!)
             val sharedUri = FileProvider.getUriForFile(
                 context, "${context.packageName}.fileprovider", zipFile
             )
@@ -124,14 +147,14 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/zip"
                 putExtra(Intent.EXTRA_EMAIL, arrayOf("kjtsar@kjt.us"))
-                putExtra(Intent.EXTRA_SUBJECT, "RID2Caltopo Log Submission")
+                putExtra(Intent.EXTRA_SUBJECT, "RID2Caltopo Logs $dateTag (${logFiles.size} session${if (logFiles.size == 1) "" else "s"})")
                 putExtra(Intent.EXTRA_STREAM, sharedUri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 
-            context.startActivity(Intent.createChooser(intent, "Send Log via..."))
+            context.startActivity(Intent.createChooser(intent, "Send Logs via..."))
         } catch (e: Exception) {
-            CTError("LogShare", "Failed to zip log from URI: $logUri", e)
+            CTError(TAG, "zipAndEmailAllLogs(): failed to create/share zip", e)
         }
     }
 
@@ -184,8 +207,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                             localViewModel = localViewModel,
                             remoteViewModels = remoteViewModels,
                             onEmailLog = {
-                                val uri = CaltopoClient.GetDebugLogUri()
-                                if (null != uri) zipAndEmailLog(localContext, uri)
+                                zipAndEmailAllLogs(localContext)
                             },
                             onShowHelp = {showHelpMenu()}
                         )

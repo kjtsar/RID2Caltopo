@@ -58,6 +58,7 @@ fun StreamTile(
     val tag="StreamTile"
     val textureViewRef = remember {mutableStateOf<TextureView?>(null)}
     var showPicker by remember { mutableStateOf(false) }
+    var showUnmatchDialog by remember { mutableStateOf(false) }
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
     var showSensitivityDialog by remember { mutableStateOf(false) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
@@ -131,9 +132,11 @@ fun StreamTile(
                             onToggleFocus()
                         },
                         onLongPress = {
-                            if (designatorState is DesignatorState.Yellow) {
-                                CTDebug(tag, "StreamTile{${streamDesignator}) onLongPress")
-                                showPicker = true
+                            CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
+                            when (designatorState) {
+                                is DesignatorState.Yellow -> showPicker = true
+                                is DesignatorState.Green  -> showUnmatchDialog = true
+                                else -> {}
                             }
                         },
                         onDoubleTap = {
@@ -293,9 +296,45 @@ fun StreamTile(
             streamErrorDetail = streamErrorDetail,
             viewModel = viewModel,
             onLongPress = {
-                if (designatorState is DesignatorState.Yellow) { showPicker = true }
+                when (designatorState) {
+                    is DesignatorState.Yellow -> showPicker = true
+                    is DesignatorState.Green  -> showUnmatchDialog = true
+                    else -> {}
+                }
             }
         )
+        if (showUnmatchDialog && designatorState is DesignatorState.Green) {
+            val greenState = designatorState as DesignatorState.Green
+            AlertDialog(
+                onDismissRequest = { showUnmatchDialog = false },
+                title = { Text("Change Telemetry Pairing") },
+                text = {
+                    Text(
+                        "Stream \"$streamDesignator\" is paired with Remote ID:\n" +
+                            "${greenState.droneSpecState.remoteId}\n\n" +
+                            "Unmatch to remove the pairing, or Remap to choose a different drone."
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        CTDebug(tag, "StreamTile($streamDesignator) Unmatch confirmed")
+                        greenState.droneSpecState.changeMappedId("")
+                        showUnmatchDialog = false
+                    }) { Text("Unmatch") }
+                },
+                dismissButton = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { showUnmatchDialog = false }) { Text("Cancel") }
+                        TextButton(onClick = {
+                            CTDebug(tag, "StreamTile($streamDesignator) Remap: clearing pairing and opening picker")
+                            greenState.droneSpecState.changeMappedId("")
+                            showUnmatchDialog = false
+                            showPicker = true
+                        }) { Text("Remap") }
+                    }
+                }
+            )
+        }
         if (showPicker && designatorState is DesignatorState.Yellow) {
             DroneSpecPickerDialog(
                 droneSpecStates = (designatorState as DesignatorState.Yellow).candidates,

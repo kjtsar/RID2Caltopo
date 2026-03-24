@@ -10,6 +10,7 @@ package org.ncssar.rid2caltopo.ui
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.location.Location
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
@@ -43,6 +44,7 @@ import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.DriveSyncAction
 import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
 import org.ncssar.rid2caltopo.data.OrgConfigManager
@@ -64,6 +66,27 @@ private fun buildTagCsv(selectedKnownTags: Set<String>, customTagsText: String):
     tags.addAll(selectedKnownTags)
     tags.addAll(parseCsvTags(customTagsText))
     return tags.joinToString(",")
+}
+
+private fun formatLocationOverride(location: Location?): String {
+    if (location == null) return "Device GPS"
+    return "%.6f, %.6f".format(location.latitude, location.longitude)
+}
+
+private fun parseLocationOverride(input: String): Location? {
+    val trimmed = input.trim()
+    if (trimmed.isEmpty()) return null
+    val parts = trimmed.split(",")
+    if (parts.size != 2) throw IllegalArgumentException("Use 'lat,lng'")
+    val lat = parts[0].trim().toDoubleOrNull() ?: throw IllegalArgumentException("Latitude is invalid")
+    val lng = parts[1].trim().toDoubleOrNull() ?: throw IllegalArgumentException("Longitude is invalid")
+    if (lat !in -90.0..90.0) throw IllegalArgumentException("Latitude must be between -90 and 90")
+    if (lng !in -180.0..180.0) throw IllegalArgumentException("Longitude must be between -180 and 180")
+    return Location("manual-override").apply {
+        latitude = lat
+        longitude = lng
+        accuracy = 1.0f
+    }
 }
 
 private val REQUIRED_MAP_CACHE_TAGS = listOf(
@@ -154,6 +177,10 @@ fun MainScreen(
     var showOrgExportDialog by remember { mutableStateOf(false) }
     var showOrgJoinDialog by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
+    var showLocationOverrideDialog by remember { mutableStateOf(false) }
+    var locationOverrideText by remember { mutableStateOf("") }
+    var locationOverrideError by remember { mutableStateOf<String?>(null) }
+    var locationOverrideLabel by remember { mutableStateOf(formatLocationOverride(CaltopoMap.GetMyLocationOverride())) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
 
     fun refreshDriveState() {
@@ -261,6 +288,63 @@ fun MainScreen(
                     pendingOrgExport = orgName
                     driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
                     callback(false, "Signing in to Google Drive…", null)
+                }
+            }
+        )
+    }
+
+    if (showLocationOverrideDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showLocationOverrideDialog = false
+                locationOverrideError = null
+            },
+            title = { Text("Simulate MyLocation") },
+            text = {
+                Column {
+                    Text("Enter `lat,lng`. Leave empty to return to device GPS. This override lasts only until the app closes.")
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = locationOverrideText,
+                        onValueChange = {
+                            locationOverrideText = it
+                            locationOverrideError = null
+                        },
+                        label = { Text("Latitude,Longitude") },
+                        singleLine = true,
+                        isError = locationOverrideError != null,
+                        supportingText = {
+                            Text(locationOverrideError ?: "Current: $locationOverrideLabel")
+                        }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        val overrideLocation = parseLocationOverride(locationOverrideText)
+                        CaltopoMap.SetMyLocationOverride(overrideLocation)
+                        locationOverrideLabel = formatLocationOverride(CaltopoMap.GetMyLocationOverride())
+                        NotamCenter.requestImmediateRefresh()
+                        CaltopoClient.ShowToast(
+                            if (overrideLocation == null) "Returned to device GPS location."
+                            else "Using temporary location ${formatLocationOverride(overrideLocation)}"
+                        )
+                        showLocationOverrideDialog = false
+                        locationOverrideError = null
+                    } catch (e: IllegalArgumentException) {
+                        locationOverrideError = e.message
+                    }
+                }) {
+                    Text("Apply")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showLocationOverrideDialog = false
+                    locationOverrideError = null
+                }) {
+                    Text("Cancel")
                 }
             }
         )
@@ -577,6 +661,18 @@ fun MainScreen(
                             menuExpanded = false
                             showOrgExportDialog = true
                         })
+                        DropdownMenuItem(
+                            text = { Text("Simulate MyLocation...") },
+                            onClick = {
+                                locationOverrideText = CaltopoMap.GetMyLocationOverride()?.let {
+                                    "%.6f, %.6f".format(it.latitude, it.longitude)
+                                }.orEmpty()
+                                locationOverrideLabel = formatLocationOverride(CaltopoMap.GetMyLocationOverride())
+                                locationOverrideError = null
+                                showLocationOverrideDialog = true
+                                menuExpanded = false
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("Join Org") },
                             onClick = {

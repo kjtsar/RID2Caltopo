@@ -46,6 +46,8 @@ data class NotamUiState(
     val chipLabel: String = "NOTAMs unavailable",
     val statusLine: String = "",
     val lastUpdatedText: String? = null,
+    val queryLatitude: Double? = null,
+    val queryLongitude: Double? = null,
     val radiusNm: Int = 2,
     val notices: List<NearbyNotam> = emptyList(),
     val suppressedNoticeCount: Int = 0,

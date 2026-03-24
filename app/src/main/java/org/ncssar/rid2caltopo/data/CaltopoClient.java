@@ -1788,7 +1788,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         if (ccs.notamLastUpdatedEpochMs != value) {
             ccs.notamLastUpdatedEpochMs = value;
-            ArchiveState("notam last updated changed");
         }
     }
 

@@ -17,6 +17,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
+import org.ncssar.rid2caltopo.video.CoordinateFormatter
 
 @Composable
 fun NotamPanel(
@@ -24,6 +28,15 @@ fun NotamPanel(
     onDismiss: () -> Unit
 ) {
     val expandedIds = remember { mutableStateListOf<String>() }
+    val coordinateDisplayFormat = CoordinateDisplayFormat.fromStorage(CaltopoClient.GetCoordinateDisplayFormat())
+    val currentLocationText = CaltopoMap.GetMyLocation()?.let { location ->
+        CoordinateFormatter.format(location.latitude, location.longitude, coordinateDisplayFormat)
+    } ?: "Unavailable"
+    val queryLocationText = if (state.queryLatitude != null && state.queryLongitude != null) {
+        CoordinateFormatter.format(state.queryLatitude, state.queryLongitude, coordinateDisplayFormat)
+    } else {
+        null
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -40,6 +53,10 @@ fun NotamPanel(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
+                Text("Location: $currentLocationText")
+                queryLocationText?.let {
+                    Text("NOTAM query used: $it")
+                }
                 Text("Radius: ${state.radiusNm} NM")
                 state.lastUpdatedText?.let {
                     Text(it, color = if (state.stale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)

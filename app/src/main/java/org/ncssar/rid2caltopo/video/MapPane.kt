@@ -509,6 +509,7 @@ internal fun SplitMapPane(
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
     var selectedNotam by remember { mutableStateOf<NearbyNotam?>(null) }
+    var selectedNotamGroup by remember { mutableStateOf<List<NearbyNotam>?>(null) }
     val dronePointEntries = viewModel.droneStates.mapNotNull { (designator, state) ->
         val stateTs = state.source.mostRecentMsecTimestamp
         var lat = state.lastLat
@@ -612,6 +613,49 @@ internal fun SplitMapPane(
             dismissButton = {}
         )
     }
+    selectedNotamGroup?.let { notices ->
+        AlertDialog(
+            onDismissRequest = { selectedNotamGroup = null },
+            title = {
+                Text(if (notices.size == 1) "NOTAM Here" else "NOTAMs Here")
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    notices.forEach { notice ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    selectedNotamGroup = null
+                                    selectedNotam = notice
+                                }
+                                .padding(vertical = 8.dp)
+                        ) {
+                            if (notice.proximityText.isNotBlank()) {
+                                Text(
+                                    notice.proximityText,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(notice.title, style = MaterialTheme.typography.titleMedium)
+                            notice.effectiveText.takeIf { it.isNotBlank() }?.let {
+                                Spacer(Modifier.height(4.dp))
+                                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedNotamGroup = null }) { Text("Close") }
+            },
+            dismissButton = {}
+        )
+    }
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
     // GeoTIFF tile names covering all currently-visible drone positions.
@@ -665,7 +709,7 @@ internal fun SplitMapPane(
     // is already on disk and elevation queries are instant (O(1) seek, no LZW/pred3).
     LaunchedEffect(Unit) {
         delay(3_000L) // give FusedLocationProvider a moment to deliver its first fix
-        val loc = CaltopoMap.MyLocation ?: return@LaunchedEffect
+        val loc = CaltopoMap.GetMyLocation() ?: return@LaunchedEffect
         if (!loc.latitude.isFinite() || !loc.longitude.isFinite()) return@LaunchedEffect
         val lat = loc.latitude
         val lng = loc.longitude
@@ -1387,14 +1431,15 @@ internal fun SplitMapPane(
             val aglFeet  = bubbleDisplayState?.aglFt
             val aglStale = bubbleDisplayState?.aglStale ?: false
             val atoFeet  = bubbleDisplayState?.atoFt
-            val rangeFeet = if (CaltopoMap.MyLocation != null &&
-                CaltopoMap.MyLocation.latitude.isFinite() &&
-                CaltopoMap.MyLocation.longitude.isFinite()
+            val myLocation = CaltopoMap.GetMyLocation()
+            val rangeFeet = if (myLocation != null &&
+                myLocation.latitude.isFinite() &&
+                myLocation.longitude.isFinite()
             ) {
                 val out = FloatArray(1)
                 Location.distanceBetween(
-                    CaltopoMap.MyLocation.latitude,
-                    CaltopoMap.MyLocation.longitude,
+                    myLocation.latitude,
+                    myLocation.longitude,
                     point.lat,
                     point.lng,
                     out
@@ -1673,7 +1718,16 @@ internal fun SplitMapPane(
                     managedOverlays.add(polygon)
                 }
 
-                val notamOverlayState = NotamMapOverlayAdapter.build(notamUiState, CaltopoMap.MyLocation)
+                val notamOverlayState = NotamMapOverlayAdapter.build(notamUiState, CaltopoMap.GetMyLocation())
+                if (CaltopoClient.CTDebugEnabled(MAP_PANE_TAG)) {
+                    CaltopoClient.CTDebug(
+                        MAP_PANE_TAG,
+                        "NOTAM overlays: notices=${notamUiState.notices.size} " +
+                            "polygons=${notamOverlayState.polygons.size} " +
+                            "lines=${notamOverlayState.lines.size} " +
+                            "points=${notamOverlayState.points.size}"
+                    )
+                }
                 notamOverlayState.polygons.forEach { polygonSpec ->
                     val polygon = Polygon(mapView).apply {
                         points = polygonSpec.points
@@ -1787,7 +1841,13 @@ internal fun SplitMapPane(
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = point.title
                         setOnMarkerClickListener { _, _ ->
-                            selectedNotam = point.notice
+                            if (point.notices.size == 1) {
+                                selectedNotamGroup = null
+                                selectedNotam = point.notices.first()
+                            } else {
+                                selectedNotam = null
+                                selectedNotamGroup = point.notices
+                            }
                             true
                         }
                     }
@@ -1795,7 +1855,7 @@ internal fun SplitMapPane(
                     managedOverlays.add(marker)
                 }
 
-                val myLocation = CaltopoMap.MyLocation
+                val myLocation = CaltopoMap.GetMyLocation()
                 if (myLocation != null && myLocation.latitude.isFinite() && myLocation.longitude.isFinite()) {
                     val localCacheKey = iconCacheService.cacheKey(LOCAL_DEVICE_SYMBOL, LOCAL_DEVICE_COLOR)
                     val localRemoteIcon = caltopoMarkerCache[localCacheKey]
@@ -1838,7 +1898,7 @@ internal fun SplitMapPane(
 
                 val iconLimitAglM = AGL_LIMIT_FT * FT_TO_METERS
                 val nearIconAglM = (AGL_LIMIT_FT - AGL_ICON_NEAR_DELTA_FT) * FT_TO_METERS
-                val homeLocation = CaltopoMap.MyLocation
+                val homeLocation = CaltopoMap.GetMyLocation()
                 dronePoints.forEach { point ->
                     val pointLatencyKey =
                         "${point.timestampMsec}|${"%.6f".format(Locale.US, point.lat)}|${"%.6f".format(Locale.US, point.lng)}|${"%.1f".format(Locale.US, point.altitudeM)}"
@@ -2062,7 +2122,7 @@ internal fun SplitMapPane(
                                 viewModel.mapViewportState() == null
                             )
                 if (shouldApplyInitialViewport) {
-                    val myLocation = CaltopoMap.MyLocation
+                    val myLocation = CaltopoMap.GetMyLocation()
                     val artifactPoints = allArtifactGeoPoints(artifactOverlayState)
                     val viewportPoints = ArrayList<GeoPoint>(artifactPoints.size + 1).apply {
                         addAll(artifactPoints)
@@ -3687,7 +3747,7 @@ private fun buildNotamMarkerIcon(
     context: Context,
     fillColor: Int
 ): Drawable {
-    val sizePx = 44
+    val sizePx = 88
     val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
     val radius = sizePx * 0.22f
@@ -3698,8 +3758,8 @@ private fun buildNotamMarkerIcon(
     }
     val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        color = AndroidColor.WHITE
-        strokeWidth = 3f
+        color = AndroidColor.BLACK
+        strokeWidth = 6f
     }
     canvas.drawCircle(center, center, radius, fill)
     canvas.drawCircle(center, center, radius, border)

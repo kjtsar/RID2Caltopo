@@ -569,9 +569,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             } // OK to let dupes thru at a rate of once every three seconds just to keep the wheels on.
         }
 
-        if (MyLat == 0.0F && null != CaltopoMap.MyLocation && CaltopoMap.MyLocation.hasAccuracy()) {
-            MyLat = CaltopoMap.MyLocation.getLatitude();
-            MyLng = CaltopoMap.MyLocation.getLongitude();
+        Location myLocation = CaltopoMap.GetMyLocation();
+        if (MyLat == 0.0F && null != myLocation && myLocation.hasAccuracy()) {
+            MyLat = myLocation.getLatitude();
+            MyLng = myLocation.getLongitude();
         }
 
         // N.B: Autel Evo Max 4N has demonstrated willingness to publish wild coordinates,

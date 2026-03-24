@@ -49,7 +49,7 @@ internal class NotamRepository {
     suspend fun refresh(force: Boolean = false) {
         val enabled = CaltopoClient.GetNotamEnabled()
         val configured = NotamAuthManager.isConfigured()
-        val location = CaltopoMap.MyLocation
+        val location = CaltopoMap.GetMyLocation()
         if (CTDebugEnabled(TAG)) {
             CTDebug(
                 TAG,
@@ -258,9 +258,12 @@ internal class NotamRepository {
             geometries = geometries
         ).also {
             if (CTDebugEnabled(TAG)) {
+                val geometryType = geometry?.optString("type").orEmpty().ifBlank { "none" }
                 CTDebug(
                     TAG,
-                    "notice id='${it.id}' severity=${it.severity} distanceNm=${it.distanceNm?.let { d -> "%.2f".format(Locale.US, d) } ?: "n/a"} intersects=${it.intersectsPilotBubble} title='${it.title.take(120)}'"
+                    "notice id='${it.id}' severity=${it.severity} distanceNm=${it.distanceNm?.let { d -> "%.2f".format(Locale.US, d) } ?: "n/a"} " +
+                        "intersects=${it.intersectsPilotBubble} geometryType=$geometryType drawableGeometries=${it.geometries.size} " +
+                        "title='${it.title.take(120)}'"
                 )
             }
         }
@@ -510,6 +513,8 @@ internal class NotamRepository {
             chipLabel = chipLabel,
             statusLine = statusLine,
             lastUpdatedText = formatLastUpdated(lastUpdatedMs, stale),
+            queryLatitude = lastRefreshLocation?.latitude,
+            queryLongitude = lastRefreshLocation?.longitude,
             radiusNm = CaltopoClient.GetNotamRadiusNm(),
             notices = visibleNotices,
             suppressedNoticeCount = suppressedNoticeCount,

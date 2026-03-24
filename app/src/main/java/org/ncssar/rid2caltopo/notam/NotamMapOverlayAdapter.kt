@@ -3,6 +3,7 @@ package org.ncssar.rid2caltopo.notam
 import android.graphics.Color
 import android.location.Location
 import org.osmdroid.util.GeoPoint
+import java.util.Locale
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -29,7 +30,7 @@ internal data class NotamMapLineSpec(
 
 internal data class NotamMapPointSpec(
     val id: String,
-    val notice: NearbyNotam,
+    val notices: List<NearbyNotam>,
     val point: GeoPoint,
     val color: Int,
     val title: String
@@ -56,7 +57,7 @@ internal object NotamMapOverlayAdapter {
         if (!state.enabled || !state.visible) return NotamMapOverlayState()
         val polygons = mutableListOf<NotamMapPolygonSpec>()
         val lines = mutableListOf<NotamMapLineSpec>()
-        val points = mutableListOf<NotamMapPointSpec>()
+        val pointBuckets = linkedMapOf<String, MutableList<NearbyNotamPoint>>()
 
         myLocation?.takeIf { it.latitude.isFinite() && it.longitude.isFinite() }?.let { location ->
             polygons += NotamMapPolygonSpec(
@@ -75,12 +76,12 @@ internal object NotamMapOverlayAdapter {
             notice.geometries.forEachIndexed { index, geometry ->
                 when (geometry) {
                     is NotamGeometry.Point -> {
-                        points += NotamMapPointSpec(
+                        val point = geometry.coordinate.toGeoPoint()
+                        val key = pointKey(point)
+                        pointBuckets.getOrPut(key) { mutableListOf() } += NearbyNotamPoint(
                             id = "${notice.id}:pt:$index",
                             notice = notice,
-                            point = geometry.coordinate.toGeoPoint(),
-                            color = style.strokeColor,
-                            title = notice.title
+                            point = point
                         )
                     }
 
@@ -120,11 +121,33 @@ internal object NotamMapOverlayAdapter {
                             )
                             polygons += nestedState.polygons.map { spec -> spec.copy(id = "${spec.id}:nested:$nestedIndex") }
                             lines += nestedState.lines.map { spec -> spec.copy(id = "${spec.id}:nested:$nestedIndex") }
-                            points += nestedState.points.map { spec -> spec.copy(id = "${spec.id}:nested:$nestedIndex") }
+                            nestedState.points.forEach { spec ->
+                                val key = pointKey(spec.point)
+                                pointBuckets.getOrPut(key) { mutableListOf() } += spec.notices.mapIndexed { noticeIndex, groupedNotice ->
+                                    NearbyNotamPoint(
+                                        id = "${spec.id}:nested:$nestedIndex:$noticeIndex",
+                                        notice = groupedNotice,
+                                        point = spec.point
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+
+        val points = pointBuckets.values.map { bucket ->
+            val point = bucket.first().point
+            val notices = NotamPolicy.sort(bucket.map { it.notice }.distinctBy { it.id })
+            val highestSeverityNotice = notices.minByOrNull { severityRank(it) } ?: notices.first()
+            NotamMapPointSpec(
+                id = bucket.joinToString(separator = "|") { it.id },
+                notices = notices,
+                point = point,
+                color = styleFor(highestSeverityNotice).strokeColor,
+                title = if (notices.size == 1) notices.first().title else "${notices.size} nearby NOTAMs"
+            )
         }
 
         return NotamMapOverlayState(
@@ -133,6 +156,12 @@ internal object NotamMapOverlayAdapter {
             polygons = polygons
         )
     }
+
+    private data class NearbyNotamPoint(
+        val id: String,
+        val notice: NearbyNotam,
+        val point: GeoPoint
+    )
 
     private data class OverlayStyle(
         val strokeColor: Int,
@@ -155,8 +184,8 @@ internal object NotamMapOverlayAdapter {
 
             else ->
                 OverlayStyle(
-                    strokeColor = Color.parseColor("#607D8B"),
-                    fillColor = Color.parseColor("#33607D8B")
+                    strokeColor = Color.parseColor("#2E7D32"),
+                    fillColor = Color.parseColor("#332E7D32")
                 )
         }
     }
@@ -184,6 +213,16 @@ internal object NotamMapOverlayAdapter {
                 add(GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2)))
             }
         }
+    }
+
+    private fun pointKey(point: GeoPoint): String =
+        String.format(Locale.US, "%.6f,%.6f", point.latitude, point.longitude)
+
+    private fun severityRank(notice: NearbyNotam): Int = when {
+        notice.intersectsPilotBubble || notice.severity == NotamChipSeverity.Danger -> 0
+        notice.severity == NotamChipSeverity.Caution -> 1
+        notice.severity == NotamChipSeverity.Normal -> 2
+        else -> 3
     }
 
     private fun NotamLatLng.toGeoPoint(): GeoPoint = GeoPoint(latitude, longitude)

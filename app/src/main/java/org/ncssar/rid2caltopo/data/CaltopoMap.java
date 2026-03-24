@@ -84,6 +84,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     private static CaltopoSession Csp;
     private static String MyUUID = null;
     public static android.location.Location MyLocation;
+    private static android.location.Location MyLocationOverride;
     private static long FirstMapUpdateTimeInSeconds = 15;
     private static long RepeatMapUpdateTimeInSeconds = 90;
     public static final CtLineProperty ArchiveLineProp =
@@ -354,9 +355,40 @@ public class CaltopoMap implements R2CPeer.R2CListener {
 
     public static float DistanceFromMeInMeters(double lat, double lng) {
         float[] dbResult = {Float.NaN};
-        if (null == MyLocation || !MyLocation.hasAccuracy()) return Float.NaN;
-        Location.distanceBetween(lat, lng, MyLocation.getLatitude(), MyLocation.getLongitude(), dbResult);
+        Location myLocation = GetMyLocation();
+        if (null == myLocation || !myLocation.hasAccuracy()) return Float.NaN;
+        Location.distanceBetween(lat, lng, myLocation.getLatitude(), myLocation.getLongitude(), dbResult);
         return dbResult[0];
+    }
+
+    @Nullable
+    public static synchronized android.location.Location GetMyLocation() {
+        if (MyLocationOverride != null) return new Location(MyLocationOverride);
+        if (MyLocation == null) return null;
+        return new Location(MyLocation);
+    }
+
+    @Nullable
+    public static synchronized android.location.Location GetMyLocationOverride() {
+        if (MyLocationOverride == null) return null;
+        return new Location(MyLocationOverride);
+    }
+
+    public static synchronized void SetMyLocationOverride(@Nullable android.location.Location location) {
+        if (location == null) {
+            if (MyLocationOverride != null) {
+                CTInfo(TAG, "SetMyLocationOverride(): cleared temporary location override.");
+            }
+            MyLocationOverride = null;
+            return;
+        }
+        MyLocationOverride = new Location(location);
+        if (!MyLocationOverride.hasAccuracy()) {
+            MyLocationOverride.setAccuracy(1.0f);
+        }
+        CTInfo(TAG, String.format(Locale.US,
+                "SetMyLocationOverride(): using temporary location %.7f,%.7f accuracy %.1fm",
+                MyLocationOverride.getLatitude(), MyLocationOverride.getLongitude(), MyLocationOverride.getAccuracy()));
     }
 
     /**
@@ -926,16 +958,17 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             DelayedExec.RunAfterDelayInMsec(CaltopoMap::ProcessPeerList, 500);
             return;
         }
-        if (null == MyLocation && WaitForGpsAccuracy++ < MAX_MAP_STARTUP_DELAY_IN_SECONDS) {
+        Location currentLocation = GetMyLocation();
+        if (null == currentLocation && WaitForGpsAccuracy++ < MAX_MAP_STARTUP_DELAY_IN_SECONDS) {
             CTDebug(TAG, "ProcessPeerList(): No Location yet...retrying");
             DelayedExec.RunAfterDelayInMsec(CaltopoMap::ProcessPeerList, 1000);
             WaitForGpsAccuracy++;
             return;
         }
-        if (null != MyLocation) {
-            accuracyInMeters = MyLocation.getAccuracy();
+        if (null != currentLocation) {
+            accuracyInMeters = currentLocation.getAccuracy();
             CTDebug(TAG, String.format(Locale.US, "ProcessPeerList(): My location is %.7f,%.7f w/in %.3f meters. My UUID is %s",
-                    MyLocation.getLatitude(), MyLocation.getLongitude(), accuracyInMeters, null == MyUUID ? "unknown":"good"));
+                    currentLocation.getLatitude(), currentLocation.getLongitude(), accuracyInMeters, null == MyUUID ? "unknown":"good"));
         } else {
             CTWarn(TAG, "ProcessPeerList(): bad/no gps - I have no idea where I am.");
         }
@@ -974,8 +1007,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             } catch (Exception e) {
                 CTError(TAG, "put() raised.", e);
             }
-            if (null != MyLocation) {
-                MyMarkerOp = CaltopoSession.AddMarker(MyLocation.getLatitude(), MyLocation.getLongitude(),
+            if (null != currentLocation) {
+                MyMarkerOp = CaltopoSession.AddMarker(currentLocation.getLatitude(), currentLocation.getLongitude(),
                         "R2C: " + R2CActivity.MyDeviceName, "radiotower", FolderId, MyUUID, prop, CaltopoMap::MyMarkerCompleted);
             }
         }
@@ -1021,7 +1054,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         }
 
         JSONObject geometry = feature.optJSONObject("geometry");
-        if (null != MyLocation) try {
+        Location currentLocation = GetMyLocation();
+        if (null != currentLocation) try {
             JSONArray coordinates;
             if (null == geometry) {
                 geometry = new JSONObject();
@@ -1035,8 +1069,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                     geometry.put("coordinates", coordinates);
                 }
             }
-            coordinates.put(0, MyLocation.getLongitude());
-            coordinates.put(1, MyLocation.getLatitude());
+            coordinates.put(0, currentLocation.getLongitude());
+            coordinates.put(1, currentLocation.getLatitude());
         } catch (Exception e) {
             CTError(TAG, "updateMyMarker() raised. ", e);
         }

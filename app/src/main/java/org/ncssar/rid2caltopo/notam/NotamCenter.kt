@@ -10,6 +10,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 object NotamCenter {
+    private const val LOOP_DELAY_MS = 60_000L
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val repository = NotamRepository()
     val uiState = repository.uiState
@@ -25,9 +26,16 @@ object NotamCenter {
     }
 
     fun requestImmediateRefresh() {
+        if (!initialized) return
         scope.launch {
             repository.refresh(force = true)
         }
+    }
+
+    fun shutdown() {
+        refreshJob?.cancel()
+        refreshJob = null
+        initialized = false
     }
 
     private fun startLoop() {
@@ -35,9 +43,8 @@ object NotamCenter {
         refreshJob = scope.launch {
             while (isActive) {
                 repository.refresh()
-                delay(15_000L)
+                delay(LOOP_DELAY_MS)
             }
         }
     }
 }
-

@@ -177,11 +177,13 @@ fun MainScreen(
     var showOrgExportDialog by remember { mutableStateOf(false) }
     var showOrgJoinDialog by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
+    var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
     var locationOverrideText by remember { mutableStateOf("") }
     var locationOverrideError by remember { mutableStateOf<String?>(null) }
     var locationOverrideLabel by remember { mutableStateOf(formatLocationOverride(CaltopoMap.GetMyLocationOverride())) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
+    val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
 
     fun refreshDriveState() {
         linkedDriveEmail = GoogleDriveConfigSync.getLinkedAccountEmail(context)
@@ -395,6 +397,43 @@ fun MainScreen(
             onDismiss = { showNotamPanel = false }
         )
     }
+    if (showProximityDebugDialog) {
+        AlertDialog(
+            onDismissRequest = { showProximityDebugDialog = false },
+            confirmButton = {
+                TextButton(onClick = { showProximityDebugDialog = false }) {
+                    Text("Close")
+                }
+            },
+            title = { Text("Proximity Pairs") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (proximityDebugPairs.isEmpty()) {
+                        Text("No active drone pairs.")
+                    } else {
+                        proximityDebugPairs.forEach { pair ->
+                            Text(
+                                "${pair.firstMappedId} <-> ${pair.secondMappedId}",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                "Horizontal ${"%.1f".format(pair.horizontalSeparationFt)} ft  •  " +
+                                    "Vertical ${"%.1f".format(pair.verticalSeparationFt)} ft  •  " +
+                                    "3D ${"%.1f".format(pair.threeDSeparationFt)} ft" +
+                                    if (pair.alerting) "  •  alerting" else ""
+                            )
+                            Spacer(Modifier.height(10.dp))
+                        }
+                    }
+                }
+            },
+            dismissButton = {}
+        )
+    }
 
     if (showConfirmExitDialog) {
         AlertDialog(
@@ -603,6 +642,7 @@ fun MainScreen(
             TopAppBar(
                 title = { Text("RID-2-Caltopo") },
                 actions = {
+                    ResumeProximityAlertButton()
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More options")
                     }
@@ -718,6 +758,10 @@ fun MainScreen(
                         DropdownMenuItem(text = { Text("Status")}, onClick = {
                             localViewModel.showScanner()
                             CaltopoClient.CTEvent(tag,"ScannersDisplayed", null)
+                            menuExpanded = false
+                        })
+                        DropdownMenuItem(text = { Text("Proximity Pairs") }, onClick = {
+                            showProximityDebugDialog = true
                             menuExpanded = false
                         })
 

@@ -27,6 +27,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
@@ -51,6 +52,8 @@ import org.ncssar.rid2caltopo.data.R2CPeer
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.MainScreen
+import org.ncssar.rid2caltopo.ui.ProximityAlertCenter
+import org.ncssar.rid2caltopo.ui.ProximityAlertHost
 import org.ncssar.rid2caltopo.ui.R2CPeerViewModel
 import org.ncssar.rid2caltopo.ui.R2CPeerViewModelFactory
 import org.ncssar.rid2caltopo.ui.R2CViewModel
@@ -225,6 +228,20 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                         )
                     }
                 }
+                ProximityAlertHost(
+                    onSuspend = { ProximityAlertCenter.suspendCurrentAlert() },
+                    onMap = { alert ->
+                        streamsViewModel.showMapOnly()
+                        streamsViewModel.requestProximityMapFocus(
+                            firstLat = alert.firstLat,
+                            firstLng = alert.firstLng,
+                            secondLat = alert.secondLat,
+                            secondLng = alert.secondLng
+                        )
+                        localViewModel.showStreams()
+                        ProximityAlertCenter.suspendCurrentAlert()
+                    }
+                )
             }
         }
         // Handle org-config QR scan that launched or re-launched this activity.

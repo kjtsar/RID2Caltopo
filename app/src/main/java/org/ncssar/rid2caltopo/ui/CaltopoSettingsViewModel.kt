@@ -32,6 +32,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     private val _captureIncomingVideo = MutableStateFlow(CaltopoClient.GetCaptureVideoStreamsFlag())
     val captureIncomingVideo = _captureIncomingVideo.asStateFlow()
+    private val _predictiveHeadEnabled = MutableStateFlow(CaltopoClient.GetPredictiveHeadEnabled())
+    val predictiveHeadEnabled = _predictiveHeadEnabled.asStateFlow()
+    private val _proximityAlertSpacingFeet = MutableStateFlow(CaltopoClient.GetProximityAlertSpacingFeet().toString())
+    val proximityAlertSpacingFeet = _proximityAlertSpacingFeet.asStateFlow()
 
     private val _maxIdleTimeInMinutes = MutableStateFlow(CaltopoClient.GetMaxIdleTimeInMinutes().toString())
     val maxIdleTimeInMinutes = _maxIdleTimeInMinutes.asStateFlow()
@@ -71,6 +75,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _goLiveFlag.value = CaltopoClient.GetGoLiveFlag()
         _usePeers.value = CaltopoClient.GetUsePeersFlag()
         _captureIncomingVideo.value = CaltopoClient.GetCaptureVideoStreamsFlag()
+        _predictiveHeadEnabled.value = CaltopoClient.GetPredictiveHeadEnabled()
+        _proximityAlertSpacingFeet.value = CaltopoClient.GetProximityAlertSpacingFeet().toString()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
@@ -105,6 +111,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onCaptureIncomingVideoChanged(enabled: Boolean) {
         _captureIncomingVideo.value = enabled
     }
+    fun onPredictiveHeadEnabledChanged(enabled: Boolean) {
+        _predictiveHeadEnabled.value = enabled
+    }
+    fun onProximityAlertSpacingFeetChanged(feet: String) {
+        _proximityAlertSpacingFeet.value = feet
+    }
     fun onCaltopoDomainAndPortChanged(url: String) {
         _caltopoDomainAndPort.value = url
     }
@@ -133,6 +145,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetGoLiveFlag(_goLiveFlag.value)
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
+        CaltopoClient.SetPredictiveHeadEnabled(_predictiveHeadEnabled.value)
+        _proximityAlertSpacingFeet.value.toLongOrNull()?.let { CaltopoClient.SetProximityAlertSpacingFeet(it) }
         CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)
         CaltopoClient.SetNotamEnabled(_notamEnabled.value)
         _notamRadiusNm.value.toIntOrNull()?.let { CaltopoClient.SetNotamRadiusNm(it) }

@@ -55,6 +55,8 @@ message AppConfig {
   string coordinate_display_format = 30;
   bool capture_video_streams = 31;
   bool use_peers = 32;
+  bool predictive_head_enabled = 33;
+  int64 proximity_alert_spacing_feet = 34;
 
   string caltopo_track_folder = 40;
   string caltopo_domain_and_port = 41;

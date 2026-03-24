@@ -431,7 +431,7 @@ internal fun SplitMapPane(
     val offlinePrepActiveCalls = remember { ConcurrentHashMap.newKeySet<Call>() }
     var mapBounds by remember { mutableStateOf<BoundingBox?>(null) }
     val maximizeThroughputBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
-    var predictiveHeadEnabled by remember { mutableStateOf(true) }
+    var predictiveHeadEnabled by remember { mutableStateOf(CaltopoClient.GetPredictiveHeadEnabled()) }
     var autoRemoveBadTiles by remember { mutableStateOf(BadTilePolicy.isAutoRemoveEnabled(context)) }
     var badTileDialogState by remember { mutableStateOf<BadTileDialogState?>(null) }
     var quarantineMatchingHash by remember { mutableStateOf(true) }
@@ -507,6 +507,7 @@ internal fun SplitMapPane(
     }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
+    val proximityMapFocusTarget by viewModel.proximityMapFocusTarget.collectAsStateWithLifecycle()
     val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
     var selectedNotam by remember { mutableStateOf<NearbyNotam?>(null) }
     var selectedNotamGroup by remember { mutableStateOf<List<NearbyNotam>?>(null) }
@@ -1719,15 +1720,6 @@ internal fun SplitMapPane(
                 }
 
                 val notamOverlayState = NotamMapOverlayAdapter.build(notamUiState, CaltopoMap.GetMyLocation())
-                if (CaltopoClient.CTDebugEnabled(MAP_PANE_TAG)) {
-                    CaltopoClient.CTDebug(
-                        MAP_PANE_TAG,
-                        "NOTAM overlays: notices=${notamUiState.notices.size} " +
-                            "polygons=${notamOverlayState.polygons.size} " +
-                            "lines=${notamOverlayState.lines.size} " +
-                            "points=${notamOverlayState.points.size}"
-                    )
-                }
                 notamOverlayState.polygons.forEach { polygonSpec ->
                     val polygon = Polygon(mapView).apply {
                         points = polygonSpec.points
@@ -2163,6 +2155,27 @@ internal fun SplitMapPane(
                     initialViewportArtifactCount = artifactOverlayState.totalFeatures
                 }
 
+                proximityMapFocusTarget?.let { focusTarget ->
+                    if (mapView.width > 0 && mapView.height > 0) {
+                        val focusPoints = listOf(
+                            GeoPoint(focusTarget.firstLat, focusTarget.firstLng),
+                            GeoPoint(focusTarget.secondLat, focusTarget.secondLng)
+                        )
+                        val samePoint =
+                            kotlin.math.abs(focusTarget.firstLat - focusTarget.secondLat) < 1e-7 &&
+                                kotlin.math.abs(focusTarget.firstLng - focusTarget.secondLng) < 1e-7
+                        if (samePoint) {
+                            mapView.controller.setCenter(focusPoints.first())
+                            mapView.controller.setZoom(OSM_MAX_ZOOM)
+                        } else {
+                            mapView.zoomToBoundingBox(boundingBoxFromPoints(focusPoints), true, 96)
+                        }
+                        viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                        initialViewportApplied = true
+                        viewModel.clearProximityMapFocus(focusTarget.requestId)
+                    }
+                }
+
                 val now = System.currentTimeMillis()
                 if (!cacheStatsQueryInFlight && now >= nextCacheStatsLogAtMs) {
                     cacheStatsQueryInFlight = true
@@ -2261,6 +2274,7 @@ internal fun SplitMapPane(
                     text = { Text(if (predictiveHeadEnabled) "Predictive Head: On" else "Predictive Head: Off") },
                     onClick = {
                         predictiveHeadEnabled = !predictiveHeadEnabled
+                        CaltopoClient.SetPredictiveHeadEnabled(predictiveHeadEnabled)
                         settingsMenuExpanded = false
                     }
                 )

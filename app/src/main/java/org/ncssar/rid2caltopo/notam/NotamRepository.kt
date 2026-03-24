@@ -20,11 +20,15 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.atan2
 import kotlin.math.cos
-import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 internal class NotamRepository {
+    private data class FetchResult(
+        val notices: List<NearbyNotam>,
+        val incremental: Boolean
+    )
+
     private data class GeometryProximity(
         val distanceNm: Double,
         val bearingDeg: Double?
@@ -32,6 +36,7 @@ internal class NotamRepository {
 
     private companion object {
         const val TAG = "NotamREST"
+        const val INCREMENTAL_MOVEMENT_THRESHOLD_FT = 100.0
     }
 
     private val client = OkHttpClient.Builder()
@@ -45,6 +50,7 @@ internal class NotamRepository {
     private var lastRefreshAtMs: Long = 0L
     private var lastFetchedNotices: List<NearbyNotam> = emptyList()
     private var lastErrorMessage: String? = null
+    private var lastSuccessfulFetchAtMs: Long = 0L
 
     suspend fun refresh(force: Boolean = false) {
         val enabled = CaltopoClient.GetNotamEnabled()
@@ -85,13 +91,17 @@ internal class NotamRepository {
         val now = System.currentTimeMillis()
         val notices = if (configured) {
             try {
-                val fetched = fetchNearbyNotams(location)
-                lastFetchedNotices = fetched
+                val fetched = fetchNearbyNotams(location, forceFull = force)
+                lastFetchedNotices = fetched.notices
+                lastSuccessfulFetchAtMs = now
                 lastErrorMessage = null
                 if (CTDebugEnabled(TAG)) {
-                    CTDebug(TAG, "Fetched ${fetched.size} nearby NOTAMs")
+                    CTDebug(
+                        TAG,
+                        "Fetched ${fetched.notices.size} nearby NOTAMs mode=${if (fetched.incremental) "delta" else "full"}"
+                    )
                 }
-                fetched
+                fetched.notices
             } catch (e: Exception) {
                 lastErrorMessage = e.message ?: "NOTAM request failed"
                 if (CTDebugEnabled(TAG)) {
@@ -148,8 +158,34 @@ internal class NotamRepository {
         return distanceNm >= 0.25
     }
 
-    private fun fetchNearbyNotams(location: Location?): List<NearbyNotam> {
+    private fun fetchNearbyNotams(location: Location?, forceFull: Boolean): FetchResult {
         val current = location ?: throw IllegalStateException("Waiting for GPS location")
+        val canUseIncremental =
+            !forceFull &&
+                lastFetchedNotices.isNotEmpty() &&
+                lastSuccessfulFetchAtMs > 0L &&
+                movedSinceLastFetchFeet(current) <= INCREMENTAL_MOVEMENT_THRESHOLD_FT
+        if (canUseIncremental) {
+            val deltaNotices = fetchNearbyNotamsDelta(current, lastSuccessfulFetchAtMs)
+            if (CTDebugEnabled(TAG)) {
+                CTDebug(
+                    TAG,
+                    "Applying incremental nearby NOTAM update movedFt=${"%.1f".format(Locale.US, movedSinceLastFetchFeet(current))} " +
+                        "deltaCount=${deltaNotices.size}"
+                )
+            }
+            return FetchResult(
+                notices = mergeIncrementalNotices(lastFetchedNotices, deltaNotices),
+                incremental = true
+            )
+        }
+        return FetchResult(
+            notices = fetchNearbyNotamsFull(current),
+            incremental = false
+        )
+    }
+
+    private fun fetchNearbyNotamsFull(current: Location): List<NearbyNotam> {
         val url = NotamAuthManager.resolvedApiBaseUrl()
             .toHttpUrl()
             .newBuilder()
@@ -187,6 +223,48 @@ internal class NotamRepository {
                 notices += featureToNearbyNotam(feature, current)
             }
             return NotamPolicy.sort(notices)
+        }
+    }
+
+    private fun fetchNearbyNotamsDelta(current: Location, sinceEpochMs: Long): List<NearbyNotam> {
+        val url = NotamAuthManager.resolvedApiBaseUrl()
+            .toHttpUrl()
+            .newBuilder()
+            .addPathSegments("v1/notams")
+            .addQueryParameter("latitude", "%.6f".format(Locale.US, current.latitude))
+            .addQueryParameter("longitude", "%.6f".format(Locale.US, current.longitude))
+            .addQueryParameter("radius", CaltopoClient.GetNotamRadiusNm().toString())
+            .addQueryParameter("lastUpdatedDate", Instant.ofEpochMilli(sinceEpochMs).toString())
+            .build()
+        if (CTDebugEnabled(TAG)) {
+            CTDebug(TAG, "GET $url responseFormat=GEOJSON delta")
+        }
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer ${NotamAuthManager.getBearerToken()}")
+            .header("nmsResponseFormat", "GEOJSON")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (CTDebugEnabled(TAG)) {
+                CTDebug(TAG, "NOTAM delta query response http=${response.code}")
+            }
+            if (!response.isSuccessful) {
+                throw IllegalStateException("NOTAM delta query failed with HTTP ${response.code}")
+            }
+            val body = response.body?.string().orEmpty()
+            val json = JSONObject(body)
+            val data = json.optJSONObject("data") ?: throw IllegalStateException("NOTAM delta response did not include data")
+            val features = data.optJSONArray("geojson") ?: JSONArray()
+            if (CTDebugEnabled(TAG)) {
+                CTDebug(TAG, "Parsed delta geojson featureCount=${features.length()} status='${json.optString("status")}' message='${json.optString("message")}'")
+            }
+            val notices = mutableListOf<NearbyNotam>()
+            for (i in 0 until features.length()) {
+                val feature = features.optJSONObject(i) ?: continue
+                notices += featureToNearbyNotam(feature, current)
+            }
+            return notices
         }
     }
 
@@ -254,6 +332,9 @@ internal class NotamRepository {
             rawText = rawText,
             rawTitle = title,
             rawReference = reference,
+            updateType = notam?.optString("type").orEmpty(),
+            cancelationDate = notam?.optString("cancelationDate").orEmpty(),
+            lastUpdated = notam?.optString("lastUpdated").orEmpty(),
             severity = severity,
             geometries = geometries
         ).also {
@@ -544,5 +625,49 @@ internal class NotamRepository {
             .withZone(ZoneId.systemDefault())
         val prefix = if (stale) "Stale since " else "Updated "
         return prefix + formatter.format(Instant.ofEpochMilli(epochMs))
+    }
+
+    private fun mergeIncrementalNotices(
+        existing: List<NearbyNotam>,
+        delta: List<NearbyNotam>
+    ): List<NearbyNotam> {
+        val merged = LinkedHashMap<String, NearbyNotam>()
+        existing.forEach { notice -> merged[notice.id] = notice }
+        delta.forEach { notice ->
+            if (shouldRemoveFromCache(notice)) {
+                merged.remove(notice.id)
+            } else {
+                merged[notice.id] = notice
+            }
+        }
+        return NotamPolicy.sort(merged.values.toList())
+    }
+
+    private fun shouldRemoveFromCache(notice: NearbyNotam): Boolean {
+        val updateType = notice.updateType.uppercase(Locale.US)
+        if (updateType == "D") return true
+        parseInstant(notice.cancelationDate)?.let { canceledAt ->
+            if (!canceledAt.isAfter(Instant.now())) return true
+        }
+        parseEffectiveEndInstant(notice.effectiveText)?.let { effectiveEnd ->
+            if (!effectiveEnd.isAfter(Instant.now())) return true
+        }
+        return false
+    }
+
+    private fun movedSinceLastFetchFeet(current: Location): Double {
+        val previous = lastRefreshLocation ?: return Double.MAX_VALUE
+        return previous.distanceTo(current) * 3.28084
+    }
+
+    private fun parseInstant(value: String): Instant? =
+        value.takeIf { it.isNotBlank() }?.let {
+            runCatching { Instant.parse(it) }.getOrNull()
+        }
+
+    private fun parseEffectiveEndInstant(effectiveText: String): Instant? {
+        val marker = " to "
+        val end = effectiveText.substringAfter(marker, missingDelimiterValue = "").trim()
+        return parseInstant(end)
     }
 }

@@ -58,6 +58,20 @@ data class MapViewportState(
     val zoom: Double
 )
 
+enum class StreamsLayoutMode {
+    Both,
+    Streams,
+    Map
+}
+
+data class ProximityMapFocusTarget(
+    val requestId: Long,
+    val firstLat: Double,
+    val firstLng: Double,
+    val secondLat: Double,
+    val secondLng: Double
+)
+
 @Stable
 class DroneSpecState(
     val source: CtDroneSpec
@@ -187,6 +201,10 @@ class StreamsViewModel(
 
     private val _mapName = mutableStateOf<String?>(null)
     val mapName: String? by _mapName
+    private val _layoutMode = MutableStateFlow(StreamsLayoutMode.Both)
+    val layoutMode: StateFlow<StreamsLayoutMode> = _layoutMode.asStateFlow()
+    private val _proximityMapFocusTarget = MutableStateFlow<ProximityMapFocusTarget?>(null)
+    val proximityMapFocusTarget: StateFlow<ProximityMapFocusTarget?> = _proximityMapFocusTarget.asStateFlow()
     private val _coordinateDisplayFormat = mutableStateOf<CoordinateDisplayFormat>(
         CoordinateDisplayFormat.fromStorage(CaltopoClient.GetCoordinateDisplayFormat())
     )
@@ -298,6 +316,30 @@ class StreamsViewModel(
     internal fun setBaseLayer(baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption) {
         if (_baseLayer.value == baseLayer) return
         _baseLayer.value = baseLayer
+    }
+
+    fun setLayoutMode(layoutMode: StreamsLayoutMode) {
+        _layoutMode.value = layoutMode
+    }
+
+    fun showMapOnly() {
+        _layoutMode.value = StreamsLayoutMode.Map
+    }
+
+    fun requestProximityMapFocus(firstLat: Double, firstLng: Double, secondLat: Double, secondLng: Double) {
+        _proximityMapFocusTarget.value = ProximityMapFocusTarget(
+            requestId = System.currentTimeMillis(),
+            firstLat = firstLat,
+            firstLng = firstLng,
+            secondLat = secondLat,
+            secondLng = secondLng
+        )
+    }
+
+    fun clearProximityMapFocus(requestId: Long) {
+        if (_proximityMapFocusTarget.value?.requestId == requestId) {
+            _proximityMapFocusTarget.value = null
+        }
     }
 
     fun mapViewportState(): MapViewportState? = persistedMapViewportState

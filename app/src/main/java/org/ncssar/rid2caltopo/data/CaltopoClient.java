@@ -65,6 +65,8 @@ import org.ncssar.rid2caltopo.app.MediaMTXService;
 import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.ScanningService;
+import org.ncssar.rid2caltopo.notam.NotamCenter;
+import org.ncssar.rid2caltopo.ui.ProximityAlertCenter;
 import com.google.firebase.analytics.FirebaseAnalytics;
 
 import okhttp3.MediaType;
@@ -90,6 +92,8 @@ class ClientClassState {
     public String trackerUrlPfx;
     public String coordinateDisplayFormat;
     public boolean captureVideoStreamsFlag;
+    public boolean predictiveHeadEnabled;
+    public long proximityAlertSpacingFeet;
     public boolean notamEnabled;
     public int notamRadiusNm;
     public boolean notamAutoRefresh;
@@ -126,10 +130,12 @@ class ClientClassState {
         trackerUrlPfx = "";
         coordinateDisplayFormat = "decimal";
         captureVideoStreamsFlag = false;
+        predictiveHeadEnabled = true;
+        proximityAlertSpacingFeet = 40L;
         notamEnabled = false;
         notamRadiusNm = 2;
         notamAutoRefresh = true;
-        notamRefreshIntervalSeconds = 90;
+        notamRefreshIntervalSeconds = 1800;
         notamWarnInsideOneNm = true;
         notamApiBaseUrl = "";
         notamTokenUrl = "";
@@ -171,13 +177,14 @@ class ClientClassState {
                 """
                         vers:'%d', minDist:'%d' ft, usePeersFlag:'%s', captureVideoStreamsFlag:'%s'
                         newTrackDelayInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
+                        predictiveHeadEnabled:%s, proximityAlertSpacingFeet:%d
                         notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
                         notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
                 AppConfigStore.SCHEMA_VERSION, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
                 newTrackDelayInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
-                incident, opPeriod, coordinateDisplayFormat,
+                incident, opPeriod, coordinateDisplayFormat, predictiveHeadEnabled, proximityAlertSpacingFeet,
                 notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
                 notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
                 notamClientSecret.isEmpty() ? "" : "###########", notamScope, notamLastUpdatedEpochMs,
@@ -964,10 +971,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String opPeriod = json.optString("op_period");
         String trackerApiKey = json.optString("tracker_api_key");
         String trackerUrlPfx = json.optString("tracker_url_pfx");
+        boolean predictiveHeadEnabled = json.optBoolean("predictive_head_enabled", true);
+        long proximityAlertSpacingFeet = json.optLong("proximity_alert_spacing_feet", 40L);
         boolean notamEnabled = json.optBoolean("notam_enabled", false);
         int notamRadiusNm = json.optInt("notam_radius_nm", 2);
         boolean notamAutoRefresh = json.optBoolean("notam_auto_refresh", true);
-        int notamRefreshIntervalSeconds = json.optInt("notam_refresh_interval_seconds", 90);
+        int notamRefreshIntervalSeconds = json.optInt("notam_refresh_interval_seconds", 1800);
         boolean notamWarnInsideOneNm = json.optBoolean("notam_warn_inside_one_nm", true);
         String notamApiBaseUrl = json.optString("notam_api_base_url");
         String notamTokenUrl = json.optString("notam_token_url");
@@ -980,6 +989,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!trackerApiKey.isEmpty()) SetTrackerApiKey(trackerApiKey);
         if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
         if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
+        SetPredictiveHeadEnabled(predictiveHeadEnabled);
+        SetProximityAlertSpacingFeet(proximityAlertSpacingFeet);
         SetNotamEnabled(notamEnabled);
         SetNotamRadiusNm(notamRadiusNm);
         SetNotamAutoRefresh(notamAutoRefresh);
@@ -1171,6 +1182,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 credentials.put("tracker_api_key", ccs.trackerApiKey);
             if (ccs.trackerUrlPfx != null && !ccs.trackerUrlPfx.isEmpty())
                 credentials.put("tracker_url_pfx", ccs.trackerUrlPfx);
+            credentials.put("predictive_head_enabled",           ccs.predictiveHeadEnabled);
+            credentials.put("proximity_alert_spacing_feet",      ccs.proximityAlertSpacingFeet);
             // ── NOTAM settings ───────────────────────────────────────────────
             credentials.put("notam_enabled",                   ccs.notamEnabled);
             credentials.put("notam_radius_nm",                 ccs.notamRadiusNm);
@@ -1634,6 +1647,33 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+    public static boolean GetPredictiveHeadEnabled() {
+        return GetState().predictiveHeadEnabled;
+    }
+
+    public static void SetPredictiveHeadEnabled(boolean enabled) {
+        ClientClassState ccs = GetState();
+        if (ccs.predictiveHeadEnabled != enabled) {
+            ccs.predictiveHeadEnabled = enabled;
+            NotifySettingsChanged();
+            ArchiveState("predictive head changed");
+        }
+    }
+
+    public static long GetProximityAlertSpacingFeet() {
+        return GetState().proximityAlertSpacingFeet;
+    }
+
+    public static void SetProximityAlertSpacingFeet(long feet) {
+        long normalized = Math.max(0L, feet);
+        ClientClassState ccs = GetState();
+        if (ccs.proximityAlertSpacingFeet != normalized) {
+            ccs.proximityAlertSpacingFeet = normalized;
+            NotifySettingsChanged();
+            ArchiveState("proximity alert spacing changed");
+        }
+    }
+
     public static boolean GetNotamEnabled() {
         return GetState().notamEnabled;
     }
@@ -1683,7 +1723,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void SetNotamRefreshIntervalSeconds(int seconds) {
-        int normalized = Math.max(30, seconds);
+        int normalized = Math.max(1800, seconds);
         ClientClassState ccs = GetState();
         if (ccs.notamRefreshIntervalSeconds != normalized) {
             ccs.notamRefreshIntervalSeconds = normalized;
@@ -1971,6 +2011,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ShutdownInProgress = true;
         }
         try {
+            NotamCenter.INSTANCE.shutdown();
             if (Ccstate != null) {
                 ArchiveState("shutdown");
             }
@@ -2349,8 +2390,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                                CtDroneSpec.TransportTypeEnum transportType, @Nullable Boolean airborne) {
         boolean goLiveFlag = GetGoLiveFlag();
         long longAltitudeInMeters = Math.round(altitudeInMeters);
+        ArrayList<CtDroneSpec> proximityDrones = new ArrayList<>(GetState().droneSpecTable.values());
 
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
+        ProximityAlertCenter.INSTANCE.updateDrones(proximityDrones);
         CaltopoMap.MapStatusListener.mapStatus mapStatus = CaltopoMap.GetMapStatus();
         if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
             if (null == liveTrack) {

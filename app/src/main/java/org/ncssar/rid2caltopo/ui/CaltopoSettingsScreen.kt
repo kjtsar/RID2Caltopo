@@ -31,6 +31,8 @@ fun CaltopoSettingsScreen(
     val goLiveFlag by settingsViewModel.goLiveFlag.collectAsState()
     val usePeers by settingsViewModel.usePeers.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
+    val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
+    val proximityAlertSpacingFeet by settingsViewModel.proximityAlertSpacingFeet.collectAsState()
     val caltopoUrl by settingsViewModel.caltopoUrl.collectAsState()
     val notamEnabled by settingsViewModel.notamEnabled.collectAsState()
     val notamRadiusNm by settingsViewModel.notamRadiusNm.collectAsState()
@@ -100,6 +102,24 @@ fun CaltopoSettingsScreen(
                     Text(if (captureIncomingVideo) "Yes" else "No")
                 }
 
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Predictive Head:")
+                    Switch(
+                        checked = predictiveHeadEnabled,
+                        onCheckedChange = { settingsViewModel.onPredictiveHeadEnabledChanged(it) }
+                    )
+                    Text(if (predictiveHeadEnabled) "On" else "Off")
+                }
+
+                OutlinedTextField(
+                    value = proximityAlertSpacingFeet,
+                    onValueChange = {
+                        settingsViewModel.onProximityAlertSpacingFeetChanged(it.filter { ch -> ch.isDigit() })
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Proximity Alert Spacing (ft)") }
+                )
+
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -137,7 +157,7 @@ fun CaltopoSettingsScreen(
                     value = notamRefreshIntervalSeconds,
                     onValueChange = { settingsViewModel.onNotamRefreshIntervalSecondsChanged(it.filter { ch -> ch.isDigit() }) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    label = { Text("NOTAM Refresh Interval (s)") }
+                    label = { Text("NOTAM Refresh Interval (s, min 1800)") }
                 )
 
                 Row(verticalAlignment = Alignment.CenterVertically) {

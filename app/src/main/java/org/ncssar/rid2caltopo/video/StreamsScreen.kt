@@ -62,13 +62,8 @@ import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
+import org.ncssar.rid2caltopo.ui.ResumeProximityAlertButton
 import org.opendroneid.android.bluetooth.WiFiScanner
-
-private enum class ScreenLayoutMode {
-    Both,
-    Streams,
-    Map
-}
 
 private fun restartMediaMtxServer(context: android.content.Context) {
     val appContext = context.applicationContext
@@ -100,7 +95,7 @@ fun StreamsScreen(
     }
 
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
-    var layoutMode by remember { mutableStateOf(ScreenLayoutMode.Both) }
+    val layoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
     var showNotamPanel by remember { mutableStateOf(false) }
 
     Surface(
@@ -137,12 +132,13 @@ fun StreamsScreen(
                 },
                 actions = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (layoutMode != ScreenLayoutMode.Both) {
+                        ResumeProximityAlertButton()
+                        if (layoutMode != StreamsLayoutMode.Both) {
                             LayoutToggleChip(
                                 label = "Split",
                                 selected = false,
                                 onClick = {
-                                    layoutMode = ScreenLayoutMode.Both
+                                    viewModel.setLayoutMode(StreamsLayoutMode.Both)
                                     if (splitFraction !in 0.1f..0.9f) {
                                         splitFraction = 0.5f
                                     }
@@ -155,21 +151,21 @@ fun StreamsScreen(
 
             Box(Modifier.fillMaxSize()) {
                 when (layoutMode) {
-                    ScreenLayoutMode.Both -> {
+                    StreamsLayoutMode.Both -> {
                         SplitStreamsAndMap(
                             viewModel = viewModel,
                             splitFraction = splitFraction,
                             onSplitFractionChange = { splitFraction = it },
-                            onStreamsPaneTap = { layoutMode = ScreenLayoutMode.Streams },
-                            onMapPaneTap = { layoutMode = ScreenLayoutMode.Map }
+                            onStreamsPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
+                            onMapPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) }
                         )
                     }
 
-                    ScreenLayoutMode.Streams -> {
+                    StreamsLayoutMode.Streams -> {
                         StreamsGrid(viewModel = viewModel, modifier = Modifier.fillMaxSize())
                     }
 
-                    ScreenLayoutMode.Map -> {
+                    StreamsLayoutMode.Map -> {
                         SplitMapPane(viewModel = viewModel, modifier = Modifier.fillMaxSize())
                     }
                 }

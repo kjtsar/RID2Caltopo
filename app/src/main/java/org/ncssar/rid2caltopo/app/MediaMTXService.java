@@ -53,6 +53,8 @@ public class MediaMTXService extends Service {
     private static boolean listenersRegistered = false;
     private static boolean recordingListenerRegistered = false;
     private static int processPid = 0;
+    private static volatile boolean serviceRunning = false;
+    public static boolean IsRunning() { return serviceRunning; }
 
     public static void onNativeProcessExit(int pid, int status, int signaled) {
         CTDebug(TAG, "MediaMTX exited pid=" + pid +
@@ -73,6 +75,7 @@ public class MediaMTXService extends Service {
 
     public void onCreate() {
         super.onCreate();
+        serviceRunning = true;
         createNotificationChannel();
         Intent launchIntent = new Intent(this, R2CActivity.class);
         launchIntent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
@@ -133,6 +136,7 @@ public class MediaMTXService extends Service {
 
     @Override
     public void onDestroy() {
+        serviceRunning = false;
         processPid = 0;
         MediaMTXNative.stop();
         // Run syncAll on a background thread to avoid ForegroundServiceDidNotStopInTimeException.

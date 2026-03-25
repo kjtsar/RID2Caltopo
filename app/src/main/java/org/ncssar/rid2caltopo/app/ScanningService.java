@@ -51,9 +51,11 @@ public class ScanningService extends Service {
     private BluetoothScanner btScanner;
     private WiFiScanner wiFiScanner;
     private boolean scanning = false;
+    private static volatile boolean serviceRunning = false;
     private static Context AppContext = R2CApplication.getAppCtxt();
     private static OpenDroneIdDataManager DataManager = new OpenDroneIdDataManager(null);
     public static long GetStartTimeInMsec() {return ScannerUptime.getStartTimeInMsec();}
+    public static boolean IsRunning() { return serviceRunning; }
     public void startScanning() {
         if (scanning) {
             CTError(TAG, "startScanning(): ignoring start request while running.");
@@ -83,6 +85,7 @@ public class ScanningService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        serviceRunning = true;
         CTDebug(TAG, String.format(Locale.US,
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
@@ -119,6 +122,7 @@ public class ScanningService extends Service {
         if (scanning) {
             stopScanning();
         }
+        serviceRunning = false;
         super.onDestroy();
     }
 

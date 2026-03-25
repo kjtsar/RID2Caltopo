@@ -369,6 +369,12 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     }
 
     @Nullable
+    public static synchronized android.location.Location GetDeviceLocation() {
+        if (MyLocation == null) return null;
+        return new Location(MyLocation);
+    }
+
+    @Nullable
     public static synchronized android.location.Location GetMyLocationOverride() {
         if (MyLocationOverride == null) return null;
         return new Location(MyLocationOverride);

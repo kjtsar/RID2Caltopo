@@ -388,9 +388,9 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             override fun onLocationResult(locationResult: LocationResult) {
                 for (location in locationResult.locations) {
                     if (location != null) {
-                        val hadLocationBefore = CaltopoMap.GetMyLocation() != null
+                        val hadDeviceLocationBefore = CaltopoMap.GetDeviceLocation() != null
                         CaltopoMap.UpdateMyLocation(location)
-                        if (!hadLocationBefore && CaltopoMap.GetMyLocation() != null) {
+                        if (!hadDeviceLocationBefore && CaltopoMap.GetDeviceLocation() != null) {
                             NotamCenter.requestImmediateRefresh()
                         }
                     }
@@ -409,7 +409,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                 )
             }
         }
-        if (!RestartingFlag) {
+        if (!RestartingFlag || !ScanningService.IsRunning()) {
             CTDebug(
                 TAG,
                 String.format(
@@ -420,9 +420,15 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             )
             val scanningServiceIntent = Intent(this, ScanningService::class.java)
             applicationContext.startForegroundService(scanningServiceIntent)
+        } else {
+            CTDebug(TAG, "onCreate(): ScanningService already running; skipping duplicate start.")
+        }
+        if (!RestartingFlag || !MediaMTXService.IsRunning()) {
             CTDebug(TAG, "Starting MediaMTXService...")
             val mediaMtxServiceIntent = Intent(this, MediaMTXService::class.java)
             applicationContext.startForegroundService(mediaMtxServiceIntent)
+        } else {
+            CTDebug(TAG, "onCreate(): MediaMTXService already running; skipping duplicate start.")
         }
     }
 

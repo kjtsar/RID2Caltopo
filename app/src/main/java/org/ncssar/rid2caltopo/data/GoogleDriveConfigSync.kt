@@ -543,6 +543,7 @@ object GoogleDriveConfigSync {
             val body = response.body?.string()
                 ?: throw IOException("Org config download returned an empty body.")
             if (!body.contains("rid2caltopo_org_config")) {
+                CaltopoClient.CTWarn(TAG, "downloadOrgConfigPublic(): invalid bundle for fileId=$fileId; first 200 chars: ${body.take(200)}")
                 throw IOException("Downloaded file does not appear to be a valid org config bundle.")
             }
             return body

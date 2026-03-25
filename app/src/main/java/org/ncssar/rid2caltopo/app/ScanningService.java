@@ -181,6 +181,7 @@ public class ScanningService extends Service {
         CTDebug(TAG, "onTaskRemoved()");
         stopForeground(true);
         stopSelf();
+        CaltopoClient.ShutdownAsync();
         super.onTaskRemoved(rootIntent);
     }
     @Override

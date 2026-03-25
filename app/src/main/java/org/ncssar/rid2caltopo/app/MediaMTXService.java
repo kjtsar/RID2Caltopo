@@ -210,6 +210,7 @@ public class MediaMTXService extends Service {
     public void onTaskRemoved(Intent rootIntent) {
         stopForeground(true);
         stopSelf();
+        CaltopoClient.ShutdownAsync();
         super.onTaskRemoved(rootIntent);
     }
 

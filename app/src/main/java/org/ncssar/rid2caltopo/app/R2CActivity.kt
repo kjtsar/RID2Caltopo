@@ -503,11 +503,8 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
                     exitRequested
                 )
             )
-            // For unexpected finishes (e.g. external caller, swipe-to-dismiss):
-            // stop the app context and flush the log.
             if (isFinishing && !isChangingConfigurations) {
                 if (this === AppActivity) AppActivity = null
-                CaltopoClient.ShutdownAsync()
             }
         }
         // Reset the one-shot initialization guard whenever the activity is truly

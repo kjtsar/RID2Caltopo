@@ -130,6 +130,8 @@ object ProximityAlertCenter {
     val uiState: StateFlow<ProximityAlertUiState?> = _uiState.asStateFlow()
     private val _suspendedAlert = MutableStateFlow<ProximityAlertUiState?>(null)
     val suspendedAlert: StateFlow<ProximityAlertUiState?> = _suspendedAlert.asStateFlow()
+    private val _canResumeAlert = MutableStateFlow(false)
+    val canResumeAlert: StateFlow<Boolean> = _canResumeAlert.asStateFlow()
     private val _debugPairs = MutableStateFlow<List<ProximityDebugPair>>(emptyList())
     val debugPairs: StateFlow<List<ProximityDebugPair>> = _debugPairs.asStateFlow()
 
@@ -147,6 +149,7 @@ object ProximityAlertCenter {
             clearEligibleSinceMs = null
             _uiState.value = null
             _suspendedAlert.value = null
+            _canResumeAlert.value = false
             _debugPairs.value = emptyList()
             latestEvaluationsByKey = emptyMap()
             return
@@ -274,6 +277,8 @@ object ProximityAlertCenter {
             }
         }
 
+        refreshResumeVisibility()
+
         previousPairSnapshots.clear()
         evaluations.forEach { evaluation ->
             previousPairSnapshots[evaluation.pairKey] = PairSnapshot(
@@ -289,6 +294,7 @@ object ProximityAlertCenter {
         clearEligibleSinceMs = null
         _suspendedAlert.value = _uiState.value
         _uiState.value = null
+        refreshResumeVisibility()
     }
 
     fun resumeSuspendedAlert() {
@@ -306,6 +312,15 @@ object ProximityAlertCenter {
             _suspendedAlert.value = null
         }
         clearEligibleSinceMs = null
+        refreshResumeVisibility()
+    }
+
+    private fun refreshResumeVisibility() {
+        val suspended = _suspendedAlert.value
+        _canResumeAlert.value = suspended != null && latestEvaluationsByKey[suspended.pairKey]?.let { evaluation ->
+            evaluation.effectiveHorizontalFt <= suspended.thresholdFt &&
+                evaluation.effectiveVerticalFt <= suspended.thresholdFt
+        } == true
     }
 
     private fun evaluateDrone(
@@ -571,8 +586,8 @@ fun ProximityAlertHost(
 
 @Composable
 fun ResumeProximityAlertButton() {
-    val suspendedAlert by ProximityAlertCenter.suspendedAlert.collectAsState()
-    suspendedAlert?.let {
+    val canResume by ProximityAlertCenter.canResumeAlert.collectAsState()
+    if (canResume) {
         TextButton(onClick = { ProximityAlertCenter.resumeSuspendedAlert() }) {
             Text("Resume Proximity Alert")
         }

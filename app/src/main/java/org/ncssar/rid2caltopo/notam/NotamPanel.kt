@@ -95,11 +95,11 @@ fun NotamPanel(
                             ) {
                                 Text(if (expandedIds.contains(nearestHidden.id)) "Hide nearest NOTAM" else "Show nearest NOTAM")
                             }
-                            if (expandedIds.contains(nearestHidden.id)) {
-                                if (nearestHidden.proximityText.isNotBlank()) {
-                                    Text(
-                                        nearestHidden.proximityText,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (expandedIds.contains(nearestHidden.id)) {
+                            if (nearestHidden.proximityText.isNotBlank()) {
+                                Text(
+                                    nearestHidden.proximityText,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                                 Text(nearestHidden.title, fontWeight = FontWeight.SemiBold)
@@ -122,16 +122,23 @@ fun NotamPanel(
                                 if (nearestHidden.details.isNotBlank()) {
                                     Text(nearestHidden.details, modifier = Modifier.padding(top = 2.dp))
                                 }
-                                if (nearestHidden.rawText.isNotBlank()) {
+                                if (nearestHidden.rawTitle.isNotBlank()) {
                                     Text(
-                                        "FAA text: ${nearestHidden.rawTitle.ifBlank { nearestHidden.rawText }}",
+                                        "FAA notice:",
                                         modifier = Modifier.padding(top = 2.dp),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                if (nearestHidden.rawText.isNotBlank() && nearestHidden.rawText != nearestHidden.rawTitle) {
+                                if (nearestHidden.rawTitle.isNotBlank()) {
                                     Text(
-                                        "Translation: ${nearestHidden.rawText}",
+                                        nearestHidden.rawTitle,
+                                        modifier = Modifier.padding(top = 2.dp),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (nearestHidden.rawText.isNotBlank()) {
+                                    Text(
+                                        nearestHidden.rawText,
                                         modifier = Modifier.padding(top = 2.dp),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -187,16 +194,23 @@ fun NotamPanel(
                             if (notice.details.isNotBlank()) {
                                 Text(notice.details, modifier = Modifier.padding(top = 2.dp))
                             }
-                            if (notice.rawText.isNotBlank()) {
+                            if (notice.rawTitle.isNotBlank()) {
                                 Text(
-                                    "FAA text: ${notice.rawTitle.ifBlank { notice.rawText }}",
+                                    "FAA notice:",
                                     modifier = Modifier.padding(top = 2.dp),
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            if (notice.rawText.isNotBlank() && notice.rawText != notice.rawTitle) {
+                            if (notice.rawTitle.isNotBlank()) {
                                 Text(
-                                    "Translation: ${notice.rawText}",
+                                    notice.rawTitle,
+                                    modifier = Modifier.padding(top = 2.dp),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (notice.rawText.isNotBlank()) {
+                                Text(
+                                    notice.rawText,
                                     modifier = Modifier.padding(top = 2.dp),
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

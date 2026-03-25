@@ -37,7 +37,16 @@ internal class NotamRepository {
     private companion object {
         const val TAG = "NotamREST"
         const val INCREMENTAL_MOVEMENT_THRESHOLD_FT = 100.0
+        const val EARTH_RADIUS_NM = 3440.065
+        val RADIUS_REGEX = Regex("""\b([0-9]+(?:\.[0-9]+)?)NM RADIUS\b""", RegexOption.IGNORE_CASE)
+        val DMS_COORD_REGEX = Regex("""\b([0-9]{6}[NS])([0-9]{7}[EW])\b""", RegexOption.IGNORE_CASE)
     }
+
+    private data class RadiusArea(
+        val centerLat: Double,
+        val centerLon: Double,
+        val radiusNm: Double
+    )
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -301,14 +310,19 @@ internal class NotamRepository {
         }
         val notamText = notam?.optString("text").orEmpty()
         val rawText = extractRawText(translations)
-        val geometries = geometry?.toNotamGeometries().orEmpty()
-        val proximity = geometry?.let { distanceToGeometry(current, it) }
+        val classification = notam?.optString("classification").orEmpty().ifBlank { "unknown" }
+        val fallbackRadiusArea = parseRadiusArea(notamText, rawText)
+            ?.takeIf { isRadiusTfrNotice(reference, notamText, rawText, classification) }
+            ?.takeIf { shouldUseFallbackRadiusArea(geometry, it) }
+        val geometries = fallbackRadiusArea?.let(::buildCircleGeometry)
+            ?: geometry?.toNotamGeometries().orEmpty()
+        val proximity = fallbackRadiusArea?.let { distanceToRadiusArea(current, it) }
+            ?: geometry?.let { distanceToGeometry(current, it) }
         val distanceNm = proximity?.distanceNm
         val intersectsPilotBubble = distanceNm != null && distanceNm <= 1.0
         val severity = inferSeverity(title, rawText, intersectsPilotBubble)
         val effectiveText = buildEffectiveText(notam)
         val proximityText = proximityText(distanceNm, proximity?.bearingDeg)
-        val classification = notam?.optString("classification").orEmpty().ifBlank { "unknown" }
         val humanized = NotamHumanizer.humanize(
             reference = reference,
             notamText = notamText,
@@ -346,6 +360,18 @@ internal class NotamRepository {
                         "intersects=${it.intersectsPilotBubble} geometryType=$geometryType drawableGeometries=${it.geometries.size} " +
                         "title='${it.title.take(120)}'"
                 )
+                if (fallbackRadiusArea != null) {
+                    CTDebug(
+                        TAG,
+                        "Using fallback radius geometry id='${it.id}' center=${"%.6f".format(Locale.US, fallbackRadiusArea.centerLat)},${"%.6f".format(Locale.US, fallbackRadiusArea.centerLon)} radiusNm=${"%.1f".format(Locale.US, fallbackRadiusArea.radiusNm)}"
+                    )
+                }
+                if (reference.contains("6/3475") || it.title.contains("6/3475")) {
+                    CTDebug(
+                        TAG,
+                        "TFR geometry debug id='${it.id}' reference='${reference}' geometry=${geometry?.toString() ?: "null"}"
+                    )
+                }
             }
         }
     }
@@ -472,6 +498,113 @@ internal class NotamRepository {
         val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
         val bearing = (Math.toDegrees(atan2(y, x)) + 360.0) % 360.0
         return GeometryProximity((earthRadiusMeters * c) / 1852.0, bearing)
+    }
+
+    private fun distanceToRadiusArea(origin: Location, area: RadiusArea): GeometryProximity {
+        val centerProximity = proximityToPoint(origin, area.centerLat, area.centerLon)
+        return centerProximity.copy(
+            distanceNm = maxOf(0.0, centerProximity.distanceNm - area.radiusNm)
+        )
+    }
+
+    private fun parseRadiusArea(notamText: String, rawText: String): RadiusArea? {
+        val sourceText = listOf(rawText, notamText).firstOrNull { it.isNotBlank() }.orEmpty()
+        if (sourceText.isBlank()) return null
+        val radiusNm = RADIUS_REGEX.find(sourceText)?.groupValues?.getOrNull(1)?.toDoubleOrNull() ?: return null
+        val coordMatch = DMS_COORD_REGEX.find(sourceText.uppercase(Locale.US)) ?: return null
+        val lat = parseCompactDmsLat(coordMatch.groupValues[1]) ?: return null
+        val lon = parseCompactDmsLon(coordMatch.groupValues[2]) ?: return null
+        return RadiusArea(centerLat = lat, centerLon = lon, radiusNm = radiusNm)
+    }
+
+    private fun isRadiusTfrNotice(
+        reference: String,
+        notamText: String,
+        rawText: String,
+        classification: String
+    ): Boolean {
+        val haystack = "$reference $notamText $rawText".uppercase(Locale.US)
+        if (classification.equals("FDC", ignoreCase = true)) return true
+        if (haystack.contains("TEMPORARY FLIGHT RESTRICTION")) return true
+        if (haystack.contains(" TFR") || haystack.startsWith("TFR")) return true
+        if (haystack.contains("NTL DEFENSE AIRSPACE")) return true
+        return false
+    }
+
+    private fun shouldUseFallbackRadiusArea(geometry: JSONObject?, area: RadiusArea): Boolean {
+        if (geometry == null) return true
+        return when (geometry.optString("type")) {
+            "Point" -> geometry.optJSONArray("coordinates")?.let { pointIsFarFromRadiusCenter(it, area) } ?: true
+            "GeometryCollection" -> {
+                val geometries = geometry.optJSONArray("geometries") ?: return true
+                if (geometries.length() != 1) return false
+                val point = geometries.optJSONObject(0) ?: return true
+                if (point.optString("type") != "Point") return false
+                point.optJSONArray("coordinates")?.let { pointIsFarFromRadiusCenter(it, area) } ?: true
+            }
+            else -> false
+        }
+    }
+
+    private fun pointIsFarFromRadiusCenter(coords: JSONArray, area: RadiusArea): Boolean {
+        if (coords.length() < 2) return true
+        val lon = coords.optDouble(0)
+        val lat = coords.optDouble(1)
+        val centerDistanceNm = proximityToPoint(
+            origin = Location("fallback-center").apply {
+                latitude = area.centerLat
+                longitude = area.centerLon
+            },
+            lat = lat,
+            lon = lon
+        ).distanceNm
+        return centerDistanceNm > maxOf(2.0, area.radiusNm * 0.25)
+    }
+
+    private fun buildCircleGeometry(area: RadiusArea, steps: Int = 48): List<NotamGeometry> {
+        val latRad = Math.toRadians(area.centerLat)
+        val lonRad = Math.toRadians(area.centerLon)
+        val angularDistance = area.radiusNm / EARTH_RADIUS_NM
+        val ring = buildList {
+            for (i in 0..steps) {
+                val bearing = (Math.PI * 2.0 * i) / steps.toDouble()
+                val lat2 = kotlin.math.asin(
+                    sin(latRad) * cos(angularDistance) +
+                        cos(latRad) * sin(angularDistance) * cos(bearing)
+                )
+                val lon2 = lonRad + atan2(
+                    sin(bearing) * sin(angularDistance) * cos(latRad),
+                    cos(angularDistance) - sin(latRad) * sin(lat2)
+                )
+                add(
+                    NotamLatLng(
+                        latitude = Math.toDegrees(lat2),
+                        longitude = Math.toDegrees(lon2)
+                    )
+                )
+            }
+        }
+        return listOf(NotamGeometry.Polygon(rings = listOf(ring)))
+    }
+
+    private fun parseCompactDmsLat(value: String): Double? {
+        if (value.length != 7) return null
+        val deg = value.substring(0, 2).toDoubleOrNull() ?: return null
+        val min = value.substring(2, 4).toDoubleOrNull() ?: return null
+        val sec = value.substring(4, 6).toDoubleOrNull() ?: return null
+        val hemi = value.last().uppercaseChar()
+        val decimal = deg + (min / 60.0) + (sec / 3600.0)
+        return if (hemi == 'S') -decimal else if (hemi == 'N') decimal else null
+    }
+
+    private fun parseCompactDmsLon(value: String): Double? {
+        if (value.length != 8) return null
+        val deg = value.substring(0, 3).toDoubleOrNull() ?: return null
+        val min = value.substring(3, 5).toDoubleOrNull() ?: return null
+        val sec = value.substring(5, 7).toDoubleOrNull() ?: return null
+        val hemi = value.last().uppercaseChar()
+        val decimal = deg + (min / 60.0) + (sec / 3600.0)
+        return if (hemi == 'W') -decimal else if (hemi == 'E') decimal else null
     }
 
     private fun JSONObject.toNotamGeometries(): List<NotamGeometry> {

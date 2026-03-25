@@ -49,6 +49,7 @@ import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.data.OrgConfigToken
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.R2CPeer
+import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.MainScreen
@@ -387,8 +388,11 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
             override fun onLocationResult(locationResult: LocationResult) {
                 for (location in locationResult.locations) {
                     if (location != null) {
-//                        DataManager?.receiverLocation = location
+                        val hadLocationBefore = CaltopoMap.GetMyLocation() != null
                         CaltopoMap.UpdateMyLocation(location)
+                        if (!hadLocationBefore && CaltopoMap.GetMyLocation() != null) {
+                            NotamCenter.requestImmediateRefresh()
+                        }
                     }
                 }
             }

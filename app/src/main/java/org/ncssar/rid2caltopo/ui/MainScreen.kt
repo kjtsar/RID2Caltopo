@@ -958,7 +958,7 @@ fun MainScreen(
                         // This key is now guaranteed to be unique and stable
                         when (item) {
                             is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
-                            is MainScreenItem.RemoteView -> item.viewModel.r2cPeer.peerName
+                            is MainScreenItem.RemoteView -> item.viewModel.peerState.guid
                             is MainScreenItem.SpacerView -> "spacer_view"
                             is MainScreenItem.IncidentView -> "incident_view"
                         }
@@ -1006,7 +1006,7 @@ fun MainScreen(
                             val remoteAppVersion by item.viewModel.remoteAppVersion.collectAsState()
 
                             R2CPeerView(
-                                peerName = item.viewModel.r2cPeer.peerName,
+                                peerName = item.viewModel.peerState.name,
                                 drones = remoteDrones,
                                 remoteUptime = remoteUptime,
                                 appVersion = remoteAppVersion,

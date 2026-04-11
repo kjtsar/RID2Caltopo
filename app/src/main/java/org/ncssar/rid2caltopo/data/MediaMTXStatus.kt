@@ -8,22 +8,23 @@ import androidx.compose.runtime.mutableStateOf
 
 object MediaMTXStatus {
 
-    var serverStatus by mutableStateOf<String>("\uD83D\uDFE1 Starting")
+    /** True while the MediaMTX server process is running. */
+    var isServerRunning by mutableStateOf(false)
+        private set
+
+    /** Non-empty only after onServerExited(); cleared on next onServerStarted(). */
+    var serverExitReason by mutableStateOf("")
         private set
 
     fun onServerStarted(version: String) {
-        val myIpAddress: String = R2CMqttManager.GetMyIpAddress()
-        Handler(Looper.getMainLooper()).post {
-            serverStatus =
-                "\uD83D\uDFE2 In => rtmp://${myIpAddress}/<droneDesig>, Out => rtsp://${myIpAddress}/<droneDesig>"
-        }
+        isServerRunning = true
+        serverExitReason = ""
     }
 
     @JvmStatic
     fun onServerExited(exitDescription: String) {
-        Handler(Looper.getMainLooper()).post {
-            serverStatus = "\uD83D\uDD34 Server exited: ${exitDescription}"
-        }
+        isServerRunning = false
+        serverExitReason = exitDescription
     }
 
     @JvmStatic
@@ -31,4 +32,3 @@ object MediaMTXStatus {
         // no-op for now
     }
 }
-

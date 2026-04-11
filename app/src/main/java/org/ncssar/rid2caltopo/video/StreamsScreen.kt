@@ -34,12 +34,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -81,7 +83,20 @@ fun StreamsScreen(
     viewModel: StreamsViewModel = viewModel(),
     onBack: () -> Unit,
 ) {
-    val serverStatus = MediaMTXStatus.serverStatus
+    val isServerRunning = MediaMTXStatus.isServerRunning
+    val serverExitReason = MediaMTXStatus.serverExitReason
+    var myIpAddress by remember { mutableStateOf(R2CMqttManager.GetMyIpAddress()) }
+    LaunchedEffect(Unit) {
+        while (myIpAddress.isEmpty()) {
+            delay(2000)
+            myIpAddress = R2CMqttManager.GetMyIpAddress()
+        }
+    }
+    val serverStatus = when {
+        isServerRunning  -> "\uD83D\uDFE2 In => rtmp://$myIpAddress/<droneDesig>, Out => rtsp://$myIpAddress/<droneDesig>"
+        serverExitReason.isNotEmpty() -> "\uD83D\uDD34 Server exited: $serverExitReason"
+        else             -> "\uD83D\uDFE1 Starting"
+    }
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val mapStatus by remember(mapName) {
@@ -425,7 +440,7 @@ private fun StreamsGrid(
 }
 
 @Composable
-private fun EmptyStreamsView(mapStatus: String, modifier: Modifier = Modifier) {
+private fun EmptyStreamsView(mapStatus: String, myIpAddress: String = R2CMqttManager.GetMyIpAddress(), modifier: Modifier = Modifier) {
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -435,7 +450,6 @@ private fun EmptyStreamsView(mapStatus: String, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            val myIpAddress: String = R2CMqttManager.GetMyIpAddress()
             val ssid = WiFiScanner.WiFiSSID(LocalContext.current)
             Text("Stream video to: 'rtmp://$myIpAddress/<droneDesig>' on $ssid network")
             Text(

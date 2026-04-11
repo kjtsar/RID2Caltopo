@@ -37,7 +37,9 @@ import org.ncssar.rid2caltopo.app.R2CApplication;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
+import java.util.Enumeration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -365,7 +367,7 @@ public class R2CMqttManager {
         boolean isNew = (ps == null);
         if (isNew) {
             ps = new PeerState(senderGuid);
-            ps.uptime.start();
+            ps.uptime.restartTimer();
             peers.put(senderGuid, ps);
         }
 
@@ -856,18 +858,44 @@ public class R2CMqttManager {
         CurrentIpAddrs = Collections.unmodifiableList(addrs);
     }
 
-    /** Returns the first non-loopback IPv4 address, or empty string. */
+    /** Returns the first non-loopback IPv4 address, or empty string.
+     *  Queries NetworkInterface directly so it is always current without
+     *  waiting for a ConnectivityManager callback to fire. */
     @NonNull
     public static String GetMyIpAddress() {
-        if (!addrMonitorStarted) {
-            Context ctx = R2CApplication.getAppCtxt();
-            if (ctx != null) {
-                ConnectivityManager cm = ctx.getSystemService(ConnectivityManager.class);
-                if (cm != null) refreshIpAddrs(cm);
+        try {
+            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+            if (ifaces == null) {
+                CTInfo(TAG, "GetMyIpAddress(): getNetworkInterfaces() returned null");
+                return "";
             }
+            while (ifaces.hasMoreElements()) {
+                NetworkInterface iface = ifaces.nextElement();
+                boolean up = iface.isUp();
+                boolean loopback = iface.isLoopback();
+                CTDebug(TAG, String.format(Locale.US,
+                        "GetMyIpAddress(): iface=%s up=%b loopback=%b", iface.getName(), up, loopback));
+                if (!up || loopback) continue;
+                Enumeration<InetAddress> addrs = iface.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress addr = addrs.nextElement();
+                    String host = addr.getHostAddress();
+                    CTDebug(TAG, String.format(Locale.US,
+                            "GetMyIpAddress():   addr=%s isIPv4=%b isLoopback=%b",
+                            host, addr instanceof Inet4Address, addr.isLoopbackAddress()));
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                        if (host != null && !host.isEmpty()) {
+                            CTInfo(TAG, "GetMyIpAddress(): returning " + host);
+                            return host;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            CTError(TAG, "GetMyIpAddress() raised.", e);
         }
-        List<String> addrs = CurrentIpAddrs;
-        return addrs.isEmpty() ? "" : addrs.get(0);
+        CTInfo(TAG, "GetMyIpAddress(): no suitable address found, returning empty");
+        return "";
     }
 
     /** Returns all IPv4 addresses as a JSON array (for log header). */

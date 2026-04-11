@@ -22,7 +22,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 5
+    const val SCHEMA_VERSION = 6
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -171,6 +171,7 @@ object AppConfigStore {
         if (config.captureVideoStreams) return true
         if (config.usePeers) return true
         if (!config.predictiveHeadEnabled) return true
+        if (config.proximityAlertSpacingConfigured) return true
         if (config.proximityAlertSpacingFeet != 0L) return true
         if (config.caltopoTrackFolder.isNotBlank()) return true
         if (config.caltopoDomainAndPort.isNotBlank()) return true
@@ -235,7 +236,10 @@ object AppConfigStore {
         state.usePeersFlag = config.usePeers
         state.predictiveHeadEnabled = if (config.schemaVersion >= 3) config.predictiveHeadEnabled else true
         state.proximityAlertSpacingFeet = when {
-            config.schemaVersion >= 3 && config.proximityAlertSpacingFeet >= 0L -> config.proximityAlertSpacingFeet
+            config.proximityAlertSpacingConfigured && config.proximityAlertSpacingFeet >= 0L ->
+                config.proximityAlertSpacingFeet
+            config.schemaVersion in 3..5 && config.proximityAlertSpacingFeet > 0L ->
+                config.proximityAlertSpacingFeet
             else -> 40L
         }
         state.notamEnabled = config.notam.enabled
@@ -301,6 +305,7 @@ object AppConfigStore {
             .setUsePeers(state.usePeersFlag)
             .setPredictiveHeadEnabled(state.predictiveHeadEnabled)
             .setProximityAlertSpacingFeet(state.proximityAlertSpacingFeet)
+            .setProximityAlertSpacingConfigured(true)
             .setCaltopoTrackFolder(activeProfile.trackFolder)
             .setCaltopoDomainAndPort(activeProfile.domainAndPort)
             .setIncident(activeProfile.incident)

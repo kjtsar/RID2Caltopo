@@ -19,6 +19,14 @@ enum class NotamChipSeverity {
     Danger
 }
 
+data class NotamAltitudeBand(
+    val floorFeetMsl: Double?,
+    val ceilingFeetMsl: Double?,
+    val floorLabel: String,
+    val ceilingLabel: String,
+    val reference: String?
+)
+
 data class NearbyNotam(
     val id: String,
     val title: String,
@@ -27,6 +35,8 @@ data class NearbyNotam(
     val bearingText: String? = null,
     val proximityText: String = "",
     val intersectsPilotBubble: Boolean = false,
+    val horizontalIntersectsPilotBubble: Boolean = false,
+    val verticallyIntersectsPilotBand: Boolean? = null,
     val effectiveText: String = "",
     val details: String = "",
     val rawText: String = "",
@@ -36,6 +46,7 @@ data class NearbyNotam(
     val cancelationDate: String = "",
     val lastUpdated: String = "",
     val severity: NotamChipSeverity = NotamChipSeverity.Normal,
+    val altitudeBand: NotamAltitudeBand? = null,
     val geometries: List<NotamGeometry> = emptyList()
 )
 

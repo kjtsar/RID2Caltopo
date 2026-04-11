@@ -34,12 +34,20 @@ internal class NotamRepository {
         val bearingDeg: Double?
     )
 
+    private data class OperatingAltitudeBand(
+        val floorFeetMsl: Double,
+        val ceilingFeetMsl: Double
+    )
+
     private companion object {
         const val TAG = "NotamREST"
         const val INCREMENTAL_MOVEMENT_THRESHOLD_FT = 100.0
         const val EARTH_RADIUS_NM = 3440.065
+        const val FEET_PER_METER = 3.28084
+        const val MAX_OPERATION_ALTITUDE_FT_AGL = 400.0
         val RADIUS_REGEX = Regex("""\b([0-9]+(?:\.[0-9]+)?)NM RADIUS\b""", RegexOption.IGNORE_CASE)
         val DMS_COORD_REGEX = Regex("""\b([0-9]{6}[NS])([0-9]{7}[EW])\b""", RegexOption.IGNORE_CASE)
+        val ALTITUDE_REGEX = Regex("""\b(SFC|FL\d{2,3}|[0-9]{2,5}FT)\s*-\s*(FL\d{2,3}|[0-9]{2,5}FT)(?:\s+(AGL|MSL))?\b""", RegexOption.IGNORE_CASE)
     }
 
     private data class RadiusArea(
@@ -319,8 +327,17 @@ internal class NotamRepository {
         val proximity = fallbackRadiusArea?.let { distanceToRadiusArea(current, it) }
             ?: geometry?.let { distanceToGeometry(current, it) }
         val distanceNm = proximity?.distanceNm
-        val intersectsPilotBubble = distanceNm != null && distanceNm <= 1.0
-        val severity = inferSeverity(title, rawText, intersectsPilotBubble)
+        val horizontalIntersectsPilotBubble = distanceNm != null && distanceNm <= 1.0
+        val altitudeBand = parseAltitudeBand(notamText, rawText)
+        val verticallyIntersectsPilotBand = altitudeBand?.overlaps(current.operatingAltitudeBand())
+        val intersectsPilotBubble = horizontalIntersectsPilotBubble && verticallyIntersectsPilotBand != false
+        val severity = inferSeverity(
+            title = title,
+            rawText = rawText,
+            intersectsPilotBubble = intersectsPilotBubble,
+            horizontalIntersectsPilotBubble = horizontalIntersectsPilotBubble,
+            verticallyIntersectsPilotBand = verticallyIntersectsPilotBand
+        )
         val effectiveText = buildEffectiveText(notam)
         val proximityText = proximityText(distanceNm, proximity?.bearingDeg)
         val humanized = NotamHumanizer.humanize(
@@ -330,6 +347,8 @@ internal class NotamRepository {
             effectiveText = effectiveText,
             proximityText = proximityText,
             intersectsPilotBubble = intersectsPilotBubble,
+            horizontalIntersectsPilotBubble = horizontalIntersectsPilotBubble,
+            verticallyIntersectsPilotBand = verticallyIntersectsPilotBand,
             classification = classification,
             scheduleText = notam?.optString("schedule").orEmpty()
         )
@@ -341,6 +360,8 @@ internal class NotamRepository {
             bearingText = proximity?.bearingDeg?.let(::compassDirection),
             proximityText = proximityText,
             intersectsPilotBubble = intersectsPilotBubble,
+            horizontalIntersectsPilotBubble = horizontalIntersectsPilotBubble,
+            verticallyIntersectsPilotBand = verticallyIntersectsPilotBand,
             effectiveText = effectiveText,
             details = humanized.details,
             rawText = rawText,
@@ -350,6 +371,7 @@ internal class NotamRepository {
             cancelationDate = notam?.optString("cancelationDate").orEmpty(),
             lastUpdated = notam?.optString("lastUpdated").orEmpty(),
             severity = severity,
+            altitudeBand = altitudeBand,
             geometries = geometries
         ).also {
             if (CTDebugEnabled(TAG)) {
@@ -408,15 +430,72 @@ internal class NotamRepository {
         }
     }
 
-    private fun inferSeverity(title: String, rawText: String, intersectsPilotBubble: Boolean): NotamChipSeverity {
+    private fun inferSeverity(
+        title: String,
+        rawText: String,
+        intersectsPilotBubble: Boolean,
+        horizontalIntersectsPilotBubble: Boolean,
+        verticallyIntersectsPilotBand: Boolean?
+    ): NotamChipSeverity {
         val haystack = "$title $rawText".uppercase(Locale.US)
         if (intersectsPilotBubble && (haystack.contains("TFR") || haystack.contains("RESTRICT") || haystack.contains("UAS") || haystack.contains("PROHIBITED"))) {
             return NotamChipSeverity.Danger
+        }
+        if (horizontalIntersectsPilotBubble && verticallyIntersectsPilotBand == false &&
+            (haystack.contains("TFR") || haystack.contains("RESTRICT") || haystack.contains("UAS") || haystack.contains("PROHIBITED"))) {
+            return NotamChipSeverity.Caution
         }
         if (haystack.contains("TFR") || haystack.contains("RESTRICT") || haystack.contains("UAS") || haystack.contains("HAZARD")) {
             return NotamChipSeverity.Caution
         }
         return NotamChipSeverity.Normal
+    }
+
+    private fun parseAltitudeBand(notamText: String, rawText: String): NotamAltitudeBand? {
+        val sourceText = listOf(rawText, notamText).firstOrNull { it.isNotBlank() }.orEmpty()
+        if (sourceText.isBlank()) return null
+        val match = ALTITUDE_REGEX.find(sourceText.uppercase(Locale.US)) ?: return null
+        val floorRaw = match.groupValues[1]
+        val ceilingRaw = match.groupValues[2]
+        val reference = match.groupValues.getOrNull(3)?.takeIf { it.isNotBlank() }
+        return NotamAltitudeBand(
+            floorFeetMsl = altitudeTokenToFeetMsl(floorRaw, reference),
+            ceilingFeetMsl = altitudeTokenToFeetMsl(ceilingRaw, reference),
+            floorLabel = floorRaw,
+            ceilingLabel = ceilingRaw,
+            reference = reference
+        )
+    }
+
+    private fun altitudeTokenToFeetMsl(token: String, reference: String?): Double? {
+        val normalized = token.uppercase(Locale.US)
+        return when {
+            normalized == "SFC" -> 0.0
+            normalized.startsWith("FL") -> normalized.removePrefix("FL").toDoubleOrNull()?.times(100.0)
+            normalized.endsWith("FT") && reference.equals("MSL", ignoreCase = true) ->
+                normalized.removeSuffix("FT").toDoubleOrNull()
+            normalized.endsWith("FT") && reference.equals("AGL", ignoreCase = true) -> null
+            normalized.endsWith("FT") && reference.isNullOrBlank() ->
+                normalized.removeSuffix("FT").toDoubleOrNull()
+            else -> null
+        }
+    }
+
+    private fun NotamAltitudeBand.overlaps(operatingBand: OperatingAltitudeBand?): Boolean? {
+        if (operatingBand == null) return null
+        val effectiveFloor = floorFeetMsl ?: Double.NEGATIVE_INFINITY
+        val effectiveCeiling = ceilingFeetMsl ?: Double.POSITIVE_INFINITY
+        return effectiveFloor <= operatingBand.ceilingFeetMsl &&
+            effectiveCeiling >= operatingBand.floorFeetMsl
+    }
+
+    private fun Location.operatingAltitudeBand(): OperatingAltitudeBand? {
+        if (!hasAltitude()) return null
+        val floorFeetMsl = altitude * FEET_PER_METER
+        return OperatingAltitudeBand(
+            floorFeetMsl = floorFeetMsl,
+            ceilingFeetMsl = floorFeetMsl + MAX_OPERATION_ALTITUDE_FT_AGL
+        )
     }
 
     private fun distanceToGeometry(origin: Location, geometry: JSONObject): GeometryProximity? {

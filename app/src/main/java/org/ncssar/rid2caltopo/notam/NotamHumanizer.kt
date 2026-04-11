@@ -20,6 +20,8 @@ internal object NotamHumanizer {
         effectiveText: String,
         proximityText: String,
         intersectsPilotBubble: Boolean,
+        horizontalIntersectsPilotBubble: Boolean,
+        verticallyIntersectsPilotBand: Boolean?,
         classification: String,
         scheduleText: String
     ): HumanizedNotam {
@@ -35,6 +37,8 @@ internal object NotamHumanizer {
         val summaryParts = mutableListOf<String>()
         when {
             intersectsPilotBubble -> summaryParts += "Intersects the pilot's 1 NM operating area."
+            horizontalIntersectsPilotBubble && verticallyIntersectsPilotBand == false ->
+                summaryParts += "Overlaps the pilot's 1 NM operating area horizontally, but stays above the 200 ft AGL operating ceiling."
             proximityText.isNotBlank() -> summaryParts += "$proximityText from current location."
         }
         areaSummary(sourceText)?.let(summaryParts::add)

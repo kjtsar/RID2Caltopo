@@ -27,7 +27,7 @@ import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
-import org.ncssar.rid2caltopo.data.R2CPeer
+import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
 enum class ActiveScreen {
@@ -109,7 +109,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         get() = CaltopoCredentials.sniffTest(CaltopoClient.GetCaltopoCredentials())
 
     val hasNetwork: Boolean
-        get() = !R2CPeer.GetMyIpAddress(false).isEmpty()
+        get() = !R2CMqttManager.GetMyIpAddress().isEmpty()
 
     // Map and U/I State management
     var connectionState by mutableStateOf<CaltopoConnectionState>(CaltopoConnectionState.StandAlone)
@@ -131,7 +131,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 overlay = when (connectionState) {
                     is CaltopoConnectionState.StandAlone -> OverlayState.ConnectionSetup
                     is CaltopoConnectionState.NoNetwork -> {
-                        if (R2CPeer.GetMyIpAddress(false).isEmpty()) {
+                        if (R2CMqttManager.GetMyIpAddress().isEmpty()) {
                             OverlayState.ConnectionSetup
                         } else {
                             OverlayState.None
@@ -169,7 +169,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 }
             }
             is UIEvent.ConnectionRequested -> {
-                if (R2CPeer.GetMyIpAddress(false).isEmpty()) {
+                if (R2CMqttManager.GetMyIpAddress().isEmpty()) {
                     connectionState = CaltopoConnectionState.NoNetwork
                 } else {
                     if (this.hasCredentials) {
@@ -339,7 +339,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     }
 
     private fun currentFlightKey(drone: CtDroneSpec): String? {
-        if (drone.myR2cOwner != null) return null
+        if (!drone.publishingLocally()) return null  // remote MQTT peer owns this drone
         val startMsec = drone.startMsecTimestamp
         if (!drone.isActive || startMsec <= 0L) return null
         return "${drone.remoteId}:$startMsec"

@@ -12,7 +12,7 @@ object MediaMTXStatus {
         private set
 
     fun onServerStarted(version: String) {
-        val myIpAddress: String = R2CPeer.GetMyIpAddress(false)
+        val myIpAddress: String = R2CMqttManager.GetMyIpAddress()
         Handler(Looper.getMainLooper()).post {
             serverStatus =
                 "\uD83D\uDFE2 In => rtmp://${myIpAddress}/<droneDesig>, Out => rtsp://${myIpAddress}/<droneDesig>"

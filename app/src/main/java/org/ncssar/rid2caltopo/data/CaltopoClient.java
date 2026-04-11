@@ -520,38 +520,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     @NonNull public CtDroneSpec getDroneSpec() {return droneSpec;}
 
-    /**
-     * SetDroneSpecOwner()
-     *
-     * @param dsIn  This is the dronespec received from our peer who has assumed ownership of said drone.
-     *              if there is no entry in our table for it, we'll create an entry with the peer's
-     *              supplied rid and mappedId, but ignore everything else about it.  If there is
-     *              already an existing dronespec, we only update the local dronespec's mappedId with
-     *              the peer's mappedId if the peer's mappedId != remoteId.
-     * @param owner This is the peer that has assumed ownership of the specified drone.
-     */
-    public static void SetDroneSpecOwner(@NonNull CtDroneSpec dsIn, @NonNull R2CPeer owner) {
-        ClientClassState ccs = GetState();
-        String rid = dsIn.getRemoteId();
-        String mid = dsIn.getMappedId();
-        CtDroneSpec ds = GetDroneSpec(rid);
-        if (null == ds) {
-            ds = new CtDroneSpec(rid, dsIn.getMappedId(), dsIn.getOrg(), dsIn.getModel(), dsIn.getOwner());
-            ccs.droneSpecTable.put(rid, ds);
-            ArchiveState("received new dronespec from our peer.");
-        } else if (!mid.isEmpty() && !mid.equals(rid) && !mid.equals(ds.getMappedId())) {
-            CTDebug(TAG, "SetDroneSpecOwner(): changing mappedId for '" + rid + "' to '" + mid + "'");
-            ds.setMappedId(mid);
-        }
-        ds.setMyR2cOwner(owner);
-        dsIn.setMyR2cOwner(owner);
-    }
-
-    public static void RemoveDroneSpecOwner(@NonNull CtDroneSpec dsIn) {
-        String rid = dsIn.getRemoteId();
-        CtDroneSpec ds = GetDroneSpec(rid);
-        if (null != ds) ds.removeMyR2cOwner();
-    }
     private static final Handler MainHandler = new Handler(Looper.getMainLooper());
 
     private static void UpdateDroneSpecs() {
@@ -705,7 +673,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 "ffmpeg_bridge",
                 "MainScreen",
                 "MediaMTXService",
-                "R2CPeer",
+                "R2CMqttManager",
                 "R2CView",
                 "R2CViewModel",
                 "RidIconLatency",
@@ -721,8 +689,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 "MapCacheDEM",
                 "MapCacheIcon",
                 "MapCacheStore",
-                "WaypointTrack",
-                "WsPipe"
+                "WaypointTrack"
         );
         DebugTagRegistry.registerTags(builtInTags);
         DebugTagRegistryInitialized = true;
@@ -2455,7 +2422,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 final String header = "########################################################################\n";
                 CTDebug(TAG, String.format(Locale.US,
                         "Logfile is up on %s @%s\n%s#  RID2Caltopo %s(%s) running on Android OS v%s(%d)\n#  Writing logs to: %s\n%s",
-                        R2CActivity.MyDeviceName, R2CPeer.GetMyIpAddresses(), header, appVers,
+                        R2CActivity.MyDeviceName, R2CMqttManager.GetMyIpAddresses(), header, appVers,
                         BuildConfig.BUILD_TIME, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, LogFilePath, header));
             }
 

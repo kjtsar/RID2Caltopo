@@ -186,6 +186,8 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     // QR code scanning in the Join Org dialog (no camera permission required)
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // MQTT peer coordination (replaces WsPipe/VPN-based R2CPeer)
+    implementation(libs.paho.mqtt)
 }
 
 protobuf {

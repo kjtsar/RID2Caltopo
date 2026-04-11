@@ -32,3 +32,6 @@
 # FFmpeg JNI bridge relies on stable class/method names for native callbacks.
 -keep class org.ncssar.rid2caltopo.video.ffmpeg.FfmpegBridge { *; }
 -keep class org.ncssar.rid2caltopo.video.ffmpeg.FfmpegTelemetry { *; }
+
+# Eclipse Paho MQTT client — uses reflection internally; preserve all classes.
+-keep class org.eclipse.paho.** { *; }

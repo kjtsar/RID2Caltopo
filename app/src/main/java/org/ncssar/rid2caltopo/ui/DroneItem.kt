@@ -55,7 +55,7 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
  *   3 bars : rssi ≥ -70 dBm  (good)
  *   2 bars : rssi ≥ -80 dBm  (fair)
  *   1 bar  : rssi ≥ -90 dBm  (poor)
- *   0 bars : rssi == 0        (no RF measurement — NaN / R2C relay)
+ *   0 bars : rssi == 0        (no RF measurement)
  *
  * @param rssi Signal strength in dBm; 0 means "not available".
  */
@@ -310,19 +310,6 @@ fun DroneItem(drone: CtDroneSpec,
             ) {
                 Text(
                     modifier = Modifier.align(Alignment.End),
-                    text = "${drone.getTransportCount(CtDroneSpec.TransportTypeEnum.R2C)}",
-                    textAlign = TextAlign.Right)
-            }
-            Column(
-                modifier = Modifier
-                    .width( 80.dp)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(1.dp)
-                    .fillMaxHeight(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    modifier = Modifier.align(Alignment.End),
                     text = "${totalCount}",
                     textAlign = TextAlign.Right)
             }
@@ -339,23 +326,6 @@ fun DroneItem(drone: CtDroneSpec,
                     text = drone.getDurationInSecAsString(),
                     fontSize=14.sp,
                     textAlign = TextAlign.Right)
-            }
-            Column(
-                modifier = Modifier
-                    .width( 125.dp)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(1.dp)
-                    .fillMaxHeight()
-            ) {
-                val r2cPeer = drone.myR2cOwner
-                val str : String
-                if (null != r2cPeer) {
-                    str = r2cPeer.rttString
-                } else {
-                    str = "n/a"
-                }
-                Text(text = str, modifier=Modifier.align(Alignment.End),
-                    fontSize = 14.sp)
             }
         }
     }

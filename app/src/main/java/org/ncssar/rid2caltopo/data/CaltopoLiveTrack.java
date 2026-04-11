@@ -19,8 +19,6 @@ import java.util.Locale;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
-import static org.ncssar.rid2caltopo.data.R2CPeer.R2CRespEnum.okToPublishLocally;
-import static org.ncssar.rid2caltopo.data.R2CPeer.R2CRespEnum.unknown;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -28,17 +26,11 @@ import androidx.annotation.Nullable;
 import java.util.LinkedList;
 
 /** CaltopoLiveTrack
- * Used to create and report track waypoints to a CaltopoMap.    If there
- * are multiple R2CPeers active, then we need to engage in a bit of arbitration
- * to see who handles new drones as they pop up in our respective zones.   While
- * planners should try to position bridges and their corresponding R2C app devices
- * so that search segments don't overlap much, there is a chance that someone will
- * start a drone somewhere that is detectable by more than one R2C app instance.
- * When that happens,  both will attempt to adopt the drone with "add-drone"
- * messages to their peers containing the lat, lng, and timestamp of the first
- * message they received from the new drone and if they both saw the same RID
- * packet, they will compute their respective distances from the drone before
- * deciding who gets to add the drone.
+ * Creates and reports track waypoints to a CaltopoMap.  When multiple R2C
+ * instances are connected to the same map, ownership is coordinated via
+ * R2CMqttManager: only the owning instance publishes waypoints to CalTopo.
+ * Ownership is assigned by MQTT-based score (proximity + CalTopo RTT);
+ * this class simply acts on the result via {@link #setLocalOwner}.
  */
 
 public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
@@ -81,8 +73,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     private int linePointsConfirmedCount;
     private String folderId;
     private boolean active;
-    private R2CPeer r2cPeer;  // if we're forwarding to a remote, this is not null
-    private R2CPeer.R2CRespEnum r2cStatus;
+    /** True once R2CMqttManager has confirmed this instance owns this drone. */
+    private boolean localOwner = false;
     private String myRemoteId;
     private CtDroneSpec droneSpec;
     private boolean shuttingDown = false;
@@ -103,19 +95,20 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         active = true;
         this.droneSpec = droneSpec;
         droneSpec.setMyLiveTrack(this);
-        this.r2cStatus = unknown;
+        this.localOwner = false;
 
         linePoints.add(new QueuedPoint(lat, lng, ele, droneTimestampInMsec, droneSpec.getLastPositionTelemetry()));
         notifyLocalTrackPoint(lat, lng, ele, droneTimestampInMsec);
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
 
         if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
-        this.r2cStatus = R2CPeer.StatusForNewRemoteId(this, droneSpec);
-        startNewTrack();
+
+        // Ask R2CMqttManager to determine ownership.  It will call setLocalOwner()
+        // (possibly after a brief discovery window) when a decision is reached.
+        double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
+        R2CMqttManager.onLiveTrackCreated(this, droneSpec, distMeters, droneTimestampInMsec);
     }
 
-    /*
-     */
     public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec) {
         if (shuttingDown) return;
 
@@ -123,41 +116,29 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         notifyLocalTrackPoint(lat, lng, ele, droneTimestampInMsec);
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
         startLiveTrackOp = null;
-        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) {
-            r2cStatus = unknown;
-            return;
-        }
-        r2cStatus = R2CPeer.StatusForNewRemoteId(this, droneSpec);
-        switch (r2cStatus) {
-            case forwardToPeer: {
-                r2cPeer = R2CPeer.PeerForRemoteId(myRemoteId);
-                if (null == r2cPeer) {
-                    CTError(TAG, "startNewTrack(): no peer to forward to - ignoring.");
-                }
-                break;
-            }
-            case okToPublishLocally: {
-                startNewTrack();
-            }
-        }
+        localOwner = false;
+
+        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
+
+        double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
+        R2CMqttManager.onLiveTrackCreated(this, droneSpec, distMeters, droneTimestampInMsec);
     }
 
     public void mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus mapStatusIn,
                                 @Nullable CaltopoNode.MapNode map, @Nullable String emsg) {
         mapStatus = mapStatusIn;
-        CTDebug(TAG, String.format(Locale.US, "mapStatusUpdate(%s) %s is %s.  LiveTrack status is:%s",
-                droneSpec.trackLabel(), CaltopoMap.GetMapId(), mapStatus, r2cStatus));
+        CTDebug(TAG, String.format(Locale.US, "mapStatusUpdate(%s) %s is %s.  localOwner:%s",
+                droneSpec.trackLabel(), CaltopoMap.GetMapId(), mapStatus, localOwner));
         switch (mapStatusIn) {
-            case credentialsVerified: // treat the same.
-            case connecting:  {
+            case credentialsVerified:
+            case connecting: {
                 shuttingDown = false;
                 active = true;
                 break;
             }
             case up: {
                 folderId = CaltopoMap.GetFolderId();
-                break; // FIXME: proactively find out if it's ok to start publishing
-                //        instead of waiting for next waypoint to come in.
+                break;
             }
             case down: {
                 break;
@@ -166,7 +147,23 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     public boolean publishingLocally() {
-        return (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up && r2cStatus == okToPublishLocally);
+        return (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up && localOwner);
+    }
+
+    /**
+     * Called by R2CMqttManager when ownership is granted or revoked.
+     * Gaining ownership starts a new CalTopo livetrack segment for this drone.
+     * Losing ownership stops publication immediately.
+     */
+    public void setLocalOwner(boolean isOwner) {
+        if (shuttingDown) return;
+        CTDebug(TAG, String.format(Locale.US,
+                "setLocalOwner(%s): %s → %s", droneSpec.trackLabel(), localOwner, isOwner));
+        boolean wasOwner = localOwner;
+        localOwner = isOwner;
+        if (isOwner && !wasOwner && mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
+            startNewTrack();
+        }
     }
 
     /* Return -1 if no corresponding point */
@@ -213,13 +210,13 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         if (active && null != liveTrackId) try {
             CTDebug(TAG, String.format(Locale.US, "shutdown(%d). Terminating '%s'",
                     maxWaitInMilliseconds, droneSpec.trackLabel()));
-            if (r2cStatus == okToPublishLocally) R2CPeer.SendDropDrone(myRemoteId);
+            if (localOwner) R2CMqttManager.onDroneLost(myRemoteId);
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(maxWaitInMilliseconds);
         } catch (Exception e) {
             CTError(TAG, String.format(Locale.US, "shutdown(%s) failed:", droneSpec.trackLabel()), e);
         }
-        r2cStatus = unknown;
+        localOwner = false;
         active = false;
     }
 
@@ -247,10 +244,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     /**  Archive this track segment on Caltopo if we're the owner.
      */
-    public void archiveTrackOnCaltopo( long maxWaitInMilliseconds) {
-        if (r2cStatus != okToPublishLocally) {
-            // We aren't responsible for writing this drone's tracks to caltopo
-            CTDebug(TAG, "archiveTrackOnCaltopo(): attempt to archive a track that is owned by a remote R2C ignored.");
+    public void archiveTrackOnCaltopo(long maxWaitInMilliseconds) {
+        if (!localOwner) {
+            CTDebug(TAG, "archiveTrackOnCaltopo(): not the owner — skipping.");
             resetLiveTrack();
             return;
         }
@@ -355,7 +351,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     private void startNewTrack() {
-        if (null == startLiveTrackOp && okToPublishLocally == r2cStatus) {
+        if (null == startLiveTrackOp && localOwner) {
             liveTrackId = null;
             linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
             active = true;
@@ -374,12 +370,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     public void finishTrack(@NonNull String reason) {
-        if (r2cStatus == okToPublishLocally) R2CPeer.SendDropDrone(myRemoteId);
+        if (localOwner) R2CMqttManager.onDroneLost(myRemoteId);
         if (active && null != liveTrackId) try {
             CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(0);
-            r2cStatus = unknown;
+            localOwner = false;
             active = false;
         } catch (Exception e) {
             CTError(TAG, String.format(Locale.US, "finishTrack(%s) '%s' failed:", droneSpec.trackLabel(), reason), e);
@@ -388,54 +384,16 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
     public boolean isActive() {return active; }
 
+    /** Re-register all active live tracks with R2CMqttManager after a map reconnect. */
     public static void ReevalUnknownAndPendingTracks() {
         for (CaltopoLiveTrack liveTrack : LiveTrackByRemoteId.values()) {
-            CtDroneSpec ds = liveTrack.droneSpec;
-            liveTrack.r2cStatus = R2CPeer.StatusForNewRemoteId(liveTrack, ds);
-        }
-    }
-
-    public void updateStatus(R2CPeer.R2CRespEnum status) {
-        if (shuttingDown) return;
-        CTDebug(TAG, String.format(Locale.US,
-                "updateStatus() - changing from '%s' to '%s'", r2cStatus.toString(), status.toString()));
-        r2cStatus = status;
-        if (status == R2CPeer.R2CRespEnum.reevaluate) {
-            reevaluate();
-            CTDebug(TAG, "updateStatus() - reevaluate changed status to: " + r2cStatus.toString());
-        }
-        switch (r2cStatus) {
-            case forwardToPeer: r2cPeer = R2CPeer.PeerForRemoteId(myRemoteId); break;
-            case okToPublishLocally: startNewTrack(); break;
-        }
-    }
-
-    /** reevaluate()
-     * This gets invoked by an R2C instance when a peer releases ownership of this drone.
-     * That can happen when the R2C instance shuts down or when it hasn't seen the drone
-     * in newtrackdelayinseconds.
-     */
-    private void reevaluate() {
-        r2cPeer = null;
-        if (active) {
-            // FIXME: Only want to follow this path if we've seen recent points, otherwise let it be.
-            long minAge = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000);
-
-            while (!linePoints.isEmpty()) {
-                QueuedPoint point = linePoints.getFirst();
-                if (point.timestampMsec <= minAge) {
-                    linePoints.removeFirst();
-                } else break;
+            if (!liveTrack.localOwner) {
+                double dist = CaltopoMap.DistanceFromMeInMeters(
+                        liveTrack.droneSpec.lastLat, liveTrack.droneSpec.lastLng);
+                long fts = liveTrack.getFirstTimestamp();
+                R2CMqttManager.onLiveTrackCreated(liveTrack, liveTrack.droneSpec, dist, fts);
             }
-            linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
-            if (linePoints.size() > 1) {
-                r2cStatus = R2CPeer.StatusForNewRemoteId(this, droneSpec);
-                CTDebug(TAG, "reevaluate(): " + r2cStatus.toString());
-                return;
-            }
-            active = false; // no current waypoints
         }
-        r2cStatus = unknown;
     }
 
     private void startLiveTrackComplete(CaltopoOp op) {
@@ -461,30 +419,21 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         linePoints.add(new QueuedPoint(lat, lng, (double)altitudeInMeters, droneTimestampInMillisec, droneSpec.getLastPositionTelemetry()));
         notifyLocalTrackPoint(lat, lng, altitudeInMeters, droneTimestampInMillisec);
         CTDebug(TAG, String.format(Locale.US,
-                "publishDirect(%s/%s/%s): added waypoint to queue. size is %d, sent count is %d, confirm count is %d and consecutive errors is %d",
-                droneSpec.trackLabel(), r2cStatus.toString(), mapStatus.toString(), linePoints.size(),
+                "publishDirect(%s/localOwner=%s/%s): waypoint queued. size=%d sent=%d confirmed=%d errors=%d",
+                droneSpec.trackLabel(), localOwner, mapStatus.toString(), linePoints.size(),
                 linePointsSentCount, linePointsConfirmedCount, consecutiveUpdateFails));
+
+        // Inform R2CMqttManager about the new observation (for score updates)
+        double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
+        R2CMqttManager.onWaypointReceived(myRemoteId, lat, lng, (double)altitudeInMeters, distMeters);
+
         if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
-        switch (r2cStatus) {
-            case forwardToPeer: {
-                if (null == r2cPeer) r2cPeer = R2CPeer.PeerForRemoteId(myRemoteId);
-                if (null != r2cPeer) {
-                    r2cPeer.reportSeen(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMillisec);
-                } else {
-                    CTError(TAG, "publishDirect(): no peer to forward to.");
-                }
-                return;
-            }
-            case pending:break;
-            case unknown: {
-                this.r2cStatus = R2CPeer.StatusForNewRemoteId(this, droneSpec);
-                if (okToPublishLocally != this.r2cStatus) break;
-            }
-            case okToPublishLocally: {
-                if (null != liveTrackId) forwardNextWaypoints(null);
-                else if (null == startLiveTrackOp) startNewTrack();
-            }
+        if (!localOwner) {
+            // Not the owner — R2CMqttManager will call setLocalOwner(true) if we should own it.
+            return;
         }
+        if (null != liveTrackId) forwardNextWaypoints(null);
+        else if (null == startLiveTrackOp) startNewTrack();
     }
 
     /** forwardNextWaypoints():
@@ -497,7 +446,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         }
         if (null != lastOp && lastOp.isDone()) {
             linePointsConfirmedCount++;
-            CaltopoRttInMsec.next(lastOp.roundTripTimeInMsec());
+            long rtt = lastOp.roundTripTimeInMsec();
+            CaltopoRttInMsec.next(rtt);
+            R2CMqttManager.updateCaltopoRtt(rtt);
             if (lastOp.fail()) {
                 consecutiveUpdateFails++;
                 CTError(TAG, "forwardNextWaypoints(): addLiveTrackPoint failed: " + lastOp.response);

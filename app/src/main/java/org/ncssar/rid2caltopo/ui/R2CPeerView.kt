@@ -247,15 +247,6 @@ fun RestRidmapHeader() {
                 )
                 Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
-                    text = "R2C:",
-                    modifier = Modifier
-                        .width(80.dp)
-                        .height(25.dp)
-                        .background(MaterialTheme.colorScheme.surface),
-                    textAlign = TextAlign.Right,
-                    fontSize = 18.sp
-                )
-                Text(
                     text = "Total:",
                     modifier = Modifier
                         .width(80.dp)
@@ -299,7 +290,7 @@ fun RestRidmapHeader() {
                     .background(MaterialTheme.colorScheme.surface)
             )
             Text(
-                text = "R2C RTT:",
+                text = "CT RTT:",
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(25.dp)

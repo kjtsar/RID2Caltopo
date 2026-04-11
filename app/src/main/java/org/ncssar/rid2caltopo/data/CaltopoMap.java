@@ -55,7 +55,7 @@ import java.util.UUID;
  *     connectivity?  Maybe a slider in the settings panel that says "ignore
  *     peers" or some such and just deal with the duplicated track points...
  */
-public class CaltopoMap implements R2CPeer.R2CListener {
+public class CaltopoMap {
     public interface MapStatusListener {
         enum mapStatus {
             down,
@@ -91,20 +91,18 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             new CtLineProperty(2, 0.5F, "#ff00ff", "solid");
     private static final int MAX_MAP_STARTUP_DELAY_IN_SECONDS = 45;
 
-    // my peers by UUID:
-    private static final Hashtable<String, R2CPeer>PeerIdMap = new Hashtable<>(16);
+    // my peers by GUID (MQTT-based):
+    private static final Hashtable<String, R2CMqttManager.PeerState> PeerIdMap = new Hashtable<>(16);
 
     // poll the map to see if there are any new r2c peers or user has changed one of our track labels
     private static final DelayedExec MapCheckerDelay = new DelayedExec();
     private static String FolderId;
-    private static CaltopoOp MyMarkerOp;
     private static String ArchiveFolderId;
     private static CaltopoNode.MapNode MapNode;
     private static String FolderName;
     private static MapStatusListener.mapStatus MapStatus = MapStatusListener.mapStatus.down;
     private static int WaitForGpsAccuracy;
     private static boolean UsePeersFlag;
-    private static JSONArray R2cPeers; // list of r2cPeerSpecs for peers listed on our map.
     private static long LastMapSync;
 
     // liveTracks that we are writing into the map keyed by their map ID:
@@ -190,7 +188,6 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         VerifyTimer.start(CaltopoMap::VerifyTimeout, VERIFY_TIMEOUT_MS, 0);
         CaltopoSession.VerifyAccount(CaltopoMap::SessionVerifyCallback);
         UsePeersFlag = CaltopoClient.GetUsePeersFlag();
-        if (UsePeersFlag) R2CPeer.Init();
         FolderName = CaltopoClient.GetTrackFolderName();
         if (FolderName.isEmpty()) FolderName = "DroneTracks";
         if (null == MyUUID) GetMyUUID();
@@ -402,27 +399,6 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                 MyLocationOverride.getLatitude(), MyLocationOverride.getLongitude(), MyLocationOverride.getAccuracy()));
     }
 
-    /**
-     *  Asynch feedback from peer that the connection to a peer was either successful or failed.
-     *
-     */
-    public void peerStatusChange(R2CPeer peer, r2cState state) {
-        CTDebug(TAG, String.format(Locale.US,
-                "Received peerStatusChange(%s) from %s.", state, peer.getPeerName()));
-
-        if (state == r2cState.up) {
-            AddPeer(peer);
-        } else {
-            RemovePeer(peer, state);
-            if (r2cState.failed == state) {
-                // FIXME: Couldn't make contact with specified peer.   If it's marker hasn't
-                //  been updated in a while, we should probably archive/remove it.
-            }
-        }
-        //  any LiveTracks that might have popped up while we were bringing up the map.
-        CaltopoLiveTrack.ReevalUnknownAndPendingTracks();
-    }
-
     @NonNull
     public static String GetMyUUID() {
         if (null != MyUUID) return MyUUID;
@@ -448,41 +424,17 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         MapCheckerDelay.stop();
         resetArtifactStore("ResetMapConnection");
         long startTime = System.currentTimeMillis();
-        CaltopoOp deleteOp = null;
-        if (UsePeersFlag) {
-            deleteOp = CaltopoSession.DeleteMarkerWithId(MyUUID, null);
-        }
         for (CaltopoLiveTrack track : LiveTracksById.values()) {
             track.shutdown(maxWaitInMilliseconds);
             if (0 != maxWaitInMilliseconds)
                 maxWaitInMilliseconds = (maxWaitInMilliseconds - (System.currentTimeMillis() - startTime));
         }
         LiveTracksById.clear();
-        if (UsePeersFlag) {
-            ArrayList<R2CPeer> peers = new ArrayList<>(PeerIdMap.size());
-            peers.addAll(PeerIdMap.values());
-            for (R2CPeer peer : peers) {
-                CTDebug(TAG, String.format(Locale.US,
-                        "resetMapConnection(%d) shutting down connection to %s due to map closure.",
-                        maxWaitInMilliseconds, peer.getPeerName()));
-                peer.shutdown(R2CPeer.R2CListener.r2cState.down);
-            }
-        }
+        R2CMqttManager.shutdown();
         PeerIdMap.clear();
         FolderId = null;
         ArchiveFolderId = null;
         LastErrorString = null;
-        if (UsePeersFlag && null != deleteOp) {
-            if (maxWaitInMilliseconds > 0) {
-                try {
-                    deleteOp.syncOp(maxWaitInMilliseconds + 250);
-                } catch (Exception e) {
-                    CTWarn(TAG, String.format(Locale.US,
-                            "resetMapConnection(%d): my marker delete raised:",
-                            maxWaitInMilliseconds), e);
-                }
-            }
-        }
     }
 
     @NonNull
@@ -563,23 +515,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                     ignoreCount++;
                 }
             } else if ("Marker".equals(classString)) {
-                if (!UsePeersFlag || MyUUID.equals(idString) || PeerIdMap.containsKey(idString)) continue;
-                String ipAddrsString = prop.optString("r2c-ipaddrs");
-                if (!ipAddrsString.isEmpty()) {
-                    newCount++;
-                    CTDebug(TAG, "parseMapUpdate(): found new peer: " + feature);
-                    JSONObject peerMarkerSpec;
-                    try {
-                        JSONArray ipAddrsObj = new JSONArray(ipAddrsString);
-                        peerMarkerSpec = ParseR2cMarker(ipAddrsObj, feature, prop);
-                        R2CPeer peer = R2CPeer.PeerForRemoteR2c(peerMarkerSpec, MyInstance);
-                        AddPeer(peer);
-                    } catch (Exception e) {
-                        CTError(TAG, "Error parsing ipaddrstring", e);
-                    }
-                } else {
-                    CTDebug(TAG, "parseMapUpdate(): ignoring non-R2C marker in our folder:\n" + feature);
-                }
+                CTDebug(TAG, "parseMapUpdate(): ignoring marker (peer discovery is MQTT-based now): " + idString);
+                ignoreCount++;
             }
         }
         if (newCount > 0 || ignoreCount > 0) {
@@ -664,7 +601,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                     "parseMap() '%s' folder not found - creating...", FolderName));
             CaltopoSession.AddFolder(FolderName, true, true, CaltopoMap::CreateTrackDirFinished);
         }
-        if (UsePeersFlag) FindR2cPeers(markerFeatures);
+        // Peer discovery is now MQTT-based; no marker scanning needed.
 
         if (null == ArchiveFolderId) {
             CTInfo(TAG, String.format(Locale.US,
@@ -768,6 +705,15 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(MapStatus, MapNode, optEmsg);
         }
         if (mapStatus == MapStatusListener.mapStatus.up) {
+            if (UsePeersFlag && MapNode != null) {
+                // Start MQTT-based peer coordination for this map.
+                // Credentials are derived automatically from the mapId — no extra config needed.
+                R2CMqttManager.init(MapNode.getId(), GetMyUUID(),
+                        R2CActivity.MyDeviceName, null);
+                R2CMqttManager.updateMyPosition(
+                        MyLocation != null ? MyLocation.getLatitude()  : 0,
+                        MyLocation != null ? MyLocation.getLongitude() : 0);
+            }
             while (!RogueFeaturesPendingDeletes.isEmpty()) {
                 JSONObject feature = RogueFeaturesPendingDeletes.remove(0);
                 JSONObject prop = feature.optJSONObject("properties");
@@ -822,6 +768,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         }
     }
 
+    // ParseR2cMarker is retained for backward-compat map parsing but no longer creates peer connections.
     private static JSONObject ParseR2cMarker(JSONArray ipAddrsObj, JSONObject feature, JSONObject prop) throws JSONException {
         JSONObject marker = new JSONObject();
         marker.put("ipaddrs", ipAddrsObj);
@@ -840,50 +787,10 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     }
 
 
-    /* Returns null if the map isn't up and/or the track folder isn't yet known,
-     * otherwise returns an array of any host entries that were found, each of the form:
-     *   {
-     *      ipaddrs: [{"ipaddr":"<ipaddr1>","intf":"<intf>"},...],
-     *      name: <deviceName>,
-     *      lat: <lat>,
-     *      lng: <lng>,
-     *      id: <marker_uuid>
-     *   }
-     */
+    // FindR2cPeers is no longer called — peer discovery is MQTT-based.
+    @SuppressWarnings("unused")
     public static void FindR2cPeers(@NonNull JSONArray markerFeatures) {
-        R2cPeers = new JSONArray();
-        try {
-            for (int i = 0; i < markerFeatures.length(); i++) {
-                JSONObject feature = markerFeatures.optJSONObject(i);
-                JSONObject prop = feature.optJSONObject("properties");
-                if (null == prop) continue;
-                String featureFolderId = prop.optString("folderId");
-                if (featureFolderId.equals(FolderId)) {
-                    String ipAddrsString = prop.optString("r2c-ipaddrs");
-                    if (!ipAddrsString.isEmpty()) {
-                        long peerUpdateTimestamp = prop.optLong("updated", 0);
-                        if (peerUpdateTimestamp > 0) {
-                            long ageInMsecs = System.currentTimeMillis() - peerUpdateTimestamp;
-                            if (ageInMsecs > 2.0*RepeatMapUpdateTimeInSeconds*1000) {
-                                CTWarn(TAG, String.format(Locale.US,
-                                        "Found %s old stale peer marker in our folder - removing: %s",
-                                        DurationAsString(ageInMsecs), feature));
-                                CaltopoSession.DeleteMarkerWithId(feature.optString("id"), null);
-                                continue;
-                            }
-                        }
-                        JSONArray ipAddrsObj = new JSONArray(ipAddrsString);
-                        R2cPeers.put(ParseR2cMarker(ipAddrsObj, feature, prop));
-                    } else {
-                        CTDebug(TAG, "Ignoring non-R2C marker in our folder:\n" + feature.toString(4));
-                    }
-                }
-            }
-            CTDebug(TAG, "getR2cPeer() found peers: " + R2cPeers.toString(4));
-        } catch (Exception e) {
-            CTError(TAG, "getR2cPeers(): Error parsing map.", e);
-        }
-        ProcessPeerList();
+        CTDebug(TAG, "FindR2cPeers(): no-op (MQTT-based peer discovery active).");
     }
 
     /** UpdateMyLocation()
@@ -913,28 +820,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
                     MyLocation.getLatitude(), MyLocation.getLongitude(), MyLocation.getAccuracy(),
                     distanceInMeters));
             MyLocation = location;
-            if (UsePeersFlag) UpdateMyMarker(null);
-        }
-    }
-
-    /* Could not establish a connection to the specified peer or it
-     * stopped responding or it sent a message saying it was going away.
-     * We need to remove it's marker from our map if we couldn't connect.
-     */
-    public static void RemovePeer(@NonNull R2CPeer peer, r2cState state) {
-        String idString = peer.getRemoteUUID();
-        R2CPeer mappedPeer = PeerIdMap.remove(idString);
-        if (null != mappedPeer) {
-            String mapId = GetMapId();
-            CTDebug(TAG, String.format(Locale.US, "Removed R2C peer '%s' from map '%s'",
-                    peer.getPeerName(), mapId ));
-            if (state == r2cState.failed) {
-                // FIXME: is this just a networking problem?   Maybe we should check the age of the artifacts
-                //  in our directory and use that to decide if the peer is really not home or if we just have
-                //  network connectivity problem.... I don't like deleting other people's stuff.
-                CTDebug(TAG, String.format(Locale.US, "Removing %s peer from %s", mappedPeer.getPeerName(), mapId));
-                CaltopoSession.DeleteMarkerWithId(mappedPeer.getRemoteUUID(), null);
-            }
+            R2CMqttManager.updateMyPosition(location.getLatitude(), location.getLongitude());
         }
     }
 
@@ -943,166 +829,8 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         return (null != LastErrorString) ? LastErrorString : "";
     }
 
-    static void AddPeer(@NonNull R2CPeer peer) {
-        String idString = peer.getRemoteUUID();
-        if (!PeerIdMap.containsKey(idString)) {
-            CTDebug(TAG, "Adding R2C peer to our map: " + idString);
-            PeerIdMap.put(idString, peer);
-        }
-    }
-
     @NonNull public static String GetMapName() {
         return (MapNode != null) ? MapNode.getTitle() : "";
-    }
-    private static void ProcessPeerList() {
-        JSONObject myMarker = null;
-        JSONArray myIpAddresses = R2CPeer.GetMyIpAddresses();
-        double accuracyInMeters;
-
-        if (null == FolderId || null == ArchiveFolderId) {
-            CTDebug(TAG, "processPeerList(): waiting for map processing to complete...");
-            DelayedExec.RunAfterDelayInMsec(CaltopoMap::ProcessPeerList, 500);
-            return;
-        }
-        if (0 == myIpAddresses.length() && WaitForGpsAccuracy++ < 5) {
-            CTDebug(TAG, "ProcessPeerList(): waiting for internet connectivity...");
-            DelayedExec.RunAfterDelayInMsec(CaltopoMap::ProcessPeerList, 500);
-            return;
-        }
-        Location currentLocation = GetMyLocation();
-        if (null == currentLocation && WaitForGpsAccuracy++ < MAX_MAP_STARTUP_DELAY_IN_SECONDS) {
-            CTDebug(TAG, "ProcessPeerList(): No Location yet...retrying");
-            DelayedExec.RunAfterDelayInMsec(CaltopoMap::ProcessPeerList, 1000);
-            WaitForGpsAccuracy++;
-            return;
-        }
-        if (null != currentLocation) {
-            accuracyInMeters = currentLocation.getAccuracy();
-            CTDebug(TAG, String.format(Locale.US, "ProcessPeerList(): My location is %.7f,%.7f w/in %.3f meters. My UUID is %s",
-                    currentLocation.getLatitude(), currentLocation.getLongitude(), accuracyInMeters, null == MyUUID ? "unknown":"good"));
-        } else {
-            CTWarn(TAG, "ProcessPeerList(): bad/no gps - I have no idea where I am.");
-        }
-
-        // look for my Marker in the list of peers and fire-off peer connections for the others:
-        for (int i=0; i<R2cPeers.length(); i++) {
-            JSONObject peer = R2cPeers.optJSONObject(i);
-            String peerUUID = peer.optString("id");
-            if (peerUUID.equals(MyUUID)) {
-                myMarker = peer;
-                CTDebug(TAG, "Found marker with my UUID: " + MyUUID);
-            } else {
-                PeerIdMap.put(peerUUID, R2CPeer.PeerForRemoteR2c(peer, MyInstance));
-            }
-        }
-
-        long timeNowInMilliseconds = System.currentTimeMillis();
-        String timeString = String.valueOf(timeNowInMilliseconds);
-        if (null != myMarker) {
-            // Not a clean shutdown previously - this can happen when app is terminated while internet is down.
-            JSONObject updateFeature = myMarker.optJSONObject("feature");
-            UpdateMyMarker(updateFeature);
-
-        } else { // we get to create our marker from scratch - yipee!
-            CTDebug(TAG, String.format(Locale.US,
-                    "Didn't find our existing marker in %d peers, so adding a new one:", R2cPeers.length()));
-            JSONObject prop = new JSONObject();
-            try {
-                String myAddrs = myIpAddresses.toString();
-                prop.put("updated", timeString);
-                prop.put("-updated-on", timeString);
-                prop.put("r2c-ipaddrs", myAddrs);
-                prop.put("r2c-name", R2CActivity.MyDeviceName);
-                prop.put("marker-color", "#0000FF");
-                if (!myAddrs.contains("tun")) prop.put("description", myAddrs);
-            } catch (Exception e) {
-                CTError(TAG, "put() raised.", e);
-            }
-            if (null != currentLocation) {
-                MyMarkerOp = CaltopoSession.AddMarker(currentLocation.getLatitude(), currentLocation.getLongitude(),
-                        "R2C: " + R2CActivity.MyDeviceName, "radiotower", FolderId, MyUUID, prop, CaltopoMap::MyMarkerCompleted);
-            }
-        }
-        if (!MapCheckerDelay.isRunning()) {
-            CTDebug(TAG, "processPeerList(): starting map checker delay...");
-            MapCheckerDelay.start(
-                    CaltopoMap::PollMapUpdates,
-                    FirstMapUpdateTimeInSeconds * 1000,
-                    RepeatMapUpdateTimeInSeconds * 1000
-            );
-        }
-    }
-
-    private static void MyMarkerCompleted(CaltopoOp lMyMarkerOp) {
-        if (!lMyMarkerOp.isDone() || lMyMarkerOp.fail()) {
-            CTError(TAG, "myMarkerCompleted(): Not able to create marker: " + lMyMarkerOp.response);
-        } else {
-            CTDebug(TAG, "myMarkerCompleted(): marker added.");
-        }
-    }
-
-    /**  updateMyMarker()
-     *    Called whenever our location has changed as well as periodically, just to
-     *    update our marker's timestamp to make sure peers know we're "not dead yet".
-     * @param feature if non-null, then we are in startup and found our
-     *                existing marker on the map.  In this case, just update.
-     *                if null, then called during periodic poll to see if
-     *                we need to update our marker location.
-     */
-    private static void UpdateMyMarker(@Nullable JSONObject feature) {
-        if (null == feature) {
-            if (null == MyMarkerOp || !MyMarkerOp.isDone() || !MyMarkerOp.success()) return;
-            feature = MyMarkerOp.getResponse();
-            if (null == feature) {
-                CTDebug(TAG, "updateMyMarker(): missing marker feature.");
-                return;
-            }
-        }
-
-        if (GetMapId().isEmpty()) {
-            CTDebug(TAG, "UpdateMyMarker(): Ignoring spurious update w/o map.");
-            return;
-        }
-
-        JSONObject geometry = feature.optJSONObject("geometry");
-        Location currentLocation = GetMyLocation();
-        if (null != currentLocation) try {
-            JSONArray coordinates;
-            if (null == geometry) {
-                geometry = new JSONObject();
-                coordinates = new JSONArray();
-                geometry.put("coordinates", coordinates);
-                feature.put("geometry", geometry);
-            } else {
-                coordinates = geometry.optJSONArray("coordinates");
-                if (null == coordinates) {
-                    coordinates = new JSONArray();
-                    geometry.put("coordinates", coordinates);
-                }
-            }
-            coordinates.put(0, currentLocation.getLongitude());
-            coordinates.put(1, currentLocation.getLatitude());
-        } catch (Exception e) {
-            CTError(TAG, "updateMyMarker() raised. ", e);
-        }
-        try {
-            JSONObject prop = feature.optJSONObject("properties");
-            if (null == prop) {
-                prop = new JSONObject();
-                feature.put("properties", prop);
-            }
-            long timeNowInMilliseconds = System.currentTimeMillis();
-            String timeString = String.valueOf(timeNowInMilliseconds);
-            if (UsePeersFlag && (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelError))
-                prop.put("description", R2cPeerConnectionStats());
-            else
-                prop.put("description", "");
-            prop.put("updated", timeString);
-            prop.put("-updated-on", timeString);
-            CaltopoSession.EditObjectWithId("Marker", MyUUID, feature, null);
-        } catch (Exception e) {
-            CTError(TAG, "updateMyMarker() raised.", e);
-        }
     }
 
     @NonNull
@@ -1110,16 +838,15 @@ public class CaltopoMap implements R2CPeer.R2CListener {
         if (CaltopoClient.DebugLevel < CaltopoClient.DebugLevelDebug) return "";
 
         StringBuilder builder = new StringBuilder();
-        for (R2CPeer r2cPeer : R2CPeer.GetCloneOfPeerHashtable().values()) {
-            String peerName = r2cPeer.getPeerName();
-            builder.append(peerName)
-                    .append(":")
-                    .append(r2cPeer.stats())
+        for (R2CMqttManager.PeerState ps : R2CMqttManager.GetPeerList()) {
+            builder.append(ps.name)
+                    .append(": ctRtt=").append(ps.caltopoRttMs).append("ms")
+                    .append(ps.online ? "" : " [offline]")
                     .append("\n");
         }
 
-        if (builder.isEmpty()) { // then we're still on our own.  Display our addr's and drones:
-            builder.append(R2CPeer.GetMyIpAddresses().toString());
+        if (builder.isEmpty()) {
+            builder.append(R2CMqttManager.GetMyIpAddresses().toString());
             for (CaltopoLiveTrack liveTrack : LiveTracksById.values()) {
                 if (liveTrack.isActive()) {
                     CtDroneSpec ds = liveTrack.getDroneSpec();
@@ -1243,7 +970,7 @@ public class CaltopoMap implements R2CPeer.R2CListener {
             MapNode = null;
             SessionNodeMap = null;
             SetMapStatus(MapStatusListener.mapStatus.down, "Shutdown in progress.");
-            if (UsePeersFlag) R2CPeer.Shutdown();
+            if (UsePeersFlag) R2CMqttManager.shutdown();
             CaltopoSession.Shutdown();
         } catch (Exception e) {
             CTError(TAG, "Shutdown() raised: ", e);

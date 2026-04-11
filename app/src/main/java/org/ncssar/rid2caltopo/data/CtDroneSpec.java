@@ -65,7 +65,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         BT5,
         WIFI,
         WNAN,
-        R2C,
+        @Deprecated R2C,
         UNKNOWN
     }
 
@@ -104,7 +104,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good packet was received */
     private transient long startMsecTimestamp; /* timestamp carried by the first accepted waypoint in the current flight */
     private transient long mostRecentFlightMsecTimestamp; /* timestamp carried by the most recent accepted waypoint */
-    private transient R2CPeer ownerR2c;
     private transient CtDroneSpecListener myListener;
     private transient CaltopoLiveTrack myLiveTrack;
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
@@ -126,7 +125,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     /**
      * Per-transport RF signal strength in dBm, indexed by {@link TransportTypeEnum#ordinal()}.
-     * 0 = no measurement received yet for that transport (R2C relay never has a real RSSI).
+     * 0 = no measurement received yet for that transport.
      * Updated by {@link #updateLastRssi} on every accepted packet from an RF transport.
      */
     private transient int[] lastRssiByTransport = new int[TransportTypeEnum.values().length];
@@ -350,18 +349,16 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     /**
      * Records the most recent RF signal strength for the given transport.
-     * R2C-relayed packets carry no real RF measurement (rssi == 0) and are ignored.
      *
      * <p>Each transport maintains its own last-seen RSSI so the UI can reflect per-transport
      * signal quality for drones that broadcast over multiple RF interfaces simultaneously
      * (e.g. a DS154 transmitting on both BT4 and BT5).</p>
      *
-     * @param rssi      Signal strength in dBm; 0 means not available (NaN / R2C relay).
+     * @param rssi      Signal strength in dBm; 0 means not available.
      * @param transport Transport type that produced this reading.
      */
     public void updateLastRssi(int rssi, @NonNull TransportTypeEnum transport) {
-        // R2C is a relay protocol — rssi=0 conveys no useful RF measurement.
-        if (transport == TransportTypeEnum.R2C || rssi == 0) return;
+        if (rssi == 0) return;
         if (null == lastRssiByTransport)
             lastRssiByTransport = new int[TransportTypeEnum.values().length];
         lastRssiByTransport[transport.ordinal()] = rssi;
@@ -376,7 +373,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (null == lastRssiByTransport) return 0;
         int best = 0;
         for (TransportTypeEnum t : TransportTypeEnum.values()) {
-            if (t == TransportTypeEnum.R2C || t == TransportTypeEnum.UNKNOWN) continue;
+            if (t == TransportTypeEnum.UNKNOWN) continue;
             int v = lastRssiByTransport[t.ordinal()];
             if (v != 0 && (best == 0 || v > best)) best = v;
         }
@@ -402,7 +399,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         int best = 0;
         TransportTypeEnum bestTransport = TransportTypeEnum.UNKNOWN;
         for (TransportTypeEnum t : TransportTypeEnum.values()) {
-            if (t == TransportTypeEnum.R2C || t == TransportTypeEnum.UNKNOWN) continue;
+            if (t == TransportTypeEnum.UNKNOWN) continue;
             int v = lastRssiByTransport[t.ordinal()];
             if (v != 0 && (best == 0 || v > best)) {
                 best = v;
@@ -500,12 +497,6 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public void setDroneSpecListener(@Nullable CtDroneSpecListener myListener) {
         this.myListener = myListener;
     }
-
-    public void setMyR2cOwner(@NonNull R2CPeer newOwnerR2c) {ownerR2c = newOwnerR2c; okToLog=false;}
-    public void removeMyR2cOwner() {ownerR2c = null;}
-
-    @Nullable
-    public R2CPeer getMyR2cOwner() {return ownerR2c;}
 
     public static long GetInvalidWaypointCount () {return InvalidWaypointCount;}
 
@@ -779,15 +770,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         String newStr = newMappedId.replaceAll(MAPPED_ID_FILTER_REGEX, "");
         if (!newStr.equals(oldMappedId)) {
             mappedId = newStr;
-            if (null != ownerR2c) {
-                CTDebug(TAG, "Forwarding name change to owner R2C to handle...");
-                ownerR2c.updateMappedId(this, newStr);
-            } else {
-                CTDebug(TAG, String.format(Locale.US, "setMappedId() changed from '%s' to '%s', listener:0x%x",
-                        oldMappedId, newStr, System.identityHashCode(myListener)));
-                updateTrackLabel();
-                if (null != myLiveTrack) myLiveTrack.renameTrack();
-            }
+            CTDebug(TAG, String.format(Locale.US, "setMappedId() changed from '%s' to '%s', listener:0x%x",
+                    oldMappedId, newStr, System.identityHashCode(myListener)));
+            updateTrackLabel();
+            if (null != myLiveTrack) myLiveTrack.renameTrack();
             if (null != myListener) {
                 myListener.mappedIdChanged(this, oldMappedId, newStr);
             }

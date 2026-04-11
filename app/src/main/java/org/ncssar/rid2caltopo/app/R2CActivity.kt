@@ -50,7 +50,7 @@ import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.data.OrgConfigToken
 import org.ncssar.rid2caltopo.data.CaltopoMap
-import org.ncssar.rid2caltopo.data.R2CPeer
+import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
@@ -75,7 +75,7 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
+class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener  {
     var locationRequest: LocationRequest? = null
     var locationCallback: LocationCallback? = null
     var mFusedLocationClient: FusedLocationProviderClient? = null
@@ -103,10 +103,10 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         }
     }
 
-    override fun onPeerListChanged(peers: MutableList<R2CPeer>) {
+    override fun onPeerListChanged(peers: List<R2CMqttManager.PeerState>) {
         remoteViewModels.clear()
         remoteViewModels.addAll(peers.map { peer ->
-            ViewModelProvider(this, R2CPeerViewModelFactory(peer)).get(peer.peerName, R2CPeerViewModel::class.java)
+            ViewModelProvider(this, R2CPeerViewModelFactory(peer)).get(peer.guid, R2CPeerViewModel::class.java)
         })
     }
 
@@ -200,7 +200,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         super.onCreate(savedInstanceState)
         CaltopoClient.MarkAppActive()
         CTDebug(TAG, "onCreate().")
-        R2CPeer.SetPeerListChangedListener(this)
+        R2CMqttManager.SetPeerListChangedListener(this)
         val localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
@@ -489,7 +489,7 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
         if (shouldShutdown) {
             try {
                 stopLocationUpdates()
-                R2CPeer.SetPeerListChangedListener(null)
+                R2CMqttManager.SetPeerListChangedListener(null)
                 CTDebug(TAG,"onDestroy() shutting down streaming service..." )
                 val streamServiceIntent = Intent(this, MediaMTXService::class.java)
                 stopService(streamServiceIntent)

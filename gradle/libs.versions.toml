@@ -22,6 +22,7 @@ appauth = "0.11.1"
 playServicesAuth = "21.0.0"
 playServicesLocation = "21.0.0"
 okhttp = "4.12.0"
+pahoMqtt = "1.2.5"
 bouncycastle = "1.70"
 constraintlayout = "2.1.4"
 documentfile = "1.0.1"
@@ -73,6 +74,7 @@ appauth = { group = "net.openid", name = "appauth", version.ref = "appauth" }
 google-play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 google-play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
 squareup-okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+paho-mqtt = { group = "org.eclipse.paho", name = "org.eclipse.paho.client.mqttv3", version.ref = "pahoMqtt" }
 squareup-okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
 squareup-okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }
 bouncycastle-prov = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }

@@ -57,7 +57,7 @@ import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
-import org.ncssar.rid2caltopo.data.R2CPeer
+import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
@@ -435,7 +435,7 @@ private fun EmptyStreamsView(mapStatus: String, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            val myIpAddress: String = R2CPeer.GetMyIpAddress(false)
+            val myIpAddress: String = R2CMqttManager.GetMyIpAddress()
             val ssid = WiFiScanner.WiFiSSID(LocalContext.current)
             Text("Stream video to: 'rtmp://$myIpAddress/<droneDesig>' on $ssid network")
             Text(

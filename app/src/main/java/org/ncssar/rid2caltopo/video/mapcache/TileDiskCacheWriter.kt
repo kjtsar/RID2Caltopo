@@ -149,6 +149,28 @@ class TileDiskCacheWriter(context: Context) : IFilesystemCache {
         return null
     }
 
+    fun readTileBytes(tileSource: ITileSource, mapTileIndex: Long): ByteArray? {
+        for (key in tileKeysForLookup(tileSource, mapTileIndex)) {
+            val cached = diskCache.get(key, countHitMiss = false) ?: continue
+            return cached.bytes
+        }
+        return null
+    }
+
+    fun importTileBytes(
+        tileSource: ITileSource,
+        mapTileIndex: Long,
+        bytes: ByteArray,
+        expirationTimestamp: Long?
+    ): Boolean {
+        return saveFile(
+            tileSource,
+            mapTileIndex,
+            ByteArrayInputStream(bytes),
+            expirationTimestamp
+        )
+    }
+
     fun prewarm() {
         diskCache.prewarm()
     }

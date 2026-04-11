@@ -1,6 +1,8 @@
 package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -48,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Checkbox
@@ -99,6 +102,12 @@ import okhttp3.Call
 import okhttp3.Request
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -131,6 +140,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.notam.NearbyNotam
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamMapOverlayAdapter
@@ -414,6 +424,7 @@ internal fun SplitMapPane(
     val hiddenItemIds = viewModel.hiddenItemIds
     var showBadTilesHowToDialog by remember { mutableStateOf(false) }
     var showOfflinePrepDialog by remember { mutableStateOf(false) }
+    var showMutualAidPackageDialog by remember { mutableStateOf(false) }
     var offlinePrepInFlight by remember { mutableStateOf(false) }
     var offlinePrepPreset by remember { mutableStateOf(OFFLINE_PREP_PRESETS[1]) }
     var offlinePrepIncludeDem by remember { mutableStateOf(true) }
@@ -430,6 +441,22 @@ internal fun SplitMapPane(
     var offlinePrepAutoCloseJob by remember { mutableStateOf<Job?>(null) }
     val offlinePrepActiveCalls = remember { ConcurrentHashMap.newKeySet<Call>() }
     var mapBounds by remember { mutableStateOf<BoundingBox?>(null) }
+    val packageZoneId = remember { ZoneId.systemDefault() }
+    val packageDateFormatter = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd") }
+    val packageTimeFormatter = remember { DateTimeFormatter.ofPattern("HH:mm") }
+    val defaultPackageExpiry = remember {
+        LocalDateTime.ofInstant(
+            Instant.ofEpochMilli(MutualAidProfileManager.defaultExpiryAtNextMidnight()),
+            packageZoneId
+        )
+    }
+    var maPackageDisplayName by remember { mutableStateOf("") }
+    var maPackageIncident by remember { mutableStateOf(CaltopoClient.GetIncident()) }
+    var maPackageOpPeriod by remember { mutableStateOf(CaltopoClient.GetOpPeriod()) }
+    var maPackageMapId by remember { mutableStateOf(CaltopoMap.GetMapId()) }
+    var maPackageMapTitle by remember { mutableStateOf(CaltopoMap.GetMapName()) }
+    var maPackageExpiryDateText by remember { mutableStateOf(defaultPackageExpiry.format(packageDateFormatter)) }
+    var maPackageExpiryTimeText by remember { mutableStateOf(defaultPackageExpiry.format(packageTimeFormatter)) }
     val maximizeThroughputBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
     var predictiveHeadEnabled by remember { mutableStateOf(CaltopoClient.GetPredictiveHeadEnabled()) }
     var autoRemoveBadTiles by remember { mutableStateOf(BadTilePolicy.isAutoRemoveEnabled(context)) }
@@ -800,6 +827,58 @@ internal fun SplitMapPane(
         return when (baseLayer) {
             BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
             BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
+        }
+    }
+
+    fun parseMutualAidPackageExpiry(): Long {
+        return runCatching {
+            val date = LocalDate.parse(maPackageExpiryDateText.trim(), packageDateFormatter)
+            val time = LocalTime.parse(maPackageExpiryTimeText.trim(), packageTimeFormatter)
+            LocalDateTime.of(date, time).atZone(packageZoneId).toInstant().toEpochMilli()
+        }.getOrDefault(0L)
+    }
+
+    val exportMutualAidPackageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val boundary =
+            if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
+            } else {
+                null
+            }
+        val prepBounds = boundary?.bounds ?: mapBounds
+        if (prepBounds == null) {
+            CaltopoClient.ShowToast("Mutual aid package export needs visible map bounds.")
+            return@rememberLauncherForActivityResult
+        }
+        uiScope.launch(Dispatchers.IO) {
+            val packageName = buildString {
+                append(maPackageIncident.ifBlank { "incident" }.replace(' ', '_'))
+                append("_op")
+                append(maPackageOpPeriod.ifBlank { "1" })
+            }
+            val result = MutualAidPackageManager.exportPackage(
+                context = context,
+                destUri = uri,
+                packageName = packageName,
+                displayName = maPackageDisplayName.trim(),
+                incident = maPackageIncident.trim(),
+                opPeriod = maPackageOpPeriod.trim(),
+                targetMapId = maPackageMapId.trim(),
+                targetMapTitle = maPackageMapTitle.trim(),
+                expiresAtEpochMs = parseMutualAidPackageExpiry(),
+                bounds = prepBounds,
+                minZoom = offlinePrepPreset.minZoom,
+                maxZoom = offlinePrepPreset.maxZoom,
+                tileSource = selectedTileSource(),
+                includeDem = offlinePrepIncludeDem,
+                clipBoundary = boundary
+            )
+            withContext(Dispatchers.Main.immediate) {
+                CaltopoClient.ShowToast(result.second)
+            }
         }
     }
 
@@ -2375,6 +2454,117 @@ internal fun SplitMapPane(
             }
         }
 
+        if (showMutualAidPackageDialog) {
+            val parsedExpiry = parseMutualAidPackageExpiry()
+            AlertDialog(
+                onDismissRequest = { showMutualAidPackageDialog = false },
+                title = { Text("Export MA Config") },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            "Specify the incident details and expiry to embed in the exported MA config package.",
+                            fontSize = 12.sp
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text("Source org: ${CaltopoClient.GetMutualAidSourceLabel().ifBlank { "Not configured in ct_mutual_aid_credentials" }}")
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = maPackageDisplayName,
+                            onValueChange = { maPackageDisplayName = it },
+                            label = { Text("Display name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = maPackageIncident,
+                            onValueChange = { maPackageIncident = it },
+                            label = { Text("Incident") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = maPackageOpPeriod,
+                            onValueChange = { maPackageOpPeriod = it },
+                            label = { Text("Op period") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = maPackageMapId,
+                            onValueChange = { maPackageMapId = it },
+                            label = { Text("Map ID") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = maPackageMapTitle,
+                            onValueChange = { maPackageMapTitle = it },
+                            label = { Text("Map title") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = maPackageExpiryDateText,
+                                onValueChange = { maPackageExpiryDateText = it },
+                                label = { Text("Expiry date") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = maPackageExpiryTimeText,
+                                onValueChange = { maPackageExpiryTimeText = it },
+                                label = { Text("Expiry time") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (parsedExpiry <= System.currentTimeMillis()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Expiry must be a future local date/time in yyyy-MM-dd and HH:mm format.",
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = CaltopoClient.GetMutualAidSourceLabel().isNotBlank() &&
+                            maPackageIncident.isNotBlank() &&
+                            maPackageOpPeriod.isNotBlank() &&
+                            maPackageMapId.isNotBlank() &&
+                            parsedExpiry > System.currentTimeMillis(),
+                        onClick = {
+                            showMutualAidPackageDialog = false
+                            val suggestedName = buildString {
+                                append(maPackageIncident.ifBlank { "incident" }.replace(' ', '_'))
+                                append("_op")
+                                append(maPackageOpPeriod.ifBlank { "1" })
+                                append("_mutual_aid_package.zip")
+                            }
+                            exportMutualAidPackageLauncher.launch(suggestedName)
+                        }
+                    ) { Text("Choose File") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showMutualAidPackageDialog = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
         if (showOfflinePrepDialog) {
             val selectedBoundary =
                 if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
@@ -2606,33 +2796,55 @@ internal fun SplitMapPane(
                     }
                 },
                 confirmButton = {
-                    TextButton(
-                        onClick = {
-                            val currentBounds = mapBounds
-                            val boundary =
-                                if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
-                                    offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
-                                } else {
-                                    null
-                                }
-                            val prepBounds = boundary?.bounds ?: currentBounds
-                            if (prepBounds == null) {
-                                CaltopoClient.ShowToast("Offline prep needs visible map bounds.")
-                                return@TextButton
-                            }
-                            if (offlinePrepEstimate.ready) {
-                                val estimateMb = offlinePrepEstimate.estimatedTileCacheMb + offlinePrepEstimate.estimatedDemCacheMb
-                                val estimateBytes = (estimateMb * 1024.0 * 1024.0).toLong()
-                                val available = offlinePrepAvailableBytes
-                                if (available != null && estimateBytes > (available * 95L / 100L)) {
-                                    CaltopoClient.ShowToast("Estimated download exceeds available storage. Pick a smaller area/zoom.")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                if (!CaltopoClient.HasMutualAidTemplate()) {
+                                    CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting MA config.")
                                     return@TextButton
                                 }
-                            }
-                            startOfflinePrep(prepBounds, boundary)
-                        },
-                        enabled = !offlinePrepInFlight && (mapBounds != null || selectedBoundary != null)
-                    ) { Text("Start") }
+                                maPackageIncident = CaltopoClient.GetIncident()
+                                maPackageOpPeriod = CaltopoClient.GetOpPeriod()
+                                maPackageMapId = CaltopoMap.GetMapId()
+                                maPackageMapTitle = CaltopoMap.GetMapName()
+                                val nextMidnight = LocalDateTime.ofInstant(
+                                    Instant.ofEpochMilli(MutualAidProfileManager.defaultExpiryAtNextMidnight()),
+                                    packageZoneId
+                                )
+                                maPackageExpiryDateText = nextMidnight.format(packageDateFormatter)
+                                maPackageExpiryTimeText = nextMidnight.format(packageTimeFormatter)
+                                showMutualAidPackageDialog = true
+                            },
+                            enabled = !offlinePrepInFlight && (mapBounds != null || selectedBoundary != null)
+                        ) { Text("Export MA Config") }
+                        TextButton(
+                            onClick = {
+                                val currentBounds = mapBounds
+                                val boundary =
+                                    if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                                        offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
+                                    } else {
+                                        null
+                                    }
+                                val prepBounds = boundary?.bounds ?: currentBounds
+                                if (prepBounds == null) {
+                                    CaltopoClient.ShowToast("Offline prep needs visible map bounds.")
+                                    return@TextButton
+                                }
+                                if (offlinePrepEstimate.ready) {
+                                    val estimateMb = offlinePrepEstimate.estimatedTileCacheMb + offlinePrepEstimate.estimatedDemCacheMb
+                                    val estimateBytes = (estimateMb * 1024.0 * 1024.0).toLong()
+                                    val available = offlinePrepAvailableBytes
+                                    if (available != null && estimateBytes > (available * 95L / 100L)) {
+                                        CaltopoClient.ShowToast("Estimated download exceeds available storage. Pick a smaller area/zoom.")
+                                        return@TextButton
+                                    }
+                                }
+                                startOfflinePrep(prepBounds, boundary)
+                            },
+                            enabled = !offlinePrepInFlight && (mapBounds != null || selectedBoundary != null)
+                        ) { Text("Start") }
+                    }
                 },
                 dismissButton = {
                     TextButton(

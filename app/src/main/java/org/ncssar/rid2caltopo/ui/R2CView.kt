@@ -11,6 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material3.*
@@ -44,7 +46,10 @@ fun R2CView(
     viewModel: R2CViewModel?,
     drones : List<CtDroneSpec>,
     appUptime : String,
-    onMappedIdChange: (CtDroneSpec, String) -> Unit
+    onMappedIdChange: (CtDroneSpec, String) -> Unit,
+    confirmationState: DroneSpecConfirmationUiState?,
+    onConfirmationChange: (organization: String?, pilotCallsign: String?, droneDescription: String?) -> Unit,
+    onConfirmationSave: () -> Unit
 ) {
     val tag = "R2CView"
     Column {
@@ -62,6 +67,13 @@ fun R2CView(
                     }
                 }
             }
+        }
+        if (confirmationState != null) {
+            DroneSpecConfirmationDialog(
+                state = confirmationState,
+                onFieldChange = onConfirmationChange,
+                onSave = onConfirmationSave
+            )
         }
     }
 }
@@ -313,8 +325,87 @@ fun RidmapHeader() {
 @Composable
 fun R2CViewPreview() {
     RID2CaltopoTheme {
-        R2CView("",  null, emptyList(), "", {} as (CtDroneSpec, String) -> Unit)
+        R2CView(
+            "",
+            null,
+            emptyList(),
+            "",
+            {} as (CtDroneSpec, String) -> Unit,
+            null,
+            { _, _, _ -> },
+            {}
+        )
     }
+}
+
+@Composable
+private fun DroneSpecConfirmationDialog(
+    state: DroneSpecConfirmationUiState,
+    onFieldChange: (organization: String?, pilotCallsign: String?, droneDescription: String?) -> Unit,
+    onSave: () -> Unit
+) {
+    val organization = state.organization.trim()
+    val pilotCallsign = state.pilotCallsign.trim()
+    val droneDescription = state.droneDescription.trim()
+    val saveEnabled = organization.isNotEmpty() && pilotCallsign.isNotEmpty() && droneDescription.isNotEmpty()
+
+    AlertDialog(
+        onDismissRequest = {},
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+        title = { Text("Confirm Drone") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (!state.warning.isNullOrBlank()) {
+                    Text(
+                        text = state.warning,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                OutlinedTextField(
+                    value = state.remoteId,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Remote ID") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = state.organization,
+                    onValueChange = { onFieldChange(it, null, null) },
+                    label = { Text("Organization") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = state.pilotCallsign,
+                    onValueChange = { onFieldChange(null, it, null) },
+                    label = { Text("Pilot Callsign") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = state.droneDescription,
+                    onValueChange = { onFieldChange(null, null, it) },
+                    label = { Text("Drone Description") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onSave,
+                enabled = saveEnabled
+            ) {
+                Text("Save")
+            }
+        }
+    )
 }
 
 @Composable

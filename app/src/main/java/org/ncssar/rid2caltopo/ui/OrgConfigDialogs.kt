@@ -35,6 +35,13 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigToken
 
 // ── QR bitmap helper ──────────────────────────────────────────────────────────
@@ -90,6 +97,13 @@ private sealed class ExportStep {
     data class Error(val message: String) : ExportStep()
 }
 
+private sealed class MutualAidExportStep {
+    object EnterDetails : MutualAidExportStep()
+    object Uploading : MutualAidExportStep()
+    data class ShowQr(val token: String) : MutualAidExportStep()
+    data class Error(val message: String) : MutualAidExportStep()
+}
+
 /**
  * Multi-step dialog shown to the admin for generating a join QR code.
  *
@@ -106,17 +120,12 @@ private sealed class ExportStep {
 @Composable
 fun OrgConfigExportDialog(
     onDismiss: () -> Unit,
-    onUploadRequested: (orgName: String, callback: (Boolean, String, String?) -> Unit) -> Unit
+    sourceOrgName: String,
+    onUploadRequested: (callback: (Boolean, String, String?) -> Unit) -> Unit
 ) {
-    val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
 
     var step by remember { mutableStateOf<ExportStep>(ExportStep.EnterName) }
-    var orgName by remember {
-        mutableStateOf(
-            org.ncssar.rid2caltopo.data.OrgConfigManager.getStoredOrgName(context)
-        )
-    }
 
     AlertDialog(
         onDismissRequest = {
@@ -126,9 +135,9 @@ fun OrgConfigExportDialog(
         title = {
             Text(
                 when (step) {
-                    is ExportStep.EnterName -> "Generate Org Join QR"
+                    is ExportStep.EnterName -> "Export Org Config"
                     is ExportStep.Uploading -> "Uploading…"
-                    is ExportStep.ShowQr   -> "Org Join QR"
+                    is ExportStep.ShowQr   -> "Org Config QR"
                     is ExportStep.Error    -> "Upload Failed"
                 }
             )
@@ -144,20 +153,14 @@ fun OrgConfigExportDialog(
 
                     is ExportStep.EnterName -> {
                         Text(
-                            "Enter your SAR org name. The app will upload your current " +
+                            "The app will upload your current " +
                                 "ridmap and credentials to Google Drive and generate a QR " +
-                                "code team members can scan to receive the config. " +
+                                "code team members can scan to receive the org config. " +
                                 "Credentials are encrypted before upload.",
                             style = MaterialTheme.typography.bodySmall
                         )
                         Spacer(Modifier.height(12.dp))
-                        OutlinedTextField(
-                            value = orgName,
-                            onValueChange = { orgName = it },
-                            label = { Text("Org name (e.g. NCSSAR)") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        Text("Source org: ${sourceOrgName.ifBlank { "Not configured in ct_credentials.json" }}")
                     }
 
                     is ExportStep.Uploading -> {
@@ -170,7 +173,7 @@ fun OrgConfigExportDialog(
                     is ExportStep.ShowQr -> {
                         Text(
                             "Share this QR with your team. Each member scans it once " +
-                                "using Menu → Join Org.",
+                                "using Menu → Import Org.",
                             style = MaterialTheme.typography.bodySmall,
                             textAlign = TextAlign.Center
                         )
@@ -218,10 +221,10 @@ fun OrgConfigExportDialog(
             when (val s = step) {
                 is ExportStep.EnterName -> {
                     TextButton(
-                        enabled = orgName.isNotBlank(),
+                        enabled = sourceOrgName.isNotBlank(),
                         onClick = {
                             step = ExportStep.Uploading
-                            onUploadRequested(orgName.trim()) { success, message, token ->
+                            onUploadRequested { success, message, token ->
                                 step = if (success && token != null) {
                                     ExportStep.ShowQr(token)
                                 } else {
@@ -229,7 +232,7 @@ fun OrgConfigExportDialog(
                                 }
                             }
                         }
-                    ) { Text("Generate") }
+                    ) { Text("Export Org Config") }
                 }
                 is ExportStep.ShowQr, is ExportStep.Error -> {
                     TextButton(onClick = onDismiss) { Text("Done") }
@@ -239,6 +242,216 @@ fun OrgConfigExportDialog(
         },
         dismissButton = {
             if (step !is ExportStep.Uploading) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    )
+}
+
+@Composable
+fun MutualAidExportDialog(
+    defaultIncident: String,
+    defaultOpPeriod: String,
+    defaultMapId: String,
+    defaultMapTitle: String,
+    defaultExpiryAtEpochMs: Long,
+    sourceOrgName: String,
+    onDismiss: () -> Unit,
+    onUploadRequested: (
+        displayName: String,
+        incident: String,
+        opPeriod: String,
+        mapId: String,
+        mapTitle: String,
+        expiresAtEpochMs: Long,
+        callback: (Boolean, String, String?) -> Unit
+    ) -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val zoneId = remember { ZoneId.systemDefault() }
+    val dateFormatter = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd") }
+    val timeFormatter = remember { DateTimeFormatter.ofPattern("HH:mm") }
+    var step by remember { mutableStateOf<MutualAidExportStep>(MutualAidExportStep.EnterDetails) }
+    var displayName by remember { mutableStateOf("") }
+    var incident by remember { mutableStateOf(defaultIncident) }
+    var opPeriod by remember { mutableStateOf(defaultOpPeriod) }
+    var mapId by remember { mutableStateOf(defaultMapId) }
+    var mapTitle by remember { mutableStateOf(defaultMapTitle) }
+    val defaultExpiry = remember(defaultExpiryAtEpochMs) {
+        LocalDateTime.ofInstant(Instant.ofEpochMilli(defaultExpiryAtEpochMs), zoneId)
+    }
+    var expiryDateText by remember { mutableStateOf(defaultExpiry.format(dateFormatter)) }
+    var expiryTimeText by remember { mutableStateOf(defaultExpiry.format(timeFormatter)) }
+
+    AlertDialog(
+        onDismissRequest = {
+            if (step !is MutualAidExportStep.Uploading) onDismiss()
+        },
+        title = {
+            Text(
+                when (step) {
+                    is MutualAidExportStep.EnterDetails -> "Export MA Config"
+                    is MutualAidExportStep.Uploading -> "Uploading…"
+                    is MutualAidExportStep.ShowQr -> "MA Config QR"
+                    is MutualAidExportStep.Error -> "Upload Failed"
+                }
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                when (val s = step) {
+                    is MutualAidExportStep.EnterDetails -> {
+                        Text(
+                            "Create a temporary mutual-aid config from the stored MA credentials and the current incident details.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text("Source org: ${sourceOrgName.ifBlank { "Not configured in ct_mutual_aid_credentials" }}")
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = displayName,
+                            onValueChange = { displayName = it },
+                            label = { Text("Display name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = incident,
+                            onValueChange = { incident = it },
+                            label = { Text("Incident") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = opPeriod,
+                            onValueChange = { opPeriod = it },
+                            label = { Text("Op period") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = mapId,
+                            onValueChange = { mapId = it },
+                            label = { Text("Map ID") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = mapTitle,
+                            onValueChange = { mapTitle = it },
+                            label = { Text("Map title") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = expiryDateText,
+                                onValueChange = { expiryDateText = it },
+                                label = { Text("Expiry date") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = expiryTimeText,
+                                onValueChange = { expiryTimeText = it },
+                                label = { Text("Expiry time") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    is MutualAidExportStep.Uploading -> {
+                        Spacer(Modifier.height(8.dp))
+                        CircularProgressIndicator()
+                        Spacer(Modifier.height(8.dp))
+                        Text("Uploading MA config to Google Drive…")
+                    }
+                    is MutualAidExportStep.ShowQr -> {
+                        Text(
+                            "Share this QR with the assisting agency. They can import it once using Menu -> Import MA QR.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        QrCodeImage(
+                            content = "r2cma1://" + s.token.removePrefix(MutualAidToken.MAGIC_PREFIX),
+                            modifier = Modifier.size(240.dp)
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        SelectionContainer {
+                            Text(
+                                text = s.token,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = { clipboard.setText(AnnotatedString(s.token)) }) {
+                            Text("Copy Token")
+                        }
+                    }
+                    is MutualAidExportStep.Error -> {
+                        Text(
+                            s.message,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            when (step) {
+                is MutualAidExportStep.EnterDetails -> {
+                    val expiresAt = runCatching {
+                        val date = LocalDate.parse(expiryDateText.trim(), dateFormatter)
+                        val time = LocalTime.parse(expiryTimeText.trim(), timeFormatter)
+                        LocalDateTime.of(date, time).atZone(zoneId).toInstant().toEpochMilli()
+                    }.getOrDefault(0L)
+                    TextButton(
+                        enabled = sourceOrgName.isNotBlank() &&
+                            incident.isNotBlank() &&
+                            opPeriod.isNotBlank() &&
+                            mapId.isNotBlank() &&
+                            expiresAt > System.currentTimeMillis(),
+                        onClick = {
+                            step = MutualAidExportStep.Uploading
+                            onUploadRequested(
+                                displayName.trim(),
+                                incident.trim(),
+                                opPeriod.trim(),
+                                mapId.trim(),
+                                mapTitle.trim(),
+                                expiresAt
+                            ) { success, message, token ->
+                                step = if (success && token != null) {
+                                    MutualAidExportStep.ShowQr(token)
+                                } else {
+                                    MutualAidExportStep.Error(message)
+                                }
+                            }
+                        }
+                    ) { Text("Export MA Config") }
+                }
+                is MutualAidExportStep.ShowQr, is MutualAidExportStep.Error -> {
+                    TextButton(onClick = onDismiss) { Text("Done") }
+                }
+                else -> {}
+            }
+        },
+        dismissButton = {
+            if (step !is MutualAidExportStep.Uploading) {
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
         }
@@ -279,7 +492,7 @@ fun OrgConfigJoinDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Join Org Config") },
+        title = { Text("Import Org Config") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
@@ -290,7 +503,7 @@ fun OrgConfigJoinDialog(
                 OutlinedTextField(
                     value = tokenText,
                     onValueChange = { tokenText = it },
-                    label = { Text("Join token") },
+                    label = { Text("Import token") },
                     placeholder = { Text("${OrgConfigToken.MAGIC_PREFIX}…") },
                     singleLine = false,
                     isError = tokenText.isNotBlank() && !isValid,
@@ -331,11 +544,96 @@ fun OrgConfigJoinDialog(
                 enabled = isValid,
                 onClick = { onJoin(tokenText.trim()) }
             ) {
-                Text("Join")
+                Text("Import")
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+fun MutualAidJoinDialog(
+    onDismiss: () -> Unit,
+    onJoin: (token: String) -> Unit,
+    onPickFile: () -> Unit
+) {
+    val context = LocalContext.current
+    var tokenText by remember { mutableStateOf("") }
+    val isValid = remember(tokenText) { MutualAidToken.isValidToken(tokenText) }
+    val decoded = remember(tokenText) { MutualAidToken.decode(tokenText.trim()) }
+
+    val scanner = remember(context) {
+        GmsBarcodeScanning.getClient(
+            context,
+            GmsBarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Import MA Config") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Scan the mutual-aid QR code, paste the token below, or choose an MA config file.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = tokenText,
+                    onValueChange = { tokenText = it },
+                    label = { Text("Mutual aid token") },
+                    placeholder = { Text("${MutualAidToken.MAGIC_PREFIX}…") },
+                    singleLine = false,
+                    isError = tokenText.isNotBlank() && !isValid,
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            scanner.startScan()
+                                .addOnSuccessListener { barcode ->
+                                    val raw = barcode.rawValue ?: return@addOnSuccessListener
+                                    tokenText = if (raw.startsWith("r2cma1://")) {
+                                        MutualAidToken.MAGIC_PREFIX + raw.removePrefix("r2cma1://")
+                                    } else raw
+                                }
+                                .addOnFailureListener { }
+                        }) {
+                            Icon(
+                                imageVector = Icons.Filled.QrCodeScanner,
+                                contentDescription = "Scan QR code"
+                            )
+                        }
+                    },
+                    supportingText = {
+                        when {
+                            tokenText.isBlank() -> Text("Scan QR or paste token from the hosting agency")
+                            isValid && decoded != null -> Text("Source org: ${decoded.sourceOrg}")
+                            else -> Text(
+                                "Token not recognised",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = isValid,
+                onClick = { onJoin(tokenText.trim()) }
+            ) {
+                Text("Import")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onPickFile) { Text("Choose File") }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
         }
     )
 }

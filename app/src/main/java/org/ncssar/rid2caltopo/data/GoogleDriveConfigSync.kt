@@ -50,6 +50,9 @@ object GoogleDriveConfigSync {
     private const val ORG_CONFIG_FOLDER_NAME = "RID2Caltopo_Configs"
     private const val ORG_APP_PROPERTY_VALUE = "org_config_v1"
     private const val KEY_ORG_CONFIG_FOLDER_ID = "org_config_folder_id"
+    private const val MUTUAL_AID_FOLDER_NAME = "RID2Caltopo_MutualAid"
+    private const val MUTUAL_AID_APP_PROPERTY_VALUE = "mutual_aid_profile_v1"
+    private const val KEY_MUTUAL_AID_FOLDER_ID = "mutual_aid_folder_id"
     private const val DRIVE_PERMISSIONS_URL = "https://www.googleapis.com/drive/v3/files/%s/permissions"
     // Public (unauthenticated) download URL for files shared with "anyone with link".
     private const val PUBLIC_DOWNLOAD_URL = "https://drive.google.com/uc?export=download&id=%s"
@@ -472,20 +475,70 @@ object GoogleDriveConfigSync {
         return fileId
     }
 
+    @JvmStatic
+    fun uploadMutualAidProfileFile(
+        context: Context,
+        account: GoogleSignInAccount,
+        bundleJson: String,
+        bundleName: String
+    ): String {
+        val token = requireAccessToken(context, account)
+        val bytes = bundleJson.toByteArray(StandardCharsets.UTF_8)
+        val fileName = "${bundleName}_MutualAid.json"
+        val existingId = findScopedPublicJsonFileId(token, fileName, MUTUAL_AID_APP_PROPERTY_VALUE)
+        val metadataObj = JSONObject()
+            .put("name", fileName)
+            .put("appProperties", JSONObject()
+                .put(APP_PROPERTY_KEY, MUTUAL_AID_APP_PROPERTY_VALUE)
+                .put("bundle_name", bundleName))
+        if (existingId == null) {
+            val folderId = findOrCreateNamedFolder(context, token, MUTUAL_AID_FOLDER_NAME, KEY_MUTUAL_AID_FOLDER_ID)
+            metadataObj.put("parents", JSONArray().put(folderId))
+        }
+        val boundary = "RID2CaltopoMutualAidBoundary"
+        val bodyBytes = buildMultipartBody(boundary, metadataObj.toString(), bytes, "application/json; charset=UTF-8")
+        val body = bodyBytes.toRequestBody("multipart/related; boundary=$boundary".toMediaType())
+        val url = if (existingId == null) {
+            "$DRIVE_UPLOAD_URL?uploadType=multipart"
+        } else {
+            "$DRIVE_UPLOAD_URL/$existingId?uploadType=multipart"
+        }
+        val builder = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $token")
+        val request = if (existingId == null) builder.post(body).build() else builder.patch(body).build()
+        val fileId = httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val details = response.body?.string().orEmpty()
+                throw IOException(formatDriveError("Mutual aid profile upload failed", response.code, details))
+            }
+            val payload = response.body?.string().orEmpty()
+            JSONObject(payload).optString("id").ifBlank {
+                existingId ?: throw IOException("Mutual aid upload succeeded but returned no file ID.")
+            }
+        }
+        makeFilePublic(token, fileId)
+        return fileId
+    }
+
     /**
      * Find or create the RID2Caltopo_Configs folder at the root of the admin's
      * Drive and return its file ID.  The ID is cached in SharedPreferences so
      * repeated uploads don't require a search round-trip.
      */
     private fun findOrCreateOrgConfigFolder(context: Context, token: String): String {
+        return findOrCreateNamedFolder(context, token, ORG_CONFIG_FOLDER_NAME, KEY_ORG_CONFIG_FOLDER_ID)
+    }
+
+    private fun findOrCreateNamedFolder(context: Context, token: String, folderName: String, prefKey: String): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val cachedId = prefs.getString(KEY_ORG_CONFIG_FOLDER_ID, "").orEmpty()
+        val cachedId = prefs.getString(prefKey, "").orEmpty()
         if (cachedId.isNotBlank() && getFileById(token, cachedId) != null) {
             return cachedId
         }
         // Search for an existing folder with our name.
         val q = URLEncoder.encode(
-            "name='$ORG_CONFIG_FOLDER_NAME' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            "name='$folderName' and mimeType='application/vnd.google-apps.folder' and trashed=false",
             StandardCharsets.UTF_8.name()
         )
         val searchRequest = Request.Builder()
@@ -501,7 +554,7 @@ object GoogleDriveConfigSync {
         val folderId = existingFolderId ?: run {
             // Create the folder.
             val body = JSONObject()
-                .put("name", ORG_CONFIG_FOLDER_NAME)
+                .put("name", folderName)
                 .put("mimeType", "application/vnd.google-apps.folder")
                 .toString()
                 .toRequestBody("application/json".toMediaType())
@@ -519,7 +572,7 @@ object GoogleDriveConfigSync {
                     .ifBlank { throw IOException("Config folder creation returned no ID.") }
             }
         }
-        prefs.edit().putString(KEY_ORG_CONFIG_FOLDER_ID, folderId).apply()
+        prefs.edit().putString(prefKey, folderId).apply()
         return folderId
     }
 
@@ -577,7 +630,11 @@ object GoogleDriveConfigSync {
     /** Find the Drive file ID of a previously uploaded org-config file for [orgName]. */
     private fun findOrgConfigFileId(token: String, orgName: String): String? {
         val orgFileName = "${orgName}_Config.json"
-        val q = URLEncoder.encode("name='$orgFileName' and trashed=false", StandardCharsets.UTF_8.name())
+        return findScopedPublicJsonFileId(token, orgFileName, ORG_APP_PROPERTY_VALUE)
+    }
+
+    private fun findScopedPublicJsonFileId(token: String, fileName: String, kindValue: String): String? {
+        val q = URLEncoder.encode("name='$fileName' and trashed=false", StandardCharsets.UTF_8.name())
         val request = Request.Builder()
             .url("$DRIVE_FILES_URL?spaces=drive&fields=files(id,appProperties,capabilities(canEdit))&orderBy=modifiedTime desc&q=$q")
             .header("Authorization", "Bearer $token")
@@ -590,7 +647,7 @@ object GoogleDriveConfigSync {
             for (i in 0 until files.length()) {
                 val file = files.getJSONObject(i)
                 val kind = file.optJSONObject("appProperties")?.optString(APP_PROPERTY_KEY).orEmpty()
-                if (kind != ORG_APP_PROPERTY_VALUE) continue
+                if (kind != kindValue) continue
                 val canEdit = file.optJSONObject("capabilities")?.optBoolean("canEdit", false) == true
                 if (canEdit) return file.optString("id")
             }

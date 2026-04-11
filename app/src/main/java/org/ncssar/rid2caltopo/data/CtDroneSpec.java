@@ -91,6 +91,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final String MAPPED_ID_FILTER_REGEX = "[^_a-zA-Z0-9]";
     private static final String CALLSIGN_OPT_MODEL_REGEX = "^([0-9]?[a-zA-Z]+[0-9]+)([_a-zA-Z0-9]{1,8})?$";
     private static final Pattern CallsignOptModelPattern = Pattern.compile(CALLSIGN_OPT_MODEL_REGEX);
+    private static final Pattern TeamMappedIdSuffixPattern = Pattern.compile("-\\d+$");
     private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
     private static long InvalidWaypointCount = 0;
 
@@ -688,12 +689,67 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     //     Autel Evo Max 4n      : AtlEvMx4n
     //     Autel Evo 2 Dual 640T : lEv2Dl640t
     @NonNull
-    private static String ModelAbbreviator(@NonNull String modelIn) {
+    public static String ModelAbbreviator(@NonNull String modelIn) {
         // (?i) makes pattern case-insensitive
         // (?<=\S)[aeiou] matches vowels preceded by a non-space character (not word-start)
         // | \s+ matches any spaces to be removed
-        String result = modelIn.replaceAll("(?i)(?<=\\S)[aeiou]|\\s+", "");
+        String trimmed = modelIn.trim();
+        if (trimmed.isEmpty()) return EMPTY_STRING;
+        String result = trimmed.replaceAll("(?i)(?<=\\S)[aeiou]|\\s+", "");
         return result.substring(Math.max(0, result.length() - 10));
+    }
+
+    @NonNull
+    public static String GuessMakeModel(@NonNull String serialNumber) {
+        String rid = serialNumber.trim().toUpperCase(Locale.US);
+        if (rid.isEmpty()) return EMPTY_STRING;
+
+        if (rid.startsWith("1581F8HGX")) return "DJI Matrice 4TD";
+        if (rid.startsWith("1581F9DEC")) return "DJI Mini 5 Pro";
+        if (rid.startsWith("1581F67QE")) return "DJI Mavic 3 Pro";
+        if (rid.startsWith("1581F6Z9C")) return "DJI Mini 4 Pro";
+        if (rid.startsWith("1581F6W8")) return "DJI Avata 2";
+        if (rid.startsWith("1865F10X")) return "DJI Neo";
+        if (rid.startsWith("1748FEV3")) return "Autel Evo Max 4N";
+        if (rid.startsWith("1748FEV2")) return "Autel EVO II V3";
+        if (rid.startsWith("1910F916")) return "Potensic Atom LT";
+
+        return EMPTY_STRING;
+    }
+
+    @NonNull
+    public static String BuildMappedId(
+            @NonNull String callsignIn,
+            @NonNull String modelIn,
+            @NonNull String remoteIdIn
+    ) {
+        String callsign = callsignIn.trim().replaceAll(MAPPED_ID_FILTER_REGEX, "");
+        if (callsign.isEmpty()) return remoteIdIn;
+        return callsign + ModelAbbreviator(modelIn);
+    }
+
+    @NonNull
+    public static String GuessPilotCallsign(
+            @NonNull String mappedIdIn,
+            @NonNull String modelIn,
+            @NonNull String remoteIdIn
+    ) {
+        String mappedId = mappedIdIn.trim();
+        if (mappedId.isEmpty() || mappedId.equals(remoteIdIn)) return EMPTY_STRING;
+        if (TeamMappedIdSuffixPattern.matcher(mappedId).find()) return EMPTY_STRING;
+
+        String modelAbbrev = ModelAbbreviator(modelIn);
+        String candidate = mappedId;
+        if (!modelAbbrev.isEmpty() &&
+                candidate.toLowerCase(Locale.US).endsWith(modelAbbrev.toLowerCase(Locale.US))) {
+            candidate = candidate.substring(0, candidate.length() - modelAbbrev.length());
+        } else {
+            Matcher match = CallsignOptModelPattern.matcher(candidate);
+            if (match.matches() && match.group(1) != null) {
+                candidate = match.group(1);
+            }
+        }
+        return candidate.trim();
     }
 
     // As of rc1.0.7, we want track labels to be meaningful and hopefully adopt the standard
@@ -742,6 +798,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     @NonNull
     public String getRemoteId() { return remoteId;}
     public String getMappedId() { return mappedId;}
+    public long getStartMsecTimestamp() { return startMsecTimestamp; }
     public String getOrg() { return org;}
     public void setOrg(String newVal) { org = newVal;}
     public String getModel() { return model;}

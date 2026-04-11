@@ -47,10 +47,15 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.DriveSyncAction
 import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
+import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
+import org.ncssar.rid2caltopo.video.MutualAidPackageManager
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 private fun parseCsvTags(csv: String): List<String> {
     val tags = linkedSetOf<String>()
@@ -170,12 +175,18 @@ fun MainScreen(
     var level by remember { mutableStateOf(CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)) }
     val context =  LocalContext.current
     var pendingDriveAction by remember { mutableStateOf<DriveSyncAction?>(null) }
-    var pendingOrgExport by remember { mutableStateOf<String?>(null) }  // org name awaiting Drive auth
+    var pendingOrgExport by remember { mutableStateOf(false) }
+    var pendingMutualAidExport by remember { mutableStateOf(false) }
     var driveSyncInProgress by remember { mutableStateOf(false) }
     var showDriveRestoreDialog by remember { mutableStateOf(shouldOfferDriveRestore(context)) }
     var linkedDriveEmail by remember { mutableStateOf(GoogleDriveConfigSync.getLinkedAccountEmail(context)) }
     var showOrgExportDialog by remember { mutableStateOf(false) }
     var showOrgJoinDialog by remember { mutableStateOf(false) }
+    var showMutualAidExportDialog by remember { mutableStateOf(false) }
+    var showMutualAidJoinDialog by remember { mutableStateOf(false) }
+    var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingMutualAidImportPreview by remember { mutableStateOf<MutualAidPackageManager.PackagePreview?>(null) }
+    var showMutualAidImportPreviewDialog by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
@@ -222,8 +233,10 @@ fun MainScreen(
         onResult = { result ->
             val requestedAction = pendingDriveAction
             val orgExport = pendingOrgExport
+            val mutualAidExport = pendingMutualAidExport
             pendingDriveAction = null
-            pendingOrgExport = null
+            pendingOrgExport = false
+            pendingMutualAidExport = false
 
             val account = if (result.data != null) {
                 try {
@@ -239,17 +252,39 @@ fun MainScreen(
                     runDriveAction(result, requestedAction)
                 requestedAction != null ->
                     CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
-                orgExport != null && account != null -> {
+                orgExport && account != null -> {
                     // Resume the org-config export after sign-in by re-opening the
                     // dialog. The org name was stored in prefs before sign-in so the
                     // dialog pre-fills it via getStoredOrgName().
                     showOrgExportDialog = true
-                    CaltopoClient.ShowToast("Signed in. Tap Generate to upload your org config.")
+                    CaltopoClient.ShowToast("Signed in. Tap Export Org Config to upload your org config.")
                     refreshDriveState()
                 }
-                orgExport != null ->
+                mutualAidExport && account != null -> {
+                    showMutualAidExportDialog = true
+                    CaltopoClient.ShowToast("Signed in. Tap Export MA Config to upload the mutual-aid config.")
+                    refreshDriveState()
+                }
+                orgExport ->
+                    CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
+                mutualAidExport ->
                     CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
             }
+        }
+    )
+
+    val importMutualAidPackageLauncher = rememberLauncherForActivityResult(
+        contract = FreshOpenDocument(),
+        onResult = { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            val preview = MutualAidPackageManager.readPackagePreview(context, uri)
+            if (!preview.first || preview.second == null) {
+                CaltopoClient.ShowToast("Could not read MA config preview.")
+                return@rememberLauncherForActivityResult
+            }
+            pendingMutualAidImportUri = uri
+            pendingMutualAidImportPreview = preview.second
+            showMutualAidImportPreviewDialog = true
         }
     )
 
@@ -274,20 +309,53 @@ fun MainScreen(
 
     if (showOrgExportDialog) {
         OrgConfigExportDialog(
+            sourceOrgName = CaltopoClient.GetHomeOrgName(),
             onDismiss = { showOrgExportDialog = false },
-            onUploadRequested = { orgName, callback ->
+            onUploadRequested = { callback ->
                 val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
                 if (account != null) {
-                    OrgConfigManager.uploadOrgConfig(context, account, orgName) { success, message, token ->
+                    OrgConfigManager.uploadOrgConfig(context, account) { success, message, token ->
                         refreshDriveState()
                         callback(success, message, token)
                     }
                 } else {
-                    // No Drive auth yet — store the org name, close the dialog, and
-                    // trigger sign-in. The launcher reopens the dialog after auth.
-                    OrgConfigManager.storeOrgName(context, orgName)
                     showOrgExportDialog = false
-                    pendingOrgExport = orgName
+                    pendingOrgExport = true
+                    driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                    callback(false, "Signing in to Google Drive…", null)
+                }
+            }
+        )
+    }
+
+    if (showMutualAidExportDialog) {
+        MutualAidExportDialog(
+            defaultIncident = CaltopoClient.GetIncident(),
+            defaultOpPeriod = CaltopoClient.GetOpPeriod(),
+            defaultMapId = CaltopoMap.GetMapId(),
+            defaultMapTitle = CaltopoMap.GetMapName(),
+            defaultExpiryAtEpochMs = MutualAidProfileManager.defaultExpiryAtNextMidnight(),
+            sourceOrgName = CaltopoClient.GetMutualAidSourceLabel(),
+            onDismiss = { showMutualAidExportDialog = false },
+            onUploadRequested = { displayName, incident, opPeriod, mapId, mapTitle, expiresAt, callback ->
+                val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
+                if (account != null) {
+                    MutualAidProfileManager.uploadMutualAidProfile(
+                        context,
+                        account,
+                        displayName,
+                        incident,
+                        opPeriod,
+                        mapId,
+                        mapTitle,
+                        expiresAt
+                    ) { success, message, token ->
+                        refreshDriveState()
+                        callback(success, message, token)
+                    }
+                } else {
+                    showMutualAidExportDialog = false
+                    pendingMutualAidExport = true
                     driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
                     callback(false, "Signing in to Google Drive…", null)
                 }
@@ -359,6 +427,83 @@ fun MainScreen(
                 showOrgJoinDialog = false
                 OrgConfigManager.joinFromToken(context, token) { _, message ->
                     CaltopoClient.ShowToast(message)
+                }
+            }
+        )
+    }
+
+    if (showMutualAidJoinDialog) {
+        MutualAidJoinDialog(
+            onDismiss = { showMutualAidJoinDialog = false },
+            onJoin = { token ->
+                showMutualAidJoinDialog = false
+                MutualAidProfileManager.joinFromToken(context, token) { _, message ->
+                    CaltopoClient.ShowToast(message)
+                }
+            },
+            onPickFile = {
+                showMutualAidJoinDialog = false
+                importMutualAidPackageLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+            }
+        )
+    }
+
+    if (showMutualAidImportPreviewDialog) {
+        val preview = pendingMutualAidImportPreview
+        val expiryText = preview?.expiresAtEpochMs?.takeIf { it > 0L }?.let {
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                .withZone(ZoneId.systemDefault())
+                .format(Instant.ofEpochMilli(it))
+        } ?: "No expiry"
+        AlertDialog(
+            onDismissRequest = {
+                showMutualAidImportPreviewDialog = false
+                pendingMutualAidImportUri = null
+                pendingMutualAidImportPreview = null
+            },
+            title = { Text("Import MA Config") },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    if (preview != null) {
+                        Text("Package: ${preview.packageName.ifBlank { "MA Config" }}")
+                        Text("Source org: ${preview.sourceOrg.ifBlank { "Unknown" }}")
+                        Text("Display name: ${preview.displayName.ifBlank { "Mutual Aid" }}")
+                        Text("Incident: ${preview.incident.ifBlank { "Unknown" }}")
+                        Text("Op period: ${preview.opPeriod.ifBlank { "Unknown" }}")
+                        Text("Map: ${preview.targetMapTitle.ifBlank { preview.targetMapId.ifBlank { "Unknown" } }}")
+                        Text("Expires: $expiryText")
+                        Text("Offline cache: ${preview.tileCount} tile(s), ${preview.demCount} DEM tile(s)")
+                    } else {
+                        Text("Could not read MA config preview.")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = pendingMutualAidImportUri != null && preview != null,
+                    onClick = {
+                        val uri = pendingMutualAidImportUri
+                        showMutualAidImportPreviewDialog = false
+                        pendingMutualAidImportUri = null
+                        pendingMutualAidImportPreview = null
+                        if (uri != null) {
+                            val result = MutualAidPackageManager.importPackage(context, uri)
+                            CaltopoClient.ShowToast(result.second)
+                        }
+                    }
+                ) {
+                    Text("Import")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showMutualAidImportPreviewDialog = false
+                        pendingMutualAidImportUri = null
+                        pendingMutualAidImportPreview = null
+                    }
+                ) {
+                    Text("Cancel")
                 }
             }
         )
@@ -697,9 +842,13 @@ fun MainScreen(
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Generate Org Join QR") }, onClick = {
+                        DropdownMenuItem(text = { Text("Export Org Config") }, onClick = {
                             menuExpanded = false
                             showOrgExportDialog = true
+                        })
+                        DropdownMenuItem(text = { Text("Export MA Config") }, onClick = {
+                            menuExpanded = false
+                            showMutualAidExportDialog = true
                         })
                         DropdownMenuItem(
                             text = { Text("Simulate MyLocation...") },
@@ -714,10 +863,17 @@ fun MainScreen(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("Join Org") },
+                            text = { Text("Import Org") },
                             onClick = {
                                 menuExpanded = false
                                 showOrgJoinDialog = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Import MA Config") },
+                            onClick = {
+                                menuExpanded = false
+                                showMutualAidJoinDialog = true
                             }
                         )
                         DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
@@ -817,6 +973,7 @@ fun MainScreen(
                             val localDrones by item.viewModel.drones.collectAsState()
                             val appUptime by item.viewModel.appUpTime.collectAsState()
                             val hostname by item.viewModel.hostname.collectAsState()
+                            val confirmationState by item.viewModel.pendingDroneConfirmation.collectAsState()
 
                             R2CView(
                                 hostName = hostname,
@@ -825,6 +982,17 @@ fun MainScreen(
                                 viewModel = item.viewModel,
                                 onMappedIdChange = { drone, newId ->
                                     item.viewModel.updateMappedId(drone, newId)
+                                },
+                                confirmationState = confirmationState,
+                                onConfirmationChange = { organization, pilotCallsign, droneDescription ->
+                                    item.viewModel.updatePendingDroneConfirmation(
+                                        organization = organization,
+                                        pilotCallsign = pilotCallsign,
+                                        droneDescription = droneDescription
+                                    )
+                                },
+                                onConfirmationSave = {
+                                    item.viewModel.savePendingDroneConfirmation()
                                 }
                             )
                         }

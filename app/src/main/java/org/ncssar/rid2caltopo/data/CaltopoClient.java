@@ -74,6 +74,126 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
+class CaltopoProfileRecord {
+    public String profileId;
+    public String displayName;
+    public String profileType;
+    public CaltopoCredentials credentials;
+    public String domainAndPort;
+    public String trackFolder;
+    public String incident;
+    public String opPeriod;
+    public String trackerApiKey;
+    public String trackerUrlPfx;
+    public boolean autoConnect;
+    public long expiresAtEpochMs;
+    public boolean quietRemoveOnExpiry;
+    public String sourceLabel;
+    public String targetMapId;
+    public String targetMapTitle;
+    public String targetFolderHint;
+    public long importedAtEpochMs;
+    public String importDedupeKey;
+
+    public CaltopoProfileRecord() {
+        this.profileId = "";
+        this.displayName = "";
+        this.profileType = "HOME";
+        this.credentials = new CaltopoCredentials();
+        this.domainAndPort = "caltopo.com";
+        this.trackFolder = "Drone Tracks";
+        this.incident = "Training";
+        this.opPeriod = "1";
+        this.trackerApiKey = "";
+        this.trackerUrlPfx = "";
+        this.autoConnect = false;
+        this.expiresAtEpochMs = 0L;
+        this.quietRemoveOnExpiry = false;
+        this.sourceLabel = "";
+        this.targetMapId = "";
+        this.targetMapTitle = "";
+        this.targetFolderHint = "";
+        this.importedAtEpochMs = 0L;
+        this.importDedupeKey = "";
+    }
+
+    public CaltopoProfileRecord(
+            @NonNull String profileId,
+            @NonNull String displayName,
+            @NonNull String profileType,
+            @NonNull CaltopoCredentials credentials,
+            @NonNull String domainAndPort,
+            @NonNull String trackFolder,
+            @NonNull String incident,
+            @NonNull String opPeriod,
+            @NonNull String trackerApiKey,
+            @NonNull String trackerUrlPfx,
+            boolean autoConnect,
+            long expiresAtEpochMs,
+            boolean quietRemoveOnExpiry,
+            @NonNull String sourceLabel,
+            @NonNull String targetMapId,
+            @NonNull String targetMapTitle,
+            @NonNull String targetFolderHint,
+            long importedAtEpochMs,
+            @NonNull String importDedupeKey
+    ) {
+        this.profileId = profileId;
+        this.displayName = displayName;
+        this.profileType = profileType;
+        this.credentials = credentials;
+        this.domainAndPort = domainAndPort;
+        this.trackFolder = trackFolder;
+        this.incident = incident;
+        this.opPeriod = opPeriod;
+        this.trackerApiKey = trackerApiKey;
+        this.trackerUrlPfx = trackerUrlPfx;
+        this.autoConnect = autoConnect;
+        this.expiresAtEpochMs = expiresAtEpochMs;
+        this.quietRemoveOnExpiry = quietRemoveOnExpiry;
+        this.sourceLabel = sourceLabel;
+        this.targetMapId = targetMapId;
+        this.targetMapTitle = targetMapTitle;
+        this.targetFolderHint = targetFolderHint;
+        this.importedAtEpochMs = importedAtEpochMs;
+        this.importDedupeKey = importDedupeKey;
+    }
+}
+
+class MutualAidTemplateRecord {
+    public String teamId;
+    public String credentialId;
+    public String credentialSecret;
+    public String domainAndPort;
+    public String sourceLabel;
+    public String targetFolderHint;
+
+    public MutualAidTemplateRecord() {
+        this.teamId = "";
+        this.credentialId = "";
+        this.credentialSecret = "";
+        this.domainAndPort = "caltopo.com";
+        this.sourceLabel = "";
+        this.targetFolderHint = "MAI";
+    }
+
+    public MutualAidTemplateRecord(
+            @NonNull String teamId,
+            @NonNull String credentialId,
+            @NonNull String credentialSecret,
+            @NonNull String domainAndPort,
+            @NonNull String sourceLabel,
+            @NonNull String targetFolderHint
+    ) {
+        this.teamId = teamId;
+        this.credentialId = credentialId;
+        this.credentialSecret = credentialSecret;
+        this.domainAndPort = domainAndPort;
+        this.sourceLabel = sourceLabel;
+        this.targetFolderHint = targetFolderHint;
+    }
+}
+
 /*
  * Persistent state management for CaltopoClient
  */
@@ -107,6 +227,9 @@ class ClientClassState {
     public long notamLastUpdatedEpochMs;
     public Hashtable<String, CtDroneSpec> cachedDroneSpecTable;  // Table to map remoteIDs to their data
     public String configFilesLoaded;
+    public MutualAidTemplateRecord mutualAidTemplate;
+    public ArrayList<CaltopoProfileRecord> caltopoProfiles;
+    public String activeCaltopoProfileId;
     transient public boolean goLiveFlag;
 
     transient public Hashtable<String, CtDroneSpec> droneSpecTable; // app lifespan only.
@@ -144,6 +267,9 @@ class ClientClassState {
         notamScope = "";
         notamLastUpdatedEpochMs = 0L;
         configFilesLoaded = "";
+        mutualAidTemplate = new MutualAidTemplateRecord();
+        caltopoProfiles = new ArrayList<>();
+        activeCaltopoProfileId = "";
         cachedDroneSpecTable = new Hashtable<>(16);
         droneSpecTable = new Hashtable<>(16);
     }
@@ -180,6 +306,7 @@ class ClientClassState {
                         predictiveHeadEnabled:%s, proximityAlertSpacingFeet:%d
                         notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
                         notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
+                        activeCaltopoProfileId:'%s', caltopoProfiles:%d, maTemplateConfigured:%s
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
                 AppConfigStore.SCHEMA_VERSION, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
@@ -188,6 +315,14 @@ class ClientClassState {
                 notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
                 notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
                 notamClientSecret.isEmpty() ? "" : "###########", notamScope, notamLastUpdatedEpochMs,
+                activeCaltopoProfileId, caltopoProfiles != null ? caltopoProfiles.size() : 0,
+                mutualAidTemplate != null && CaltopoCredentials.sniffTest(
+                        new CaltopoCredentials(
+                                mutualAidTemplate.teamId,
+                                mutualAidTemplate.credentialId,
+                                mutualAidTemplate.credentialSecret
+                        )
+                ),
                 archivePath, caltopoTrackFolder, domainAndPort, teamId, credId, credSecret,
                 CaltopoClient.DroneSpecStringRep(cachedDroneSpecTable),
                 configFilesLoaded.replaceAll("\\n", "  \n"));
@@ -793,6 +928,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static String GetTrackFolderName() {
         ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.trackFolder != null) {
+            return profile.trackFolder;
+        }
         return ccs.caltopoTrackFolder;
     }
 
@@ -822,7 +962,258 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @NonNull
     public static CaltopoCredentials GetCaltopoCredentials() {
         ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.credentials != null) {
+            return profile.credentials;
+        }
         return ccs.caltopoCredentials;
+    }
+
+    @Nullable
+    public static CaltopoProfileRecord GetActiveCaltopoProfile() {
+        ClientClassState ccs = GetState();
+        if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return null;
+        if (ccs.activeCaltopoProfileId != null && !ccs.activeCaltopoProfileId.isEmpty()) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if (ccs.activeCaltopoProfileId.equals(profile.profileId)) return profile;
+            }
+        }
+        return ccs.caltopoProfiles.get(0);
+    }
+
+    @NonNull
+    public static List<CaltopoProfileRecord> GetCaltopoProfiles() {
+        ClientClassState ccs = GetState();
+        if (ccs.caltopoProfiles == null) return new ArrayList<>();
+        return new ArrayList<>(ccs.caltopoProfiles);
+    }
+
+    @Nullable
+    public static CaltopoProfileRecord GetCaltopoProfileById(@NonNull String profileId) {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles == null) return null;
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (profileId.equals(profile.profileId)) return profile;
+        }
+        return null;
+    }
+
+    @Nullable
+    public static String GetActiveCaltopoProfileId() {
+        ClientClassState ccs = GetState();
+        return ccs.activeCaltopoProfileId;
+    }
+
+    public static boolean SetActiveCaltopoProfileId(@NonNull String profileId, boolean reconnect) {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles == null) return false;
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (!profileId.equals(profile.profileId)) continue;
+            ccs.activeCaltopoProfileId = profileId;
+            mirrorProfileIntoLegacyFields(ccs, profile);
+            ArchiveState("active caltopo profile changed");
+            if (reconnect) {
+                CaltopoMap.ResetMapConnection(0);
+            }
+            NotifySettingsChanged();
+            return true;
+        }
+        return false;
+    }
+
+    public static void UpsertCaltopoProfile(
+            @NonNull CaltopoProfileRecord profile,
+            boolean makeActive,
+            boolean reconnect
+    ) {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles == null) {
+            ccs.caltopoProfiles = new ArrayList<>();
+        }
+        boolean replaced = false;
+        for (int i = 0; i < ccs.caltopoProfiles.size(); i++) {
+            CaltopoProfileRecord existing = ccs.caltopoProfiles.get(i);
+            boolean idMatch = profile.profileId != null && profile.profileId.equals(existing.profileId);
+            boolean dedupeMatch = profile.importDedupeKey != null &&
+                    !profile.importDedupeKey.isEmpty() &&
+                    profile.importDedupeKey.equals(existing.importDedupeKey);
+            if (!idMatch && !dedupeMatch) continue;
+            ccs.caltopoProfiles.set(i, profile);
+            replaced = true;
+            break;
+        }
+        if (!replaced) {
+            ccs.caltopoProfiles.add(profile);
+        }
+        if (makeActive || ccs.activeCaltopoProfileId == null || ccs.activeCaltopoProfileId.isEmpty()) {
+            ccs.activeCaltopoProfileId = profile.profileId;
+            mirrorProfileIntoLegacyFields(ccs, profile);
+        }
+        ArchiveState(replaced ? "caltopo profile updated" : "caltopo profile added");
+        if (makeActive && reconnect) {
+            CaltopoMap.ResetMapConnection(0);
+        }
+        NotifySettingsChanged();
+    }
+
+    public static boolean RemoveCaltopoProfile(
+            @NonNull String profileId,
+            boolean fallbackToHome,
+            boolean reconnect
+    ) {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return false;
+        boolean removedActive = false;
+        boolean removed = false;
+        ArrayList<CaltopoProfileRecord> survivors = new ArrayList<>(ccs.caltopoProfiles.size());
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (profileId.equals(profile.profileId)) {
+                removed = true;
+                if (profileId.equals(ccs.activeCaltopoProfileId)) removedActive = true;
+                continue;
+            }
+            survivors.add(profile);
+        }
+        if (!removed) return false;
+
+        ccs.caltopoProfiles = survivors;
+        if (removedActive) {
+            String fallbackId = "";
+            if (fallbackToHome) {
+                for (CaltopoProfileRecord profile : survivors) {
+                    if ("HOME".equals(profile.profileType)) {
+                        fallbackId = profile.profileId;
+                        break;
+                    }
+                }
+            }
+            if (fallbackId.isEmpty() && !survivors.isEmpty()) {
+                fallbackId = survivors.get(0).profileId;
+            }
+            ccs.activeCaltopoProfileId = fallbackId;
+            CaltopoProfileRecord fallback = fallbackId.isEmpty() ? null : GetCaltopoProfileById(fallbackId);
+            if (fallback != null) {
+                mirrorProfileIntoLegacyFields(ccs, fallback);
+            }
+        }
+        ArchiveState("caltopo profile removed");
+        if (removedActive && reconnect) {
+            CaltopoMap.ResetMapConnection(0);
+        }
+        NotifySettingsChanged();
+        return true;
+    }
+
+    private static void mirrorProfileIntoLegacyFields(
+            @NonNull ClientClassState ccs,
+            @NonNull CaltopoProfileRecord profile
+    ) {
+        ccs.caltopoCredentials = profile.credentials;
+        ccs.caltopoDomainAndPort = profile.domainAndPort;
+        ccs.caltopoTrackFolder = profile.trackFolder;
+        ccs.incident = profile.incident;
+        ccs.opPeriod = profile.opPeriod;
+        ccs.trackerApiKey = profile.trackerApiKey;
+        ccs.trackerUrlPfx = profile.trackerUrlPfx;
+    }
+
+    public static boolean HasExpired(@Nullable CaltopoProfileRecord profile, long nowMs) {
+        return profile != null &&
+                profile.expiresAtEpochMs > 0L &&
+                nowMs >= profile.expiresAtEpochMs;
+    }
+
+    @Nullable
+    public static String FindFallbackHomeProfileId() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles == null) return null;
+        long nowMs = System.currentTimeMillis();
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (!"HOME".equals(profile.profileType)) continue;
+            if (HasExpired(profile, nowMs)) continue;
+            return profile.profileId;
+        }
+        return null;
+    }
+
+    public static int RemoveExpiredCaltopoProfiles(long nowMs, boolean disconnectIfActive) {
+        ClientClassState ccs = GetState();
+        if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return 0;
+        ArrayList<CaltopoProfileRecord> survivors = new ArrayList<>(ccs.caltopoProfiles.size());
+        boolean activeExpired = false;
+        int removed = 0;
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (HasExpired(profile, nowMs)) {
+                removed++;
+                if (profile.profileId != null && profile.profileId.equals(ccs.activeCaltopoProfileId)) {
+                    activeExpired = true;
+                }
+                continue;
+            }
+            survivors.add(profile);
+        }
+        if (removed == 0) return 0;
+
+        ccs.caltopoProfiles = survivors;
+        if (activeExpired || ccs.activeCaltopoProfileId == null || ccs.activeCaltopoProfileId.isEmpty()
+                || !containsProfileId(survivors, ccs.activeCaltopoProfileId)) {
+            String fallbackId = null;
+            for (CaltopoProfileRecord profile : survivors) {
+                if ("HOME".equals(profile.profileType)) {
+                    fallbackId = profile.profileId;
+                    break;
+                }
+            }
+            if (fallbackId == null && !survivors.isEmpty()) {
+                fallbackId = survivors.get(0).profileId;
+            }
+            ccs.activeCaltopoProfileId = fallbackId != null ? fallbackId : "";
+            CaltopoProfileRecord activeProfile = null;
+            if (fallbackId != null) {
+                for (CaltopoProfileRecord profile : survivors) {
+                    if (fallbackId.equals(profile.profileId)) {
+                        activeProfile = profile;
+                        break;
+                    }
+                }
+            }
+            if (activeProfile != null) {
+                mirrorProfileIntoLegacyFields(ccs, activeProfile);
+            } else {
+                ccs.caltopoCredentials = new CaltopoCredentials();
+                ccs.caltopoDomainAndPort = "caltopo.com";
+            }
+        }
+
+        if (disconnectIfActive && activeExpired) {
+            try {
+                CaltopoMap.ResetMapConnection(0);
+            } catch (Exception e) {
+                CTWarn(TAG, "RemoveExpiredCaltopoProfiles(): map reset raised", e);
+            }
+        }
+        ArchiveState("expired caltopo profiles removed");
+        NotifySettingsChanged();
+        return removed;
+    }
+
+    private static boolean containsProfileId(@NonNull List<CaltopoProfileRecord> profiles, @Nullable String profileId) {
+        if (profileId == null || profileId.isEmpty()) return false;
+        for (CaltopoProfileRecord profile : profiles) {
+            if (profileId.equals(profile.profileId)) return true;
+        }
+        return false;
+    }
+
+    private static void ensureProfileStateFresh(@NonNull ClientClassState ccs, boolean disconnectIfActive) {
+        if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return;
+        RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), disconnectIfActive);
     }
 
     public static void SetGoLiveFlag(boolean flag) {
@@ -895,8 +1286,107 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ArchiveState("caltopo domain changed");
     }
 
+    @NonNull
+    public static MutualAidTemplateRecord GetMutualAidTemplate() {
+        ClientClassState ccs = GetState();
+        if (ccs.mutualAidTemplate == null) {
+            ccs.mutualAidTemplate = new MutualAidTemplateRecord();
+        }
+        return ccs.mutualAidTemplate;
+    }
+
+    public static boolean HasMutualAidTemplate() {
+        MutualAidTemplateRecord template = GetMutualAidTemplate();
+        return CaltopoCredentials.sniffTest(
+                new CaltopoCredentials(template.teamId, template.credentialId, template.credentialSecret)
+        );
+    }
+
+    @NonNull
+    public static String GetHomeOrgName() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        if (ccs.caltopoProfiles != null) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if ("HOME".equals(profile.profileType) && profile.sourceLabel != null && !profile.sourceLabel.isEmpty()) {
+                    return profile.sourceLabel;
+                }
+            }
+        }
+        CaltopoProfileRecord active = GetActiveCaltopoProfile();
+        if (active != null && "HOME".equals(active.profileType) && active.sourceLabel != null) {
+            return active.sourceLabel;
+        }
+        return "";
+    }
+
+    public static void SetHomeOrgName(@NonNull String orgName) {
+        ClientClassState ccs = GetState();
+        String trimmed = orgName.trim();
+        if (ccs.caltopoProfiles == null) {
+            ccs.caltopoProfiles = new ArrayList<>();
+        }
+        CaltopoProfileRecord target = null;
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if ("HOME".equals(profile.profileType)) {
+                target = profile;
+                break;
+            }
+        }
+        if (target == null) {
+            target = new CaltopoProfileRecord(
+                    "home-default",
+                    "Default",
+                    "HOME",
+                    ccs.caltopoCredentials != null ? ccs.caltopoCredentials : new CaltopoCredentials(),
+                    ccs.caltopoDomainAndPort != null ? ccs.caltopoDomainAndPort : "caltopo.com",
+                    ccs.caltopoTrackFolder != null ? ccs.caltopoTrackFolder : "Drone Tracks",
+                    ccs.incident != null ? ccs.incident : "Training",
+                    ccs.opPeriod != null ? ccs.opPeriod : "1",
+                    ccs.trackerApiKey != null ? ccs.trackerApiKey : "",
+                    ccs.trackerUrlPfx != null ? ccs.trackerUrlPfx : "",
+                    false,
+                    0L,
+                    false,
+                    trimmed,
+                    "",
+                    "",
+                    "",
+                    0L,
+                    ""
+            );
+            ccs.caltopoProfiles.add(target);
+        }
+        if (trimmed.equals(target.sourceLabel)) return;
+        target.sourceLabel = trimmed;
+        CaltopoProfileRecord active = GetActiveCaltopoProfile();
+        if (active != null && "HOME".equals(active.profileType) && active.profileId.equals(target.profileId)) {
+            mirrorProfileIntoLegacyFields(ccs, target);
+        }
+        NotifySettingsChanged();
+        ArchiveState("home org name changed");
+    }
+
+    @NonNull
+    public static String GetMutualAidSourceLabel() {
+        MutualAidTemplateRecord template = GetMutualAidTemplate();
+        return template.sourceLabel != null ? template.sourceLabel : "";
+    }
+
+    public static void SetMutualAidTemplate(@NonNull MutualAidTemplateRecord template) {
+        ClientClassState ccs = GetState();
+        ccs.mutualAidTemplate = template;
+        NotifySettingsChanged();
+        ArchiveState("mutual aid template changed");
+    }
+
     public static String GetCaltopoDomainAndPort() {
         ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.domainAndPort != null && !profile.domainAndPort.isEmpty()) {
+            return profile.domainAndPort;
+        }
         if (null == ccs.caltopoDomainAndPort)
             ccs.caltopoDomainAndPort = ""; // shouldn't happen, but play it safe.
         return ccs.caltopoDomainAndPort;
@@ -962,6 +1452,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void readCredentialsFileContent(JSONObject json)
             throws JSONException {
+        String orgName = json.optString("org_name", json.optString("source_label"));
         String teamId = json.optString("team_id");
         String credentialId = json.optString("credential_id");
         String credentialSecret = json.optString("credential_secret");
@@ -1001,11 +1492,38 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!notamClientId.isEmpty()) SetNotamClientId(notamClientId);
         if (!notamClientSecret.isEmpty()) SetNotamClientSecret(notamClientSecret);
         if (!notamScope.isEmpty()) SetNotamScope(notamScope);
+        if (!orgName.isEmpty()) SetHomeOrgName(orgName);
         if (!teamId.isEmpty() || !credentialId.isEmpty() || !credentialSecret.isEmpty()) {
             SetCaltopoCredentials(new CaltopoCredentials(teamId, credentialId, credentialSecret));
         }
         NotifySettingsChanged();
         ArchiveState("Credentials loaded");
+    }
+
+    public static void readMutualAidCredentialsFileContent(JSONObject json)
+            throws JSONException {
+        String teamId = json.optString("team_id");
+        String credentialId = json.optString("credential_id");
+        String credentialSecret = json.optString("credential_secret");
+        String domainAndPort = json.optString("domain_and_port", GetCaltopoDomainAndPort());
+        String sourceLabel = json.optString("source_label", json.optString("org_name"));
+        String targetFolderHint = json.optString("target_folder_hint", "MAI");
+        MutualAidTemplateRecord template = new MutualAidTemplateRecord(
+                teamId,
+                credentialId,
+                credentialSecret,
+                domainAndPort,
+                sourceLabel,
+                targetFolderHint
+        );
+        if (!CaltopoCredentials.sniffTest(
+                new CaltopoCredentials(template.teamId, template.credentialId, template.credentialSecret)
+        )) {
+            throw new RuntimeException("Mutual aid credentials file is missing required fields.");
+        }
+        SetMutualAidTemplate(template);
+        NotifySettingsChanged();
+        ArchiveState("Mutual aid credentials loaded");
     }
 
     // readRidmapFileContent():
@@ -1105,6 +1623,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 readRidmapFileContent(json);
             } else if (type.equals("ct_credentials")) {
                 readCredentialsFileContent(json);
+            } else if (type.equals("ct_mutual_aid_credentials")) {
+                readMutualAidCredentialsFileContent(json);
             }
             NotifySettingsChanged();
             ShowToast(String.format(Locale.US, "%s:%s successfully loaded.", type, fileVersion));
@@ -1267,6 +1787,39 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.cachedDroneSpecTable.size();
     }
 
+    public static void SaveDroneSpecConfirmation(
+            @NonNull String remoteId,
+            @NonNull String org,
+            @NonNull String model,
+            @NonNull String mappedId
+    ) {
+        ClientClassState ccs = GetState();
+        String trimmedOrg = org.trim();
+        String trimmedModel = model.trim();
+        String trimmedMappedId = mappedId.trim();
+
+        CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
+        if (activeDs != null) {
+            activeDs.setOrg(trimmedOrg);
+            activeDs.setModel(trimmedModel);
+            activeDs.setMappedId(trimmedMappedId);
+        }
+
+        CtDroneSpec cachedDs = ccs.cachedDroneSpecTable.get(remoteId);
+        if (cachedDs == null) {
+            String owner = activeDs != null ? activeDs.getOwner() : "";
+            cachedDs = new CtDroneSpec(remoteId, trimmedMappedId, trimmedOrg, trimmedModel, owner);
+            ccs.cachedDroneSpecTable.put(remoteId, cachedDs);
+        } else {
+            cachedDs.setOrg(trimmedOrg);
+            cachedDs.setModel(trimmedModel);
+            cachedDs.setMappedId(trimmedMappedId);
+        }
+
+        ArchiveState("drone spec confirmation saved");
+        UpdateDroneSpecs();
+    }
+
     public static String GetConfigFilesLoadedRecord() {
         ClientClassState ccs = GetState();
         return String.format(Locale.US, " * %s",
@@ -1347,8 +1900,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return FBAnalytics;
     }
 
-    private static void SetFBDefaults() {
-        ClientClassState ccs = GetState();
+    private static void SetFBDefaults(@Nullable ClientClassState ccs) {
+        if (ccs == null) ccs = GetState();
         FirebaseAnalytics fbAnalytics = GetFBAnalytics();
         if (null == fbAnalytics) return;
         try {
@@ -1402,14 +1955,32 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTDebug(TAG, "reloadPersistedStateInternal(): restored ClientClassState from proto store.");
         }
         if (null == ccs) ccs = new ClientClassState();
+        // Publish a provisional state immediately so any re-entrant getters hit this
+        // object instead of re-entering restoreClientState() while startup is still in flight.
+        Ccstate = ccs;
         if (ctxt != null) {
             applyArchivePathBackupPrefs(ctxt, ccs);
         }
         if (null == ccs.droneSpecTable) ccs.droneSpecTable = new Hashtable<>(16);
         if (null == ccs.cachedDroneSpecTable) ccs.cachedDroneSpecTable = new Hashtable<>(16);
-        Ccstate = ccs;
+        if (ccs.caltopoProfiles == null) ccs.caltopoProfiles = new ArrayList<>();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord activeProfile = null;
+        if (ccs.caltopoProfiles != null && !ccs.caltopoProfiles.isEmpty()) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if (profile.profileId != null && profile.profileId.equals(ccs.activeCaltopoProfileId)) {
+                    activeProfile = profile;
+                    break;
+                }
+            }
+            if (activeProfile == null) {
+                activeProfile = ccs.caltopoProfiles.get(0);
+                ccs.activeCaltopoProfileId = activeProfile.profileId;
+            }
+            mirrorProfileIntoLegacyFields(ccs, activeProfile);
+        }
         CTDebug(TAG, "reloadPersistedStateInternal(): " + Ccstate);
-        SetFBDefaults();
+        SetFBDefaults(ccs);
         if (notifySettings) {
             NotifySettingsChanged();
         }
@@ -1427,7 +1998,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             Ccstate.debugLevel = DebugLevel;
             AppConfigStore.persistState(ctxt, Ccstate, ArchivePermissionMissingFlag);
             CTDebug(TAG, String.format(Locale.US, "ArchiveState(%s):\n%s", reason, Ccstate));
-            SetFBDefaults();
+            SetFBDefaults(Ccstate);
             Bundle parameters = new Bundle();
             parameters.putString("r2c_reason", reason);
             CTEvent(TAG, "ArchiveState", parameters);
@@ -1577,6 +2148,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @NonNull
     public static String GetTrackerApiKey() {
         ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.trackerApiKey != null) {
+            return profile.trackerApiKey;
+        }
         return ccs.trackerApiKey;
     }
 
@@ -1592,6 +2168,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @NonNull
     public static String GetTrackerUrlPfx() {
         ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.trackerUrlPfx != null) {
+            return profile.trackerUrlPfx;
+        }
         return ccs.trackerUrlPfx;
     }
 
@@ -1606,6 +2187,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static String GetIncident() {
         ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.incident != null) {
+            return profile.incident;
+        }
         return ccs.incident;
     }
 
@@ -1619,6 +2205,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static String GetOpPeriod() {
         ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
+        if (profile != null && profile.opPeriod != null) {
+            return profile.opPeriod;
+        }
         return ccs.opPeriod;
     }
 
@@ -2052,6 +2643,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         synchronized (ShutdownLock) {
             AppExitRequested = false;
         }
+        RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true);
     }
 
     public static boolean IsExitRequested() {

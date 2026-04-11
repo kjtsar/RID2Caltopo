@@ -36,6 +36,7 @@ enum class ActiveScreen {
     SETTINGS,
     SCANNER
 }
+
 sealed class CaltopoConnectionState(val displayName: String) {
     override fun toString(): String = displayName
     // Standard operating mode: local logging only
@@ -95,8 +96,11 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     val appUpTime = _appUptime.asStateFlow()
     private val _hostname = MutableStateFlow("")
     val hostname = _hostname.asStateFlow()
+    private val _pendingDroneConfirmation = MutableStateFlow<DroneSpecConfirmationUiState?>(null)
+    val pendingDroneConfirmation = _pendingDroneConfirmation.asStateFlow()
     private val _activeScreen = MutableStateFlow(ActiveScreen.MAIN)
     val activeScreen : StateFlow<ActiveScreen> = _activeScreen.asStateFlow()
+    private val promptedFlightKeys = linkedSetOf<String>()
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
@@ -256,6 +260,33 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         drone.setMappedId(newMappedId)
     }
 
+    fun updatePendingDroneConfirmation(
+        organization: String? = null,
+        pilotCallsign: String? = null,
+        droneDescription: String? = null
+    ) {
+        val current = _pendingDroneConfirmation.value ?: return
+        _pendingDroneConfirmation.value = current.copy(
+            organization = organization ?: current.organization,
+            pilotCallsign = pilotCallsign ?: current.pilotCallsign,
+            droneDescription = droneDescription ?: current.droneDescription
+        )
+    }
+
+    fun savePendingDroneConfirmation() {
+        val current = _pendingDroneConfirmation.value ?: return
+        val remoteId = current.remoteId.trim()
+        val organization = current.organization.trim()
+        val callsign = current.pilotCallsign.trim()
+        val droneDescription = current.droneDescription.trim()
+        if (remoteId.isEmpty() || organization.isEmpty() || callsign.isEmpty() || droneDescription.isEmpty()) {
+            return
+        }
+        val mappedId = CtDroneSpec.BuildMappedId(callsign, droneDescription, remoteId)
+        CaltopoClient.SaveDroneSpecConfirmation(remoteId, organization, droneDescription, mappedId)
+        _pendingDroneConfirmation.value = null
+    }
+
     fun housekeeping() {
         _appUptime.value = uptimeTimer.durationAsString()
         val newDeviceName = R2CActivity.MyDeviceName
@@ -270,6 +301,30 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         _drones.value = droneSpecs
         housekeeping()
+        val activeFlightKeys = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
+            currentFlightKey(drone)
+        }
+        promptedFlightKeys.retainAll(activeFlightKeys)
+        val pendingRemoteId = _pendingDroneConfirmation.value?.remoteId
+        val pendingStillActive = droneSpecs.any { drone ->
+            pendingRemoteId == drone.remoteId && currentFlightKey(drone) != null
+        }
+        if (!pendingStillActive) {
+            _pendingDroneConfirmation.value = null
+        }
+        if (_pendingDroneConfirmation.value == null) {
+            val droneToConfirm = droneSpecs.firstOrNull { drone ->
+                val flightKey = currentFlightKey(drone)
+                flightKey != null && flightKey !in promptedFlightKeys
+            }
+            if (droneToConfirm != null) {
+                val flightKey = currentFlightKey(droneToConfirm)
+                if (flightKey != null) {
+                    promptedFlightKeys.add(flightKey)
+                    _pendingDroneConfirmation.value = buildConfirmationState(droneToConfirm)
+                }
+            }
+        }
         if (droneSpecs.isEmpty()) {
             if (!delayedUptimePoll.isRunning) {
                 delayedUptimePoll.start(this::uptimePoll, 1000, 1000)
@@ -281,6 +336,20 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
 
     fun uptimePoll() {
         housekeeping()
+    }
+
+    private fun currentFlightKey(drone: CtDroneSpec): String? {
+        if (drone.myR2cOwner != null) return null
+        val startMsec = drone.startMsecTimestamp
+        if (!drone.isActive || startMsec <= 0L) return null
+        return "${drone.remoteId}:$startMsec"
+    }
+
+    private fun buildConfirmationState(drone: CtDroneSpec): DroneSpecConfirmationUiState {
+        return DroneSpecConfirmationLogic.buildInitialState(
+            drone = drone,
+            defaultOrganization = CaltopoClient.GetHomeOrgName()
+        )
     }
 }
 

@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import java.io.IOException
+import java.util.ArrayList
 import java.util.Hashtable
 import java.util.Locale
 
@@ -21,9 +22,10 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 3
+    const val SCHEMA_VERSION = 5
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
+    private const val DEFAULT_HOME_PROFILE_ID = "home-default"
 
     @Volatile
     private var appContext: Context? = null
@@ -195,16 +197,28 @@ object AppConfigStore {
         if (config.notam.lastUpdatedEpochMs != 0L) return true
         if (config.ridMappingsCount > 0) return true
         if (config.loadedConfigFilesCount > 0) return true
+        if (config.mutualAidTemplate.teamId.isNotBlank()) return true
+        if (config.mutualAidTemplate.credentialId.isNotBlank()) return true
+        if (config.mutualAidTemplate.credentialSecret.isNotBlank()) return true
+        if (config.mutualAidTemplate.domainAndPort.isNotBlank()) return true
+        if (config.mutualAidTemplate.sourceLabel.isNotBlank()) return true
+        if (config.mutualAidTemplate.targetFolderHint.isNotBlank()) return true
+        if (config.caltopoProfilesCount > 0) return true
+        if (config.activeCaltopoProfileId.isNotBlank()) return true
         return false
     }
 
     private fun toClientState(config: AppConfig): ClientClassState {
+        val profiles = effectiveProfiles(config)
+        val activeProfile = selectActiveProfile(config, profiles)
         val state = ClientClassState()
         state.minDistanceInFeet = if (config.minDistanceFeet > 0) config.minDistanceFeet else CaltopoClient.MIN_DISTANCE_IN_FEET
         state.archivePath = config.archiveLocation.treeUri
-        state.caltopoTrackFolder = config.caltopoTrackFolder.ifBlank { "Drone Tracks" }
-        state.caltopoDomainAndPort = config.caltopoDomainAndPort.ifBlank { "caltopo.com" }
-        state.caltopoCredentials = CaltopoCredentials(
+        state.caltopoTrackFolder = activeProfile?.trackFolder?.ifBlank { "Drone Tracks" }
+            ?: config.caltopoTrackFolder.ifBlank { "Drone Tracks" }
+        state.caltopoDomainAndPort = activeProfile?.domainAndPort?.ifBlank { "caltopo.com" }
+            ?: config.caltopoDomainAndPort.ifBlank { "caltopo.com" }
+        state.caltopoCredentials = activeProfile?.credentials ?: CaltopoCredentials(
             config.caltopoCredentials.teamId,
             config.caltopoCredentials.credentialId,
             config.caltopoCredentials.credentialSecret
@@ -212,10 +226,10 @@ object AppConfigStore {
         state.newTrackDelayInSeconds = if (config.newTrackDelaySeconds > 0) config.newTrackDelaySeconds else 30
         state.debugLevel = config.debugLevel
         state.maxIdleTimeInMinutes = if (config.maxIdleTimeMinutes >= 0) config.maxIdleTimeMinutes else 120
-        state.incident = config.incident.ifBlank { "Training" }
-        state.opPeriod = config.opPeriod.ifBlank { "1" }
-        state.trackerApiKey = config.trackerApiKey
-        state.trackerUrlPfx = config.trackerUrlPrefix
+        state.incident = activeProfile?.incident?.ifBlank { "Training" } ?: config.incident.ifBlank { "Training" }
+        state.opPeriod = activeProfile?.opPeriod?.ifBlank { "1" } ?: config.opPeriod.ifBlank { "1" }
+        state.trackerApiKey = activeProfile?.trackerApiKey ?: config.trackerApiKey
+        state.trackerUrlPfx = activeProfile?.trackerUrlPfx ?: config.trackerUrlPrefix
         state.coordinateDisplayFormat = config.coordinateDisplayFormat.ifBlank { "decimal" }
         state.captureVideoStreamsFlag = config.captureVideoStreams
         state.usePeersFlag = config.usePeers
@@ -253,6 +267,9 @@ object AppConfigStore {
             state.cachedDroneSpecTable[spec.remoteId] = spec
         }
         state.configFilesLoaded = loadedConfigFilesDisplay(config)
+        state.mutualAidTemplate = fromProtoTemplate(config.mutualAidTemplate)
+        state.caltopoProfiles = ArrayList(profiles)
+        state.activeCaltopoProfileId = activeProfile?.profileId ?: config.activeCaltopoProfileId
         state.droneSpecTable = Hashtable<String, CtDroneSpec>(16)
         state.goLiveFlag = false
         return state
@@ -263,6 +280,15 @@ object AppConfigStore {
         state: ClientClassState,
         archivePermissionMissing: Boolean
     ): AppConfig {
+        val profiles = mutableListOf<CaltopoProfileRecord>().apply {
+            addAll(state.caltopoProfiles ?: effectiveProfiles(current))
+        }
+        val activeProfileId = selectActiveProfileId(current, state, profiles)
+        val activeProfile = syncActiveProfileFromState(
+            state = state,
+            profiles = profiles,
+            activeProfileId = activeProfileId
+        )
         val builder = current.toBuilder()
             .setSchemaVersion(SCHEMA_VERSION)
             .setLegacyImportComplete(true)
@@ -275,12 +301,12 @@ object AppConfigStore {
             .setUsePeers(state.usePeersFlag)
             .setPredictiveHeadEnabled(state.predictiveHeadEnabled)
             .setProximityAlertSpacingFeet(state.proximityAlertSpacingFeet)
-            .setCaltopoTrackFolder(state.caltopoTrackFolder ?: "")
-            .setCaltopoDomainAndPort(state.caltopoDomainAndPort ?: "")
-            .setIncident(state.incident ?: "")
-            .setOpPeriod(state.opPeriod ?: "")
-            .setTrackerApiKey(state.trackerApiKey ?: "")
-            .setTrackerUrlPrefix(state.trackerUrlPfx ?: "")
+            .setCaltopoTrackFolder(activeProfile.trackFolder)
+            .setCaltopoDomainAndPort(activeProfile.domainAndPort)
+            .setIncident(activeProfile.incident)
+            .setOpPeriod(activeProfile.opPeriod)
+            .setTrackerApiKey(activeProfile.trackerApiKey)
+            .setTrackerUrlPrefix(activeProfile.trackerUrlPfx)
             .setNotam(
                 AppConfig.NotamConfig.newBuilder()
                     .setEnabled(state.notamEnabled)
@@ -298,11 +324,12 @@ object AppConfigStore {
             )
             .setCaltopoCredentials(
                 AppConfig.CaltopoCredentialsConfig.newBuilder()
-                    .setTeamId(state.caltopoCredentials?.teamId ?: "")
-                    .setCredentialId(state.caltopoCredentials?.credentialId ?: "")
-                    .setCredentialSecret(state.caltopoCredentials?.credentialSecret ?: "")
+                    .setTeamId(activeProfile.credentials.teamId ?: "")
+                    .setCredentialId(activeProfile.credentials.credentialId ?: "")
+                    .setCredentialSecret(activeProfile.credentials.credentialSecret ?: "")
                     .build()
             )
+            .setActiveCaltopoProfileId(activeProfile.profileId)
 
         val currentArchive = current.archiveLocation
         val archivePath = state.archivePath ?: ""
@@ -341,8 +368,173 @@ object AppConfigStore {
         }
         builder.clearLoadedConfigFiles()
         builder.addAllLoadedConfigFiles(importedRecords.take(MAX_LOADED_CONFIG_FILES))
+        builder.setMutualAidTemplate((state.mutualAidTemplate ?: fromProtoTemplate(current.mutualAidTemplate)).toProto())
+        builder.clearCaltopoProfiles()
+        builder.addAllCaltopoProfiles(profiles.map { it.toProto() })
         return builder.build()
     }
+
+    private fun effectiveProfiles(config: AppConfig): List<CaltopoProfileRecord> {
+        if (config.caltopoProfilesCount > 0) {
+            return config.caltopoProfilesList.map { fromProtoProfile(it) }
+        }
+        return listOfNotNull(migrateLegacyProfile(config))
+    }
+
+    private fun selectActiveProfile(
+        config: AppConfig,
+        profiles: List<CaltopoProfileRecord>
+    ): CaltopoProfileRecord? {
+        if (profiles.isEmpty()) return null
+        val requestedId = config.activeCaltopoProfileId
+        return profiles.firstOrNull { it.profileId == requestedId }
+            ?: profiles.firstOrNull { it.profileType == "HOME" }
+            ?: profiles.first()
+    }
+
+    private fun selectActiveProfileId(
+        current: AppConfig,
+        state: ClientClassState,
+        profiles: List<CaltopoProfileRecord>
+    ): String {
+        val requested = state.activeCaltopoProfileId
+        if (!requested.isNullOrBlank() && profiles.any { it.profileId == requested }) return requested
+        val existing = current.activeCaltopoProfileId
+        if (existing.isNotBlank() && profiles.any { it.profileId == existing }) return existing
+        return profiles.firstOrNull { it.profileType == "HOME" }?.profileId
+            ?: profiles.firstOrNull()?.profileId
+            ?: DEFAULT_HOME_PROFILE_ID
+    }
+
+    private fun migrateLegacyProfile(config: AppConfig): CaltopoProfileRecord? {
+        val hasLegacy =
+            config.caltopoCredentials.teamId.isNotBlank() ||
+                config.caltopoCredentials.credentialId.isNotBlank() ||
+                config.caltopoCredentials.credentialSecret.isNotBlank() ||
+                config.caltopoDomainAndPort.isNotBlank() ||
+                config.caltopoTrackFolder.isNotBlank() ||
+                config.incident.isNotBlank() ||
+                config.opPeriod.isNotBlank() ||
+                config.trackerApiKey.isNotBlank() ||
+                config.trackerUrlPrefix.isNotBlank()
+        if (!hasLegacy) return null
+        return CaltopoProfileRecord(
+            DEFAULT_HOME_PROFILE_ID,
+            "Default",
+            "HOME",
+            CaltopoCredentials(
+                config.caltopoCredentials.teamId,
+                config.caltopoCredentials.credentialId,
+                config.caltopoCredentials.credentialSecret
+            ),
+            config.caltopoDomainAndPort.ifBlank { "caltopo.com" },
+            config.caltopoTrackFolder.ifBlank { "Drone Tracks" },
+            config.incident.ifBlank { "Training" },
+            config.opPeriod.ifBlank { "1" },
+            config.trackerApiKey,
+            config.trackerUrlPrefix,
+            false,
+            0L,
+            false,
+            "",
+            "",
+            "",
+            "",
+            0L,
+            ""
+        )
+    }
+
+    private fun buildDefaultHomeProfile(state: ClientClassState): CaltopoProfileRecord =
+        CaltopoProfileRecord(
+            DEFAULT_HOME_PROFILE_ID,
+            "Default",
+            "HOME",
+            state.caltopoCredentials ?: CaltopoCredentials(),
+            state.caltopoDomainAndPort ?: "caltopo.com",
+            state.caltopoTrackFolder ?: "Drone Tracks",
+            state.incident ?: "Training",
+            state.opPeriod ?: "1",
+            state.trackerApiKey ?: "",
+            state.trackerUrlPfx ?: "",
+            false,
+            0L,
+            false,
+            "",
+            "",
+            "",
+            "",
+            0L,
+            ""
+        )
+
+    private fun syncActiveProfileFromState(
+        state: ClientClassState,
+        profiles: MutableList<CaltopoProfileRecord>,
+        activeProfileId: String
+    ): CaltopoProfileRecord {
+        val base = profiles.firstOrNull { it.profileId == activeProfileId } ?: buildDefaultHomeProfile(state)
+        val synced = CaltopoProfileRecord(
+            if (base.profileId.isNotBlank()) base.profileId else DEFAULT_HOME_PROFILE_ID,
+            if (base.displayName.isNotBlank()) base.displayName else "Default",
+            if (base.profileType.isNotBlank()) base.profileType else "HOME",
+            state.caltopoCredentials ?: base.credentials ?: CaltopoCredentials(),
+            state.caltopoDomainAndPort ?: base.domainAndPort,
+            state.caltopoTrackFolder ?: base.trackFolder,
+            state.incident ?: base.incident,
+            state.opPeriod ?: base.opPeriod,
+            state.trackerApiKey ?: base.trackerApiKey,
+            state.trackerUrlPfx ?: base.trackerUrlPfx,
+            base.autoConnect,
+            base.expiresAtEpochMs,
+            base.quietRemoveOnExpiry,
+            base.sourceLabel,
+            base.targetMapId,
+            base.targetMapTitle,
+            base.targetFolderHint,
+            base.importedAtEpochMs,
+            base.importDedupeKey
+        )
+        val idx = profiles.indexOfFirst { it.profileId == synced.profileId }
+        if (idx >= 0) {
+            profiles[idx] = synced
+        } else {
+            profiles.add(synced)
+        }
+        state.caltopoProfiles = ArrayList(profiles)
+        state.activeCaltopoProfileId = synced.profileId
+        return synced
+    }
+
+    private fun fromProtoProfile(profile: AppConfig.CaltopoProfile): CaltopoProfileRecord =
+        CaltopoProfileRecord(
+            profile.profileId,
+            profile.displayName,
+            when (profile.profileType) {
+                AppConfig.CaltopoProfileType.CALTOPO_PROFILE_TYPE_MUTUAL_AID -> "MUTUAL_AID"
+                else -> "HOME"
+            },
+            CaltopoCredentials(
+                profile.teamId,
+                profile.credentialId,
+                profile.credentialSecret
+            ),
+            profile.domainAndPort,
+            profile.trackFolder,
+            profile.incident,
+            profile.opPeriod,
+            profile.trackerApiKey,
+            profile.trackerUrlPrefix,
+            profile.autoConnect,
+            profile.expiresAtEpochMs,
+            profile.quietRemoveOnExpiry,
+            profile.sourceLabel,
+            profile.targetMapId,
+            profile.targetMapTitle,
+            profile.targetFolderHint,
+            profile.importedAtEpochMs,
+            profile.importDedupeKey
+        )
 
     private fun mergeLoadedConfigFiles(
         current: List<AppConfig.LoadedConfigFileRecord>,
@@ -380,6 +572,57 @@ object AppConfigStore {
 
     private fun loadedConfigFilesDisplay(config: AppConfig): String = config.loadedConfigFilesList
         .joinToString(separator = "\n") { it.displayText }
+
+    private fun CaltopoProfileRecord.toProto(): AppConfig.CaltopoProfile =
+        AppConfig.CaltopoProfile.newBuilder()
+            .setProfileId(profileId)
+            .setDisplayName(displayName)
+            .setProfileType(
+                if (profileType == "MUTUAL_AID") {
+                    AppConfig.CaltopoProfileType.CALTOPO_PROFILE_TYPE_MUTUAL_AID
+                } else {
+                    AppConfig.CaltopoProfileType.CALTOPO_PROFILE_TYPE_HOME
+                }
+            )
+            .setTeamId(credentials.teamId ?: "")
+            .setCredentialId(credentials.credentialId ?: "")
+            .setCredentialSecret(credentials.credentialSecret ?: "")
+            .setDomainAndPort(domainAndPort)
+            .setTrackFolder(trackFolder)
+            .setIncident(incident)
+            .setOpPeriod(opPeriod)
+            .setTrackerApiKey(trackerApiKey)
+            .setTrackerUrlPrefix(trackerUrlPfx)
+            .setAutoConnect(autoConnect)
+            .setExpiresAtEpochMs(expiresAtEpochMs)
+            .setQuietRemoveOnExpiry(quietRemoveOnExpiry)
+            .setSourceLabel(sourceLabel)
+            .setTargetMapId(targetMapId)
+            .setTargetMapTitle(targetMapTitle)
+            .setTargetFolderHint(targetFolderHint)
+            .setImportedAtEpochMs(importedAtEpochMs)
+            .setImportDedupeKey(importDedupeKey)
+            .build()
+
+    private fun fromProtoTemplate(template: AppConfig.MutualAidTemplate): MutualAidTemplateRecord =
+        MutualAidTemplateRecord(
+            template.teamId,
+            template.credentialId,
+            template.credentialSecret,
+            template.domainAndPort.ifBlank { "caltopo.com" },
+            template.sourceLabel,
+            template.targetFolderHint
+        )
+
+    private fun MutualAidTemplateRecord.toProto(): AppConfig.MutualAidTemplate =
+        AppConfig.MutualAidTemplate.newBuilder()
+            .setTeamId(teamId ?: "")
+            .setCredentialId(credentialId ?: "")
+            .setCredentialSecret(credentialSecret ?: "")
+            .setDomainAndPort(domainAndPort ?: "")
+            .setSourceLabel(sourceLabel ?: "")
+            .setTargetFolderHint(targetFolderHint ?: "")
+            .build()
 
     private fun hasPersistedReadPermission(resolver: ContentResolver, uri: Uri): Boolean {
         val permissions: List<UriPermission> = resolver.persistedUriPermissions

@@ -13,6 +13,50 @@ message AppConfig {
     string credential_secret = 3;
   }
 
+  enum CaltopoProfileType {
+    CALTOPO_PROFILE_TYPE_UNSPECIFIED = 0;
+    CALTOPO_PROFILE_TYPE_HOME = 1;
+    CALTOPO_PROFILE_TYPE_MUTUAL_AID = 2;
+  }
+
+  message CaltopoProfile {
+    string profile_id = 1;
+    string display_name = 2;
+    CaltopoProfileType profile_type = 3;
+
+    string team_id = 4;
+    string credential_id = 5;
+    string credential_secret = 6;
+    string domain_and_port = 7;
+
+    string track_folder = 8;
+    string incident = 9;
+    string op_period = 10;
+    string tracker_api_key = 11;
+    string tracker_url_prefix = 12;
+
+    bool auto_connect = 13;
+    int64 expires_at_epoch_ms = 14;
+    bool quiet_remove_on_expiry = 15;
+
+    string source_label = 16;
+    string target_map_id = 17;
+    string target_map_title = 18;
+    string target_folder_hint = 19;
+
+    int64 imported_at_epoch_ms = 20;
+    string import_dedupe_key = 21;
+  }
+
+  message MutualAidTemplate {
+    string team_id = 1;
+    string credential_id = 2;
+    string credential_secret = 3;
+    string domain_and_port = 4;
+    string source_label = 5;
+    string target_folder_hint = 6;
+  }
+
   message RidMapping {
     string remote_id = 1;
     string mapped_id = 2;
@@ -72,4 +116,7 @@ message AppConfig {
 
   repeated RidMapping rid_mappings = 70;
   repeated LoadedConfigFileRecord loaded_config_files = 80;
+  MutualAidTemplate mutual_aid_template = 81;
+  repeated CaltopoProfile caltopo_profiles = 90;
+  string active_caltopo_profile_id = 91;
 }

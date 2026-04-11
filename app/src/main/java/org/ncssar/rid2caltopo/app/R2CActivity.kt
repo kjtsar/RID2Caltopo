@@ -45,6 +45,8 @@ import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.MutualAidProfileManager
+import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.data.OrgConfigToken
 import org.ncssar.rid2caltopo.data.CaltopoMap
@@ -170,11 +172,21 @@ class R2CActivity : AppCompatActivity(), R2CPeer.PeerListChangedListener  {
     private fun handleR2cIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
-        if (uri.scheme != "r2c1") return
-        val token = OrgConfigToken.MAGIC_PREFIX + uri.toString().removePrefix("r2c1://")
-        CTDebug(TAG, "handleR2cIntent(): joining org from scanned QR")
-        OrgConfigManager.joinFromToken(this, token) { _, message ->
-            showToast(message)
+        when (uri.scheme) {
+            "r2c1" -> {
+                val token = OrgConfigToken.MAGIC_PREFIX + uri.toString().removePrefix("r2c1://")
+                CTDebug(TAG, "handleR2cIntent(): joining org from scanned QR")
+                OrgConfigManager.joinFromToken(this, token) { _, message ->
+                    showToast(message)
+                }
+            }
+            "r2cma1" -> {
+                val token = MutualAidToken.MAGIC_PREFIX + uri.toString().removePrefix("r2cma1://")
+                CTDebug(TAG, "handleR2cIntent(): joining mutual aid from scanned QR")
+                MutualAidProfileManager.joinFromToken(this, token) { _, message ->
+                    showToast(message)
+                }
+            }
         }
     }
 

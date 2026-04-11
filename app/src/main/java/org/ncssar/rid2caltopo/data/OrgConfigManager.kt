@@ -140,12 +140,14 @@ object OrgConfigManager {
     fun uploadOrgConfig(
         context: Context,
         account: GoogleSignInAccount,
-        orgName: String,
         callback: (Boolean, String, String?) -> Unit
     ) {
         val appContext = context.applicationContext
         executor.execute {
             val result = try {
+                val orgName = CaltopoClient.GetHomeOrgName().ifBlank {
+                    throw IllegalStateException("Load ct_credentials with org_name before exporting org config.")
+                }
                 val rawBundle = CaltopoClient.BuildOrgConfigBundle(orgName)
                     ?: throw IllegalStateException("Failed to build org config bundle.")
                 val securedBundle = encryptCredentialsInBundle(rawBundle)

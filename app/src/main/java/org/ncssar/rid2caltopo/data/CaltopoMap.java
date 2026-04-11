@@ -165,9 +165,14 @@ public class CaltopoMap implements R2CPeer.R2CListener {
     public static String Init() {
         CTDebug(TAG, "Init()");
         ShutdownInProgress = false;
+        CaltopoClient.RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true);
         if (null == MyInstance)
             MyInstance = new CaltopoMap(); // needed to receive notifications only.
 
+        CaltopoProfileRecord activeProfile = CaltopoClient.GetActiveCaltopoProfile();
+        if (activeProfile != null && CaltopoClient.HasExpired(activeProfile, System.currentTimeMillis())) {
+            return "Mutual aid access expired";
+        }
         CaltopoCredentials sessionCredentials = CaltopoClient.GetCaltopoCredentials();
         if (!CaltopoCredentials.sniffTest(sessionCredentials)) {
             return "Missing required credentials";

@@ -58,6 +58,7 @@ import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
@@ -82,6 +83,8 @@ private fun restartMediaMtxServer(context: android.content.Context) {
 fun StreamsScreen(
     viewModel: StreamsViewModel = viewModel(),
     onBack: () -> Unit,
+    showNavigation: Boolean = true,
+    externalContentMode: ExternalDisplayContentMode? = null,
 ) {
     val isServerRunning = MediaMTXStatus.isServerRunning
     val serverExitReason = MediaMTXStatus.serverExitReason
@@ -106,6 +109,16 @@ fun StreamsScreen(
             } else {
                 "No map connection"
             }
+        }
+    }
+
+    LaunchedEffect(externalContentMode) {
+        when (externalContentMode) {
+            ExternalDisplayContentMode.StreamsGrid,
+            ExternalDisplayContentMode.ObserverMode -> viewModel.setLayoutMode(StreamsLayoutMode.Streams)
+            ExternalDisplayContentMode.MapOnly -> viewModel.setLayoutMode(StreamsLayoutMode.Map)
+            ExternalDisplayContentMode.Split -> viewModel.setLayoutMode(StreamsLayoutMode.Both)
+            null -> Unit
         }
     }
 
@@ -137,13 +150,17 @@ fun StreamsScreen(
                         }
                     }
                 },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back"
-                        )
+                navigationIcon = if (showNavigation) {
+                    {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back"
+                            )
+                        }
                     }
+                } else {
+                    {}
                 },
                 actions = {
                     Row(verticalAlignment = Alignment.CenterVertically) {

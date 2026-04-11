@@ -12,6 +12,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
+import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
+import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
+import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
@@ -64,6 +68,21 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _notamStatus = MutableStateFlow(buildNotamStatus())
     val notamStatus = _notamStatus.asStateFlow()
 
+    private val initialExternalConfig = R2CApplication.getAppCtxt()?.let { ExternalDisplayPrefs.load(it) }
+        ?: ExternalDisplayConfig()
+    private val _externalDisplayEnabled = MutableStateFlow(initialExternalConfig.enabledWhenConnected)
+    val externalDisplayEnabled = _externalDisplayEnabled.asStateFlow()
+    private val _externalDisplayAutoOpen = MutableStateFlow(initialExternalConfig.autoOpenOnConnect)
+    val externalDisplayAutoOpen = _externalDisplayAutoOpen.asStateFlow()
+    private val _externalDisplayReturnToPhoneOnly = MutableStateFlow(initialExternalConfig.returnToPhoneOnlyLayoutOnDisconnect)
+    val externalDisplayReturnToPhoneOnly = _externalDisplayReturnToPhoneOnly.asStateFlow()
+    private val _externalDisplayAllowInteraction = MutableStateFlow(initialExternalConfig.allowInteraction)
+    val externalDisplayAllowInteraction = _externalDisplayAllowInteraction.asStateFlow()
+    private val _externalDisplayContentMode = MutableStateFlow(initialExternalConfig.contentMode)
+    val externalDisplayContentMode = _externalDisplayContentMode.asStateFlow()
+    private val _externalDisplayAlertRouting = MutableStateFlow(initialExternalConfig.alertRouting)
+    val externalDisplayAlertRouting = _externalDisplayAlertRouting.asStateFlow()
+
 
 
     init {
@@ -86,6 +105,14 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamRefreshIntervalSeconds.value = CaltopoClient.GetNotamRefreshIntervalSeconds().toString()
         _notamAutoRefresh.value = CaltopoClient.GetNotamAutoRefresh()
         _notamStatus.value = buildNotamStatus()
+        val externalConfig = R2CApplication.getAppCtxt()?.let { ExternalDisplayPrefs.load(it) }
+            ?: ExternalDisplayConfig()
+        _externalDisplayEnabled.value = externalConfig.enabledWhenConnected
+        _externalDisplayAutoOpen.value = externalConfig.autoOpenOnConnect
+        _externalDisplayReturnToPhoneOnly.value = externalConfig.returnToPhoneOnlyLayoutOnDisconnect
+        _externalDisplayAllowInteraction.value = externalConfig.allowInteraction
+        _externalDisplayContentMode.value = externalConfig.contentMode
+        _externalDisplayAlertRouting.value = externalConfig.alertRouting
     }
 
     // --- UI Event Handlers --- //
@@ -137,6 +164,30 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamAutoRefresh.value = enabled
     }
 
+    fun onExternalDisplayEnabledChanged(enabled: Boolean) {
+        _externalDisplayEnabled.value = enabled
+    }
+
+    fun onExternalDisplayAutoOpenChanged(enabled: Boolean) {
+        _externalDisplayAutoOpen.value = enabled
+    }
+
+    fun onExternalDisplayReturnToPhoneOnlyChanged(enabled: Boolean) {
+        _externalDisplayReturnToPhoneOnly.value = enabled
+    }
+
+    fun onExternalDisplayAllowInteractionChanged(enabled: Boolean) {
+        _externalDisplayAllowInteraction.value = enabled
+    }
+
+    fun onExternalDisplayContentModeChanged(mode: ExternalDisplayContentMode) {
+        _externalDisplayContentMode.value = mode
+    }
+
+    fun onExternalDisplayAlertRoutingChanged(routing: ExternalDisplayAlertRouting) {
+        _externalDisplayAlertRouting.value = routing
+    }
+
     fun saveSettings() {
         val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
@@ -152,6 +203,19 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamRadiusNm.value.toIntOrNull()?.let { CaltopoClient.SetNotamRadiusNm(it) }
         _notamRefreshIntervalSeconds.value.toIntOrNull()?.let { CaltopoClient.SetNotamRefreshIntervalSeconds(it) }
         CaltopoClient.SetNotamAutoRefresh(_notamAutoRefresh.value)
+        R2CApplication.getAppCtxt()?.let { context ->
+            ExternalDisplayPrefs.save(
+                context,
+                ExternalDisplayConfig(
+                    enabledWhenConnected = _externalDisplayEnabled.value,
+                    autoOpenOnConnect = _externalDisplayAutoOpen.value,
+                    returnToPhoneOnlyLayoutOnDisconnect = _externalDisplayReturnToPhoneOnly.value,
+                    allowInteraction = _externalDisplayAllowInteraction.value,
+                    contentMode = _externalDisplayContentMode.value,
+                    alertRouting = _externalDisplayAlertRouting.value
+                )
+            )
+        }
         _notamStatus.value = buildNotamStatus()
         NotamCenter.requestImmediateRefresh()
         if (restartMediaMtx) {

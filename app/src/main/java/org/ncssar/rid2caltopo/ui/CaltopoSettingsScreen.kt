@@ -19,6 +19,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
+import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
+import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 
 @Composable
 fun CaltopoSettingsScreen(
@@ -39,6 +41,12 @@ fun CaltopoSettingsScreen(
     val notamRefreshIntervalSeconds by settingsViewModel.notamRefreshIntervalSeconds.collectAsState()
     val notamAutoRefresh by settingsViewModel.notamAutoRefresh.collectAsState()
     val notamStatus by settingsViewModel.notamStatus.collectAsState()
+    val externalDisplayEnabled by settingsViewModel.externalDisplayEnabled.collectAsState()
+    val externalDisplayAutoOpen by settingsViewModel.externalDisplayAutoOpen.collectAsState()
+    val externalDisplayReturnToPhoneOnly by settingsViewModel.externalDisplayReturnToPhoneOnly.collectAsState()
+    val externalDisplayAllowInteraction by settingsViewModel.externalDisplayAllowInteraction.collectAsState()
+    val externalDisplayContentMode by settingsViewModel.externalDisplayContentMode.collectAsState()
+    val externalDisplayAlertRouting by settingsViewModel.externalDisplayAlertRouting.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
         Card (modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -171,6 +179,52 @@ fun CaltopoSettingsScreen(
                     Text(if (notamAutoRefresh) "Yes" else "No")
                 }
 
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text("External Display", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                LabeledSwitch(
+                    label = "Enable when HDMI/DeX connected",
+                    checked = externalDisplayEnabled,
+                    onCheckedChange = settingsViewModel::onExternalDisplayEnabledChanged
+                )
+                LabeledSwitch(
+                    label = "Auto-open on connect",
+                    checked = externalDisplayAutoOpen,
+                    onCheckedChange = settingsViewModel::onExternalDisplayAutoOpenChanged
+                )
+                LabeledSwitch(
+                    label = "Return to phone-only layout on disconnect",
+                    checked = externalDisplayReturnToPhoneOnly,
+                    onCheckedChange = settingsViewModel::onExternalDisplayReturnToPhoneOnlyChanged
+                )
+                LabeledSwitch(
+                    label = "Allow external display interaction",
+                    checked = externalDisplayAllowInteraction,
+                    onCheckedChange = settingsViewModel::onExternalDisplayAllowInteractionChanged
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("External display content", style = MaterialTheme.typography.titleSmall)
+                SingleChoiceGroup(
+                    options = ExternalDisplayContentMode.entries,
+                    selected = externalDisplayContentMode,
+                    label = { it.displayLabel },
+                    onSelected = settingsViewModel::onExternalDisplayContentModeChanged
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Alert routing", style = MaterialTheme.typography.titleSmall)
+                SingleChoiceGroup(
+                    options = ExternalDisplayAlertRouting.entries,
+                    selected = externalDisplayAlertRouting,
+                    label = { it.displayLabel },
+                    onSelected = settingsViewModel::onExternalDisplayAlertRoutingChanged
+                )
+
                 Row {
                     Button(onClick = {
                         settingsViewModel.saveSettings()
@@ -183,6 +237,44 @@ fun CaltopoSettingsScreen(
                         Text("Close")
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LabeledSwitch(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label)
+        Spacer(modifier = Modifier.width(8.dp))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(if (checked) "Yes" else "No")
+    }
+}
+
+@Composable
+private fun <T> SingleChoiceGroup(
+    options: List<T>,
+    selected: T,
+    label: (T) -> String,
+    onSelected: (T) -> Unit
+) {
+    Column {
+        options.forEach { option ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                RadioButton(
+                    selected = option == selected,
+                    onClick = { onSelected(option) }
+                )
+                Text(label(option))
             }
         }
     }

@@ -14,10 +14,12 @@ import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.view.Display
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
@@ -25,9 +27,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
@@ -50,6 +54,10 @@ import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.data.OrgConfigToken
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
+import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
+import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
+import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
@@ -66,7 +74,6 @@ import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
-import androidx.lifecycle.viewmodel.compose.viewModel
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -81,6 +88,25 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     var mFusedLocationClient: FusedLocationProviderClient? = null
     private val remoteViewModels = mutableStateListOf<R2CPeerViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
+    private lateinit var localViewModel: R2CViewModel
+    private lateinit var streamsViewModel: StreamsViewModel
+    private var externalDisplayConfig by mutableStateOf(ExternalDisplayConfig())
+    private var externalDisplayConnected by mutableStateOf(false)
+    private var externalDisplayPresentation: ExternalDisplayPresentation? = null
+    private var displayManager: DisplayManager? = null
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {
+            runOnUiThread { refreshExternalDisplay() }
+        }
+
+        override fun onDisplayRemoved(displayId: Int) {
+            runOnUiThread { refreshExternalDisplay() }
+        }
+
+        override fun onDisplayChanged(displayId: Int) {
+            runOnUiThread { refreshExternalDisplay() }
+        }
+    }
 
     private fun checkPermission(permission: String) {
         if (ActivityCompat.checkSelfPermission(
@@ -195,25 +221,33 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         handleR2cIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        reloadExternalDisplayConfig()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         CaltopoClient.MarkAppActive()
         CTDebug(TAG, "onCreate().")
         R2CMqttManager.SetPeerListChangedListener(this)
-        val localViewModel = ViewModelProvider(
+        localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
+        streamsViewModel = ViewModelProvider(this)[StreamsViewModel::class.java]
         CaltopoClient.AddDroneSpecsChangedListener(localViewModel)
         CaltopoClient.CheckIdle()
+        displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayManager?.registerDisplayListener(displayListener, null)
+        reloadExternalDisplayConfig()
 
         remoteViewModels.clear()
         setContent {
             RID2CaltopoTheme() {
                 val localContext =  LocalContext.current
-                val streamsViewModel : StreamsViewModel = viewModel()
                 val activeScreen by localViewModel
                     .activeScreen
                     .collectAsState()
@@ -225,11 +259,17 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                             onEmailLog = {
                                 zipAndEmailAllLogs(localContext)
                             },
-                            onShowHelp = {showHelpMenu()}
+                            onShowHelp = {showHelpMenu()},
+                            externalDisplayConnected = externalDisplayConnected,
+                            externalDisplayContentMode = externalDisplayConfig.contentMode,
+                            onSetExternalDisplayContent = ::setExternalDisplayContentMode
                         )
                     }
                     ActiveScreen.SETTINGS -> {
-                        CaltopoSettingsScreen(onDismiss = { localViewModel.showMain() })
+                        CaltopoSettingsScreen(onDismiss = {
+                            reloadExternalDisplayConfig()
+                            localViewModel.showMain()
+                        })
                     }
                     ActiveScreen.SCANNER -> {
                         ScannerScreen(onDismiss = { localViewModel.showMain() })
@@ -251,12 +291,15 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                             secondLat = alert.secondLat,
                             secondLng = alert.secondLng
                         )
-                        localViewModel.showStreams()
+                        if (shouldRouteAlertToPhone()) {
+                            localViewModel.showStreams()
+                        }
                         ProximityAlertCenter.suspendCurrentAlert()
                     }
                 )
             }
         }
+        refreshExternalDisplay()
         // Handle org-config QR scan that launched or re-launched this activity.
         handleR2cIntent(intent)
 
@@ -352,6 +395,68 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         val helpMenu: DeviceHelp = DeviceHelp.newInstance()
         val transaction = supportFragmentManager.beginTransaction()
         helpMenu.show(transaction, "Help")
+    }
+
+    private fun reloadExternalDisplayConfig() {
+        externalDisplayConfig = ExternalDisplayPrefs.load(this)
+        refreshExternalDisplay()
+    }
+
+    private fun setExternalDisplayContentMode(mode: ExternalDisplayContentMode) {
+        externalDisplayConfig = externalDisplayConfig.copy(contentMode = mode)
+        ExternalDisplayPrefs.save(this, externalDisplayConfig)
+        refreshExternalDisplay(forceRecreate = true)
+    }
+
+    private fun shouldRouteAlertToPhone(): Boolean {
+        return when (externalDisplayConfig.alertRouting) {
+            ExternalDisplayAlertRouting.PhoneOnly -> true
+            ExternalDisplayAlertRouting.ExternalOnly -> !externalDisplayConnected
+            ExternalDisplayAlertRouting.Both -> true
+        }
+    }
+
+    private fun findPresentationDisplay(): Display? {
+        val displays = displayManager?.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+            ?: return null
+        val primaryDisplayId = display?.displayId
+        return displays.firstOrNull { it.displayId != primaryDisplayId } ?: displays.firstOrNull()
+    }
+
+    private fun refreshExternalDisplay(forceRecreate: Boolean = false) {
+        val targetDisplay = findPresentationDisplay()
+        externalDisplayConnected = targetDisplay != null
+        if (!externalDisplayConfig.enabledWhenConnected || !externalDisplayConfig.autoOpenOnConnect || targetDisplay == null) {
+            dismissExternalDisplay(returnPhoneToMain = targetDisplay == null)
+            return
+        }
+        val existing = externalDisplayPresentation
+        val sameDisplay = existing?.display?.displayId == targetDisplay.displayId
+        if (!forceRecreate && sameDisplay && existing?.isShowing == true) return
+        dismissExternalDisplay(returnPhoneToMain = false)
+        externalDisplayPresentation = ExternalDisplayPresentation(
+            outerContext = this,
+            display = targetDisplay,
+            streamsViewModel = streamsViewModel,
+            config = externalDisplayConfig
+        ).also {
+            try {
+                it.show()
+            } catch (e: Exception) {
+                CTError(TAG, "Unable to show external display presentation.", e)
+                externalDisplayPresentation = null
+            }
+        }
+    }
+
+    private fun dismissExternalDisplay(returnPhoneToMain: Boolean) {
+        externalDisplayPresentation?.dismiss()
+        externalDisplayPresentation = null
+        if (returnPhoneToMain &&
+            externalDisplayConfig.returnToPhoneOnlyLayoutOnDisconnect &&
+            localViewModel.activeScreen.value == ActiveScreen.STREAMS) {
+            localViewModel.showMain()
+        }
     }
 
     override fun onRequestPermissionsResult(
@@ -483,6 +588,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     public override fun onDestroy() {
+        displayManager?.unregisterDisplayListener(displayListener)
+        dismissExternalDisplay(returnPhoneToMain = false)
         val exitRequested = CaltopoClient.IsExitRequested()
         val shouldShutdown = (this === AppActivity) && isFinishing && exitRequested
 

@@ -46,6 +46,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.DriveSyncAction
+import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.OrgConfigManager
@@ -162,7 +163,10 @@ fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CPeerViewModel>,
     onEmailLog: () -> Unit,
-    onShowHelp: () -> Unit
+    onShowHelp: () -> Unit,
+    externalDisplayConnected: Boolean = false,
+    externalDisplayContentMode: ExternalDisplayContentMode? = null,
+    onSetExternalDisplayContent: ((ExternalDisplayContentMode) -> Unit)? = null
 ) {
     val tag = "MainScreen"
     var menuExpanded by remember { mutableStateOf(false) }
@@ -911,6 +915,37 @@ fun MainScreen(
                             CaltopoClient.CTEvent(tag,"Stream Service Activated", null)
                             menuExpanded = false
                         })
+                        if (externalDisplayConnected && onSetExternalDisplayContent != null && externalDisplayContentMode != null) {
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text("External: Streams Grid") },
+                                onClick = {
+                                    onSetExternalDisplayContent(ExternalDisplayContentMode.StreamsGrid)
+                                    menuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("External: Map Only") },
+                                onClick = {
+                                    onSetExternalDisplayContent(ExternalDisplayContentMode.MapOnly)
+                                    menuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("External: Split View") },
+                                onClick = {
+                                    onSetExternalDisplayContent(ExternalDisplayContentMode.Split)
+                                    menuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("External: Observer Mode") },
+                                onClick = {
+                                    onSetExternalDisplayContent(ExternalDisplayContentMode.ObserverMode)
+                                    menuExpanded = false
+                                }
+                            )
+                        }
                         DropdownMenuItem(text = { Text("Status")}, onClick = {
                             localViewModel.showScanner()
                             CaltopoClient.CTEvent(tag,"ScannersDisplayed", null)

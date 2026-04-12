@@ -1109,6 +1109,31 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return null;
     }
 
+    @Nullable
+    private static CaltopoProfileRecord GetPreferredTrackerProfile() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord active = GetActiveCaltopoProfile();
+        if (active != null &&
+                !"MUTUAL_AID".equals(active.profileType) &&
+                active.trackerApiKey != null &&
+                !active.trackerApiKey.isEmpty() &&
+                active.trackerUrlPfx != null &&
+                !active.trackerUrlPfx.isEmpty()) {
+            return active;
+        }
+        if (ccs.caltopoProfiles == null) return active;
+        long nowMs = System.currentTimeMillis();
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (!"HOME".equals(profile.profileType)) continue;
+            if (HasExpired(profile, nowMs)) continue;
+            if (profile.trackerApiKey == null || profile.trackerApiKey.isEmpty()) continue;
+            if (profile.trackerUrlPfx == null || profile.trackerUrlPfx.isEmpty()) continue;
+            return profile;
+        }
+        return active;
+    }
+
     public static int RemoveExpiredCaltopoProfiles(long nowMs, boolean disconnectIfActive) {
         ClientClassState ccs = GetState();
         if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return 0;
@@ -2116,8 +2141,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static String GetTrackerApiKey() {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
-        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
-        if (profile != null && profile.trackerApiKey != null) {
+        CaltopoProfileRecord profile = GetPreferredTrackerProfile();
+        if (profile != null && profile.trackerApiKey != null && !profile.trackerApiKey.isEmpty()) {
             return profile.trackerApiKey;
         }
         return ccs.trackerApiKey;
@@ -2136,8 +2161,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static String GetTrackerUrlPfx() {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
-        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
-        if (profile != null && profile.trackerUrlPfx != null) {
+        CaltopoProfileRecord profile = GetPreferredTrackerProfile();
+        if (profile != null && profile.trackerUrlPfx != null && !profile.trackerUrlPfx.isEmpty()) {
             return profile.trackerUrlPfx;
         }
         return ccs.trackerUrlPfx;
@@ -2844,10 +2869,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (IsExitRequested()) {
             return 499;
         }
-        ClientClassState ccs = GetState();
-        if (ccs.trackerApiKey.isEmpty() || ccs.trackerUrlPfx.isEmpty()) return 8675309;
+        String trackerApiKey = GetTrackerApiKey();
+        String trackerUrlPfx = GetTrackerUrlPfx();
+        if (trackerApiKey.isEmpty() || trackerUrlPfx.isEmpty()) return 8675309;
 
-        String urlStr = String.format(Locale.US, "%s/%s", ccs.trackerUrlPfx, "upload");
+        String urlStr = String.format(Locale.US, "%s/%s", trackerUrlPfx, "upload");
         long startStamp = System.currentTimeMillis();
 
         // Define the Media Type
@@ -2861,7 +2887,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 .url(urlStr)
                 .put(body) // This sets the method to PUT
                 .header("User-Agent", "RID2Caltopo/0.1")
-                .header("X-SAR-Token", ccs.trackerApiKey)
+                .header("X-SAR-Token", trackerApiKey)
                 .build();
 
         if (CTDebugEnabled(TAG)) CTDebug(TAG, "BgPublishStats(): uploading " + geoJsonString.length() + " characters to '" + urlStr + "'");
@@ -2873,7 +2899,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             StringBuilder responseLog = new StringBuilder();
             responseLog.append(String.format(Locale.US,
                     "BgPublishStats(%s) completed in %.3f seconds with code %d.\n",
-                    ccs.trackerUrlPfx, (endStamp - startStamp) / 1000.0, responseCode));
+                    trackerUrlPfx, (endStamp - startStamp) / 1000.0, responseCode));
 
             // Read the body (Response.body().string() handles stream closing)
             String bodyString = response.body() != null ? response.body().string() : "";
@@ -2893,6 +2919,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             return CompletableFuture.completedFuture(499);
         }
         return GetGeoJsonStatsExecutorPool().submit(() -> BgPublishGeoJsonStats(geoJsonString));
+    }
+
+    public static Future<Integer> PublishGeoJsonStats(
+            @NonNull TrackerPublisher trackerPublisher,
+            @NonNull String geoJsonString) {
+        if (IsExitRequested()) {
+            return CompletableFuture.completedFuture(499);
+        }
+        return GetGeoJsonStatsExecutorPool().submit(() -> trackerPublisher.publishGeoJson(geoJsonString));
     }
 
     @NonNull

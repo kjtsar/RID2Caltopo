@@ -53,6 +53,7 @@ import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.data.OrgConfigToken
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
@@ -231,7 +232,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         super.onCreate(savedInstanceState)
         CaltopoClient.MarkAppActive()
         CTDebug(TAG, "onCreate().")
-        R2CMqttManager.SetPeerListChangedListener(this)
+        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(this)
         localViewModel = ViewModelProvider(
             this,
             R2CViewModelFactory(
@@ -450,11 +451,19 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     private fun dismissExternalDisplay(returnPhoneToMain: Boolean) {
+        val hadPresentation = externalDisplayPresentation != null
         externalDisplayPresentation?.dismiss()
         externalDisplayPresentation = null
+        CTDebug(
+            TAG,
+            "dismissExternalDisplay(returnPhoneToMain=$returnPhoneToMain, hadPresentation=$hadPresentation, " +
+                "returnToPhoneOnly=${externalDisplayConfig.returnToPhoneOnlyLayoutOnDisconnect}, activeScreen=${localViewModel.activeScreen.value})"
+        )
         if (returnPhoneToMain &&
+            hadPresentation &&
             externalDisplayConfig.returnToPhoneOnlyLayoutOnDisconnect &&
             localViewModel.activeScreen.value == ActiveScreen.STREAMS) {
+            CTDebug(TAG, "dismissExternalDisplay(): returning phone from Streams to Main after presentation dismissal.")
             localViewModel.showMain()
         }
     }
@@ -596,7 +605,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         if (shouldShutdown) {
             try {
                 stopLocationUpdates()
-                R2CMqttManager.SetPeerListChangedListener(null)
+                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(null)
                 CTDebug(TAG,"onDestroy() shutting down streaming service..." )
                 val streamServiceIntent = Intent(this, MediaMTXService::class.java)
                 stopService(streamServiceIntent)

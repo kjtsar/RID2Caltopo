@@ -2,6 +2,8 @@ package org.ncssar.rid2caltopo.video
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import org.json.JSONArray
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -15,6 +17,7 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
 import java.io.ByteArrayInputStream
 import java.util.Locale
+import java.util.concurrent.Executors
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -24,6 +27,8 @@ object MutualAidPackageManager {
     private const val FORMAT = "rid2caltopo_mutual_aid_package"
     private const val VERSION = 1
     private const val MANIFEST_PATH = "manifest.json"
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     data class PackagePreview(
         val packageName: String,
@@ -194,6 +199,20 @@ object MutualAidPackageManager {
         } catch (e: Exception) {
             CaltopoClient.CTWarn("MutualAidPackageMgr", "importPackage() failed.", e)
             false to (e.message ?: "Failed to import MA config.")
+        }
+    }
+
+    fun importPackageAsync(
+        context: Context,
+        srcUri: Uri,
+        callback: (Boolean, String) -> Unit
+    ) {
+        val appContext = context.applicationContext
+        executor.execute {
+            val result = importPackage(appContext, srcUri)
+            mainHandler.post {
+                callback(result.first, result.second)
+            }
         }
     }
 

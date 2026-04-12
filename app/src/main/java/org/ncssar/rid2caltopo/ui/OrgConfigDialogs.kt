@@ -378,7 +378,7 @@ fun MutualAidExportDialog(
                     }
                     is MutualAidExportStep.ShowQr -> {
                         Text(
-                            "Share this QR with the assisting agency. They can import it once using Menu -> Import MA QR.",
+                            "Share this QR with the assisting agency. They can import it once using Menu -> Import MA Config.",
                             style = MaterialTheme.typography.bodySmall,
                             textAlign = TextAlign.Center
                         )

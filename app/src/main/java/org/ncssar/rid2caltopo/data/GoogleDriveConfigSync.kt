@@ -603,6 +603,33 @@ object GoogleDriveConfigSync {
         }
     }
 
+    /**
+     * Download the mutual-aid JSON bundle for [fileId] using Google Drive's
+     * public export URL — no authentication required for files shared with
+     * "anyone". Must be called from a background thread.
+     */
+    @JvmStatic
+    fun downloadMutualAidBundlePublic(fileId: String): String {
+        val url = PUBLIC_DOWNLOAD_URL.format(fileId)
+        val request = Request.Builder()
+            .url(url)
+            .header("Cache-Control", "no-cache")
+            .get()
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Mutual-aid config download failed: HTTP ${response.code}")
+            }
+            val body = response.body?.string()
+                ?: throw IOException("Mutual-aid config download returned an empty body.")
+            if (!body.contains("rid2caltopo_mutual_aid_profile")) {
+                CaltopoClient.CTWarn(TAG, "downloadMutualAidBundlePublic(): invalid bundle for fileId=$fileId; first 200 chars: ${body.take(200)}")
+                throw IOException("Downloaded file does not appear to be a valid mutual-aid config bundle.")
+            }
+            return body
+        }
+    }
+
     /** Grant "anyone with the link → reader" permission on [fileId]. Non-fatal on failure. */
     private fun makeFilePublic(token: String, fileId: String) {
         val body = JSONObject()

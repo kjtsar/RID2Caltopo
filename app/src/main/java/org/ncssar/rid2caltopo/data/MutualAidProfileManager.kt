@@ -66,6 +66,11 @@ object MutualAidProfileManager {
                 val sourceOrg = CaltopoClient.GetMutualAidSourceLabel().ifBlank {
                     throw IllegalStateException("Load ct_mutual_aid_credentials with source_label before exporting MA config.")
                 }
+                val template = CaltopoClient.GetMutualAidTemplate()
+                CaltopoClient.CTDebug(
+                    TAG,
+                    "uploadMutualAidProfile(): exporting sourceOrg='$sourceOrg' teamId='${maskId(template.teamId)}' credentialId='${maskId(template.credentialId)}' targetMapId='${targetMapId.ifBlank { CaltopoMap.GetMapId() }}'"
+                )
                 val profile = buildProfile(
                     sourceOrg = sourceOrg,
                     displayName = displayName,
@@ -226,7 +231,7 @@ object MutualAidProfileManager {
         val appContext = context.applicationContext
         executor.execute {
             val result = try {
-                val encJson = GoogleDriveConfigSync.downloadOrgConfigPublic(config.driveFileId)
+                val encJson = GoogleDriveConfigSync.downloadMutualAidBundlePublic(config.driveFileId)
                 val applied = applyBundle(appContext, encJson)
                 if (applied.first) {
                     storeToken(appContext, trimmed)
@@ -314,6 +319,13 @@ object MutualAidProfileManager {
     ): CaltopoProfileRecord {
         val template = CaltopoClient.GetMutualAidTemplate()
         require(CaltopoClient.HasMutualAidTemplate()) { "Load ct_mutual_aid_credentials before exporting MA config." }
+        val templateCreds = CaltopoCredentials(template.teamId, template.credentialId, template.credentialSecret)
+        val homeCreds = CaltopoClient.GetCaltopoProfiles()
+            .firstOrNull { it.profileType == "HOME" }
+            ?.credentials
+        require(homeCreds == null || !CaltopoCredentials.credentialsAreEqual(templateCreds, homeCreds)) {
+            "MA credentials match home org credentials; refusing export."
+        }
         val active = CaltopoClient.GetActiveCaltopoProfile()
         val normalizedIncident = incident.ifBlank { CaltopoClient.GetIncident() }
         val normalizedOpPeriod = opPeriod.ifBlank { CaltopoClient.GetOpPeriod() }
@@ -332,13 +344,13 @@ object MutualAidProfileManager {
             "mai-${sanitizeBundleName(sourceOrg)}-${sanitizeBundleName(normalizedIncident)}-op${sanitizeBundleName(normalizedOpPeriod)}",
             finalDisplayName,
             "MUTUAL_AID",
-            CaltopoCredentials(template.teamId, template.credentialId, template.credentialSecret),
+            templateCreds,
             template.domainAndPort.ifBlank { active?.domainAndPort ?: CaltopoClient.GetCaltopoDomainAndPort() },
             active?.trackFolder ?: CaltopoClient.GetTrackFolderName(),
             normalizedIncident,
             normalizedOpPeriod,
-            active?.trackerApiKey ?: CaltopoClient.GetTrackerApiKey(),
-            active?.trackerUrlPfx ?: CaltopoClient.GetTrackerUrlPfx(),
+            "",
+            "",
             true,
             expiresAtEpochMs,
             true,
@@ -354,5 +366,12 @@ object MutualAidProfileManager {
     private fun sanitizeBundleName(raw: String): String {
         val cleaned = raw.trim().replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_')
         return if (cleaned.isBlank()) "mutual_aid" else cleaned
+    }
+
+    private fun maskId(value: String?): String {
+        val normalized = value.orEmpty().trim()
+        if (normalized.isBlank()) return ""
+        if (normalized.length <= 4) return normalized
+        return "..." + normalized.takeLast(4)
     }
 }

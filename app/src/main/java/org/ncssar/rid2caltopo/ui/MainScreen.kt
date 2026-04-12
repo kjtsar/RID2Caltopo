@@ -50,6 +50,7 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.OrgConfigManager
+import org.ncssar.rid2caltopo.data.RidReplayManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
@@ -191,6 +192,7 @@ fun MainScreen(
     var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingMutualAidImportPreview by remember { mutableStateOf<MutualAidPackageManager.PackagePreview?>(null) }
     var showMutualAidImportPreviewDialog by remember { mutableStateOf(false) }
+    var importingMutualAidConfig by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
@@ -257,16 +259,13 @@ fun MainScreen(
                 requestedAction != null ->
                     CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
                 orgExport && account != null -> {
-                    // Resume the org-config export after sign-in by re-opening the
-                    // dialog. The org name was stored in prefs before sign-in so the
-                    // dialog pre-fills it via getStoredOrgName().
                     showOrgExportDialog = true
-                    CaltopoClient.ShowToast("Signed in. Tap Export Org Config to upload your org config.")
+                    CaltopoClient.ShowToast("Signed in to Google Drive.")
                     refreshDriveState()
                 }
                 mutualAidExport && account != null -> {
                     showMutualAidExportDialog = true
-                    CaltopoClient.ShowToast("Signed in. Tap Export MA Config to upload the mutual-aid config.")
+                    CaltopoClient.ShowToast("Signed in to Google Drive.")
                     refreshDriveState()
                 }
                 orgExport ->
@@ -491,8 +490,11 @@ fun MainScreen(
                         pendingMutualAidImportUri = null
                         pendingMutualAidImportPreview = null
                         if (uri != null) {
-                            val result = MutualAidPackageManager.importPackage(context, uri)
-                            CaltopoClient.ShowToast(result.second)
+                            importingMutualAidConfig = true
+                            MutualAidPackageManager.importPackageAsync(context, uri) { _, message ->
+                                importingMutualAidConfig = false
+                                CaltopoClient.ShowToast(message)
+                            }
                         }
                     }
                 ) {
@@ -510,6 +512,21 @@ fun MainScreen(
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    if (importingMutualAidConfig) {
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Importing MA Config") },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(12.dp))
+                    Text("Importing offline tiles and mutual-aid settings. This may take a while for larger packages.")
+                }
+            },
+            confirmButton = { }
         )
     }
 
@@ -738,6 +755,27 @@ fun MainScreen(
         }
     )
 
+    val loadRidReplayLauncher = rememberLauncherForActivityResult(
+        contract = FreshOpenDocument(),
+        onResult = { uri ->
+            if (uri == null) {
+                CaltopoClient.ShowToast("RID replay file selection cancelled.")
+                return@rememberLauncherForActivityResult
+            }
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {
+                // Some providers do not grant persistable access; best effort is fine.
+            }
+            RidReplayManager.startReplayFromUri(context, uri) { _, message ->
+                CaltopoClient.ShowToast(message)
+            }
+        }
+    )
+
     LaunchedEffect(localViewModel.overlay) {
         if (localViewModel.overlay == OverlayState.RequestConfigFile && !isPickerOpen) {
             CTDebug(tag, "LaunchedEffect(): requesting config file...")
@@ -846,13 +884,37 @@ fun MainScreen(
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
                         })
+                        DropdownMenuItem(text = { Text("Load RID Replay") }, onClick = {
+                            menuExpanded = false
+                            loadRidReplayLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+                        })
+                        if (RidReplayManager.isReplayRunning()) {
+                            DropdownMenuItem(text = { Text("Stop RID Replay") }, onClick = {
+                                menuExpanded = false
+                                CaltopoClient.ShowToast(RidReplayManager.stopReplay())
+                            })
+                        }
                         DropdownMenuItem(text = { Text("Export Org Config") }, onClick = {
                             menuExpanded = false
-                            showOrgExportDialog = true
+                            if (CaltopoClient.GetHomeOrgName().isBlank()) {
+                                CaltopoClient.ShowToast("Load ct_credentials with org_name before exporting org config.")
+                            } else if (GoogleDriveConfigSync.getAuthorizedAccount(context) != null) {
+                                showOrgExportDialog = true
+                            } else {
+                                pendingOrgExport = true
+                                driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                            }
                         })
                         DropdownMenuItem(text = { Text("Export MA Config") }, onClick = {
                             menuExpanded = false
-                            showMutualAidExportDialog = true
+                            if (!CaltopoClient.HasMutualAidTemplate()) {
+                                CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting MA config.")
+                            } else if (GoogleDriveConfigSync.getAuthorizedAccount(context) != null) {
+                                showMutualAidExportDialog = true
+                            } else {
+                                pendingMutualAidExport = true
+                                driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                            }
                         })
                         DropdownMenuItem(
                             text = { Text("Simulate MyLocation...") },

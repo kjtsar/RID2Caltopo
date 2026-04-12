@@ -326,7 +326,9 @@ public class WaypointTrack {
             }
             Future<Integer> publishFuture = null;
             try {
-                publishFuture = CaltopoClient.PublishGeoJsonStats(geoJsonString);
+                publishFuture = CaltopoClient.PublishGeoJsonStats(
+                        R2cRuntimeRegistry.getDefaultRuntime().getTrackerPublisher(),
+                        geoJsonString);
                 responseCode = publishFuture.get(GEOJSON_PUBLISH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
                 if (publishFuture != null) publishFuture.cancel(true);

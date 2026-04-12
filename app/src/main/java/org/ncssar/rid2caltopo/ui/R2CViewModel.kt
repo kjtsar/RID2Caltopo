@@ -238,15 +238,19 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     }
 
     fun showStreams() {
+        CTDebug(tag, "showStreams(): ${_activeScreen.value} -> ${ActiveScreen.STREAMS}")
         _activeScreen.value = ActiveScreen.STREAMS
     }
     fun showMain() {
+        CTDebug(tag, "showMain(): ${_activeScreen.value} -> ${ActiveScreen.MAIN}")
         _activeScreen.value = ActiveScreen.MAIN
     }
     fun showSettings() {
+        CTDebug(tag, "showSettings(): ${_activeScreen.value} -> ${ActiveScreen.SETTINGS}")
         _activeScreen.value = ActiveScreen.SETTINGS
     }
     fun showScanner() {
+        CTDebug(tag, "showScanner(): ${_activeScreen.value} -> ${ActiveScreen.SCANNER}")
         _activeScreen.value = ActiveScreen.SCANNER
     }
     // Clean up the listener when the ViewModel is no longer in use.

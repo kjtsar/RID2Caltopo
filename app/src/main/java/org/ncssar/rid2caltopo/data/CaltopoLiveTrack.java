@@ -106,7 +106,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         // Ask R2CMqttManager to determine ownership.  It will call setLocalOwner()
         // (possibly after a brief discovery window) when a decision is reached.
         double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
-        R2CMqttManager.onLiveTrackCreated(this, droneSpec, distMeters, droneTimestampInMsec);
+        R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator()
+                .onLiveTrackCreated(this, droneSpec, distMeters, droneTimestampInMsec);
     }
 
     public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec) {
@@ -121,7 +122,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
 
         double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
-        R2CMqttManager.onLiveTrackCreated(this, droneSpec, distMeters, droneTimestampInMsec);
+        R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator()
+                .onLiveTrackCreated(this, droneSpec, distMeters, droneTimestampInMsec);
     }
 
     public void mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus mapStatusIn,
@@ -210,7 +212,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         if (active && null != liveTrackId) try {
             CTDebug(TAG, String.format(Locale.US, "shutdown(%d). Terminating '%s'",
                     maxWaitInMilliseconds, droneSpec.trackLabel()));
-            if (localOwner) R2CMqttManager.onDroneLost(myRemoteId);
+            if (localOwner) R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().onDroneLost(myRemoteId);
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(maxWaitInMilliseconds);
         } catch (Exception e) {
@@ -285,8 +287,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
         } else {
             // for some reason, we weren't able to start the live track, so this will likely block as well
             try {
-                CaltopoSession.AddLine(jsonArray, trackLabel, "", "", archiveFolderId,
-                        CaltopoMap.ArchiveLineProp, null);
+                R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+                        .addLine(jsonArray, trackLabel, "", "", archiveFolderId,
+                                CaltopoMap.ArchiveLineProp, null);
             } catch (Exception e) {
                 CTError(TAG, "archiveTrackCaltopo() addLine() raised - for no apparent reason.", e);
             }
@@ -344,7 +347,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             prop.put("title", droneSpec.trackLabel());
             prop.put("updated", timeString);
             prop.put("-updated-on", timeString);
-            CaltopoSession.EditObjectWithId("LiveTrack", liveTrackId, feature, this::renameTrackCompleted);
+            R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+                    .editObjectWithId("LiveTrack", liveTrackId, feature, this::renameTrackCompleted);
         } catch (Exception e) {
             CTError(TAG, "renameTrack() raised.", e);
         }
@@ -360,8 +364,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             CTDebug(TAG, String.format(Locale.US, "startNewTrack(DRONE-%s): Starting LiveTrack w/label:%s in folder:%s",
                     myRemoteId, trackLabel, folderId));
             try {
-                startLiveTrackOp = CaltopoSession.StartLiveTrack(myRemoteId, trackLabel, folderId,
-                        null, null, this::startLiveTrackComplete);
+                startLiveTrackOp = R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+                        .startLiveTrack(myRemoteId, trackLabel, folderId,
+                                null, null, this::startLiveTrackComplete);
                 forwardNextWaypoints(null); // We've got at least one waypoint - get it on it's way.
             } catch (Exception e) {
                 CTError(TAG, "startNewTrack(): startLiveTrack() raised: ", e);
@@ -370,7 +375,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
     }
 
     public void finishTrack(@NonNull String reason) {
-        if (localOwner) R2CMqttManager.onDroneLost(myRemoteId);
+        if (localOwner) R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().onDroneLost(myRemoteId);
         if (active && null != liveTrackId) try {
             CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
             CaltopoMap.RemoveLiveTrack(liveTrackId);
@@ -391,7 +396,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
                 double dist = CaltopoMap.DistanceFromMeInMeters(
                         liveTrack.droneSpec.lastLat, liveTrack.droneSpec.lastLng);
                 long fts = liveTrack.getFirstTimestamp();
-                R2CMqttManager.onLiveTrackCreated(liveTrack, liveTrack.droneSpec, dist, fts);
+                R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator()
+                        .onLiveTrackCreated(liveTrack, liveTrack.droneSpec, dist, fts);
             }
         }
     }
@@ -425,7 +431,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
 
         // Inform R2CMqttManager about the new observation (for score updates)
         double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
-        R2CMqttManager.onWaypointReceived(myRemoteId, lat, lng, (double)altitudeInMeters, distMeters);
+        R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator()
+                .onWaypointReceived(myRemoteId, lat, lng, (double)altitudeInMeters, distMeters);
 
         if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
         if (!localOwner) {
@@ -448,7 +455,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
             linePointsConfirmedCount++;
             long rtt = lastOp.roundTripTimeInMsec();
             CaltopoRttInMsec.next(rtt);
-            R2CMqttManager.updateCaltopoRtt(rtt);
+            R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().updateCaltopoRtt(rtt);
             if (lastOp.fail()) {
                 consecutiveUpdateFails++;
                 CTError(TAG, "forwardNextWaypoints(): addLiveTrackPoint failed: " + lastOp.response);
@@ -467,8 +474,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
                 QueuedPoint point = linePoints.get(linePointsSentCount++);
                 CTDebug(TAG, String.format(Locale.US, "forwardNextWaypoint(DRONE-%s#%d): adding %.7f,%.7f@%dm to LiveTrack.",
                         myRemoteId, linePointsSentCount, point.lat, point.lng, (long)point.ele));
-                CaltopoSession.AddLiveTrackPoint(myRemoteId, point.lat, point.lng, point.ele, point.telemetry,
-                        this::forwardNextWaypoints);
+                R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+                        .addLiveTrackPoint(myRemoteId, point.lat, point.lng, point.ele, point.telemetry,
+                                this::forwardNextWaypoints);
             }
         } catch (Exception e) {
             CTError(TAG, "forwardNextWaypoints(): addLiveTrackPoint() raised: ", e);

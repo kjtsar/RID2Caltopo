@@ -22,15 +22,7 @@ import android.net.NetworkRequest;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import org.eclipse.paho.client.mqttv3.IMqttActionListener;
-import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
-import org.eclipse.paho.client.mqttv3.IMqttToken;
-import org.eclipse.paho.client.mqttv3.MqttAsyncClient;
-import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
-import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
-import org.eclipse.paho.client.mqttv3.MqttMessage;
-import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.ncssar.rid2caltopo.app.R2CApplication;
@@ -107,7 +99,7 @@ public class R2CMqttManager {
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── internal observation / ownership state ───────────────────────────────
-    private static class DroneObservation {
+    private static class DroneObservation implements PeerOwnershipEngine.ObservationView {
         final String observerGuid;
         volatile double droneLat, droneLon, droneAlt;
         volatile double distMeters;
@@ -122,8 +114,29 @@ public class R2CMqttManager {
             this.ts = this.firstSeenTs = ts;
         }
 
+        @NonNull
+        @Override
+        public String getObserverGuid() {
+            return observerGuid;
+        }
+
+        @Override
+        public double getDistMeters() {
+            return distMeters;
+        }
+
+        @Override
+        public long getFirstSeenTs() {
+            return firstSeenTs;
+        }
+
         boolean isExpired() {
-            return System.currentTimeMillis() - ts > OBSERVATION_EXPIRY_MS;
+            return isExpired(System.currentTimeMillis());
+        }
+
+        @Override
+        public boolean isExpired(long nowMs) {
+            return nowMs - ts > OBSERVATION_EXPIRY_MS;
         }
     }
 
@@ -146,7 +159,8 @@ public class R2CMqttManager {
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── static state ─────────────────────────────────────────────────────────
-    private static MqttAsyncClient mqttClient;
+    private static PeerTransport peerTransport;
+    @Nullable private static PeerTransportFactory peerTransportFactory;
     private static String myGuid   = "";
     private static String myName   = "";
     private static String mapId    = "";
@@ -160,6 +174,8 @@ public class R2CMqttManager {
 
     private static final DelayedExec heartbeatTimer      = new DelayedExec();
     private static final DelayedExec ownershipCheckTimer = new DelayedExec();
+    private static final PeerOwnershipEngine ownershipEngine = new PeerOwnershipEngine(
+            DIST_SCALE_M, RTT_SCALE_MS, WEIGHT_PROXIMITY, WEIGHT_RTT);
 
     private static volatile PeerListChangedListener peerListChangedListener;
     private static volatile boolean initialized = false;
@@ -199,46 +215,35 @@ public class R2CMqttManager {
                 "init(): mapId=%s guid=%s broker=%s", mapId, myGuid, brokerUri));
 
         try {
-            // Client ID: "r2c-" + guid (HiveMQ public broker supports long IDs)
             String clientId = "r2c-" + myGuid;
-            mqttClient = new MqttAsyncClient(brokerUri, clientId, new MemoryPersistence());
-            mqttClient.setCallback(new MqttCallbackExtended() {
-                @Override public void connectComplete(boolean reconnect, String serverURI) {
+            peerTransport = createPeerTransport(brokerUri, clientId);
+            peerTransport.setCallback(new PeerTransportCallback() {
+                @Override public void onConnected(boolean reconnect, @NonNull String serverURI) {
                     CTInfo(TAG, "connectComplete() reconnect=" + reconnect);
                     onMqttConnected();
                 }
-                @Override public void connectionLost(Throwable cause) {
+
+                @Override public void onConnectionLost(@Nullable Throwable cause) {
                     CTError(TAG, "connectionLost(): " + (cause != null ? cause.getMessage() : "unknown"));
-                    // automatic reconnect handles re-subscription; no action needed here.
                 }
-                @Override public void messageArrived(String topic, MqttMessage message) {
-                    onMessageArrived(topic, message);
+
+                @Override public void onMessageArrived(@NonNull String topic, @NonNull byte[] payload) {
+                    onMessageArrived(topic, payload);
                 }
-                @Override public void deliveryComplete(IMqttDeliveryToken token) { /* no-op */ }
             });
-
-            MqttConnectOptions opts = new MqttConnectOptions();
-            opts.setCleanSession(false);       // retain session so subscriptions survive reconnects
-            opts.setAutomaticReconnect(true);
-            opts.setKeepAliveInterval(30);
-            opts.setConnectionTimeout(10);
-
-            // Last will: publish offline heartbeat so peers know we're gone
             byte[] lwtPayload = buildPeerPayload(false);
-            opts.setWill(peerTopic(myGuid), lwtPayload, 1, true);
-
-            mqttClient.connect(opts, null, new IMqttActionListener() {
-                @Override public void onSuccess(IMqttToken t) {
-                    CTInfo(TAG, "MQTT connect succeeded.");
-                }
-                @Override public void onFailure(IMqttToken t, Throwable ex) {
-                    CTError(TAG, "MQTT connect failed: " + (ex != null ? ex.getMessage() : "unknown"));
-                }
-            });
+            peerTransport.connect(
+                    peerTopic(myGuid),
+                    lwtPayload,
+                    1,
+                    true,
+                    () -> CTInfo(TAG, "MQTT connect succeeded."),
+                    () -> CTError(TAG, "MQTT connect failed: unknown")
+            );
             initialized = true;
 
         } catch (MqttException e) {
-            CTError(TAG, "init(): MqttAsyncClient creation failed.", e);
+            CTError(TAG, "init(): PeerTransport creation failed.", e);
         }
     }
 
@@ -251,7 +256,7 @@ public class R2CMqttManager {
         heartbeatTimer.stop();
         ownershipCheckTimer.stop();
 
-        if (mqttClient != null && mqttClient.isConnected()) {
+        if (peerTransport != null && peerTransport.isConnected()) {
             try {
                 // Clear our retained peer presence
                 publishRetained(peerTopic(myGuid), buildPeerPayload(false));
@@ -261,14 +266,14 @@ public class R2CMqttManager {
                         clearRetained(ownerTopic(e.getKey()));
                     }
                 }
-                mqttClient.disconnect();
-            } catch (MqttException ex) {
+                peerTransport.disconnect();
+            } catch (Exception ex) {
                 CTError(TAG, "shutdown(): disconnect raised.", ex);
             }
         }
         peers.clear();
         drones.clear();
-        mqttClient = null;
+        peerTransport = null;
     }
 
     // ── called on successful MQTT connect ─────────────────────────────────────
@@ -277,8 +282,8 @@ public class R2CMqttManager {
         try {
             // Subscribe to everything under our map's namespace
             String rootFilter = "R2C/" + mapId + "/#";
-            mqttClient.subscribe(rootFilter, 1, null, new IMqttActionListener() {
-                @Override public void onSuccess(IMqttToken t) {
+            peerTransport.subscribe(rootFilter, 1,
+                () -> {
                     CTInfo(TAG, "Subscribed to " + rootFilter);
                     // Publish our own presence immediately so peers discover us
                     publishHeartbeat();
@@ -288,27 +293,23 @@ public class R2CMqttManager {
                     // Start periodic ownership checks
                     ownershipCheckTimer.start(R2CMqttManager::checkAllOwnerships,
                             OWNERSHIP_CHECK_MS, OWNERSHIP_CHECK_MS);
-                }
-                @Override public void onFailure(IMqttToken t, Throwable ex) {
-                    CTError(TAG, "subscribe() failed: " + (ex != null ? ex.getMessage() : "?"));
-                }
-            });
-        } catch (MqttException e) {
+                },
+                () -> CTError(TAG, "subscribe() failed: ?")
+            );
+        } catch (Exception e) {
             CTError(TAG, "onMqttConnected(): subscribe raised.", e);
         }
     }
 
     // ── message dispatch ──────────────────────────────────────────────────────
 
-    private static void onMessageArrived(@NonNull String topic, @NonNull MqttMessage message) {
+    private static void onMessageArrived(@NonNull String topic, @NonNull byte[] payload) {
         try {
             // Topic structure: R2C/<mapId>/<category>/...
             String[] parts = topic.split("/");
             if (parts.length < 4) return;
             // parts[0]="R2C"  parts[1]=mapId  parts[2]=category
             String category = parts[2];
-
-            byte[] payload = message.getPayload();
 
             switch (category) {
                 case "peer": {
@@ -457,43 +458,19 @@ public class R2CMqttManager {
 
     // ── ownership computation ─────────────────────────────────────────────────
 
-    private static double computeScore(@NonNull DroneObservation obs) {
-        double proxScore = 1.0 / (1.0 + obs.distMeters / DIST_SCALE_M);
-
-        PeerState peer = peers.get(obs.observerGuid);
-        double ctRtt;
-        if (obs.observerGuid.equals(myGuid)) {
-            ctRtt = myCaltopoRttMs;
-        } else {
-            ctRtt = (peer != null) ? peer.caltopoRttMs : 2_000;
-        }
-        double rttScore = 1.0 / (1.0 + ctRtt / RTT_SCALE_MS);
-
-        return WEIGHT_PROXIMITY * proxScore + WEIGHT_RTT * rttScore;
-    }
-
     /** Deterministic owner selection from current observations. */
     @Nullable
     private static String computeOwnerGuid(@NonNull DroneState ds) {
-        String bestGuid   = null;
-        double bestScore  = -1;
-        long   bestFts    = Long.MAX_VALUE;
-
-        for (DroneObservation obs : ds.obs.values()) {
-            if (obs.isExpired()) continue;
-            double score = computeScore(obs);
-            boolean better =
-                    score > bestScore ||
-                    (score == bestScore && obs.firstSeenTs < bestFts) ||
-                    (score == bestScore && obs.firstSeenTs == bestFts
-                            && obs.observerGuid.compareTo(bestGuid) < 0);
-            if (better) {
-                bestScore = score;
-                bestGuid  = obs.observerGuid;
-                bestFts   = obs.firstSeenTs;
-            }
-        }
-        return bestGuid;
+        PeerOwnershipEngine.ScoreResult result = ownershipEngine.selectOwner(
+                ds.obs.values(),
+                observerGuid -> {
+                    if (observerGuid.equals(myGuid)) return myCaltopoRttMs;
+                    PeerState peer = peers.get(observerGuid);
+                    return (peer != null) ? peer.caltopoRttMs : 2_000L;
+                },
+                System.currentTimeMillis()
+        );
+        return result.ownerGuid;
     }
 
     private static void checkOwnership(@NonNull String remoteId) {
@@ -575,7 +552,7 @@ public class R2CMqttManager {
                                            @NonNull CtDroneSpec droneSpec,
                                            double distMeters,
                                            long firstSeenTs) {
-        if (!initialized || !mqttClient.isConnected()) {
+        if (!initialized || peerTransport == null || !peerTransport.isConnected()) {
             // No peers connected — own it immediately
             liveTrack.setLocalOwner(true);
             return;
@@ -674,7 +651,7 @@ public class R2CMqttManager {
     // ── publish helpers ───────────────────────────────────────────────────────
 
     private static void publishHeartbeat() {
-        if (!initialized || mqttClient == null || !mqttClient.isConnected()) return;
+        if (!initialized || peerTransport == null || !peerTransport.isConnected()) return;
         publishRetained(peerTopic(myGuid), buildPeerPayload(true));
     }
 
@@ -682,7 +659,7 @@ public class R2CMqttManager {
                                        @NonNull CtDroneSpec spec,
                                        double distMeters,
                                        long firstSeenTs) {
-        if (!initialized || mqttClient == null || !mqttClient.isConnected()) return;
+        if (!initialized || peerTransport == null || !peerTransport.isConnected()) return;
         try {
             JSONObject jo = new JSONObject();
             jo.put("dLat", spec.lastLat);
@@ -691,18 +668,19 @@ public class R2CMqttManager {
             jo.put("dist", distMeters);
             jo.put("fts",  firstSeenTs);
             jo.put("ts",   System.currentTimeMillis());
-
-            MqttMessage msg = new MqttMessage(jo.toString().getBytes(StandardCharsets.UTF_8));
-            msg.setQos(0);
-            msg.setRetained(false);
-            mqttClient.publish(detectTopic(remoteId, myGuid), msg);
+            peerTransport.publish(
+                    detectTopic(remoteId, myGuid),
+                    jo.toString().getBytes(StandardCharsets.UTF_8),
+                    0,
+                    false
+            );
         } catch (Exception e) {
             CTError(TAG, "publishDetect() raised.", e);
         }
     }
 
     private static void publishOwnerClaim(@NonNull String remoteId) {
-        if (!initialized || mqttClient == null || !mqttClient.isConnected()) return;
+        if (!initialized || peerTransport == null || !peerTransport.isConnected()) return;
         try {
             JSONObject jo = new JSONObject();
             jo.put("guid", myGuid);
@@ -715,13 +693,10 @@ public class R2CMqttManager {
     }
 
     private static void publishRetained(@NonNull String topic, @NonNull byte[] payload) {
-        if (!initialized || mqttClient == null || !mqttClient.isConnected()) return;
+        if (!initialized || peerTransport == null || !peerTransport.isConnected()) return;
         try {
-            MqttMessage msg = new MqttMessage(payload);
-            msg.setQos(1);
-            msg.setRetained(true);
-            mqttClient.publish(topic, msg);
-        } catch (MqttException e) {
+            peerTransport.publish(topic, payload, 1, true);
+        } catch (Exception e) {
             CTError(TAG, "publishRetained(" + topic + ") raised.", e);
         }
     }
@@ -807,6 +782,23 @@ public class R2CMqttManager {
 
     public static @NonNull List<PeerState> GetPeerList() {
         return new ArrayList<>(peers.values());
+    }
+
+    public static synchronized void SetPeerTransportFactoryForTesting(@Nullable PeerTransportFactory factory) {
+        peerTransportFactory = factory;
+    }
+
+    @NonNull
+    public static PeerCoordinator GetDefaultCoordinator() {
+        return DefaultPeerCoordinator.getInstance();
+    }
+
+    @NonNull
+    private static PeerTransport createPeerTransport(@NonNull String brokerUri, @NonNull String clientId) throws MqttException {
+        if (peerTransportFactory != null) {
+            return peerTransportFactory.create(brokerUri, clientId);
+        }
+        return new MqttPeerTransport(brokerUri, clientId);
     }
 
     // ── network address monitoring (replaces R2CPeer networking) ─────────────

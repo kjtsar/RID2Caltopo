@@ -15,6 +15,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
+import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
@@ -70,8 +71,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     private val initialExternalConfig = R2CApplication.getAppCtxt()?.let { ExternalDisplayPrefs.load(it) }
         ?: ExternalDisplayConfig()
-    private val _externalDisplayEnabled = MutableStateFlow(initialExternalConfig.enabledWhenConnected)
-    val externalDisplayEnabled = _externalDisplayEnabled.asStateFlow()
+    private val _externalDisplayMode = MutableStateFlow(initialExternalConfig.mode)
+    val externalDisplayMode = _externalDisplayMode.asStateFlow()
     private val _externalDisplayAutoOpen = MutableStateFlow(initialExternalConfig.autoOpenOnConnect)
     val externalDisplayAutoOpen = _externalDisplayAutoOpen.asStateFlow()
     private val _externalDisplayReturnToPhoneOnly = MutableStateFlow(initialExternalConfig.returnToPhoneOnlyLayoutOnDisconnect)
@@ -107,7 +108,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamStatus.value = buildNotamStatus()
         val externalConfig = R2CApplication.getAppCtxt()?.let { ExternalDisplayPrefs.load(it) }
             ?: ExternalDisplayConfig()
-        _externalDisplayEnabled.value = externalConfig.enabledWhenConnected
+        _externalDisplayMode.value = externalConfig.mode
         _externalDisplayAutoOpen.value = externalConfig.autoOpenOnConnect
         _externalDisplayReturnToPhoneOnly.value = externalConfig.returnToPhoneOnlyLayoutOnDisconnect
         _externalDisplayAllowInteraction.value = externalConfig.allowInteraction
@@ -164,8 +165,8 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamAutoRefresh.value = enabled
     }
 
-    fun onExternalDisplayEnabledChanged(enabled: Boolean) {
-        _externalDisplayEnabled.value = enabled
+    fun onExternalDisplayModeChanged(mode: ExternalDisplayMode) {
+        _externalDisplayMode.value = mode
     }
 
     fun onExternalDisplayAutoOpenChanged(enabled: Boolean) {
@@ -207,7 +208,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
             ExternalDisplayPrefs.save(
                 context,
                 ExternalDisplayConfig(
-                    enabledWhenConnected = _externalDisplayEnabled.value,
+                    mode = _externalDisplayMode.value,
                     autoOpenOnConnect = _externalDisplayAutoOpen.value,
                     returnToPhoneOnlyLayoutOnDisconnect = _externalDisplayReturnToPhoneOnly.value,
                     allowInteraction = _externalDisplayAllowInteraction.value,

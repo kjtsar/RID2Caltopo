@@ -326,6 +326,10 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 if (flightKey != null) {
                     promptedFlightKeys.add(flightKey)
                     _pendingDroneConfirmation.value = buildConfirmationState(droneToConfirm)
+                    if (_activeScreen.value == ActiveScreen.STREAMS) {
+                        CaltopoClient.ShowToast("New drone needs confirmation. Returning to main screen.")
+                        showMain()
+                    }
                 }
             }
         }

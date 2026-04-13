@@ -38,6 +38,7 @@ import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModelProvider
+import androidx.savedstate.SavedStateRegistryOwner
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -58,11 +59,13 @@ import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
+import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
+import org.ncssar.rid2caltopo.ui.DroneSpecConfirmationDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.ProximityAlertCenter
 import org.ncssar.rid2caltopo.ui.ProximityAlertHost
@@ -82,6 +85,22 @@ import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+
+internal fun buildLogArchiveEntryName(rawName: String?): String {
+    val baseName = rawName?.trim().orEmpty().ifBlank { "log_unknown" }
+    return if (baseName.lowercase(Locale.US).endsWith(".txt")) {
+        baseName
+    } else {
+        "$baseName.txt"
+    }
+}
+
+data class LogArchiveDayOption(
+    val directoryName: String,
+    val logFileCount: Int,
+    val lastModifiedMs: Long,
+    val isToday: Boolean,
+)
 
 class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener  {
     var locationRequest: LocationRequest? = null
@@ -137,23 +156,55 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         })
     }
 
+    fun listAvailableLogArchiveDays(): List<LogArchiveDayOption> {
+        val archiveDir = CaltopoClient.GetArchiveDir() ?: return emptyList()
+        val todayDirName = "tracks-" + SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
+        return archiveDir.listFiles()
+            .asSequence()
+            .filter { it.isDirectory }
+            .mapNotNull { dir ->
+                val dirName = dir.name ?: return@mapNotNull null
+                val logFileCount = dir.listFiles().count { it.type == "text/plain" }
+                if (logFileCount <= 0) return@mapNotNull null
+                LogArchiveDayOption(
+                    directoryName = dirName,
+                    logFileCount = logFileCount,
+                    lastModifiedMs = dir.lastModified(),
+                    isToday = dirName == todayDirName
+                )
+            }
+            .sortedWith(
+                compareByDescending<LogArchiveDayOption> { it.isToday }
+                    .thenByDescending { it.lastModifiedMs }
+                    .thenByDescending { it.directoryName }
+            )
+            .toList()
+    }
+
     /**
-     * Zip all log files (text/plain entries) from today's track directory into a
-     * single archive and fire a share intent so the user can email the bundle.
-     * Collects every session's log from the current calendar day, not just the
-     * active one, so a multi-battery day produces one complete submission.
+     * Zip text log files from one or more archive subdirectories into a single archive and fire
+     * a share intent so the user can email the bundle.
      */
-    fun zipAndEmailAllLogs(context: Context) {
-        val todaysDir: DocumentFile = CaltopoClient.GetTodaysTrackDir() ?: run {
-            CTError(TAG, "zipAndEmailAllLogs(): today's track dir unavailable")
+    fun zipAndEmailSelectedLogs(context: Context, selectedDirectoryNames: List<String>) {
+        val archiveDir = CaltopoClient.GetArchiveDir() ?: run {
+            CTError(TAG, "zipAndEmailSelectedLogs(): archive dir unavailable")
+            return
+        }
+        if (selectedDirectoryNames.isEmpty()) {
+            CTError(TAG, "zipAndEmailSelectedLogs(): no archive days selected")
             return
         }
 
-        // Log files are created as text/plain; other files in the dir are
-        // GeoJSON tracks, JPEG snapshots, KMZ exports, etc.
-        val logFiles = todaysDir.listFiles().filter { it.type == "text/plain" }
+        val selectedDirs = selectedDirectoryNames.distinct().mapNotNull { dirName ->
+            archiveDir.findFile(dirName)?.takeIf { it.isDirectory }
+        }
+        val logFiles = selectedDirs.flatMap { dir ->
+            dir.listFiles()
+                .filter { it.type == "text/plain" }
+                .map { dir to it }
+        }
         if (logFiles.isEmpty()) {
-            CTError(TAG, "zipAndEmailAllLogs(): no log files found in today's dir")
+            CTError(TAG, "zipAndEmailSelectedLogs(): no log files found in selected dirs")
             return
         }
 
@@ -163,10 +214,16 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         try {
             ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
                 val resolver = context.contentResolver
-                for (logDoc in logFiles) {
-                    val entryName = (logDoc.name ?: "log_unknown") + ".txt"
+                for ((dir, logDoc) in logFiles) {
+                    val dirName = dir.name ?: "logs"
+                    val entryName = "$dirName/${buildLogArchiveEntryName(logDoc.name)}"
                     resolver.openInputStream(logDoc.uri)?.use { inputStream ->
-                        zos.putNextEntry(ZipEntry(entryName))
+                        val entry = ZipEntry(entryName)
+                        val lastModified = logDoc.lastModified()
+                        if (lastModified > 0L) {
+                            entry.time = lastModified
+                        }
+                        zos.putNextEntry(entry)
                         inputStream.copyTo(zos)
                         zos.closeEntry()
                     }
@@ -180,14 +237,17 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/zip"
                 putExtra(Intent.EXTRA_EMAIL, arrayOf("kjtsar@kjt.us"))
-                putExtra(Intent.EXTRA_SUBJECT, "RID2Caltopo Logs $dateTag (${logFiles.size} session${if (logFiles.size == 1) "" else "s"})")
+                putExtra(
+                    Intent.EXTRA_SUBJECT,
+                    "RID2Caltopo Logs $dateTag (${selectedDirs.size} day${if (selectedDirs.size == 1) "" else "s"}, ${logFiles.size} log${if (logFiles.size == 1) "" else "s"})"
+                )
                 putExtra(Intent.EXTRA_STREAM, sharedUri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 
             context.startActivity(Intent.createChooser(intent, "Send Logs via..."))
         } catch (e: Exception) {
-            CTError(TAG, "zipAndEmailAllLogs(): failed to create/share zip", e)
+            CTError(TAG, "zipAndEmailSelectedLogs(): failed to create/share zip", e)
         }
     }
 
@@ -252,13 +312,19 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 val activeScreen by localViewModel
                     .activeScreen
                     .collectAsState()
+                val pendingDroneConfirmation by localViewModel
+                    .pendingDroneConfirmation
+                    .collectAsState()
                 when (activeScreen) {
                     ActiveScreen.MAIN -> {
                         MainScreen(
                             localViewModel = localViewModel,
                             remoteViewModels = remoteViewModels,
-                            onEmailLog = {
-                                zipAndEmailAllLogs(localContext)
+                            availableLogArchiveDaysProvider = {
+                                listAvailableLogArchiveDays()
+                            },
+                            onEmailLog = { selectedDirectoryNames ->
+                                zipAndEmailSelectedLogs(localContext, selectedDirectoryNames)
                             },
                             onShowHelp = {showHelpMenu()},
                             externalDisplayConnected = externalDisplayConnected,
@@ -281,6 +347,21 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                             viewModel = streamsViewModel
                         )
                     }
+                }
+                pendingDroneConfirmation?.let { confirmationState ->
+                    DroneSpecConfirmationDialog(
+                        state = confirmationState,
+                        onFieldChange = { organization, pilotCallsign, droneDescription ->
+                            localViewModel.updatePendingDroneConfirmation(
+                                organization = organization,
+                                pilotCallsign = pilotCallsign,
+                                droneDescription = droneDescription
+                            )
+                        },
+                        onSave = {
+                            localViewModel.savePendingDroneConfirmation()
+                        }
+                    )
                 }
                 ProximityAlertHost(
                     onSuspend = { ProximityAlertCenter.suspendCurrentAlert() },
@@ -404,7 +485,16 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     private fun setExternalDisplayContentMode(mode: ExternalDisplayContentMode) {
-        externalDisplayConfig = externalDisplayConfig.copy(contentMode = mode)
+        val supportedMode = when (mode) {
+            ExternalDisplayContentMode.StreamsGrid,
+            ExternalDisplayContentMode.ObserverMode -> mode
+            ExternalDisplayContentMode.MapOnly,
+            ExternalDisplayContentMode.Split -> {
+                showToast("External display map modes are not supported yet. Using streams view instead.")
+                ExternalDisplayContentMode.StreamsGrid
+            }
+        }
+        externalDisplayConfig = externalDisplayConfig.copy(contentMode = supportedMode)
         ExternalDisplayPrefs.save(this, externalDisplayConfig)
         refreshExternalDisplay(forceRecreate = true)
     }
@@ -412,7 +502,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     private fun shouldRouteAlertToPhone(): Boolean {
         return when (externalDisplayConfig.alertRouting) {
             ExternalDisplayAlertRouting.PhoneOnly -> true
-            ExternalDisplayAlertRouting.ExternalOnly -> !externalDisplayConnected
+            ExternalDisplayAlertRouting.ExternalOnly ->
+                !externalDisplayConnected || externalDisplayConfig.mode != ExternalDisplayMode.AppManaged
             ExternalDisplayAlertRouting.Both -> true
         }
     }
@@ -427,7 +518,9 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     private fun refreshExternalDisplay(forceRecreate: Boolean = false) {
         val targetDisplay = findPresentationDisplay()
         externalDisplayConnected = targetDisplay != null
-        if (!externalDisplayConfig.enabledWhenConnected || !externalDisplayConfig.autoOpenOnConnect || targetDisplay == null) {
+        if (externalDisplayConfig.mode != ExternalDisplayMode.AppManaged ||
+            !externalDisplayConfig.autoOpenOnConnect ||
+            targetDisplay == null) {
             dismissExternalDisplay(returnPhoneToMain = targetDisplay == null)
             return
         }
@@ -439,7 +532,10 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
             outerContext = this,
             display = targetDisplay,
             streamsViewModel = streamsViewModel,
-            config = externalDisplayConfig
+            config = externalDisplayConfig,
+            lifecycleOwner = this,
+            savedStateRegistryOwner = this as SavedStateRegistryOwner,
+            viewModelStoreOwner = this
         ).also {
             try {
                 it.show()

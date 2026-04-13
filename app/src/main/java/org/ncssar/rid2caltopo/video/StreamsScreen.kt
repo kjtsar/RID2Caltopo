@@ -4,6 +4,7 @@ import StreamsViewModel
 import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -112,18 +113,15 @@ fun StreamsScreen(
         }
     }
 
-    LaunchedEffect(externalContentMode) {
-        when (externalContentMode) {
-            ExternalDisplayContentMode.StreamsGrid,
-            ExternalDisplayContentMode.ObserverMode -> viewModel.setLayoutMode(StreamsLayoutMode.Streams)
-            ExternalDisplayContentMode.MapOnly -> viewModel.setLayoutMode(StreamsLayoutMode.Map)
-            ExternalDisplayContentMode.Split -> viewModel.setLayoutMode(StreamsLayoutMode.Both)
-            null -> Unit
-        }
-    }
-
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
-    val layoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
+    val persistedLayoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
+    val layoutMode = when (externalContentMode) {
+        ExternalDisplayContentMode.StreamsGrid,
+        ExternalDisplayContentMode.ObserverMode -> StreamsLayoutMode.Streams
+        ExternalDisplayContentMode.MapOnly -> StreamsLayoutMode.Map
+        ExternalDisplayContentMode.Split -> StreamsLayoutMode.Both
+        null -> persistedLayoutMode
+    }
     var showNotamPanel by remember { mutableStateOf(false) }
 
     Surface(
@@ -140,7 +138,15 @@ fun StreamsScreen(
                             outerPadding = PaddingValues(0.dp)
                         )
                         Spacer(Modifier.width(8.dp))
-                        Box(modifier = Modifier.weight(1f, fill = false)) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .pointerInput(onBack) {
+                                    detectTapGestures(
+                                        onDoubleTap = { onBack() }
+                                    )
+                                }
+                        ) {
                             Text(
                                 text = "$serverStatus - $mapStatus",
                                 fontSize = 14.sp,

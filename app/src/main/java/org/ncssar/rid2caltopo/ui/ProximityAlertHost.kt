@@ -110,6 +110,17 @@ object ProximityAlertCenter {
         val effectiveThreeDFt: Double
     )
 
+    internal data class PairThresholdDecision(
+        val insideThreshold: Boolean,
+        val crossedIntoThreshold: Boolean,
+        val isGettingFartherApart: Boolean,
+        val predictedCloser: Boolean,
+        val actuallyApproaching: Boolean,
+        val highSeverity: Boolean,
+        val shouldAlert: Boolean,
+        val severityScore: Double
+    )
+
     private data class PairEvaluation(
         val pairKey: String,
         val first: EvaluatedDrone,
@@ -427,24 +438,14 @@ object ProximityAlertCenter {
 
         val pairKey = pairKey(first.remoteId, second.remoteId)
         val previous = previousPairSnapshots[pairKey]
-        val insideThreshold =
-            effectiveHorizontalFt <= thresholdFt && effectiveVerticalFt <= thresholdFt
-        val crossedIntoThreshold = previous == null ||
-            previous.effectiveHorizontalFt > thresholdFt ||
-            previous.effectiveVerticalFt > thresholdFt
-        val isGettingFartherApart = previous != null && effectiveThreeDFt > previous.effectiveThreeDFt + MIN_DRONE_MOVE_FT
-        val predictedCloser = effectiveThreeDFt + MIN_DRONE_MOVE_FT < currentThreeDFt
-        val actuallyApproaching = previous == null || effectiveThreeDFt + MIN_DRONE_MOVE_FT < previous.effectiveThreeDFt
-        val highSeverity =
-            effectiveHorizontalFt < thresholdFt * 0.75 || effectiveVerticalFt < thresholdFt * 0.75
-        val shouldAlert = if (predictionEnabled) {
-            insideThreshold && (predictedCloser || crossedIntoThreshold)
-        } else {
-            insideThreshold && (actuallyApproaching || crossedIntoThreshold)
-        }
-        val severityScore = maxOf(
-            effectiveHorizontalFt / thresholdFt,
-            effectiveVerticalFt / thresholdFt
+        val decision = evaluateThresholdDecision(
+            effectiveHorizontalFt = effectiveHorizontalFt,
+            effectiveVerticalFt = effectiveVerticalFt,
+            effectiveThreeDFt = effectiveThreeDFt,
+            currentThreeDFt = currentThreeDFt,
+            thresholdFt = thresholdFt,
+            predictionEnabled = predictionEnabled,
+            previous = previous
         )
         return PairEvaluation(
             pairKey = pairKey,
@@ -456,10 +457,87 @@ object ProximityAlertCenter {
             currentHorizontalFt = currentHorizontalFt,
             currentVerticalFt = currentVerticalFt,
             currentThreeDFt = currentThreeDFt,
-            shouldAlert = shouldAlert,
+            shouldAlert = decision.shouldAlert,
+            isGettingFartherApart = decision.isGettingFartherApart,
+            highSeverity = decision.highSeverity,
+            severityScore = decision.severityScore
+        )
+    }
+
+    private fun evaluateThresholdDecision(
+        effectiveHorizontalFt: Double,
+        effectiveVerticalFt: Double,
+        effectiveThreeDFt: Double,
+        currentThreeDFt: Double,
+        thresholdFt: Double,
+        predictionEnabled: Boolean,
+        previous: PairSnapshot?
+    ): PairThresholdDecision {
+        val insideThreshold =
+            effectiveHorizontalFt <= thresholdFt && effectiveVerticalFt <= thresholdFt
+        val crossedIntoThreshold = previous == null ||
+            previous.effectiveHorizontalFt > thresholdFt ||
+            previous.effectiveVerticalFt > thresholdFt
+        val isGettingFartherApart = previous != null &&
+            effectiveThreeDFt > previous.effectiveThreeDFt + MIN_DRONE_MOVE_FT
+        val predictedCloser = effectiveThreeDFt + MIN_DRONE_MOVE_FT < currentThreeDFt
+        val actuallyApproaching = previous == null ||
+            effectiveThreeDFt + MIN_DRONE_MOVE_FT < previous.effectiveThreeDFt
+        val highSeverity =
+            effectiveHorizontalFt < thresholdFt * 0.75 || effectiveVerticalFt < thresholdFt * 0.75
+        val shouldAlert = if (predictionEnabled) {
+            insideThreshold && (predictedCloser || crossedIntoThreshold)
+        } else {
+            insideThreshold && (actuallyApproaching || crossedIntoThreshold)
+        }
+        val severityScore = maxOf(
+            effectiveHorizontalFt / thresholdFt,
+            effectiveVerticalFt / thresholdFt
+        )
+        return PairThresholdDecision(
+            insideThreshold = insideThreshold,
+            crossedIntoThreshold = crossedIntoThreshold,
             isGettingFartherApart = isGettingFartherApart,
+            predictedCloser = predictedCloser,
+            actuallyApproaching = actuallyApproaching,
             highSeverity = highSeverity,
+            shouldAlert = shouldAlert,
             severityScore = severityScore
+        )
+    }
+
+    internal fun evaluateThresholdDecisionForTests(
+        effectiveHorizontalFt: Double,
+        effectiveVerticalFt: Double,
+        effectiveThreeDFt: Double,
+        currentThreeDFt: Double,
+        thresholdFt: Double,
+        predictionEnabled: Boolean,
+        previousHorizontalFt: Double? = null,
+        previousVerticalFt: Double? = null,
+        previousThreeDFt: Double? = null
+    ): PairThresholdDecision {
+        val previous = if (
+            previousHorizontalFt != null &&
+            previousVerticalFt != null &&
+            previousThreeDFt != null
+        ) {
+            PairSnapshot(
+                effectiveHorizontalFt = previousHorizontalFt,
+                effectiveVerticalFt = previousVerticalFt,
+                effectiveThreeDFt = previousThreeDFt
+            )
+        } else {
+            null
+        }
+        return evaluateThresholdDecision(
+            effectiveHorizontalFt = effectiveHorizontalFt,
+            effectiveVerticalFt = effectiveVerticalFt,
+            effectiveThreeDFt = effectiveThreeDFt,
+            currentThreeDFt = currentThreeDFt,
+            thresholdFt = thresholdFt,
+            predictionEnabled = predictionEnabled,
+            previous = previous
         )
     }
 

@@ -8,7 +8,7 @@ import androidx.annotation.NonNull;
  */
 public final class TestR2cRuntimeFactory {
 
-    public static final class Fixture {
+    public static class Fixture {
         @NonNull public final R2cRuntime runtime;
         @NonNull public final PeerCoordinator peerCoordinator;
         @NonNull public final FakeCalTopoSessionGateway calTopoSessionGateway;

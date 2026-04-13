@@ -59,6 +59,17 @@ class DroneSpecConfirmationLogicTest {
     }
 
     @Test
+    fun avata360RemoteId_prefillsDiscoveredModelDescription() {
+        val drone = CtDroneSpec("1581FBLKC262T00B07G1")
+
+        val state = DroneSpecConfirmationLogic.buildInitialState(drone, defaultOrganization = "NCSSAR")
+
+        assertEquals("NCSSAR", state.organization)
+        assertEquals("", state.pilotCallsign)
+        assertEquals("DJI Avata 360", state.droneDescription)
+    }
+
+    @Test
     fun nonDefaultMappedId_doesNotGuessDescriptionWhenModelIsBlank() {
         val drone = CtDroneSpec(
             "1581F6Z9C249G0031CLB",

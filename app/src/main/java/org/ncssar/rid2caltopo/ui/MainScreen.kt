@@ -27,11 +27,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -39,6 +41,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
 import org.ncssar.rid2caltopo.app.MediaMTXService
+import org.ncssar.rid2caltopo.app.LogArchiveDayOption
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -163,7 +166,8 @@ private fun restartMediaMtxServer(context: android.content.Context) {
 fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CPeerViewModel>,
-    onEmailLog: () -> Unit,
+    availableLogArchiveDaysProvider: () -> List<LogArchiveDayOption>,
+    onEmailLog: (List<String>) -> Unit,
     onShowHelp: () -> Unit,
     externalDisplayConnected: Boolean = false,
     externalDisplayContentMode: ExternalDisplayContentMode? = null,
@@ -195,6 +199,9 @@ fun MainScreen(
     var importingMutualAidConfig by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
     var showProximityDebugDialog by remember { mutableStateOf(false) }
+    var showLogArchiveDialog by remember { mutableStateOf(false) }
+    var logArchiveDays by remember { mutableStateOf(emptyList<LogArchiveDayOption>()) }
+    var selectedLogArchiveDays by remember { mutableStateOf(emptySet<String>()) }
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
     var locationOverrideText by remember { mutableStateOf("") }
     var locationOverrideError by remember { mutableStateOf<String?>(null) }
@@ -827,7 +834,18 @@ fun MainScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("RID-2-Caltopo") },
+                title = {
+                    Text(
+                        "RID-2-Caltopo",
+                        modifier = Modifier.pointerInput(Unit) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    localViewModel.showStreams()
+                                }
+                            )
+                        }
+                    )
+                },
                 actions = {
                     ResumeProximityAlertButton()
                     IconButton(onClick = { menuExpanded = true }) {
@@ -943,8 +961,12 @@ fun MainScreen(
                             }
                         )
                         DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
-                            onEmailLog()
-                            CaltopoClient.CTEvent(tag,"LogEmailed", null)
+                            logArchiveDays = availableLogArchiveDaysProvider()
+                            selectedLogArchiveDays = logArchiveDays
+                                .filter { it.isToday }
+                                .mapTo(linkedSetOf()) { it.directoryName }
+                                .ifEmpty { logArchiveDays.firstOrNull()?.let { linkedSetOf(it.directoryName) } ?: linkedSetOf() }
+                            showLogArchiveDialog = true
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = {
@@ -1070,7 +1092,6 @@ fun MainScreen(
                             val localDrones by item.viewModel.drones.collectAsState()
                             val appUptime by item.viewModel.appUpTime.collectAsState()
                             val hostname by item.viewModel.hostname.collectAsState()
-                            val confirmationState by item.viewModel.pendingDroneConfirmation.collectAsState()
 
                             R2CView(
                                 hostName = hostname,
@@ -1079,17 +1100,6 @@ fun MainScreen(
                                 viewModel = item.viewModel,
                                 onMappedIdChange = { drone, newId ->
                                     item.viewModel.updateMappedId(drone, newId)
-                                },
-                                confirmationState = confirmationState,
-                                onConfirmationChange = { organization, pilotCallsign, droneDescription ->
-                                    item.viewModel.updatePendingDroneConfirmation(
-                                        organization = organization,
-                                        pilotCallsign = pilotCallsign,
-                                        droneDescription = droneDescription
-                                    )
-                                },
-                                onConfirmationSave = {
-                                    item.viewModel.savePendingDroneConfirmation()
                                 }
                             )
                         }
@@ -1118,5 +1128,63 @@ fun MainScreen(
                 }
             }
         }
+    }
+
+    if (showLogArchiveDialog) {
+        AlertDialog(
+            onDismissRequest = { showLogArchiveDialog = false },
+            title = { Text("Select Log Days") },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                ) {
+                    if (logArchiveDays.isEmpty()) {
+                        Text("No archived log folders with text logs were found.")
+                    } else {
+                        logArchiveDays.forEach { option ->
+                            val checked = selectedLogArchiveDays.contains(option.directoryName)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = { isChecked ->
+                                        selectedLogArchiveDays = selectedLogArchiveDays.toMutableSet().apply {
+                                            if (isChecked) add(option.directoryName) else remove(option.directoryName)
+                                        }
+                                    }
+                                )
+                                Column(modifier = Modifier.padding(start = 8.dp)) {
+                                    Text(option.directoryName)
+                                    Text(
+                                        text = "${option.logFileCount} log file${if (option.logFileCount == 1) "" else "s"}${if (option.isToday) " • today" else ""}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onEmailLog(logArchiveDays.filter { selectedLogArchiveDays.contains(it.directoryName) }.map { it.directoryName })
+                        CaltopoClient.CTEvent(tag,"LogEmailed", null)
+                        showLogArchiveDialog = false
+                    },
+                    enabled = selectedLogArchiveDays.isNotEmpty() && logArchiveDays.isNotEmpty()
+                ) {
+                    Text("Send")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogArchiveDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

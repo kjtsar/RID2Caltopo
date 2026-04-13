@@ -46,10 +46,7 @@ fun R2CView(
     viewModel: R2CViewModel?,
     drones : List<CtDroneSpec>,
     appUptime : String,
-    onMappedIdChange: (CtDroneSpec, String) -> Unit,
-    confirmationState: DroneSpecConfirmationUiState?,
-    onConfirmationChange: (organization: String?, pilotCallsign: String?, droneDescription: String?) -> Unit,
-    onConfirmationSave: () -> Unit
+    onMappedIdChange: (CtDroneSpec, String) -> Unit
 ) {
     val tag = "R2CView"
     Column {
@@ -67,13 +64,6 @@ fun R2CView(
                     }
                 }
             }
-        }
-        if (confirmationState != null) {
-            DroneSpecConfirmationDialog(
-                state = confirmationState,
-                onFieldChange = onConfirmationChange,
-                onSave = onConfirmationSave
-            )
         }
     }
 }
@@ -330,16 +320,13 @@ fun R2CViewPreview() {
             null,
             emptyList(),
             "",
-            {} as (CtDroneSpec, String) -> Unit,
-            null,
-            { _, _, _ -> },
-            {}
+            { _, _ -> }
         )
     }
 }
 
 @Composable
-private fun DroneSpecConfirmationDialog(
+fun DroneSpecConfirmationDialog(
     state: DroneSpecConfirmationUiState,
     onFieldChange: (organization: String?, pilotCallsign: String?, droneDescription: String?) -> Unit,
     onSave: () -> Unit

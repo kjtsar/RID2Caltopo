@@ -3,6 +3,7 @@ package org.ncssar.rid2caltopo.video
 import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import DroneSpecState
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DesignatorState
 

@@ -351,6 +351,20 @@ internal data class BadTileDialogState(
     val hash: String
 )
 
+private fun closedPolylinePoints(points: List<GeoPoint>): List<GeoPoint> {
+    if (points.isEmpty()) return points
+    val first = points.first()
+    val last = points.last()
+    return if (
+        first.latitude == last.latitude &&
+        first.longitude == last.longitude
+    ) {
+        points
+    } else {
+        points + GeoPoint(first.latitude, first.longitude)
+    }
+}
+
 // Tile source objects
 internal object ArcGisWorldImageryTileSource : OnlineTileSourceBase(
     "ArcGIS-WorldImagery",
@@ -1787,25 +1801,45 @@ internal fun SplitMapPane(
                 managedOverlays.add(tapOverlay)
 
                 artifactOverlayState.polygons.forEach { polygonSpec ->
-                    val polygon = Polygon(mapView).apply {
+                    val polygonFill = Polygon(mapView).apply {
                         points = polygonSpec.points
-                        title = polygonSpec.title
-                        strokeColor = polygonSpec.strokeColor
+                        title = ""
+                        strokeColor = AndroidColor.TRANSPARENT
                         fillColor = polygonSpec.fillColor
-                        strokeWidth = polygonSpec.strokeWidth
+                        strokeWidth = 0f
+                        setOnClickListener { _, _, _ -> false }
                     }
-                    mapView.overlays.add(polygon)
-                    managedOverlays.add(polygon)
+                    mapView.overlays.add(polygonFill)
+                    managedOverlays.add(polygonFill)
+
+                    val polygonBoundary = Polyline(mapView).apply {
+                        setPoints(closedPolylinePoints(polygonSpec.points))
+                        title = polygonSpec.title
+                        color = polygonSpec.strokeColor
+                        width = polygonSpec.strokeWidth
+                    }
+                    mapView.overlays.add(polygonBoundary)
+                    managedOverlays.add(polygonBoundary)
                 }
 
                 val notamOverlayState = NotamMapOverlayAdapter.build(notamUiState, CaltopoMap.GetMyLocation())
                 notamOverlayState.polygons.forEach { polygonSpec ->
-                    val polygon = Polygon(mapView).apply {
+                    val polygonFill = Polygon(mapView).apply {
                         points = polygonSpec.points
-                        title = polygonSpec.title
-                        strokeColor = polygonSpec.strokeColor
+                        title = ""
+                        strokeColor = AndroidColor.TRANSPARENT
                         fillColor = polygonSpec.fillColor
-                        strokeWidth = polygonSpec.strokeWidth
+                        strokeWidth = 0f
+                        setOnClickListener { _, _, _ -> false }
+                    }
+                    mapView.overlays.add(polygonFill)
+                    managedOverlays.add(polygonFill)
+
+                    val polygonBoundary = Polyline(mapView).apply {
+                        setPoints(closedPolylinePoints(polygonSpec.points))
+                        title = polygonSpec.title
+                        color = polygonSpec.strokeColor
+                        width = polygonSpec.strokeWidth
                         polygonSpec.notice?.let { notice ->
                             setOnClickListener { _, _, _ ->
                                 selectedNotam = notice
@@ -1813,8 +1847,8 @@ internal fun SplitMapPane(
                             }
                         }
                     }
-                    mapView.overlays.add(polygon)
-                    managedOverlays.add(polygon)
+                    mapView.overlays.add(polygonBoundary)
+                    managedOverlays.add(polygonBoundary)
                 }
 
                 artifactOverlayState.lines.forEach { lineSpec ->

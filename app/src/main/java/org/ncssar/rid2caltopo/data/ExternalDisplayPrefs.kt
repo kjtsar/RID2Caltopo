@@ -18,6 +18,21 @@ enum class ExternalDisplayContentMode(
     }
 }
 
+enum class ExternalDisplayMode(
+    val storageValue: String,
+    val displayLabel: String
+) {
+    Off("off", "Off"),
+    AppManaged("app_managed", "App-managed"),
+    OsMirroring("os_mirroring", "Use OS mirroring");
+
+    companion object {
+        fun fromStorage(value: String?): ExternalDisplayMode {
+            return entries.firstOrNull { it.storageValue == value } ?: AppManaged
+        }
+    }
+}
+
 enum class ExternalDisplayAlertRouting(
     val storageValue: String,
     val displayLabel: String
@@ -34,7 +49,7 @@ enum class ExternalDisplayAlertRouting(
 }
 
 data class ExternalDisplayConfig(
-    val enabledWhenConnected: Boolean = true,
+    val mode: ExternalDisplayMode = ExternalDisplayMode.AppManaged,
     val autoOpenOnConnect: Boolean = true,
     val returnToPhoneOnlyLayoutOnDisconnect: Boolean = true,
     val allowInteraction: Boolean = true,
@@ -44,7 +59,7 @@ data class ExternalDisplayConfig(
 
 object ExternalDisplayPrefs {
     private const val PREFS_NAME = "external_display_prefs"
-    private const val KEY_ENABLED = "enabled"
+    private const val KEY_MODE = "mode"
     private const val KEY_AUTO_OPEN = "auto_open"
     private const val KEY_RETURN_TO_PHONE_ONLY = "return_to_phone_only"
     private const val KEY_ALLOW_INTERACTION = "allow_interaction"
@@ -55,7 +70,9 @@ object ExternalDisplayPrefs {
     fun load(context: Context): ExternalDisplayConfig {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return ExternalDisplayConfig(
-            enabledWhenConnected = prefs.getBoolean(KEY_ENABLED, true),
+            mode = ExternalDisplayMode.fromStorage(
+                prefs.getString(KEY_MODE, ExternalDisplayMode.AppManaged.storageValue)
+            ),
             autoOpenOnConnect = prefs.getBoolean(KEY_AUTO_OPEN, true),
             returnToPhoneOnlyLayoutOnDisconnect = prefs.getBoolean(KEY_RETURN_TO_PHONE_ONLY, true),
             allowInteraction = prefs.getBoolean(KEY_ALLOW_INTERACTION, true),
@@ -72,7 +89,7 @@ object ExternalDisplayPrefs {
     fun save(context: Context, config: ExternalDisplayConfig) {
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putBoolean(KEY_ENABLED, config.enabledWhenConnected)
+            .putString(KEY_MODE, config.mode.storageValue)
             .putBoolean(KEY_AUTO_OPEN, config.autoOpenOnConnect)
             .putBoolean(KEY_RETURN_TO_PHONE_ONLY, config.returnToPhoneOnlyLayoutOnDisconnect)
             .putBoolean(KEY_ALLOW_INTERACTION, config.allowInteraction)

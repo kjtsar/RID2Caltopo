@@ -128,7 +128,13 @@ public class CaltopoMap {
     private static DelayedExec VerifyPhotoTimeout = new DelayedExec();
     private static final long VERIFY_TIMEOUT_MS = 10 * 1000L;
     private static volatile boolean ShutdownInProgress = false;
+    @NonNull private static R2cRuntime CurrentRuntime = R2cRuntimeRegistry.getDefaultRuntime();
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
+
+    @NonNull
+    private static R2cRuntime getCurrentRuntime() {
+        return CurrentRuntime;
+    }
 
     public static void SessionVerifyCallback(@NonNull CaltopoOp verifyOp) {
         VerifyTimer.stop();
@@ -163,6 +169,7 @@ public class CaltopoMap {
     public static String Init() {
         CTDebug(TAG, "Init()");
         ShutdownInProgress = false;
+        CurrentRuntime = R2cRuntimeRegistry.getDefaultRuntime();
         CaltopoClient.RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true);
         if (null == MyInstance)
             MyInstance = new CaltopoMap(); // needed to receive notifications only.
@@ -183,11 +190,11 @@ public class CaltopoMap {
         MyCaltopoCredentials = sessionCredentials;
         SessionNodeMap = null;
         CTDebug(TAG, "Init(): Initializing session...");
-        R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+        getCurrentRuntime().getCalTopoSessionGateway()
                 .init(MyCaltopoCredentials, DomainAndPort);
         CTDebug(TAG, "Init(): Verifying Credentials...");
         VerifyTimer.start(CaltopoMap::VerifyTimeout, VERIFY_TIMEOUT_MS, 0);
-        R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+        getCurrentRuntime().getCalTopoSessionGateway()
                 .verifyAccount(CaltopoMap::SessionVerifyCallback);
         UsePeersFlag = CaltopoClient.GetUsePeersFlag();
         FolderName = CaltopoClient.GetTrackFolderName();
@@ -270,7 +277,7 @@ public class CaltopoMap {
         SetMapStatus(MapStatusListener.mapStatus.connecting, null);
         try {
             CTDebug(TAG, String.format(Locale.US, "Connecting to map '%s'(%s)'", MapNode.getTitle(), MapNode.getId()));
-            R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+            getCurrentRuntime().getCalTopoSessionGateway()
                     .openMap(MapNode, 0, CaltopoMap::OpenMapFinished);
 
         } catch (Exception e) {
@@ -433,7 +440,7 @@ public class CaltopoMap {
                 maxWaitInMilliseconds = (maxWaitInMilliseconds - (System.currentTimeMillis() - startTime));
         }
         LiveTracksById.clear();
-        R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().stop();
+        getCurrentRuntime().getPeerCoordinator().stop();
         PeerIdMap.clear();
         FolderId = null;
         ArchiveFolderId = null;
@@ -602,7 +609,7 @@ public class CaltopoMap {
         if (null == FolderId) {
             CTInfo(TAG, String.format(Locale.US,
                     "parseMap() '%s' folder not found - creating...", FolderName));
-            R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+            getCurrentRuntime().getCalTopoSessionGateway()
                     .addFolder(FolderName, true, true, CaltopoMap::CreateTrackDirFinished);
         }
         // Peer discovery is now MQTT-based; no marker scanning needed.
@@ -610,7 +617,7 @@ public class CaltopoMap {
         if (null == ArchiveFolderId) {
             CTInfo(TAG, String.format(Locale.US,
                     "parseMap() '%s' folder not found - creating...", archiveFolderName));
-            R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+            getCurrentRuntime().getCalTopoSessionGateway()
                     .addFolder(archiveFolderName, false, false, CaltopoMap::CreateArchiveDirFinished);
         } else LookForExistingLiveTracks();
     }
@@ -623,7 +630,7 @@ public class CaltopoMap {
         // Our marker feature s/b/ valid at this point, so start polling for updates...
         CTInfo(TAG, "PollMapUpdates(): updating map connection()");
         long mapSync = System.currentTimeMillis();
-        R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+        getCurrentRuntime().getCalTopoSessionGateway()
                 .openMap(MapNode, LastMapSync, CaltopoMap::UpdateMapFinished);
         LastMapSync = mapSync;
     }
@@ -684,7 +691,7 @@ public class CaltopoMap {
         CTDebug(TAG, "SubmitClue(" + clueTitle + ")...");
 
         VerifyPhotoTimeout.start(CaltopoMap::PhotoMarkerTimeout, 30 * 1000, 0);
-        R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway().addPhotoMarker(
+        getCurrentRuntime().getCalTopoSessionGateway().addPhotoMarker(
                 clueLat,
                 clueLng,
                 clueTitle,
@@ -714,9 +721,9 @@ public class CaltopoMap {
             if (UsePeersFlag && MapNode != null) {
                 // Start MQTT-based peer coordination for this map.
                 // Credentials are derived automatically from the mapId — no extra config needed.
-                R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().start(
+                getCurrentRuntime().getPeerCoordinator().start(
                         MapNode.getId(), GetMyUUID(), R2CActivity.MyDeviceName, null);
-                R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().updateMyPosition(
+                getCurrentRuntime().getPeerCoordinator().updateMyPosition(
                         MyLocation != null ? MyLocation.getLatitude()  : 0,
                         MyLocation != null ? MyLocation.getLongitude() : 0);
             }
@@ -728,7 +735,7 @@ public class CaltopoMap {
                     if (featureFolderId.equals(FolderId) || featureFolderId.equals(ArchiveFolderId)) {
                         // then it's a feature fragment that we created, so we can/should delete it.
                         String featureId = feature.optString("id");
-                        R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+                        getCurrentRuntime().getCalTopoSessionGateway()
                                 .deleteShapeWithId(featureId, null);
                     }
                 }
@@ -827,7 +834,7 @@ public class CaltopoMap {
                     MyLocation.getLatitude(), MyLocation.getLongitude(), MyLocation.getAccuracy(),
                     distanceInMeters));
             MyLocation = location;
-            R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator()
+            getCurrentRuntime().getPeerCoordinator()
                     .updateMyPosition(location.getLatitude(), location.getLongitude());
         }
     }
@@ -846,7 +853,7 @@ public class CaltopoMap {
         if (CaltopoClient.DebugLevel < CaltopoClient.DebugLevelDebug) return "";
 
         StringBuilder builder = new StringBuilder();
-        for (R2CMqttManager.PeerState ps : R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().getPeerList()) {
+        for (R2CMqttManager.PeerState ps : getCurrentRuntime().getPeerCoordinator().getPeerList()) {
             builder.append(ps.name)
                     .append(": ctRtt=").append(ps.caltopoRttMs).append("ms")
                     .append(ps.online ? "" : " [offline]")
@@ -944,7 +951,7 @@ public class CaltopoMap {
             prop.put("updated", timeString);
             prop.put("-updated-on", timeString);
             prop.put("class", "Shape");  // convert from LiveTrack to shape.
-            CaltopoOp op = R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+            CaltopoOp op = getCurrentRuntime().getCalTopoSessionGateway()
                     .editObjectWithId("Shape", trackId, feature, null);
             if (maxWaitInMilliseconds > 0) {
                 op.syncOp(maxWaitInMilliseconds);
@@ -952,7 +959,7 @@ public class CaltopoMap {
             }
             if (featureClass.equals("LiveTrack")) {
                 CTInfo(TAG, String.format(Locale.US, "archiveFeature(): Stopping liveTrack %s....", trackId));
-                op = R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway()
+                op = getCurrentRuntime().getCalTopoSessionGateway()
                         .deleteLiveTrackWithId(trackId, null);  // Then delete LiveTrack.
                 if (maxWaitInMilliseconds > 0) op.syncOp(maxWaitInMilliseconds);
             }
@@ -980,8 +987,8 @@ public class CaltopoMap {
             MapNode = null;
             SessionNodeMap = null;
             SetMapStatus(MapStatusListener.mapStatus.down, "Shutdown in progress.");
-            if (UsePeersFlag) R2cRuntimeRegistry.getDefaultRuntime().getPeerCoordinator().stop();
-            R2cRuntimeRegistry.getDefaultRuntime().getCalTopoSessionGateway().shutdown();
+            if (UsePeersFlag) getCurrentRuntime().getPeerCoordinator().stop();
+            getCurrentRuntime().getCalTopoSessionGateway().shutdown();
         } catch (Exception e) {
             CTError(TAG, "Shutdown() raised: ", e);
         }

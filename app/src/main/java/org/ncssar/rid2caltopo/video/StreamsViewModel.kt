@@ -8,6 +8,9 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
+import androidx.media3.exoplayer.ExoPlayer
+import org.ncssar.rid2caltopo.video.StreamRenderRouter
+import org.ncssar.rid2caltopo.video.session.StreamSessionService
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -72,6 +75,17 @@ data class ProximityMapFocusTarget(
     val secondLng: Double
 )
 
+internal fun chooseResyncSnapshot(
+    lastSyncedStreams: Map<String, StreamInfo>,
+    latestFlowValue: Map<String, StreamInfo>,
+): Map<String, StreamInfo> {
+    return if (lastSyncedStreams.isNotEmpty() && latestFlowValue.isEmpty()) {
+        lastSyncedStreams
+    } else {
+        latestFlowValue
+    }
+}
+
 @Stable
 class DroneSpecState(
     val source: CtDroneSpec
@@ -121,6 +135,12 @@ class StreamsViewModel(
         CTError(tag, "FFmpeg probe service unavailable; stream playback will remain unavailable.", Exception(t))
         null
     }
+    private val streamSessionService = StreamSessionService(
+        context = application.applicationContext,
+        scope = viewModelScope,
+        preferredModeProvider = { StreamSessionService.ProtocolMode.RTSP },
+        sourcePathProvider = { designator -> streamInfoByDesignator[designator]?.sourcePath ?: designator },
+    )
 
     val streams: StateFlow<Map<String, StreamInfo>> =
         StreamRegistry.streams.stateIn(
@@ -256,6 +276,8 @@ class StreamsViewModel(
         ffmpegProbeService?.unbindRenderSurface(designator)
     }
 
+    fun getExoPlayerFor(designator: String): ExoPlayer? = streamSessionService.playerFor(designator)
+
     fun toggleFocus(designator: String) {
         var fString = "has"
         _focusedPath.value =
@@ -267,12 +289,13 @@ class StreamsViewModel(
             }
         CTDebug(tag, "toggleFocus(): ${designator} ${fString} focus.")
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-        syncStreamSessions(streams.value)
+        syncStreamSessions(currentResyncSnapshot())
     }
 
     override fun onCleared() {
         CaltopoMap.RemoveMapStatusListener(this)
         ffmpegProbeService?.close()
+        streamSessionService.releaseAll()
         super.onCleared()
     }
 
@@ -549,7 +572,12 @@ class StreamsViewModel(
     }
 
     private fun shouldUseFfmpegRender(designator: String): Boolean {
-        return streamInfoByDesignator[designator]?.state == StreamState.LIVE
+        return StreamRenderRouter.useFfmpeg(
+            designator = designator,
+            liveStreams = streamInfoByDesignator,
+            focusedDesignator = _focusedPath.value,
+            ffmpegAvailable = ffmpegProbeService != null,
+        )
     }
 
     private fun syncStreamSessions(streamsMap: Map<String, StreamInfo>) {
@@ -609,16 +637,18 @@ class StreamsViewModel(
 
         val removed = lastLiveRevisions.keys - liveDesignators
         removed.forEach { designator ->
-            CTDebug(tag, "Stream $designator no longer live -> stop FFmpeg render")
+            CTDebug(tag, "Stream $designator no longer live -> stop render")
             renderRouteByDesignator.remove(designator)
             ffmpegProbeService?.setRenderEnabled(designator, false)
             ffmpegProbeService?.onStreamStopped(designator)
+            streamSessionService.onStreamStopped(designator)
         }
 
         dismissedLiveDesignators.forEach { designator ->
             renderRouteByDesignator[designator] = false
             ffmpegProbeService?.setRenderEnabled(designator, false)
             ffmpegProbeService?.onStreamStopped(designator)
+            streamSessionService.onStreamStopped(designator)
         }
 
         activeLiveStreams.forEach { info ->
@@ -636,6 +666,7 @@ class StreamsViewModel(
             renderRouteByDesignator[designator] = useFfmpeg
             ffmpegProbeService?.setRenderEnabled(designator, useFfmpeg)
             if (useFfmpeg) {
+                streamSessionService.onStreamStopped(designator)
                 if (republishDetected) {
                     if (publisherChanged) {
                         CTDebug(
@@ -656,6 +687,14 @@ class StreamsViewModel(
                     ffmpegProbeService?.onStreamBecameLive(designator)
                     CTDebug(tag, "Stream $designator live -> using FFmpeg render path")
                 }
+            } else {
+                if (republishDetected) {
+                    streamSessionService.onStreamRepublished(designator)
+                    CTDebug(tag, "Stream $designator live -> using ExoPlayer render path (republished)")
+                } else if (newlyLive || wasUsingFfmpeg) {
+                    streamSessionService.onStreamBecameLive(designator)
+                    CTDebug(tag, "Stream $designator live -> using ExoPlayer render path")
+                }
             }
         }
 
@@ -667,7 +706,7 @@ class StreamsViewModel(
     fun clearFocus() {
         _focusedPath.value = null
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-        syncStreamSessions(streams.value)
+        syncStreamSessions(currentResyncSnapshot())
     }
 
     fun dismissFocusedStream() {
@@ -677,7 +716,7 @@ class StreamsViewModel(
         CTDebug(tag, "dismissFocusedStream(): hiding $designator at revision=${info.revision}")
         _focusedPath.value = null
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-        syncStreamSessions(streams.value)
+        syncStreamSessions(currentResyncSnapshot())
         CaltopoClient.ShowToast("Closed $designator until it republishes.")
     }
 
@@ -689,7 +728,14 @@ class StreamsViewModel(
         val updated = reducer(current)
         _anomalyConfigByDesignator[designator] = updated
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-        syncStreamSessions(streams.value)
+        syncStreamSessions(currentResyncSnapshot())
+    }
+
+    private fun currentResyncSnapshot(): Map<String, StreamInfo> {
+        return chooseResyncSnapshot(
+            lastSyncedStreams = streamInfoByDesignator.toMap(),
+            latestFlowValue = streams.value,
+        )
     }
 
     private fun applyFocusedAnomalyPolicy(liveDesignators: Set<String>) {

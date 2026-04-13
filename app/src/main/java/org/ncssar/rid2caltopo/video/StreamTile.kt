@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
+import org.ncssar.rid2caltopo.ui.StreamPlayerView
 
 
 @Composable
@@ -363,10 +364,12 @@ fun StreamPlayer(
     if (state != StreamState.LIVE) return
 
     if (!viewModel.useFfmpegRender(designator)) {
-        Box(
-            modifier = modifier
-                .background(Color.Black)
-        )
+        val player = viewModel.getExoPlayerFor(designator)
+        if (player != null) {
+            StreamPlayerView(player = player, modifier = modifier, onPlayerViewReady = {})
+        } else {
+            Box(modifier = modifier.background(Color.Black))
+        }
         return
     }
 

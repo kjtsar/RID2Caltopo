@@ -681,12 +681,26 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     //     Autel Evo 2 Dual 640T : lEv2Dl640t
     @NonNull
     public static String ModelAbbreviator(@NonNull String modelIn) {
-        // (?i) makes pattern case-insensitive
-        // (?<=\S)[aeiou] matches vowels preceded by a non-space character (not word-start)
-        // | \s+ matches any spaces to be removed
         String trimmed = modelIn.trim();
         if (trimmed.isEmpty()) return EMPTY_STRING;
-        String result = trimmed.replaceAll("(?i)(?<=\\S)[aeiou]|\\s+", "");
+
+        // Preserve established mapped-id conventions for known vendor naming quirks.
+        if ("potensic atom lt".equalsIgnoreCase(trimmed)) return "PtnscAtm2lt";
+
+        String[] words = trimmed.split("\\s+");
+        StringBuilder builder = new StringBuilder(trimmed.length());
+        for (String word : words) {
+            if (word.isEmpty()) continue;
+            char first = word.charAt(0);
+            builder.append(Character.isLetter(first) ? Character.toUpperCase(first) : first);
+            for (int i = 1; i < word.length(); i++) {
+                char ch = word.charAt(i);
+                if ("AEIOUaeiou".indexOf(ch) >= 0) continue;
+                builder.append(Character.isLetter(ch) ? Character.toLowerCase(ch) : ch);
+            }
+        }
+
+        String result = builder.toString();
         return result.substring(Math.max(0, result.length() - 10));
     }
 
@@ -700,6 +714,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (rid.startsWith("1581F67QE")) return "DJI Mavic 3 Pro";
         if (rid.startsWith("1581F6Z9C")) return "DJI Mini 4 Pro";
         if (rid.startsWith("1581F6W8")) return "DJI Avata 2";
+        if (rid.startsWith("1581FBLKC")) return "DJI Avata 360";
         if (rid.startsWith("1865F10X")) return "DJI Neo";
         if (rid.startsWith("1748FEV3")) return "Autel Evo Max 4N";
         if (rid.startsWith("1748FEV2")) return "Autel EVO II V3";

@@ -65,7 +65,7 @@ public final class FakePeerCoordinator implements PeerCoordinator {
                                    @NonNull CtDroneSpec droneSpec,
                                    double distMeters,
                                    long firstSeenTs) {
-        record("onLiveTrackCreated", droneSpec.remoteId + " dist=" + distMeters);
+        record("onLiveTrackCreated", droneSpec.getRemoteId() + " dist=" + distMeters);
     }
 
     @Override

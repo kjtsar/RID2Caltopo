@@ -10,10 +10,10 @@ class StreamRegistryLifecycleTest {
     fun staleConnectingEntries_areEvictedToPreventCapacityLockout() {
         val initial = StreamAdmissionState(
             active = mapOf(
-                "a" to StreamInfo("a", StreamState.CONNECTING),
-                "b" to StreamInfo("b", StreamState.CONNECTING),
-                "c" to StreamInfo("c", StreamState.CONNECTING),
-                "d" to StreamInfo("d", StreamState.CONNECTING),
+                "a" to StreamInfo(designator = "a", state = StreamState.CONNECTING),
+                "b" to StreamInfo(designator = "b", state = StreamState.CONNECTING),
+                "c" to StreamInfo(designator = "c", state = StreamState.CONNECTING),
+                "d" to StreamInfo(designator = "d", state = StreamState.CONNECTING),
             ),
             stateChangedAtMs = mapOf("a" to 0L, "b" to 0L, "c" to 0L, "d" to 0L),
             rejectedPaths = emptySet(),
@@ -21,7 +21,9 @@ class StreamRegistryLifecycleTest {
 
         val result = StreamAdmissionPolicy.admit(
             state = initial,
-            path = "e",
+            designator = "e",
+            sourcePath = "e",
+            controllerProfile = StreamControllerProfile.GENERIC,
             targetState = StreamState.CONNECTING,
             nowMs = 31_000L,
             maxSimultaneousStreams = 4,
@@ -57,7 +59,9 @@ class StreamRegistryLifecycleTest {
         )
         val connecting = StreamAdmissionPolicy.admit(
             state = emptyState,
-            path = "d1",
+            designator = "d1",
+            sourcePath = "d1",
+            controllerProfile = StreamControllerProfile.GENERIC,
             targetState = StreamState.CONNECTING,
             nowMs = 1_000L,
             maxSimultaneousStreams = 4,
@@ -69,7 +73,9 @@ class StreamRegistryLifecycleTest {
 
         val live = StreamAdmissionPolicy.admit(
             state = connecting,
-            path = "d1",
+            designator = "d1",
+            sourcePath = "d1",
+            controllerProfile = StreamControllerProfile.GENERIC,
             targetState = StreamState.LIVE,
             nowMs = 2_000L,
             maxSimultaneousStreams = 4,
@@ -81,7 +87,9 @@ class StreamRegistryLifecycleTest {
 
         val republished = StreamAdmissionPolicy.admit(
             state = live,
-            path = "d1",
+            designator = "d1",
+            sourcePath = "d1",
+            controllerProfile = StreamControllerProfile.GENERIC,
             targetState = StreamState.LIVE,
             nowMs = 3_000L,
             maxSimultaneousStreams = 4,
@@ -98,7 +106,7 @@ class StreamRegistryLifecycleTest {
     @Test
     fun markError_recordsErrorDetail() {
         val initial = StreamAdmissionState(
-            active = mapOf("d1" to StreamInfo("d1", StreamState.LIVE)),
+            active = mapOf("d1" to StreamInfo(designator = "d1", state = StreamState.LIVE)),
             stateChangedAtMs = mapOf("d1" to 1_000L),
             rejectedPaths = emptySet(),
         )
@@ -121,7 +129,7 @@ class StreamRegistryLifecycleTest {
     @Test
     fun transientRtmpClose_isDeferredWhileStreamIsStillActive() {
         val initial = StreamAdmissionState(
-            active = mapOf("d1" to StreamInfo("d1", StreamState.LIVE)),
+            active = mapOf("d1" to StreamInfo(designator = "d1", state = StreamState.LIVE)),
             stateChangedAtMs = mapOf("d1" to 1_000L),
             rejectedPaths = emptySet(),
         )
@@ -140,7 +148,7 @@ class StreamRegistryLifecycleTest {
     @Test
     fun nonRtmpError_stillTransitionsToError() {
         val initial = StreamAdmissionState(
-            active = mapOf("d1" to StreamInfo("d1", StreamState.LIVE)),
+            active = mapOf("d1" to StreamInfo(designator = "d1", state = StreamState.LIVE)),
             stateChangedAtMs = mapOf("d1" to 1_000L),
             rejectedPaths = emptySet(),
         )

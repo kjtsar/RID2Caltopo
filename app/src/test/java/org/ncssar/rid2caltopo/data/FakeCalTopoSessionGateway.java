@@ -211,10 +211,14 @@ public final class FakeCalTopoSessionGateway implements CalTopoSessionGateway {
     @NonNull
     private CaltopoOp completedOp(@NonNull String id) {
         CaltopoOp op = new CaltopoOp(null);
-        op.idString = id;
         op.responseCode = 200;
         op.response = "fake";
-        op.responseString = "fake";
+        JSONObject responseJson = new JSONObject();
+        try {
+            responseJson.put("id", id);
+            responseJson.put("status", "fake");
+        } catch (Exception ignored) { }
+        op.responseJson = responseJson;
         op.setOperationIsDone(true);
         return op;
     }

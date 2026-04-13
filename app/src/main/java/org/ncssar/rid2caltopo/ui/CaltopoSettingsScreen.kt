@@ -21,6 +21,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
+import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 
 @Composable
 fun CaltopoSettingsScreen(
@@ -41,7 +42,7 @@ fun CaltopoSettingsScreen(
     val notamRefreshIntervalSeconds by settingsViewModel.notamRefreshIntervalSeconds.collectAsState()
     val notamAutoRefresh by settingsViewModel.notamAutoRefresh.collectAsState()
     val notamStatus by settingsViewModel.notamStatus.collectAsState()
-    val externalDisplayEnabled by settingsViewModel.externalDisplayEnabled.collectAsState()
+    val externalDisplayMode by settingsViewModel.externalDisplayMode.collectAsState()
     val externalDisplayAutoOpen by settingsViewModel.externalDisplayAutoOpen.collectAsState()
     val externalDisplayReturnToPhoneOnly by settingsViewModel.externalDisplayReturnToPhoneOnly.collectAsState()
     val externalDisplayAllowInteraction by settingsViewModel.externalDisplayAllowInteraction.collectAsState()
@@ -186,44 +187,71 @@ fun CaltopoSettingsScreen(
                 Text("External Display", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(8.dp))
 
-                LabeledSwitch(
-                    label = "Enable when HDMI/DeX connected",
-                    checked = externalDisplayEnabled,
-                    onCheckedChange = settingsViewModel::onExternalDisplayEnabledChanged
-                )
-                LabeledSwitch(
-                    label = "Auto-open on connect",
-                    checked = externalDisplayAutoOpen,
-                    onCheckedChange = settingsViewModel::onExternalDisplayAutoOpenChanged
-                )
-                LabeledSwitch(
-                    label = "Return to phone-only layout on disconnect",
-                    checked = externalDisplayReturnToPhoneOnly,
-                    onCheckedChange = settingsViewModel::onExternalDisplayReturnToPhoneOnlyChanged
-                )
-                LabeledSwitch(
-                    label = "Allow external display interaction",
-                    checked = externalDisplayAllowInteraction,
-                    onCheckedChange = settingsViewModel::onExternalDisplayAllowInteractionChanged
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("External display content", style = MaterialTheme.typography.titleSmall)
+                Text("External display mode", style = MaterialTheme.typography.titleSmall)
                 SingleChoiceGroup(
-                    options = ExternalDisplayContentMode.entries,
-                    selected = externalDisplayContentMode,
+                    options = ExternalDisplayMode.entries,
+                    selected = externalDisplayMode,
                     label = { it.displayLabel },
-                    onSelected = settingsViewModel::onExternalDisplayContentModeChanged
+                    onSelected = settingsViewModel::onExternalDisplayModeChanged
                 )
+                when (externalDisplayMode) {
+                    ExternalDisplayMode.Off -> {
+                        Text(
+                            "RID2Caltopo will not manage the external display.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Alert routing", style = MaterialTheme.typography.titleSmall)
-                SingleChoiceGroup(
-                    options = ExternalDisplayAlertRouting.entries,
-                    selected = externalDisplayAlertRouting,
-                    label = { it.displayLabel },
-                    onSelected = settingsViewModel::onExternalDisplayAlertRoutingChanged
-                )
+                    ExternalDisplayMode.OsMirroring -> {
+                        Text(
+                            "RID2Caltopo will not open its own external window. Enable mirroring from Samsung/Android display controls.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    ExternalDisplayMode.AppManaged -> {
+                        LabeledSwitch(
+                            label = "Auto-open on connect",
+                            checked = externalDisplayAutoOpen,
+                            onCheckedChange = settingsViewModel::onExternalDisplayAutoOpenChanged
+                        )
+                        LabeledSwitch(
+                            label = "Return to phone-only layout on disconnect",
+                            checked = externalDisplayReturnToPhoneOnly,
+                            onCheckedChange = settingsViewModel::onExternalDisplayReturnToPhoneOnlyChanged
+                        )
+                        LabeledSwitch(
+                            label = "Allow external display interaction",
+                            checked = externalDisplayAllowInteraction,
+                            onCheckedChange = settingsViewModel::onExternalDisplayAllowInteractionChanged
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("External display content", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Presentation-mode external displays currently support stream layouts only.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        SingleChoiceGroup(
+                            options = ExternalDisplayContentMode.entries,
+                            selected = externalDisplayContentMode,
+                            label = { it.displayLabel },
+                            onSelected = settingsViewModel::onExternalDisplayContentModeChanged
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Alert routing", style = MaterialTheme.typography.titleSmall)
+                        SingleChoiceGroup(
+                            options = ExternalDisplayAlertRouting.entries,
+                            selected = externalDisplayAlertRouting,
+                            label = { it.displayLabel },
+                            onSelected = settingsViewModel::onExternalDisplayAlertRoutingChanged
+                        )
+                    }
+                }
 
                 Row {
                     Button(onClick = {

@@ -307,6 +307,6 @@ fun RestRidmapHeader() {
 @Composable
 fun R2CPeerViewPreview() {
     RID2CaltopoTheme {
-        R2CPeerView("", "", null, emptyList(), "", "", {} as (CtDroneSpec, String) -> Unit)
+        R2CPeerView("", "", null, emptyList(), "", "", { _, _ -> })
     }
 }

@@ -3,6 +3,7 @@ import android.location.Location
 import androidx.compose.runtime.mutableStateMapOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
@@ -29,6 +30,7 @@ import androidx.compose.runtime.snapshotFlow
  * (DEM samples, calibration, correction factors, last-known headings) is preserved across
  * attach/detach cycles, so a consumer that re-attaches immediately sees fresh-looking values.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 internal class DroneAltitudeCoordinator(
     private val scope: CoroutineScope,
     appContext: Context,

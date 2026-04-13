@@ -365,6 +365,28 @@ private fun closedPolylinePoints(points: List<GeoPoint>): List<GeoPoint> {
     }
 }
 
+@Suppress("DEPRECATION")
+private fun applyPolygonStyle(
+    polygon: Polygon,
+    strokeColor: Int,
+    fillColor: Int,
+    strokeWidth: Float
+) {
+    polygon.strokeColor = strokeColor
+    polygon.fillColor = fillColor
+    polygon.strokeWidth = strokeWidth
+}
+
+@Suppress("DEPRECATION")
+private fun applyPolylineStyle(
+    polyline: Polyline,
+    color: Int,
+    width: Float
+) {
+    polyline.color = color
+    polyline.width = width
+}
+
 // Tile source objects
 internal object ArcGisWorldImageryTileSource : OnlineTileSourceBase(
     "ArcGIS-WorldImagery",
@@ -1804,9 +1826,12 @@ internal fun SplitMapPane(
                     val polygonFill = Polygon(mapView).apply {
                         points = polygonSpec.points
                         title = ""
-                        strokeColor = AndroidColor.TRANSPARENT
-                        fillColor = polygonSpec.fillColor
-                        strokeWidth = 0f
+                        applyPolygonStyle(
+                            polygon = this,
+                            strokeColor = AndroidColor.TRANSPARENT,
+                            fillColor = polygonSpec.fillColor,
+                            strokeWidth = 0f
+                        )
                         setOnClickListener { _, _, _ -> false }
                     }
                     mapView.overlays.add(polygonFill)
@@ -1815,8 +1840,7 @@ internal fun SplitMapPane(
                     val polygonBoundary = Polyline(mapView).apply {
                         setPoints(closedPolylinePoints(polygonSpec.points))
                         title = polygonSpec.title
-                        color = polygonSpec.strokeColor
-                        width = polygonSpec.strokeWidth
+                        applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth)
                     }
                     mapView.overlays.add(polygonBoundary)
                     managedOverlays.add(polygonBoundary)
@@ -1827,9 +1851,12 @@ internal fun SplitMapPane(
                     val polygonFill = Polygon(mapView).apply {
                         points = polygonSpec.points
                         title = ""
-                        strokeColor = AndroidColor.TRANSPARENT
-                        fillColor = polygonSpec.fillColor
-                        strokeWidth = 0f
+                        applyPolygonStyle(
+                            polygon = this,
+                            strokeColor = AndroidColor.TRANSPARENT,
+                            fillColor = polygonSpec.fillColor,
+                            strokeWidth = 0f
+                        )
                         setOnClickListener { _, _, _ -> false }
                     }
                     mapView.overlays.add(polygonFill)
@@ -1838,8 +1865,7 @@ internal fun SplitMapPane(
                     val polygonBoundary = Polyline(mapView).apply {
                         setPoints(closedPolylinePoints(polygonSpec.points))
                         title = polygonSpec.title
-                        color = polygonSpec.strokeColor
-                        width = polygonSpec.strokeWidth
+                        applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth)
                         polygonSpec.notice?.let { notice ->
                             setOnClickListener { _, _, _ ->
                                 selectedNotam = notice
@@ -1855,8 +1881,7 @@ internal fun SplitMapPane(
                     val line = Polyline(mapView).apply {
                         setPoints(lineSpec.points)
                         title = lineSpec.title
-                        color = lineSpec.color
-                        width = lineSpec.width
+                        applyPolylineStyle(this, lineSpec.color, lineSpec.width)
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -1866,8 +1891,7 @@ internal fun SplitMapPane(
                     val line = Polyline(mapView).apply {
                         setPoints(lineSpec.points)
                         title = lineSpec.title
-                        color = lineSpec.color
-                        width = lineSpec.width
+                        applyPolylineStyle(this, lineSpec.color, lineSpec.width)
                         setOnClickListener { _, _, _ ->
                             selectedNotam = lineSpec.notice
                             true
@@ -1894,8 +1918,7 @@ internal fun SplitMapPane(
                     val line = Polyline(mapView).apply {
                         setPoints(points.map { GeoPoint(it.lat, it.lng) })
                         title = "Local track: $mappedId (${points.size})"
-                        color = AndroidColor.parseColor("#1E88E5")
-                        width = 4.0f
+                        applyPolylineStyle(this, AndroidColor.parseColor("#1E88E5"), 4.0f)
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -2990,9 +3013,10 @@ private fun buildArtifactOverlayState(
         val markerSymbol = properties?.optString("marker-symbol", "point").orEmpty().ifBlank { "point" }
         val markerColor = properties?.optString("marker-color")
         val trackLikeFeature = isTrackLikeFeature(properties, className)
+        val defaultStrokeHex = markerColor?.takeIf { it.isNotBlank() } ?: "#FF5A1F"
 
         val strokeColor = colorFromHex(
-            properties?.optString("stroke", properties?.optString("marker-color", "#FF5A1F")),
+            properties?.optString("stroke", defaultStrokeHex),
             "#FF5A1F",
             properties?.optDouble("stroke-opacity", 1.0) ?: 1.0
         )
@@ -3842,7 +3866,7 @@ private fun buildDroneStatusLabelDrawable(
     text: String
 ): Drawable {
     val density = resources.displayMetrics.density
-    val scaledDensity = resources.displayMetrics.scaledDensity
+    val scaledDensity = density * resources.configuration.fontScale
     val textSizePx = 13f * scaledDensity
     val cornerPx = 5f * density
     val horizontalPaddingPx = 5f * density
@@ -3883,7 +3907,7 @@ private fun buildDroneNameLabelDrawable(
     text: String
 ): Drawable {
     val density = resources.displayMetrics.density
-    val scaledDensity = resources.displayMetrics.scaledDensity
+    val scaledDensity = density * resources.configuration.fontScale
     val textSizePx = 16f * scaledDensity
     val cornerPx = 6f * density
     val horizontalPaddingPx = 6f * density

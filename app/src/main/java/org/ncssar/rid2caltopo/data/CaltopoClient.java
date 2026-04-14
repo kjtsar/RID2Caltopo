@@ -243,7 +243,7 @@ class ClientClassState {
         caltopoCredentials = new CaltopoCredentials();
         caltopoDomainAndPort = "caltopo.com";
         goLiveFlag = false;
-        usePeersFlag = false;
+        usePeersFlag = true;
         newTrackDelayInSeconds = 30;
         maxIdleTimeInMinutes = 120;
         debugLevel = -1; // undefined.
@@ -1455,6 +1455,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String opPeriod = json.optString("op_period");
         String trackerApiKey = json.optString("tracker_api_key");
         String trackerUrlPfx = json.optString("tracker_url_pfx");
+        boolean hasUsePeers = json.has("use_peers");
+        boolean usePeers = json.optBoolean("use_peers", true);
         boolean predictiveHeadEnabled = json.optBoolean("predictive_head_enabled", true);
         long proximityAlertSpacingFeet = json.optLong("proximity_alert_spacing_feet", 40L);
         boolean notamEnabled = json.optBoolean("notam_enabled", false);
@@ -1473,6 +1475,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (!trackerApiKey.isEmpty()) SetTrackerApiKey(trackerApiKey);
         if (!trackerUrlPfx.isEmpty()) SetTrackerUrlPfx(trackerUrlPfx);
         if (!domainAndPort.isEmpty()) SetCaltopoDomainAndPort(domainAndPort);
+        if (hasUsePeers) SetUsePeers(usePeers);
         SetPredictiveHeadEnabled(predictiveHeadEnabled);
         SetProximityAlertSpacingFeet(proximityAlertSpacingFeet);
         SetNotamEnabled(notamEnabled);
@@ -1695,6 +1698,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 credentials.put("tracker_api_key", ccs.trackerApiKey);
             if (ccs.trackerUrlPfx != null && !ccs.trackerUrlPfx.isEmpty())
                 credentials.put("tracker_url_pfx", ccs.trackerUrlPfx);
+            credentials.put("use_peers", ccs.usePeersFlag);
             credentials.put("predictive_head_enabled",           ccs.predictiveHeadEnabled);
             credentials.put("proximity_alert_spacing_feet",      ccs.proximityAlertSpacingFeet);
             // ── NOTAM settings ───────────────────────────────────────────────

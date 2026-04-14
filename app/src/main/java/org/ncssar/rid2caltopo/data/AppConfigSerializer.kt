@@ -15,7 +15,7 @@ object AppConfigSerializer : Serializer<AppConfig> {
         .setDebugLevel(-1)
         .setCoordinateDisplayFormat("decimal")
         .setCaptureVideoStreams(false)
-        .setUsePeers(false)
+        .setUsePeers(true)
         .setCaltopoTrackFolder("Drone Tracks")
         .setCaltopoDomainAndPort("caltopo.com")
         .setIncident("Training")

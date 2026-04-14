@@ -102,7 +102,10 @@ public class CaltopoMap {
     private static String FolderName;
     private static MapStatusListener.mapStatus MapStatus = MapStatusListener.mapStatus.down;
     private static int WaitForGpsAccuracy;
-    private static boolean UsePeersFlag;
+    // NOTE: UsePeersFlag was removed as a static field.
+    // MQTT peer coordination is now unconditional whenever the map is up.
+    // A developer-only "Disable MQTT" toggle in Settings can suppress it via
+    // CaltopoClient.GetUsePeersFlag() — that flag is read live, not cached.
     private static long LastMapSync;
 
     // liveTracks that we are writing into the map keyed by their map ID:
@@ -196,7 +199,7 @@ public class CaltopoMap {
         VerifyTimer.start(CaltopoMap::VerifyTimeout, VERIFY_TIMEOUT_MS, 0);
         getCurrentRuntime().getCalTopoSessionGateway()
                 .verifyAccount(CaltopoMap::SessionVerifyCallback);
-        UsePeersFlag = CaltopoClient.GetUsePeersFlag();
+        // UsePeersFlag removed — MQTT starts unconditionally with the map (see SetMapStatus).
         FolderName = CaltopoClient.GetTrackFolderName();
         if (FolderName.isEmpty()) FolderName = "DroneTracks";
         if (null == MyUUID) GetMyUUID();
@@ -718,14 +721,20 @@ public class CaltopoMap {
             for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(MapStatus, MapNode, optEmsg);
         }
         if (mapStatus == MapStatusListener.mapStatus.up) {
-            if (UsePeersFlag && MapNode != null) {
+            if (MapNode != null) {
                 // Start MQTT-based peer coordination for this map.
                 // Credentials are derived automatically from the mapId — no extra config needed.
-                getCurrentRuntime().getPeerCoordinator().start(
-                        MapNode.getId(), GetMyUUID(), R2CActivity.MyDeviceName, null);
-                getCurrentRuntime().getPeerCoordinator().updateMyPosition(
-                        MyLocation != null ? MyLocation.getLatitude()  : 0,
-                        MyLocation != null ? MyLocation.getLongitude() : 0);
+                // The developer-only "Disable MQTT" toggle in Settings is the only gate;
+                // ownership arbitration is required whenever a map is connected.
+                if (CaltopoClient.GetUsePeersFlag()) {
+                    getCurrentRuntime().getPeerCoordinator().start(
+                            MapNode.getId(), GetMyUUID(), R2CActivity.MyDeviceName, null);
+                    getCurrentRuntime().getPeerCoordinator().updateMyPosition(
+                            MyLocation != null ? MyLocation.getLatitude()  : 0,
+                            MyLocation != null ? MyLocation.getLongitude() : 0);
+                } else {
+                    CTWarn(TAG, "SetMapStatus(up): MQTT peer coordination disabled by developer override.");
+                }
             }
             while (!RogueFeaturesPendingDeletes.isEmpty()) {
                 JSONObject feature = RogueFeaturesPendingDeletes.remove(0);
@@ -987,7 +996,7 @@ public class CaltopoMap {
             MapNode = null;
             SessionNodeMap = null;
             SetMapStatus(MapStatusListener.mapStatus.down, "Shutdown in progress.");
-            if (UsePeersFlag) getCurrentRuntime().getPeerCoordinator().stop();
+            getCurrentRuntime().getPeerCoordinator().stop(); // always stop; no-op if never started
             getCurrentRuntime().getCalTopoSessionGateway().shutdown();
         } catch (Exception e) {
             CTError(TAG, "Shutdown() raised: ", e);

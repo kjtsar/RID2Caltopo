@@ -202,6 +202,7 @@ fun MainScreen(
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLogArchiveDialog by remember { mutableStateOf(false) }
     var showTestingToolsDialog by remember { mutableStateOf(false) }
+    var mqttDisabled by remember { mutableStateOf(!CaltopoClient.GetUsePeersFlag()) }
     var loadingLogArchiveDays by remember { mutableStateOf(false) }
     var sendingLogArchive by remember { mutableStateOf(false) }
     var logArchiveDays by remember { mutableStateOf(emptyList<LogArchiveDayOption>()) }
@@ -1214,6 +1215,27 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Simulate MyLocation...")
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "MQTT peer ownership arbitration runs automatically whenever a map is " +
+                            "connected. Disable only for isolated testing — dual-write to CalTopo " +
+                            "will occur if multiple instances are running.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Text("Disable MQTT", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = mqttDisabled,
+                            onCheckedChange = { disabled ->
+                                mqttDisabled = disabled
+                                CaltopoClient.SetUsePeers(!disabled)
+                            }
+                        )
                     }
                 }
             },

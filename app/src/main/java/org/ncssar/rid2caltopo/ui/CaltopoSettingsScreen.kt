@@ -32,7 +32,6 @@ fun CaltopoSettingsScreen(
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val goLiveFlag by settingsViewModel.goLiveFlag.collectAsState()
-    val usePeers by settingsViewModel.usePeers.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
     val proximityAlertSpacingFeet by settingsViewModel.proximityAlertSpacingFeet.collectAsState()
@@ -95,15 +94,6 @@ fun CaltopoSettingsScreen(
                         onCheckedChange = { settingsViewModel.onSendLiveChanged(it) }
                     )
                     Text(if (goLiveFlag) "Yes" else "No")
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Use Peers:")
-                    Switch(
-                        checked = usePeers,
-                        onCheckedChange = { settingsViewModel.onUsePeersChanged(it) }
-                    )
-                    Text(if (usePeers) "Yes" else "No")
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -257,6 +247,7 @@ fun CaltopoSettingsScreen(
                     }
                 }
 
+                Spacer(modifier = Modifier.height(16.dp))
                 Row {
                     Button(onClick = dismissAndSave) {
                         Text("Save")

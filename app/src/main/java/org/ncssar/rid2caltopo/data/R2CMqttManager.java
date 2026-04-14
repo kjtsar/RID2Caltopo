@@ -10,6 +10,7 @@ package org.ncssar.rid2caltopo.data;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
@@ -553,7 +554,20 @@ public class R2CMqttManager {
                                            double distMeters,
                                            long firstSeenTs) {
         if (!initialized || peerTransport == null || !peerTransport.isConnected()) {
-            // No peers connected — own it immediately
+            // No MQTT peer connection — take ownership immediately.
+            // If the user has "Use Peers" enabled but we still end up here it means either
+            // (a) MQTT was never configured (no broker credentials loaded), or
+            // (b) the broker connection hasn't been established yet.
+            // In either case log a warning so the operator can diagnose dual-write situations.
+            String remoteIdForLog = droneSpec.getRemoteId();
+            if (initialized && peerTransport != null) {
+                CTWarn(TAG, "onLiveTrackCreated(" + remoteIdForLog + "): " +
+                        "MQTT configured but not connected — claiming ownership immediately. " +
+                        "Check broker reachability; peer ownership arbitration is unavailable.");
+            } else {
+                CTDebug(TAG, "onLiveTrackCreated(" + remoteIdForLog + "): " +
+                        "MQTT not initialized — claiming ownership immediately (no-peers mode).");
+            }
             liveTrack.setLocalOwner(true);
             return;
         }

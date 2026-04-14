@@ -329,7 +329,8 @@ fun R2CViewPreview() {
 fun DroneSpecConfirmationDialog(
     state: DroneSpecConfirmationUiState,
     onFieldChange: (organization: String?, pilotCallsign: String?, droneDescription: String?) -> Unit,
-    onSave: () -> Unit
+    onSave: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     val organization = state.organization.trim()
     val pilotCallsign = state.pilotCallsign.trim()
@@ -391,7 +392,12 @@ fun DroneSpecConfirmationDialog(
             ) {
                 Text("Save")
             }
-        }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Not recognized")
+            }
+        },
     )
 }
 

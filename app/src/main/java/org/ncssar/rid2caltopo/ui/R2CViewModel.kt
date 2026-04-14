@@ -277,6 +277,15 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         )
     }
 
+    /**
+     * The operator doesn't recognise this drone. Dismiss the panel without saving a dronespec.
+     * The flight key was already added to [promptedFlightKeys] when the dialog was first shown,
+     * so the panel will not reappear for the remainder of this flight.
+     */
+    fun dismissPendingDroneConfirmation() {
+        _pendingDroneConfirmation.value = null
+    }
+
     fun savePendingDroneConfirmation() {
         val current = _pendingDroneConfirmation.value ?: return
         val remoteId = current.remoteId.trim()

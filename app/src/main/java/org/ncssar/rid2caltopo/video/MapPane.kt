@@ -272,6 +272,15 @@ internal data class OfflinePrepEstimate(
     val ready: Boolean = false
 )
 
+internal data class OfflinePrepCacheStatus(
+    val checked: Boolean = false,
+    val tileMissing: Int = 0,
+    val demMissing: Int = 0
+) {
+    val readyForPackage: Boolean
+        get() = checked && tileMissing == 0 && demMissing == 0
+}
+
 internal data class DroneMapPoint(
     val designator: String,        // mappedId — display label, may change during a flight
     val remoteId: String,          // stable unique identifier from the Remote ID broadcast
@@ -471,6 +480,7 @@ internal fun SplitMapPane(
     var offlinePrepCancelRequested by remember { mutableStateOf(false) }
     var offlinePrepEstimate by remember { mutableStateOf(OfflinePrepEstimate()) }
     var offlinePrepEstimateRunning by remember { mutableStateOf(false) }
+    var offlinePrepCacheStatus by remember { mutableStateOf(OfflinePrepCacheStatus()) }
     var offlinePrepAvailableBytes by remember { mutableStateOf<Long?>(null) }
     var offlinePrepTileCacheCapBytes by remember { mutableStateOf(MapCachePolicy.tileCacheMaxBytes(context)) }
     var offlinePrepJob by remember { mutableStateOf<Job?>(null) }
@@ -853,6 +863,71 @@ internal fun SplitMapPane(
         offlinePrepTileCacheCapBytes = withContext(Dispatchers.IO) {
             MapCachePolicy.tileCacheMaxBytes(context)
         }
+    }
+    LaunchedEffect(
+        showOfflinePrepDialog,
+        offlinePrepAreaMode,
+        offlinePrepBoundaryId,
+        offlinePrepPreset,
+        offlinePrepIncludeDem,
+        baseLayer,
+        mapBounds,
+        offlineBoundaryOptions,
+        offlinePrepInFlight,
+        offlinePrepProgress.phase
+    ) {
+        if (!showOfflinePrepDialog) {
+            offlinePrepCacheStatus = OfflinePrepCacheStatus()
+            return@LaunchedEffect
+        }
+        val selectedBoundary =
+            if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
+            } else {
+                null
+            }
+        val prepBounds = selectedBoundary?.bounds ?: mapBounds
+        if (prepBounds == null) {
+            offlinePrepCacheStatus = OfflinePrepCacheStatus()
+            return@LaunchedEffect
+        }
+        offlinePrepCacheStatus = OfflinePrepCacheStatus(checked = false)
+        val tileSource = when (baseLayer) {
+            BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
+            BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
+        }
+        val includeDem = offlinePrepIncludeDem
+        val computed = withContext(Dispatchers.IO) {
+            var tileMissing = 0
+            forEachTileIndexForBounds(
+                bounds = prepBounds,
+                minZoom = offlinePrepPreset.minZoom,
+                maxZoom = offlinePrepPreset.maxZoom,
+                clipBoundary = selectedBoundary
+            ) { tileIndex ->
+                if (!tileCacheWriter.exists(tileSource, tileIndex)) {
+                    tileMissing++
+                }
+            }
+            var demMissing = 0
+            if (includeDem) {
+                val archiveRoot = CaltopoClient.GetArchiveDir()
+                val demDir = archiveRoot?.findFile("cache")?.findFile("dem")
+                for (tileName in demTileNamesForBounds(prepBounds)) {
+                    val fileName = "USGS_1_$tileName.tif"
+                    val demFile = demDir?.findFile(fileName)
+                    if (demFile?.isFile != true) {
+                        demMissing++
+                    }
+                }
+            }
+            OfflinePrepCacheStatus(
+                checked = true,
+                tileMissing = tileMissing,
+                demMissing = demMissing
+            )
+        }
+        offlinePrepCacheStatus = computed
     }
 
     fun calibrateDroneAto50(target: DroneMapPoint) {
@@ -2515,7 +2590,7 @@ internal fun SplitMapPane(
             val parsedExpiry = parseMutualAidPackageExpiry()
             AlertDialog(
                 onDismissRequest = { showMutualAidPackageDialog = false },
-                title = { Text("Export MA Config") },
+                title = { Text("Save MA Offline Package") },
                 text = {
                     Column(
                         modifier = Modifier
@@ -2523,7 +2598,7 @@ internal fun SplitMapPane(
                             .verticalScroll(rememberScrollState())
                     ) {
                         Text(
-                            "Specify the incident details and expiry to embed in the exported MA config package.",
+                            "Specify the incident details and expiry to embed in the saved mutual-aid offline package.",
                             fontSize = 12.sp
                         )
                         Spacer(Modifier.height(12.dp))
@@ -2850,6 +2925,36 @@ internal fun SplitMapPane(
                                 }
                             }
                         }
+                        Text(
+                            when {
+                                !offlinePrepCacheStatus.checked -> "Offline package readiness: checking cached tiles..."
+                                offlinePrepCacheStatus.readyForPackage -> "Offline package readiness: selected map data is fully cached."
+                                else -> buildString {
+                                    append("Offline package readiness: run Start first")
+                                    if (offlinePrepCacheStatus.tileMissing > 0 || offlinePrepCacheStatus.demMissing > 0) {
+                                        append(" (missing ")
+                                        if (offlinePrepCacheStatus.tileMissing > 0) {
+                                            append("${offlinePrepCacheStatus.tileMissing} tile")
+                                            if (offlinePrepCacheStatus.tileMissing != 1) append("s")
+                                        }
+                                        if (offlinePrepCacheStatus.tileMissing > 0 && offlinePrepCacheStatus.demMissing > 0) {
+                                            append(", ")
+                                        }
+                                        if (offlinePrepCacheStatus.demMissing > 0) {
+                                            append("${offlinePrepCacheStatus.demMissing} DEM")
+                                            if (offlinePrepCacheStatus.demMissing != 1) append("s")
+                                        }
+                                        append(")")
+                                    }
+                                }
+                            },
+                            fontSize = 11.sp,
+                            color = if (offlinePrepCacheStatus.checked && !offlinePrepCacheStatus.readyForPackage) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
                     }
                 },
                 confirmButton = {
@@ -2872,8 +2977,10 @@ internal fun SplitMapPane(
                                 maPackageExpiryTimeText = nextMidnight.format(packageTimeFormatter)
                                 showMutualAidPackageDialog = true
                             },
-                            enabled = !offlinePrepInFlight && (mapBounds != null || selectedBoundary != null)
-                        ) { Text("Export MA Config") }
+                            enabled = !offlinePrepInFlight &&
+                                offlinePrepCacheStatus.readyForPackage &&
+                                (mapBounds != null || selectedBoundary != null)
+                        ) { Text("Save MA Offline Package") }
                         TextButton(
                             onClick = {
                                 val currentBounds = mapBounds

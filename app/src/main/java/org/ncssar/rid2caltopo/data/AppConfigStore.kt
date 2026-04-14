@@ -22,7 +22,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 6
+    const val SCHEMA_VERSION = 7
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -167,6 +167,7 @@ object AppConfigStore {
         if (config.newTrackDelaySeconds != 0L) return true
         if (config.maxIdleTimeMinutes != 0L) return true
         if (config.debugLevel != 0) return true
+        if (config.goLiveFlag) return true
         if (config.coordinateDisplayFormat.isNotBlank()) return true
         if (config.captureVideoStreams) return true
         if (config.usePeers) return true
@@ -232,6 +233,7 @@ object AppConfigStore {
         state.trackerApiKey = activeProfile?.trackerApiKey ?: config.trackerApiKey
         state.trackerUrlPfx = activeProfile?.trackerUrlPfx ?: config.trackerUrlPrefix
         state.coordinateDisplayFormat = config.coordinateDisplayFormat.ifBlank { "decimal" }
+        state.goLiveFlag = config.goLiveFlag
         state.captureVideoStreamsFlag = config.captureVideoStreams
         state.usePeersFlag = config.usePeers
         state.predictiveHeadEnabled = if (config.schemaVersion >= 3) config.predictiveHeadEnabled else true
@@ -300,6 +302,7 @@ object AppConfigStore {
             .setNewTrackDelaySeconds(state.newTrackDelayInSeconds)
             .setMaxIdleTimeMinutes(state.maxIdleTimeInMinutes)
             .setDebugLevel(state.debugLevel)
+            .setGoLiveFlag(state.goLiveFlag)
             .setCoordinateDisplayFormat(state.coordinateDisplayFormat ?: "decimal")
             .setCaptureVideoStreams(state.captureVideoStreamsFlag)
             .setUsePeers(state.usePeersFlag)

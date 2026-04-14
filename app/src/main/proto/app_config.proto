@@ -95,6 +95,7 @@ message AppConfig {
   int64 new_track_delay_seconds = 21;
   int64 max_idle_time_minutes = 22;
   int32 debug_level = 23;
+  bool go_live_flag = 24;
 
   string coordinate_display_format = 30;
   bool capture_video_streams = 31;

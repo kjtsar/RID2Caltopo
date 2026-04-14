@@ -201,6 +201,7 @@ fun MainScreen(
     var showNotamPanel by remember { mutableStateOf(false) }
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLogArchiveDialog by remember { mutableStateOf(false) }
+    var showTestingToolsDialog by remember { mutableStateOf(false) }
     var loadingLogArchiveDays by remember { mutableStateOf(false) }
     var sendingLogArchive by remember { mutableStateOf(false) }
     var logArchiveDays by remember { mutableStateOf(emptyList<LogArchiveDayOption>()) }
@@ -863,36 +864,6 @@ fun MainScreen(
                             localViewModel.showSettings()
                             menuExpanded = false
                         })
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    if (linkedDriveEmail.isBlank()) {
-                                        "Restore config from Google Drive"
-                                    } else {
-                                        "Restore config from Google Drive ($linkedDriveEmail)"
-                                    }
-                                )
-                            },
-                            onClick = {
-                                menuExpanded = false
-                                startDriveAction(DriveSyncAction.RESTORE)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    if (linkedDriveEmail.isBlank()) {
-                                        "Back up config to Google Drive"
-                                    } else {
-                                        "Back up config to Google Drive ($linkedDriveEmail)"
-                                    }
-                                )
-                            },
-                            onClick = {
-                                menuExpanded = false
-                                startDriveAction(DriveSyncAction.BACKUP)
-                            }
-                        )
                         if (linkedDriveEmail.isNotBlank()) {
                             DropdownMenuItem(
                                 text = { Text("Disconnect Google Drive") },
@@ -906,16 +877,6 @@ fun MainScreen(
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Load RID Replay") }, onClick = {
-                            menuExpanded = false
-                            loadRidReplayLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
-                        })
-                        if (RidReplayManager.isReplayRunning()) {
-                            DropdownMenuItem(text = { Text("Stop RID Replay") }, onClick = {
-                                menuExpanded = false
-                                CaltopoClient.ShowToast(RidReplayManager.stopReplay())
-                            })
-                        }
                         DropdownMenuItem(text = { Text("Export Org Config") }, onClick = {
                             menuExpanded = false
                             if (CaltopoClient.GetHomeOrgName().isBlank()) {
@@ -927,6 +888,13 @@ fun MainScreen(
                                 driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
                             }
                         })
+                        DropdownMenuItem(
+                            text = { Text("Import Org Config") },
+                            onClick = {
+                                menuExpanded = false
+                                showOrgJoinDialog = true
+                            }
+                        )
                         DropdownMenuItem(text = { Text("Export MA Config") }, onClick = {
                             menuExpanded = false
                             if (!CaltopoClient.HasMutualAidTemplate()) {
@@ -938,25 +906,6 @@ fun MainScreen(
                                 driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
                             }
                         })
-                        DropdownMenuItem(
-                            text = { Text("Simulate MyLocation...") },
-                            onClick = {
-                                locationOverrideText = CaltopoMap.GetMyLocationOverride()?.let {
-                                    "%.6f, %.6f".format(it.latitude, it.longitude)
-                                }.orEmpty()
-                                locationOverrideLabel = formatLocationOverride(CaltopoMap.GetMyLocationOverride())
-                                locationOverrideError = null
-                                showLocationOverrideDialog = true
-                                menuExpanded = false
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Import Org") },
-                            onClick = {
-                                menuExpanded = false
-                                showOrgJoinDialog = true
-                            }
-                        )
                         DropdownMenuItem(
                             text = { Text("Import MA Config") },
                             onClick = {
@@ -1059,6 +1008,10 @@ fun MainScreen(
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
                             onShowHelp()
                             CaltopoClient.CTEvent(tag,"HelpDisplayed", null)
+                            menuExpanded = false
+                        })
+                        DropdownMenuItem(text = { Text("Developer Tools") }, onClick = {
+                            showTestingToolsDialog = true
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Quit") }, onClick = {
@@ -1215,6 +1168,58 @@ fun MainScreen(
                     enabled = !loadingLogArchiveDays && !sendingLogArchive
                 ) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showTestingToolsDialog) {
+        AlertDialog(
+            onDismissRequest = { showTestingToolsDialog = false },
+            title = { Text("Developer Tools") },
+            text = {
+                Column {
+                    Button(
+                        onClick = {
+                            showTestingToolsDialog = false
+                            loadRidReplayLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Load RID Replay")
+                    }
+                    if (RidReplayManager.isReplayRunning()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                showTestingToolsDialog = false
+                                CaltopoClient.ShowToast(RidReplayManager.stopReplay())
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Stop RID Replay")
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            locationOverrideText = CaltopoMap.GetMyLocationOverride()?.let {
+                                "%.6f, %.6f".format(it.latitude, it.longitude)
+                            }.orEmpty()
+                            locationOverrideLabel = formatLocationOverride(CaltopoMap.GetMyLocationOverride())
+                            locationOverrideError = null
+                            showLocationOverrideDialog = true
+                            showTestingToolsDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Simulate MyLocation...")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTestingToolsDialog = false }) {
+                    Text("Close")
                 }
             }
         )

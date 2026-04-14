@@ -1213,6 +1213,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (ccs.goLiveFlag != flag) {
             ccs.goLiveFlag = flag;
             NotifySettingsChanged();
+            ArchiveState("goLive changed to " + flag);
         }
     }
 

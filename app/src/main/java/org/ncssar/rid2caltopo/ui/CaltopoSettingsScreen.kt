@@ -48,8 +48,12 @@ fun CaltopoSettingsScreen(
     val externalDisplayAllowInteraction by settingsViewModel.externalDisplayAllowInteraction.collectAsState()
     val externalDisplayContentMode by settingsViewModel.externalDisplayContentMode.collectAsState()
     val externalDisplayAlertRouting by settingsViewModel.externalDisplayAlertRouting.collectAsState()
+    val dismissAndSave = {
+        settingsViewModel.saveSettings()
+        onDismiss()
+    }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(onDismissRequest = dismissAndSave) {
         Card (modifier = Modifier.verticalScroll(rememberScrollState())) {
             Column(
                 modifier = Modifier.padding(16.dp),
@@ -254,14 +258,11 @@ fun CaltopoSettingsScreen(
                 }
 
                 Row {
-                    Button(onClick = {
-                        settingsViewModel.saveSettings()
-                        onDismiss()
-                    }) {
+                    Button(onClick = dismissAndSave) {
                         Text("Save")
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Button(onClick = onDismiss) {
+                    Button(onClick = dismissAndSave) {
                         Text("Close")
                     }
                 }

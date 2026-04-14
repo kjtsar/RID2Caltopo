@@ -138,7 +138,12 @@ class StreamsViewModel(
     private val streamSessionService = StreamSessionService(
         context = application.applicationContext,
         scope = viewModelScope,
-        preferredModeProvider = { StreamSessionService.ProtocolMode.RTSP },
+        // Use HLS for background ExoPlayer tiles. RTSP is not used here because
+        // ExoPlayer's RtspMediaSource rejects the `s= ` (space-only session name)
+        // that MediaMTX/gortsplib includes in its SDP — a known incompatibility.
+        // HLS adds ~3–7 s latency but that is acceptable for background tiles;
+        // the focused stream always runs through FFmpeg at low latency.
+        preferredModeProvider = { StreamSessionService.ProtocolMode.HLS },
         sourcePathProvider = { designator -> streamInfoByDesignator[designator]?.sourcePath ?: designator },
     )
 

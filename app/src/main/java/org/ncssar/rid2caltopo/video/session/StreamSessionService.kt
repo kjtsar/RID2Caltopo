@@ -414,7 +414,23 @@ class StreamSessionService(
     }
 
     private fun maybeSwitchProtocol(designator: String, error: PlaybackException): Boolean {
-        return false
+        val current = modeFor(designator)
+        val scores = modeScoresByDesignator[designator] ?: return false
+        // If the current mode's score has fallen below every alternative, switch now.
+        val bestAlternative = ProtocolMode.entries
+            .filter { it != current }
+            .maxByOrNull { scores[it] ?: 0 }
+            ?: return false
+        val currentScore = scores[current] ?: 0
+        val alternativeScore = scores[bestAlternative] ?: 0
+        if (alternativeScore <= currentScore) return false
+        CTDebug(
+            tag,
+            "Switching $designator from $current (score=$currentScore) " +
+                "to $bestAlternative (score=$alternativeScore) after error: ${error.errorCodeName}"
+        )
+        protocolByDesignator[designator] = bestAlternative
+        return true
     }
 
     private fun modeFor(designator: String): ProtocolMode {

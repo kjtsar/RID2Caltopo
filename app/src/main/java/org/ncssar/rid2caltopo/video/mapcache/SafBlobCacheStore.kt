@@ -4,12 +4,71 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteDatabaseLockedException
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
+
+private object SafCacheIndexDatabaseHolder {
+    private const val DB_DIR = "map_cache"
+    private const val DB_NAME = "saf_cache_index.db"
+    private const val OPEN_RETRY_COUNT = 3
+    private const val OPEN_RETRY_DELAY_MS = 50L
+    private val lock = Any()
+    @Volatile
+    private var sharedDb: SQLiteDatabase? = null
+
+    fun get(context: Context): SQLiteDatabase {
+        sharedDb?.takeIf { it.isOpen }?.let { return it }
+        synchronized(lock) {
+            sharedDb?.takeIf { it.isOpen }?.let { return it }
+            val opened = openDatabaseWithRetry(context.applicationContext)
+            ensureSchema(opened)
+            sharedDb = opened
+            return opened
+        }
+    }
+
+    private fun openDatabaseWithRetry(context: Context): SQLiteDatabase {
+        val dbDir = context.noBackupFilesDir.resolve(DB_DIR)
+        if (!dbDir.exists()) dbDir.mkdirs()
+        val dbFile = File(dbDir, DB_NAME)
+        var lastError: SQLiteDatabaseLockedException? = null
+        repeat(OPEN_RETRY_COUNT) { attempt ->
+            try {
+                return SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+            } catch (e: SQLiteDatabaseLockedException) {
+                lastError = e
+                if (attempt == OPEN_RETRY_COUNT - 1) return@repeat
+                Thread.sleep(OPEN_RETRY_DELAY_MS)
+            }
+        }
+        throw lastError ?: IllegalStateException("Failed to open SAF cache index database.")
+    }
+
+    private fun ensureSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS saf_entries (
+                namespace TEXT NOT NULL,
+                cache_key TEXT NOT NULL,
+                file_uri TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                accessed_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (namespace, cache_key)
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_saf_entries_ns_accessed ON saf_entries(namespace, accessed_at)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_saf_entries_ns_expires ON saf_entries(namespace, expires_at)")
+    }
+}
 
 internal class SafBlobCacheStore(
     context: Context,
@@ -39,30 +98,7 @@ internal class SafBlobCacheStore(
     private val bytesUsedAtomic = AtomicLong(0L)
     private var namespaceFileIndex: MutableMap<String, DocumentFile>? = null
 
-    private val db: SQLiteDatabase by lazy {
-        val dbDir = appContext.noBackupFilesDir.resolve("map_cache")
-        if (!dbDir.exists()) dbDir.mkdirs()
-        val dbFile = File(dbDir, "saf_cache_index.db")
-        SQLiteDatabase.openOrCreateDatabase(dbFile, null).apply {
-            execSQL(
-                """
-                CREATE TABLE IF NOT EXISTS saf_entries (
-                    namespace TEXT NOT NULL,
-                    cache_key TEXT NOT NULL,
-                    file_uri TEXT NOT NULL,
-                    file_name TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    accessed_at INTEGER NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    PRIMARY KEY (namespace, cache_key)
-                )
-                """.trimIndent()
-            )
-            execSQL("CREATE INDEX IF NOT EXISTS idx_saf_entries_ns_accessed ON saf_entries(namespace, accessed_at)")
-            execSQL("CREATE INDEX IF NOT EXISTS idx_saf_entries_ns_expires ON saf_entries(namespace, expires_at)")
-        }
-    }
+    private val db: SQLiteDatabase by lazy { SafCacheIndexDatabaseHolder.get(appContext) }
 
     override fun defaultExpiry(nowMs: Long): Long = nowMs + defaultTtlMs
 

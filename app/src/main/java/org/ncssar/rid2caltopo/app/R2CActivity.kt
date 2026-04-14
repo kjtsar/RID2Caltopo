@@ -85,6 +85,8 @@ import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 internal fun buildLogArchiveEntryName(rawName: String?): String {
     val baseName = rawName?.trim().orEmpty().ifBlank { "log_unknown" }
@@ -156,10 +158,10 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         })
     }
 
-    fun listAvailableLogArchiveDays(): List<LogArchiveDayOption> {
-        val archiveDir = CaltopoClient.GetArchiveDir() ?: return emptyList()
+    suspend fun listAvailableLogArchiveDays(): List<LogArchiveDayOption> = withContext(Dispatchers.IO) {
+        val archiveDir = CaltopoClient.GetArchiveDir() ?: return@withContext emptyList()
         val todayDirName = "tracks-" + SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
-        return archiveDir.listFiles()
+        archiveDir.listFiles()
             .asSequence()
             .filter { it.isDirectory }
             .mapNotNull { dir ->
@@ -185,70 +187,76 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
      * Zip text log files from one or more archive subdirectories into a single archive and fire
      * a share intent so the user can email the bundle.
      */
-    fun zipAndEmailSelectedLogs(context: Context, selectedDirectoryNames: List<String>) {
-        val archiveDir = CaltopoClient.GetArchiveDir() ?: run {
-            CTError(TAG, "zipAndEmailSelectedLogs(): archive dir unavailable")
-            return
-        }
-        if (selectedDirectoryNames.isEmpty()) {
-            CTError(TAG, "zipAndEmailSelectedLogs(): no archive days selected")
-            return
-        }
+    suspend fun zipAndEmailSelectedLogs(context: Context, selectedDirectoryNames: List<String>) {
+        val zipResult = withContext(Dispatchers.IO) {
+            val archiveDir = CaltopoClient.GetArchiveDir() ?: run {
+                CTError(TAG, "zipAndEmailSelectedLogs(): archive dir unavailable")
+                return@withContext null
+            }
+            if (selectedDirectoryNames.isEmpty()) {
+                CTError(TAG, "zipAndEmailSelectedLogs(): no archive days selected")
+                return@withContext null
+            }
 
-        val selectedDirs = selectedDirectoryNames.distinct().mapNotNull { dirName ->
-            archiveDir.findFile(dirName)?.takeIf { it.isDirectory }
-        }
-        val logFiles = selectedDirs.flatMap { dir ->
-            dir.listFiles()
-                .filter { it.type == "text/plain" }
-                .map { dir to it }
-        }
-        if (logFiles.isEmpty()) {
-            CTError(TAG, "zipAndEmailSelectedLogs(): no log files found in selected dirs")
-            return
-        }
+            val selectedDirs = selectedDirectoryNames.distinct().mapNotNull { dirName ->
+                archiveDir.findFile(dirName)?.takeIf { it.isDirectory }
+            }
+            val logFiles = selectedDirs.flatMap { dir ->
+                dir.listFiles()
+                    .filter { it.type == "text/plain" }
+                    .map { dir to it }
+            }
+            if (logFiles.isEmpty()) {
+                CTError(TAG, "zipAndEmailSelectedLogs(): no log files found in selected dirs")
+                return@withContext null
+            }
 
-        val dateTag = SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
-        val zipFile = File(context.cacheDir, "R2C_Logs_$dateTag.zip")
+            val dateTag = SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
+            val zipFile = File(context.cacheDir, "R2C_Logs_$dateTag.zip")
 
-        try {
-            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-                val resolver = context.contentResolver
-                for ((dir, logDoc) in logFiles) {
-                    val dirName = dir.name ?: "logs"
-                    val entryName = "$dirName/${buildLogArchiveEntryName(logDoc.name)}"
-                    resolver.openInputStream(logDoc.uri)?.use { inputStream ->
-                        val entry = ZipEntry(entryName)
-                        val lastModified = logDoc.lastModified()
-                        if (lastModified > 0L) {
-                            entry.time = lastModified
+            try {
+                ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+                    val resolver = context.contentResolver
+                    for ((dir, logDoc) in logFiles) {
+                        val dirName = dir.name ?: "logs"
+                        val entryName = "$dirName/${buildLogArchiveEntryName(logDoc.name)}"
+                        resolver.openInputStream(logDoc.uri)?.use { inputStream ->
+                            val entry = ZipEntry(entryName)
+                            val lastModified = logDoc.lastModified()
+                            if (lastModified > 0L) {
+                                entry.time = lastModified
+                            }
+                            zos.putNextEntry(entry)
+                            inputStream.copyTo(zos)
+                            zos.closeEntry()
                         }
-                        zos.putNextEntry(entry)
-                        inputStream.copyTo(zos)
-                        zos.closeEntry()
                     }
                 }
+                Triple(zipFile, selectedDirs.size, logFiles.size)
+            } catch (e: Exception) {
+                CTError(TAG, "zipAndEmailSelectedLogs(): failed to create/share zip", e)
+                null
             }
+        } ?: return
 
-            val sharedUri = FileProvider.getUriForFile(
-                context, "${context.packageName}.fileprovider", zipFile
+        val (zipFile, selectedDirCount, logFileCount) = zipResult
+        val dateTag = SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
+        val sharedUri = FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", zipFile
+        )
+
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_EMAIL, arrayOf("kjtsar@kjt.us"))
+            putExtra(
+                Intent.EXTRA_SUBJECT,
+                "RID2Caltopo Logs $dateTag (${selectedDirCount} day${if (selectedDirCount == 1) "" else "s"}, ${logFileCount} log${if (logFileCount == 1) "" else "s"})"
             )
-
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/zip"
-                putExtra(Intent.EXTRA_EMAIL, arrayOf("kjtsar@kjt.us"))
-                putExtra(
-                    Intent.EXTRA_SUBJECT,
-                    "RID2Caltopo Logs $dateTag (${selectedDirs.size} day${if (selectedDirs.size == 1) "" else "s"}, ${logFiles.size} log${if (logFiles.size == 1) "" else "s"})"
-                )
-                putExtra(Intent.EXTRA_STREAM, sharedUri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-
-            context.startActivity(Intent.createChooser(intent, "Send Logs via..."))
-        } catch (e: Exception) {
-            CTError(TAG, "zipAndEmailSelectedLogs(): failed to create/share zip", e)
+            putExtra(Intent.EXTRA_STREAM, sharedUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
+
+        context.startActivity(Intent.createChooser(intent, "Send Logs via..."))
     }
 
     /**

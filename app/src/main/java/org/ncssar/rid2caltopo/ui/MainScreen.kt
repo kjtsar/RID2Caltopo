@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
+import kotlinx.coroutines.launch
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.LogArchiveDayOption
 import org.ncssar.rid2caltopo.app.R2CActivity
@@ -166,8 +167,8 @@ private fun restartMediaMtxServer(context: android.content.Context) {
 fun MainScreen(
     localViewModel: R2CViewModel,
     remoteViewModels: List<R2CPeerViewModel>,
-    availableLogArchiveDaysProvider: () -> List<LogArchiveDayOption>,
-    onEmailLog: (List<String>) -> Unit,
+    availableLogArchiveDaysProvider: suspend () -> List<LogArchiveDayOption>,
+    onEmailLog: suspend (List<String>) -> Unit,
     onShowHelp: () -> Unit,
     externalDisplayConnected: Boolean = false,
     externalDisplayContentMode: ExternalDisplayContentMode? = null,
@@ -200,6 +201,8 @@ fun MainScreen(
     var showNotamPanel by remember { mutableStateOf(false) }
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLogArchiveDialog by remember { mutableStateOf(false) }
+    var loadingLogArchiveDays by remember { mutableStateOf(false) }
+    var sendingLogArchive by remember { mutableStateOf(false) }
     var logArchiveDays by remember { mutableStateOf(emptyList<LogArchiveDayOption>()) }
     var selectedLogArchiveDays by remember { mutableStateOf(emptySet<String>()) }
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
@@ -208,6 +211,7 @@ fun MainScreen(
     var locationOverrideLabel by remember { mutableStateOf(formatLocationOverride(CaltopoMap.GetMyLocationOverride())) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
+    val coroutineScope = rememberCoroutineScope()
 
     fun refreshDriveState() {
         linkedDriveEmail = GoogleDriveConfigSync.getLinkedAccountEmail(context)
@@ -961,13 +965,20 @@ fun MainScreen(
                             }
                         )
                         DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
-                            logArchiveDays = availableLogArchiveDaysProvider()
-                            selectedLogArchiveDays = logArchiveDays
-                                .filter { it.isToday }
-                                .mapTo(linkedSetOf()) { it.directoryName }
-                                .ifEmpty { logArchiveDays.firstOrNull()?.let { linkedSetOf(it.directoryName) } ?: linkedSetOf() }
                             showLogArchiveDialog = true
+                            loadingLogArchiveDays = true
+                            logArchiveDays = emptyList()
+                            selectedLogArchiveDays = emptySet()
                             menuExpanded = false
+                            coroutineScope.launch {
+                                val loadedDays = availableLogArchiveDaysProvider()
+                                logArchiveDays = loadedDays
+                                selectedLogArchiveDays = loadedDays
+                                    .filter { it.isToday }
+                                    .mapTo(linkedSetOf()) { it.directoryName }
+                                    .ifEmpty { loadedDays.firstOrNull()?.let { linkedSetOf(it.directoryName) } ?: linkedSetOf() }
+                                loadingLogArchiveDays = false
+                            }
                         })
                         DropdownMenuItem(text = {
                             Text("LogLevel:${level}") }, onClick = {
@@ -1132,13 +1143,27 @@ fun MainScreen(
 
     if (showLogArchiveDialog) {
         AlertDialog(
-            onDismissRequest = { showLogArchiveDialog = false },
+            onDismissRequest = {
+                if (!loadingLogArchiveDays && !sendingLogArchive) {
+                    showLogArchiveDialog = false
+                }
+            },
             title = { Text("Select Log Days") },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                 ) {
-                    if (logArchiveDays.isEmpty()) {
+                    if (loadingLogArchiveDays) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
+                            Text("Scanning archived log folders…")
+                        }
+                    } else if (sendingLogArchive) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
+                            Text("Preparing log archive…")
+                        }
+                    } else if (logArchiveDays.isEmpty()) {
                         Text("No archived log folders with text logs were found.")
                     } else {
                         logArchiveDays.forEach { option ->
@@ -1171,17 +1196,24 @@ fun MainScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onEmailLog(logArchiveDays.filter { selectedLogArchiveDays.contains(it.directoryName) }.map { it.directoryName })
-                        CaltopoClient.CTEvent(tag,"LogEmailed", null)
-                        showLogArchiveDialog = false
+                        sendingLogArchive = true
+                        coroutineScope.launch {
+                            onEmailLog(logArchiveDays.filter { selectedLogArchiveDays.contains(it.directoryName) }.map { it.directoryName })
+                            CaltopoClient.CTEvent(tag,"LogEmailed", null)
+                            sendingLogArchive = false
+                            showLogArchiveDialog = false
+                        }
                     },
-                    enabled = selectedLogArchiveDays.isNotEmpty() && logArchiveDays.isNotEmpty()
+                    enabled = !loadingLogArchiveDays && !sendingLogArchive && selectedLogArchiveDays.isNotEmpty() && logArchiveDays.isNotEmpty()
                 ) {
                     Text("Send")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showLogArchiveDialog = false }) {
+                TextButton(
+                    onClick = { showLogArchiveDialog = false },
+                    enabled = !loadingLogArchiveDays && !sendingLogArchive
+                ) {
                     Text("Cancel")
                 }
             }

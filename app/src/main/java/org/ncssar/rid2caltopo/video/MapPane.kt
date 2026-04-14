@@ -2758,9 +2758,6 @@ internal fun SplitMapPane(
                 title = { Text("Download Map") },
                 text = {
                     Column(
-                        modifier = Modifier
-                            .heightIn(max = 520.dp)
-                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (offlinePrepInFlight || offlinePrepProgress.phase != "Idle") {
@@ -2832,6 +2829,12 @@ internal fun SplitMapPane(
                                 }
                             }
                         }
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text("Area")
                         OfflinePrepAreaMode.entries.forEach { area ->
                             val enabled = area != OfflinePrepAreaMode.MapBoundary || offlineBoundaryOptions.isNotEmpty()
@@ -3020,6 +3023,7 @@ internal fun SplitMapPane(
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             }
                         )
+                    }
                     }
                 },
                 confirmButton = {

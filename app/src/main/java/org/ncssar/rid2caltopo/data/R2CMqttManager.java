@@ -225,7 +225,10 @@ public class R2CMqttManager {
                 }
 
                 @Override public void onConnectionLost(@Nullable Throwable cause) {
-                    CTError(TAG, "connectionLost(): " + (cause != null ? cause.getMessage() : "unknown"));
+                    String detail = cause != null
+                            ? cause.getClass().getSimpleName() + ": " + cause.getMessage()
+                            : "unknown";
+                    CTError(TAG, "connectionLost(): " + detail);
                 }
 
                 @Override public void onMessageArrived(@NonNull String topic, @NonNull byte[] payload) {

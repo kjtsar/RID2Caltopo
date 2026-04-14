@@ -60,7 +60,10 @@ public class MqttPeerTransport implements PeerTransport {
                         @Nullable Runnable onFailure) {
         try {
             MqttConnectOptions opts = new MqttConnectOptions();
-            opts.setCleanSession(false);
+            // cleanSession=true: don't accumulate stale session state on the public broker.
+            // Retained messages (peer presence, drone ownership) are always replayed on subscribe
+            // regardless of this flag, so arbitration state is recovered on reconnect.
+            opts.setCleanSession(true);
             opts.setAutomaticReconnect(true);
             opts.setKeepAliveInterval(30);
             opts.setConnectionTimeout(10);
@@ -107,6 +110,8 @@ public class MqttPeerTransport implements PeerTransport {
                 }
 
                 @Override public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
+                    CTError(TAG, "subscribe(" + topicFilter + ") failed: " +
+                            (exception != null ? exception.getMessage() : "unknown"));
                     if (onFailure != null) onFailure.run();
                 }
             });

@@ -481,6 +481,7 @@ internal fun SplitMapPane(
     var offlinePrepEstimate by remember { mutableStateOf(OfflinePrepEstimate()) }
     var offlinePrepEstimateRunning by remember { mutableStateOf(false) }
     var offlinePrepCacheStatus by remember { mutableStateOf(OfflinePrepCacheStatus()) }
+    var offlinePrepCompletedSelectionKey by remember { mutableStateOf<String?>(null) }
     var offlinePrepAvailableBytes by remember { mutableStateOf<Long?>(null) }
     var offlinePrepTileCacheCapBytes by remember { mutableStateOf(MapCachePolicy.tileCacheMaxBytes(context)) }
     var offlinePrepJob by remember { mutableStateOf<Job?>(null) }
@@ -949,6 +950,48 @@ internal fun SplitMapPane(
         }.getOrDefault(0L)
     }
 
+    fun currentOfflinePrepSelectionKey(): String? {
+        val boundary =
+            if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
+            } else {
+                null
+            }
+        val bounds = boundary?.bounds ?: mapBounds ?: return null
+        val areaKey =
+            if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+                "boundary:${offlinePrepBoundaryId ?: "none"}"
+            } else {
+                "viewport"
+            }
+        return listOf(
+            "base=${baseLayer.name}",
+            "preset=${offlinePrepPreset.label}",
+            "dem=$offlinePrepIncludeDem",
+            areaKey,
+            "n=${"%.5f".format(Locale.US, bounds.latNorth)}",
+            "s=${"%.5f".format(Locale.US, bounds.latSouth)}",
+            "w=${"%.5f".format(Locale.US, bounds.lonWest)}",
+            "e=${"%.5f".format(Locale.US, bounds.lonEast)}"
+        ).joinToString("|")
+    }
+
+    val offlinePrepReadyByCompletion = remember(
+        offlinePrepInFlight,
+        offlinePrepCompletedSelectionKey,
+        offlinePrepAreaMode,
+        offlinePrepBoundaryId,
+        offlinePrepPreset,
+        offlinePrepIncludeDem,
+        baseLayer,
+        mapBounds,
+        offlineBoundaryOptions
+    ) {
+        !offlinePrepInFlight && offlinePrepCompletedSelectionKey != null &&
+            offlinePrepCompletedSelectionKey == currentOfflinePrepSelectionKey()
+    }
+    val offlinePackageReady = offlinePrepCacheStatus.readyForPackage || offlinePrepReadyByCompletion
+
     val exportMutualAidPackageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/zip")
     ) { uri ->
@@ -1011,6 +1054,7 @@ internal fun SplitMapPane(
         val estimatedDemOps = demTileNames.size
         val estimatedTotalOps = (estimatedTileOps + estimatedDemOps).coerceAtLeast(1)
         val tileSource = selectedTileSource()
+        val selectionKey = currentOfflinePrepSelectionKey()
         offlinePrepJob = uiScope.launch(Dispatchers.IO) {
             val onlineTileSource = tileSource as? OnlineTileSourceBase
             if (onlineTileSource == null) {
@@ -1419,6 +1463,7 @@ internal fun SplitMapPane(
                 withContext(Dispatchers.Main.immediate) {
                     offlinePrepInFlight = false
                     offlinePrepJob = null
+                    offlinePrepCompletedSelectionKey = selectionKey
                     offlinePrepActiveCalls.clear()
                     offlinePrepCancelRequested = false
                     val doneMsg =
@@ -2929,6 +2974,24 @@ internal fun SplitMapPane(
                             when {
                                 !offlinePrepCacheStatus.checked -> "Offline package readiness: checking cached tiles..."
                                 offlinePrepCacheStatus.readyForPackage -> "Offline package readiness: selected map data is fully cached."
+                                offlinePrepReadyByCompletion -> buildString {
+                                    append("Offline package readiness: enabled from latest Start run")
+                                    if (offlinePrepCacheStatus.tileMissing > 0 || offlinePrepCacheStatus.demMissing > 0) {
+                                        append(" (still missing ")
+                                        if (offlinePrepCacheStatus.tileMissing > 0) {
+                                            append("${offlinePrepCacheStatus.tileMissing} tile")
+                                            if (offlinePrepCacheStatus.tileMissing != 1) append("s")
+                                        }
+                                        if (offlinePrepCacheStatus.tileMissing > 0 && offlinePrepCacheStatus.demMissing > 0) {
+                                            append(", ")
+                                        }
+                                        if (offlinePrepCacheStatus.demMissing > 0) {
+                                            append("${offlinePrepCacheStatus.demMissing} DEM")
+                                            if (offlinePrepCacheStatus.demMissing != 1) append("s")
+                                        }
+                                        append(")")
+                                    }
+                                }
                                 else -> buildString {
                                     append("Offline package readiness: run Start first")
                                     if (offlinePrepCacheStatus.tileMissing > 0 || offlinePrepCacheStatus.demMissing > 0) {
@@ -2949,8 +3012,10 @@ internal fun SplitMapPane(
                                 }
                             },
                             fontSize = 11.sp,
-                            color = if (offlinePrepCacheStatus.checked && !offlinePrepCacheStatus.readyForPackage) {
+                            color = if (offlinePrepCacheStatus.checked && !offlinePackageReady) {
                                 MaterialTheme.colorScheme.error
+                            } else if (offlinePrepReadyByCompletion && !offlinePrepCacheStatus.readyForPackage) {
+                                MaterialTheme.colorScheme.tertiary
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             }
@@ -2978,7 +3043,7 @@ internal fun SplitMapPane(
                                 showMutualAidPackageDialog = true
                             },
                             enabled = !offlinePrepInFlight &&
-                                offlinePrepCacheStatus.readyForPackage &&
+                                offlinePackageReady &&
                                 (mapBounds != null || selectedBoundary != null)
                         ) { Text("Save MA Offline Package") }
                         TextButton(

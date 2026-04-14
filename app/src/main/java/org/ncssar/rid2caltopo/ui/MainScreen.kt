@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -1036,18 +1037,18 @@ fun MainScreen(
                         onClick = { showNotamPanel = true }
                     )
                 }
-                items(
+                itemsIndexed(
                     items = screenItems,
-                    key = { item ->
+                    key = { index, item ->
                         // This key is now guaranteed to be unique and stable
                         when (item) {
                             is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
                             is MainScreenItem.RemoteView -> item.viewModel.peerState.guid
-                            is MainScreenItem.SpacerView -> "spacer_view"
+                            is MainScreenItem.SpacerView -> "spacer_view_$index"
                             is MainScreenItem.IncidentView -> "incident_view"
                         }
                     }
-                ) { item ->
+                ) { _, item ->
                     // 4. Use a `when` statement to render the correct composable.
                     when (item) {
                         is MainScreenItem.IncidentView -> {

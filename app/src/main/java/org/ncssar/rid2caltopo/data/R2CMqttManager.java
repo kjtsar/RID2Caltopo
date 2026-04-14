@@ -73,7 +73,7 @@ public class R2CMqttManager {
     private static final long   DETECT_INTERVAL_MS     = 4_000;
     private static final long   OBSERVATION_EXPIRY_MS  = 15_000;
     private static final long   OWNERSHIP_CHECK_MS     = 10_000;
-    private static final long   HANDOFF_DELAY_MS       = 2_000;
+    private static       long   HANDOFF_DELAY_MS       = 2_000;
     private static final long   DISCOVERY_WINDOW_MS    = 1_000;
     private static final double DIST_SCALE_M           = 200.0;
     private static final double RTT_SCALE_MS           = 1_000.0;
@@ -180,6 +180,7 @@ public class R2CMqttManager {
 
     private static volatile PeerListChangedListener peerListChangedListener;
     private static volatile boolean initialized = false;
+    @Nullable private static volatile String subscribedTopicFilter = null; // set on successful subscribe
 
     // network address monitoring (moved from R2CPeer)
     private static final Object AddrLock = new Object();
@@ -232,7 +233,7 @@ public class R2CMqttManager {
                 }
 
                 @Override public void onMessageArrived(@NonNull String topic, @NonNull byte[] payload) {
-                    onMessageArrived(topic, payload);
+                    R2CMqttManager.onMessageArrived(topic, payload);
                 }
             });
             byte[] lwtPayload = buildPeerPayload(false);
@@ -278,6 +279,7 @@ public class R2CMqttManager {
         peers.clear();
         drones.clear();
         peerTransport = null;
+        subscribedTopicFilter = null;
     }
 
     // ── called on successful MQTT connect ─────────────────────────────────────
@@ -289,6 +291,7 @@ public class R2CMqttManager {
             peerTransport.subscribe(rootFilter, 1,
                 () -> {
                     CTInfo(TAG, "Subscribed to " + rootFilter);
+                    subscribedTopicFilter = rootFilter;
                     // Publish our own presence immediately so peers discover us
                     publishHeartbeat();
                     // Start periodic heartbeat
@@ -552,7 +555,7 @@ public class R2CMqttManager {
      * After DISCOVERY_WINDOW_MS, ownership is evaluated and the livetrack is
      * notified via {@link CaltopoLiveTrack#setLocalOwner}.
      */
-    public static void onLiveTrackCreated(@NonNull CaltopoLiveTrack liveTrack,
+    public static void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
                                            @NonNull CtDroneSpec droneSpec,
                                            double distMeters,
                                            long firstSeenTs) {
@@ -803,6 +806,82 @@ public class R2CMqttManager {
 
     public static synchronized void SetPeerTransportFactoryForTesting(@Nullable PeerTransportFactory factory) {
         peerTransportFactory = factory;
+    }
+
+    /** Returns true if the transport is currently connected (for tests and UI diagnostics). */
+    public static boolean isConnected() {
+        return initialized && peerTransport != null && peerTransport.isConnected();
+    }
+
+    /**
+     * Returns true if a successful subscribe has been recorded for the given filter.
+     * Intended for unit tests only.
+     */
+    public static boolean isSubscribedForTesting(@NonNull String topicFilter) {
+        return topicFilter.equals(subscribedTopicFilter);
+    }
+
+    /**
+     * Directly invokes ownership evaluation for a remoteId, bypassing DISCOVERY_WINDOW_MS.
+     * Intended for unit tests only.
+     */
+    public static void checkOwnershipForTesting(@NonNull String remoteId) {
+        checkOwnership(remoteId);
+    }
+
+    /** Overrides the handoff delay for unit tests (pass 0 to apply ownership synchronously). */
+    public static void setHandoffDelayMsForTesting(long ms) {
+        HANDOFF_DELAY_MS = ms;
+    }
+
+    /** Returns the current ownerGuid for a drone (for unit tests). */
+    @Nullable
+    public static String getOwnerGuidForTesting(@NonNull String remoteId) {
+        DroneState ds = drones.get(remoteId);
+        return ds != null ? ds.ownerGuid : null;
+    }
+
+    /** Returns the localOwnerActive flag for a drone (for unit tests). */
+    public static boolean getLocalOwnerActiveForTesting(@NonNull String remoteId) {
+        DroneState ds = drones.get(remoteId);
+        return ds != null && ds.localOwnerActive;
+    }
+
+    /** Returns the number of observations recorded for a drone (for unit tests). */
+    public static int getObservationCountForTesting(@NonNull String remoteId) {
+        DroneState ds = drones.get(remoteId);
+        return ds != null ? ds.obs.size() : 0;
+    }
+
+    /**
+     * Directly injects a peer observation without going through MQTT message parsing.
+     * Use in unit tests where org.json stubs (returnDefaultValues=true) would otherwise
+     * cause all optDouble/optLong calls to return 0 regardless of the payload content.
+     */
+    public static void addPeerObservationForTesting(
+            @NonNull String remoteId,
+            @NonNull String peerGuid,
+            double distMeters,
+            long firstSeenTs) {
+        DroneState ds = getOrCreateDroneState(remoteId);
+        long now = System.currentTimeMillis();
+        DroneObservation obs = new DroneObservation(peerGuid, 0, 0, 0, distMeters, now);
+        obs.firstSeenTs = firstSeenTs;
+        ds.obs.put(peerGuid, obs);
+    }
+
+    /** Full reset for unit tests: shuts down if running, clears all static state. */
+    public static synchronized void resetForTesting() {
+        shutdown();
+        peers.clear();
+        drones.clear();
+        peerTransportFactory = null;
+        subscribedTopicFilter = null;
+        HANDOFF_DELAY_MS = 2_000;
+        myGuid    = "";
+        myName    = "";
+        mapId     = "";
+        brokerUri = DEFAULT_BROKER_URI;
     }
 
     @NonNull

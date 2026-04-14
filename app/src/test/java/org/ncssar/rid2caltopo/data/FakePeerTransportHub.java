@@ -190,5 +190,10 @@ public final class FakePeerTransportHub {
             }
             return false;
         }
+
+        /** Returns true if the given filter string is registered as a subscription (exact match). */
+        public boolean hasSubscription(@NonNull String filter) {
+            return subscriptions.contains(filter);
+        }
     }
 }

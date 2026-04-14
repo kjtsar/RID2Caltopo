@@ -8,7 +8,7 @@ import java.util.List;
 public interface PeerCoordinator {
     void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri);
     void stop();
-    void onLiveTrackCreated(@NonNull CaltopoLiveTrack liveTrack,
+    void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
                             @NonNull CtDroneSpec droneSpec,
                             double distMeters,
                             long firstSeenTs);

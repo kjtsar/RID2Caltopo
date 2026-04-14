@@ -61,7 +61,7 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     }
 
     @Override
-    public void onLiveTrackCreated(@NonNull CaltopoLiveTrack liveTrack,
+    public void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
                                    @NonNull CtDroneSpec droneSpec,
                                    double distMeters,
                                    long firstSeenTs) {

@@ -33,7 +33,7 @@ import java.util.LinkedList;
  * this class simply acts on the result via {@link #setLocalOwner}.
  */
 
-public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
+public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrackOwnerDelegate {
     private static final String ICON_LATENCY_TAG = "RidIconLatency";
     public interface LocalTrackListener {
         void onLocalTrackPoint(
@@ -159,6 +159,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener {
      * Gaining ownership starts a new CalTopo livetrack segment for this drone.
      * Losing ownership stops publication immediately.
      */
+    @Override
+    public @NonNull String getRemoteId() {
+        return myRemoteId;
+    }
+
+    @Override
     public void setLocalOwner(boolean isOwner) {
         if (shuttingDown) return;
         CTDebug(TAG, String.format(Locale.US,

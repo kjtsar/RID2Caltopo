@@ -14,6 +14,9 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.util.Locale;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class DelayedExec {
     private static final String TAG = "DelayedExec";
@@ -23,12 +26,25 @@ public class DelayedExec {
     private long repeatMsec;  // zero == no repeat.
     private boolean running;
 
+    // Fallback executor used when Android Looper is unavailable (unit-test environments).
+    private static final ScheduledExecutorService testExecutor =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "DelayedExec-test");
+                t.setDaemon(true);
+                return t;
+            });
+
     public DelayedExec() {
     }
 
     public static void RunAfterDelayInMsec(Runnable aRunnable, long delayInMsec) {
-        Handler handler = new Handler(Looper.getMainLooper());
-        handler.postDelayed(aRunnable, delayInMsec);
+        Looper mainLooper = Looper.getMainLooper();
+        if (mainLooper != null) {
+            new Handler(mainLooper).postDelayed(aRunnable, delayInMsec);
+        } else {
+            // No Android Looper — running in a unit-test JVM.  Use a thread-based fallback.
+            testExecutor.schedule(aRunnable, delayInMsec, TimeUnit.MILLISECONDS);
+        }
     }
 
     private void dispatcher() {
@@ -71,7 +87,16 @@ public class DelayedExec {
 
     public void start(Runnable runnable, long delayInMsec, long repeatDelayInMsec) {
         if (null == handler) {
-            handler = new Handler(Looper.getMainLooper());
+            Looper mainLooper = Looper.getMainLooper();
+            if (mainLooper == null) {
+                // Unit-test fallback: schedule via shared executor; repeat is unsupported.
+                this.runnable = runnable;
+                running = true;
+                repeatMsec = repeatDelayInMsec;
+                testExecutor.schedule(this::dispatcher, delayInMsec, TimeUnit.MILLISECONDS);
+                return;
+            }
+            handler = new Handler(mainLooper);
         }
         if (null == dispatcherRunnable) {
             dispatcherRunnable = this::dispatcher;

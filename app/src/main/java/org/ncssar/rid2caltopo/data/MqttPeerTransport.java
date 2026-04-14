@@ -34,7 +34,13 @@ public class MqttPeerTransport implements PeerTransport {
         client.setCallback(new MqttCallbackExtended() {
             @Override public void connectComplete(boolean reconnect, String serverURI) {
                 PeerTransportCallback cb = MqttPeerTransport.this.callback;
-                if (cb != null) cb.onConnected(reconnect, serverURI != null ? serverURI : brokerUri);
+                if (cb == null) return;
+                // Paho fires connectComplete on its own internal reconnect/callback thread.
+                // Calling subscribe() from that thread while automaticReconnect=true causes
+                // MqttAsyncClient.subscribeBase to throw (Paho v1.x lock contention bug).
+                // Dispatch to a separate thread so subscribe() runs off the Paho stack.
+                final String uri = serverURI != null ? serverURI : brokerUri;
+                new Thread(() -> cb.onConnected(reconnect, uri), "mqtt-connect-notify").start();
             }
 
             @Override public void connectionLost(Throwable cause) {

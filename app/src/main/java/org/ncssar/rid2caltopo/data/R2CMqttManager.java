@@ -488,6 +488,18 @@ public class R2CMqttManager {
         String newOwner = computeOwnerGuid(ds);
         String prevOwner = ds.ownerGuid;
 
+        if (newOwner == null) {
+            // No non-expired observations available — this happens immediately after a reconnect
+            // before any detect messages have arrived.  The retained owner message from the broker
+            // may already have set ds.ownerGuid correctly; don't overwrite it with null just
+            // because ds.obs is temporarily empty.  Ownership is cleared through explicit paths:
+            // onDroneLost(), an empty retained owner message, or a peer going offline.
+            CTDebug(TAG, String.format(Locale.US,
+                    "checkOwnership(%s): no observations — keeping current owner %s",
+                    remoteId, prevOwner));
+            return;
+        }
+
         if (!objectsEqual(newOwner, prevOwner)) {
             CTDebug(TAG, String.format(Locale.US,
                     "checkOwnership(%s): %s → %s", remoteId, prevOwner, newOwner));
@@ -773,6 +785,7 @@ public class R2CMqttManager {
         for (PeerState ps : snapshot) ps.ownedDrones.clear();
         for (Map.Entry<String, DroneState> e : drones.entrySet()) {
             String ownerGuid = e.getValue().ownerGuid;
+            if (ownerGuid == null) continue;   // ownerGuid is unresolved; ConcurrentHashMap rejects null keys
             PeerState ps = peers.get(ownerGuid);
             if (ps != null) {
                 CtDroneSpec spec = CaltopoClient.GetDroneSpec(e.getKey());

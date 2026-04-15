@@ -35,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Enumeration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -719,6 +720,32 @@ public class R2CMqttManager {
     private static void publishHeartbeat() {
         if (!initialized || peerTransport == null || !peerTransport.isConnected()) return;
         publishRetained(peerTopic(myGuid), buildPeerPayload(true));
+        checkPeerExpiry();
+    }
+
+    /**
+     * Remove peers whose heartbeat has not been seen for more than
+     * {@code 3 × HEARTBEAT_INTERVAL_MS} (30 s).  Called on every heartbeat tick
+     * so stale peers are evicted promptly even when the remote device is killed
+     * without sending an explicit offline message.
+     */
+    private static void checkPeerExpiry() {
+        long now = System.currentTimeMillis();
+        long expiryMs = 3 * HEARTBEAT_INTERVAL_MS; // 30 seconds
+        boolean changed = false;
+        Iterator<Map.Entry<String, PeerState>> it = peers.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, PeerState> e = it.next();
+            PeerState ps = e.getValue();
+            if (now - ps.lastSeenMs > expiryMs) {
+                CTInfo(TAG, String.format(Locale.US,
+                        "checkPeerExpiry(): removing stale peer '%s' (last seen %d ms ago)",
+                        ps.name, now - ps.lastSeenMs));
+                it.remove();
+                changed = true;
+            }
+        }
+        if (changed) notifyPeerListChanged();
     }
 
     private static void publishDetect(@NonNull String remoteId,

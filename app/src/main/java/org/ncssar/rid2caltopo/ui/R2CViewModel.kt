@@ -314,8 +314,10 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         _drones.value = droneSpecs
         housekeeping()
+        // Prune stale flight keys using ownership-agnostic keys so that a brief
+        // ownership flip (MQTT arbitration) never clears a just-confirmed entry.
         val activeFlightKeys = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
-            currentFlightKey(drone)
+            anyPeerFlightKey(drone)
         }
         promptedFlightKeys.retainAll(activeFlightKeys)
         val pendingRemoteId = _pendingDroneConfirmation.value?.remoteId
@@ -355,8 +357,23 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         housekeeping()
     }
 
+    /**
+     * A flight key that gates whether THIS device should prompt for confirmation.
+     * Returns null when the drone is owned by a remote peer or is not yet airborne.
+     */
     private fun currentFlightKey(drone: CtDroneSpec): String? {
         if (!drone.publishingLocally()) return null  // remote MQTT peer owns this drone
+        val startMsec = drone.startMsecTimestamp
+        if (!drone.isActive || startMsec <= 0L) return null
+        return "${drone.remoteId}:$startMsec"
+    }
+
+    /**
+     * A flight key used only for pruning [promptedFlightKeys].
+     * Ignores ownership so that a brief MQTT arbitration ownership flip does not
+     * evict an already-confirmed flight key and trigger a duplicate prompt.
+     */
+    private fun anyPeerFlightKey(drone: CtDroneSpec): String? {
         val startMsec = drone.startMsecTimestamp
         if (!drone.isActive || startMsec <= 0L) return null
         return "${drone.remoteId}:$startMsec"

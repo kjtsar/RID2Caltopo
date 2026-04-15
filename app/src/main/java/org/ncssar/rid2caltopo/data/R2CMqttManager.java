@@ -359,6 +359,12 @@ public class R2CMqttManager {
                                     new JSONObject(new String(payload, StandardCharsets.UTF_8)));
                             break;
                         }
+                        case "spec": {
+                            if (payload.length == 0) return; // clear is a no-op for spec
+                            onDroneSpec(remoteId,
+                                    new JSONObject(new String(payload, StandardCharsets.UTF_8)));
+                            break;
+                        }
                     }
                     break;
                 }
@@ -461,6 +467,24 @@ public class R2CMqttManager {
             ds.ownerChangedMs = System.currentTimeMillis();
             applyOwnershipChange(remoteId, prevOwner, claimedOwner);
         }
+    }
+
+    /**
+     * Handles an incoming retained drone-spec message from a peer.
+     * Delegates to {@link CaltopoClient#ApplyRemoteDroneSpec} which updates the active spec
+     * in place (if the drone is already being tracked) or pre-populates the persistent cache
+     * (so the correct mappedId is used as soon as the first local waypoint arrives).
+     */
+    private static void onDroneSpec(@NonNull String remoteId, @NonNull JSONObject jo) {
+        String newMappedId = jo.optString("mid",   "");
+        String newOrg      = jo.optString("org",   "");
+        String newModel    = jo.optString("model", "");
+        String newOwner    = jo.optString("owner", "");
+        if (newMappedId.isEmpty()) return;
+        CTInfo(TAG, String.format(Locale.US,
+                "onDroneSpec(%s): peer update mid=%s org=%s model=%s owner=%s",
+                remoteId, newMappedId, newOrg, newModel, newOwner));
+        CaltopoClient.ApplyRemoteDroneSpec(remoteId, newMappedId, newOrg, newModel, newOwner);
     }
 
     // ── ownership computation ─────────────────────────────────────────────────
@@ -663,6 +687,16 @@ public class R2CMqttManager {
         return ds != null && ds.localOwnerActive;
     }
 
+    /**
+     * Called by {@link CaltopoClient} whenever a drone spec field (mappedId, org, model, owner)
+     * changes locally — e.g. the user selects a drone in the confirmation dialog or edits it.
+     * Publishes the updated spec as a retained MQTT message so all peers on the same map
+     * immediately receive and apply the new label.
+     */
+    public static void onDroneSpecChanged(@NonNull String remoteId) {
+        publishDroneSpec(remoteId);
+    }
+
     /** Called by CaltopoLiveTrack when it measures a new CalTopo RTT. */
     public static void updateCaltopoRtt(long rttMs) {
         myCaltopoRttMs = rttMs;
@@ -733,6 +767,27 @@ public class R2CMqttManager {
         }
     }
 
+    private static void publishDroneSpec(@NonNull String remoteId) {
+        if (!initialized || peerTransport == null || !peerTransport.isConnected()) return;
+        CtDroneSpec spec = CaltopoClient.GetDroneSpec(remoteId);
+        if (spec == null) return;
+        String mid = spec.getMappedId();
+        if (mid.isEmpty() || mid.equals(remoteId)) return; // don't publish trivial (unset) spec
+        try {
+            JSONObject jo = new JSONObject();
+            jo.put("mid",   mid);
+            jo.put("org",   spec.getOrg());
+            jo.put("model", spec.getModel());
+            jo.put("owner", spec.getOwner());
+            jo.put("ts",    System.currentTimeMillis());
+            publishRetained(specTopic(remoteId), jo.toString().getBytes(StandardCharsets.UTF_8));
+            CTInfo(TAG, String.format(Locale.US,
+                    "publishDroneSpec(%s): mid=%s", remoteId, mid));
+        } catch (Exception e) {
+            CTError(TAG, "publishDroneSpec() raised.", e);
+        }
+    }
+
     /** Delete a retained message by publishing empty payload. */
     private static void clearRetained(@NonNull String topic) {
         publishRetained(topic, new byte[0]);
@@ -761,6 +816,10 @@ public class R2CMqttManager {
 
     private static String detectTopic(@NonNull String remoteId, @NonNull String guid) {
         return "R2C/" + mapId + "/drone/" + remoteId + "/detect/" + guid;
+    }
+
+    private static String specTopic(@NonNull String remoteId) {
+        return "R2C/" + mapId + "/drone/" + remoteId + "/spec";
     }
 
     private static String ownerTopic(@NonNull String remoteId) {

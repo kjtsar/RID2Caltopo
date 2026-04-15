@@ -475,18 +475,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         remoteId = rid;
         CtDroneSpec lDroneSpec = ccs.droneSpecTable.get(rid); // Is this one already active?
-        if (null == lDroneSpec) { // no - check for it in our persistent cache next:
-            lDroneSpec = ccs.cachedDroneSpecTable.get(rid);
+        if (null != lDroneSpec) { // already in the active table — re-use it directly
+            droneSpec = lDroneSpec;
+        } else {
+            lDroneSpec = ccs.cachedDroneSpecTable.get(rid); // check persistent cache
             if (null != lDroneSpec) { // found it.  Make a working copy:
                 lDroneSpec = lDroneSpec.copy();
                 ccs.droneSpecTable.put(rid, lDroneSpec);
                 droneSpec = lDroneSpec;
+            } else { // new - never seen before - make a working version.
+                lDroneSpec = new CtDroneSpec(rid);
+                ccs.droneSpecTable.put(rid, lDroneSpec);
+                droneSpec = lDroneSpec;
             }
-        }
-        if (null == lDroneSpec) { // new - never seen before - make a working version.
-            lDroneSpec = new CtDroneSpec(rid);
-            ccs.droneSpecTable.put(rid, lDroneSpec);
-            droneSpec = lDroneSpec;
         }
         droneSpec.setDroneSpecListener(this);
         idleTimeoutPoll = new DelayedExec();
@@ -514,6 +515,45 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ds;
     }
 
+    /**
+     * Applies a drone spec received from a peer via MQTT.
+     * If the drone is already active (waypoints being tracked), updates it in place so the
+     * track label changes immediately.  If the drone has not yet been seen locally, pre-populates
+     * the persistent cache so the correct mappedId is used as soon as the first waypoint arrives.
+     *
+     * Must be safe to call from any thread (MQTT callback thread or main thread).
+     */
+    public static void ApplyRemoteDroneSpec(@NonNull String remoteId,
+                                            @NonNull String mappedId,
+                                            @NonNull String org,
+                                            @NonNull String model,
+                                            @NonNull String owner) {
+        ClientClassState ccs = GetState();
+
+        // Case 1: drone is already in the active table — update it directly.
+        CtDroneSpec active = ccs.droneSpecTable.get(remoteId);
+        if (active != null) {
+            active.setMappedId(mappedId); // fires mappedIdChanged → UpdateDroneSpecs
+            if (!org.isEmpty())   active.setOrg(org);
+            if (!model.isEmpty()) active.setModel(model);
+            if (!owner.isEmpty()) active.setOwner(owner);
+            return;
+        }
+
+        // Case 2: drone not yet active — update or insert in the persistent cache so the
+        // spec is ready when the first waypoint arrives and ClientForRemoteId() is called.
+        CtDroneSpec cached = ccs.cachedDroneSpecTable.get(remoteId);
+        if (cached != null) {
+            cached.setMappedId(mappedId);
+            if (!org.isEmpty())   cached.setOrg(org);
+            if (!model.isEmpty()) cached.setModel(model);
+            if (!owner.isEmpty()) cached.setOwner(owner);
+        } else {
+            CtDroneSpec newSpec = new CtDroneSpec(remoteId, mappedId, org, model, owner);
+            ccs.cachedDroneSpecTable.put(remoteId, newSpec);
+        }
+    }
+
     public static void SetSettingsListener(@Nullable ClientSettingsListener listener) {
         SettingsListener = listener;
     }
@@ -534,6 +574,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CTDebug(TAG, String.format(Locale.US,
                 "mappedIdChanged(%s): change from '%s' to '%s'", ds.trackLabel(), oldval, newval));
         UpdateDroneSpecs();
+        // Propagate the updated spec to all peers on this map so every R2C instance
+        // uses the same track label without requiring manual re-entry.
+        R2CMqttManager.onDroneSpecChanged(ds.getRemoteId());
     }
 
     public void droneTakingOff(@NonNull CtDroneSpec ds){

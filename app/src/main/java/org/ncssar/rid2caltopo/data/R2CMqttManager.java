@@ -519,10 +519,30 @@ public class R2CMqttManager {
             // may already have set ds.ownerGuid correctly; don't overwrite it with null just
             // because ds.obs is temporarily empty.  Ownership is cleared through explicit paths:
             // onDroneLost(), an empty retained owner message, or a peer going offline.
-            CTDebug(TAG, String.format(Locale.US,
-                    "checkOwnership(%s): no observations — keeping current owner %s",
-                    remoteId, prevOwner));
+            // Logged at verbose level only — this is the steady-state after a drone lands.
             return;
+        }
+
+        // Guard: if we're about to claim self-ownership but the current retained owner is a
+        // different peer AND we have no observations from any peer yet (e.g. right after reconnect
+        // when QoS-0 detect messages haven't re-arrived), hold off.  Acting on incomplete
+        // information here causes ownership oscillation: we'd override the peer's retained claim,
+        // the peer would counter-claim, and both devices would oscillate every reconnect cycle.
+        if (myGuid.equals(newOwner) && prevOwner != null && !myGuid.equals(prevOwner)) {
+            long nowMs = System.currentTimeMillis();
+            boolean hasPeerObs = false;
+            for (DroneObservation obs : ds.obs.values()) {
+                if (!myGuid.equals(obs.observerGuid) && !obs.isExpired(nowMs)) {
+                    hasPeerObs = true;
+                    break;
+                }
+            }
+            if (!hasPeerObs) {
+                CTDebug(TAG, String.format(Locale.US,
+                        "checkOwnership(%s): no peer observations yet — not contesting peer owner %s",
+                        remoteId, prevOwner));
+                return;
+            }
         }
 
         if (!objectsEqual(newOwner, prevOwner)) {

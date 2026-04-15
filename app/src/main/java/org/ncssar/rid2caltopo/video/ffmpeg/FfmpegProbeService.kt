@@ -147,6 +147,12 @@ class FfmpegProbeService {
     private var lastPerfProcessCpuMs = 0L
     private var lastPerfMainThreadCpuNs = 0L
     private var lastPollAtMs = 0L
+    // Adaptive render stride: engage stride=2 when maxFrameAgeMs rises above the engage
+    // threshold, release back to 1 when it falls below the release threshold.
+    // Hysteresis between the two thresholds prevents rapid toggling.
+    private val renderStrideEngageMs = 1_500L
+    private val renderStrideReleaseMs = 400L
+    @Volatile private var currentRenderStride = 1
     @Volatile
     private var closing = false
     private val probeListener: (String, Long, String, FfmpegTelemetry) -> Unit =
@@ -455,6 +461,7 @@ class FfmpegProbeService {
             _renderDelayMsByDesignator.value = emptyMap()
             snapshot
         }
+        currentRenderStride = 1
     }
 
     fun stopAll() {
@@ -645,6 +652,10 @@ class FfmpegProbeService {
                 }
             }
             applyAnomalyConfigToSession(designator, sessionId)
+            // Propagate the current adaptive stride to the new session immediately so
+            // it doesn't start at 1 while the pipeline is still under pressure.
+            val stride = currentRenderStride
+            if (stride > 1) FfmpegBridge.setRenderStride(sessionId, stride)
             return sessionId
         }
         synchronized(stateLock) {
@@ -1056,12 +1067,35 @@ class FfmpegProbeService {
             tag,
             "Perf sample active(render=${renderActive.size}) " +
                 "elapsedMs=$elapsedMs pollGapMs=$pollGapMs processCpuDeltaMs=$processCpuDeltaMs " +
-                "mainThreadCpuDeltaMs=$mainThreadCpuDeltaMs maxFrameAgeMs=$maxFrameAgeMs"
+                "mainThreadCpuDeltaMs=$mainThreadCpuDeltaMs maxFrameAgeMs=$maxFrameAgeMs " +
+                "renderStride=$currentRenderStride"
         )
 
         lastPerfSampleAtMs = nowMs
         lastPerfProcessCpuMs = processCpuMs
         lastPerfMainThreadCpuNs = mainThreadCpuNs
+
+        // Adaptive render stride: engage stride=2 when frames are backing up, restore to 1
+        // once the pipeline is draining.  Hysteresis avoids rapid toggling.
+        if (maxFrameAgeMs >= 0L) {
+            val desiredStride = when {
+                maxFrameAgeMs > renderStrideEngageMs -> 2
+                maxFrameAgeMs < renderStrideReleaseMs -> 1
+                else -> currentRenderStride  // hysteresis zone — keep current
+            }
+            if (desiredStride != currentRenderStride) {
+                currentRenderStride = desiredStride
+                CTDebug(
+                    tag,
+                    if (desiredStride == 1) "Render stride restored to 1 (maxFrameAgeMs=${maxFrameAgeMs}ms)"
+                    else "Render stride engaged: stride=$desiredStride (maxFrameAgeMs=${maxFrameAgeMs}ms)"
+                )
+                val sessionSnapshot = synchronized(stateLock) { renderSessions.toMap() }
+                sessionSnapshot.values.forEach { sessionId ->
+                    FfmpegBridge.setRenderStride(sessionId, desiredStride)
+                }
+            }
+        }
     }
 
     private fun stopSessionAsync(sessionId: Long, completionLog: String) {

@@ -101,6 +101,11 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private val _activeScreen = MutableStateFlow(ActiveScreen.MAIN)
     val activeScreen : StateFlow<ActiveScreen> = _activeScreen.asStateFlow()
     private val promptedFlightKeys = linkedSetOf<String>()
+    // remoteIds already confirmed this session — prevents a re-prompt when
+    // startMsecTimestamp changes as a new track segment initialises (which
+    // produces a different flightKey from the one that was just added to
+    // promptedFlightKeys, causing a duplicate confirmation dialog).
+    private val confirmedRemoteIds = linkedSetOf<String>()
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
@@ -283,6 +288,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
      * so the panel will not reappear for the remainder of this flight.
      */
     fun dismissPendingDroneConfirmation() {
+        _pendingDroneConfirmation.value?.remoteId?.let { confirmedRemoteIds.add(it) }
         _pendingDroneConfirmation.value = null
     }
 
@@ -295,6 +301,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         if (remoteId.isEmpty() || organization.isEmpty() || callsign.isEmpty() || droneDescription.isEmpty()) {
             return
         }
+        confirmedRemoteIds.add(remoteId)
         val mappedId = CtDroneSpec.BuildMappedId(callsign, droneDescription, remoteId)
         CaltopoClient.SaveDroneSpecConfirmation(remoteId, organization, droneDescription, mappedId)
         _pendingDroneConfirmation.value = null
@@ -330,7 +337,13 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         if (_pendingDroneConfirmation.value == null) {
             val droneToConfirm = droneSpecs.firstOrNull { drone ->
                 val flightKey = currentFlightKey(drone)
-                flightKey != null && flightKey !in promptedFlightKeys
+                // A drone is eligible for confirmation if it has a valid local flight key,
+                // its flightKey hasn't been prompted yet, AND its remoteId hasn't already
+                // been confirmed/dismissed this session (guards against a re-prompt when
+                // startMsecTimestamp changes mid-initialisation and creates a new flightKey).
+                flightKey != null &&
+                    flightKey !in promptedFlightKeys &&
+                    drone.remoteId !in confirmedRemoteIds
             }
             if (droneToConfirm != null) {
                 val flightKey = currentFlightKey(droneToConfirm)

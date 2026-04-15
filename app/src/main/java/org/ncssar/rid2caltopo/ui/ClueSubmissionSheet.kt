@@ -1,7 +1,5 @@
 package org.ncssar.rid2caltopo.ui
 
-import androidx.compose.foundation.layout.BoxWithConstraints
-
 import PendingClue
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -10,20 +8,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -34,7 +28,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,12 +41,14 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
-import java.util.Locale
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.SheetValue
+import androidx.compose.material3.TextButton
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -94,13 +93,31 @@ fun ClueSheetContent (
     onCancel: () -> Unit
 ) {
     val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val descriptionFocusRequester = remember { FocusRequester() }
     val titleFocusRequester = remember { FocusRequester() }
     val configuration = LocalConfiguration.current
     val maxSheetHeight = configuration.screenHeightDp.dp * 0.7f
+    var descriptionFieldValue by remember(clue.designator) {
+        mutableStateOf(
+            TextFieldValue(
+                text = clue.description,
+                selection = TextRange(clue.description.length)
+            )
+        )
+    }
 
     LaunchedEffect(Unit) {
         titleFocusRequester.requestFocus()
+    }
+
+    LaunchedEffect(clue.description) {
+        if (clue.description != descriptionFieldValue.text) {
+            descriptionFieldValue = TextFieldValue(
+                text = clue.description,
+                selection = TextRange(clue.description.length)
+            )
+        }
     }
 
     Box(
@@ -180,24 +197,60 @@ fun ClueSheetContent (
 
             // Description
             OutlinedTextField(
-                value = clue.description,
-                onValueChange = onDescriptionChange,
+                value = descriptionFieldValue,
+                onValueChange = {
+                    descriptionFieldValue = it
+                    onDescriptionChange(it.text)
+                },
                 label = { Text("Description") },
                 modifier = Modifier
                     .fillMaxWidth()
                     .focusRequester(descriptionFocusRequester)
                     .heightIn(min = 120.dp),
+                singleLine = false,
                 maxLines = 5,
                 keyboardOptions = KeyboardOptions(
-                    imeAction = ImeAction.Done
+                    imeAction = ImeAction.Default
                 ),
                 keyboardActions = KeyboardActions(
                     onNext = { titleFocusRequester.requestFocus() },
-                    onDone = {
-                        focusManager.clearFocus()
-                    }
                 )
             )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                TextButton(
+                    onClick = {
+                        val current = descriptionFieldValue
+                        val start = current.selection.min
+                        val end = current.selection.max
+                        val updatedText = buildString {
+                            append(current.text.substring(0, start))
+                            append('\n')
+                            append(current.text.substring(end))
+                        }
+                        val updatedValue = TextFieldValue(
+                            text = updatedText,
+                            selection = TextRange(start + 1)
+                        )
+                        descriptionFieldValue = updatedValue
+                        onDescriptionChange(updatedText)
+                    }
+                ) {
+                    Text("New line")
+                }
+
+                TextButton(
+                    onClick = {
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
+                    }
+                ) {
+                    Text("Hide keyboard")
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),

@@ -76,6 +76,11 @@ object FfmpegBridge {
         }
     }
 
+    fun setRenderStride(sessionId: Long, stride: Int) {
+        if (!nativeLoaded || sessionId <= 0L) return
+        nativeSetRenderStride(sessionId, stride)
+    }
+
     fun updateAnomalyConfig(sessionId: Long, config: NativeAnomalyConfig) {
         if (!nativeLoaded || sessionId <= 0L) return
         nativeUpdateAnomalyConfig(
@@ -166,6 +171,7 @@ object FfmpegBridge {
     private external fun nativeStartRender(designator: String, rtspUrl: String): Long
     private external fun nativeAttachSurface(sessionId: Long, surface: Surface): Boolean
     private external fun nativeDetachSurface(sessionId: Long)
+    private external fun nativeSetRenderStride(sessionId: Long, stride: Int)
     private external fun nativeUpdateAnomalyConfig(
         sessionId: Long,
         enabled: Boolean,

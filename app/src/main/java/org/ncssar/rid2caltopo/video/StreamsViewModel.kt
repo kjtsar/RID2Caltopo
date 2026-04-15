@@ -22,6 +22,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
@@ -84,6 +87,18 @@ internal fun chooseResyncSnapshot(
     } else {
         latestFlowValue
     }
+}
+
+private val clueTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+internal fun buildClueDescriptionTemplate(
+    timestampMs: Long,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): String {
+    val localTime = Instant.ofEpochMilli(timestampMs)
+        .atZone(zoneId)
+        .format(clueTimeFormatter)
+    return "time: $localTime\nfound by: \nreported to IC: yes|no\n"
 }
 
 @Stable
@@ -408,7 +423,7 @@ class StreamsViewModel(
             bitmap = bitmap,
             preview = null,
             title = "",
-            description = summary ?: "",
+            description = buildClueDescriptionTemplate(clueTimestamp),
             streamTelemetrySummary = summary
         )
 
@@ -572,8 +587,9 @@ class StreamsViewModel(
         if (summary.isNullOrBlank()) return description
         if (description.trim() == summary.trim()) return description
         if (description.contains("Telemetry:")) return description
-        if (description.isBlank()) return summary
-        return "$description\n\n$summary"
+        val trimmedDescription = description.trimEnd()
+        if (trimmedDescription.isBlank()) return summary
+        return "$trimmedDescription\n\n$summary"
     }
 
     private fun shouldUseFfmpegRender(designator: String): Boolean {
@@ -693,12 +709,23 @@ class StreamsViewModel(
                     CTDebug(tag, "Stream $designator live -> using FFmpeg render path")
                 }
             } else {
-                if (republishDetected) {
-                    streamSessionService.onStreamRepublished(designator)
-                    CTDebug(tag, "Stream $designator live -> using ExoPlayer render path (republished)")
-                } else if (newlyLive || wasUsingFfmpeg) {
-                    streamSessionService.onStreamBecameLive(designator)
-                    CTDebug(tag, "Stream $designator live -> using ExoPlayer render path")
+                // If another stream is focused, suspend this one's ExoPlayer to save CPU.
+                // Re-read _focusedPath.value here in case it was cleared above (e.g. a new
+                // off-focus stream arriving auto-dismissed focus and returned to grid view).
+                val currentFocus = _focusedPath.value
+                if (currentFocus != null && currentFocus != designator) {
+                    if (streamSessionService.playerFor(designator) != null) {
+                        streamSessionService.onStreamStopped(designator)
+                        CTDebug(tag, "Stream $designator -> ExoPlayer suspended (focus is on $currentFocus)")
+                    }
+                } else {
+                    if (republishDetected) {
+                        streamSessionService.onStreamRepublished(designator)
+                        CTDebug(tag, "Stream $designator live -> using ExoPlayer render path (republished)")
+                    } else if (newlyLive || wasUsingFfmpeg || streamSessionService.playerFor(designator) == null) {
+                        streamSessionService.onStreamBecameLive(designator)
+                        CTDebug(tag, "Stream $designator live -> using ExoPlayer render path")
+                    }
                 }
             }
         }

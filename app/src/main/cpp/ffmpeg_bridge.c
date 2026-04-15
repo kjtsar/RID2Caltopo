@@ -117,6 +117,8 @@ typedef struct {
     float anomaly_min_area_fraction;
     int anomaly_thermal_polarity;
     int64_t anomaly_frame_counter;
+    int render_stride;          // skip every N-1 non-keyframe packets; 1 = no skip (default)
+    int64_t render_stride_counter; // counts non-keyframe packets seen; reset when stride changes
     int64_t last_render_post_at_ms;
     int64_t last_no_surface_log_at_ms;
     int64_t source_render_interval_ms;
@@ -2830,6 +2832,20 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         }
 #endif
 
+        // Render stride: when stride > 1, drop every N-1 non-keyframe packets before decode
+        // to reduce CPU load under pressure.  Keyframe (IDR) packets always pass through
+        // so the decoder's reference-frame state is never broken.
+        if (session->render_stride > 1) {
+            bool is_keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
+            if (!is_keyframe) {
+                session->render_stride_counter++;
+                if ((session->render_stride_counter % session->render_stride) != 0) {
+                    av_packet_unref(pkt);
+                    continue;
+                }
+            }
+        }
+
         rc = avcodec_send_packet(session->codec, pkt);
         av_packet_unref(pkt);
         if (rc < 0) {
@@ -2997,6 +3013,8 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION;
     slot->anomaly_thermal_polarity = ANOMALY_THERMAL_WHITE_HOT;
     slot->anomaly_frame_counter = 0;
+    slot->render_stride = 1;
+    slot->render_stride_counter = 0;
 #if HAVE_FFMPEG
     slot->video_stream_index = -1;
 #if HAVE_SWSCALE
@@ -3273,6 +3291,33 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                 ((int) thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
                 ? ANOMALY_THERMAL_BLACK_HOT
                 : ANOMALY_THERMAL_WHITE_HOT;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+JNIEXPORT void JNICALL
+Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetRenderStride(
+        JNIEnv *env,
+        jobject thiz,
+        jlong session_id,
+        jint stride
+) {
+    (void) env;
+    (void) thiz;
+    pthread_mutex_lock(&g_lock);
+    ffmpeg_session_t *session = find_session_locked(session_id);
+    if (session != NULL && session->active) {
+        int new_stride = ((int) stride < 1) ? 1 : (int) stride;
+        if (new_stride != session->render_stride) {
+            ct_debug(TAG,
+                     "render stride id=%lld designator=%s: %d -> %d",
+                     (long long) session->session_id,
+                     session->designator,
+                     session->render_stride,
+                     new_stride);
+            session->render_stride = new_stride;
+            session->render_stride_counter = 0;
+        }
     }
     pthread_mutex_unlock(&g_lock);
 }

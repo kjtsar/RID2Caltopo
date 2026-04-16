@@ -12,11 +12,13 @@ public interface PeerCoordinator {
                             @NonNull CtDroneSpec droneSpec,
                             double distMeters,
                             long firstSeenTs);
-    void onWaypointReceived(@NonNull String remoteId,
+    void onWaypointReceived(@NonNull CtDroneSpec droneSpec,
                             double droneLat,
                             double droneLon,
                             double droneAlt,
-                            double distMeters);
+                            double distMeters,
+                            long timestampMsec,
+                            @Nullable CtDroneSpec.PositionTelemetry telemetry);
     void onDroneLost(@NonNull String remoteId);
     boolean isLocalOwner(@NonNull String remoteId);
     void updateCaltopoRtt(long rttMs);

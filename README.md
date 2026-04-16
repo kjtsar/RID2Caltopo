@@ -109,6 +109,10 @@ website if your team is using that tool to keep track of flights:
 }
 </code></blockquote>
 
+The tracker settings are optional. If `tracker_url_pfx` and `tracker_api_key`
+are configured, RID2Caltopo will use tracker-backed multi-zone coordination.
+If they are omitted, the app falls back to MQTT-based peer coordination.
+
 The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the Caltopo Teams
 APIs credentials.  These are the only required fields for this file.    The _map_id_, 
 _group_id_, and _use_direct_flag_ may all be configured separately in the apps Settings 
@@ -118,6 +122,10 @@ credentials.json files in your google drive account and sharing with team member
 You'll need to load the files once when you first start the app and the information is 
 encrypted and stored locally in your account afterwards.  In the app, select the hamburger
 menu and "Load Config File", then select the left-hand hamburger menu in the file selection
+
+These tracker settings also flow through shared org config and Mutual Aid profile
+payloads so multi-agency searches can coordinate against the same tracker service
+when the participating organizations choose to use it.
 option and scroll down to your Google Drive option to load the files securely from your
 Google Drive.
 

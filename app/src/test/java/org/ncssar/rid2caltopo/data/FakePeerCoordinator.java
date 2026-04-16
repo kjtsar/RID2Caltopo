@@ -69,14 +69,16 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     }
 
     @Override
-    public void onWaypointReceived(@NonNull String remoteId,
+    public void onWaypointReceived(@NonNull CtDroneSpec droneSpec,
                                    double droneLat,
                                    double droneLon,
                                    double droneAlt,
-                                   double distMeters) {
+                                   double distMeters,
+                                   long timestampMsec,
+                                   @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         record("onWaypointReceived",
                 String.format(Locale.US, "%s %.6f,%.6f d=%.1f",
-                        remoteId, droneLat, droneLon, distMeters));
+                        droneSpec.getRemoteId(), droneLat, droneLon, distMeters));
     }
 
     @Override

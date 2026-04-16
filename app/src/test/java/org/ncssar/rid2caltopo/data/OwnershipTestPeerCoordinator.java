@@ -103,11 +103,14 @@ public final class OwnershipTestPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
-    public void onWaypointReceived(@NonNull String remoteId,
+    public void onWaypointReceived(@NonNull CtDroneSpec droneSpec,
                                    double droneLat,
                                    double droneLon,
                                    double droneAlt,
-                                   double distMeters) {
+                                   double distMeters,
+                                   long timestampMsec,
+                                   @Nullable CtDroneSpec.PositionTelemetry telemetry) {
+        String remoteId = droneSpec.getRemoteId();
         long firstSeenTs = firstSeenTsFor(remoteId);
         observeRemoteId(remoteId, distMeters, firstSeenTs != 0L ? firstSeenTs : System.currentTimeMillis());
     }

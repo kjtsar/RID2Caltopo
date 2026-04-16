@@ -430,21 +430,52 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     public void publishDirect(double lat, double lng, long altitudeInMeters, long droneTimestampInMillisec) {
-        linePoints.add(new QueuedPoint(lat, lng, (double)altitudeInMeters, droneTimestampInMillisec, droneSpec.getLastPositionTelemetry()));
-        notifyLocalTrackPoint(lat, lng, altitudeInMeters, droneTimestampInMillisec);
-        CTDebug(TAG, String.format(Locale.US,
-                "publishDirect(%s/localOwner=%s/%s): waypoint queued. size=%d sent=%d confirmed=%d errors=%d",
-                droneSpec.trackLabel(), localOwner, mapStatus.toString(), linePoints.size(),
-                linePointsSentCount, linePointsConfirmedCount, consecutiveUpdateFails));
+        queueWaypoint(
+                lat,
+                lng,
+                altitudeInMeters,
+                droneTimestampInMillisec,
+                droneSpec.getLastPositionTelemetry(),
+                true
+        );
+    }
 
-        // Inform R2CMqttManager about the new observation (for score updates)
-        double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
-        runtime.getPeerCoordinator()
-                .onWaypointReceived(myRemoteId, lat, lng, (double)altitudeInMeters, distMeters);
+    @Override
+    public void onPeerWaypoint(
+            @NonNull String sourceZoneId,
+            double lat,
+            double lng,
+            double altitudeMeters,
+            long timestampMsec,
+            @Nullable CtDroneSpec.PositionTelemetry telemetry) {
+        CTDebug(TAG, String.format(Locale.US,
+                "onPeerWaypoint(%s <- %s): %.6f,%.6f alt=%.1f ts=%d",
+                droneSpec.trackLabel(), sourceZoneId, lat, lng, altitudeMeters, timestampMsec));
+        queueWaypoint(lat, lng, altitudeMeters, timestampMsec, telemetry, false);
+    }
+
+    private void queueWaypoint(
+            double lat,
+            double lng,
+            double altitudeMeters,
+            long timestampMsec,
+            @Nullable CtDroneSpec.PositionTelemetry telemetry,
+            boolean notifyCoordinator) {
+        linePoints.add(new QueuedPoint(lat, lng, altitudeMeters, timestampMsec, telemetry));
+        notifyLocalTrackPoint(lat, lng, altitudeMeters, timestampMsec);
+        CTDebug(TAG, String.format(Locale.US,
+                "queueWaypoint(%s/localOwner=%s/%s): waypoint queued. size=%d sent=%d confirmed=%d errors=%d notify=%s",
+                droneSpec.trackLabel(), localOwner, mapStatus.toString(), linePoints.size(),
+                linePointsSentCount, linePointsConfirmedCount, consecutiveUpdateFails, notifyCoordinator));
+
+        if (notifyCoordinator) {
+            double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
+            runtime.getPeerCoordinator()
+                    .onWaypointReceived(droneSpec, lat, lng, altitudeMeters, distMeters, timestampMsec, telemetry);
+        }
 
         if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
         if (!localOwner) {
-            // Not the owner — R2CMqttManager will call setLocalOwner(true) if we should own it.
             return;
         }
         if (null != liveTrackId) forwardNextWaypoints(null);

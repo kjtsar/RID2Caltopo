@@ -1023,8 +1023,71 @@ public class R2CMqttManager {
     }
 
     @NonNull
+    private static final PeerCoordinator DEFAULT_COORDINATOR = new PeerCoordinator() {
+        @Override
+        public void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri) {
+            R2CMqttManager.init(mapId, guid, name, brokerUri);
+        }
+
+        @Override
+        public void stop() {
+            R2CMqttManager.shutdown();
+        }
+
+        @Override
+        public void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
+                                       @NonNull CtDroneSpec droneSpec,
+                                       double distMeters,
+                                       long firstSeenTs) {
+            R2CMqttManager.onLiveTrackCreated(liveTrack, droneSpec, distMeters, firstSeenTs);
+        }
+
+        @Override
+        public void onWaypointReceived(@NonNull CtDroneSpec droneSpec,
+                                       double droneLat,
+                                       double droneLon,
+                                       double droneAlt,
+                                       double distMeters,
+                                       long timestampMsec,
+                                       @Nullable CtDroneSpec.PositionTelemetry telemetry) {
+            R2CMqttManager.onWaypointReceived(droneSpec.getRemoteId(), droneLat, droneLon, droneAlt, distMeters);
+        }
+
+        @Override
+        public void onDroneLost(@NonNull String remoteId) {
+            R2CMqttManager.onDroneLost(remoteId);
+        }
+
+        @Override
+        public boolean isLocalOwner(@NonNull String remoteId) {
+            return R2CMqttManager.isLocalOwner(remoteId);
+        }
+
+        @Override
+        public void updateCaltopoRtt(long rttMs) {
+            R2CMqttManager.updateCaltopoRtt(rttMs);
+        }
+
+        @Override
+        public void updateMyPosition(double lat, double lon) {
+            R2CMqttManager.updateMyPosition(lat, lon);
+        }
+
+        @Override
+        public void setPeerListChangedListener(@Nullable PeerListChangedListener listener) {
+            R2CMqttManager.SetPeerListChangedListener(listener);
+        }
+
+        @NonNull
+        @Override
+        public List<PeerState> getPeerList() {
+            return R2CMqttManager.GetPeerList();
+        }
+    };
+
+    @NonNull
     public static PeerCoordinator GetDefaultCoordinator() {
-        return DefaultPeerCoordinator.getInstance();
+        return DEFAULT_COORDINATOR;
     }
 
     @NonNull

@@ -56,14 +56,18 @@ final class OkHttpTrackerCoordinationTransport implements TrackerCoordinationTra
             public void onFailure(@NonNull WebSocket webSocket, @NonNull Throwable t, @Nullable Response response) {
                 connected = false;
                 Callback cb = callback;
+                int responseCode = 0;
+                String responseMessage = null;
                 if (response != null) {
+                    responseCode = response.code();
+                    responseMessage = response.message();
                     CaltopoClient.CTWarn(
                             "TrackerWsTransport",
                             "websocket failure response: code=" + response.code() +
                                     " message='" + response.message() + "'"
                     );
                 }
-                if (cb != null) cb.onFailure(t);
+                if (cb != null) cb.onFailure(t, responseCode, responseMessage);
             }
         });
     }

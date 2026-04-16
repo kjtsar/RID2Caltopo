@@ -603,7 +603,17 @@ class StreamsViewModel(
             liveStreams = streamInfoByDesignator,
             focusedDesignator = _focusedPath.value,
             ffmpegAvailable = ffmpegProbeService != null,
+            displayedTileCount = displayedTileCountForCurrentLayout(),
         )
+    }
+
+    private fun displayedTileCountForCurrentLayout(): Int {
+        if (_layoutMode.value == StreamsLayoutMode.Map) return 0
+        val visibleLiveCount = streamInfoByDesignator.values.count { info ->
+            info.state == StreamState.LIVE && isStreamVisible(info)
+        }
+        if (visibleLiveCount <= 0) return 0
+        return if (_focusedPath.value != null) 1 else visibleLiveCount
     }
 
     private fun syncStreamSessions(streamsMap: Map<String, StreamInfo>) {

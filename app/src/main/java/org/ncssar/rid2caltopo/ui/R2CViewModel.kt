@@ -302,7 +302,14 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             return
         }
         confirmedRemoteIds.add(remoteId)
-        val mappedId = CtDroneSpec.BuildMappedId(callsign, droneDescription, remoteId)
+        val existingMappedId = CaltopoClient.GetDroneSpec(remoteId)?.mappedId?.trim().orEmpty()
+        val mappedId = if (existingMappedId.isNotEmpty() && existingMappedId != remoteId) {
+            // Preserve an explicit stream-to-drone mapping made via long-press instead of
+            // regenerating the mappedId from the confirmation fields.
+            existingMappedId
+        } else {
+            CtDroneSpec.BuildMappedId(callsign, droneDescription, remoteId)
+        }
         CaltopoClient.SaveDroneSpecConfirmation(remoteId, organization, droneDescription, mappedId)
         _pendingDroneConfirmation.value = null
     }

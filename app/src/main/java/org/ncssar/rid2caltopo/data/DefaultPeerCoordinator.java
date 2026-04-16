@@ -3,6 +3,8 @@ package org.ncssar.rid2caltopo.data;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
 
 /**
@@ -14,7 +16,36 @@ import java.util.List;
  */
 public final class DefaultPeerCoordinator implements PeerCoordinator {
     private static final DefaultPeerCoordinator INSTANCE = new DefaultPeerCoordinator();
-    @NonNull private volatile PeerCoordinator activeCoordinator = R2CMqttManager.GetDefaultCoordinator();
+    @Nullable private static volatile PeerCoordinator mqttCoordinatorOverrideForTesting;
+
+    private static final class ActiveTrackRegistration {
+        @NonNull final LiveTrackOwnerDelegate liveTrack;
+        @NonNull final CtDroneSpec droneSpec;
+        final double distMeters;
+        final long firstSeenTs;
+
+        ActiveTrackRegistration(@NonNull LiveTrackOwnerDelegate liveTrack,
+                                @NonNull CtDroneSpec droneSpec,
+                                double distMeters,
+                                long firstSeenTs) {
+            this.liveTrack = liveTrack;
+            this.droneSpec = droneSpec;
+            this.distMeters = distMeters;
+            this.firstSeenTs = firstSeenTs;
+        }
+    }
+
+    @NonNull private final Map<String, ActiveTrackRegistration> activeTracks = new ConcurrentHashMap<>();
+    @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
+    @Nullable private volatile String startedMapId;
+    @Nullable private volatile String startedGuid;
+    @Nullable private volatile String startedName;
+    @Nullable private volatile String startedBrokerUri;
+    private volatile boolean trackerSelected;
+    private volatile double myLat;
+    private volatile double myLon;
+    private volatile long myCaltopoRttMs = 2_000L;
+    @NonNull private volatile PeerCoordinator activeCoordinator = getMqttCoordinator();
 
     private DefaultPeerCoordinator() { }
 
@@ -25,27 +56,48 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri) {
-        boolean trackerConfigured = shouldUseTrackerCoordinator();
-        activeCoordinator = trackerConfigured
+        startedMapId = mapId;
+        startedGuid = guid;
+        startedName = name;
+        startedBrokerUri = brokerUri;
+        trackerSelected = shouldUseTrackerCoordinator();
+        activeCoordinator = trackerSelected
                 ? TrackerPeerCoordinator.getInstance()
-                : R2CMqttManager.GetDefaultCoordinator();
+                : getMqttCoordinator();
+        if (trackerSelected) {
+            TrackerPeerCoordinator.getInstance().setHardFailureListener(this::handleTrackerHardFailure);
+        }
         CaltopoClient.CTInfo(
                 "DefaultPeerCoord",
                 String.format(
                         "start(): using %s coordination for mapId='%s' guid='%s' trackerConfigured=%s brokerUriPresent=%s",
-                        trackerConfigured ? "tracker" : "mqtt",
+                        trackerSelected ? "tracker" : "mqtt",
                         mapId,
                         guid,
-                        trackerConfigured,
+                        trackerSelected,
                         brokerUri != null && !brokerUri.isEmpty()
                 )
         );
+        if (peerListChangedListener != null) {
+            activeCoordinator.setPeerListChangedListener(peerListChangedListener);
+        }
         activeCoordinator.start(mapId, guid, name, brokerUri);
+        activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
+        activeCoordinator.updateMyPosition(myLat, myLon);
     }
 
     @Override
     public void stop() {
+        if (trackerSelected) {
+            TrackerPeerCoordinator.getInstance().setHardFailureListener(null);
+        }
         activeCoordinator.stop();
+        trackerSelected = false;
+        startedMapId = null;
+        startedGuid = null;
+        startedName = null;
+        startedBrokerUri = null;
+        activeTracks.clear();
     }
 
     @Override
@@ -53,6 +105,8 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                                    @NonNull CtDroneSpec droneSpec,
                                    double distMeters,
                                    long firstSeenTs) {
+        activeTracks.put(droneSpec.getRemoteId(),
+                new ActiveTrackRegistration(liveTrack, droneSpec, distMeters, firstSeenTs));
         activeCoordinator.onLiveTrackCreated(liveTrack, droneSpec, distMeters, firstSeenTs);
     }
 
@@ -77,6 +131,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void onDroneLost(@NonNull String remoteId) {
+        activeTracks.remove(remoteId);
         activeCoordinator.onDroneLost(remoteId);
     }
 
@@ -87,16 +142,20 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void updateCaltopoRtt(long rttMs) {
+        myCaltopoRttMs = rttMs;
         activeCoordinator.updateCaltopoRtt(rttMs);
     }
 
     @Override
     public void updateMyPosition(double lat, double lon) {
+        myLat = lat;
+        myLon = lon;
         activeCoordinator.updateMyPosition(lat, lon);
     }
 
     @Override
     public void setPeerListChangedListener(@Nullable R2CMqttManager.PeerListChangedListener listener) {
+        peerListChangedListener = listener;
         activeCoordinator.setPeerListChangedListener(listener);
     }
 
@@ -109,5 +168,51 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     private boolean shouldUseTrackerCoordinator() {
         return !CaltopoClient.GetTrackerApiKey().isEmpty()
                 && !CaltopoClient.GetTrackerUrlPfx().isEmpty();
+    }
+
+    private void handleTrackerHardFailure(int responseCode, @Nullable String responseMessage) {
+        if (!trackerSelected) return;
+        CaltopoClient.CTWarn(
+                "DefaultPeerCoord",
+                String.format("Tracker coordination hard-failed with code=%d message='%s'; falling back to MQTT.",
+                        responseCode, responseMessage == null ? "" : responseMessage)
+        );
+        switchToCoordinator(getMqttCoordinator(), false);
+    }
+
+    private synchronized void switchToCoordinator(@NonNull PeerCoordinator coordinator, boolean tracker) {
+        if (startedMapId == null || startedGuid == null || startedName == null) return;
+        if (activeCoordinator == coordinator && trackerSelected == tracker) return;
+        if (trackerSelected) {
+            TrackerPeerCoordinator.getInstance().setHardFailureListener(null);
+        }
+        activeCoordinator.stop();
+        activeCoordinator = coordinator;
+        trackerSelected = tracker;
+        if (peerListChangedListener != null) {
+            activeCoordinator.setPeerListChangedListener(peerListChangedListener);
+        }
+        activeCoordinator.start(startedMapId, startedGuid, startedName, startedBrokerUri);
+        activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
+        activeCoordinator.updateMyPosition(myLat, myLon);
+        for (ActiveTrackRegistration registration : activeTracks.values()) {
+            activeCoordinator.onLiveTrackCreated(
+                    registration.liveTrack,
+                    registration.droneSpec,
+                    registration.distMeters,
+                    registration.firstSeenTs
+            );
+        }
+    }
+
+    @NonNull
+    private static PeerCoordinator getMqttCoordinator() {
+        return mqttCoordinatorOverrideForTesting != null
+                ? mqttCoordinatorOverrideForTesting
+                : R2CMqttManager.GetDefaultCoordinator();
+    }
+
+    static void setMqttCoordinatorOverrideForTesting(@Nullable PeerCoordinator coordinator) {
+        mqttCoordinatorOverrideForTesting = coordinator;
     }
 }

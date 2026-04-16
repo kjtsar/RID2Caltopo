@@ -31,6 +31,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static final String TAG = "TrackerPeerCoord";
     private static final TrackerPeerCoordinator INSTANCE = new TrackerPeerCoordinator();
+    interface HardFailureListener {
+        void onHardFailure(int responseCode, @Nullable String responseMessage);
+    }
 
     private static final long HEARTBEAT_INTERVAL_MS = 15_000L;
     private static final long CONNECT_GRACE_MS = 12_000L;
@@ -69,6 +72,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     @Nullable private volatile TrackerCoordinationTransport transport;
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
+    @Nullable private volatile HardFailureListener hardFailureListener;
 
     @Nullable private volatile String mapId;
     @Nullable private volatile String myGuid;
@@ -79,6 +83,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private volatile double myLon;
     private volatile long myCaltopoRttMs = 2_000L;
     private volatile boolean started;
+    private volatile boolean hardFailureNotified;
 
     private TrackerPeerCoordinator() {
     }
@@ -113,6 +118,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.trackerApiKey = trackerApiKey;
         this.trackerWsUrl = buildTrackerWebSocketUrl(trackerUrlPrefix);
         this.started = true;
+        this.hardFailureNotified = false;
         CTInfo(TAG, String.format(Locale.US,
                 "start(): wsUrl='%s' token=%s",
                 this.trackerWsUrl,
@@ -142,13 +148,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             }
 
             @Override
-            public void onFailure(@Nullable Throwable throwable) {
+            public void onFailure(@Nullable Throwable throwable, int responseCode, @Nullable String responseMessage) {
                 if (throwable != null) {
                     CTWarn(TAG, "tracker websocket failure: " + throwable.getMessage());
                 } else {
                     CTWarn(TAG, "tracker websocket failure: unknown");
                 }
                 heartbeatTimer.stop();
+                notifyHardFailureIfNeeded(responseCode, responseMessage);
                 scheduleReconnect();
             }
         });
@@ -176,6 +183,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             activeTransport.disconnect();
         }
         started = false;
+        hardFailureNotified = false;
     }
 
     @Override
@@ -309,12 +317,23 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             }
 
             @Override
-            public void onFailure(@Nullable Throwable throwable) {
+            public void onFailure(@Nullable Throwable throwable, int responseCode, @Nullable String responseMessage) {
                 heartbeatTimer.stop();
+                notifyHardFailureIfNeeded(responseCode, responseMessage);
                 scheduleReconnect();
             }
         });
         activeTransport.connect(trackerWsUrl, trackerApiKey);
+    }
+
+    private void notifyHardFailureIfNeeded(int responseCode, @Nullable String responseMessage) {
+        if ((responseCode == 401 || responseCode == 403) && !hardFailureNotified) {
+            hardFailureNotified = true;
+            HardFailureListener listener = hardFailureListener;
+            if (listener != null) {
+                listener.onHardFailure(responseCode, responseMessage);
+            }
+        }
     }
 
     private void scheduleFallbackOwnership(@NonNull PendingDrone pending) {
@@ -597,6 +616,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         trackerApiKeyOverrideForTesting = trackerApiKey;
     }
 
+    void setHardFailureListenerForTesting(@Nullable HardFailureListener listener) {
+        hardFailureListener = listener;
+    }
+
+    void setHardFailureListener(@Nullable HardFailureListener listener) {
+        hardFailureListener = listener;
+    }
+
     static void resetForTesting() {
         INSTANCE.stop();
         INSTANCE.mapId = null;
@@ -608,6 +635,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         INSTANCE.myLon = 0.0;
         INSTANCE.myCaltopoRttMs = 2_000L;
         INSTANCE.peerListChangedListener = null;
+        INSTANCE.hardFailureListener = null;
+        INSTANCE.hardFailureNotified = false;
         transportFactory = OkHttpTrackerCoordinationTransport::new;
         trackerUrlPrefixOverrideForTesting = null;
         trackerApiKeyOverrideForTesting = null;

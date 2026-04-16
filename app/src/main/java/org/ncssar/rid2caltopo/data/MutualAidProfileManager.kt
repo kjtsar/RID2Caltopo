@@ -122,7 +122,6 @@ object MutualAidProfileManager {
                 return false to "Mutual aid profile is missing a profile ID."
             }
             CaltopoClient.UpsertCaltopoProfile(profile, true, true)
-            applySharedSettings(profileJson)
             true to "Mutual aid access installed for ${profile.displayName}."
         } catch (e: Exception) {
             CaltopoClient.CTWarn(TAG, "applyBundle() failed.", e)
@@ -145,7 +144,6 @@ object MutualAidProfileManager {
             .put("op_period", profile.opPeriod)
             .put("tracker_api_key", profile.trackerApiKey)
             .put("tracker_url_prefix", profile.trackerUrlPfx)
-            .put("use_peers", CaltopoClient.GetUsePeersFlag())
             .put("auto_connect", profile.autoConnect)
             .put("expires_at_epoch_ms", profile.expiresAtEpochMs)
             .put("quiet_remove_on_expiry", profile.quietRemoveOnExpiry)
@@ -189,7 +187,6 @@ object MutualAidProfileManager {
                 .put("op_period", profile.opPeriod)
                 .put("tracker_api_key", profile.trackerApiKey)
                 .put("tracker_url_prefix", profile.trackerUrlPfx)
-                .put("use_peers", CaltopoClient.GetUsePeersFlag())
                 .put("auto_connect", profile.autoConnect)
                 .put("expires_at_epoch_ms", profile.expiresAtEpochMs)
                 .put("quiet_remove_on_expiry", profile.quietRemoveOnExpiry)
@@ -212,7 +209,6 @@ object MutualAidProfileManager {
             val profileJson = JSONObject(MutualAidToken.decryptPayload(encryptedPayload))
             val profile = parseProfile(profileJson)
             CaltopoClient.UpsertCaltopoProfile(profile, true, true)
-            applySharedSettings(profileJson)
             true to "Mutual aid profile installed."
         } catch (e: Exception) {
             CaltopoClient.CTWarn(TAG, "installEncryptedProfilePayload() failed.", e)
@@ -296,7 +292,6 @@ object MutualAidProfileManager {
             .put("op_period", profile.opPeriod)
             .put("tracker_api_key", profile.trackerApiKey)
             .put("tracker_url_prefix", profile.trackerUrlPfx)
-            .put("use_peers", CaltopoClient.GetUsePeersFlag())
             .put("auto_connect", profile.autoConnect)
             .put("expires_at_epoch_ms", profile.expiresAtEpochMs)
             .put("quiet_remove_on_expiry", profile.quietRemoveOnExpiry)
@@ -366,12 +361,6 @@ object MutualAidProfileManager {
             importedAt,
             dedupeKey
         )
-    }
-
-    private fun applySharedSettings(profileJson: JSONObject) {
-        if (profileJson.has("use_peers")) {
-            CaltopoClient.SetUsePeers(profileJson.optBoolean("use_peers", true))
-        }
     }
 
     private fun sanitizeBundleName(raw: String): String {

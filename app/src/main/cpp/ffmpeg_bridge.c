@@ -139,6 +139,12 @@
 #define RENDER_NO_SURFACE_LOG_INTERVAL_MS 2000
 #define IO_STARTUP_INTERRUPT_MS 4000
 #define ANOMALY_MAX_BOXES_PER_FRAME 3
+// Set to 1 to enable telemetry extraction from packet side-data and frame
+// metadata (drone flight data embedded in the stream).  This is expensive on
+// CPU-constrained devices and has not yet yielded actionable insights, so it
+// is disabled by default.  probe_event calls for frame_decoded /
+// decoded_frame_gap are NOT gated by this flag — they remain active.
+#define FFMPEG_TELEMETRY_ENABLED 0
 
 #if HAVE_FFMPEG && HAVE_SWSCALE
 typedef struct {
@@ -188,6 +194,12 @@ typedef struct {
     // Default: 1 (no skip).
     int render_stride;
     int64_t render_stride_counter; // non-keyframe packet counter; reset on stride change
+    // Surface-absent decode gate: set true when no render surface is attached.
+    // The decode thread skips avcodec_send_packet while this flag is set, keeping
+    // the RTSP connection alive for instant resume.  The render queue is flushed
+    // immediately on detach via render_queue_flush_requested.
+    volatile bool surface_paused;              // true until render surface is attached
+    volatile bool render_queue_flush_requested; // render thread flushes on seeing this; clears after flush
     int64_t last_render_post_at_ms;
     int64_t last_no_surface_log_at_ms;
     int64_t source_render_interval_ms;
@@ -2036,6 +2048,13 @@ static void *render_thread_main(void *arg) {
         bool should_stop = false;
 
         pthread_mutex_lock(&session->render_lock);
+        // Surface-detach flush: discard all queued frames when the surface has gone
+        // away.  This prevents unbounded render-queue growth during the interval
+        // between detach and the next surface attachment.
+        if (session->render_queue_flush_requested) {
+            clear_render_queue(session);
+            session->render_queue_flush_requested = false;
+        }
         if (session->render_queue_depth > 0 &&
             dequeue_due_render_frame_locked(session,
                                             &to_render,
@@ -2881,6 +2900,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         }
         last_video_packet_at_ms = now_ms;
 
+#if FFMPEG_TELEMETRY_ENABLED
         telemetry_values_t packet_tv = telemetry_values_init();
 #if defined(AV_PKT_DATA_STRINGS_METADATA)
         size_t sd_size = 0;
@@ -2899,7 +2919,8 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
             av_dict_free(&packet_dict);
         }
-#endif
+#endif  // AV_PKT_DATA_STRINGS_METADATA
+#endif  // FFMPEG_TELEMETRY_ENABLED
 
         // Manual render stride (optional, set via nativeSetRenderStride):
         // When render_stride > 1, every N-1 out of N non-keyframe packets are
@@ -2914,6 +2935,15 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     continue;
                 }
             }
+        }
+
+        // Surface-absent gate: discard packets without decoding when no render
+        // surface is present.  The RTSP connection is maintained so that when the
+        // surface returns (e.g. after a dialog dismissal) decode resumes from the
+        // live edge with zero latency from accumulated backlog.
+        if (session->is_render && session->surface_paused) {
+            av_packet_unref(pkt);
+            continue;
         }
 
         rc = avcodec_send_packet(session->codec, pkt);
@@ -2932,12 +2962,14 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
 
             int64_t pts_us = pts_to_us(frame->best_effort_timestamp, session->video_time_base);
+#if FFMPEG_TELEMETRY_ENABLED
             log_dict_keys_once(
                     session,
                     frame->metadata,
                     "frame-metadata",
                     &session->frame_metadata_keys_logged);
             telemetry_values_t frame_tv = collect_dict_telemetry_values(frame->metadata, pts_us);
+#endif  // FFMPEG_TELEMETRY_ENABLED
             int64_t decoded_at_ms = monotonic_ms();
             if (last_decoded_frame_at_ms != 0) {
                 int64_t frame_gap_ms = decoded_at_ms - last_decoded_frame_at_ms;
@@ -2955,7 +2987,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             last_decoded_frame_at_ms = decoded_at_ms;
             dispatch_probe_event(session->designator, "frame_decoded", session->session_id, pts_us,
                                  NAN, NAN, NAN, NAN, NAN, NAN);
+#if FFMPEG_TELEMETRY_ENABLED
             emit_telemetry_values(session, "frame-metadata", 0.60, &frame_tv);
+#endif  // FFMPEG_TELEMETRY_ENABLED
 
 #if HAVE_SWSCALE
             if (session->is_render) {
@@ -3085,6 +3119,10 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_frame_counter = 0;
     slot->render_stride = 1;
     slot->render_stride_counter = 0;
+    // Render sessions start paused: no frames decoded until the TextureView surface
+    // is attached.  Non-render sessions (probe/audio) are never paused this way.
+    slot->surface_paused = slot->is_render;
+    slot->render_queue_flush_requested = false;
 #if HAVE_FFMPEG
     slot->video_stream_index = -1;
 #if HAVE_SWSCALE
@@ -3302,6 +3340,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeAttachSurface(
 
     session->surface_global_ref = (*env)->NewGlobalRef(env, surface);
     session->window = window;
+    session->surface_paused = false;  // surface ready — resume decode
     pthread_mutex_unlock(&g_lock);
 
     dispatch_probe_event(session->designator, "surface_attached", session->session_id, 0,
@@ -3328,6 +3367,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeDetachSurface(
             ANativeWindow_release(session->window);
             session->window = NULL;
         }
+        // Pause decode and request a render-queue flush.  The decode thread will
+        // drop incoming packets until the surface is reattached; the render thread
+        // will drain and discard any already-queued frames on its next iteration.
+        session->surface_paused = true;
+        session->render_queue_flush_requested = true;
         dispatch_probe_event(session->designator, "surface_detached", session->session_id, 0,
                              NAN, NAN, NAN, NAN, NAN, NAN);
     }

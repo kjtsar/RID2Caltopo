@@ -25,9 +25,21 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri) {
-        activeCoordinator = shouldUseTrackerCoordinator()
+        boolean trackerConfigured = shouldUseTrackerCoordinator();
+        activeCoordinator = trackerConfigured
                 ? TrackerPeerCoordinator.getInstance()
                 : R2CMqttManager.GetDefaultCoordinator();
+        CaltopoClient.CTInfo(
+                "DefaultPeerCoord",
+                String.format(
+                        "start(): using %s coordination for mapId='%s' guid='%s' trackerConfigured=%s brokerUriPresent=%s",
+                        trackerConfigured ? "tracker" : "mqtt",
+                        mapId,
+                        guid,
+                        trackerConfigured,
+                        brokerUri != null && !brokerUri.isEmpty()
+                )
+        );
         activeCoordinator.start(mapId, guid, name, brokerUri);
     }
 

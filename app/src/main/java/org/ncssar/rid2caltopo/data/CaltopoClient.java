@@ -1497,7 +1497,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String incident = json.optString("incident");
         String opPeriod = json.optString("op_period");
         String trackerApiKey = json.optString("tracker_api_key");
-        String trackerUrlPfx = json.optString("tracker_url_pfx");
+        String trackerUrlPfx = TrackerConfigCompat.readTrackerUrlPrefix(json);
         boolean hasUsePeers = json.has("use_peers");
         boolean usePeers = json.optBoolean("use_peers", true);
         boolean predictiveHeadEnabled = json.optBoolean("predictive_head_enabled", true);
@@ -1739,8 +1739,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 credentials.put("op_period", ccs.opPeriod);
             if (ccs.trackerApiKey != null && !ccs.trackerApiKey.isEmpty())
                 credentials.put("tracker_api_key", ccs.trackerApiKey);
-            if (ccs.trackerUrlPfx != null && !ccs.trackerUrlPfx.isEmpty())
+            if (ccs.trackerUrlPfx != null && !ccs.trackerUrlPfx.isEmpty()) {
                 credentials.put("tracker_url_pfx", ccs.trackerUrlPfx);
+                credentials.put("tracker_url_prefix", ccs.trackerUrlPfx);
+            }
             credentials.put("use_peers", ccs.usePeersFlag);
             credentials.put("predictive_head_enabled",           ccs.predictiveHeadEnabled);
             credentials.put("proximity_alert_spacing_feet",      ccs.proximityAlertSpacingFeet);

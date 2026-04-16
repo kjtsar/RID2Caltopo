@@ -722,18 +722,23 @@ public class CaltopoMap {
         }
         if (mapStatus == MapStatusListener.mapStatus.up) {
             if (MapNode != null) {
-                // Start MQTT-based peer coordination for this map.
-                // Credentials are derived automatically from the mapId — no extra config needed.
-                // The developer-only "Disable MQTT" toggle in Settings is the only gate;
+                // Start peer coordination for this map.
+                // The runtime chooses tracker-backed coordination when configured,
+                // otherwise it falls back to MQTT.
+                // The developer-only peer-coordination toggle in Settings is the only gate;
                 // ownership arbitration is required whenever a map is connected.
                 if (CaltopoClient.GetUsePeersFlag()) {
+                    CTInfo(TAG, String.format(Locale.US,
+                            "SetMapStatus(up): starting peer coordination. trackerConfigured=%s",
+                            !CaltopoClient.GetTrackerApiKey().isEmpty() &&
+                                    !CaltopoClient.GetTrackerUrlPfx().isEmpty()));
                     getCurrentRuntime().getPeerCoordinator().start(
                             MapNode.getId(), GetMyUUID(), R2CActivity.MyDeviceName, null);
                     getCurrentRuntime().getPeerCoordinator().updateMyPosition(
                             MyLocation != null ? MyLocation.getLatitude()  : 0,
                             MyLocation != null ? MyLocation.getLongitude() : 0);
                 } else {
-                    CTWarn(TAG, "SetMapStatus(up): MQTT peer coordination disabled by developer override.");
+                    CTWarn(TAG, "SetMapStatus(up): peer coordination disabled by developer override.");
                 }
             }
             while (!RogueFeaturesPendingDeletes.isEmpty()) {

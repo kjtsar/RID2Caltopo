@@ -1221,7 +1221,7 @@ fun MainScreen(
                     HorizontalDivider()
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "MQTT peer ownership arbitration runs automatically whenever a map is " +
+                        text = "Peer coordination runs automatically whenever a map is " +
                             "connected. Disable only for isolated testing — dual-write to CalTopo " +
                             "will occur if multiple instances are running.",
                         style = MaterialTheme.typography.bodySmall,
@@ -1229,7 +1229,7 @@ fun MainScreen(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                        Text("Disable MQTT", modifier = Modifier.weight(1f))
+                        Text("Disable Peer Coordination", modifier = Modifier.weight(1f))
                         Switch(
                             checked = mqttDisabled,
                             onCheckedChange = { disabled ->

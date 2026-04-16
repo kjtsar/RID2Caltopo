@@ -104,14 +104,15 @@ website if your team is using that tool to keep track of flights:
     "use_direct_flag" : true,
     "group_id" : "NCSSAR",
     "track_folder" : "DroneTracks",
-    "tracker_url_pfx" : "https://tracker.kjt.us",
+    "tracker_url_prefix" : "https://tracker.kjt.us",
     "tracker_api_key" : "SecretTokenToAuthenticateSubmission"
 }
 </code></blockquote>
 
-The tracker settings are optional. If `tracker_url_pfx` and `tracker_api_key`
+The tracker settings are optional. If `tracker_url_prefix` and `tracker_api_key`
 are configured, RID2Caltopo will use tracker-backed multi-zone coordination.
-If they are omitted, the app falls back to MQTT-based peer coordination.
+If they are omitted, the app falls back to MQTT-based peer coordination. The
+legacy `tracker_url_pfx` key is still accepted for backward compatibility.
 
 The _team_id_, _credential_id_, and _credential_secret_ tuple comprise the Caltopo Teams
 APIs credentials.  These are the only required fields for this file.    The _map_id_, 
@@ -161,33 +162,23 @@ peers.  Networks can be cellular data or wireless.  In the Sierras, we may end u
 battery powered Starlink Minis if we can't locate our R2C instance high enough to get cell
 coverage.
 
-You’ll most likely need to run ZeroTier on all your R2C devices if they aren’t already connected to 
-the same subnet. ZeroTier provides the ability for networked devices to rendezvous across the
-network boundary's created by network access providers and cellphone carriers.  To make this work,
-log in to [ZeroTier.com](https://www.ZeroTier.com) and create a free account, then create a network 
-and copy the 16 digit network ID. Then download the free ZeroTier app from the PlayStore and 
-connect to the network ID copied above.  If you mark that ZeroTier network as a 'public' network, 
-then a bad actor could theoretically guess or otherwise learn about your network ID and then have 
-direct network access to your devices, so consider carefully.  The default is to configure a 
-private network, where you'll need to use the ZeroTier web interface to approve each new device that 
-connects.  After jumping thru those hoops once, you just need to make sure that the ZeroTier app is 
-up and running and connected to your ZeroTier network _prior_ to starting the RID2Caltopo app.  
-
 When RID2Caltopo connects to a map, it creates a marker at the device's current location in the 
-"track_folder" specified above.  The marker contains a private field listing all the network 
-addresses of the corresponding device.  The app then looks for peer Markers in the same folder and 
-extracts their addresses from the marker and attempts to connect to those peers via secure 
-websocket connections.  Once peers are connected, they establish 'ownership' of drones when they 
-first launch.  In cases where R2C zones have overlap in their detection coverage, the proximity of 
-the drone's location to each R2C instance will be the primary factor deciding which instance becomes
-the owner.  
+"track_folder" specified above.
 
-After receiving ownership of a drone, the app will write all captured waypoints into the Caltopo 
-map.  R2C peers that detect any waypoints associated with a drone owned by a peer will forward 
-copies of those waypoints to the owning R2C instance over the websocket connection.  This allows
-the owning R2C instance to compare the peer provided waypoints to those it's detected and decide
-whether or not to add any missing waypoints to the drone's track.  This mechanism extends the 
-detection range of a drone to multiple R2C Zones.
+If `tracker_api_key` and `tracker_url_prefix` are configured, RID2Caltopo will prefer
+tracker-backed peer coordination. Each R2C zone opens an outbound connection to the
+organization's `r2c-tracker` service, reports its presence and approximate location, and
+submits first-sighting and waypoint candidate updates for each observed Remote ID. The
+tracker service acts as the rendezvous point and ownership arbiter: it assigns one zone as
+the owner for each drone stream and relays candidate sightings to that owner. The owner is
+then responsible for suppressing duplicates, enforcing strictly increasing waypoint
+timestamps, and writing the accepted track into the CalTopo map.
+
+If tracker coordination is not configured, RID2Caltopo falls back to MQTT-based peer
+coordination. That path uses the map-scoped MQTT topic space to negotiate ownership and
+share peer state. If neither tracker nor MQTT coordination is available, or if peer
+coordination is explicitly disabled in the app's testing tools, each R2C zone writes its
+own track independently and duplicate tracks may appear in CalTopo.
 
 ## R2C Site selection
 Your team's Remote Pilot In Command 

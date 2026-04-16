@@ -170,6 +170,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         CTDebug(TAG, String.format(Locale.US,
                 "setLocalOwner(%s): %s → %s", droneSpec.trackLabel(), localOwner, isOwner));
         boolean wasOwner = localOwner;
+        if (wasOwner && !isOwner) {
+            retireLocalPublication("ownership lost");
+        }
         localOwner = isOwner;
         if (isOwner && !wasOwner && mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
             startNewTrack();
@@ -379,6 +382,32 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             } catch (Exception e) {
                 CTError(TAG, "startNewTrack(): startLiveTrack() raised: ", e);
             }
+        }
+    }
+
+    private void retireLocalPublication(@NonNull String reason) {
+        CTDebug(TAG, String.format(Locale.US,
+                "retireLocalPublication(%s): %s", droneSpec.trackLabel(), reason));
+        try {
+            if (liveTrackId != null) {
+                CaltopoMap.RemoveLiveTrack(liveTrackId);
+            }
+            if (startLiveTrackOp != null && startLiveTrackOp.isDone() && startLiveTrackOp.success()) {
+                CaltopoMap.ArchiveFeature(
+                        startLiveTrackOp.responseJson,
+                        "LiveTrack",
+                        System.currentTimeMillis(),
+                        0
+                );
+            }
+        } catch (Exception e) {
+            CTError(TAG, "retireLocalPublication() raised.", e);
+        } finally {
+            liveTrackId = null;
+            startLiveTrackOp = null;
+            linePoints.clear();
+            linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
+            active = true;
         }
     }
 

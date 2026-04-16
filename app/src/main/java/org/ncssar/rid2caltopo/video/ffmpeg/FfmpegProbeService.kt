@@ -109,6 +109,7 @@ private data class ManagedRenderSession(
     var lastObservedRenderedFrameCount: Long = 0L,
     var idlePollCount: Int = 0,
     var lastStartupRecoveryDeferredLogAtMs: Long = 0L,
+    var renderStride: Int = 1,
 )
 
 class FfmpegProbeService {
@@ -122,6 +123,12 @@ class FfmpegProbeService {
     private val startupNoFrameDeferralLogMs = 5_000L
     private val noFrameCheckMs = 1_000L
     private val renderedNoProgressRecoveryPolls = 8
+    private val renderStrideMildLagMs = 1_500L
+    private val renderStrideSevereLagMs = 5_000L
+    private val renderStrideRecoverLagMs = 600L
+    private val renderStrideMildBacklogFrames = 120L
+    private val renderStrideSevereBacklogFrames = 300L
+    private val renderStrideRecoverBacklogFrames = 45L
     private val renderSessions = mutableMapOf<String, Long>()
     private val lastFrameAtMs = mutableMapOf<String, Long>()
     private val sourcePathByDesignator = mutableMapOf<String, String>()
@@ -814,6 +821,7 @@ class FfmpegProbeService {
                 else -> sourceLagMs ?: renderLatencyMs
             }
             updateRenderDelayLocked(designator, effectiveLagMs, now)
+            updateRenderStrideLocked(sessionId, sessionState, effectiveLagMs)
         }
     }
 
@@ -826,6 +834,31 @@ class FfmpegProbeService {
             }
             managedRenderSessions.remove(sessionId)
         }
+    }
+
+    private fun updateRenderStrideLocked(
+        sessionId: Long,
+        sessionState: ManagedRenderSession,
+        effectiveLagMs: Long?,
+    ) {
+        val backlogFrames = max(0L, sessionState.decodedFrameCount - sessionState.renderedFrameCount)
+        val desiredStride = when {
+            backlogFrames >= renderStrideSevereBacklogFrames ||
+                (effectiveLagMs != null && effectiveLagMs >= renderStrideSevereLagMs) -> 3
+            backlogFrames >= renderStrideMildBacklogFrames ||
+                (effectiveLagMs != null && effectiveLagMs >= renderStrideMildLagMs) -> 2
+            backlogFrames <= renderStrideRecoverBacklogFrames &&
+                (effectiveLagMs == null || effectiveLagMs <= renderStrideRecoverLagMs) -> 1
+            else -> sessionState.renderStride
+        }
+        if (desiredStride == sessionState.renderStride) return
+        sessionState.renderStride = desiredStride
+        CTDebug(
+            tag,
+            "Adaptive render stride designator=${sessionState.designator} sessionId=$sessionId " +
+                "stride=$desiredStride backlogFrames=$backlogFrames effectiveLagMs=${effectiveLagMs ?: -1L}"
+        )
+        FfmpegBridge.setRenderStride(sessionId, desiredStride)
     }
 
     private fun updateRenderDelayLocked(

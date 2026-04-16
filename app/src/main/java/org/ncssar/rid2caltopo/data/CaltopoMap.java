@@ -966,7 +966,10 @@ public class CaltopoMap {
             prop.put("-updated-on", timeString);
             prop.put("class", "Shape");  // convert from LiveTrack to shape.
             CaltopoOp op = getCurrentRuntime().getCalTopoSessionGateway()
-                    .editObjectWithId("Shape", trackId, feature, null);
+                    .editObjectWithId("Shape", trackId, feature, archiveOp ->
+                            CTInfo(TAG, String.format(Locale.US,
+                                    "archiveFeature(): edit trackId=%s success=%s responseCode=%d",
+                                    trackId, archiveOp.success(), archiveOp.responseCode)));
             if (maxWaitInMilliseconds > 0) {
                 op.syncOp(maxWaitInMilliseconds);
                 maxWaitInMilliseconds = maxWaitInMilliseconds - (System.currentTimeMillis() - timeNowInMilliseconds);
@@ -974,7 +977,10 @@ public class CaltopoMap {
             if (featureClass.equals("LiveTrack")) {
                 CTInfo(TAG, String.format(Locale.US, "archiveFeature(): Stopping liveTrack %s....", trackId));
                 op = getCurrentRuntime().getCalTopoSessionGateway()
-                        .deleteLiveTrackWithId(trackId, null);  // Then delete LiveTrack.
+                        .deleteLiveTrackWithId(trackId, deleteOp ->
+                                CTInfo(TAG, String.format(Locale.US,
+                                        "archiveFeature(): delete liveTrackId=%s success=%s responseCode=%d",
+                                        trackId, deleteOp.success(), deleteOp.responseCode)));  // Then delete LiveTrack.
                 if (maxWaitInMilliseconds > 0) op.syncOp(maxWaitInMilliseconds);
             }
         } catch (Exception e) {

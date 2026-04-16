@@ -2200,6 +2200,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void SetTrackerApiKey(@NonNull String apiKey) {
         ClientClassState ccs = GetState();
+        apiKey = apiKey.trim();
         if (!ccs.trackerApiKey.equals(apiKey)) {
             ccs.trackerApiKey = apiKey;
             NotifySettingsChanged();
@@ -2220,6 +2221,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void SetTrackerUrlPfx(@NonNull String urlPfx) {
         ClientClassState ccs = GetState();
+        urlPfx = urlPfx.trim();
         if (!ccs.trackerUrlPfx.equals(urlPfx)) {
             ccs.trackerUrlPfx = urlPfx;
             NotifySettingsChanged();

@@ -113,6 +113,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.trackerApiKey = trackerApiKey;
         this.trackerWsUrl = buildTrackerWebSocketUrl(trackerUrlPrefix);
         this.started = true;
+        CTInfo(TAG, String.format(Locale.US,
+                "start(): wsUrl='%s' token=%s",
+                this.trackerWsUrl,
+                describeToken(trackerApiKey)));
 
         transport = transportFactory.create();
         transport.setCallback(new TrackerCoordinationTransport.Callback() {
@@ -543,6 +547,18 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             url = "ws://" + url.substring("http://".length());
         }
         return url + "/ws/r2c";
+    }
+
+    @NonNull
+    private static String describeToken(@Nullable String token) {
+        if (token == null) return "<null>";
+        String trimmed = token.trim();
+        if (trimmed.isEmpty()) return "<empty>";
+        if (trimmed.length() <= 4) {
+            return String.format(Locale.US, "len=%d suffix=%s", trimmed.length(), trimmed);
+        }
+        return String.format(Locale.US, "len=%d suffix=%s",
+                trimmed.length(), trimmed.substring(trimmed.length() - 4));
     }
 
     private static void putTelemetry(@NonNull JSONObject jo, @Nullable CtDroneSpec.PositionTelemetry telemetry) {

@@ -46,7 +46,66 @@
 #define RENDER_MIN_INTERVAL_MS 5
 #define RENDER_MAX_INTERVAL_MS 1000
 #define RENDER_DEFAULT_FPS 30
+// ═══════════════════════════════════════════════════════════════════════════
+// Bursty drone video and the adaptive render-control loop
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Drone video (DJI over RTMP → MediaMTX → RTSP) is highly bursty and varies
+// significantly across drone models and controller firmware:
+//
+//   • The drone controller batches H.264 NAL units and sends them in tight
+//     bursts — several frames may arrive within a few ms of each other.
+//   • Gaps of 200 – 800 ms between bursts are completely normal, and are
+//     observed during manoeuvres, auto-exposure events, or controller-side
+//     recording flushes.  Some models produce gaps > 900 ms routinely.
+//   • A single IDR "keyframe" may carry a disproportionately large payload and
+//     arrive well ahead of the next P-frame run.
+//   • Different controller/drone combinations produce wildly different cadences.
+//     Hardcoded thresholds tuned for one model will break others.
+//
+// Because of this burstiness the decode thread fills the render queue faster
+// than the render thread drains it during a burst, then the queue sits empty
+// during the gap.  A naïve approach (render as fast as possible) would drain
+// the queue before the next burst and cause display stutter.
+//
+// ── Adaptive control overview ───────────────────────────────────────────────
+// Rather than capping the queue or hard-coding a backpressure depth, the render
+// thread uses a closed-loop controller that adapts to each stream's observed
+// behaviour:
+//
+//  1. source_render_interval_ms  — EMA of inter-decode deltas and PTS-derived
+//     cadence.  Represents the underlying "native" frame rate of this stream.
+//
+//  2. stall_estimate_ms  — asymmetric EMA of observed inter-burst gaps.
+//     Rises quickly when a new gap is seen (RENDER_STALL_RISE_EMA_PCT),
+//     decays very slowly after a long quiet period (RENDER_STALL_DECAY_EMA_PCT,
+//     with a 5-second grace window before decay starts).
+//
+//  3. proven_gap_ms  — tracks the largest confirmed gap (> RENDER_PROVEN_GAP_TRIGGER_MS).
+//     Only decays after 30 seconds of silence, and very slowly (2 % EMA).
+//     This prevents the renderer from becoming over-eager after a drone that
+//     normally has large gaps happens to transmit smoothly for a while.
+//
+//  4. target_latency_ms  — computed as max(stall_ms, proven_gap_ms) × 2 + margin,
+//     clamped to [RENDER_TARGET_LATENCY_MIN_MS, RENDER_TARGET_LATENCY_MAX_MS].
+//     This is the desired amount of buffered content the render thread aims to
+//     maintain so it can bridge inter-burst gaps without stalling.
+//
+//  5. compute_desired_render_interval_ms_locked()  — PID-like controller.
+//     Compares the current buffered_span_ms to target_latency_ms and adjusts the
+//     render interval proportionally (±RENDER_INTERVAL_ADJUST_BASE_PCT to
+//     ±RENDER_INTERVAL_ADJUST_MAX_PCT).  A smoothing EMA prevents abrupt steps.
+//     During an active stall the interval is gently extended to conserve buffer.
+//
+// RENDER_QUEUE_INITIAL_CAPACITY is the queue's starting size; it grows
+// automatically via ensure_render_queue_capacity() if needed.
+//
+// RENDER_QUEUE_BACKPRESSURE_DEPTH is reserved for a potential future
+// decode-side backpressure mechanism.  It is NOT currently used in the decode
+// loop — the adaptive render-control loop above is the sole mechanism for
+// matching render rate to source rate.
 #define RENDER_QUEUE_INITIAL_CAPACITY 32
+#define RENDER_QUEUE_BACKPRESSURE_DEPTH 16  // reserved; not active — see notes above
 #define RENDER_QUEUE_LOG_INTERVAL_MS 1000
 #define RENDER_QUEUE_WARN_INTERVAL_MS 2000
 #define RENDER_QUEUE_WARN_DEPTH 100
@@ -117,8 +176,18 @@ typedef struct {
     float anomaly_min_area_fraction;
     int anomaly_thermal_polarity;
     int64_t anomaly_frame_counter;
-    int render_stride;          // skip every N-1 non-keyframe packets; 1 = no skip (default)
-    int64_t render_stride_counter; // counts non-keyframe packets seen; reset when stride changes
+    // Manual render stride — set via nativeSetRenderStride().
+    // When render_stride > 1, every (render_stride - 1) out of render_stride
+    // non-keyframe packets are dropped *before* decode.  Keyframe (IDR) packets
+    // always pass through so the decoder's reference-frame state is never broken.
+    // This is an operator-controlled tool for extreme CPU-reduction scenarios
+    // (e.g., one focused FFmpeg stream + several background streams on a
+    // CPU-constrained device).  It operates entirely in the decode thread and is
+    // independent of the adaptive render-control loop, which continues to run
+    // normally on whatever frames do reach the render queue.
+    // Default: 1 (no skip).
+    int render_stride;
+    int64_t render_stride_counter; // non-keyframe packet counter; reset on stride change
     int64_t last_render_post_at_ms;
     int64_t last_no_surface_log_at_ms;
     int64_t source_render_interval_ms;
@@ -2832,9 +2901,10 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         }
 #endif
 
-        // Render stride: when stride > 1, drop every N-1 non-keyframe packets before decode
-        // to reduce CPU load under pressure.  Keyframe (IDR) packets always pass through
-        // so the decoder's reference-frame state is never broken.
+        // Manual render stride (optional, set via nativeSetRenderStride):
+        // When render_stride > 1, every N-1 out of N non-keyframe packets are
+        // dropped before decode.  Keyframe (IDR) packets always pass through so
+        // the decoder's reference-frame state is never broken.
         if (session->render_stride > 1) {
             bool is_keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
             if (!is_keyframe) {

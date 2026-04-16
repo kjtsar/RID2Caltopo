@@ -71,6 +71,7 @@ public class R2CMqttManager {
     // ── tuneable constants ────────────────────────────────────────────────────
     public  static final String DEFAULT_BROKER_URI     = "tcp://broker.hivemq.com:1883";
     private static final long   HEARTBEAT_INTERVAL_MS  = 10_000;
+    private static final long   MQTT_CONNECT_GRACE_MS  = 3_000;  // max wait for broker before immediate-claim fallback
     private static final long   DETECT_INTERVAL_MS     = 4_000;
     private static final long   OBSERVATION_EXPIRY_MS  = 15_000;
     private static final long   OWNERSHIP_CHECK_MS     = 10_000;
@@ -616,14 +617,32 @@ public class R2CMqttManager {
                                            @NonNull CtDroneSpec droneSpec,
                                            double distMeters,
                                            long firstSeenTs) {
+        onLiveTrackCreatedImpl(liveTrack, droneSpec, distMeters, firstSeenTs, false);
+    }
+
+    private static void onLiveTrackCreatedImpl(@NonNull LiveTrackOwnerDelegate liveTrack,
+                                               @NonNull CtDroneSpec droneSpec,
+                                               double distMeters,
+                                               long firstSeenTs,
+                                               boolean isRetry) {
         if (!initialized || peerTransport == null || !peerTransport.isConnected()) {
             // No MQTT peer connection — take ownership immediately.
             // If the user has "Use Peers" enabled but we still end up here it means either
             // (a) MQTT was never configured (no broker credentials loaded), or
             // (b) the broker connection hasn't been established yet.
-            // In either case log a warning so the operator can diagnose dual-write situations.
+            // In either case (b), defer once so that a briefly-slow broker connection does not
+            // cause both devices to claim ownership simultaneously.
             String remoteIdForLog = droneSpec.getRemoteId();
             if (initialized && peerTransport != null) {
+                if (!isRetry && droneSpec.isActive()) {
+                    CTDebug(TAG, "onLiveTrackCreated(" + remoteIdForLog + "): " +
+                            "MQTT not connected — deferring " + MQTT_CONNECT_GRACE_MS +
+                            " ms to allow broker connection before falling back to immediate-claim.");
+                    DelayedExec.RunAfterDelayInMsec(
+                            () -> onLiveTrackCreatedImpl(liveTrack, droneSpec, distMeters, firstSeenTs, true),
+                            MQTT_CONNECT_GRACE_MS);
+                    return;
+                }
                 CTWarn(TAG, "onLiveTrackCreated(" + remoteIdForLog + "): " +
                         "MQTT configured but not connected — claiming ownership immediately. " +
                         "Check broker reachability; peer ownership arbitration is unavailable.");

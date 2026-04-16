@@ -159,6 +159,11 @@ class StreamsViewModel(
         // HLS adds ~3–7 s latency but that is acceptable for background tiles;
         // the focused stream always runs through FFmpeg at low latency.
         preferredModeProvider = { StreamSessionService.ProtocolMode.HLS },
+        // All drone video is bursty: the controller batches H.264 NAL units and sends
+        // them in tight clusters with gaps of 200–800 ms between bursts.  Enable the
+        // bursty-HLS tuning (larger buffer headroom, faster stall recovery) for every
+        // stream so ExoPlayer handles inter-burst silences without needless buffering.
+        burstyHlsSourceProvider = { true },
         sourcePathProvider = { designator -> streamInfoByDesignator[designator]?.sourcePath ?: designator },
     )
 

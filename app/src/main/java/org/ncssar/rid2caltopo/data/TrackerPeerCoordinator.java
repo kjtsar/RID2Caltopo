@@ -120,9 +120,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.started = true;
         this.hardFailureNotified = false;
         CTInfo(TAG, String.format(Locale.US,
-                "start(): wsUrl='%s' token=%s",
+                "start(): wsUrl='%s' token=%s %s",
                 this.trackerWsUrl,
-                describeToken(trackerApiKey)));
+                describeToken(trackerApiKey),
+                CaltopoClient.DescribeTrackerCredentialSelection()));
 
         transport = transportFactory.create();
         transport.setCallback(new TrackerCoordinationTransport.Callback() {

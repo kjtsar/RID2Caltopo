@@ -1177,6 +1177,53 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return active;
     }
 
+    @NonNull
+    private static String describeToken(@Nullable String token) {
+        if (token == null) return "<null>";
+        String trimmed = token.trim();
+        if (trimmed.isEmpty()) return "<empty>";
+        if (trimmed.length() <= 4) {
+            return String.format(Locale.US, "len=%d suffix=%s", trimmed.length(), trimmed);
+        }
+        return String.format(Locale.US, "len=%d suffix=%s",
+                trimmed.length(), trimmed.substring(trimmed.length() - 4));
+    }
+
+    @NonNull
+    public static String DescribeTrackerCredentialSelection() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord active = GetActiveCaltopoProfile();
+        CaltopoProfileRecord preferred = GetPreferredTrackerProfile();
+        String source = "state";
+        if (preferred != null) {
+            if (active != null && preferred.profileId.equals(active.profileId)) {
+                source = "active-profile";
+            } else {
+                source = "fallback-profile";
+            }
+        }
+        String profileId = preferred != null ? preferred.profileId : "";
+        String profileType = preferred != null ? preferred.profileType : "";
+        String activeProfileId = active != null ? active.profileId : "";
+        String activeProfileType = active != null ? active.profileType : "";
+        String url = preferred != null && preferred.trackerUrlPfx != null && !preferred.trackerUrlPfx.isEmpty()
+                ? preferred.trackerUrlPfx
+                : ccs.trackerUrlPfx;
+        String token = preferred != null && preferred.trackerApiKey != null && !preferred.trackerApiKey.isEmpty()
+                ? preferred.trackerApiKey
+                : ccs.trackerApiKey;
+        return String.format(Locale.US,
+                "source=%s activeProfileId='%s' activeProfileType='%s' selectedProfileId='%s' selectedProfileType='%s' trackerUrl='%s' trackerToken=%s",
+                source,
+                activeProfileId,
+                activeProfileType,
+                profileId,
+                profileType,
+                url,
+                describeToken(token));
+    }
+
     public static int RemoveExpiredCaltopoProfiles(long nowMs, boolean disconnectIfActive) {
         ClientClassState ccs = GetState();
         if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return 0;
@@ -2924,6 +2971,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String trackerApiKey = GetTrackerApiKey();
         String trackerUrlPfx = GetTrackerUrlPfx();
         if (trackerApiKey.isEmpty() || trackerUrlPfx.isEmpty()) return 8675309;
+
+        if (CTDebugEnabled(TAG)) {
+            CTDebug(TAG, "BgPublishGeoJsonStats() tracker selection: " + DescribeTrackerCredentialSelection());
+        }
 
         String urlStr = String.format(Locale.US, "%s/%s", trackerUrlPfx, "upload");
         long startStamp = System.currentTimeMillis();

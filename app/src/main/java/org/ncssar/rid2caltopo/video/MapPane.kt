@@ -58,6 +58,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -69,6 +70,7 @@ import androidx.compose.runtime.setValue
 import org.ncssar.rid2caltopo.ui.MapFoldersDialog
 import org.ncssar.rid2caltopo.ui.MapFolderUiState
 import org.ncssar.rid2caltopo.ui.MapItemUiState
+import org.ncssar.rid2caltopo.ui.MutualAidPackageShareDialog
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -141,6 +143,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
+import org.ncssar.rid2caltopo.video.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.notam.NearbyNotam
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamMapOverlayAdapter
@@ -504,6 +507,11 @@ internal fun SplitMapPane(
     var maPackageMapTitle by remember { mutableStateOf(CaltopoMap.GetMapName()) }
     var maPackageExpiryDateText by remember { mutableStateOf(defaultPackageExpiry.format(packageDateFormatter)) }
     var maPackageExpiryTimeText by remember { mutableStateOf(defaultPackageExpiry.format(packageTimeFormatter)) }
+    var maPackageUseMapPaneExtents by remember { mutableStateOf(true) }
+    val exportRequestId by MutualAidExportCoordinator.requestId.collectAsState()
+    var lastHandledExportRequestId by remember { mutableStateOf(0L) }
+    val activeShareSession by MutualAidPackageTransferManager.shareSession.collectAsState()
+    var preparingMutualAidShare by remember { mutableStateOf(false) }
     val maximizeThroughputBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
     var predictiveHeadEnabled by remember { mutableStateOf(CaltopoClient.GetPredictiveHeadEnabled()) }
     var autoRemoveBadTiles by remember { mutableStateOf(BadTilePolicy.isAutoRemoveEnabled(context)) }
@@ -992,12 +1000,9 @@ internal fun SplitMapPane(
     }
     val offlinePackageReady = offlinePrepCacheStatus.readyForPackage || offlinePrepReadyByCompletion
 
-    val exportMutualAidPackageLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/zip")
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    fun startMutualAidShare() {
         val boundary =
-            if (offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
+            if (!maPackageUseMapPaneExtents && offlinePrepAreaMode == OfflinePrepAreaMode.MapBoundary) {
                 offlineBoundaryOptions.firstOrNull { it.id == offlinePrepBoundaryId }?.boundary
             } else {
                 null
@@ -1005,17 +1010,17 @@ internal fun SplitMapPane(
         val prepBounds = boundary?.bounds ?: mapBounds
         if (prepBounds == null) {
             CaltopoClient.ShowToast("Mutual aid package export needs visible map bounds.")
-            return@rememberLauncherForActivityResult
+            return
         }
+        preparingMutualAidShare = true
         uiScope.launch(Dispatchers.IO) {
             val packageName = buildString {
                 append(maPackageIncident.ifBlank { "incident" }.replace(' ', '_'))
                 append("_op")
                 append(maPackageOpPeriod.ifBlank { "1" })
             }
-            val result = MutualAidPackageManager.exportPackage(
+            val exportResult = MutualAidPackageManager.exportPackageToTempFile(
                 context = context,
-                destUri = uri,
                 packageName = packageName,
                 displayName = maPackageDisplayName.trim(),
                 incident = maPackageIncident.trim(),
@@ -1030,10 +1035,33 @@ internal fun SplitMapPane(
                 includeDem = offlinePrepIncludeDem,
                 clipBoundary = boundary
             )
+            val result = if (exportResult.first && exportResult.second != null) {
+                MutualAidPackageTransferManager.startShareSession(context, exportResult.second!!, packageName)
+            } else {
+                false to "Failed to build MA package."
+            }
             withContext(Dispatchers.Main.immediate) {
+                preparingMutualAidShare = false
                 CaltopoClient.ShowToast(result.second)
             }
         }
+    }
+
+    LaunchedEffect(exportRequestId) {
+        if (exportRequestId <= 0L || exportRequestId == lastHandledExportRequestId) return@LaunchedEffect
+        lastHandledExportRequestId = exportRequestId
+        maPackageIncident = CaltopoClient.GetIncident()
+        maPackageOpPeriod = CaltopoClient.GetOpPeriod()
+        maPackageMapId = CaltopoMap.GetMapId()
+        maPackageMapTitle = CaltopoMap.GetMapName()
+        maPackageUseMapPaneExtents = true
+        val nextMidnight = LocalDateTime.ofInstant(
+            Instant.ofEpochMilli(MutualAidProfileManager.defaultExpiryAtNextMidnight()),
+            packageZoneId
+        )
+        maPackageExpiryDateText = nextMidnight.format(packageDateFormatter)
+        maPackageExpiryTimeText = nextMidnight.format(packageTimeFormatter)
+        showMutualAidPackageDialog = true
     }
 
     fun startOfflinePrep(bounds: BoundingBox, clipBoundary: GeoBoundary?) {
@@ -2635,7 +2663,7 @@ internal fun SplitMapPane(
             val parsedExpiry = parseMutualAidPackageExpiry()
             AlertDialog(
                 onDismissRequest = { showMutualAidPackageDialog = false },
-                title = { Text("Save MA Offline Package") },
+                title = { Text("Export MA Package") },
                 text = {
                     Column(
                         modifier = Modifier
@@ -2643,7 +2671,7 @@ internal fun SplitMapPane(
                             .verticalScroll(rememberScrollState())
                     ) {
                         Text(
-                            "Specify the incident details and expiry to embed in the saved mutual-aid offline package.",
+                            "Export a mutual-aid package from the current map using already-cached imagery and DEM data only.",
                             fontSize = 12.sp
                         )
                         Spacer(Modifier.height(12.dp))
@@ -2689,6 +2717,22 @@ internal fun SplitMapPane(
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = maPackageUseMapPaneExtents,
+                                onCheckedChange = { maPackageUseMapPaneExtents = it }
+                            )
+                            Text("Use MapPane extents")
+                        }
+                        Text(
+                            if (maPackageUseMapPaneExtents) {
+                                "Export uses the current MapPane viewport instead of the offline-prep boundary selection."
+                            } else {
+                                "Export uses the offline-prep boundary selection when one is active; otherwise it uses the current MapPane viewport."
+                            },
+                            fontSize = 11.sp
+                        )
+                        Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedTextField(
                                 value = maPackageExpiryDateText,
@@ -2721,24 +2765,41 @@ internal fun SplitMapPane(
                             maPackageIncident.isNotBlank() &&
                             maPackageOpPeriod.isNotBlank() &&
                             maPackageMapId.isNotBlank() &&
-                            parsedExpiry > System.currentTimeMillis(),
+                            parsedExpiry > System.currentTimeMillis() &&
+                            !preparingMutualAidShare,
                         onClick = {
                             showMutualAidPackageDialog = false
-                            val suggestedName = buildString {
-                                append(maPackageIncident.ifBlank { "incident" }.replace(' ', '_'))
-                                append("_op")
-                                append(maPackageOpPeriod.ifBlank { "1" })
-                                append("_mutual_aid_package.zip")
-                            }
-                            exportMutualAidPackageLauncher.launch(suggestedName)
+                            startMutualAidShare()
                         }
-                    ) { Text("Choose File") }
+                    ) { Text("Start Sharing") }
                 },
                 dismissButton = {
                     TextButton(onClick = { showMutualAidPackageDialog = false }) {
                         Text("Cancel")
                     }
                 }
+            )
+        }
+
+        if (preparingMutualAidShare) {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("Preparing MA Package") },
+                text = {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(8.dp))
+                        Text("Packaging cached map and DEM data for transfer…")
+                    }
+                },
+                confirmButton = {}
+            )
+        }
+
+        activeShareSession?.let { session ->
+            MutualAidPackageShareDialog(
+                session = session,
+                onDone = { MutualAidPackageTransferManager.stopShareSession() }
             )
         }
 
@@ -3028,28 +3089,6 @@ internal fun SplitMapPane(
                 },
                 confirmButton = {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(
-                            onClick = {
-                                if (!CaltopoClient.HasMutualAidTemplate()) {
-                                    CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting MA config.")
-                                    return@TextButton
-                                }
-                                maPackageIncident = CaltopoClient.GetIncident()
-                                maPackageOpPeriod = CaltopoClient.GetOpPeriod()
-                                maPackageMapId = CaltopoMap.GetMapId()
-                                maPackageMapTitle = CaltopoMap.GetMapName()
-                                val nextMidnight = LocalDateTime.ofInstant(
-                                    Instant.ofEpochMilli(MutualAidProfileManager.defaultExpiryAtNextMidnight()),
-                                    packageZoneId
-                                )
-                                maPackageExpiryDateText = nextMidnight.format(packageDateFormatter)
-                                maPackageExpiryTimeText = nextMidnight.format(packageTimeFormatter)
-                                showMutualAidPackageDialog = true
-                            },
-                            enabled = !offlinePrepInFlight &&
-                                offlinePackageReady &&
-                                (mapBounds != null || selectedBoundary != null)
-                        ) { Text("Save MA Offline Package") }
                         TextButton(
                             onClick = {
                                 val currentBounds = mapBounds

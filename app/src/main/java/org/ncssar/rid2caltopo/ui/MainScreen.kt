@@ -59,6 +59,7 @@ import org.ncssar.rid2caltopo.data.RidReplayManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
+import org.ncssar.rid2caltopo.video.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.video.MutualAidPackageManager
 import java.time.Instant
 import java.time.ZoneId
@@ -187,13 +188,11 @@ fun MainScreen(
     val context =  LocalContext.current
     var pendingDriveAction by remember { mutableStateOf<DriveSyncAction?>(null) }
     var pendingOrgExport by remember { mutableStateOf(false) }
-    var pendingMutualAidExport by remember { mutableStateOf(false) }
     var driveSyncInProgress by remember { mutableStateOf(false) }
     var showDriveRestoreDialog by remember { mutableStateOf(shouldOfferDriveRestore(context)) }
     var linkedDriveEmail by remember { mutableStateOf(GoogleDriveConfigSync.getLinkedAccountEmail(context)) }
     var showOrgExportDialog by remember { mutableStateOf(false) }
     var showOrgJoinDialog by remember { mutableStateOf(false) }
-    var showMutualAidExportDialog by remember { mutableStateOf(false) }
     var showMutualAidJoinDialog by remember { mutableStateOf(false) }
     var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingMutualAidImportPreview by remember { mutableStateOf<MutualAidPackageManager.PackagePreview?>(null) }
@@ -204,6 +203,7 @@ fun MainScreen(
     var showLogArchiveDialog by remember { mutableStateOf(false) }
     var showTestingToolsDialog by remember { mutableStateOf(false) }
     var showResetPersistentStateDialog by remember { mutableStateOf(false) }
+    var forceArchiveDirPrompt by remember { mutableStateOf(false) }
     var mqttDisabled by remember { mutableStateOf(!CaltopoClient.GetUsePeersFlag()) }
     var loadingLogArchiveDays by remember { mutableStateOf(false) }
     var sendingLogArchive by remember { mutableStateOf(false) }
@@ -254,10 +254,8 @@ fun MainScreen(
         onResult = { result ->
             val requestedAction = pendingDriveAction
             val orgExport = pendingOrgExport
-            val mutualAidExport = pendingMutualAidExport
             pendingDriveAction = null
             pendingOrgExport = false
-            pendingMutualAidExport = false
 
             val account = if (result.data != null) {
                 try {
@@ -278,14 +276,7 @@ fun MainScreen(
                     CaltopoClient.ShowToast("Signed in to Google Drive.")
                     refreshDriveState()
                 }
-                mutualAidExport && account != null -> {
-                    showMutualAidExportDialog = true
-                    CaltopoClient.ShowToast("Signed in to Google Drive.")
-                    refreshDriveState()
-                }
                 orgExport ->
-                    CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
-                mutualAidExport ->
                     CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
             }
         }
@@ -339,41 +330,6 @@ fun MainScreen(
                 } else {
                     showOrgExportDialog = false
                     pendingOrgExport = true
-                    driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
-                    callback(false, "Signing in to Google Drive…", null)
-                }
-            }
-        )
-    }
-
-    if (showMutualAidExportDialog) {
-        MutualAidExportDialog(
-            defaultIncident = CaltopoClient.GetIncident(),
-            defaultOpPeriod = CaltopoClient.GetOpPeriod(),
-            defaultMapId = CaltopoMap.GetMapId(),
-            defaultMapTitle = CaltopoMap.GetMapName(),
-            defaultExpiryAtEpochMs = MutualAidProfileManager.defaultExpiryAtNextMidnight(),
-            sourceOrgName = CaltopoClient.GetMutualAidSourceLabel(),
-            onDismiss = { showMutualAidExportDialog = false },
-            onUploadRequested = { displayName, incident, opPeriod, mapId, mapTitle, expiresAt, callback ->
-                val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
-                if (account != null) {
-                    MutualAidProfileManager.uploadMutualAidProfile(
-                        context,
-                        account,
-                        displayName,
-                        incident,
-                        opPeriod,
-                        mapId,
-                        mapTitle,
-                        expiresAt
-                    ) { success, message, token ->
-                        refreshDriveState()
-                        callback(success, message, token)
-                    }
-                } else {
-                    showMutualAidExportDialog = false
-                    pendingMutualAidExport = true
                     driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
                     callback(false, "Signing in to Google Drive…", null)
                 }
@@ -814,8 +770,11 @@ fun MainScreen(
             }
         }
     )
-    LaunchedEffect(showDriveRestoreDialog, driveSyncInProgress) {
-        if (!showDriveRestoreDialog && !driveSyncInProgress && null == CaltopoClient.GetArchiveUri()) {
+    LaunchedEffect(showDriveRestoreDialog, driveSyncInProgress, forceArchiveDirPrompt) {
+        val shouldPromptArchiveDir =
+            null == CaltopoClient.GetArchiveUri() &&
+                (forceArchiveDirPrompt || (!showDriveRestoreDialog && !driveSyncInProgress))
+        if (shouldPromptArchiveDir) {
             val initialUri = CaltopoClient.GetArchiveUriSelectionHint()
             val prompt = if (CaltopoClient.WasArchiveUriPermissionMissing()) {
                 "Archive folder access expired. Please re-select the archive directory for tracks and map cache."
@@ -824,6 +783,7 @@ fun MainScreen(
             }
             CaltopoClient.ShowToast(prompt)
             CTDebug(tag, "LaunchedEffect() requesting archiveDir initialUri='${initialUri ?: "<none>"}'")
+            forceArchiveDirPrompt = false
             queryArchiveDirLauncher.launch(initialUri)
         }
     }
@@ -898,15 +858,15 @@ fun MainScreen(
                                 showOrgJoinDialog = true
                             }
                         )
-                        DropdownMenuItem(text = { Text("Export MA Config") }, onClick = {
+                        DropdownMenuItem(text = { Text("Export MA Package") }, onClick = {
                             menuExpanded = false
                             if (!CaltopoClient.HasMutualAidTemplate()) {
                                 CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting MA config.")
-                            } else if (GoogleDriveConfigSync.getAuthorizedAccount(context) != null) {
-                                showMutualAidExportDialog = true
+                            } else if (CaltopoMap.GetMapId().isBlank()) {
+                                CaltopoClient.ShowToast("Connect to a CalTopo map before exporting an MA package.")
                             } else {
-                                pendingMutualAidExport = true
-                                driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                                MutualAidExportCoordinator.requestExportDialog()
+                                localViewModel.showStreams()
                             }
                         })
                         DropdownMenuItem(
@@ -1275,6 +1235,7 @@ fun MainScreen(
                 TextButton(
                     onClick = {
                         CaltopoClient.ResetPersistedClientState()
+                        forceArchiveDirPrompt = true
                         CaltopoClient.ShowToast("Persisted app state reset and backup state updated.")
                         showResetPersistentStateDialog = false
                     }

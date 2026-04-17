@@ -67,6 +67,7 @@ import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.DroneSpecConfirmationDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
+import org.ncssar.rid2caltopo.ui.MutualAidPackageImportDialog
 import org.ncssar.rid2caltopo.ui.ProximityAlertCenter
 import org.ncssar.rid2caltopo.ui.ProximityAlertHost
 import org.ncssar.rid2caltopo.ui.R2CPeerViewModel
@@ -75,6 +76,8 @@ import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
+import org.ncssar.rid2caltopo.video.MutualAidPackageTransferManager
+import org.ncssar.rid2caltopo.video.MutualAidPackageTransferToken
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner
@@ -282,6 +285,11 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     showToast(message)
                 }
             }
+            "r2cmapkg1" -> {
+                val token = MutualAidPackageTransferToken.MAGIC_PREFIX + uri.toString().removePrefix("r2cmapkg1://")
+                CTDebug(TAG, "handleR2cIntent(): importing mutual aid package from scanned QR")
+                MutualAidPackageTransferManager.importFromToken(this, token)
+            }
         }
     }
 
@@ -323,6 +331,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 val pendingDroneConfirmation by localViewModel
                     .pendingDroneConfirmation
                     .collectAsState()
+                val maPackageImportState by MutualAidPackageTransferManager.importState.collectAsState()
                 when (activeScreen) {
                     ActiveScreen.MAIN -> {
                         MainScreen(
@@ -390,6 +399,12 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         ProximityAlertCenter.suspendCurrentAlert()
                     }
                 )
+                if (maPackageImportState !is org.ncssar.rid2caltopo.video.MutualAidPackageImportState.Idle) {
+                    MutualAidPackageImportDialog(
+                        state = maPackageImportState,
+                        onDismiss = { MutualAidPackageTransferManager.dismissImportState() }
+                    )
+                }
             }
         }
         refreshExternalDisplay()

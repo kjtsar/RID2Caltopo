@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import java.io.File
+import java.io.OutputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -62,82 +64,75 @@ object MutualAidPackageManager {
     ): Pair<Boolean, String> {
         return try {
             val resolver = context.contentResolver
-            val tileWriter = TileDiskCacheWriter(context)
-            val tileEntries = ArrayList<JSONObject>()
-            val demEntries = ArrayList<JSONObject>()
-            val archiveDir = CaltopoClient.GetArchiveDir()
-            val demDir = archiveDir?.findFile("cache")?.findFile("dem")
-            val sourceOrg = CaltopoClient.GetMutualAidSourceLabel()
-            val profileEnc = MutualAidProfileManager.buildEncryptedProfilePayloadForCurrentIncident(
-                displayName = displayName,
-                incident = incident,
-                opPeriod = opPeriod,
-                targetMapId = targetMapId,
-                targetMapTitle = targetMapTitle,
-                expiresAtEpochMs = expiresAtEpochMs
-            )
-            if (profileEnc.isNullOrBlank()) {
-                return false to "Load ct_mutual_aid_credentials before exporting MA config."
-            }
-
             resolver.openOutputStream(destUri, "w")?.use { rawOut ->
-                ZipOutputStream(rawOut).use { zip ->
-                    forEachTileIndexForBounds(bounds, minZoom, maxZoom, clipBoundary) { tileIndex ->
-                        val bytes = tileWriter.readTileBytes(tileSource, tileIndex) ?: return@forEachTileIndexForBounds
-                        val z = MapTileIndex.getZoom(tileIndex)
-                        val x = MapTileIndex.getX(tileIndex)
-                        val y = MapTileIndex.getY(tileIndex)
-                        val path = "tiles/${sanitizePath(tileSource.name())}/$z/$x/$y.bin"
-                        zip.putNextEntry(ZipEntry(path))
-                        zip.write(bytes)
-                        zip.closeEntry()
-                        tileEntries += JSONObject()
-                            .put("source", tileSource.name())
-                            .put("z", z)
-                            .put("x", x)
-                            .put("y", y)
-                            .put("expires_at_epoch_ms", tileWriter.getExpirationTimestamp(tileSource, tileIndex) ?: 0L)
-                            .put("path", path)
-                    }
-
-                    if (includeDem) {
-                        val demTileNames = demTileNamesForBounds(bounds)
-                        for (tileName in demTileNames) {
-                            val fileName = "USGS_1_$tileName.tif"
-                            val demFile = demDir?.findFile(fileName) ?: continue
-                            if (!demFile.isFile) continue
-                            val path = "dem/$fileName"
-                            resolver.openInputStream(demFile.uri)?.use { input ->
-                                zip.putNextEntry(ZipEntry(path))
-                                input.copyTo(zip)
-                                zip.closeEntry()
-                            } ?: continue
-                            demEntries += JSONObject()
-                                .put("tile_name", tileName)
-                                .put("file_name", fileName)
-                                .put("path", path)
-                        }
-                    }
-
-                    val manifest = JSONObject()
-                        .put("format", FORMAT)
-                        .put("version", VERSION)
-                        .put("generated", CaltopoClient.TimeDatestampString(System.currentTimeMillis()))
-                        .put("package_name", packageName)
-                        .put("source_org", "")
-                        .put("profile_enc", profileEnc ?: "")
-                        .put("tile_entries", JSONArray(tileEntries))
-                        .put("dem_entries", JSONArray(demEntries))
-                    zip.putNextEntry(ZipEntry(MANIFEST_PATH))
-                    zip.write(manifest.toString(2).toByteArray(Charsets.UTF_8))
-                    zip.closeEntry()
-                }
+                writePackage(
+                    context = context,
+                    rawOut = rawOut,
+                    packageName = packageName,
+                    displayName = displayName,
+                    incident = incident,
+                    opPeriod = opPeriod,
+                    targetMapId = targetMapId,
+                    targetMapTitle = targetMapTitle,
+                    expiresAtEpochMs = expiresAtEpochMs,
+                    bounds = bounds,
+                    minZoom = minZoom,
+                    maxZoom = maxZoom,
+                    tileSource = tileSource,
+                    includeDem = includeDem,
+                    clipBoundary = clipBoundary
+                )
             } ?: return false to "Could not open destination for MA config export."
 
-            true to "Saved MA config with ${tileEntries.size} tile(s) and ${demEntries.size} DEM tile(s)."
         } catch (e: Exception) {
             CaltopoClient.CTWarn("MutualAidPackageMgr", "exportPackage() failed.", e)
             false to (e.message ?: "Failed to save MA config.")
+        }
+    }
+
+    internal fun exportPackageToTempFile(
+        context: Context,
+        packageName: String,
+        displayName: String,
+        incident: String,
+        opPeriod: String,
+        targetMapId: String,
+        targetMapTitle: String,
+        expiresAtEpochMs: Long,
+        bounds: BoundingBox,
+        minZoom: Int,
+        maxZoom: Int,
+        tileSource: ITileSource,
+        includeDem: Boolean,
+        clipBoundary: GeoBoundary? = null
+    ): Pair<Boolean, File?> {
+        return try {
+            val tempDir = context.cacheDir.resolve("ma-transfer").apply { mkdirs() }
+            val file = File(tempDir, "${sanitizePath(packageName)}_mutual_aid_package.zip")
+            if (file.exists()) file.delete()
+            file.outputStream().use { rawOut ->
+                writePackage(
+                    context = context,
+                    rawOut = rawOut,
+                    packageName = packageName,
+                    displayName = displayName,
+                    incident = incident,
+                    opPeriod = opPeriod,
+                    targetMapId = targetMapId,
+                    targetMapTitle = targetMapTitle,
+                    expiresAtEpochMs = expiresAtEpochMs,
+                    bounds = bounds,
+                    minZoom = minZoom,
+                    maxZoom = maxZoom,
+                    tileSource = tileSource,
+                    includeDem = includeDem,
+                    clipBoundary = clipBoundary
+                )
+            }
+            true to file
+        } catch (e: Exception) {
+            CaltopoClient.CTWarn("MutualAidPackageMgr", "exportPackage() failed.", e)
+            false to null
         }
     }
 
@@ -273,6 +268,94 @@ object MutualAidPackageManager {
 
     private fun sanitizePath(raw: String): String =
         raw.lowercase(Locale.US).replace(Regex("[^a-z0-9._-]+"), "_").trim('_')
+
+    private fun writePackage(
+        context: Context,
+        rawOut: OutputStream,
+        packageName: String,
+        displayName: String,
+        incident: String,
+        opPeriod: String,
+        targetMapId: String,
+        targetMapTitle: String,
+        expiresAtEpochMs: Long,
+        bounds: BoundingBox,
+        minZoom: Int,
+        maxZoom: Int,
+        tileSource: ITileSource,
+        includeDem: Boolean,
+        clipBoundary: GeoBoundary?
+    ): Pair<Boolean, String> {
+        val resolver = context.contentResolver
+        val tileWriter = TileDiskCacheWriter(context)
+        val tileEntries = ArrayList<JSONObject>()
+        val demEntries = ArrayList<JSONObject>()
+        val archiveDir = CaltopoClient.GetArchiveDir()
+        val demDir = archiveDir?.findFile("cache")?.findFile("dem")
+        val profileEnc = MutualAidProfileManager.buildEncryptedProfilePayloadForCurrentIncident(
+            displayName = displayName,
+            incident = incident,
+            opPeriod = opPeriod,
+            targetMapId = targetMapId,
+            targetMapTitle = targetMapTitle,
+            expiresAtEpochMs = expiresAtEpochMs
+        )
+        if (profileEnc.isNullOrBlank()) {
+            throw IllegalStateException("Load ct_mutual_aid_credentials before exporting MA config.")
+        }
+        ZipOutputStream(rawOut).use { zip ->
+            forEachTileIndexForBounds(bounds, minZoom, maxZoom, clipBoundary) { tileIndex ->
+                val bytes = tileWriter.readTileBytes(tileSource, tileIndex) ?: return@forEachTileIndexForBounds
+                val z = MapTileIndex.getZoom(tileIndex)
+                val x = MapTileIndex.getX(tileIndex)
+                val y = MapTileIndex.getY(tileIndex)
+                val path = "tiles/${sanitizePath(tileSource.name())}/$z/$x/$y.bin"
+                zip.putNextEntry(ZipEntry(path))
+                zip.write(bytes)
+                zip.closeEntry()
+                tileEntries += JSONObject()
+                    .put("source", tileSource.name())
+                    .put("z", z)
+                    .put("x", x)
+                    .put("y", y)
+                    .put("expires_at_epoch_ms", tileWriter.getExpirationTimestamp(tileSource, tileIndex) ?: 0L)
+                    .put("path", path)
+            }
+
+            if (includeDem) {
+                val demTileNames = demTileNamesForBounds(bounds)
+                for (tileName in demTileNames) {
+                    val fileName = "USGS_1_$tileName.tif"
+                    val demFile = demDir?.findFile(fileName) ?: continue
+                    if (!demFile.isFile) continue
+                    val path = "dem/$fileName"
+                    resolver.openInputStream(demFile.uri)?.use { input ->
+                        zip.putNextEntry(ZipEntry(path))
+                        input.copyTo(zip)
+                        zip.closeEntry()
+                    } ?: continue
+                    demEntries += JSONObject()
+                        .put("tile_name", tileName)
+                        .put("file_name", fileName)
+                        .put("path", path)
+                }
+            }
+
+            val manifest = JSONObject()
+                .put("format", FORMAT)
+                .put("version", VERSION)
+                .put("generated", CaltopoClient.TimeDatestampString(System.currentTimeMillis()))
+                .put("package_name", packageName)
+                .put("source_org", "")
+                .put("profile_enc", profileEnc)
+                .put("tile_entries", JSONArray(tileEntries))
+                .put("dem_entries", JSONArray(demEntries))
+            zip.putNextEntry(ZipEntry(MANIFEST_PATH))
+            zip.write(manifest.toString(2).toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
+        return true to "Saved MA config with ${tileEntries.size} tile(s) and ${demEntries.size} DEM tile(s)."
+    }
 
     private fun forEachTileIndexForBounds(
         bounds: BoundingBox,

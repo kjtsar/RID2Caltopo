@@ -332,8 +332,11 @@ object MutualAidPackageTransferManager {
                 socket.use { serveSocket(it, sessionId, packageFile) }
             } catch (_: SocketTimeoutException) {
                 continue
-            } catch (_: Exception) {
-                return
+            } catch (e: Exception) {
+                if (currentSessionId.get() != sessionId) {
+                    return
+                }
+                CaltopoClient.CTWarn(TAG, "runServerLoop() accept failed for sid=$sessionId", e)
             }
         }
     }
@@ -370,46 +373,54 @@ object MutualAidPackageTransferManager {
             progress = MutualAidPackageShareProgress(receiverName, 0L, packageFile.length(), "Sending"),
             statusMessage = "Sending to $receiverName"
         )
-        var sent = 0L
-        var lastProgressBytes = 0L
-        var lastProgressAtMs = 0L
-        val output = BufferedOutputStream(socket.getOutputStream())
-        val header = buildString {
-            append("HTTP/1.1 200 OK\r\n")
-            append("Content-Type: application/zip\r\n")
-            append("Content-Length: ${packageFile.length()}\r\n")
-            append("Content-Disposition: attachment; filename=\"${packageFile.name}\"\r\n")
-            append("Connection: close\r\n")
-            append("\r\n")
-        }
-        output.write(header.toByteArray(StandardCharsets.UTF_8))
-        packageFile.inputStream().use { fileInput ->
-            BufferedInputStream(fileInput).use { buffered ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    val read = buffered.read(buffer)
-                    if (read < 0) break
-                    output.write(buffer, 0, read)
-                    sent += read
-                    if (shouldPublishProgress(sent, packageFile.length(), lastProgressBytes, lastProgressAtMs)) {
-                        _shareSession.value = _shareSession.value?.copy(
-                            progress = MutualAidPackageShareProgress(receiverName, sent, packageFile.length(), "Sending"),
-                            statusMessage = "Sending to $receiverName"
-                        )
-                        lastProgressBytes = sent
-                        lastProgressAtMs = System.currentTimeMillis()
+        try {
+            var sent = 0L
+            var lastProgressBytes = 0L
+            var lastProgressAtMs = 0L
+            val output = BufferedOutputStream(socket.getOutputStream())
+            val header = buildString {
+                append("HTTP/1.1 200 OK\r\n")
+                append("Content-Type: application/zip\r\n")
+                append("Content-Length: ${packageFile.length()}\r\n")
+                append("Content-Disposition: attachment; filename=\"${packageFile.name}\"\r\n")
+                append("Connection: close\r\n")
+                append("\r\n")
+            }
+            output.write(header.toByteArray(StandardCharsets.UTF_8))
+            packageFile.inputStream().use { fileInput ->
+                BufferedInputStream(fileInput).use { buffered ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val read = buffered.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        sent += read
+                        if (shouldPublishProgress(sent, packageFile.length(), lastProgressBytes, lastProgressAtMs)) {
+                            _shareSession.value = _shareSession.value?.copy(
+                                progress = MutualAidPackageShareProgress(receiverName, sent, packageFile.length(), "Sending"),
+                                statusMessage = "Sending to $receiverName"
+                            )
+                            lastProgressBytes = sent
+                            lastProgressAtMs = System.currentTimeMillis()
+                        }
                     }
                 }
             }
-        }
-        output.flush()
-        CaltopoClient.CTInfo(TAG, "Completed receiver='$receiverName' sid=$sessionId bytes=$sent")
-        val completed = MutualAidPackageCompletedReceiver(receiverName, System.currentTimeMillis())
-        _shareSession.value = _shareSession.value?.let {
-            it.copy(
+            output.flush()
+            CaltopoClient.CTInfo(TAG, "Completed receiver='$receiverName' sid=$sessionId bytes=$sent")
+            val completed = MutualAidPackageCompletedReceiver(receiverName, System.currentTimeMillis())
+            _shareSession.value = _shareSession.value?.let {
+                it.copy(
+                    progress = MutualAidPackageShareProgress("", 0L, packageFile.length(), "Ready"),
+                    completedReceivers = it.completedReceivers + completed,
+                    statusMessage = "Ready for another receiver"
+                )
+            }
+        } catch (e: Exception) {
+            CaltopoClient.CTWarn(TAG, "serveSocket() failed for receiver='$receiverName' sid=$sessionId", e)
+            _shareSession.value = _shareSession.value?.copy(
                 progress = MutualAidPackageShareProgress("", 0L, packageFile.length(), "Ready"),
-                completedReceivers = it.completedReceivers + completed,
-                statusMessage = "Ready for another receiver"
+                statusMessage = "Transfer failed for $receiverName"
             )
         }
     }

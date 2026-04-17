@@ -1902,14 +1902,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.cachedDroneSpecTable.size();
     }
 
-    public static void ClearPersistedRidMappings() {
-        ClientClassState ccs = GetState();
-        if (ccs.cachedDroneSpecTable == null || ccs.cachedDroneSpecTable.isEmpty()) {
-            CTInfo(TAG, "ClearPersistedRidMappings(): no persistent rid mappings to clear.");
-            return;
-        }
-        ccs.cachedDroneSpecTable.clear();
-        ArchiveState("persistent rid mappings cleared");
+    public static void ResetPersistedClientState() {
+        Ccstate = new ClientClassState();
+        DebugLevel = DebugLevelDebug;
+        ClearDebugTagFilter();
+        ArchivePermissionMissingFlag = false;
+        ArchiveState("persistent client state reset");
         NotifySettingsChanged();
         UpdateDroneSpecs();
     }

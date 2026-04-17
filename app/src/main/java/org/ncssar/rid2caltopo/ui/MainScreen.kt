@@ -203,7 +203,7 @@ fun MainScreen(
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLogArchiveDialog by remember { mutableStateOf(false) }
     var showTestingToolsDialog by remember { mutableStateOf(false) }
-    var showClearRidmapDialog by remember { mutableStateOf(false) }
+    var showResetPersistentStateDialog by remember { mutableStateOf(false) }
     var mqttDisabled by remember { mutableStateOf(!CaltopoClient.GetUsePeersFlag()) }
     var loadingLogArchiveDays by remember { mutableStateOf(false) }
     var sendingLogArchive by remember { mutableStateOf(false) }
@@ -1221,12 +1221,12 @@ fun MainScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {
-                            showClearRidmapDialog = true
+                            showResetPersistentStateDialog = true
                             showTestingToolsDialog = false
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Clear Persisted RID Map")
+                        Text("Reset Persisted App State")
                     }
                     Spacer(modifier = Modifier.height(16.dp))
                     HorizontalDivider()
@@ -1259,30 +1259,31 @@ fun MainScreen(
         )
     }
 
-    if (showClearRidmapDialog) {
+    if (showResetPersistentStateDialog) {
         AlertDialog(
-            onDismissRequest = { showClearRidmapDialog = false },
-            title = { Text("Clear Persisted RID Map?") },
+            onDismissRequest = { showResetPersistentStateDialog = false },
+            title = { Text("Reset Persisted App State?") },
             text = {
                 Text(
-                    "This removes all ct_ridmap-backed persistent RID mappings from app_config.pb " +
-                        "and re-saves the cleaned config for future backup/restore. Active transient " +
-                        "drone specs for the current session are left alone."
+                    "This rewrites app_config.pb from a fresh default ClientClassState and updates " +
+                        "future backup/restore from that clean baseline. It clears persistent rid " +
+                        "mappings, credentials, profiles, archive path, loaded-config history, and " +
+                        "other saved settings. Transient runtime activity may repopulate state after reset."
                 )
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        CaltopoClient.ClearPersistedRidMappings()
-                        CaltopoClient.ShowToast("Persisted RID map cleared and backup state updated.")
-                        showClearRidmapDialog = false
+                        CaltopoClient.ResetPersistedClientState()
+                        CaltopoClient.ShowToast("Persisted app state reset and backup state updated.")
+                        showResetPersistentStateDialog = false
                     }
                 ) {
-                    Text("Clear")
+                    Text("Reset")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showClearRidmapDialog = false }) {
+                TextButton(onClick = { showResetPersistentStateDialog = false }) {
                     Text("Cancel")
                 }
             }

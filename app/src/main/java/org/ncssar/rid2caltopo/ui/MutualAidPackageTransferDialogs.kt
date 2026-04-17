@@ -108,7 +108,7 @@ fun MutualAidPackageShareDialog(
                 Text(session.statusMessage, fontSize = 12.sp)
                 if (session.progress.phase == "Sending" && session.progress.totalBytes > 0L) {
                     Spacer(Modifier.height(8.dp))
-                    Text("Receiver: ${session.progress.receiverName}")
+                    Text("Sending to ${session.progress.receiverName}")
                     LinearProgressIndicator(progress = { progressFraction }, modifier = Modifier.fillMaxWidth())
                     Text(
                         "${(progressFraction * 100).toInt()}%  (${formatBytes(session.progress.bytesSent)} / ${formatBytes(session.progress.totalBytes)})",

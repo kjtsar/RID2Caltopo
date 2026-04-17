@@ -179,6 +179,12 @@ public class R2CMqttManager {
     private static final DelayedExec ownershipCheckTimer = new DelayedExec();
     private static final PeerOwnershipEngine ownershipEngine = new PeerOwnershipEngine(
             DIST_SCALE_M, RTT_SCALE_MS, WEIGHT_PROXIMITY, WEIGHT_RTT);
+    private static final Object mqttLogLock = new Object();
+    private static final long MQTT_LOG_SUPPRESS_WINDOW_MS = 30_000L;
+    private static volatile boolean mqttConnected = false;
+    @Nullable private static volatile String lastMqttDisconnectDetail = null;
+    private static volatile long lastMqttDisconnectLogMs = 0L;
+    private static volatile int suppressedMqttDisconnects = 0;
 
     private static volatile PeerListChangedListener peerListChangedListener;
     private static volatile boolean initialized = false;
@@ -223,6 +229,7 @@ public class R2CMqttManager {
             peerTransport = createPeerTransport(brokerUri, clientId);
             peerTransport.setCallback(new PeerTransportCallback() {
                 @Override public void onConnected(boolean reconnect, @NonNull String serverURI) {
+                    noteMqttConnected(reconnect, serverURI);
                     CTInfo(TAG, "connectComplete() reconnect=" + reconnect);
                     onMqttConnected();
                 }
@@ -231,7 +238,7 @@ public class R2CMqttManager {
                     String detail = cause != null
                             ? cause.getClass().getSimpleName() + ": " + cause.getMessage()
                             : "unknown";
-                    CTError(TAG, "connectionLost(): " + detail);
+                    noteMqttConnectionLost(detail);
                 }
 
                 @Override public void onMessageArrived(@NonNull String topic, @NonNull byte[] payload) {
@@ -282,6 +289,51 @@ public class R2CMqttManager {
         drones.clear();
         peerTransport = null;
         subscribedTopicFilter = null;
+        resetMqttDisconnectLogging();
+    }
+
+    private static void noteMqttConnected(boolean reconnect, @NonNull String serverURI) {
+        synchronized (mqttLogLock) {
+            if (suppressedMqttDisconnects > 0) {
+                CTInfo(TAG, String.format(Locale.US,
+                        "MQTT reconnect complete after %d suppressed disconnect event(s). reconnect=%s server=%s",
+                        suppressedMqttDisconnects, reconnect, serverURI));
+            }
+            mqttConnected = true;
+            lastMqttDisconnectDetail = null;
+            lastMqttDisconnectLogMs = 0L;
+            suppressedMqttDisconnects = 0;
+        }
+    }
+
+    private static void noteMqttConnectionLost(@NonNull String detail) {
+        synchronized (mqttLogLock) {
+            long now = System.currentTimeMillis();
+            boolean detailChanged = !detail.equals(lastMqttDisconnectDetail);
+            boolean stale = now - lastMqttDisconnectLogMs >= MQTT_LOG_SUPPRESS_WINDOW_MS;
+
+            if (mqttConnected || detailChanged || stale) {
+                String suffix = suppressedMqttDisconnects > 0
+                        ? String.format(Locale.US, " (suppressed %d similar event(s))", suppressedMqttDisconnects)
+                        : "";
+                CTWarn(TAG, "connectionLost(): " + detail + suffix);
+                mqttConnected = false;
+                lastMqttDisconnectDetail = detail;
+                lastMqttDisconnectLogMs = now;
+                suppressedMqttDisconnects = 0;
+            } else {
+                suppressedMqttDisconnects++;
+            }
+        }
+    }
+
+    private static void resetMqttDisconnectLogging() {
+        synchronized (mqttLogLock) {
+            mqttConnected = false;
+            lastMqttDisconnectDetail = null;
+            lastMqttDisconnectLogMs = 0L;
+            suppressedMqttDisconnects = 0;
+        }
     }
 
     // ── called on successful MQTT connect ─────────────────────────────────────

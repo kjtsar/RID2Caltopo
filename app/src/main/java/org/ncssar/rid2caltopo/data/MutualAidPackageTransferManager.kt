@@ -89,6 +89,8 @@ object MutualAidPackageTransferManager {
     private const val MAX_SESSION_MINUTES = 30L
     private const val TLS_KEY_ALIAS = "ma-transfer"
     private const val TLS_KEY_PASSWORD = "rid2caltopo-transfer"
+    private const val PROGRESS_UPDATE_BYTES = 256 * 1024L
+    private const val PROGRESS_UPDATE_MS = 250L
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val _shareSession = MutableStateFlow<MutualAidPackageShareSession?>(null)
     val shareSession: StateFlow<MutualAidPackageShareSession?> = _shareSession.asStateFlow()
@@ -204,17 +206,23 @@ object MutualAidPackageTransferManager {
                                 BufferedOutputStream(output).use { bufferedOut ->
                                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                                     var bytesReadTotal = 0L
+                                    var lastProgressBytes = 0L
+                                    var lastProgressAtMs = 0L
                                     while (true) {
                                         val read = buffered.read(buffer)
                                         if (read < 0) break
                                         bufferedOut.write(buffer, 0, read)
                                         bytesReadTotal += read
-                                        _importState.value = MutualAidPackageImportState.Downloading(
-                                            packageName,
-                                            bytesReadTotal,
-                                            totalBytes,
-                                            "Downloading"
-                                        )
+                                        if (shouldPublishProgress(bytesReadTotal, totalBytes, lastProgressBytes, lastProgressAtMs)) {
+                                            _importState.value = MutualAidPackageImportState.Downloading(
+                                                packageName,
+                                                bytesReadTotal,
+                                                totalBytes,
+                                                "Downloading"
+                                            )
+                                            lastProgressBytes = bytesReadTotal
+                                            lastProgressAtMs = System.currentTimeMillis()
+                                        }
                                     }
                                     bufferedOut.flush()
                                 }
@@ -363,6 +371,8 @@ object MutualAidPackageTransferManager {
             statusMessage = "Sending to $receiverName"
         )
         var sent = 0L
+        var lastProgressBytes = 0L
+        var lastProgressAtMs = 0L
         val output = BufferedOutputStream(socket.getOutputStream())
         val header = buildString {
             append("HTTP/1.1 200 OK\r\n")
@@ -381,10 +391,14 @@ object MutualAidPackageTransferManager {
                     if (read < 0) break
                     output.write(buffer, 0, read)
                     sent += read
-                    _shareSession.value = _shareSession.value?.copy(
-                        progress = MutualAidPackageShareProgress(receiverName, sent, packageFile.length(), "Sending"),
-                        statusMessage = "Sending to $receiverName"
-                    )
+                    if (shouldPublishProgress(sent, packageFile.length(), lastProgressBytes, lastProgressAtMs)) {
+                        _shareSession.value = _shareSession.value?.copy(
+                            progress = MutualAidPackageShareProgress(receiverName, sent, packageFile.length(), "Sending"),
+                            statusMessage = "Sending to $receiverName"
+                        )
+                        lastProgressBytes = sent
+                        lastProgressAtMs = System.currentTimeMillis()
+                    }
                 }
             }
         }
@@ -436,5 +450,18 @@ object MutualAidPackageTransferManager {
         val model = Build.MODEL?.trim().orEmpty()
         if (model.isNotEmpty()) return model
         return "RID2Caltopo Receiver"
+    }
+
+    private fun shouldPublishProgress(
+        bytesDone: Long,
+        totalBytes: Long,
+        lastBytes: Long,
+        lastAtMs: Long
+    ): Boolean {
+        if (bytesDone <= 0L) return false
+        if (bytesDone >= totalBytes && totalBytes > 0L) return true
+        if (bytesDone - lastBytes >= PROGRESS_UPDATE_BYTES) return true
+        val now = System.currentTimeMillis()
+        return now - lastAtMs >= PROGRESS_UPDATE_MS
     }
 }

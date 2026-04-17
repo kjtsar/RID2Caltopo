@@ -156,7 +156,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             @Override
             public void onFailure(@Nullable Throwable throwable, int responseCode, @Nullable String responseMessage) {
                 if (throwable != null) {
-                    CTWarn(TAG, "tracker websocket failure: " + throwable.getMessage());
+                    String message = throwable.getMessage();
+                    if (message == null || message.isEmpty()) {
+                        message = throwable.getClass().getSimpleName();
+                    }
+                    CTWarn(TAG, "tracker websocket failure: " + message);
                 } else {
                     CTWarn(TAG, "tracker websocket failure: unknown");
                 }
@@ -325,6 +329,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             @Override
             public void onFailure(@Nullable Throwable throwable, int responseCode, @Nullable String responseMessage) {
                 heartbeatTimer.stop();
+                if (throwable != null) {
+                    String message = throwable.getMessage();
+                    if (message == null || message.isEmpty()) {
+                        message = throwable.getClass().getSimpleName();
+                    }
+                    CTWarn(TAG, "tracker websocket reconnect failure: " + message);
+                }
                 notifyHardFailureIfNeeded(responseCode, responseMessage);
                 scheduleReconnect();
             }

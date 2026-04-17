@@ -35,6 +35,11 @@ final class OkHttpTrackerCoordinationTransport implements TrackerCoordinationTra
             @Override
             public void onOpen(@NonNull WebSocket webSocket, @NonNull Response response) {
                 connected = true;
+                CaltopoClient.CTInfo(
+                        "TrackerWsTransport",
+                        "websocket opened: code=" + response.code() +
+                                " message='" + response.message() + "'"
+                );
                 Callback cb = callback;
                 if (cb != null) cb.onOpen();
             }
@@ -46,8 +51,20 @@ final class OkHttpTrackerCoordinationTransport implements TrackerCoordinationTra
             }
 
             @Override
+            public void onClosing(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
+                CaltopoClient.CTWarn(
+                        "TrackerWsTransport",
+                        "websocket closing: code=" + code + " reason='" + reason + "'"
+                );
+            }
+
+            @Override
             public void onClosed(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
                 connected = false;
+                CaltopoClient.CTWarn(
+                        "TrackerWsTransport",
+                        "websocket closed: code=" + code + " reason='" + reason + "'"
+                );
                 Callback cb = callback;
                 if (cb != null) cb.onClosed();
             }
@@ -65,6 +82,12 @@ final class OkHttpTrackerCoordinationTransport implements TrackerCoordinationTra
                             "TrackerWsTransport",
                             "websocket failure response: code=" + response.code() +
                                     " message='" + response.message() + "'"
+                    );
+                } else {
+                    CaltopoClient.CTWarn(
+                            "TrackerWsTransport",
+                            "websocket failure without HTTP response: throwable=" +
+                                    t.getClass().getSimpleName()
                     );
                 }
                 if (cb != null) cb.onFailure(t, responseCode, responseMessage);

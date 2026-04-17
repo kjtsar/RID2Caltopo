@@ -12,6 +12,7 @@ import org.ncssar.rid2caltopo.BuildConfig;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.EOFException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -160,7 +161,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     if (message == null || message.isEmpty()) {
                         message = throwable.getClass().getSimpleName();
                     }
-                    CTWarn(TAG, "tracker websocket failure: " + message);
+                    if (throwable instanceof EOFException) {
+                        CTInfo(TAG, "tracker websocket transient disconnect: " + message);
+                    } else {
+                        CTWarn(TAG, "tracker websocket failure: " + message);
+                    }
                 } else {
                     CTWarn(TAG, "tracker websocket failure: unknown");
                 }
@@ -334,7 +339,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     if (message == null || message.isEmpty()) {
                         message = throwable.getClass().getSimpleName();
                     }
-                    CTWarn(TAG, "tracker websocket reconnect failure: " + message);
+                    if (throwable instanceof EOFException) {
+                        CTInfo(TAG, "tracker websocket reconnect transient disconnect: " + message);
+                    } else {
+                        CTWarn(TAG, "tracker websocket reconnect failure: " + message);
+                    }
                 }
                 notifyHardFailureIfNeeded(responseCode, responseMessage);
                 scheduleReconnect();
@@ -522,10 +531,15 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private void onRelaySighting(@NonNull JSONObject jo) {
         String remoteId = jo.optString("remoteId");
         if (remoteId.isEmpty() || !isLocalOwner(remoteId)) return;
+        String fromZoneId = firstNonEmpty(jo.optString("fromZoneId"), jo.optString("zoneId"));
+        if (fromZoneId.equals(myGuid)) {
+            CTDebug(TAG, "Ignoring self-relayed sighting for " + remoteId);
+            return;
+        }
         PendingDrone pending = pendingDrones.get(remoteId);
         if (pending == null) return;
         pending.liveTrack.onPeerWaypoint(
-                firstNonEmpty(jo.optString("fromZoneId"), jo.optString("zoneId")),
+                fromZoneId,
                 jo.optDouble("lat", 0.0),
                 jo.optDouble("lng", 0.0),
                 jo.optDouble("altM", 0.0),
@@ -547,6 +561,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             long droneTs,
             @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         if (!isLocalOwner(remoteId)) return;
+        if (fromZoneId.equals(myGuid)) return;
         PendingDrone pending = pendingDrones.get(remoteId);
         if (pending == null) return;
         pending.liveTrack.onPeerWaypoint(fromZoneId, lat, lng, altM, droneTs, telemetry);

@@ -120,6 +120,27 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun selfRelayedSighting_isIgnored() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1")
+        val track = FakeLiveTrack("DRONE1")
+        coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
+
+        coordinator.handleRelaySightingForTesting(
+            "DRONE1",
+            "zone-alpha",
+            39.1,
+            -121.2,
+            123.4,
+            9876L,
+            null
+        )
+
+        assertEquals(0, track.peerWaypointCount)
+    }
+
+    @Test
     fun hardAuthFailure_notifiesListenerOnce() {
         var failureCount = 0
         var lastCode = 0

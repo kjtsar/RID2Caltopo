@@ -56,14 +56,33 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri) {
+        boolean nextTrackerSelected = shouldUseTrackerCoordinator();
+        PeerCoordinator nextCoordinator = nextTrackerSelected
+                ? TrackerPeerCoordinator.getInstance()
+                : getMqttCoordinator();
+        if (sameString(startedMapId, mapId) &&
+                sameString(startedGuid, guid) &&
+                sameString(startedName, name) &&
+                sameString(startedBrokerUri, brokerUri) &&
+                trackerSelected == nextTrackerSelected &&
+                activeCoordinator == nextCoordinator) {
+            CaltopoClient.CTDebug(
+                    "DefaultPeerCoord",
+                    String.format(
+                            "start(): ignoring duplicate start for mapId='%s' guid='%s' using %s coordination",
+                            mapId,
+                            guid,
+                            trackerSelected ? "tracker" : "mqtt"
+                    )
+            );
+            return;
+        }
         startedMapId = mapId;
         startedGuid = guid;
         startedName = name;
         startedBrokerUri = brokerUri;
-        trackerSelected = shouldUseTrackerCoordinator();
-        activeCoordinator = trackerSelected
-                ? TrackerPeerCoordinator.getInstance()
-                : getMqttCoordinator();
+        trackerSelected = nextTrackerSelected;
+        activeCoordinator = nextCoordinator;
         if (trackerSelected) {
             TrackerPeerCoordinator.getInstance().setHardFailureListener(this::handleTrackerHardFailure);
         }
@@ -166,7 +185,8 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     }
 
     private boolean shouldUseTrackerCoordinator() {
-        return !CaltopoClient.GetTrackerApiKey().isEmpty()
+        return CaltopoClient.GetUsePeersFlag()
+                && !CaltopoClient.GetTrackerApiKey().isEmpty()
                 && !CaltopoClient.GetTrackerUrlPfx().isEmpty();
     }
 
@@ -214,5 +234,12 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     static void setMqttCoordinatorOverrideForTesting(@Nullable PeerCoordinator coordinator) {
         mqttCoordinatorOverrideForTesting = coordinator;
+    }
+
+    private static boolean sameString(@Nullable String left, @Nullable String right) {
+        if (left == null) {
+            return right == null;
+        }
+        return left.equals(right);
     }
 }

@@ -220,9 +220,10 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         if (active && null != liveTrackId) try {
             CTDebug(TAG, String.format(Locale.US, "shutdown(%d). Terminating '%s'",
                     maxWaitInMilliseconds, droneSpec.trackLabel()));
-            if (localOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
+            boolean wasOwner = localOwner;
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(maxWaitInMilliseconds);
+            if (wasOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
         } catch (Exception e) {
             CTError(TAG, String.format(Locale.US, "shutdown(%s) failed:", droneSpec.trackLabel()), e);
         }
@@ -383,11 +384,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     public void finishTrack(@NonNull String reason) {
-        if (localOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
         if (active && null != liveTrackId) try {
+            boolean wasOwner = localOwner;
             CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(0);
+            if (wasOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
             localOwner = false;
             active = false;
         } catch (Exception e) {

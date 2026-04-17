@@ -99,10 +99,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
         String trackerUrlPrefix = trackerUrlPrefixOverrideForTesting != null
                 ? trackerUrlPrefixOverrideForTesting
-                : CaltopoClient.GetTrackerUrlPfx();
+                : CaltopoClient.GetTrackerCoordinationUrlPfx();
         String trackerApiKey = trackerApiKeyOverrideForTesting != null
                 ? trackerApiKeyOverrideForTesting
-                : CaltopoClient.GetTrackerApiKey();
+                : CaltopoClient.GetTrackerCoordinationApiKey();
         if (trackerUrlPrefix.isEmpty() || trackerApiKey.isEmpty()) {
             CTWarn(TAG, "start(): tracker coordination not configured; falling back to local ownership.");
             this.mapId = mapId;
@@ -123,7 +123,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 "start(): wsUrl='%s' token=%s %s",
                 this.trackerWsUrl,
                 describeToken(trackerApiKey),
-                CaltopoClient.DescribeTrackerCredentialSelection()));
+                CaltopoClient.DescribeTrackerCredentialSelection("coordination")));
 
         transport = transportFactory.create();
         transport.setCallback(new TrackerCoordinationTransport.Callback() {

@@ -1191,6 +1191,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     @NonNull
     public static String DescribeTrackerCredentialSelection() {
+        return DescribeTrackerCredentialSelection("shared");
+    }
+
+    @NonNull
+    public static String DescribeTrackerCredentialSelection(@NonNull String usage) {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
         CaltopoProfileRecord active = GetActiveCaltopoProfile();
@@ -1214,7 +1219,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 ? preferred.trackerApiKey
                 : ccs.trackerApiKey;
         return String.format(Locale.US,
-                "source=%s activeProfileId='%s' activeProfileType='%s' selectedProfileId='%s' selectedProfileType='%s' trackerUrl='%s' trackerToken=%s",
+                "usage=%s source=%s activeProfileId='%s' activeProfileType='%s' selectedProfileId='%s' selectedProfileType='%s' trackerUrl='%s' trackerToken=%s",
+                usage,
                 source,
                 activeProfileId,
                 activeProfileType,
@@ -1222,6 +1228,26 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 profileType,
                 url,
                 describeToken(token));
+    }
+
+    @NonNull
+    public static String GetTrackerUploadApiKey() {
+        return GetTrackerApiKey();
+    }
+
+    @NonNull
+    public static String GetTrackerUploadUrlPfx() {
+        return GetTrackerUrlPfx();
+    }
+
+    @NonNull
+    public static String GetTrackerCoordinationApiKey() {
+        return GetTrackerApiKey();
+    }
+
+    @NonNull
+    public static String GetTrackerCoordinationUrlPfx() {
+        return GetTrackerUrlPfx();
     }
 
     public static int RemoveExpiredCaltopoProfiles(long nowMs, boolean disconnectIfActive) {
@@ -1888,21 +1914,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String trimmedMappedId = mappedId.trim();
 
         CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
-        if (activeDs != null) {
+        if (activeDs == null) {
+            // Confirmations are transient operator input unless a ct_ridmap explicitly
+            // loaded the dronespec into the persistent cache.
+            activeDs = new CtDroneSpec(remoteId, trimmedMappedId, trimmedOrg, trimmedModel, "");
+            ccs.droneSpecTable.put(remoteId, activeDs);
+        } else {
             activeDs.setOrg(trimmedOrg);
             activeDs.setModel(trimmedModel);
             activeDs.setMappedId(trimmedMappedId);
-        }
-
-        CtDroneSpec cachedDs = ccs.cachedDroneSpecTable.get(remoteId);
-        if (cachedDs == null) {
-            String owner = activeDs != null ? activeDs.getOwner() : "";
-            cachedDs = new CtDroneSpec(remoteId, trimmedMappedId, trimmedOrg, trimmedModel, owner);
-            ccs.cachedDroneSpecTable.put(remoteId, cachedDs);
-        } else {
-            cachedDs.setOrg(trimmedOrg);
-            cachedDs.setModel(trimmedModel);
-            cachedDs.setMappedId(trimmedMappedId);
         }
 
         ArchiveState("drone spec confirmation saved");
@@ -2968,12 +2988,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (IsExitRequested()) {
             return 499;
         }
-        String trackerApiKey = GetTrackerApiKey();
-        String trackerUrlPfx = GetTrackerUrlPfx();
+        String trackerApiKey = GetTrackerUploadApiKey();
+        String trackerUrlPfx = GetTrackerUploadUrlPfx();
         if (trackerApiKey.isEmpty() || trackerUrlPfx.isEmpty()) return 8675309;
 
         if (CTDebugEnabled(TAG)) {
-            CTDebug(TAG, "BgPublishGeoJsonStats() tracker selection: " + DescribeTrackerCredentialSelection());
+            CTDebug(TAG, "BgPublishGeoJsonStats() tracker selection: " + DescribeTrackerCredentialSelection("upload"));
         }
 
         String urlStr = String.format(Locale.US, "%s/%s", trackerUrlPfx, "upload");

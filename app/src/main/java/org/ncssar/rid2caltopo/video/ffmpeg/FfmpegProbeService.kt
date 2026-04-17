@@ -110,6 +110,8 @@ private data class ManagedRenderSession(
     var idlePollCount: Int = 0,
     var lastStartupRecoveryDeferredLogAtMs: Long = 0L,
     var renderStride: Int = 1,
+    var strideEscalationVotes: Int = 0,
+    var strideRecoveryVotes: Int = 0,
 )
 
 class FfmpegProbeService {
@@ -123,12 +125,12 @@ class FfmpegProbeService {
     private val startupNoFrameDeferralLogMs = 5_000L
     private val noFrameCheckMs = 1_000L
     private val renderedNoProgressRecoveryPolls = 8
-    private val renderStrideMildLagMs = 1_500L
-    private val renderStrideSevereLagMs = 5_000L
-    private val renderStrideRecoverLagMs = 600L
-    private val renderStrideMildBacklogFrames = 120L
-    private val renderStrideSevereBacklogFrames = 300L
-    private val renderStrideRecoverBacklogFrames = 45L
+    private val renderStrideMildLagMs = 3_000L
+    private val renderStrideRecoverLagMs = 900L
+    private val renderStrideMildBacklogFrames = 140L
+    private val renderStrideRecoverBacklogFrames = 40L
+    private val renderStrideEscalationVotesRequired = 10
+    private val renderStrideRecoveryVotesRequired = 20
     private val renderSessions = mutableMapOf<String, Long>()
     private val lastFrameAtMs = mutableMapOf<String, Long>()
     private val sourcePathByDesignator = mutableMapOf<String, String>()
@@ -842,17 +844,33 @@ class FfmpegProbeService {
         effectiveLagMs: Long?,
     ) {
         val backlogFrames = max(0L, sessionState.decodedFrameCount - sessionState.renderedFrameCount)
+        val overload = backlogFrames >= renderStrideMildBacklogFrames ||
+            (effectiveLagMs != null && effectiveLagMs >= renderStrideMildLagMs)
+        val recovered = backlogFrames <= renderStrideRecoverBacklogFrames &&
+            (effectiveLagMs == null || effectiveLagMs <= renderStrideRecoverLagMs)
+
+        if (overload) {
+            sessionState.strideEscalationVotes += 1
+            sessionState.strideRecoveryVotes = 0
+        } else if (recovered) {
+            sessionState.strideRecoveryVotes += 1
+            sessionState.strideEscalationVotes = 0
+        } else {
+            sessionState.strideEscalationVotes = 0
+            sessionState.strideRecoveryVotes = 0
+        }
+
         val desiredStride = when {
-            backlogFrames >= renderStrideSevereBacklogFrames ||
-                (effectiveLagMs != null && effectiveLagMs >= renderStrideSevereLagMs) -> 3
-            backlogFrames >= renderStrideMildBacklogFrames ||
-                (effectiveLagMs != null && effectiveLagMs >= renderStrideMildLagMs) -> 2
-            backlogFrames <= renderStrideRecoverBacklogFrames &&
-                (effectiveLagMs == null || effectiveLagMs <= renderStrideRecoverLagMs) -> 1
+            sessionState.renderStride == 1 &&
+                sessionState.strideEscalationVotes >= renderStrideEscalationVotesRequired -> 2
+            sessionState.renderStride > 1 &&
+                sessionState.strideRecoveryVotes >= renderStrideRecoveryVotesRequired -> 1
             else -> sessionState.renderStride
         }
         if (desiredStride == sessionState.renderStride) return
         sessionState.renderStride = desiredStride
+        sessionState.strideEscalationVotes = 0
+        sessionState.strideRecoveryVotes = 0
         CTDebug(
             tag,
             "Adaptive render stride designator=${sessionState.designator} sessionId=$sessionId " +

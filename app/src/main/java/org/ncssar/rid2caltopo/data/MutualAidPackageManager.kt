@@ -1,4 +1,4 @@
-package org.ncssar.rid2caltopo.video
+package org.ncssar.rid2caltopo.data
 
 import android.content.Context
 import android.net.Uri
@@ -8,10 +8,6 @@ import java.io.File
 import java.io.OutputStream
 import org.json.JSONArray
 import org.json.JSONObject
-import org.ncssar.rid2caltopo.data.CaltopoClient
-import org.ncssar.rid2caltopo.data.CaltopoCredentials
-import org.ncssar.rid2caltopo.data.MutualAidProfileManager
-import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
 import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.util.BoundingBox

@@ -51,6 +51,8 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
+import org.ncssar.rid2caltopo.data.MutualAidPackageTransferManager
+import org.ncssar.rid2caltopo.data.MutualAidPackageTransferToken
 import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigManager
 import org.ncssar.rid2caltopo.data.OrgConfigToken
@@ -76,8 +78,6 @@ import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
-import org.ncssar.rid2caltopo.video.MutualAidPackageTransferManager
-import org.ncssar.rid2caltopo.video.MutualAidPackageTransferToken
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
 import org.opendroneid.android.bluetooth.BluetoothScanner

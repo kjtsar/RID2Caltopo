@@ -575,11 +575,11 @@ fun MutualAidJoinDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Import MA Config") },
+        title = { Text("Import MA Package") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Scan the mutual-aid QR code, paste the token below, or choose an MA config file.",
+                    "Scan the mutual-aid QR code, paste the token below, or choose an MA package file.",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Spacer(Modifier.height(12.dp))

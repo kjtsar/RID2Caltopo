@@ -288,7 +288,7 @@ fun MainScreen(
             if (uri == null) return@rememberLauncherForActivityResult
             val preview = MutualAidPackageManager.readPackagePreview(context, uri)
             if (!preview.first || preview.second == null) {
-                CaltopoClient.ShowToast("Could not read MA config preview.")
+                CaltopoClient.ShowToast("Could not read MA package preview.")
                 return@rememberLauncherForActivityResult
             }
             pendingMutualAidImportUri = uri
@@ -435,11 +435,11 @@ fun MainScreen(
                 pendingMutualAidImportUri = null
                 pendingMutualAidImportPreview = null
             },
-            title = { Text("Import MA Config") },
+            title = { Text("Import MA Package") },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     if (preview != null) {
-                        Text("Package: ${preview.packageName.ifBlank { "MA Config" }}")
+                        Text("Package: ${preview.packageName.ifBlank { "MA Package" }}")
                         Text("Source org: ${preview.sourceOrg.ifBlank { "Unknown" }}")
                         Text("Display name: ${preview.displayName.ifBlank { "Mutual Aid" }}")
                         Text("Incident: ${preview.incident.ifBlank { "Unknown" }}")
@@ -448,7 +448,7 @@ fun MainScreen(
                         Text("Expires: $expiryText")
                         Text("Offline cache: ${preview.tileCount} tile(s), ${preview.demCount} DEM tile(s)")
                     } else {
-                        Text("Could not read MA config preview.")
+                        Text("Could not read MA package preview.")
                     }
                 }
             },
@@ -489,7 +489,7 @@ fun MainScreen(
     if (importingMutualAidConfig) {
         AlertDialog(
             onDismissRequest = { },
-            title = { Text("Importing MA Config") },
+            title = { Text("Importing MA Package") },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     CircularProgressIndicator()
@@ -861,7 +861,7 @@ fun MainScreen(
                         DropdownMenuItem(text = { Text("Export MA Package") }, onClick = {
                             menuExpanded = false
                             if (!CaltopoClient.HasMutualAidTemplate()) {
-                                CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting MA config.")
+                                CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting an MA package.")
                             } else if (CaltopoMap.GetMapId().isBlank()) {
                                 CaltopoClient.ShowToast("Connect to a CalTopo map before exporting an MA package.")
                             } else {
@@ -870,7 +870,7 @@ fun MainScreen(
                             }
                         })
                         DropdownMenuItem(
-                            text = { Text("Import MA Config") },
+                            text = { Text("Import MA Package") },
                             onClick = {
                                 menuExpanded = false
                                 showMutualAidJoinDialog = true

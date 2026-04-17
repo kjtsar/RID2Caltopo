@@ -82,11 +82,11 @@ object MutualAidPackageManager {
                     includeDem = includeDem,
                     clipBoundary = clipBoundary
                 )
-            } ?: return false to "Could not open destination for MA config export."
+            } ?: return false to "Could not open destination for MA package export."
 
         } catch (e: Exception) {
             CaltopoClient.CTWarn("MutualAidPackageMgr", "exportPackage() failed.", e)
-            false to (e.message ?: "Failed to save MA config.")
+            false to (e.message ?: "Failed to save MA package.")
         }
     }
 
@@ -147,7 +147,7 @@ object MutualAidPackageManager {
             val manifestBytes = entryBytes[MANIFEST_PATH] ?: return false to "Package is missing manifest.json."
             val manifest = JSONObject(String(manifestBytes, Charsets.UTF_8))
             if (manifest.optString("format") != FORMAT) {
-                return false to "Unexpected MA config format."
+                return false to "Unexpected MA package format."
             }
 
             val profileEnc = manifest.optString("profile_enc")
@@ -190,10 +190,10 @@ object MutualAidPackageManager {
                 importedDem++
             }
 
-            true to "Imported MA config: $importedTiles tile(s), $importedDem DEM tile(s)."
+            true to "Imported MA package: $importedTiles tile(s), $importedDem DEM tile(s)."
         } catch (e: Exception) {
             CaltopoClient.CTWarn("MutualAidPackageMgr", "importPackage() failed.", e)
-            false to (e.message ?: "Failed to import MA config.")
+            false to (e.message ?: "Failed to import MA package.")
         }
     }
 
@@ -256,7 +256,7 @@ object MutualAidPackageManager {
                     entry = zip.nextEntry
                 }
             }
-        } ?: throw IllegalStateException("Could not open selected MA config.")
+        } ?: throw IllegalStateException("Could not open selected MA package.")
         return entryBytes
     }
 
@@ -301,7 +301,7 @@ object MutualAidPackageManager {
             expiresAtEpochMs = expiresAtEpochMs
         )
         if (profileEnc.isNullOrBlank()) {
-            throw IllegalStateException("Load ct_mutual_aid_credentials before exporting MA config.")
+            throw IllegalStateException("Load ct_mutual_aid_credentials before exporting an MA package.")
         }
         ZipOutputStream(rawOut).use { zip ->
             forEachTileIndexForBounds(bounds, minZoom, maxZoom, clipBoundary) { tileIndex ->
@@ -354,7 +354,7 @@ object MutualAidPackageManager {
             zip.write(manifest.toString(2).toByteArray(Charsets.UTF_8))
             zip.closeEntry()
         }
-        return true to "Saved MA config with ${tileEntries.size} tile(s) and ${demEntries.size} DEM tile(s)."
+        return true to "Saved MA package with ${tileEntries.size} tile(s) and ${demEntries.size} DEM tile(s)."
     }
 
     private fun forEachTileIndexForBounds(

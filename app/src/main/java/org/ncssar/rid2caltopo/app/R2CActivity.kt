@@ -399,7 +399,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         ProximityAlertCenter.suspendCurrentAlert()
                     }
                 )
-                if (maPackageImportState !is org.ncssar.rid2caltopo.video.MutualAidPackageImportState.Idle) {
+                if (maPackageImportState !is org.ncssar.rid2caltopo.data.MutualAidPackageImportState.Idle) {
                     MutualAidPackageImportDialog(
                         state = maPackageImportState,
                         onDismiss = { MutualAidPackageTransferManager.dismissImportState() }

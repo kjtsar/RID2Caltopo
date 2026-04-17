@@ -203,6 +203,7 @@ fun MainScreen(
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLogArchiveDialog by remember { mutableStateOf(false) }
     var showTestingToolsDialog by remember { mutableStateOf(false) }
+    var showClearRidmapDialog by remember { mutableStateOf(false) }
     var mqttDisabled by remember { mutableStateOf(!CaltopoClient.GetUsePeersFlag()) }
     var loadingLogArchiveDays by remember { mutableStateOf(false) }
     var sendingLogArchive by remember { mutableStateOf(false) }
@@ -1217,6 +1218,16 @@ fun MainScreen(
                     ) {
                         Text("Simulate MyLocation...")
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            showClearRidmapDialog = true
+                            showTestingToolsDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Clear Persisted RID Map")
+                    }
                     Spacer(modifier = Modifier.height(16.dp))
                     HorizontalDivider()
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1243,6 +1254,36 @@ fun MainScreen(
             confirmButton = {
                 TextButton(onClick = { showTestingToolsDialog = false }) {
                     Text("Close")
+                }
+            }
+        )
+    }
+
+    if (showClearRidmapDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearRidmapDialog = false },
+            title = { Text("Clear Persisted RID Map?") },
+            text = {
+                Text(
+                    "This removes all ct_ridmap-backed persistent RID mappings from app_config.pb " +
+                        "and re-saves the cleaned config for future backup/restore. Active transient " +
+                        "drone specs for the current session are left alone."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        CaltopoClient.ClearPersistedRidMappings()
+                        CaltopoClient.ShowToast("Persisted RID map cleared and backup state updated.")
+                        showClearRidmapDialog = false
+                    }
+                ) {
+                    Text("Clear")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearRidmapDialog = false }) {
+                    Text("Cancel")
                 }
             }
         )

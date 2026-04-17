@@ -9,6 +9,9 @@ import java.io.OutputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
+import org.ncssar.rid2caltopo.video.ArcGisWorldImageryTileSource
+import org.ncssar.rid2caltopo.video.GeoBoundary
+import org.ncssar.rid2caltopo.video.OsmStandardTileSource
 import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint

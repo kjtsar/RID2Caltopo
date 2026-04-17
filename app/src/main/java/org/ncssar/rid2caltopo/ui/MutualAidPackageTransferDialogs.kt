@@ -33,8 +33,8 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import org.ncssar.rid2caltopo.video.MutualAidPackageImportState
-import org.ncssar.rid2caltopo.video.MutualAidPackageShareSession
+import org.ncssar.rid2caltopo.data.MutualAidPackageImportState
+import org.ncssar.rid2caltopo.data.MutualAidPackageShareSession
 
 private fun generateQrBitmap(content: String, sizePx: Int = 512): Bitmap? {
     if (content.isBlank()) return null

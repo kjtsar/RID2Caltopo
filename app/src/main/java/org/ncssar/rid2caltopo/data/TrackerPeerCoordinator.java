@@ -103,6 +103,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         String trackerApiKey = trackerApiKeyOverrideForTesting != null
                 ? trackerApiKeyOverrideForTesting
                 : CaltopoClient.GetTrackerCoordinationApiKey();
+        String normalizedTrackerApiKey = normalizeTrackerToken(trackerApiKey);
+        if (!trackerApiKey.equals(normalizedTrackerApiKey)) {
+            CTWarn(TAG, "start(): trimming tracker token whitespace before websocket auth.");
+        }
+        trackerApiKey = normalizedTrackerApiKey;
         if (trackerUrlPrefix.isEmpty() || trackerApiKey.isEmpty()) {
             CTWarn(TAG, "start(): tracker coordination not configured; falling back to local ownership.");
             this.mapId = mapId;
@@ -579,6 +584,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         return String.format(Locale.US, "len=%d suffix=%s",
                 trimmed.length(), trimmed.substring(trimmed.length() - 4));
+    }
+
+    @NonNull
+    private static String normalizeTrackerToken(@Nullable String token) {
+        return token == null ? "" : token.trim();
     }
 
     private static void putTelemetry(@NonNull JSONObject jo, @Nullable CtDroneSpec.PositionTelemetry telemetry) {

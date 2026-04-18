@@ -334,6 +334,8 @@ object MutualAidProfileManager {
         val finalDisplayName = displayName.ifBlank {
             listOf(sourceOrg, normalizedIncident, "OP$normalizedOpPeriod").joinToString(" ").trim()
         }
+        val trackerApiKey = CaltopoClient.GetTrackerApiKey()
+        val trackerUrlPfx = CaltopoClient.GetTrackerUrlPfx()
         val importedAt = System.currentTimeMillis()
         val dedupeKey = listOf(
             sourceOrg.trim(),
@@ -349,8 +351,8 @@ object MutualAidProfileManager {
             active?.trackFolder ?: CaltopoClient.GetTrackFolderName(),
             normalizedIncident,
             normalizedOpPeriod,
-            "",
-            "",
+            trackerApiKey,
+            trackerUrlPfx,
             true,
             expiresAtEpochMs,
             true,

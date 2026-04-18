@@ -577,11 +577,13 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         val hadPresentation = externalDisplayPresentation != null
         externalDisplayPresentation?.dismiss()
         externalDisplayPresentation = null
-        CTDebug(
-            TAG,
-            "dismissExternalDisplay(returnPhoneToMain=$returnPhoneToMain, hadPresentation=$hadPresentation, " +
-                "returnToPhoneOnly=${externalDisplayConfig.returnToPhoneOnlyLayoutOnDisconnect}, activeScreen=${localViewModel.activeScreen.value})"
-        )
+        if (hadPresentation) {
+            CTDebug(
+                TAG,
+                "dismissExternalDisplay(returnPhoneToMain=$returnPhoneToMain, hadPresentation=$hadPresentation, " +
+                    "returnToPhoneOnly=${externalDisplayConfig.returnToPhoneOnlyLayoutOnDisconnect}, activeScreen=${localViewModel.activeScreen.value})"
+            )
+        }
         if (returnPhoneToMain &&
             hadPresentation &&
             externalDisplayConfig.returnToPhoneOnlyLayoutOnDisconnect &&

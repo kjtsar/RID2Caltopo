@@ -73,7 +73,7 @@ internal class NotamRepository {
         val enabled = CaltopoClient.GetNotamEnabled()
         val configured = NotamAuthManager.isConfigured()
         val location = CaltopoMap.GetMyLocation()
-        if (CTDebugEnabled(TAG)) {
+        if (force && CTDebugEnabled(TAG)) {
             CTDebug(
                 TAG,
                 "refresh(force=$force) enabled=$enabled configured=$configured radiusNm=${CaltopoClient.GetNotamRadiusNm()} hasLocation=${location != null} accuracyM=${location?.accuracy ?: Float.NaN}"
@@ -85,9 +85,6 @@ internal class NotamRepository {
         }
 
         if (!force && !shouldRefresh(location)) {
-            if (CTDebugEnabled(TAG)) {
-                CTDebug(TAG, "Skipping refresh due to debounce/stability thresholds.")
-            }
             val retainedNotices = if (lastFetchedNotices.isNotEmpty()) lastFetchedNotices else _uiState.value.notices
             _uiState.value = buildUiState(
                 location = location,
@@ -166,12 +163,6 @@ internal class NotamRepository {
         val current = location ?: return false
         val distanceMeters = previous.distanceTo(current)
         val distanceNm = distanceMeters / 1852.0
-        if (CTDebugEnabled(TAG)) {
-            CTDebug(
-                TAG,
-                "Debounce check ageMs=${now - lastRefreshAtMs} movedNm=${"%.3f".format(Locale.US, distanceNm)} refreshIntervalMs=$refreshIntervalMs"
-            )
-        }
         return distanceNm >= 0.25
     }
 

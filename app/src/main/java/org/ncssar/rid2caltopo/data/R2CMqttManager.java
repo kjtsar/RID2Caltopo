@@ -1214,14 +1214,14 @@ public class R2CMqttManager {
                 NetworkInterface iface = ifaces.nextElement();
                 boolean up = iface.isUp();
                 boolean loopback = iface.isLoopback();
-                CTDebug(TAG, String.format(Locale.US,
+                CTInfo(TAG, String.format(Locale.US,
                         "GetMyIpAddress(): iface=%s up=%b loopback=%b", iface.getName(), up, loopback));
                 if (!up || loopback) continue;
                 Enumeration<InetAddress> addrs = iface.getInetAddresses();
                 while (addrs.hasMoreElements()) {
                     InetAddress addr = addrs.nextElement();
                     String host = addr.getHostAddress();
-                    CTDebug(TAG, String.format(Locale.US,
+                    CTInfo(TAG, String.format(Locale.US,
                             "GetMyIpAddress():   addr=%s isIPv4=%b isLoopback=%b",
                             host, addr instanceof Inet4Address, addr.isLoopbackAddress()));
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {

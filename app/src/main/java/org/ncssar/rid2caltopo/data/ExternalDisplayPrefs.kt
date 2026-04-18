@@ -28,7 +28,7 @@ enum class ExternalDisplayMode(
 
     companion object {
         fun fromStorage(value: String?): ExternalDisplayMode {
-            return entries.firstOrNull { it.storageValue == value } ?: AppManaged
+            return entries.firstOrNull { it.storageValue == value } ?: OsMirroring
         }
     }
 }
@@ -49,7 +49,7 @@ enum class ExternalDisplayAlertRouting(
 }
 
 data class ExternalDisplayConfig(
-    val mode: ExternalDisplayMode = ExternalDisplayMode.AppManaged,
+    val mode: ExternalDisplayMode = ExternalDisplayMode.OsMirroring,
     val autoOpenOnConnect: Boolean = true,
     val returnToPhoneOnlyLayoutOnDisconnect: Boolean = true,
     val allowInteraction: Boolean = true,
@@ -71,7 +71,7 @@ object ExternalDisplayPrefs {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return ExternalDisplayConfig(
             mode = ExternalDisplayMode.fromStorage(
-                prefs.getString(KEY_MODE, ExternalDisplayMode.AppManaged.storageValue)
+                prefs.getString(KEY_MODE, ExternalDisplayMode.OsMirroring.storageValue)
             ),
             autoOpenOnConnect = prefs.getBoolean(KEY_AUTO_OPEN, true),
             returnToPhoneOnlyLayoutOnDisconnect = prefs.getBoolean(KEY_RETURN_TO_PHONE_ONLY, true),

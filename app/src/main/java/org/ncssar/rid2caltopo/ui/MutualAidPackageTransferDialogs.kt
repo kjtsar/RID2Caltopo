@@ -142,7 +142,8 @@ fun MutualAidPackageShareDialog(
 @Composable
 fun MutualAidPackageImportDialog(
     state: MutualAidPackageImportState,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onCancel: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = {
@@ -195,6 +196,7 @@ fun MutualAidPackageImportDialog(
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = onDismiss) { Text("Hide") }
+                    TextButton(onClick = onCancel) { Text("Cancel") }
                 }
             }
         }

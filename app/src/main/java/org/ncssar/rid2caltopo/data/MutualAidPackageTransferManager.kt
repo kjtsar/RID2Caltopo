@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.data
 
 import android.content.Context
 import android.os.Build
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.tls.HeldCertificate
@@ -28,6 +29,7 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocketFactory
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -94,6 +96,13 @@ object MutualAidPackageTransferManager {
     private const val PROGRESS_UPDATE_BYTES = 256 * 1024L
     private const val PROGRESS_UPDATE_MS = 250L
     private const val TRANSFER_LOG_BYTES = 5L * 1024L * 1024L
+    private const val TRANSFER_LOG_MS = 5_000L
+    private const val TRANSFER_BUFFER_SIZE = 256 * 1024
+    private const val RECEIVER_TELEMETRY_BYTES = 1L * 1024L * 1024L
+    private const val RECEIVER_TELEMETRY_MS = 5_000L
+    private const val FLUSH_INTERVAL_BYTES = 1L * 1024L * 1024L
+    private const val READ_STALL_LOG_MS = 1_500L
+    private const val WRITE_STALL_LOG_MS = 1_500L
     private const val IMPORT_MAX_ATTEMPTS = 3
     private const val IMPORT_RETRY_BASE_DELAY_MS = 1_500L
     private val ioExecutor = Executors.newSingleThreadExecutor()
@@ -104,6 +113,9 @@ object MutualAidPackageTransferManager {
     private val currentServerSocket = AtomicReference<ServerSocket?>()
     private val currentServedFile = AtomicReference<File?>()
     private val currentSessionId = AtomicReference<String?>()
+    private val currentImportSessionId = AtomicReference<String?>()
+    private val currentImportCall = AtomicReference<Call?>()
+    private val currentImportTempFile = AtomicReference<File?>()
     fun startShareSession(
         context: Context,
         packageFile: File,
@@ -174,26 +186,40 @@ object MutualAidPackageTransferManager {
         _importState.value = MutualAidPackageImportState.Idle
     }
 
+    fun cancelImport() {
+        val sessionId = currentImportSessionId.getAndSet(null)
+        currentImportCall.getAndSet(null)?.cancel()
+        currentImportTempFile.getAndSet(null)?.runCatching { delete() }
+        if (sessionId != null) {
+            CaltopoClient.CTDebug(TAG, "cancelImport(): canceled sid=$sessionId")
+        }
+        _importState.value = MutualAidPackageImportState.Idle
+    }
+
     fun importFromToken(context: Context, token: String) {
         val config = MutualAidPackageTransferToken.decode(token.trim())
         if (config == null) {
             _importState.value = MutualAidPackageImportState.Error("MA package", "Invalid MA package token.")
             return
         }
+        cancelImport()
         val appContext = context.applicationContext
+        currentImportSessionId.set(config.sessionId)
         ioExecutor.execute {
             val packageName = config.packageName.ifBlank { "MA package" }
             val tempFile = File(appContext.cacheDir.resolve("ma-transfer"), "${config.sessionId}.zip").apply {
                 parentFile?.mkdirs()
                 if (exists()) delete()
             }
+            currentImportTempFile.set(tempFile)
             try {
                 downloadPackageWithRetries(config, packageName, tempFile)
+                if (currentImportSessionId.get() != config.sessionId) return@execute
                 val actualSha = sha256Hex(tempFile)
                 if (!actualSha.equals(config.sha256, ignoreCase = true)) {
                     throw IllegalStateException("Downloaded MA package checksum did not match QR token.")
                 }
-                CaltopoClient.CTInfo(TAG, "Download complete sid=${config.sessionId} bytes=${tempFile.length()} sha256=$actualSha")
+                CaltopoClient.CTDebug(TAG, "Download complete sid=${config.sessionId} bytes=${tempFile.length()} sha256=$actualSha")
                 _importState.value = MutualAidPackageImportState.Importing(packageName, "Importing")
                 val result = MutualAidPackageManager.importPackage(appContext, androidx.core.content.FileProvider.getUriForFile(
                     appContext,
@@ -208,8 +234,16 @@ object MutualAidPackageTransferManager {
                 }
             } catch (e: Exception) {
                 tempFile.delete()
-                CaltopoClient.CTWarn(TAG, "importFromToken() failed.", e)
-                _importState.value = MutualAidPackageImportState.Error(packageName, e.message ?: "MA package transfer failed.")
+                if (currentImportSessionId.get() == config.sessionId) {
+                    CaltopoClient.CTWarn(TAG, "importFromToken() failed.", e)
+                    _importState.value = MutualAidPackageImportState.Error(packageName, e.message ?: "MA package transfer failed.")
+                } else {
+                    CaltopoClient.CTDebug(TAG, "importFromToken(): ignoring late failure from canceled sid=${config.sessionId}")
+                }
+            } finally {
+                currentImportCall.compareAndSet(currentImportCall.get(), null)
+                currentImportTempFile.compareAndSet(tempFile, null)
+                currentImportSessionId.compareAndSet(config.sessionId, null)
             }
         }
     }
@@ -259,30 +293,62 @@ object MutualAidPackageTransferManager {
             .header(HEADER_RECEIVER, receiverName)
             .get()
             .build()
-        CaltopoClient.CTInfo(
+        CaltopoClient.CTDebug(
             TAG,
             "Connecting to sender host=${config.host} port=${config.port} sid=${config.sessionId} receiver='$receiverName' attempt=$attempt"
         )
         _importState.value = MutualAidPackageImportState.Downloading(packageName, 0L, config.sizeBytes, "Connecting")
-        httpClient.newCall(request).execute().use { response ->
+        val call = httpClient.newCall(request)
+        currentImportCall.set(call)
+        call.execute().use { response ->
             if (!response.isSuccessful) {
                 throw IllegalStateException("Sender returned HTTP ${response.code}.")
             }
             val totalBytes = response.body?.contentLength()?.takeIf { it > 0L } ?: config.sizeBytes
+            val downloadStartMs = System.currentTimeMillis()
+            var bytesReadTotal = 0L
+            var lastByteAtMs = downloadStartMs
+            var lastTelemetryAtMs = downloadStartMs
+            var lastTelemetryBytes = 0L
+            CaltopoClient.CTDebug(
+                TAG,
+                "Download response sid=${config.sessionId} attempt=$attempt code=${response.code} totalBytes=$totalBytes"
+            )
+            response.handshake?.let { handshake ->
+                CaltopoClient.CTDebug(
+                    TAG,
+                    "Download TLS sid=${config.sessionId} attempt=$attempt tls=${handshake.tlsVersion} cipher=${handshake.cipherSuite}"
+                )
+            }
             response.body?.byteStream()?.use { input ->
                 BufferedInputStream(input).use { buffered ->
                     tempFile.outputStream().use { output ->
                         BufferedOutputStream(output).use { bufferedOut ->
-                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                            var bytesReadTotal = 0L
+                            val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
                             var lastProgressBytes = 0L
                             var lastProgressAtMs = 0L
                             var lastLoggedBytes = 0L
+                            var lastLoggedAtMs = downloadStartMs
+                            var lastFlushedBytes = 0L
                             while (true) {
+                                val readStartedMs = System.currentTimeMillis()
                                 val read = buffered.read(buffer)
+                                val readCompletedMs = System.currentTimeMillis()
+                                val readDurationMs = readCompletedMs - readStartedMs
                                 if (read < 0) break
                                 bufferedOut.write(buffer, 0, read)
                                 bytesReadTotal += read
+                                if (bytesReadTotal - lastFlushedBytes >= FLUSH_INTERVAL_BYTES) {
+                                    bufferedOut.flush()
+                                    lastFlushedBytes = bytesReadTotal
+                                }
+                                lastByteAtMs = readCompletedMs
+                                if (readDurationMs >= READ_STALL_LOG_MS) {
+                                    CaltopoClient.CTWarn(
+                                        TAG,
+                                        "Receiver read stall sid=${config.sessionId} attempt=$attempt waitMs=$readDurationMs readBytes=$read totalBytes=$bytesReadTotal/$totalBytes"
+                                    )
+                                }
                                 if (shouldPublishProgress(bytesReadTotal, totalBytes, lastProgressBytes, lastProgressAtMs)) {
                                     _importState.value = MutualAidPackageImportState.Downloading(
                                         packageName,
@@ -293,12 +359,27 @@ object MutualAidPackageTransferManager {
                                     lastProgressBytes = bytesReadTotal
                                     lastProgressAtMs = System.currentTimeMillis()
                                 }
-                                if (shouldLogTransferProgress(bytesReadTotal, totalBytes, lastLoggedBytes)) {
-                                    CaltopoClient.CTInfo(
+                                if (shouldLogTransferProgress(bytesReadTotal, totalBytes, lastLoggedBytes, lastLoggedAtMs)) {
+                                    CaltopoClient.CTDebug(
                                         TAG,
                                         "Download progress sid=${config.sessionId} attempt=$attempt bytes=$bytesReadTotal/$totalBytes"
                                     )
                                     lastLoggedBytes = bytesReadTotal
+                                    lastLoggedAtMs = readCompletedMs
+                                }
+                                if (shouldEmitReceiverTelemetry(bytesReadTotal, lastTelemetryBytes, lastByteAtMs, lastTelemetryAtMs)) {
+                                    val elapsedMs = (lastByteAtMs - downloadStartMs).coerceAtLeast(1L)
+                                    val windowMs = (lastByteAtMs - lastTelemetryAtMs).coerceAtLeast(1L)
+                                    val windowBytes = (bytesReadTotal - lastTelemetryBytes).coerceAtLeast(0L)
+                                    CaltopoClient.CTDebug(
+                                        TAG,
+                                        "Receiver telemetry sid=${config.sessionId} attempt=$attempt bytes=$bytesReadTotal/$totalBytes " +
+                                                "avgMbps=${formatMbps(bytesReadTotal, elapsedMs)} " +
+                                                "windowMbps=${formatMbps(windowBytes, windowMs)} " +
+                                                "idleMs=${System.currentTimeMillis() - lastByteAtMs}"
+                                    )
+                                    lastTelemetryBytes = bytesReadTotal
+                                    lastTelemetryAtMs = lastByteAtMs
                                 }
                             }
                             bufferedOut.flush()
@@ -368,8 +449,8 @@ object MutualAidPackageTransferManager {
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustManager)
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.MINUTES)
-            .writeTimeout(5, TimeUnit.MINUTES)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .writeTimeout(0, TimeUnit.MILLISECONDS)
             .build()
     }
 
@@ -395,6 +476,20 @@ object MutualAidPackageTransferManager {
     }
 
     private fun serveSocket(socket: Socket, sessionId: String, packageFile: File) {
+        socket.keepAlive = true
+        socket.tcpNoDelay = true
+        runCatching { socket.sendBufferSize = TRANSFER_BUFFER_SIZE }
+        runCatching { socket.receiveBufferSize = TRANSFER_BUFFER_SIZE }
+        if (socket is SSLSocket) {
+            runCatching { socket.enableSessionCreation = true }
+            runCatching { socket.startHandshake() }
+            runCatching {
+                CaltopoClient.CTDebug(
+                    TAG,
+                    "Sender TLS sid=$sessionId peer=${socket.inetAddress?.hostAddress.orEmpty()} tls=${socket.session.protocol} cipher=${socket.session.cipherSuite}"
+                )
+            }
+        }
         val input = socket.getInputStream().bufferedReader(StandardCharsets.UTF_8)
         val requestLine = input.readLine() ?: return
         val headers = linkedMapOf<String, String>()
@@ -421,7 +516,7 @@ object MutualAidPackageTransferManager {
         val receiverName = headers[HEADER_RECEIVER.lowercase(Locale.US)]
             ?.takeIf { it.isNotBlank() }
             ?: socket.inetAddress?.hostAddress.orEmpty().ifBlank { "Receiver" }
-        CaltopoClient.CTInfo(TAG, "Accepted receiver='$receiverName' sid=$sessionId size=${packageFile.length()}")
+        CaltopoClient.CTDebug(TAG, "Accepted receiver='$receiverName' sid=$sessionId size=${packageFile.length()}")
         _shareSession.value = _shareSession.value?.copy(
             progress = MutualAidPackageShareProgress(receiverName, 0L, packageFile.length(), "Sending"),
             statusMessage = "Sending to $receiverName"
@@ -441,34 +536,51 @@ object MutualAidPackageTransferManager {
                 append("\r\n")
             }
             output.write(header.toByteArray(StandardCharsets.UTF_8))
+            output.flush()
             packageFile.inputStream().use { fileInput ->
                 BufferedInputStream(fileInput).use { buffered ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
+                    var lastLoggedAtMs = System.currentTimeMillis()
+                    var lastFlushedBytes = 0L
                     while (true) {
                         val read = buffered.read(buffer)
                         if (read < 0) break
+                        val writeStartedMs = System.currentTimeMillis()
                         output.write(buffer, 0, read)
+                        val writeCompletedMs = System.currentTimeMillis()
+                        val writeDurationMs = writeCompletedMs - writeStartedMs
                         sent += read
+                        if (sent - lastFlushedBytes >= FLUSH_INTERVAL_BYTES) {
+                            output.flush()
+                            lastFlushedBytes = sent
+                        }
+                        if (writeDurationMs >= WRITE_STALL_LOG_MS) {
+                            CaltopoClient.CTWarn(
+                                TAG,
+                                "Sender write stall receiver='$receiverName' sid=$sessionId waitMs=$writeDurationMs writeBytes=$read totalBytes=$sent/${packageFile.length()}"
+                            )
+                        }
                         if (shouldPublishProgress(sent, packageFile.length(), lastProgressBytes, lastProgressAtMs)) {
                             _shareSession.value = _shareSession.value?.copy(
                                 progress = MutualAidPackageShareProgress(receiverName, sent, packageFile.length(), "Sending"),
                                 statusMessage = "Sending to $receiverName"
                             )
                             lastProgressBytes = sent
-                            lastProgressAtMs = System.currentTimeMillis()
+                            lastProgressAtMs = writeCompletedMs
                         }
-                        if (shouldLogTransferProgress(sent, packageFile.length(), lastLoggedBytes)) {
-                            CaltopoClient.CTInfo(
+                        if (shouldLogTransferProgress(sent, packageFile.length(), lastLoggedBytes, lastLoggedAtMs)) {
+                            CaltopoClient.CTDebug(
                                 TAG,
                                 "Send progress receiver='$receiverName' sid=$sessionId bytes=$sent/${packageFile.length()}"
                             )
                             lastLoggedBytes = sent
+                            lastLoggedAtMs = writeCompletedMs
                         }
                     }
                 }
             }
             output.flush()
-            CaltopoClient.CTInfo(TAG, "Completed receiver='$receiverName' sid=$sessionId bytes=$sent")
+            CaltopoClient.CTDebug(TAG, "Completed receiver='$receiverName' sid=$sessionId bytes=$sent")
             val completed = MutualAidPackageCompletedReceiver(receiverName, System.currentTimeMillis())
             _shareSession.value = _shareSession.value?.let {
                 it.copy(
@@ -540,11 +652,32 @@ object MutualAidPackageTransferManager {
     private fun shouldLogTransferProgress(
         bytesDone: Long,
         totalBytes: Long,
-        lastLoggedBytes: Long
+        lastLoggedBytes: Long,
+        lastLoggedAtMs: Long
     ): Boolean {
         if (bytesDone <= 0L) return false
         if (totalBytes > 0L && bytesDone >= totalBytes) return true
-        return bytesDone - lastLoggedBytes >= TRANSFER_LOG_BYTES
+        if (bytesDone - lastLoggedBytes >= TRANSFER_LOG_BYTES) return true
+        val now = System.currentTimeMillis()
+        return now - lastLoggedAtMs >= TRANSFER_LOG_MS
+    }
+
+    private fun shouldEmitReceiverTelemetry(
+        bytesDone: Long,
+        lastTelemetryBytes: Long,
+        nowMs: Long,
+        lastTelemetryAtMs: Long
+    ): Boolean {
+        if (bytesDone <= 0L) return false
+        if (bytesDone - lastTelemetryBytes >= RECEIVER_TELEMETRY_BYTES) return true
+        return nowMs - lastTelemetryAtMs >= RECEIVER_TELEMETRY_MS
+    }
+
+    private fun formatMbps(bytes: Long, durationMs: Long): String {
+        if (bytes <= 0L || durationMs <= 0L) return "0.00"
+        val bitsPerSecond = (bytes.toDouble() * 8_000.0) / durationMs.toDouble()
+        val mbps = bitsPerSecond / 1_000_000.0
+        return String.format(Locale.US, "%.2f", mbps)
     }
 
     private fun isRetryableImportException(error: Throwable): Boolean {

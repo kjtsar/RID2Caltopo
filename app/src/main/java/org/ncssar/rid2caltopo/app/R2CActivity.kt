@@ -402,7 +402,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 if (maPackageImportState !is org.ncssar.rid2caltopo.data.MutualAidPackageImportState.Idle) {
                     MutualAidPackageImportDialog(
                         state = maPackageImportState,
-                        onDismiss = { MutualAidPackageTransferManager.dismissImportState() }
+                        onDismiss = { MutualAidPackageTransferManager.dismissImportState() },
+                        onCancel = { MutualAidPackageTransferManager.cancelImport() }
                     )
                 }
             }

@@ -9,8 +9,10 @@ import org.ncssar.rid2caltopo.app.R2CActivity
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
+import java.io.InterruptedIOException
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -91,6 +93,9 @@ object MutualAidPackageTransferManager {
     private const val TLS_KEY_PASSWORD = "rid2caltopo-transfer"
     private const val PROGRESS_UPDATE_BYTES = 256 * 1024L
     private const val PROGRESS_UPDATE_MS = 250L
+    private const val TRANSFER_LOG_BYTES = 5L * 1024L * 1024L
+    private const val IMPORT_MAX_ATTEMPTS = 3
+    private const val IMPORT_RETRY_BASE_DELAY_MS = 1_500L
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val _shareSession = MutableStateFlow<MutualAidPackageShareSession?>(null)
     val shareSession: StateFlow<MutualAidPackageShareSession?> = _shareSession.asStateFlow()
@@ -183,53 +188,7 @@ object MutualAidPackageTransferManager {
                 if (exists()) delete()
             }
             try {
-                val httpClient = createPinnedClient(config)
-                val receiverName = localDeviceName()
-                val request = Request.Builder()
-                    .url("https://${config.host}:${config.port}$HTTP_PATH?sid=${config.sessionId}")
-                    .header(HEADER_RECEIVER, receiverName)
-                    .get()
-                    .build()
-                CaltopoClient.CTInfo(
-                    TAG,
-                    "Connecting to sender host=${config.host} port=${config.port} sid=${config.sessionId} receiver='$receiverName'"
-                )
-                _importState.value = MutualAidPackageImportState.Downloading(packageName, 0L, config.sizeBytes, "Connecting")
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        throw IllegalStateException("Sender returned HTTP ${response.code}.")
-                    }
-                    val totalBytes = response.body?.contentLength()?.takeIf { it > 0L } ?: config.sizeBytes
-                    response.body?.byteStream()?.use { input ->
-                        BufferedInputStream(input).use { buffered ->
-                            tempFile.outputStream().use { output ->
-                                BufferedOutputStream(output).use { bufferedOut ->
-                                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                                    var bytesReadTotal = 0L
-                                    var lastProgressBytes = 0L
-                                    var lastProgressAtMs = 0L
-                                    while (true) {
-                                        val read = buffered.read(buffer)
-                                        if (read < 0) break
-                                        bufferedOut.write(buffer, 0, read)
-                                        bytesReadTotal += read
-                                        if (shouldPublishProgress(bytesReadTotal, totalBytes, lastProgressBytes, lastProgressAtMs)) {
-                                            _importState.value = MutualAidPackageImportState.Downloading(
-                                                packageName,
-                                                bytesReadTotal,
-                                                totalBytes,
-                                                "Downloading"
-                                            )
-                                            lastProgressBytes = bytesReadTotal
-                                            lastProgressAtMs = System.currentTimeMillis()
-                                        }
-                                    }
-                                    bufferedOut.flush()
-                                }
-                            }
-                        }
-                    } ?: throw IllegalStateException("Sender returned an empty MA package.")
-                }
+                downloadPackageWithRetries(config, packageName, tempFile)
                 val actualSha = sha256Hex(tempFile)
                 if (!actualSha.equals(config.sha256, ignoreCase = true)) {
                     throw IllegalStateException("Downloaded MA package checksum did not match QR token.")
@@ -252,6 +211,101 @@ object MutualAidPackageTransferManager {
                 CaltopoClient.CTWarn(TAG, "importFromToken() failed.", e)
                 _importState.value = MutualAidPackageImportState.Error(packageName, e.message ?: "MA package transfer failed.")
             }
+        }
+    }
+
+    private fun downloadPackageWithRetries(
+        config: MutualAidPackageTransferToken.Config,
+        packageName: String,
+        tempFile: File
+    ) {
+        var attempt = 1
+        while (true) {
+            tempFile.delete()
+            try {
+                downloadPackage(config, packageName, tempFile, attempt)
+                return
+            } catch (e: Exception) {
+                val retryable = isRetryableImportException(e)
+                if (!retryable || attempt >= IMPORT_MAX_ATTEMPTS) throw e
+                val delayMs = IMPORT_RETRY_BASE_DELAY_MS * attempt
+                CaltopoClient.CTWarn(
+                    TAG,
+                    "downloadPackageWithRetries(): attempt $attempt/$IMPORT_MAX_ATTEMPTS failed; retrying in ${delayMs}ms",
+                    e
+                )
+                _importState.value = MutualAidPackageImportState.Downloading(
+                    packageName,
+                    0L,
+                    config.sizeBytes,
+                    "Retrying download ($attempt/$IMPORT_MAX_ATTEMPTS)"
+                )
+                Thread.sleep(delayMs)
+                attempt++
+            }
+        }
+    }
+
+    private fun downloadPackage(
+        config: MutualAidPackageTransferToken.Config,
+        packageName: String,
+        tempFile: File,
+        attempt: Int
+    ) {
+        val httpClient = createPinnedClient(config)
+        val receiverName = localDeviceName()
+        val request = Request.Builder()
+            .url("https://${config.host}:${config.port}$HTTP_PATH?sid=${config.sessionId}")
+            .header(HEADER_RECEIVER, receiverName)
+            .get()
+            .build()
+        CaltopoClient.CTInfo(
+            TAG,
+            "Connecting to sender host=${config.host} port=${config.port} sid=${config.sessionId} receiver='$receiverName' attempt=$attempt"
+        )
+        _importState.value = MutualAidPackageImportState.Downloading(packageName, 0L, config.sizeBytes, "Connecting")
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Sender returned HTTP ${response.code}.")
+            }
+            val totalBytes = response.body?.contentLength()?.takeIf { it > 0L } ?: config.sizeBytes
+            response.body?.byteStream()?.use { input ->
+                BufferedInputStream(input).use { buffered ->
+                    tempFile.outputStream().use { output ->
+                        BufferedOutputStream(output).use { bufferedOut ->
+                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                            var bytesReadTotal = 0L
+                            var lastProgressBytes = 0L
+                            var lastProgressAtMs = 0L
+                            var lastLoggedBytes = 0L
+                            while (true) {
+                                val read = buffered.read(buffer)
+                                if (read < 0) break
+                                bufferedOut.write(buffer, 0, read)
+                                bytesReadTotal += read
+                                if (shouldPublishProgress(bytesReadTotal, totalBytes, lastProgressBytes, lastProgressAtMs)) {
+                                    _importState.value = MutualAidPackageImportState.Downloading(
+                                        packageName,
+                                        bytesReadTotal,
+                                        totalBytes,
+                                        "Downloading"
+                                    )
+                                    lastProgressBytes = bytesReadTotal
+                                    lastProgressAtMs = System.currentTimeMillis()
+                                }
+                                if (shouldLogTransferProgress(bytesReadTotal, totalBytes, lastLoggedBytes)) {
+                                    CaltopoClient.CTInfo(
+                                        TAG,
+                                        "Download progress sid=${config.sessionId} attempt=$attempt bytes=$bytesReadTotal/$totalBytes"
+                                    )
+                                    lastLoggedBytes = bytesReadTotal
+                                }
+                            }
+                            bufferedOut.flush()
+                        }
+                    }
+                }
+            } ?: throw IllegalStateException("Sender returned an empty MA package.")
         }
     }
 
@@ -316,7 +370,6 @@ object MutualAidPackageTransferManager {
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.MINUTES)
             .writeTimeout(5, TimeUnit.MINUTES)
-            .callTimeout(10, TimeUnit.MINUTES)
             .build()
     }
 
@@ -377,6 +430,7 @@ object MutualAidPackageTransferManager {
             var sent = 0L
             var lastProgressBytes = 0L
             var lastProgressAtMs = 0L
+            var lastLoggedBytes = 0L
             val output = BufferedOutputStream(socket.getOutputStream())
             val header = buildString {
                 append("HTTP/1.1 200 OK\r\n")
@@ -402,6 +456,13 @@ object MutualAidPackageTransferManager {
                             )
                             lastProgressBytes = sent
                             lastProgressAtMs = System.currentTimeMillis()
+                        }
+                        if (shouldLogTransferProgress(sent, packageFile.length(), lastLoggedBytes)) {
+                            CaltopoClient.CTInfo(
+                                TAG,
+                                "Send progress receiver='$receiverName' sid=$sessionId bytes=$sent/${packageFile.length()}"
+                            )
+                            lastLoggedBytes = sent
                         }
                     }
                 }
@@ -474,5 +535,24 @@ object MutualAidPackageTransferManager {
         if (bytesDone - lastBytes >= PROGRESS_UPDATE_BYTES) return true
         val now = System.currentTimeMillis()
         return now - lastAtMs >= PROGRESS_UPDATE_MS
+    }
+
+    private fun shouldLogTransferProgress(
+        bytesDone: Long,
+        totalBytes: Long,
+        lastLoggedBytes: Long
+    ): Boolean {
+        if (bytesDone <= 0L) return false
+        if (totalBytes > 0L && bytesDone >= totalBytes) return true
+        return bytesDone - lastLoggedBytes >= TRANSFER_LOG_BYTES
+    }
+
+    private fun isRetryableImportException(error: Throwable): Boolean {
+        return when (error) {
+            is InterruptedIOException -> true
+            is SocketException -> true
+            is SocketTimeoutException -> true
+            else -> false
+        }
     }
 }

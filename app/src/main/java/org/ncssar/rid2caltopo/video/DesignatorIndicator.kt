@@ -53,12 +53,13 @@ fun DesignatorIndicator(
 ) {
     val errorSummary = formatStreamErrorDetail(streamErrorDetail)
     val renderDelayMs = viewModel.renderDelayMsFor(streamDesignator)
+    val playbackIndicatorState = viewModel.playbackIndicatorStateFor(streamDesignator)
     val droneDisplayState = viewModel.droneDisplayStateFor(streamDesignator)
     val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
     var coordinateMenuExpanded by remember(streamDesignator) { mutableStateOf(false) }
     val streamStateText = when (streamState) {
         StreamState.CONNECTING -> "Connecting..."
-        StreamState.LIVE -> formatLiveState(renderDelayMs)
+        StreamState.LIVE -> formatLiveState(renderDelayMs, playbackIndicatorState)
         StreamState.STOPPED -> "Stopped"
         StreamState.ERROR -> errorSummary?.let { "Error: $it" } ?: "Error"
     }
@@ -240,9 +241,13 @@ internal fun indicatorPaletteFor(designatorState: DesignatorState): IndicatorPal
     )
 }
 
-internal fun formatLiveState(renderDelayMs: Long?): String {
-    val delayMs = renderDelayMs ?: return "Live"
-    if (delayMs < 500L) return "Live"
+internal fun formatLiveState(
+    renderDelayMs: Long?,
+    playbackIndicatorState: PlaybackIndicatorState? = null,
+): String {
+    if (playbackIndicatorState == PlaybackIndicatorState.BUFFERING) return "Buffering"
+    if (playbackIndicatorState == PlaybackIndicatorState.LIVE_UNMEASURED) return "Live"
+    val delayMs = renderDelayMs ?: return "Starting"
     if (delayMs >= 5_000L) return "Stalled"
     if (delayMs < 1_000L) return "lag:${delayMs}ms"
     return String.format(Locale.US, "lag:%.1fs", delayMs / 1000.0)

@@ -18,12 +18,20 @@ data class StreamAdmissionResult(
     val admitted: Boolean,
     val shouldNotifyRejection: Boolean,
     val evictedPaths: Set<String>,
+    val rejectionReason: String? = null,
+    val rejectionToast: String? = null,
 )
 
 data class StreamTransitionResult(
     val state: StreamAdmissionState,
     val changed: Boolean,
     val existed: Boolean,
+)
+
+data class StreamAdmissionGuardResult(
+    val allow: Boolean,
+    val reason: String? = null,
+    val toastMessage: String? = null,
 )
 
 private data class PublisherConnEvent(
@@ -97,6 +105,7 @@ object StreamAdmissionPolicy {
         maxSimultaneousStreams: Int,
         staleConnectingMs: Long,
         staleErrorMs: Long,
+        admissionGuard: ((StreamAdmissionState, String, StreamState) -> StreamAdmissionGuardResult)? = null,
     ): StreamAdmissionResult {
         val active = state.active.toMutableMap()
         val changedAt = state.stateChangedAtMs.toMutableMap()
@@ -128,7 +137,28 @@ object StreamAdmissionPolicy {
                 admitted = false,
                 shouldNotifyRejection = firstReject,
                 evictedPaths = evicted,
+                rejectionReason = "capacity",
+                rejectionToast = "Rejected stream $designator (max $maxSimultaneousStreams streams).",
             )
+        }
+
+        if (!active.containsKey(designator)) {
+            val guardDecision = admissionGuard?.invoke(
+                StreamAdmissionState(active, changedAt, rejected),
+                designator,
+                targetState,
+            )
+            if (guardDecision != null && !guardDecision.allow) {
+                val firstReject = rejected.add(designator)
+                return StreamAdmissionResult(
+                    state = StreamAdmissionState(active, changedAt, rejected),
+                    admitted = false,
+                    shouldNotifyRejection = firstReject,
+                    evictedPaths = evicted,
+                    rejectionReason = guardDecision.reason ?: "guard",
+                    rejectionToast = guardDecision.toastMessage,
+                )
+            }
         }
 
         val existing = active[designator]
@@ -208,6 +238,7 @@ object StreamRegistry {
     private val stateChangedAtMs = mutableMapOf<String, Long>()
     private val recentPublisherHandoffs = mutableMapOf<String, PublisherConnEvent>()
     private val recentPublisherClosures = mutableMapOf<String, PublisherConnEvent>()
+    private var admissionGuard: ((StreamAdmissionState, String, StreamState) -> StreamAdmissionGuardResult)? = null
     private val lock = Any()
     internal var nowMsProvider: () -> Long = { System.currentTimeMillis() }
 
@@ -270,6 +301,12 @@ object StreamRegistry {
         _streams.value = active
     }
 
+    fun setAdmissionGuard(guard: ((StreamAdmissionState, String, StreamState) -> StreamAdmissionGuardResult)?) {
+        synchronized(lock) {
+            admissionGuard = guard
+        }
+    }
+
     fun onStreamConnecting(path: String) {
         val parsed = parseStreamPath(path)
         var observedAtMs = 0L
@@ -286,15 +323,19 @@ object StreamRegistry {
                 maxSimultaneousStreams = MAX_SIMULTANEOUS_STREAMS,
                 staleConnectingMs = STALE_CONNECTING_MS,
                 staleErrorMs = STALE_ERROR_MS,
+                admissionGuard = admissionGuard,
             )
             applyStateLocked(result.state)
             result.evictedPaths.forEach { stalePath ->
                 CTWarn(TAG, "Evicting stale stream '$stalePath' to prevent capacity lockout.")
             }
             if (!result.admitted && result.shouldNotifyRejection) {
-                val msg = "Rejecting stream '${parsed.designator}': max $MAX_SIMULTANEOUS_STREAMS active streams."
+                val msg = when (result.rejectionReason) {
+                    "capacity" -> "Rejecting stream '${parsed.designator}': max $MAX_SIMULTANEOUS_STREAMS active streams."
+                    else -> "Rejecting stream '${parsed.designator}': ${result.rejectionReason ?: "admission guard"}."
+                }
                 CTWarn(TAG, msg)
-                ShowToast("Rejected stream ${parsed.designator} (max $MAX_SIMULTANEOUS_STREAMS streams).")
+                ShowToast(result.rejectionToast ?: "Rejected stream ${parsed.designator}.")
             }
             result.admitted
         }
@@ -302,7 +343,7 @@ object StreamRegistry {
             designator = parsed.designator,
             sourcePath = parsed.sourcePath,
             boundary = "stream_connecting",
-            outcome = if (admitted) "admitted" else "rejected_capacity",
+            outcome = if (admitted) "admitted" else "rejected",
             observedAtMs = observedAtMs,
         )
         if (admitted) {
@@ -480,6 +521,7 @@ object StreamRegistry {
                 maxSimultaneousStreams = MAX_SIMULTANEOUS_STREAMS,
                 staleConnectingMs = STALE_CONNECTING_MS,
                 staleErrorMs = STALE_ERROR_MS,
+                admissionGuard = admissionGuard,
             )
             applyStateLocked(result.state)
             recentPublisherHandoffs.remove(parsed.sourcePath)
@@ -488,9 +530,12 @@ object StreamRegistry {
                 CTWarn(TAG, "Evicting stale stream '$stalePath' to prevent capacity lockout.")
             }
             if (!result.admitted && result.shouldNotifyRejection) {
-                val msg = "Rejecting stream '${parsed.designator}': max $MAX_SIMULTANEOUS_STREAMS active streams."
+                val msg = when (result.rejectionReason) {
+                    "capacity" -> "Rejecting stream '${parsed.designator}': max $MAX_SIMULTANEOUS_STREAMS active streams."
+                    else -> "Rejecting stream '${parsed.designator}': ${result.rejectionReason ?: "admission guard"}."
+                }
                 CTWarn(TAG, msg)
-                ShowToast("Rejected stream ${parsed.designator} (max $MAX_SIMULTANEOUS_STREAMS streams).")
+                ShowToast(result.rejectionToast ?: "Rejected stream ${parsed.designator}.")
             }
             if (result.admitted) "admitted" else "rejected"
         }

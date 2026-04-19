@@ -1862,6 +1862,60 @@ static void clear_render_queue(ffmpeg_session_t *session) {
     session->render_queue_depth = 0;
 }
 
+static void reset_render_timing_state_locked(ffmpeg_session_t *session, bool observe_startup) {
+    if (session == NULL) return;
+    session->source_render_interval_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    session->render_interval_smoothed_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    session->next_render_due_ms = 0;
+    session->last_render_control_log_at_ms = 0;
+    session->startup_observation_active = observe_startup;
+    session->startup_started_at_ms = monotonic_ms();
+    session->source_interval_confidence = 0;
+    session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+    session->target_latency_ms = 1000;
+    session->stall_active = false;
+    session->last_decode_at_ms = 0;
+    session->last_valid_pts_us = 0;
+    session->last_source_estimate_update_at_ms = 0;
+    session->last_gap_at_ms = 0;
+    session->last_stall_decay_at_ms = 0;
+    session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
+    session->last_proven_gap_decay_at_ms = 0;
+    memset(session->cadence_samples_ms, 0, sizeof(session->cadence_samples_ms));
+    session->cadence_sample_count = 0;
+    session->cadence_sample_head = 0;
+    memset(session->gap_samples_ms, 0, sizeof(session->gap_samples_ms));
+    session->gap_sample_count = 0;
+    session->gap_sample_head = 0;
+}
+
+static void trim_render_queue_to_latest(ffmpeg_session_t *session, int keep_latest) {
+    if (session == NULL ||
+        session->render_queue == NULL ||
+        session->render_queue_capacity <= 0 ||
+        session->render_queue_depth <= keep_latest ||
+        keep_latest < 1) {
+        return;
+    }
+
+    int drop_count = session->render_queue_depth - keep_latest;
+    for (int i = 0; i < drop_count; i++) {
+        int idx = (session->render_queue_head + i) % session->render_queue_capacity;
+        clear_render_queue_slot(&session->render_queue[idx]);
+    }
+
+    session->render_queue_head = (session->render_queue_head + drop_count) % session->render_queue_capacity;
+    session->render_queue_depth = keep_latest;
+    session->render_drop_count += drop_count;
+
+    ct_warn(TAG,
+            "render queue trimmed to live edge id=%lld designator=%s dropped=%d keep=%d",
+            (long long) session->session_id,
+            session->designator,
+            drop_count,
+            keep_latest);
+}
+
 static void destroy_render_queue_storage(ffmpeg_session_t *session) {
     if (session == NULL) return;
     clear_render_queue(session);
@@ -1979,6 +2033,15 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
     int64_t base_interval_ms = session->source_render_interval_ms > 0
             ? session->source_render_interval_ms
             : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+
+    if (session->target_latency_ms > 0 &&
+        session->render_queue_depth >= RENDER_QUEUE_WARN_DEPTH &&
+        buffered_span_ms >= (session->target_latency_ms * 2)) {
+        trim_render_queue_to_latest(session, 8);
+        oldest_index = session->render_queue_head;
+        buffered_span_ms = buffered_span_ms_locked(session);
+    }
+
     if (session->next_render_due_ms <= 0) {
         session->next_render_due_ms = now_ms;
     }
@@ -2609,34 +2672,13 @@ static void run_decode_loop(ffmpeg_session_t *session) {
     // the first connection attempt.  Subsequent reconnects skip the EMA/buffer
     // fields so the tuned gap history survives the 20-second DJI session rotation.
     if (session->is_render) {
-        session->source_render_interval_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-        session->render_interval_smoothed_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-        session->next_render_due_ms = 0;
         session->render_drop_count = 0;
         session->last_logged_render_queue_depth = -1;
         session->last_logged_render_drop_count = -1;
         session->last_render_queue_log_at_ms = 0;
         session->last_render_queue_warn_at_ms = 0;
         session->last_render_lag_log_at_ms = 0;
-        session->last_render_control_log_at_ms = 0;
-        session->startup_observation_active = true;
-        session->startup_started_at_ms = monotonic_ms();
-        session->source_interval_confidence = 0;
-        session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
-        session->target_latency_ms = 1000;
-        session->stall_active = false;
-        session->last_decode_at_ms = 0;
-        session->last_valid_pts_us = 0;
-        session->last_source_estimate_update_at_ms = 0;
-        session->last_gap_at_ms = 0;
-        session->last_stall_decay_at_ms = 0;
-        session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
-        session->last_proven_gap_decay_at_ms = 0;
-        memset(session->cadence_samples_ms, 0, sizeof(session->cadence_samples_ms));
-        session->cadence_sample_count = 0;
-        session->cadence_sample_head = 0;
-        memset(session->gap_samples_ms, 0, sizeof(session->gap_samples_ms));
-        session->gap_sample_count = 0;
+        reset_render_timing_state_locked(session, true);
         session->gap_sample_head = 0;
         session->reader_stall_started_at_ms = 0;
         session->last_reader_stall_log_at_ms = 0;
@@ -2760,29 +2802,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
 
         if (!first_open) {
             if (session->is_render) {
-                session->source_render_interval_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-                session->render_interval_smoothed_ms = RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-                session->next_render_due_ms = 0;
-                session->last_render_control_log_at_ms = 0;
-                session->startup_observation_active = true;
-                session->startup_started_at_ms = monotonic_ms();
-                session->source_interval_confidence = 0;
-                session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
-                session->target_latency_ms = 1000;
-                session->stall_active = false;
-                session->last_decode_at_ms = 0;
-                session->last_valid_pts_us = 0;
-                session->last_source_estimate_update_at_ms = 0;
-                session->last_gap_at_ms = 0;
-                session->last_stall_decay_at_ms = 0;
-                session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
-                session->last_proven_gap_decay_at_ms = 0;
-                memset(session->cadence_samples_ms, 0, sizeof(session->cadence_samples_ms));
-                session->cadence_sample_count = 0;
-                session->cadence_sample_head = 0;
-                memset(session->gap_samples_ms, 0, sizeof(session->gap_samples_ms));
-                session->gap_sample_count = 0;
-                session->gap_sample_head = 0;
+                reset_render_timing_state_locked(session, true);
                 ct_debug(TAG,
                          "render startup observe begin id=%lld designator=%s observeMs=%d reconnect=1",
                          (long long) session->session_id,
@@ -3354,9 +3374,20 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeAttachSurface(
         ANativeWindow_release(session->window);
     }
 
+    bool was_surface_paused = session->surface_paused;
     session->surface_global_ref = (*env)->NewGlobalRef(env, surface);
     session->window = window;
     session->surface_paused = false;  // surface ready — resume decode
+    if (was_surface_paused && session->is_render) {
+        clear_render_queue(session);
+        session->render_queue_flush_requested = false;
+        reset_render_timing_state_locked(session, false);
+        ct_debug(TAG,
+                 "render resume reset id=%lld designator=%s targetLatencyMs=%lld",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) session->target_latency_ms);
+    }
     pthread_mutex_unlock(&g_lock);
 
     dispatch_probe_event(session->designator, "surface_attached", session->session_id, 0,

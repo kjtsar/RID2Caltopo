@@ -180,6 +180,13 @@ object MediaMtxLogParser {
                         updatedState(),
                     )
                 }
+                if (reason.contains("connection reset by peer", ignoreCase = true)) {
+                    suppressStopForPath.remove(path)
+                    return MediaMtxParserResult(
+                        MediaMTXEvent.StreamStopped(path = path, publisherConnId = conn),
+                        updatedState(),
+                    )
+                }
                 return MediaMtxParserResult(
                     MediaMTXEvent.StreamError(path = path, publisherConnId = conn, reason = normalizeRtmpCloseReason(reason)),
                     updatedState(),

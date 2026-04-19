@@ -70,6 +70,7 @@ private enum class RenderSessionPhase {
     STARTING,
     PRIMED,
     LIVE,
+    SUSPENDED,
     RETIRING,
 }
 
@@ -123,6 +124,7 @@ class FfmpegProbeService {
     private val noFrameCheckMs = 1_000L
     private val renderedNoProgressRecoveryPolls = 8
     private val renderSessions = mutableMapOf<String, Long>()
+    private val suspendedRenderSessions = mutableMapOf<String, Long>()
     private val lastFrameAtMs = mutableMapOf<String, Long>()
     private val sourcePathByDesignator = mutableMapOf<String, String>()
     private val renderEnabledDesignators = mutableSetOf<String>()
@@ -430,10 +432,36 @@ class FfmpegProbeService {
             clearRenderDelayLocked(designator)
             pendingRepublishByDesignator.remove(designator)
             renderSessions.remove(designator)
+            suspendedRenderSessions.remove(designator)
         }
         sessionIds.forEach { sessionId ->
             stopSessionAsync(sessionId, "Stopped FFmpeg render for $designator sessionId=$sessionId")
         }
+    }
+
+    fun suspendRender(designator: String) {
+        val sessionId = synchronized(stateLock) {
+            val activeSessionId = renderSessions.remove(designator) ?: return@synchronized null
+            suspendedRenderSessions[designator] = activeSessionId
+            lastFrameAtMs.remove(designator)
+            clearRenderDelayLocked(designator)
+            managedRenderSessions[activeSessionId]?.let { session ->
+                setSessionPhaseLocked(
+                    session = session,
+                    phase = RenderSessionPhase.SUSPENDED,
+                    nowMs = System.currentTimeMillis(),
+                )
+                session.idlePollCount = 0
+                session.lastObservedDecodedFrameCount = session.decodedFrameCount
+                session.lastObservedRenderedFrameCount = session.renderedFrameCount
+                session.lastReaderWaitAtMs = null
+                session.readerWaitWindowStartedAtMs = null
+                session.readerWaitEventCountInWindow = 0
+            }
+            activeSessionId
+        } ?: return
+        CTDebug(tag, "Suspending FFmpeg render for $designator sessionId=$sessionId")
+        FfmpegBridge.detachSurface(sessionId)
     }
 
     private fun sessionIdsForDesignatorLocked(designator: String): List<Long> {
@@ -449,9 +477,11 @@ class FfmpegProbeService {
     private fun collectActiveSessionsForShutdown(): List<Long> {
         return synchronized(stateLock) {
             val snapshot = renderSessions.values
+                .plus(suspendedRenderSessions.values)
                 .plus(managedRenderSessions.keys)
                 .distinct()
             renderSessions.clear()
+            suspendedRenderSessions.clear()
             startingRenderDesignators.clear()
             lastFrameAtMs.clear()
             sourcePathByDesignator.clear()
@@ -522,7 +552,22 @@ class FfmpegProbeService {
         if (!isRenderEnabled(designator)) return false
         val existingRenderSessionId = synchronized(stateLock) {
             boundRenderSurfaces[designator] = surface
-            renderSessions[designator]
+            renderSessions[designator] ?: suspendedRenderSessions.remove(designator)?.also { sessionId ->
+                renderSessions[designator] = sessionId
+                managedRenderSessions[sessionId]?.let { session ->
+                    setSessionPhaseLocked(
+                        session = session,
+                        phase = RenderSessionPhase.PRIMED,
+                        nowMs = System.currentTimeMillis(),
+                    )
+                    session.idlePollCount = 0
+                    session.lastObservedDecodedFrameCount = session.decodedFrameCount
+                    session.lastObservedRenderedFrameCount = session.renderedFrameCount
+                    session.lastReaderWaitAtMs = null
+                    session.readerWaitWindowStartedAtMs = null
+                    session.readerWaitEventCountInWindow = 0
+                }
+            }
         }
         if (existingRenderSessionId != null) {
             val attached = FfmpegBridge.attachSurface(existingRenderSessionId, surface)
@@ -547,6 +592,7 @@ class FfmpegProbeService {
         return synchronized(stateLock) {
             if (retiringSessionIds.contains(sessionId)) return@synchronized "retiring"
             if (sessionId == renderSessions[designator]) return@synchronized null
+            if (sessionId == suspendedRenderSessions[designator]) return@synchronized null
             val managed = managedRenderSessions[sessionId]
             if (managed != null && managed.designator == designator) return@synchronized null
             if (startingRenderDesignators.contains(designator)) return@synchronized null
@@ -557,7 +603,7 @@ class FfmpegProbeService {
     fun unbindRenderSurface(designator: String) {
         val sessionId = synchronized(stateLock) {
             boundRenderSurfaces.remove(designator)
-            renderSessions[designator]
+            renderSessions[designator] ?: suspendedRenderSessions[designator]
         } ?: return
         CTDebug(tag, "Unbinding render surface for $designator sessionId=$sessionId")
         FfmpegBridge.detachSurface(sessionId)
@@ -604,6 +650,24 @@ class FfmpegProbeService {
         synchronized(stateLock) {
             renderSessions[designator]?.let {
                 CTDebug(tag, "Reusing FFmpeg render session for $designator sessionId=$it")
+                return it
+            }
+            suspendedRenderSessions.remove(designator)?.let {
+                renderSessions[designator] = it
+                managedRenderSessions[it]?.let { session ->
+                    setSessionPhaseLocked(
+                        session = session,
+                        phase = RenderSessionPhase.PRIMED,
+                        nowMs = System.currentTimeMillis(),
+                    )
+                    session.idlePollCount = 0
+                    session.lastObservedDecodedFrameCount = session.decodedFrameCount
+                    session.lastObservedRenderedFrameCount = session.renderedFrameCount
+                    session.lastReaderWaitAtMs = null
+                    session.readerWaitWindowStartedAtMs = null
+                    session.readerWaitEventCountInWindow = 0
+                }
+                CTDebug(tag, "Resuming suspended FFmpeg render session for $designator sessionId=$it")
                 return it
             }
             if (!startingRenderDesignators.add(designator)) {
@@ -837,6 +901,9 @@ class FfmpegProbeService {
                 renderSessions.remove(designator)
                 lastFrameAtMs.remove(designator)
                 clearRenderDelayLocked(designator)
+            }
+            if (suspendedRenderSessions[designator] == sessionId) {
+                suspendedRenderSessions.remove(designator)
             }
             managedRenderSessions.remove(sessionId)
         }

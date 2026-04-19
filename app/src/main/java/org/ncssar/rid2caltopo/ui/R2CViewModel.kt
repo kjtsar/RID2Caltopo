@@ -328,6 +328,11 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         _drones.value = droneSpecs
         housekeeping()
+        droneSpecs.forEach { drone ->
+            if (hasKnownDroneSpec(drone)) {
+                confirmedRemoteIds.add(drone.remoteId)
+            }
+        }
         // Prune stale flight keys using ownership-agnostic keys so that a brief
         // ownership flip (MQTT arbitration) never clears a just-confirmed entry.
         val activeFlightKeys = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
@@ -349,6 +354,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 // been confirmed/dismissed this session (guards against a re-prompt when
                 // startMsecTimestamp changes mid-initialisation and creates a new flightKey).
                 flightKey != null &&
+                    !hasKnownDroneSpec(drone) &&
                     flightKey !in promptedFlightKeys &&
                     drone.remoteId !in confirmedRemoteIds
             }
@@ -404,6 +410,19 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             drone = drone,
             defaultOrganization = CaltopoClient.GetHomeOrgName()
         )
+    }
+
+    private fun hasKnownDroneSpec(drone: CtDroneSpec): Boolean {
+        val cached = CaltopoClient.GetDroneSpec(drone.remoteId)
+        return hasMeaningfulDroneSpec(drone) || (cached != null && hasMeaningfulDroneSpec(cached))
+    }
+
+    private fun hasMeaningfulDroneSpec(drone: CtDroneSpec): Boolean {
+        val mappedId = drone.mappedId.trim()
+        return drone.org.isNotBlank() ||
+            drone.model.isNotBlank() ||
+            drone.owner.isNotBlank() ||
+            (mappedId.isNotEmpty() && mappedId != drone.remoteId)
     }
 }
 

@@ -1,5 +1,7 @@
 import android.app.Application
 import android.graphics.Bitmap
+import android.os.Debug
+import android.os.Process
 import android.view.Surface
 import org.osmdroid.api.IGeoPoint
 import androidx.compose.runtime.Stable
@@ -40,7 +42,10 @@ import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
+import org.ncssar.rid2caltopo.video.PlaybackIndicatorState
 import org.ncssar.rid2caltopo.video.StreamInfo
+import org.ncssar.rid2caltopo.video.StreamAdmissionGuardResult
+import org.ncssar.rid2caltopo.video.StreamAdmissionState
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
 
@@ -76,6 +81,13 @@ data class ProximityMapFocusTarget(
     val firstLng: Double,
     val secondLat: Double,
     val secondLng: Double
+)
+
+private data class ProcessLoadSnapshot(
+    val observedAtMs: Long,
+    val sampleWindowMs: Long,
+    val processCpuFraction: Double,
+    val mainThreadCpuFraction: Double,
 )
 
 internal fun chooseResyncSnapshot(
@@ -144,6 +156,10 @@ class StreamsViewModel(
     CaltopoMap.MapStatusListener {
 
     private val tag = "StreamsViewModel"
+    private val processLoadSampleIntervalMs = 5_000L
+    private val hotProcessCpuFractionForSecondStream = 0.85
+    private val hotProcessCpuFractionForThirdOrFourthStream = 0.55
+    private val hotMainThreadCpuFractionForThirdOrFourthStream = 0.30
     private val ffmpegProbeService: FfmpegProbeService? = try {
         FfmpegProbeService()
     } catch (t: Throwable) {
@@ -153,18 +169,51 @@ class StreamsViewModel(
     private val streamSessionService = StreamSessionService(
         context = application.applicationContext,
         scope = viewModelScope,
-        // Use HLS for background ExoPlayer tiles. RTSP is not used here because
-        // ExoPlayer's RtspMediaSource rejects the `s= ` (space-only session name)
-        // that MediaMTX/gortsplib includes in its SDP — a known incompatibility.
-        // HLS adds ~3–7 s latency but that is acceptable for background tiles;
-        // the focused stream always runs through FFmpeg at low latency.
-        preferredModeProvider = { StreamSessionService.ProtocolMode.HLS },
+        // Prefer RTSP for ExoPlayer tiles. The bundled MediaMTX SDP now uses a
+        // non-empty session name so ExoPlayer's RtspMediaSource can parse it.
+        // This avoids the HLS muxing/playlist churn that was adding large lag and
+        // repeated stalls in multi-stream scenarios.
+        preferredModeProvider = { StreamSessionService.ProtocolMode.RTSP },
         // All drone video is bursty: the controller batches H.264 NAL units and sends
         // them in tight clusters with gaps of 200–800 ms between bursts.  Enable the
         // bursty-HLS tuning (larger buffer headroom, faster stall recovery) for every
         // stream so ExoPlayer handles inter-burst silences without needless buffering.
         burstyHlsSourceProvider = { true },
         sourcePathProvider = { designator -> streamInfoByDesignator[designator]?.sourcePath ?: designator },
+        listener = object : StreamSessionService.Listener {
+            override fun onBuffering(designator: String) {
+                _playbackIndicatorStateByDesignator[designator] = PlaybackIndicatorState.BUFFERING
+            }
+
+            override fun onLive(designator: String) {
+                if (_renderDelayMsByDesignator[designator] == null &&
+                    renderRouteByDesignator[designator] == false
+                ) {
+                    _playbackIndicatorStateByDesignator[designator] = PlaybackIndicatorState.LIVE_UNMEASURED
+                } else {
+                    _playbackIndicatorStateByDesignator.remove(designator)
+                }
+            }
+
+            override fun onEnded(designator: String) {
+                _playbackIndicatorStateByDesignator.remove(designator)
+            }
+
+            override fun onError(designator: String, error: androidx.media3.common.PlaybackException) {
+                _playbackIndicatorStateByDesignator.remove(designator)
+            }
+
+            override fun onPlaybackDelayChanged(designator: String, delayMs: Long?) {
+                if (delayMs == null) {
+                    _renderDelayMsByDesignator.remove(designator)
+                } else {
+                    _renderDelayMsByDesignator[designator] = delayMs
+                    if (_playbackIndicatorStateByDesignator[designator] == PlaybackIndicatorState.LIVE_UNMEASURED) {
+                        _playbackIndicatorStateByDesignator.remove(designator)
+                    }
+                }
+            }
+        },
     )
 
     val streams: StateFlow<Map<String, StreamInfo>> =
@@ -182,9 +231,12 @@ class StreamsViewModel(
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
     private val _anomalyConfigByDesignator = mutableStateMapOf<String, AnomalyConfig>()
     private val _renderDelayMsByDesignator = mutableStateMapOf<String, Long>()
+    private val _playbackIndicatorStateByDesignator = mutableStateMapOf<String, PlaybackIndicatorState>()
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
     private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
     private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
+    @Volatile
+    private var latestProcessLoadSnapshot: ProcessLoadSnapshot? = null
     /** Coordinator that owns all DEM / AGL / ATO / heading computation. */
     internal val altitudeCoordinator = DroneAltitudeCoordinator(
         scope = viewModelScope,
@@ -334,6 +386,7 @@ class StreamsViewModel(
     }
 
     override fun onCleared() {
+        StreamRegistry.setAdmissionGuard(null)
         CaltopoMap.RemoveMapStatusListener(this)
         ffmpegProbeService?.close()
         streamSessionService.releaseAll()
@@ -369,6 +422,10 @@ class StreamsViewModel(
 
     fun renderDelayMsFor(designator: String): Long? {
         return _renderDelayMsByDesignator[designator]
+    }
+
+    fun playbackIndicatorStateFor(designator: String): PlaybackIndicatorState? {
+        return _playbackIndicatorStateByDesignator[designator]
     }
 
     fun setCoordinateDisplayFormat(format: CoordinateDisplayFormat) {
@@ -692,6 +749,7 @@ class StreamsViewModel(
         removed.forEach { designator ->
             CTDebug(tag, "Stream $designator no longer live -> stop render")
             renderRouteByDesignator.remove(designator)
+            _playbackIndicatorStateByDesignator.remove(designator)
             ffmpegProbeService?.setRenderEnabled(designator, false)
             ffmpegProbeService?.onStreamStopped(designator)
             streamSessionService.onStreamStopped(designator)
@@ -699,6 +757,7 @@ class StreamsViewModel(
 
         dismissedLiveDesignators.forEach { designator ->
             renderRouteByDesignator[designator] = false
+            _playbackIndicatorStateByDesignator.remove(designator)
             ffmpegProbeService?.setRenderEnabled(designator, false)
             ffmpegProbeService?.onStreamStopped(designator)
             streamSessionService.onStreamStopped(designator)
@@ -725,6 +784,7 @@ class StreamsViewModel(
                 return@forEach
             }
             if (useFfmpeg) {
+                _playbackIndicatorStateByDesignator.remove(designator)
                 streamSessionService.onStreamStopped(designator)
                 if (republishDetected) {
                     if (publisherChanged) {
@@ -747,12 +807,16 @@ class StreamsViewModel(
                     CTDebug(tag, "Stream $designator live -> using FFmpeg render path")
                 }
             } else {
+                if (wasUsingFfmpeg) {
+                    ffmpegProbeService?.suspendRender(designator)
+                }
                 // If another stream is focused, suspend this one's ExoPlayer to save CPU.
                 // Re-read _focusedPath.value here in case it was cleared above (e.g. a new
                 // off-focus stream arriving auto-dismissed focus and returned to grid view).
                 val currentFocus = _focusedPath.value
                 if (currentFocus != null && currentFocus != designator) {
                     if (streamSessionService.playerFor(designator) != null) {
+                        _playbackIndicatorStateByDesignator.remove(designator)
                         streamSessionService.onStreamStopped(designator)
                         CTDebug(tag, "Stream $designator -> ExoPlayer suspended (focus is on $currentFocus)")
                     }
@@ -808,6 +872,78 @@ class StreamsViewModel(
         )
     }
 
+    private fun startProcessLoadMonitor() {
+        viewModelScope.launch {
+            var lastObservedAtMs = 0L
+            var lastProcessCpuMs = 0L
+            var lastMainThreadCpuNs = 0L
+            val cpuCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            while (true) {
+                kotlinx.coroutines.delay(processLoadSampleIntervalMs)
+                val nowMs = System.currentTimeMillis()
+                val processCpuMs = Process.getElapsedCpuTime()
+                val mainThreadCpuNs = Debug.threadCpuTimeNanos()
+                if (lastObservedAtMs != 0L) {
+                    val windowMs = nowMs - lastObservedAtMs
+                    if (windowMs > 0L) {
+                        val processCpuFraction =
+                            ((processCpuMs - lastProcessCpuMs).toDouble() / windowMs.toDouble() / cpuCount.toDouble())
+                                .coerceIn(0.0, 1.0)
+                        val mainThreadCpuFraction =
+                            (((mainThreadCpuNs - lastMainThreadCpuNs) / 1_000_000.0) / windowMs.toDouble())
+                                .coerceIn(0.0, 1.0)
+                        latestProcessLoadSnapshot = ProcessLoadSnapshot(
+                            observedAtMs = nowMs,
+                            sampleWindowMs = windowMs,
+                            processCpuFraction = processCpuFraction,
+                            mainThreadCpuFraction = mainThreadCpuFraction,
+                        )
+                    }
+                }
+                lastObservedAtMs = nowMs
+                lastProcessCpuMs = processCpuMs
+                lastMainThreadCpuNs = mainThreadCpuNs
+            }
+        }
+    }
+
+    private fun admissionGuardDecision(
+        state: StreamAdmissionState,
+        designator: String,
+        targetState: StreamState,
+    ): StreamAdmissionGuardResult {
+        if (targetState != StreamState.CONNECTING && targetState != StreamState.LIVE) {
+            return StreamAdmissionGuardResult(allow = true)
+        }
+        val activeCount = state.active.size
+        val projectedCount = activeCount + 1
+        val snapshot = latestProcessLoadSnapshot ?: return StreamAdmissionGuardResult(allow = true)
+        val sampleAgeMs = System.currentTimeMillis() - snapshot.observedAtMs
+        if (sampleAgeMs > processLoadSampleIntervalMs * 2) {
+            return StreamAdmissionGuardResult(allow = true)
+        }
+        if (projectedCount >= 3 &&
+            (snapshot.processCpuFraction >= hotProcessCpuFractionForThirdOrFourthStream ||
+                snapshot.mainThreadCpuFraction >= hotMainThreadCpuFractionForThirdOrFourthStream)
+        ) {
+            val processPct = (snapshot.processCpuFraction * 100.0).toInt()
+            return StreamAdmissionGuardResult(
+                allow = false,
+                reason = "load_guard",
+                toastMessage = "Rejected stream $designator (device load ${processPct}% too high for stream $projectedCount).",
+            )
+        }
+        if (projectedCount == 2 && snapshot.processCpuFraction >= hotProcessCpuFractionForSecondStream) {
+            val processPct = (snapshot.processCpuFraction * 100.0).toInt()
+            return StreamAdmissionGuardResult(
+                allow = false,
+                reason = "load_guard",
+                toastMessage = "Rejected stream $designator (device load ${processPct}% too high for a second stream).",
+            )
+        }
+        return StreamAdmissionGuardResult(allow = true)
+    }
+
     private fun applyFocusedAnomalyPolicy(liveDesignators: Set<String>) {
         val focused = _focusedPath.value
         liveDesignators.forEach { designator ->
@@ -823,6 +959,8 @@ class StreamsViewModel(
     init {
         CaltopoMap.AddMapStatusListener(this)
         CaltopoClient.AddDroneSpecsChangedListener(this)
+        StreamRegistry.setAdmissionGuard(::admissionGuardDecision)
+        startProcessLoadMonitor()
 
         viewModelScope.launch {
             StreamRegistry.streams.collect { map ->
@@ -838,4 +976,5 @@ class StreamsViewModel(
             }
         }
     }
+
 }

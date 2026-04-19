@@ -55,6 +55,7 @@ class StreamSessionService(
         fun onLive(designator: String)
         fun onEnded(designator: String)
         fun onError(designator: String, error: PlaybackException)
+        fun onPlaybackDelayChanged(designator: String, delayMs: Long?)
     }
 
     private val tag = "StreamSessionService"
@@ -128,6 +129,7 @@ class StreamSessionService(
 
     fun releasePlayer(designator: String) {
         clearTracking(designator)
+        listener?.onPlaybackDelayChanged(designator, null)
         playersByDesignator.remove(designator)?.let { player ->
             player.clearVideoSurface()
             player.release()
@@ -187,6 +189,14 @@ class StreamSessionService(
 
     private fun pollForStalledPlayers() {
         val now = System.currentTimeMillis()
+
+        playersByDesignator.forEach { (designator, player) ->
+            val liveOffsetMs = player.currentLiveOffset
+            listener?.onPlaybackDelayChanged(
+                designator,
+                if (liveOffsetMs != C.TIME_UNSET) liveOffsetMs else null
+            )
+        }
 
         lastBufferingAt.toList().forEach { (designator, bufferingSince) ->
             val player = playersByDesignator[designator] ?: return@forEach
@@ -296,6 +306,11 @@ class StreamSessionService(
                 firstFrameRendered += designator
                 lastBufferingAt.remove(designator)
                 adjustModeScore(designator, modeFor(designator), +3)
+                val liveOffsetMs = player.currentLiveOffset
+                listener?.onPlaybackDelayChanged(
+                    designator,
+                    if (liveOffsetMs != C.TIME_UNSET) liveOffsetMs else null
+                )
                 listener?.onLive(designator)
             }
 
@@ -329,10 +344,18 @@ class StreamSessionService(
                         listener?.onBuffering(designator)
                     }
                     Player.STATE_READY -> {
-                        lastBufferingAt.remove(designator)
-                        firstFrameRendered += designator
                         restarting -= designator
-                        listener?.onLive(designator)
+                        val liveOffsetMs = player.currentLiveOffset
+                        listener?.onPlaybackDelayChanged(
+                            designator,
+                            if (liveOffsetMs != C.TIME_UNSET) liveOffsetMs else null
+                        )
+                        if (firstFrameRendered.contains(designator)) {
+                            lastBufferingAt.remove(designator)
+                            listener?.onLive(designator)
+                        } else {
+                            listener?.onBuffering(designator)
+                        }
                     }
                     Player.STATE_ENDED -> {
                         listener?.onEnded(designator)

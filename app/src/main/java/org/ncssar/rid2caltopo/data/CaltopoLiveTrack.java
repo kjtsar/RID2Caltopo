@@ -164,6 +164,15 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         return myRemoteId;
     }
 
+    public boolean ownsLiveTrackId(@Nullable String trackId) {
+        return null != trackId && trackId.equals(liveTrackId);
+    }
+
+    public boolean matchesFeatureDeviceId(@Nullable String deviceId) {
+        if (deviceId == null || deviceId.isEmpty()) return false;
+        return deviceId.equalsIgnoreCase("FLEET:DRONE-" + myRemoteId);
+    }
+
     @Override
     public void setLocalOwner(boolean isOwner) {
         if (shuttingDown) return;

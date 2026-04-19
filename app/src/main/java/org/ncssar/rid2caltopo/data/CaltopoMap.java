@@ -120,6 +120,7 @@ public class CaltopoMap {
     private static final HashSet<ArtifactListener> ArtifactListeners = new HashSet<>();
     private static final Object ArtifactLock = new Object();
     private static final Hashtable<String, JSONObject> ArtifactFeaturesById = new Hashtable<>();
+    private static final HashSet<String> DuplicateLiveTrackArchivePending = new HashSet<>();
 
     private static JSONArray MyLiveTracksInThisMap;   // Actual 'LiveTrack' objects in the current map
     private static String LastErrorString = null;
@@ -366,6 +367,42 @@ public class CaltopoMap {
                     "removeLiveTrack(%s): removing liveTrack %s",
                     GetMapId(), liveTrack.getTrackLabel()));
         }
+        DuplicateLiveTrackArchivePending.remove(trackId);
+    }
+
+    @Nullable
+    private static CaltopoLiveTrack findPublishingDuplicateOwner(@Nullable String featureDeviceId,
+                                                                 @Nullable String trackId) {
+        if (featureDeviceId == null || featureDeviceId.isEmpty() || trackId == null || trackId.isEmpty()) {
+            return null;
+        }
+        for (CaltopoLiveTrack liveTrack : liveTracks) {
+            if (!liveTrack.publishingLocally()) continue;
+            if (!liveTrack.matchesFeatureDeviceId(featureDeviceId)) continue;
+            if (liveTrack.ownsLiveTrackId(trackId)) continue;
+            return liveTrack;
+        }
+        return null;
+    }
+
+    private static boolean archiveDuplicateLiveTrackIfNeeded(@NonNull JSONObject feature,
+                                                             @NonNull JSONObject prop,
+                                                             @NonNull String featureClass,
+                                                             @NonNull String trackId,
+                                                             @NonNull String title) {
+        if (!"LiveTrack".equals(featureClass) || trackId.isEmpty()) return false;
+        if (!FolderId.equals(prop.optString("folderId", ""))) return false;
+
+        String featureDeviceId = prop.optString("deviceId", "");
+        CaltopoLiveTrack ownerTrack = findPublishingDuplicateOwner(featureDeviceId, trackId);
+        if (ownerTrack == null) return false;
+        if (!DuplicateLiveTrackArchivePending.add(trackId)) return true;
+
+        CTWarn(TAG, String.format(Locale.US,
+                "archiveDuplicateLiveTrackIfNeeded(): archiving stale duplicate '%s' id=%s deviceId=%s while '%s' is publishing locally",
+                title, trackId, featureDeviceId, ownerTrack.getTrackLabel()));
+        ArchiveFeature(feature, featureClass, System.currentTimeMillis(), 0);
+        return true;
     }
 
     public static float DistanceFromMeInMeters(double lat, double lng) {
@@ -523,6 +560,8 @@ public class CaltopoMap {
                 if (null != liveTrack) {
                     CTDebug(TAG, "parseMapUpdate(): liveTrack is one of ours - checking");
                     liveTrack.checkCaltopoTrackLabel(title);
+                } else if (archiveDuplicateLiveTrackIfNeeded(feature, prop, classString, idString, title)) {
+                    CTDebug(TAG, "parseMapUpdate(): duplicate liveTrack matched local publisher - archiving");
                 } else {
                     CTDebug(TAG, "parseMapUpdate(): liveTrack is not one of ours - ignoring");
                     ignoreCount++;
@@ -914,6 +953,11 @@ public class CaltopoMap {
             String featureClass = prop.optString("class", null);
             String title = prop.optString("title");
             CTDebug(TAG, String.format(Locale.US, "Found a %s:%s in drone folder", featureClass, title));
+
+            if (archiveDuplicateLiveTrackIfNeeded(feature, prop, featureClass, feature.optString("id", ""), title)) {
+                continue;
+            }
+
             String lastUpdatedStr = prop.optString("updated", "");
             long lastUpdatedInMilliseconds = Long.parseLong(lastUpdatedStr);
             long trackAgeInMilliseconds = timeNowInMilliseconds - lastUpdatedInMilliseconds;

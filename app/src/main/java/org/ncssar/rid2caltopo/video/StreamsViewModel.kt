@@ -176,6 +176,7 @@ class StreamsViewModel(
 
     private val _focusedPath = MutableStateFlow<String?>(null)
     val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
+    private val _streamsUiActive = MutableStateFlow(false)
 
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
@@ -314,6 +315,21 @@ class StreamsViewModel(
             }
         CTDebug(tag, "toggleFocus(): ${designator} ${fString} focus.")
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+        syncStreamSessions(currentResyncSnapshot())
+    }
+
+    fun ensureFocus(designator: String) {
+        if (_focusedPath.value == designator) return
+        _focusedPath.value = designator
+        CTDebug(tag, "ensureFocus(): $designator has focus.")
+        applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+        syncStreamSessions(currentResyncSnapshot())
+    }
+
+    fun setStreamsUiActive(active: Boolean) {
+        if (_streamsUiActive.value == active) return
+        _streamsUiActive.value = active
+        CTDebug(tag, "setStreamsUiActive(): active=$active")
         syncStreamSessions(currentResyncSnapshot())
     }
 
@@ -608,6 +624,7 @@ class StreamsViewModel(
     }
 
     private fun displayedTileCountForCurrentLayout(): Int {
+        if (!_streamsUiActive.value) return 0
         if (_layoutMode.value == StreamsLayoutMode.Map) return 0
         val visibleLiveCount = streamInfoByDesignator.values.count { info ->
             info.state == StreamState.LIVE && isStreamVisible(info)
@@ -642,6 +659,7 @@ class StreamsViewModel(
             .toSet()
         val activeLiveStreams = liveStreams.filter(::isStreamVisible)
         val liveDesignators = liveRevisions.keys
+        val streamsUiActive = _streamsUiActive.value
         val added = activeLiveStreams.map { it.designator }.toSet() - lastLiveRevisions.keys
         val republished = activeLiveStreams
             .filter { info ->
@@ -657,7 +675,7 @@ class StreamsViewModel(
             .map { it.designator }
             .toSet()
         val focusedPath = _focusedPath.value
-        if (focusedPath != null) {
+        if (streamsUiActive && focusedPath != null) {
             val newlyAttachedOffFocus = added.filter { it != focusedPath }
             if (newlyAttachedOffFocus.isNotEmpty()) {
                 val msg = if (newlyAttachedOffFocus.size == 1) {
@@ -665,9 +683,8 @@ class StreamsViewModel(
                 } else {
                     "New streams attached: ${newlyAttachedOffFocus.joinToString(", ")}"
                 }
-                _focusedPath.value = null
-                CaltopoClient.ShowToast("$msg. Returning to grid.")
-                CTInfo(tag, "$msg -> clearing focus to return to grid")
+                CaltopoClient.ShowToast(msg)
+                CTInfo(tag, "$msg -> keeping current focus")
             }
         }
 
@@ -696,11 +713,17 @@ class StreamsViewModel(
                 info.publisherConnId != null &&
                 info.publisherConnId != previousPublisherConnId
             val republishDetected = designator in republished
-            val useFfmpeg = shouldUseFfmpegRender(designator)
+            val useFfmpeg = streamsUiActive && shouldUseFfmpegRender(designator)
             val wasUsingFfmpeg = renderRouteByDesignator[designator] == true
             ffmpegProbeService?.updateSourcePath(designator, info.sourcePath)
             renderRouteByDesignator[designator] = useFfmpeg
             ffmpegProbeService?.setRenderEnabled(designator, useFfmpeg)
+            if (!streamsUiActive) {
+                ffmpegProbeService?.onStreamStopped(designator)
+                streamSessionService.onStreamStopped(designator)
+                CTDebug(tag, "Stream $designator live -> streams UI inactive, discarding packets")
+                return@forEach
+            }
             if (useFfmpeg) {
                 streamSessionService.onStreamStopped(designator)
                 if (republishDetected) {

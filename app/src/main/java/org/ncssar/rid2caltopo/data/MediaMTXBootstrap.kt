@@ -6,6 +6,7 @@ object MediaMTXBootstrap {
 
     @JvmStatic
     fun init() {
+        // Structured events are the primary lifecycle feed from MediaMTX.
         MediaMTXStructuredDispatcher.addListener { event ->
             when (event) {
                 is MediaMTXEvent.StreamConnecting ->
@@ -30,6 +31,17 @@ object MediaMTXBootstrap {
 
                 is MediaMTXEvent.HlsStreamStarted -> {}
                 //    StreamRegistry.onStreamStarted(event.path)
+            }
+        }
+        // Raw log parsing is intentionally narrower: only use it for stop signals
+        // that some controllers expose in logs before MediaMTX emits/destroys the
+        // corresponding structured path state.
+        MediaMTXLogDispatcher.addListener { event ->
+            when (event) {
+                is MediaMTXEvent.StreamStopped ->
+                    StreamRegistry.onStreamStopped(event.path, event.publisherConnId)
+
+                else -> {}
             }
         }
     }

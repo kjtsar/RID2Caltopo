@@ -35,6 +35,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -86,6 +87,13 @@ fun StreamsScreen(
     showNavigation: Boolean = true,
     externalContentMode: ExternalDisplayContentMode? = null,
 ) {
+    DisposableEffect(viewModel) {
+        viewModel.setStreamsUiActive(true)
+        onDispose {
+            viewModel.setStreamsUiActive(false)
+        }
+    }
+
     val isServerRunning = MediaMTXStatus.isServerRunning
     val serverExitReason = MediaMTXStatus.serverExitReason
     var myIpAddress by remember { mutableStateOf(R2CMqttManager.GetMyIpAddress()) }
@@ -394,6 +402,16 @@ private fun StreamsGrid(
             streamEntries
         }
 
+    val singleVisibleDesignator = remember(visibleEntries, focusedPath) {
+        if (focusedPath == null && visibleEntries.size == 1) visibleEntries[0].key else null
+    }
+
+    LaunchedEffect(singleVisibleDesignator) {
+        singleVisibleDesignator?.let { designator ->
+            viewModel.ensureFocus(designator)
+        }
+    }
+
     Box(modifier = modifier) {
         if (visibleEntries.isEmpty()) {
             CTDebug(tag, "No streams to show.")
@@ -402,10 +420,6 @@ private fun StreamsGrid(
                 modifier = Modifier.fillMaxSize()
             )
         } else {
-            if (focusedPath == null && visibleEntries.count() == 1) {
-                viewModel.toggleFocus(visibleEntries[0].key)
-            }
-
             val columns = if (visibleEntries.size <= 2) 1 else 2
             val rows = when (visibleEntries.size) {
                 0, 1 -> 1

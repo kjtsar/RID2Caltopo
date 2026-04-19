@@ -20,9 +20,13 @@ public final class MediaMTXNative {
     }
 
     public static void onMediaMTXLogLine(String line) {
-        // Raw MediaMTX stdout/stderr is debug-only. Structured JSON remains the
-        // authoritative signaling path for lifecycle events.
+        // Most lifecycle signaling comes through structured JSON events, but some
+        // controller-specific publisher shutdown cues only appear in raw log lines
+        // (for example FCUnpublish/deleteStream before the path timeout elapses).
+        // Feed both paths so StreamRegistry can react immediately when the logs
+        // contain a stronger stop signal than the structured event stream.
         CTDebug("MediaMTXService", "MediaMTX: " + line);
+        MediaMTXLogDispatcher.dispatch(line);
     }
 
     public static void onMediaMTXEventJson(String json) {

@@ -2795,6 +2795,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
     // ── Inner decode loop ───────────────────────────────────────────────────
     int64_t last_video_packet_at_ms = 0;
     int64_t last_decoded_frame_at_ms = 0;
+    int startup_packet_log_count = 0;
 
     while (session_running(session)) {
         int64_t read_started_at_ms = monotonic_ms();
@@ -2899,6 +2900,21 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
         }
         last_video_packet_at_ms = now_ms;
+
+        if (last_decoded_frame_at_ms == 0 && startup_packet_log_count < 8) {
+            bool is_keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
+            int64_t pkt_pts_us = pts_to_us(pkt->pts, session->video_time_base);
+            startup_packet_log_count++;
+            ct_debug(TAG,
+                     "startup packet id=%lld designator=%s count=%d key=%d size=%d ptsUs=%lld dts=%lld",
+                     (long long) session->session_id,
+                     session->designator,
+                     startup_packet_log_count,
+                     is_keyframe ? 1 : 0,
+                     pkt->size,
+                     (long long) pkt_pts_us,
+                     (long long) pkt->dts);
+        }
 
 #if FFMPEG_TELEMETRY_ENABLED
         telemetry_values_t packet_tv = telemetry_values_init();

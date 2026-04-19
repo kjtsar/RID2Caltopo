@@ -243,6 +243,7 @@ internal fun indicatorPaletteFor(designatorState: DesignatorState): IndicatorPal
 internal fun formatLiveState(renderDelayMs: Long?): String {
     val delayMs = renderDelayMs ?: return "Live"
     if (delayMs < 500L) return "Live"
+    if (delayMs >= 5_000L) return "Stalled"
     if (delayMs < 1_000L) return "lag:${delayMs}ms"
     return String.format(Locale.US, "lag:%.1fs", delayMs / 1000.0)
 }

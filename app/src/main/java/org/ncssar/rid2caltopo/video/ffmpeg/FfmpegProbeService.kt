@@ -419,32 +419,46 @@ class FfmpegProbeService {
         CTDebug(tag, "Stream stopped for $designator; tearing down FFmpeg sessions")
         val sessionIds: List<Long>
         synchronized(stateLock) {
-            sessionIds = listOfNotNull(
-                renderSessions.remove(designator),
-            ).distinct()
+            sessionIds = sessionIdsForDesignatorLocked(designator)
             startingRenderDesignators.remove(designator)
             lastFrameAtMs.remove(designator)
             sourcePathByDesignator.remove(designator)
+            renderEnabledDesignators.remove(designator)
             boundRenderSurfaces.remove(designator)
             telemetryByDesignator.remove(designator)
             remoteIdCandidatesByDesignator.remove(designator)
             clearRenderDelayLocked(designator)
             pendingRepublishByDesignator.remove(designator)
+            renderSessions.remove(designator)
         }
         sessionIds.forEach { sessionId ->
             stopSessionAsync(sessionId, "Stopped FFmpeg render for $designator sessionId=$sessionId")
         }
     }
 
+    private fun sessionIdsForDesignatorLocked(designator: String): List<Long> {
+        val activeSessionId = renderSessions[designator]
+        val managedSessionIds = managedRenderSessions
+            .filterValues { it.designator == designator }
+            .keys
+        return listOfNotNull(activeSessionId)
+            .plus(managedSessionIds)
+            .distinct()
+    }
+
     private fun collectActiveSessionsForShutdown(): List<Long> {
         return synchronized(stateLock) {
-            val snapshot = renderSessions.values.distinct()
+            val snapshot = renderSessions.values
+                .plus(managedRenderSessions.keys)
+                .distinct()
             renderSessions.clear()
             startingRenderDesignators.clear()
             lastFrameAtMs.clear()
             sourcePathByDesignator.clear()
             renderEnabledDesignators.clear()
             boundRenderSurfaces.clear()
+            managedRenderSessions.clear()
+            retiringSessionIds.clear()
             telemetryByDesignator.clear()
             remoteIdCandidatesByDesignator.clear()
             renderDelayMsByDesignator.clear()
@@ -908,7 +922,11 @@ class FfmpegProbeService {
                     val upstreamTransientClose =
                         upstreamBoundary?.boundary == "stream_error" &&
                             upstreamBoundary.outcome == "deferred_transient_close"
-                    val deferStartupRecovery = hasRecentReaderWait || upstreamTransientClose
+                    // A recent reader stall is expected once playback is already flowing and the
+                    // upstream bursts. It should not suppress startup recovery when we have never
+                    // decoded or rendered a single frame, otherwise the render can sit black in
+                    // PRIMED state indefinitely waiting on a stream that never becomes decodable.
+                    val deferStartupRecovery = upstreamTransientClose || (hasAnyFrames && hasRecentReaderWait)
                     val allowForcedRecovery = phaseAgeMs >= startupNoFrameAbsoluteRecoveryMs
                     if (!hasAnyFrames &&
                         phaseAgeMs >= startupNoFrameRecoveryMs &&

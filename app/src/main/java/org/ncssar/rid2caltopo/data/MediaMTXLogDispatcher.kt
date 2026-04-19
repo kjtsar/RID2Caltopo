@@ -9,6 +9,7 @@ data class MediaMtxParserState(
     val pathPublisherConnMap: Map<String, String> = emptyMap(),
     val suppressStopForPath: LinkedHashSet<String> = linkedSetOf(),
     val publisherHandoffClosingConns: LinkedHashSet<String> = linkedSetOf(),
+    val publisherIntentionalCloseConns: LinkedHashSet<String> = linkedSetOf(),
 )
 
 data class MediaMtxParserResult(
@@ -25,6 +26,8 @@ object MediaMtxLogParser {
         Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+is publishing to path '([^']+)'""")
     private val rtmpClosedRegex =
         Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+closed:\s*(.+)""")
+    private val rtmpPublishCommandRegex =
+        Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+RTMP control:\s+received command '([^']+)'\s+\(id=\d+\)\s+during publish on path '([^']+)'""")
 
     fun parseLine(state: MediaMtxParserState, line: String): MediaMtxParserResult {
         val pendingRunOnReadyPaths = LinkedHashSet(state.pendingRunOnReadyPaths)
@@ -33,6 +36,7 @@ object MediaMtxLogParser {
         val pathPublisherConnMap = state.pathPublisherConnMap.toMutableMap()
         val suppressStopForPath = LinkedHashSet(state.suppressStopForPath)
         val publisherHandoffClosingConns = LinkedHashSet(state.publisherHandoffClosingConns)
+        val publisherIntentionalCloseConns = LinkedHashSet(state.publisherIntentionalCloseConns)
         val trimmed = line.trim()
 
         fun updatedState() = MediaMtxParserState(
@@ -42,6 +46,7 @@ object MediaMtxLogParser {
             pathPublisherConnMap = pathPublisherConnMap,
             suppressStopForPath = suppressStopForPath,
             publisherHandoffClosingConns = publisherHandoffClosingConns,
+            publisherIntentionalCloseConns = publisherIntentionalCloseConns,
         )
 
         fun emitStop(path: String): MediaMTXEvent? {
@@ -118,6 +123,7 @@ object MediaMtxLogParser {
             pendingRunOnReadyPaths.remove(path)
             pendingRunOnReadyVerbPaths.remove(path)
             suppressStopForPath.remove(path)
+            publisherIntentionalCloseConns.remove(conn)
             if (isDuplicatePublisherLine) {
                 return MediaMtxParserResult(
                     null,
@@ -130,12 +136,31 @@ object MediaMtxLogParser {
             )
         }
 
+        val rtmpPublishCommandMatch = rtmpPublishCommandRegex.find(line)
+        if (rtmpPublishCommandMatch != null) {
+            val conn = rtmpPublishCommandMatch.groupValues[1]
+            val command = rtmpPublishCommandMatch.groupValues[2]
+            val path = rtmpPublishCommandMatch.groupValues[3]
+            if (command.equals("FCUnpublish", ignoreCase = true) ||
+                command.equals("deleteStream", ignoreCase = true)
+            ) {
+                if (rtmpConnPathMap[conn] == path || pathPublisherConnMap[path] == conn) {
+                    publisherIntentionalCloseConns.add(conn)
+                }
+            }
+            return MediaMtxParserResult(
+                null,
+                updatedState(),
+            )
+        }
+
         val rtmpClosedMatch = rtmpClosedRegex.find(line)
         if (rtmpClosedMatch != null) {
             val conn = rtmpClosedMatch.groupValues[1]
             val reason = rtmpClosedMatch.groupValues[2].trim()
             val path = rtmpConnPathMap.remove(conn)
             if (path != null) {
+                val intentionalPublisherStop = publisherIntentionalCloseConns.remove(conn)
                 if (pathPublisherConnMap[path] == conn) {
                     pathPublisherConnMap.remove(path)
                 }
@@ -148,8 +173,15 @@ object MediaMtxLogParser {
                         updatedState(),
                     )
                 }
+                if (intentionalPublisherStop) {
+                    suppressStopForPath.remove(path)
+                    return MediaMtxParserResult(
+                        MediaMTXEvent.StreamStopped(path = path, publisherConnId = conn),
+                        updatedState(),
+                    )
+                }
                 return MediaMtxParserResult(
-                    MediaMTXEvent.StreamError(path = path, reason = normalizeRtmpCloseReason(reason)),
+                    MediaMTXEvent.StreamError(path = path, publisherConnId = conn, reason = normalizeRtmpCloseReason(reason)),
                     updatedState(),
                 )
             }

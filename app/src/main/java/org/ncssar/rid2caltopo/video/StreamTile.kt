@@ -465,7 +465,6 @@ fun StreamPlayer(
                 surfaceTag,
                 "FFmpeg TextureView dispose for $designator viewId=${attachedTextureView?.let { System.identityHashCode(it) }}"
             )
-            viewModel.unbindFfmpegRenderSurface(designator, attachedSurface)
             attachedSurface?.release()
             attachedSurface = null
             attachedTextureView = null

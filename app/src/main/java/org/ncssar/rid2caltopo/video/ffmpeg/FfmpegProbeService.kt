@@ -129,7 +129,8 @@ class FfmpegProbeService {
     private val sourcePathByDesignator = mutableMapOf<String, String>()
     private val renderEnabledDesignators = mutableSetOf<String>()
     private val startingRenderDesignators = mutableSetOf<String>()
-    private val boundRenderSurfaces = mutableMapOf<String, Surface>()
+    private val activeRenderSurfaceByDesignator = mutableMapOf<String, Surface>()
+    private val renderSurfaceCandidatesByDesignator = mutableMapOf<String, MutableList<Surface>>()
     private val retiringSessionIds = mutableSetOf<Long>()
     private val managedRenderSessions = mutableMapOf<Long, ManagedRenderSession>()
     private val telemetryByDesignator = mutableMapOf<String, FfmpegTelemetry>()
@@ -426,7 +427,8 @@ class FfmpegProbeService {
             lastFrameAtMs.remove(designator)
             sourcePathByDesignator.remove(designator)
             renderEnabledDesignators.remove(designator)
-            boundRenderSurfaces.remove(designator)
+            activeRenderSurfaceByDesignator.remove(designator)
+            renderSurfaceCandidatesByDesignator.remove(designator)
             telemetryByDesignator.remove(designator)
             remoteIdCandidatesByDesignator.remove(designator)
             clearRenderDelayLocked(designator)
@@ -486,7 +488,8 @@ class FfmpegProbeService {
             lastFrameAtMs.clear()
             sourcePathByDesignator.clear()
             renderEnabledDesignators.clear()
-            boundRenderSurfaces.clear()
+            activeRenderSurfaceByDesignator.clear()
+            renderSurfaceCandidatesByDesignator.clear()
             managedRenderSessions.clear()
             retiringSessionIds.clear()
             telemetryByDesignator.clear()
@@ -551,7 +554,10 @@ class FfmpegProbeService {
     fun bindRenderSurface(designator: String, surface: Surface): Boolean {
         if (!isRenderEnabled(designator)) return false
         val existingRenderSessionId = synchronized(stateLock) {
-            boundRenderSurfaces[designator] = surface
+            val candidates = renderSurfaceCandidatesByDesignator.getOrPut(designator) { mutableListOf() }
+            candidates.removeAll { it === surface }
+            candidates.add(surface)
+            activeRenderSurfaceByDesignator[designator] = surface
             renderSessions[designator] ?: suspendedRenderSessions.remove(designator)?.also { sessionId ->
                 renderSessions[designator] = sessionId
                 managedRenderSessions[sessionId]?.let { session ->
@@ -584,7 +590,7 @@ class FfmpegProbeService {
 
     private fun hasBoundRenderSurface(designator: String): Boolean {
         return synchronized(stateLock) {
-            boundRenderSurfaces.containsKey(designator)
+            renderSurfaceCandidatesByDesignator[designator]?.isNotEmpty() == true
         }
     }
 
@@ -601,26 +607,83 @@ class FfmpegProbeService {
     }
 
     fun unbindRenderSurface(designator: String, surface: Surface?) {
-        val sessionId = synchronized(stateLock) {
-            val boundSurface = boundRenderSurfaces[designator] ?: return@synchronized null
-            if (surface != null && boundSurface !== surface) {
-                CTDebug(
-                    tag,
-                    "Ignoring stale render surface unbind for $designator " +
-                        "boundSurface=${System.identityHashCode(boundSurface)} " +
-                        "requestedSurface=${System.identityHashCode(surface)}"
-                )
+        data class UnbindAction(
+            val sessionId: Long,
+            val requestedSurface: Surface?,
+            val detachCurrent: Boolean,
+            val fallbackSurface: Surface?,
+        )
+
+        val action = synchronized(stateLock) {
+            val activeSurface = activeRenderSurfaceByDesignator[designator]
+            val candidates = renderSurfaceCandidatesByDesignator[designator] ?: return@synchronized null
+            val requestedSurface = surface ?: activeSurface ?: return@synchronized null
+            val removed = candidates.removeAll { it === requestedSurface }
+            if (!removed) {
+                if (surface != null) {
+                    CTDebug(
+                        tag,
+                        "Ignoring stale render surface unbind for $designator " +
+                            "activeSurface=${activeSurface?.let { System.identityHashCode(it) }} " +
+                            "requestedSurface=${System.identityHashCode(surface)}"
+                    )
+                }
                 return@synchronized null
             }
-            boundRenderSurfaces.remove(designator)
-            renderSessions[designator] ?: suspendedRenderSessions[designator]
+            val sessionId = renderSessions[designator] ?: suspendedRenderSessions[designator] ?: return@synchronized null
+            val detachCurrent = activeSurface === requestedSurface
+            val fallbackSurface = when {
+                candidates.isEmpty() -> null
+                detachCurrent -> candidates.last()
+                else -> activeSurface
+            }
+            if (candidates.isEmpty()) {
+                renderSurfaceCandidatesByDesignator.remove(designator)
+                activeRenderSurfaceByDesignator.remove(designator)
+            } else {
+                activeRenderSurfaceByDesignator[designator] = fallbackSurface!!
+            }
+            UnbindAction(
+                sessionId = sessionId,
+                requestedSurface = requestedSurface,
+                detachCurrent = detachCurrent,
+                fallbackSurface = if (detachCurrent) fallbackSurface else null,
+            )
         } ?: return
+
+        if (!action.detachCurrent) {
+            CTDebug(
+                tag,
+                "Removed non-active render surface for $designator sessionId=${action.sessionId} " +
+                    "surface=${action.requestedSurface?.let { System.identityHashCode(it) }}"
+            )
+            return
+        }
+
+        if (action.fallbackSurface != null) {
+            CTDebug(
+                tag,
+                "Rebinding render surface for $designator sessionId=${action.sessionId} " +
+                    "oldSurface=${action.requestedSurface?.let { System.identityHashCode(it) }} " +
+                    "newSurface=${System.identityHashCode(action.fallbackSurface)}"
+            )
+            FfmpegBridge.detachSurface(action.sessionId)
+            if (!FfmpegBridge.attachSurface(action.sessionId, action.fallbackSurface)) {
+                CTWarn(
+                    tag,
+                    "Unable to attach fallback render surface for $designator " +
+                        "sessionId=${action.sessionId}"
+                )
+            }
+            return
+        }
+
         CTDebug(
             tag,
-            "Unbinding render surface for $designator sessionId=$sessionId " +
-                "surface=${surface?.let { System.identityHashCode(it) }}"
+            "Unbinding render surface for $designator sessionId=${action.sessionId} " +
+                "surface=${action.requestedSurface?.let { System.identityHashCode(it) }}"
         )
-        FfmpegBridge.detachSurface(sessionId)
+        FfmpegBridge.detachSurface(action.sessionId)
     }
 
     fun telemetrySnapshot(designator: String): StreamTelemetrySnapshot? {
@@ -725,7 +788,7 @@ class FfmpegProbeService {
                     created.pendingRepublishMarker = marker
                 }
                 managedRenderSessions[sessionId] = created
-                boundRenderSurfaces[designator]
+                activeRenderSurfaceByDesignator[designator]
             }
             if (duplicateSessionId != null) {
                 stopSessionAsync(sessionId, "Stopped duplicate FFmpeg render for $designator sessionId=$sessionId")
@@ -1038,7 +1101,7 @@ class FfmpegProbeService {
                     }
                     return@forEach
                 }
-                val useRenderedProgress = boundRenderSurfaces.containsKey(designator)
+                val useRenderedProgress = activeRenderSurfaceByDesignator.containsKey(designator)
                 updateSessionPollProgressLocked(
                     sessionState = activeSession,
                     useRenderedProgress = useRenderedProgress,

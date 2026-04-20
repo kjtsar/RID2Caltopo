@@ -226,6 +226,8 @@ class StreamsViewModel(
     private val _focusedPath = MutableStateFlow<String?>(null)
     val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
     private val _streamsUiActive = MutableStateFlow(false)
+    private val streamsUiConsumerLock = Any()
+    private val streamsUiConsumers = mutableSetOf<Any>()
 
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
@@ -378,11 +380,34 @@ class StreamsViewModel(
         syncStreamSessions(currentResyncSnapshot())
     }
 
-    fun setStreamsUiActive(active: Boolean) {
-        if (_streamsUiActive.value == active) return
-        _streamsUiActive.value = active
-        CTDebug(tag, "setStreamsUiActive(): active=$active")
-        syncStreamSessions(currentResyncSnapshot())
+    fun addStreamsUiConsumer(): () -> Unit {
+        val token = Any()
+        var shouldSync = false
+        synchronized(streamsUiConsumerLock) {
+            streamsUiConsumers.add(token)
+            if (!_streamsUiActive.value) {
+                _streamsUiActive.value = true
+                shouldSync = true
+            }
+            CTDebug(tag, "addStreamsUiConsumer(): count=${streamsUiConsumers.size}")
+        }
+        if (shouldSync) {
+            syncStreamSessions(currentResyncSnapshot())
+        }
+        return {
+            var becameInactive = false
+            synchronized(streamsUiConsumerLock) {
+                if (!streamsUiConsumers.remove(token)) return@synchronized
+                CTDebug(tag, "removeStreamsUiConsumer(): count=${streamsUiConsumers.size}")
+                if (streamsUiConsumers.isEmpty() && _streamsUiActive.value) {
+                    _streamsUiActive.value = false
+                    becameInactive = true
+                }
+            }
+            if (becameInactive) {
+                syncStreamSessions(currentResyncSnapshot())
+            }
+        }
     }
 
     override fun onCleared() {

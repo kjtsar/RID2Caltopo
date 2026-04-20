@@ -88,9 +88,9 @@ fun StreamsScreen(
     externalContentMode: ExternalDisplayContentMode? = null,
 ) {
     DisposableEffect(viewModel) {
-        viewModel.setStreamsUiActive(true)
+        val removeConsumer = viewModel.addStreamsUiConsumer()
         onDispose {
-            viewModel.setStreamsUiActive(false)
+            removeConsumer()
         }
     }
 

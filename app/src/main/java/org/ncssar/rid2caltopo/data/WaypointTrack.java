@@ -136,7 +136,6 @@ public class WaypointTrack {
 	private String startTimeStr;
 	private DocumentFile dataFilepath;
     private String fileName;
-	private OutputStream outputStream = null;
     private final List<ArchivedClue> clues = new ArrayList<>();
 
 	public WaypointTrack(@NonNull String trackLabel, @NonNull CtDroneSpec droneSpec) {
@@ -148,7 +147,6 @@ public class WaypointTrack {
         this.incident = CaltopoClient.GetIncident();
         this.opPeriod = CaltopoClient.GetOpPeriod();
         this.mapId = CaltopoMap.GetMapId();
-		setupOutputStream();
 		CTDebug(TAG, String.format("AddWaypointForTrack(%s): Starting new track.", trackLabel));
 	}
 
@@ -182,18 +180,23 @@ public class WaypointTrack {
 		}
 	}
 
-	private void setupOutputStream() {
+	private boolean prepareArchiveFile() {
+        if (dataFilepath != null && fileName != null) return true;
 		Context ctxt = R2CApplication.getAppCtxt();
 		DocumentFile todaysArchiveDir = GetTodaysTrackDir();
-		if (null == ctxt || null == todaysArchiveDir) return;
+		if (null == ctxt || null == todaysArchiveDir) return false;
 		try {
 			fileName = trackLabel + ".json";
 			dataFilepath = todaysArchiveDir.createFile(GEOJSON_MIME_TYPE, fileName);
-			ContentResolver resolver = ctxt.getContentResolver();
-			outputStream = resolver.openOutputStream(dataFilepath.getUri());
-			CTDebug(TAG, "setupOutputStream(): stream opened for " + dataFilepath.getUri());
+			if (dataFilepath == null) {
+                CTError(TAG, "prepareArchiveFile(): not able to create " + fileName);
+                return false;
+            }
+			CTDebug(TAG, "prepareArchiveFile(): created " + dataFilepath.getUri());
+            return true;
 		} catch (Exception e) {
-			CTError(TAG, "setupOutputStream() raised.", e);
+			CTError(TAG, "prepareArchiveFile() raised.", e);
+            return false;
 		}
 	}
 
@@ -425,8 +428,8 @@ public class WaypointTrack {
                     waypointTrack = ReadGeoJson(file);
                 } catch (Exception e) {
                     CTWarn(TAG, "Not able to read " + filename, e);
-                    // ignore this file during future launches:
-                    mainThreadHandler.post(() -> ReportStatsForFile(finalReportedFilepath, filename));
+                    // Ignore unreadable/empty files during future launches.
+                    ReportStatsForFile(finalReportedFilepath, filename);
                     continue;
                 }
                 if (null == waypointTrack) continue;
@@ -479,18 +482,32 @@ public class WaypointTrack {
 
     public void archive() {
         long numCoords = coordinates.length();
-        if (numCoords <= 0 || null == outputStream) {
+        if (numCoords <= 0) {
             CTDebug(TAG, "archive(): no waypoints.");
             return;
         }
         JSONObject joTop = getGeoJson();
         String geoJsonString = null;
         if (null != joTop) try {
+            if (!prepareArchiveFile()) {
+                CTError(TAG, "archive(): unable to prepare archive file.");
+                return;
+            }
             geoJsonString = joTop.toString();
-            outputStream.write(geoJsonString.getBytes());
-            outputStream.flush();
-            outputStream.close();
-            outputStream = null;
+            Context ctxt = R2CApplication.getAppCtxt();
+            if (ctxt == null || dataFilepath == null) {
+                CTError(TAG, "archive(): missing context or archive path.");
+                return;
+            }
+            ContentResolver resolver = ctxt.getContentResolver();
+            try (OutputStream outputStream = resolver.openOutputStream(dataFilepath.getUri(), "wt")) {
+                if (outputStream == null) {
+                    CTError(TAG, "archive(): unable to open output stream for " + dataFilepath.getUri());
+                    return;
+                }
+                outputStream.write(geoJsonString.getBytes());
+                outputStream.flush();
+            }
             CTDebug(TAG, String.format(Locale.US, "archive(): wrote %d coordinates to %s",
                     numCoords, dataFilepath.getUri()));
             if (null != droneSpec && droneSpec.okToLog()) {
@@ -520,7 +537,6 @@ public class WaypointTrack {
 		ja.put(String.format(Locale.US, "%d", timestampInMillisec));
 		coordinates.put(ja);
 		WaypointCount++;
-		if (null == outputStream) setupOutputStream();
 	}
 
     /** Associates a clue with this track for inclusion in the KMZ archive. */

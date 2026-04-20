@@ -373,18 +373,6 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                         screenBeforeConfirmation = null
                     }
                 }
-            } else {
-                droneSpecs.forEach { drone ->
-                    val flightKey = currentFlightKey(drone)
-                    if (flightKey == null) return@forEach
-                    CTDebug(
-                        tag,
-                        "Skipping confirmation for ${drone.remoteId}: " +
-                            "flightKey=$flightKey prompted=${flightKey in promptedFlightKeys} " +
-                            "known=${hasKnownDroneSpec(drone)} mappedId=${drone.mappedId} " +
-                            "org='${drone.org}' model='${drone.model}' owner='${drone.owner}'"
-                    )
-                }
             }
         }
         if (droneSpecs.isEmpty()) {

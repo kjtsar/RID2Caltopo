@@ -6,6 +6,12 @@ import androidx.annotation.Nullable;
 import java.util.List;
 
 public interface PeerCoordinator {
+    enum CoordinationIndicatorState {
+        HEALTHY,
+        DEGRADED,
+        UNCONFIGURED
+    }
+
     void start(@NonNull String mapId, @NonNull String guid, @NonNull String name, @Nullable String brokerUri);
     void stop();
     void onLiveTrackCreated(@NonNull LiveTrackOwnerDelegate liveTrack,
@@ -25,4 +31,5 @@ public interface PeerCoordinator {
     void updateMyPosition(double lat, double lon);
     void setPeerListChangedListener(@Nullable R2CMqttManager.PeerListChangedListener listener);
     @NonNull List<R2CMqttManager.PeerState> getPeerList();
+    @NonNull CoordinationIndicatorState getCoordinationIndicatorState();
 }

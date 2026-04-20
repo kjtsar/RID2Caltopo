@@ -21,6 +21,7 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.MediaMTXBootstrap;
@@ -138,7 +139,12 @@ public class MediaMTXService extends Service {
     public void onDestroy() {
         serviceRunning = false;
         processPid = 0;
-        MediaMTXNative.stop();
+        try {
+            stopForeground(true);
+        } catch (Exception e) {
+            CTDebug(TAG, "onDestroy(): stopForeground ignored: " + e.getMessage());
+        }
+        new Thread(MediaMTXNative::stop, "mediamtx-native-stop").start();
         // Run syncAll on a background thread to avoid ForegroundServiceDidNotStopInTimeException.
         // Android 14+ enforces a ~20 s shutdown timeout on the main thread; copying large video
         // files to the SAF archive can easily exceed that.  Any fragments not synced here will
@@ -198,6 +204,12 @@ public class MediaMTXService extends Service {
         } else {
             context.startService(restartIntent);
         }
+    }
+
+    public static void requestStop(Context context) {
+        Intent stopIntent = new Intent(context, MediaMTXService.class);
+        stopIntent.setAction(ACTION_STOP_SERVICE);
+        ContextCompat.startForegroundService(context, stopIntent);
     }
 
     @Nullable

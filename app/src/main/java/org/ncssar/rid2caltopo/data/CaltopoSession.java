@@ -565,9 +565,11 @@ public class CaltopoSession {
 		JSONObject top = new JSONObject();
 		String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/Folder";
 		try {
+			prop.put("class", "Folder");
 			prop.put("title", folderName);
 			prop.put("visible", contentsVisible);
 			prop.put("labelVisible", contentLabelsVisible);
+			top.put("type", "Feature");
 			top.put("properties", prop);
 		} catch (Exception e) {
 			CTError(TAG, "addFolder() raised.", e);

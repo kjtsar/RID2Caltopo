@@ -26,6 +26,7 @@ import android.os.Process;
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.ServiceCompat;
+import androidx.core.content.ContextCompat;
 
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.CaltopoClient;
@@ -44,6 +45,7 @@ import java.util.Locale;
 
 public class ScanningService extends Service {
     private static final String TAG = "ScanningService";
+    private static final String ACTION_STOP_SERVICE = "STOP_SERVICE";
     private static final String CHANNEL_ID = "OpenDroneIdScanner";
     private static final String CHANNEL_NAME = "OpenDroneId Scanner Service";
     private static final int NOTIFICATION_ID = 1;
@@ -119,6 +121,11 @@ public class ScanningService extends Service {
     public void onDestroy() {
         CTDebug(TAG, String.format(Locale.US,
                 "onDestroy(): ScanningService 0x%x", this.hashCode()));
+        try {
+            stopForeground(true);
+        } catch (Exception e) {
+            CTDebug(TAG, "onDestroy(): stopForeground ignored: " + e.getMessage());
+        }
         if (scanning) {
             stopScanning();
         }
@@ -139,7 +146,7 @@ public class ScanningService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && "STOP_SERVICE".equals(intent.getAction())) {
+        if (intent != null && ACTION_STOP_SERVICE.equals(intent.getAction())) {
             CTDebug(TAG, "ScanningService shutting down.");
             stopForeground(true);
             stopSelf();
@@ -183,6 +190,12 @@ public class ScanningService extends Service {
         stopSelf();
         CaltopoClient.ShutdownAsync();
         super.onTaskRemoved(rootIntent);
+    }
+
+    public static void requestStop(@NonNull Context context) {
+        Intent stopIntent = new Intent(context, ScanningService.class);
+        stopIntent.setAction(ACTION_STOP_SERVICE);
+        ContextCompat.startForegroundService(context, stopIntent);
     }
     @Override
     public void onTrimMemory(int level) {

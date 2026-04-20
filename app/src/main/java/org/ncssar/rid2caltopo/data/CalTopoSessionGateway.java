@@ -17,7 +17,12 @@ public interface CalTopoSessionGateway {
     @NonNull CaltopoOp addLine(@NonNull JSONArray pointArray, @NonNull String lineLabel, @Nullable String description,
                                @Nullable String existingLineId, @Nullable String folderId,
                                @Nullable CtLineProperty lineProp, @Nullable Consumer<CaltopoOp> onComplete);
+    @Nullable CaltopoOp addMarker(double lat, double lng, @NonNull String markerTitle,
+                                  @Nullable String symbol, @Nullable String folderId,
+                                  @Nullable String existingMarkerId, @Nullable JSONObject extraProperties,
+                                  @Nullable Consumer<CaltopoOp> onComplete);
     @NonNull CaltopoOp deleteShapeWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete);
+    @NonNull CaltopoOp deleteMarkerWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete);
     @NonNull CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete);
     @NonNull CaltopoOp editObjectWithId(@NonNull String objectType, @NonNull String objId,
                                         @NonNull JSONObject featureSet, @Nullable Consumer<CaltopoOp> onComplete);

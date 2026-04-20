@@ -1916,6 +1916,26 @@ static void trim_render_queue_to_latest(ffmpeg_session_t *session, int keep_late
             keep_latest);
 }
 
+static int compute_trim_keep_latest_locked(const ffmpeg_session_t *session,
+                                           int64_t source_interval_ms,
+                                           int64_t target_latency_ms) {
+    if (session == NULL) return 8;
+    if (source_interval_ms <= 0) {
+        source_interval_ms = session->source_render_interval_ms > 0
+                ? session->source_render_interval_ms
+                : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    }
+    if (target_latency_ms <= 0) {
+        target_latency_ms = session->target_latency_ms > 0
+                ? session->target_latency_ms
+                : RENDER_TARGET_LATENCY_MIN_MS;
+    }
+    int keep_latest = (int) ((target_latency_ms + source_interval_ms - 1) / source_interval_ms);
+    if (keep_latest < 8) keep_latest = 8;
+    if (keep_latest > 36) keep_latest = 36;
+    return keep_latest;
+}
+
 static void destroy_render_queue_storage(ffmpeg_session_t *session) {
     if (session == NULL) return;
     clear_render_queue(session);
@@ -2035,9 +2055,10 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
             : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
 
     if (session->target_latency_ms > 0 &&
-        session->render_queue_depth >= RENDER_QUEUE_WARN_DEPTH &&
         buffered_span_ms >= (session->target_latency_ms * 2)) {
-        trim_render_queue_to_latest(session, 8);
+        int keep_latest =
+                compute_trim_keep_latest_locked(session, base_interval_ms, session->target_latency_ms);
+        trim_render_queue_to_latest(session, keep_latest);
         oldest_index = session->render_queue_head;
         buffered_span_ms = buffered_span_ms_locked(session);
     }

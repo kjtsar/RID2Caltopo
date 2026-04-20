@@ -54,10 +54,22 @@ public final class DefaultCalTopoSessionGateway implements CalTopoSessionGateway
         return CaltopoSession.AddLine(pointArray, lineLabel, description, existingLineId, folderId, lineProp, onComplete);
     }
 
+    @Nullable
+    @Override
+    public CaltopoOp addMarker(double lat, double lng, @NonNull String markerTitle, @Nullable String symbol, @Nullable String folderId, @Nullable String existingMarkerId, @Nullable JSONObject extraProperties, @Nullable Consumer<CaltopoOp> onComplete) {
+        return CaltopoSession.AddMarker(lat, lng, markerTitle, symbol, folderId, existingMarkerId, extraProperties, onComplete);
+    }
+
     @NonNull
     @Override
     public CaltopoOp deleteShapeWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
         return CaltopoSession.DeleteShapeWithId(objId, onComplete);
+    }
+
+    @NonNull
+    @Override
+    public CaltopoOp deleteMarkerWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+        return CaltopoSession.DeleteMarkerWithId(objId, onComplete);
     }
 
     @NonNull

@@ -151,6 +151,7 @@ object RidReplayManager {
                     drone.remoteId,
                     drone.org,
                     drone.model,
+                    drone.owner,
                     mappedId
                 )
             }

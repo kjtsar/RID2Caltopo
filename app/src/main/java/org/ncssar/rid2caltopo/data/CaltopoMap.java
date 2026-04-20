@@ -90,6 +90,11 @@ public class CaltopoMap {
     public static final CtLineProperty ArchiveLineProp =
             new CtLineProperty(2, 0.5F, "#ff00ff", "solid");
     private static final int MAX_MAP_STARTUP_DELAY_IN_SECONDS = 45;
+    private static final String LOCAL_DEVICE_MARKER_SYMBOL = "radiotower";
+    private static final String LOCAL_DEVICE_MARKER_TITLE_PREFIX = "R2C: ";
+    private static final String LOCAL_DEVICE_COLOR_HEALTHY = "#0000FF";
+    private static final String LOCAL_DEVICE_COLOR_DEGRADED = "#FFA500";
+    private static final String LOCAL_DEVICE_COLOR_UNCONFIGURED = "#FF0000";
 
     // my peers by GUID (MQTT-based):
     private static final Hashtable<String, R2CMqttManager.PeerState> PeerIdMap = new Hashtable<>(16);
@@ -473,6 +478,7 @@ public class CaltopoMap {
         if (MapStatus == MapStatusListener.mapStatus.down) return;
         MapCheckerDelay.stop();
         resetArtifactStore("ResetMapConnection");
+        removeMyDeviceMarker();
         long startTime = System.currentTimeMillis();
         for (CaltopoLiveTrack track : LiveTracksById.values()) {
             track.shutdown(maxWaitInMilliseconds);
@@ -889,6 +895,7 @@ public class CaltopoMap {
             MyLocation = location;
             getCurrentRuntime().getPeerCoordinator()
                     .updateMyPosition(location.getLatitude(), location.getLongitude());
+            publishMyDeviceMarkerIfPossible(location);
         }
     }
 
@@ -933,6 +940,7 @@ public class CaltopoMap {
 
     private static void LookForExistingLiveTracks() {
         if (null == FolderId || null == ArchiveFolderId) return;
+        publishMyDeviceMarkerIfPossible(GetMyLocation());
         long timeNowInMilliseconds = System.currentTimeMillis();
         long maxTrackAgeInMilliseconds = CaltopoClient.GetNewTrackDelayInSeconds() * 1000;
 
@@ -1048,6 +1056,7 @@ public class CaltopoMap {
             MapCheckerDelay.stop();
             VerifyTimer.stop();
             VerifyPhotoTimeout.stop();
+            removeMyDeviceMarker();
             MapNode = null;
             SessionNodeMap = null;
             SetMapStatus(MapStatusListener.mapStatus.down, "Shutdown in progress.");
@@ -1116,5 +1125,65 @@ public class CaltopoMap {
             ArtifactFeaturesById.clear();
         }
         CTDebug(TAG, "resetArtifactStore(): " + reason);
+    }
+
+    private static void publishMyDeviceMarkerIfPossible(@Nullable Location location) {
+        if (ShutdownInProgress || MapNode == null || FolderId == null || FolderId.isEmpty() || location == null) {
+            return;
+        }
+        String markerId = GetMyUUID();
+        if (markerId.isEmpty()) return;
+        try {
+            JSONObject extraProperties = new JSONObject();
+            extraProperties.put("r2c-name", R2CActivity.MyDeviceName);
+            extraProperties.put("r2c-guid", markerId);
+            extraProperties.put("description", "RID2Caltopo device position");
+            extraProperties.put("marker-color", getLocalDeviceMarkerColor());
+            getCurrentRuntime().getCalTopoSessionGateway().addMarker(
+                    location.getLatitude(),
+                    location.getLongitude(),
+                    LOCAL_DEVICE_MARKER_TITLE_PREFIX + R2CActivity.MyDeviceName,
+                    LOCAL_DEVICE_MARKER_SYMBOL,
+                    FolderId,
+                    markerId,
+                    extraProperties,
+                    markerOp -> CTDebug(TAG, String.format(Locale.US,
+                            "publishMyDeviceMarkerIfPossible(): markerId=%s success=%s responseCode=%d",
+                            markerId, markerOp != null && markerOp.success(),
+                            markerOp != null ? markerOp.responseCode : -1)));
+        } catch (Exception e) {
+            CTError(TAG, "publishMyDeviceMarkerIfPossible() raised", e);
+        }
+    }
+
+    private static void removeMyDeviceMarker() {
+        if (MapNode == null) return;
+        String markerId = GetMyUUID();
+        if (markerId.isEmpty()) return;
+        try {
+            getCurrentRuntime().getCalTopoSessionGateway()
+                    .deleteMarkerWithId(markerId, deleteOp ->
+                            CTDebug(TAG, String.format(Locale.US,
+                                    "removeMyDeviceMarker(): markerId=%s success=%s responseCode=%d",
+                                    markerId, deleteOp != null && deleteOp.success(),
+                                    deleteOp != null ? deleteOp.responseCode : -1)));
+        } catch (Exception e) {
+            CTWarn(TAG, "removeMyDeviceMarker() raised", e);
+        }
+    }
+
+    @NonNull
+    private static String getLocalDeviceMarkerColor() {
+        PeerCoordinator.CoordinationIndicatorState state =
+                getCurrentRuntime().getPeerCoordinator().getCoordinationIndicatorState();
+        switch (state) {
+            case HEALTHY:
+                return LOCAL_DEVICE_COLOR_HEALTHY;
+            case DEGRADED:
+                return LOCAL_DEVICE_COLOR_DEGRADED;
+            case UNCONFIGURED:
+            default:
+                return LOCAL_DEVICE_COLOR_UNCONFIGURED;
+        }
     }
 }

@@ -1135,6 +1135,17 @@ public class R2CMqttManager {
         public List<PeerState> getPeerList() {
             return R2CMqttManager.GetPeerList();
         }
+
+        @NonNull
+        @Override
+        public CoordinationIndicatorState getCoordinationIndicatorState() {
+            if (!CaltopoClient.GetUsePeersFlag()) {
+                return CoordinationIndicatorState.UNCONFIGURED;
+            }
+            return R2CMqttManager.isConnected()
+                    ? CoordinationIndicatorState.HEALTHY
+                    : CoordinationIndicatorState.DEGRADED;
+        }
     };
 
     @NonNull

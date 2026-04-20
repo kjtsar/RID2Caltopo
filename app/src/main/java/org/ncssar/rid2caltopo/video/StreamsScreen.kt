@@ -86,6 +86,7 @@ fun StreamsScreen(
     onBack: () -> Unit,
     showNavigation: Boolean = true,
     externalContentMode: ExternalDisplayContentMode? = null,
+    allowModalDialogs: Boolean = true,
 ) {
     DisposableEffect(viewModel) {
         val removeConsumer = viewModel.addStreamsUiConsumer()
@@ -215,7 +216,7 @@ fun StreamsScreen(
                     }
                 }
 
-                viewModel.pendingClue?.let {
+                if (allowModalDialogs) viewModel.pendingClue?.let {
                     ClueSubmissionSheet(
                         pendingClue = it,
                         onTitleChanged = viewModel::updateClueTitle,

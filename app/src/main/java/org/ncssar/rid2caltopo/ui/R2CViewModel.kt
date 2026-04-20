@@ -310,7 +310,13 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         } else {
             CtDroneSpec.BuildMappedId(callsign, droneDescription, remoteId)
         }
-        CaltopoClient.SaveDroneSpecConfirmation(remoteId, organization, droneDescription, mappedId)
+        CaltopoClient.SaveDroneSpecConfirmation(
+            remoteId,
+            organization,
+            droneDescription,
+            callsign,
+            mappedId
+        )
         _pendingDroneConfirmation.value = null
     }
 
@@ -344,12 +350,18 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             pendingRemoteId == drone.remoteId && currentFlightKey(drone) != null
         }
         if (!pendingStillActive) {
+            if (pendingRemoteId != null) {
+                CTDebug(tag, "Clearing pending confirmation for $pendingRemoteId: no longer active/eligible")
+            }
             _pendingDroneConfirmation.value = null
         }
         if (_pendingDroneConfirmation.value == null) {
+            val unknownActiveDrones = droneSpecs.filter { drone ->
+                currentFlightKey(drone) != null && !hasKnownDroneSpec(drone)
+            }
             val droneToConfirm = droneSpecs.firstOrNull { drone ->
                 val flightKey = currentFlightKey(drone)
-                // A drone is eligible for confirmation if it has a valid local flight key,
+                // A drone is eligible for confirmation if it has a valid flight key,
                 // its flightKey hasn't been prompted yet, AND its remoteId hasn't already
                 // been confirmed/dismissed this session (guards against a re-prompt when
                 // startMsecTimestamp changes mid-initialisation and creates a new flightKey).
@@ -361,12 +373,30 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             if (droneToConfirm != null) {
                 val flightKey = currentFlightKey(droneToConfirm)
                 if (flightKey != null) {
+                    CTDebug(
+                        tag,
+                        "Queueing confirmation for ${droneToConfirm.remoteId}: " +
+                            "flightKey=$flightKey mappedId=${droneToConfirm.mappedId} " +
+                            "org='${droneToConfirm.org}' model='${droneToConfirm.model}' owner='${droneToConfirm.owner}'"
+                    )
                     promptedFlightKeys.add(flightKey)
                     _pendingDroneConfirmation.value = buildConfirmationState(droneToConfirm)
                     if (_activeScreen.value == ActiveScreen.STREAMS) {
                         CaltopoClient.ShowToast("New drone needs confirmation. Returning to main screen.")
                         showMain()
                     }
+                }
+            } else if (unknownActiveDrones.isNotEmpty()) {
+                unknownActiveDrones.forEach { drone ->
+                    val flightKey = currentFlightKey(drone)
+                    CTDebug(
+                        tag,
+                        "Skipping confirmation for ${drone.remoteId}: " +
+                            "flightKey=$flightKey prompted=${flightKey != null && flightKey in promptedFlightKeys} " +
+                            "confirmed=${drone.remoteId in confirmedRemoteIds} " +
+                            "known=${hasKnownDroneSpec(drone)} mappedId=${drone.mappedId} " +
+                            "org='${drone.org}' model='${drone.model}' owner='${drone.owner}'"
+                    )
                 }
             }
         }
@@ -385,10 +415,11 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
 
     /**
      * A flight key that gates whether THIS device should prompt for confirmation.
-     * Returns null when the drone is owned by a remote peer or is not yet airborne.
+     * Confirmation is an operator-facing workflow, so it should appear as soon as
+     * this app sees a new active flight, regardless of which peer currently owns
+     * CalTopo publishing for that drone.
      */
     private fun currentFlightKey(drone: CtDroneSpec): String? {
-        if (!drone.publishingLocally()) return null  // remote MQTT peer owns this drone
         val startMsec = drone.startMsecTimestamp
         if (!drone.isActive || startMsec <= 0L) return null
         return "${drone.remoteId}:$startMsec"

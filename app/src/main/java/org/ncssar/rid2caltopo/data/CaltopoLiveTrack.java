@@ -14,6 +14,7 @@ import org.json.JSONObject;
 
 import org.opendroneid.android.data.Util;
 
+import java.util.ArrayList;
 import java.util.Hashtable;
 import java.util.Locale;
 
@@ -154,6 +155,19 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         return (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up && localOwner);
     }
 
+    @NonNull
+    public static String buildArchiveDescription(@Nullable CtDroneSpec droneSpec) {
+        if (droneSpec == null) return "";
+        ArrayList<String> lines = new ArrayList<>(3);
+        String owner = droneSpec.getOwner().trim();
+        String org = droneSpec.getOrg().trim();
+        String model = droneSpec.getModel().trim();
+        if (!owner.isEmpty()) lines.add("Pilot Callsign: " + owner);
+        if (!org.isEmpty()) lines.add("Pilot Organization: " + org);
+        if (!model.isEmpty()) lines.add("Drone Model: " + model);
+        return String.join("\n", lines);
+    }
+
     /**
      * Called by R2CMqttManager when ownership is granted or revoked.
      * Gaining ownership starts a new CalTopo livetrack segment for this drone.
@@ -288,6 +302,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             jsonArray.put(pointArray);
         }
         String archiveFolderId = CaltopoMap.GetArchiveFolderId();
+        String archiveDescription = buildArchiveDescription(droneSpec);
         CTDebug(TAG, String.format(Locale.US, "archiveTrackOnCaltopo(%s): Archiving track with %d points.",
                 trackLabel, size));
         if (null != startLiveTrackOp && startLiveTrackOp.isDone() && startLiveTrackOp.success()) {
@@ -298,6 +313,14 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 geometry.put("coordinates", jsonArray);
                 geometry.put("type", "LineString");
                 feature.put("geometry", geometry);
+                JSONObject properties = feature.optJSONObject("properties");
+                if (properties == null) {
+                    properties = new JSONObject();
+                    feature.put("properties", properties);
+                }
+                if (!archiveDescription.isEmpty()) {
+                    properties.put("description", archiveDescription);
+                }
             } catch (JSONException e) {
                 CTError(TAG, "archiveTrackCaltopo() JSONObject.put() raised - for no apparent reason.", e);
             }
@@ -306,7 +329,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             // for some reason, we weren't able to start the live track, so this will likely block as well
             try {
                 runtime.getCalTopoSessionGateway()
-                        .addLine(jsonArray, trackLabel, "", "", archiveFolderId,
+                        .addLine(jsonArray, trackLabel, archiveDescription, "", archiveFolderId,
                                 CaltopoMap.ArchiveLineProp, null);
             } catch (Exception e) {
                 CTError(TAG, "archiveTrackCaltopo() addLine() raised - for no apparent reason.", e);

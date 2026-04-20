@@ -138,10 +138,13 @@ import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.PeerCoordinator
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.data.MutualAidPackageManager
 import org.ncssar.rid2caltopo.data.MutualAidPackageTransferManager
@@ -163,7 +166,9 @@ import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
 internal const val MAP_PANE_TAG = "SplitMapPane"
 internal const val MAP_PANE_VERBOSE_LOGS = false
 internal const val LOCAL_DEVICE_SYMBOL = "radiotower"
-internal const val LOCAL_DEVICE_COLOR = "0000FF"
+internal const val LOCAL_DEVICE_COLOR_HEALTHY = "0000FF"
+internal const val LOCAL_DEVICE_COLOR_DEGRADED = "FFA500"
+internal const val LOCAL_DEVICE_COLOR_UNCONFIGURED = "FF0000"
 internal const val ICON_LATENCY_TAG = "RidIconLatency"
 internal const val AGL_LIMIT_FT = 200.0
 internal const val CALIBRATE_ATO_TARGET_FT = 50.0
@@ -1782,9 +1787,9 @@ internal fun SplitMapPane(
                 }
 
                 artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
-                if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
+                if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) CTInfo(
                     MAP_PANE_TAG,
-                    "Artifact ingest source=$source id=$featureId total=${artifactOverlayState.totalFeatures} " +
+                    "Artifact ingest source=$source ${artifactLogSummary(feature)} total=${artifactOverlayState.totalFeatures} " +
                         "points=${artifactOverlayState.points.size} lines=${artifactOverlayState.lines.size} " +
                         "polygons=${artifactOverlayState.polygons.size} ignoredTrackLike=${artifactOverlayState.ignoredTrackLikeFeatures}"
                 )
@@ -2135,7 +2140,8 @@ internal fun SplitMapPane(
 
                 val myLocation = CaltopoMap.GetMyLocation()
                 if (myLocation != null && myLocation.latitude.isFinite() && myLocation.longitude.isFinite()) {
-                    val localCacheKey = iconCacheService.cacheKey(LOCAL_DEVICE_SYMBOL, LOCAL_DEVICE_COLOR)
+                    val localDeviceColor = localDeviceMarkerColor()
+                    val localCacheKey = iconCacheService.cacheKey(LOCAL_DEVICE_SYMBOL, localDeviceColor)
                     val localRemoteIcon = caltopoMarkerCache[localCacheKey]
                     if (localRemoteIcon == null && !caltopoMarkerPending.contains(localCacheKey)) {
                         caltopoMarkerPending.add(localCacheKey)
@@ -2143,7 +2149,7 @@ internal fun SplitMapPane(
                             val loaded = iconCacheService.loadBestAvailableDrawable(
                                 resources = context.resources,
                                 markerSymbol = LOCAL_DEVICE_SYMBOL,
-                                markerColor = LOCAL_DEVICE_COLOR
+                                markerColor = localDeviceColor
                             )
                             withContext(Dispatchers.Main.immediate) {
                                 if (loaded != null) {
@@ -2159,7 +2165,7 @@ internal fun SplitMapPane(
                             ?: markerIconForArtifactSymbol(
                                 resources = context.resources,
                                 symbol = LOCAL_DEVICE_SYMBOL,
-                                colorHex = LOCAL_DEVICE_COLOR,
+                                colorHex = localDeviceColor,
                                 cache = symbolMarkerCache
                             )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
@@ -3897,6 +3903,28 @@ private fun geoPointsFromLine(coords: JSONArray): List<GeoPoint> {
         points += geoPoint
     }
     return points
+}
+
+private fun artifactLogSummary(feature: JSONObject): String {
+    val featureId = feature.optString("id").ifBlank { "?" }
+    val props = feature.optJSONObject("properties")
+    val className = props?.optString("class").orEmpty().ifBlank { "unknown" }
+    val title = props?.optString("title").orEmpty().ifBlank { "<untitled>" }
+    val description = props?.optString("description").orEmpty().trim()
+    val descriptionSummary = when {
+        description.isBlank() -> ""
+        description.length <= 48 -> " desc=\"$description\""
+        else -> " desc=\"${description.take(45)}...\""
+    }
+    return "id=$featureId class=$className title=\"$title\"$descriptionSummary"
+}
+
+private fun localDeviceMarkerColor(): String {
+    return when (R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationIndicatorState) {
+        PeerCoordinator.CoordinationIndicatorState.HEALTHY -> LOCAL_DEVICE_COLOR_HEALTHY
+        PeerCoordinator.CoordinationIndicatorState.DEGRADED -> LOCAL_DEVICE_COLOR_DEGRADED
+        PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED -> LOCAL_DEVICE_COLOR_UNCONFIGURED
+    }
 }
 
 private fun geoPointFromLngLat(coords: JSONArray): GeoPoint? {

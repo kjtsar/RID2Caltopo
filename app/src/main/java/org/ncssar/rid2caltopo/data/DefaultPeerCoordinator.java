@@ -184,6 +184,30 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         return activeCoordinator.getPeerList();
     }
 
+    @NonNull
+    @Override
+    public CoordinationIndicatorState getCoordinationIndicatorState() {
+        boolean peersEnabled = CaltopoClient.GetUsePeersFlag();
+        boolean trackerConfigured = !CaltopoClient.GetTrackerCoordinationUrlPfx().isEmpty()
+                && !CaltopoClient.GetTrackerCoordinationApiKey().isEmpty();
+        boolean mqttConfigured = peersEnabled;
+
+        if (!trackerConfigured && !mqttConfigured) {
+            return CoordinationIndicatorState.UNCONFIGURED;
+        }
+
+        CoordinationIndicatorState activeState = activeCoordinator.getCoordinationIndicatorState();
+        if (activeState == CoordinationIndicatorState.HEALTHY) {
+            return CoordinationIndicatorState.HEALTHY;
+        }
+
+        if (trackerConfigured || mqttConfigured) {
+            return CoordinationIndicatorState.DEGRADED;
+        }
+
+        return CoordinationIndicatorState.UNCONFIGURED;
+    }
+
     private boolean shouldUseTrackerCoordinator() {
         return CaltopoClient.GetUsePeersFlag()
                 && !CaltopoClient.GetTrackerApiKey().isEmpty()

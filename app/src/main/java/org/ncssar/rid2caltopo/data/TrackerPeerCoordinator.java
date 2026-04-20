@@ -293,6 +293,17 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         return new ArrayList<>(peers.values());
     }
 
+    @NonNull
+    @Override
+    public CoordinationIndicatorState getCoordinationIndicatorState() {
+        if (!started || trackerWsUrl == null || trackerApiKey == null) {
+            return CoordinationIndicatorState.UNCONFIGURED;
+        }
+        return isConnected()
+                ? CoordinationIndicatorState.HEALTHY
+                : CoordinationIndicatorState.DEGRADED;
+    }
+
     private boolean isConnected() {
         TrackerCoordinationTransport activeTransport = transport;
         return activeTransport != null && activeTransport.isConnected();

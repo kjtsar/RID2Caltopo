@@ -156,6 +156,12 @@ public final class OwnershipTestPeerCoordinator implements PeerCoordinator {
         }
     }
 
+    @NonNull
+    @Override
+    public CoordinationIndicatorState getCoordinationIndicatorState() {
+        return guid != null ? CoordinationIndicatorState.HEALTHY : CoordinationIndicatorState.UNCONFIGURED;
+    }
+
     public void observeRemoteId(@NonNull String remoteId, double distMeters, long firstSeenTs) {
         String localGuid = requireGuid();
         Map<String, Observation> observationMap = observationsByRemoteId.computeIfAbsent(

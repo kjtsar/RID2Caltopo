@@ -51,7 +51,8 @@ class ExternalDisplayPresentation(
                         viewModel = streamsViewModel,
                         onBack = {},
                         showNavigation = false,
-                        externalContentMode = externalMode
+                        externalContentMode = externalMode,
+                        allowModalDialogs = false
                     )
                 }
             }

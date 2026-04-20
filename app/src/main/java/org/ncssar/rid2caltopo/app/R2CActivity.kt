@@ -732,11 +732,9 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 stopLocationUpdates()
                 R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(null)
                 CTDebug(TAG,"onDestroy() shutting down streaming service..." )
-                val streamServiceIntent = Intent(this, MediaMTXService::class.java)
-                stopService(streamServiceIntent)
+                MediaMTXService.requestStop(this)
                 CTDebug(TAG,"onDestroy() shutting down scanning service..." )
-                val serviceIntent = Intent(this, ScanningService::class.java)
-                stopService(serviceIntent)
+                ScanningService.requestStop(this)
                 CaltopoClient.ShutdownAsync()
                 CTDebug(TAG, "onDestroy() archiving tracks...")
                 AppActivity = null

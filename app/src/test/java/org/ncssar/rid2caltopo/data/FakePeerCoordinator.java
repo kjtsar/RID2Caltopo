@@ -114,6 +114,12 @@ public final class FakePeerCoordinator implements PeerCoordinator {
         }
     }
 
+    @NonNull
+    @Override
+    public CoordinationIndicatorState getCoordinationIndicatorState() {
+        return started ? CoordinationIndicatorState.HEALTHY : CoordinationIndicatorState.UNCONFIGURED;
+    }
+
     public boolean isStarted() {
         return started;
     }

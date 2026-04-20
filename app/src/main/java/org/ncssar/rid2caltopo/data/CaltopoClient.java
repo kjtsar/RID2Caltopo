@@ -1916,26 +1916,30 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             @NonNull String remoteId,
             @NonNull String org,
             @NonNull String model,
+            @NonNull String owner,
             @NonNull String mappedId
     ) {
         ClientClassState ccs = GetState();
         String trimmedOrg = org.trim();
         String trimmedModel = model.trim();
+        String trimmedOwner = owner.trim();
         String trimmedMappedId = mappedId.trim();
 
         CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
         if (activeDs == null) {
-            // Confirmations are transient operator input unless a ct_ridmap explicitly
-            // loaded the dronespec into the persistent cache.
-            activeDs = new CtDroneSpec(remoteId, trimmedMappedId, trimmedOrg, trimmedModel, "");
+            // Confirmation panel edits are session-scoped operator input.
+            // Keep them only in the active table for this app invocation; they
+            // can seed later confirmations in this run but must not become part
+            // of the persisted ridmap cache.
+            activeDs = new CtDroneSpec(remoteId, trimmedMappedId, trimmedOrg, trimmedModel, trimmedOwner);
             ccs.droneSpecTable.put(remoteId, activeDs);
         } else {
             activeDs.setOrg(trimmedOrg);
             activeDs.setModel(trimmedModel);
+            activeDs.setOwner(trimmedOwner);
             activeDs.setMappedId(trimmedMappedId);
         }
 
-        ArchiveState("drone spec confirmation saved");
         UpdateDroneSpecs();
     }
 
@@ -2684,14 +2688,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         Context context = R2CApplication.getAppCtxt();
 
         // 1. Stop the Scanning Service
-        Intent stopScanner = new Intent(context, ScanningService.class);
-        stopScanner.setAction("STOP_SERVICE");
-        context.startService(stopScanner);
+        ScanningService.requestStop(context);
 
         // 2. Stop the MediaMTX Service
-        Intent stopMedia = new Intent(context, MediaMTXService.class);
-        stopMedia.setAction("STOP_SERVICE");
-        context.startService(stopMedia);
+        MediaMTXService.requestStop(context);
 
         // 3. Clear any remaining notifications (optional but clean)
         // NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);

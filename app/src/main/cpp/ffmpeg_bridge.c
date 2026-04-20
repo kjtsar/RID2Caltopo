@@ -1428,6 +1428,40 @@ static void apply_pts_source_interval_locked(ffmpeg_session_t *session,
     }
 }
 
+static bool maybe_fast_relock_to_pts_locked(ffmpeg_session_t *session,
+                                            int64_t buffered_span_ms,
+                                            int64_t target_latency_ms,
+                                            int64_t now_ms) {
+    if (session == NULL || session->render_queue_depth < 8) return false;
+    if (target_latency_ms <= 0) return false;
+    if (buffered_span_ms < target_latency_ms) return false;
+    if ((now_ms - session->last_source_pts_relock_at_ms) < 250) return false;
+
+    int64_t current_interval_ms = session->source_render_interval_ms > 0
+            ? session->source_render_interval_ms
+            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    int64_t pts_interval_ms = queue_pts_interval_ms_locked(session, 24);
+    if (pts_interval_ms <= 0) return false;
+    if (pts_interval_ms >= current_interval_ms - 3) return false;
+
+    int64_t previous_interval_ms = session->source_render_interval_ms;
+    apply_pts_source_interval_locked(session, pts_interval_ms, true);
+    session->last_source_pts_relock_at_ms = now_ms;
+    if (llabs(session->source_render_interval_ms - previous_interval_ms) >= 2) {
+        ct_debug(TAG,
+                 "render fast relock id=%lld designator=%s oldIntervalMs=%lld newIntervalMs=%lld ptsIntervalMs=%lld bufferedSpanMs=%lld targetLatencyMs=%lld queueDepth=%d",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) previous_interval_ms,
+                 (long long) session->source_render_interval_ms,
+                 (long long) pts_interval_ms,
+                 (long long) buffered_span_ms,
+                 (long long) target_latency_ms,
+                 session->render_queue_depth);
+    }
+    return true;
+}
+
 static void update_stall_estimate_locked(ffmpeg_session_t *session, int64_t gap_ms) {
     if (session == NULL || gap_ms < RENDER_GAP_FLOOR_MS) return;
     int64_t old_stall_ms = session->stall_estimate_ms > 0
@@ -1702,6 +1736,13 @@ static int64_t compute_desired_render_interval_ms_locked(ffmpeg_session_t *sessi
     int64_t target_latency_ms = session->target_latency_ms > 0
             ? session->target_latency_ms
             : compute_target_latency_ms_locked(session);
+    if (maybe_fast_relock_to_pts_locked(session, buffered_span_ms, target_latency_ms, now_ms)) {
+        source_interval_ms = session->source_render_interval_ms;
+        session->target_latency_ms = compute_target_latency_ms_locked(session);
+        target_latency_ms = session->target_latency_ms > 0
+                ? session->target_latency_ms
+                : compute_target_latency_ms_locked(session);
+    }
     if (session->last_decode_at_ms > 0) {
         int64_t stall_threshold_ms = source_interval_ms * 3;
         if (stall_threshold_ms < RENDER_GAP_FLOOR_MS) {
@@ -1936,6 +1977,22 @@ static int compute_trim_keep_latest_locked(const ffmpeg_session_t *session,
     return keep_latest;
 }
 
+static int compute_render_queue_hard_cap_locked(const ffmpeg_session_t *session,
+                                                int keep_latest) {
+    if (session == NULL) return 24;
+    if (keep_latest < 8) {
+        keep_latest = compute_trim_keep_latest_locked(
+                session,
+                session->source_render_interval_ms,
+                session->target_latency_ms);
+    }
+    int hard_cap = keep_latest * 2;
+    if (hard_cap < (keep_latest + 12)) hard_cap = keep_latest + 12;
+    if (hard_cap < 24) hard_cap = 24;
+    if (hard_cap > 72) hard_cap = 72;
+    return hard_cap;
+}
+
 static void destroy_render_queue_storage(ffmpeg_session_t *session) {
     if (session == NULL) return;
     clear_render_queue(session);
@@ -2003,6 +2060,14 @@ static bool enqueue_render_frame(ffmpeg_session_t *session,
     session->render_queue[tail_idx].source_ts_us = source_ts_us;
     session->render_queue[tail_idx].enqueued_at_ms = enqueued_at_ms;
     session->render_queue_depth += 1;
+    int keep_latest = compute_trim_keep_latest_locked(
+            session,
+            session->source_render_interval_ms,
+            session->target_latency_ms);
+    int hard_cap = compute_render_queue_hard_cap_locked(session, keep_latest);
+    if (session->render_queue_depth > hard_cap) {
+        trim_render_queue_to_latest(session, keep_latest);
+    }
     log_render_queue_state(session, session->render_queue_depth, false);
     return true;
 }

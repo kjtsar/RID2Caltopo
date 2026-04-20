@@ -101,11 +101,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private val _activeScreen = MutableStateFlow(ActiveScreen.MAIN)
     val activeScreen : StateFlow<ActiveScreen> = _activeScreen.asStateFlow()
     private val promptedFlightKeys = linkedSetOf<String>()
-    // remoteIds already confirmed this session — prevents a re-prompt when
-    // startMsecTimestamp changes as a new track segment initialises (which
-    // produces a different flightKey from the one that was just added to
-    // promptedFlightKeys, causing a duplicate confirmation dialog).
-    private val confirmedRemoteIds = linkedSetOf<String>()
+    private var screenBeforeConfirmation: ActiveScreen? = null
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
@@ -288,8 +284,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
      * so the panel will not reappear for the remainder of this flight.
      */
     fun dismissPendingDroneConfirmation() {
-        _pendingDroneConfirmation.value?.remoteId?.let { confirmedRemoteIds.add(it) }
         _pendingDroneConfirmation.value = null
+        restoreScreenAfterConfirmation()
     }
 
     fun savePendingDroneConfirmation() {
@@ -301,7 +297,6 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         if (remoteId.isEmpty() || organization.isEmpty() || callsign.isEmpty() || droneDescription.isEmpty()) {
             return
         }
-        confirmedRemoteIds.add(remoteId)
         val existingMappedId = CaltopoClient.GetDroneSpec(remoteId)?.mappedId?.trim().orEmpty()
         val mappedId = if (existingMappedId.isNotEmpty() && existingMappedId != remoteId) {
             // Preserve an explicit stream-to-drone mapping made via long-press instead of
@@ -318,6 +313,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             mappedId
         )
         _pendingDroneConfirmation.value = null
+        restoreScreenAfterConfirmation()
     }
 
     fun housekeeping() {
@@ -334,13 +330,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         _drones.value = droneSpecs
         housekeeping()
-        droneSpecs.forEach { drone ->
-            if (hasKnownDroneSpec(drone)) {
-                confirmedRemoteIds.add(drone.remoteId)
-            }
-        }
         // Prune stale flight keys using ownership-agnostic keys so that a brief
-        // ownership flip (MQTT arbitration) never clears a just-confirmed entry.
+        // ownership flip (MQTT arbitration) never clears an already-prompted entry.
         val activeFlightKeys = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
             anyPeerFlightKey(drone)
         }
@@ -356,19 +347,12 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             _pendingDroneConfirmation.value = null
         }
         if (_pendingDroneConfirmation.value == null) {
-            val unknownActiveDrones = droneSpecs.filter { drone ->
-                currentFlightKey(drone) != null && !hasKnownDroneSpec(drone)
-            }
             val droneToConfirm = droneSpecs.firstOrNull { drone ->
                 val flightKey = currentFlightKey(drone)
-                // A drone is eligible for confirmation if it has a valid flight key,
-                // its flightKey hasn't been prompted yet, AND its remoteId hasn't already
-                // been confirmed/dismissed this session (guards against a re-prompt when
-                // startMsecTimestamp changes mid-initialisation and creates a new flightKey).
+                // Every new flight should prompt once, even for known drones, so the
+                // operator can confirm or update pilot/callsign ownership for this flight.
                 flightKey != null &&
-                    !hasKnownDroneSpec(drone) &&
-                    flightKey !in promptedFlightKeys &&
-                    drone.remoteId !in confirmedRemoteIds
+                    flightKey !in promptedFlightKeys
             }
             if (droneToConfirm != null) {
                 val flightKey = currentFlightKey(droneToConfirm)
@@ -382,18 +366,21 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                     promptedFlightKeys.add(flightKey)
                     _pendingDroneConfirmation.value = buildConfirmationState(droneToConfirm)
                     if (_activeScreen.value == ActiveScreen.STREAMS) {
+                        screenBeforeConfirmation = _activeScreen.value
                         CaltopoClient.ShowToast("New drone needs confirmation. Returning to main screen.")
                         showMain()
+                    } else {
+                        screenBeforeConfirmation = null
                     }
                 }
-            } else if (unknownActiveDrones.isNotEmpty()) {
-                unknownActiveDrones.forEach { drone ->
+            } else {
+                droneSpecs.forEach { drone ->
                     val flightKey = currentFlightKey(drone)
+                    if (flightKey == null) return@forEach
                     CTDebug(
                         tag,
                         "Skipping confirmation for ${drone.remoteId}: " +
-                            "flightKey=$flightKey prompted=${flightKey != null && flightKey in promptedFlightKeys} " +
-                            "confirmed=${drone.remoteId in confirmedRemoteIds} " +
+                            "flightKey=$flightKey prompted=${flightKey in promptedFlightKeys} " +
                             "known=${hasKnownDroneSpec(drone)} mappedId=${drone.mappedId} " +
                             "org='${drone.org}' model='${drone.model}' owner='${drone.owner}'"
                     )
@@ -446,6 +433,15 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private fun hasKnownDroneSpec(drone: CtDroneSpec): Boolean {
         val cached = CaltopoClient.GetDroneSpec(drone.remoteId)
         return hasMeaningfulDroneSpec(drone) || (cached != null && hasMeaningfulDroneSpec(cached))
+    }
+
+    private fun restoreScreenAfterConfirmation() {
+        val priorScreen = screenBeforeConfirmation
+        screenBeforeConfirmation = null
+        if (priorScreen != null && _activeScreen.value == ActiveScreen.MAIN && priorScreen != ActiveScreen.MAIN) {
+            CTDebug(tag, "restoreScreenAfterConfirmation(): MAIN -> $priorScreen")
+            _activeScreen.value = priorScreen
+        }
     }
 
     private fun hasMeaningfulDroneSpec(drone: CtDroneSpec): Boolean {

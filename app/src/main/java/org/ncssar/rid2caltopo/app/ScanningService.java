@@ -195,7 +195,7 @@ public class ScanningService extends Service {
     public static void requestStop(@NonNull Context context) {
         Intent stopIntent = new Intent(context, ScanningService.class);
         stopIntent.setAction(ACTION_STOP_SERVICE);
-        ContextCompat.startForegroundService(context, stopIntent);
+        context.getApplicationContext().startService(stopIntent);
     }
     @Override
     public void onTrimMemory(int level) {

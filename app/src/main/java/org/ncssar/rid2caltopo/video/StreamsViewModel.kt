@@ -350,8 +350,8 @@ class StreamsViewModel(
         return ffmpegProbeService?.bindRenderSurface(designator, surface) == true
     }
 
-    fun unbindFfmpegRenderSurface(designator: String) {
-        ffmpegProbeService?.unbindRenderSurface(designator)
+    fun unbindFfmpegRenderSurface(designator: String, surface: Surface?) {
+        ffmpegProbeService?.unbindRenderSurface(designator, surface)
     }
 
     fun getExoPlayerFor(designator: String): ExoPlayer? = streamSessionService.playerFor(designator)

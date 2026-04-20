@@ -351,7 +351,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     }
                     ActiveScreen.SETTINGS -> {
                         CaltopoSettingsScreen(onDismiss = {
-                            reloadExternalDisplayConfig()
+                            reloadExternalDisplayConfig(forceRecreate = true)
                             localViewModel.showMain()
                         })
                     }
@@ -506,9 +506,9 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         helpMenu.show(transaction, "Help")
     }
 
-    private fun reloadExternalDisplayConfig() {
+    private fun reloadExternalDisplayConfig(forceRecreate: Boolean = false) {
         externalDisplayConfig = ExternalDisplayPrefs.load(this)
-        refreshExternalDisplay()
+        refreshExternalDisplay(forceRecreate = forceRecreate)
     }
 
     private fun setExternalDisplayContentMode(mode: ExternalDisplayContentMode) {

@@ -20,7 +20,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
-import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 
 @Composable
@@ -45,7 +44,6 @@ fun CaltopoSettingsScreen(
     val externalDisplayAutoOpen by settingsViewModel.externalDisplayAutoOpen.collectAsState()
     val externalDisplayReturnToPhoneOnly by settingsViewModel.externalDisplayReturnToPhoneOnly.collectAsState()
     val externalDisplayAllowInteraction by settingsViewModel.externalDisplayAllowInteraction.collectAsState()
-    val externalDisplayContentMode by settingsViewModel.externalDisplayContentMode.collectAsState()
     val externalDisplayAlertRouting by settingsViewModel.externalDisplayAlertRouting.collectAsState()
     val dismissAndSave = {
         settingsViewModel.saveSettings()
@@ -223,17 +221,10 @@ fun CaltopoSettingsScreen(
                         )
 
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("External display content", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "Presentation-mode external displays currently support stream layouts only.",
+                            "App-managed external display currently uses a single streams-focused layout.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        SingleChoiceGroup(
-                            options = ExternalDisplayContentMode.entries,
-                            selected = externalDisplayContentMode,
-                            label = { it.displayLabel },
-                            onSelected = settingsViewModel::onExternalDisplayContentModeChanged
                         )
 
                         Spacer(modifier = Modifier.height(8.dp))

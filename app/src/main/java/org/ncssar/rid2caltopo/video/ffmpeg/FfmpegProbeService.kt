@@ -600,12 +600,26 @@ class FfmpegProbeService {
         }
     }
 
-    fun unbindRenderSurface(designator: String) {
+    fun unbindRenderSurface(designator: String, surface: Surface?) {
         val sessionId = synchronized(stateLock) {
+            val boundSurface = boundRenderSurfaces[designator] ?: return@synchronized null
+            if (surface != null && boundSurface !== surface) {
+                CTDebug(
+                    tag,
+                    "Ignoring stale render surface unbind for $designator " +
+                        "boundSurface=${System.identityHashCode(boundSurface)} " +
+                        "requestedSurface=${System.identityHashCode(surface)}"
+                )
+                return@synchronized null
+            }
             boundRenderSurfaces.remove(designator)
             renderSessions[designator] ?: suspendedRenderSessions[designator]
         } ?: return
-        CTDebug(tag, "Unbinding render surface for $designator sessionId=$sessionId")
+        CTDebug(
+            tag,
+            "Unbinding render surface for $designator sessionId=$sessionId " +
+                "surface=${surface?.let { System.identityHashCode(it) }}"
+        )
         FfmpegBridge.detachSurface(sessionId)
     }
 

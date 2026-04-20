@@ -426,7 +426,7 @@ fun StreamPlayer(
                             surfaceTag,
                             "SurfaceTexture destroyed for $designator textureId=${System.identityHashCode(surfaceTexture)}"
                         )
-                        viewModel.unbindFfmpegRenderSurface(designator)
+                        viewModel.unbindFfmpegRenderSurface(designator, attachedSurface)
                         attachedSurface?.release()
                         attachedSurface = null
                         return true
@@ -465,7 +465,7 @@ fun StreamPlayer(
                 surfaceTag,
                 "FFmpeg TextureView dispose for $designator viewId=${attachedTextureView?.let { System.identityHashCode(it) }}"
             )
-            viewModel.unbindFfmpegRenderSurface(designator)
+            viewModel.unbindFfmpegRenderSurface(designator, attachedSurface)
             attachedSurface?.release()
             attachedSurface = null
             attachedTextureView = null

@@ -925,30 +925,9 @@ fun MainScreen(
                         if (externalDisplayConnected && onSetExternalDisplayContent != null && externalDisplayContentMode != null) {
                             HorizontalDivider()
                             DropdownMenuItem(
-                                text = { Text("External: Streams Grid") },
+                                text = { Text("External: Streams View") },
                                 onClick = {
                                     onSetExternalDisplayContent(ExternalDisplayContentMode.StreamsGrid)
-                                    menuExpanded = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("External: Map Only") },
-                                onClick = {
-                                    onSetExternalDisplayContent(ExternalDisplayContentMode.MapOnly)
-                                    menuExpanded = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("External: Split View") },
-                                onClick = {
-                                    onSetExternalDisplayContent(ExternalDisplayContentMode.Split)
-                                    menuExpanded = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("External: Observer Mode") },
-                                onClick = {
-                                    onSetExternalDisplayContent(ExternalDisplayContentMode.ObserverMode)
                                     menuExpanded = false
                                 }
                             )

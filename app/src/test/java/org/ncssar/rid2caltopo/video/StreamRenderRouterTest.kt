@@ -19,11 +19,13 @@ class StreamRenderRouterTest {
         liveStreams: Map<String, StreamInfo>,
         focusedDesignator: String? = null,
         ffmpegAvailable: Boolean = true,
+        displayedTileCount: Int = liveStreams.size,
     ) = StreamRenderRouter.useFfmpeg(
         designator = designator,
         liveStreams = liveStreams,
         focusedDesignator = focusedDesignator,
         ffmpegAvailable = ffmpegAvailable,
+        displayedTileCount = displayedTileCount,
     )
 
     // --- Single stream ---

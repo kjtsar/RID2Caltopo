@@ -133,10 +133,36 @@ public final class FakeCalTopoSessionGateway implements CalTopoSessionGateway {
         return completedOp(existingLineId != null && !existingLineId.isEmpty() ? existingLineId : "line-" + nextId.getAndIncrement());
     }
 
+    @Nullable
+    @Override
+    public CaltopoOp addMarker(double lat, double lng, @NonNull String markerTitle, @Nullable String symbol, @Nullable String folderId, @Nullable String existingMarkerId, @Nullable JSONObject extraProperties, @Nullable Consumer<CaltopoOp> onComplete) {
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("markerTitle", markerTitle);
+            payload.put("lat", lat);
+            payload.put("lng", lng);
+            payload.put("symbol", symbol);
+            payload.put("folderId", folderId);
+            payload.put("existingMarkerId", existingMarkerId);
+            if (extraProperties != null) {
+                payload.put("extraProperties", extraProperties);
+            }
+        } catch (Exception ignored) { }
+        record("addMarker", markerTitle, payload);
+        return completedOp(existingMarkerId != null && !existingMarkerId.isEmpty() ? existingMarkerId : "marker-" + nextId.getAndIncrement());
+    }
+
     @NonNull
     @Override
     public CaltopoOp deleteShapeWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
         record("deleteShape", objId, null);
+        return completedOp(objId);
+    }
+
+    @NonNull
+    @Override
+    public CaltopoOp deleteMarkerWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+        record("deleteMarker", objId, null);
         return completedOp(objId);
     }
 

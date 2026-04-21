@@ -9,10 +9,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -34,20 +36,12 @@ internal class NotamRepository {
         val bearingDeg: Double?
     )
 
-    private data class OperatingAltitudeBand(
-        val floorFeetMsl: Double,
-        val ceilingFeetMsl: Double
-    )
-
     private companion object {
         const val TAG = "NotamREST"
         const val INCREMENTAL_MOVEMENT_THRESHOLD_FT = 100.0
         const val EARTH_RADIUS_NM = 3440.065
-        const val FEET_PER_METER = 3.28084
-        const val MAX_OPERATION_ALTITUDE_FT_AGL = 400.0
         val RADIUS_REGEX = Regex("""\b([0-9]+(?:\.[0-9]+)?)NM RADIUS\b""", RegexOption.IGNORE_CASE)
         val DMS_COORD_REGEX = Regex("""\b([0-9]{6}[NS])([0-9]{7}[EW])\b""", RegexOption.IGNORE_CASE)
-        val ALTITUDE_REGEX = Regex("""\b(SFC|FL\d{2,3}|[0-9]{2,5}FT)\s*-\s*(FL\d{2,3}|[0-9]{2,5}FT)(?:\s+(AGL|MSL))?\b""", RegexOption.IGNORE_CASE)
     }
 
     private data class RadiusArea(
@@ -60,6 +54,9 @@ internal class NotamRepository {
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+    private val demElevationService by lazy {
+        R2CApplication.getAppCtxt()?.let { DemElevationService(it) }
+    }
     private val _uiState = MutableStateFlow(buildUiState(null, configured = false, loading = false, notices = emptyList()))
     val uiState: StateFlow<NotamUiState> = _uiState.asStateFlow()
 
@@ -166,7 +163,7 @@ internal class NotamRepository {
         return distanceNm >= 0.25
     }
 
-    private fun fetchNearbyNotams(location: Location?, forceFull: Boolean): FetchResult {
+    private suspend fun fetchNearbyNotams(location: Location?, forceFull: Boolean): FetchResult {
         val current = location ?: throw IllegalStateException("Waiting for GPS location")
         val canUseIncremental =
             !forceFull &&
@@ -193,7 +190,7 @@ internal class NotamRepository {
         )
     }
 
-    private fun fetchNearbyNotamsFull(current: Location): List<NearbyNotam> {
+    private suspend fun fetchNearbyNotamsFull(current: Location): List<NearbyNotam> {
         val url = NotamAuthManager.resolvedApiBaseUrl()
             .toHttpUrl()
             .newBuilder()
@@ -234,7 +231,7 @@ internal class NotamRepository {
         }
     }
 
-    private fun fetchNearbyNotamsDelta(current: Location, sinceEpochMs: Long): List<NearbyNotam> {
+    private suspend fun fetchNearbyNotamsDelta(current: Location, sinceEpochMs: Long): List<NearbyNotam> {
         val url = NotamAuthManager.resolvedApiBaseUrl()
             .toHttpUrl()
             .newBuilder()
@@ -276,7 +273,7 @@ internal class NotamRepository {
         }
     }
 
-    private fun featureToNearbyNotam(feature: JSONObject, current: Location): NearbyNotam {
+    private suspend fun featureToNearbyNotam(feature: JSONObject, current: Location): NearbyNotam {
         val properties = feature.optJSONObject("properties")
         val coreData = properties?.optJSONObject("coreNOTAMData")
         val notam = coreData?.optJSONObject("notam")
@@ -320,7 +317,8 @@ internal class NotamRepository {
         val distanceNm = proximity?.distanceNm
         val horizontalIntersectsPilotBubble = distanceNm != null && distanceNm <= 1.0
         val altitudeBand = parseAltitudeBand(notamText, rawText)
-        val verticallyIntersectsPilotBand = altitudeBand?.overlaps(current.operatingAltitudeBand())
+        val operatingBand = resolveOperatingAltitudeBand(current)
+        val verticallyIntersectsPilotBand = altitudeBand?.overlaps(operatingBand)
         val intersectsPilotBubble = horizontalIntersectsPilotBubble && verticallyIntersectsPilotBand != false
         val severity = inferSeverity(
             title = title,
@@ -444,32 +442,7 @@ internal class NotamRepository {
 
     private fun parseAltitudeBand(notamText: String, rawText: String): NotamAltitudeBand? {
         val sourceText = listOf(rawText, notamText).firstOrNull { it.isNotBlank() }.orEmpty()
-        if (sourceText.isBlank()) return null
-        val match = ALTITUDE_REGEX.find(sourceText.uppercase(Locale.US)) ?: return null
-        val floorRaw = match.groupValues[1]
-        val ceilingRaw = match.groupValues[2]
-        val reference = match.groupValues.getOrNull(3)?.takeIf { it.isNotBlank() }
-        return NotamAltitudeBand(
-            floorFeetMsl = altitudeTokenToFeetMsl(floorRaw, reference),
-            ceilingFeetMsl = altitudeTokenToFeetMsl(ceilingRaw, reference),
-            floorLabel = floorRaw,
-            ceilingLabel = ceilingRaw,
-            reference = reference
-        )
-    }
-
-    private fun altitudeTokenToFeetMsl(token: String, reference: String?): Double? {
-        val normalized = token.uppercase(Locale.US)
-        return when {
-            normalized == "SFC" -> 0.0
-            normalized.startsWith("FL") -> normalized.removePrefix("FL").toDoubleOrNull()?.times(100.0)
-            normalized.endsWith("FT") && reference.equals("MSL", ignoreCase = true) ->
-                normalized.removeSuffix("FT").toDoubleOrNull()
-            normalized.endsWith("FT") && reference.equals("AGL", ignoreCase = true) -> null
-            normalized.endsWith("FT") && reference.isNullOrBlank() ->
-                normalized.removeSuffix("FT").toDoubleOrNull()
-            else -> null
-        }
+        return NotamAltitudeParser.parse(sourceText)
     }
 
     private fun NotamAltitudeBand.overlaps(operatingBand: OperatingAltitudeBand?): Boolean? {
@@ -480,13 +453,13 @@ internal class NotamRepository {
             effectiveCeiling >= operatingBand.floorFeetMsl
     }
 
-    private fun Location.operatingAltitudeBand(): OperatingAltitudeBand? {
-        if (!hasAltitude()) return null
-        val floorFeetMsl = altitude * FEET_PER_METER
-        return OperatingAltitudeBand(
-            floorFeetMsl = floorFeetMsl,
-            ceilingFeetMsl = floorFeetMsl + MAX_OPERATION_ALTITUDE_FT_AGL
-        )
+    private suspend fun resolveOperatingAltitudeBand(location: Location): OperatingAltitudeBand? {
+        val demElevationMeters = if (location.hasAltitude()) {
+            null
+        } else {
+            demElevationService?.sampleElevationMeters(location.latitude, location.longitude)?.elevationMeters
+        }
+        return NotamOperatingAltitudeResolver.resolve(location, demElevationMeters)
     }
 
     private fun distanceToGeometry(origin: Location, geometry: JSONObject): GeometryProximity? {

@@ -9,7 +9,6 @@ internal data class HumanizedNotam(
 )
 
 internal object NotamHumanizer {
-    private val altitudeRegex = Regex("""\b(SFC|[0-9]{2,5}FT)\s*-\s*([0-9]{2,5}FT)(?:\s+(AGL|MSL))?\b""")
     private val radiusRegex = Regex("""\b([0-9]+(?:\.[0-9]+)?)NM RADIUS\b""")
     private val scheduleRegex = Regex("""\b(DLY|DAILY|MON|TUE|WED|THU|FRI|SAT|SUN|SR-SS)\b.*""")
 
@@ -38,7 +37,7 @@ internal object NotamHumanizer {
         when {
             intersectsPilotBubble -> summaryParts += "Intersects the pilot's 1 NM operating area."
             horizontalIntersectsPilotBubble && verticallyIntersectsPilotBand == false ->
-                summaryParts += "Overlaps the pilot's 1 NM operating area horizontally, but stays above the 200 ft AGL operating ceiling."
+                summaryParts += "Overlaps the pilot's 1 NM operating area horizontally, but stays above the 400 ft AGL operating ceiling."
             proximityText.isNotBlank() -> summaryParts += "$proximityText from current location."
         }
         areaSummary(sourceText)?.let(summaryParts::add)
@@ -111,15 +110,12 @@ internal object NotamHumanizer {
     }
 
     private fun altitudeSummary(text: String): String? {
-        val match = altitudeRegex.find(text.uppercase(Locale.US)) ?: return null
-        val floor = match.groupValues[1]
-        val ceiling = match.groupValues[2]
-        val units = match.groupValues.getOrNull(3).orEmpty()
+        val altitudeBand = NotamAltitudeParser.parse(text) ?: return null
         return buildString {
-            append(formatAltitudeFloor(floor))
+            append(formatAltitudeFloor(altitudeBand.floorLabel))
             append(" to ")
-            append(formatAltitudeCeiling(ceiling))
-            if (units.isNotBlank()) {
+            append(formatAltitudeCeiling(altitudeBand.ceilingLabel))
+            altitudeBand.reference?.takeIf { it.isNotBlank() }?.let { units ->
                 append(" ")
                 append(units)
             }
@@ -135,5 +131,5 @@ internal object NotamHumanizer {
         if (raw == "SFC") "surface" else raw
 
     private fun formatAltitudeCeiling(raw: String): String =
-        raw.removeSuffix("FT") + " ft"
+        if (raw.endsWith("FT")) raw.removeSuffix("FT") + " ft" else raw
 }

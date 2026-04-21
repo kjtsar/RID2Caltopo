@@ -406,6 +406,7 @@ fun MapStateView(viewModel: R2CViewModel) {
     // 1. Observe the two sources of truth
     val connection = viewModel.connectionState
     val overlay = viewModel.overlay
+    val pendingProfileSwitch = viewModel.pendingProfileSwitch
 
     Box (
         contentAlignment = Alignment.Center,
@@ -462,6 +463,8 @@ fun MapStateView(viewModel: R2CViewModel) {
                         key(nodes) {
                             CaltopoHybridBrowser(
                                 rootNodes = nodes,
+                                profileOptions = viewModel.mapBrowserProfiles,
+                                selectedProfileId = viewModel.selectedMapBrowserProfileId,
                                 onUIEvent = { viewModel.onUIEvent(it) }
                             )
                         }
@@ -490,6 +493,30 @@ fun MapStateView(viewModel: R2CViewModel) {
 
             OverlayState.None -> { /* Render nothing over the map */ }
         }
+    }
+
+    pendingProfileSwitch?.let { pending ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissPendingProfileSwitch() },
+            title = { Text("Switch Browse Profile?") },
+            text = {
+                Text(
+                    "Disconnect from the current map and stop arbitration for " +
+                            "${pending.activeFlightCount} active flight(s) before browsing as " +
+                            "${pending.label}?"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmPendingProfileSwitch() }) {
+                    Text("Disconnect")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissPendingProfileSwitch() }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

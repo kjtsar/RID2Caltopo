@@ -67,6 +67,7 @@ sealed class UIEvent(val displayName: String) {
     object DismissRequested : UIEvent("DismissRequested")
     object DisconnectRequested : UIEvent("DisconnectRequested")
     object SwitchMapRequested: UIEvent("SwitchMapRequested")
+    data class BrowseProfileSelected(val profileId: String) : UIEvent("BrowseProfileSelected")
     object ConfigFileLoaded: UIEvent("ConfigFileLoaded")
     object NotAbleToReadConfigFile: UIEvent("NotAbleToReadConfigFile")
     data class MapSelected(val map: CaltopoNode.MapNode) : UIEvent("MapSelected")
@@ -85,6 +86,17 @@ sealed class OverlayState(val displayName: String) {
     object Management : OverlayState("Management")     // Formerly showConnectedOptions
     data class Error(val message: String) : OverlayState("Error") // Added for the error dialog
 }
+
+data class MapBrowserProfileOption(
+    val profileId: String,
+    val label: String
+)
+
+data class PendingProfileSwitchUiState(
+    val profileId: String,
+    val label: String,
+    val activeFlightCount: Int
+)
 
 class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     CtDroneSpec.DroneSpecsChangedListener, CaltopoMap.MapStatusListener {
@@ -105,6 +117,12 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
+    var mapBrowserProfiles by mutableStateOf<List<MapBrowserProfileOption>>(emptyList())
+        private set
+    var selectedMapBrowserProfileId by mutableStateOf("")
+        private set
+    var pendingProfileSwitch by mutableStateOf<PendingProfileSwitchUiState?>(null)
+        private set
 
     val hasCredentials: Boolean
         get() = CaltopoCredentials.sniffTest(CaltopoClient.GetCaltopoCredentials())
@@ -122,13 +140,48 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         CaltopoMap.AddMapStatusListener(this)
         overlay = OverlayState.None
         connectionState = CaltopoConnectionState.StandAlone
+        refreshMapBrowserProfiles()
         delayedUptimePoll.start(this::uptimePoll, 1000, 1000)
     }
+
+    private fun refreshMapBrowserProfiles() {
+        mapBrowserProfiles = CaltopoClient.GetMapBrowserProfileOptions().map { option ->
+            MapBrowserProfileOption(
+                profileId = option.first.orEmpty(),
+                label = option.second.orEmpty()
+            )
+        }
+        selectedMapBrowserProfileId = CaltopoClient.GetActiveCaltopoProfileId().orEmpty()
+    }
+
+    private fun performMapBrowserProfileSwitch(profileId: String) {
+        if (profileId == CaltopoClient.GetActiveCaltopoProfileId()) return
+        if (CaltopoMap.GetMapStatus() != CaltopoMap.MapStatusListener.mapStatus.down) {
+            CaltopoMap.OpenMap(null)
+        }
+        if (CaltopoClient.SetActiveCaltopoProfileId(profileId, false)) {
+            refreshMapBrowserProfiles()
+            overlay = OverlayState.Connecting
+            CaltopoMap.Init()
+        }
+    }
+
+    fun confirmPendingProfileSwitch() {
+        val pending = pendingProfileSwitch ?: return
+        pendingProfileSwitch = null
+        performMapBrowserProfileSwitch(pending.profileId)
+    }
+
+    fun dismissPendingProfileSwitch() {
+        pendingProfileSwitch = null
+    }
+
     fun onUIEvent(uiEvent: UIEvent) {
         val oldState = "      PRE: Overlay='${overlay}' ConnectionState: '${connectionState}'"
 
         when (uiEvent) {
             is UIEvent.HeaderClicked -> {
+                refreshMapBrowserProfiles()
                 overlay = when (connectionState) {
                     is CaltopoConnectionState.StandAlone -> OverlayState.ConnectionSetup
                     is CaltopoConnectionState.NoNetwork -> {
@@ -170,6 +223,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 }
             }
             is UIEvent.ConnectionRequested -> {
+                refreshMapBrowserProfiles()
                 if (R2CMqttManager.GetMyIpAddress().isEmpty()) {
                     connectionState = CaltopoConnectionState.NoNetwork
                 } else {
@@ -184,7 +238,25 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             }
 
             is UIEvent.SwitchMapRequested -> {
+                refreshMapBrowserProfiles()
                 overlay = OverlayState.MapBrowser // Close the management dialog and open the browser
+            }
+
+            is UIEvent.BrowseProfileSelected -> {
+                if (uiEvent.profileId != CaltopoClient.GetActiveCaltopoProfileId()) {
+                    val activeFlightCount = CaltopoClient.GetActiveFlightCount()
+                    val targetOption = mapBrowserProfiles.firstOrNull { it.profileId == uiEvent.profileId }
+                    if (activeFlightCount > 0 &&
+                        CaltopoMap.GetMapStatus() == CaltopoMap.MapStatusListener.mapStatus.up) {
+                        pendingProfileSwitch = PendingProfileSwitchUiState(
+                            profileId = uiEvent.profileId,
+                            label = targetOption?.label ?: uiEvent.profileId,
+                            activeFlightCount = activeFlightCount
+                        )
+                    } else {
+                        performMapBrowserProfileSwitch(uiEvent.profileId)
+                    }
+                }
             }
 
             is UIEvent.DisconnectRequested -> {
@@ -204,6 +276,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 connectionState = when (status) {
                     CaltopoMap.MapStatusListener.mapStatus.credentialsVerified -> {
                         mapHierarchy = CaltopoMap.GetSessionNodeMap()
+                        refreshMapBrowserProfiles()
                         overlay = OverlayState.MapBrowser
                         CaltopoConnectionState.CredentialsVerified
                     }

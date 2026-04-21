@@ -135,8 +135,11 @@ public class CaltopoMap {
     private static CaltopoMap MyInstance = null; // keep around just to serve as listener.
     private static DelayedExec VerifyTimer = new DelayedExec();
     private static DelayedExec VerifyPhotoTimeout = new DelayedExec();
+    private static final DelayedExec ProfileExpiryPoll = new DelayedExec();
     private static final long VERIFY_TIMEOUT_MS = 10 * 1000L;
+    private static final long PROFILE_EXPIRY_POLL_MS = 10 * 1000L;
     private static volatile boolean ShutdownInProgress = false;
+    @Nullable private static String DeferredExpiredProfileId = null;
     @NonNull private static R2cRuntime CurrentRuntime = R2cRuntimeRegistry.getDefaultRuntime();
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
 
@@ -167,6 +170,35 @@ public class CaltopoMap {
             SetMapStatus(MapStatusListener.mapStatus.down, emsg);
             SessionNodeMap = null;
         }
+    }
+
+    private static void pollActiveProfileExpiry() {
+        if (ShutdownInProgress) return;
+        if (MapStatus != MapStatusListener.mapStatus.up) return;
+        CaltopoProfileRecord activeProfile = CaltopoClient.GetActiveCaltopoProfile();
+        long nowMs = System.currentTimeMillis();
+        if (activeProfile == null || !CaltopoClient.HasExpired(activeProfile, nowMs)) {
+            DeferredExpiredProfileId = null;
+            return;
+        }
+        int activeFlightCount = CaltopoClient.GetActiveFlightCount();
+        if (activeFlightCount > 0) {
+            if (activeProfile.profileId != null && !activeProfile.profileId.equals(DeferredExpiredProfileId)) {
+                DeferredExpiredProfileId = activeProfile.profileId;
+                CTWarn(TAG, String.format(Locale.US,
+                        "pollActiveProfileExpiry(): active profile '%s' expired; deferring disconnect until %d active flight(s) finish.",
+                        activeProfile.displayName, activeFlightCount));
+                ShowToast(String.format(Locale.US,
+                        "Mutual aid access expired; waiting for %d active flight(s) to finish before disconnecting.",
+                        activeFlightCount));
+            }
+            return;
+        }
+        DeferredExpiredProfileId = null;
+        CTWarn(TAG, String.format(Locale.US,
+                "pollActiveProfileExpiry(): active profile '%s' expired with no active flights; disconnecting.",
+                activeProfile.displayName));
+        CaltopoClient.RemoveExpiredCaltopoProfiles(nowMs, true);
     }
 
     /***
@@ -766,6 +798,7 @@ public class CaltopoMap {
             for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(MapStatus, MapNode, optEmsg);
         }
         if (mapStatus == MapStatusListener.mapStatus.up) {
+            ProfileExpiryPoll.start(CaltopoMap::pollActiveProfileExpiry, PROFILE_EXPIRY_POLL_MS, PROFILE_EXPIRY_POLL_MS);
             if (MapNode != null) {
                 // Start peer coordination for this map.
                 // The runtime chooses tracker-backed coordination when configured,
@@ -802,6 +835,9 @@ public class CaltopoMap {
                     }
                 }
             }
+        } else {
+            ProfileExpiryPoll.stop();
+            DeferredExpiredProfileId = null;
         }
     }
 
@@ -1059,6 +1095,8 @@ public class CaltopoMap {
             MapCheckerDelay.stop();
             VerifyTimer.stop();
             VerifyPhotoTimeout.stop();
+            ProfileExpiryPoll.stop();
+            DeferredExpiredProfileId = null;
             removeMyDeviceMarker();
             MapNode = null;
             SessionNodeMap = null;

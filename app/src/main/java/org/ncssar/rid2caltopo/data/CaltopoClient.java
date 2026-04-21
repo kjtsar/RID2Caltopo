@@ -24,6 +24,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.provider.OpenableColumns;
+import android.util.Pair;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -515,6 +516,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ds;
     }
 
+    public static int GetActiveFlightCount() {
+        ClientClassState ccs = GetState();
+        if (ccs.droneSpecTable == null || ccs.droneSpecTable.isEmpty()) return 0;
+        int activeCount = 0;
+        for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+            if (ds != null && ds.isActive()) activeCount++;
+        }
+        return activeCount;
+    }
+
     /**
      * Applies a drone spec received from a peer via MQTT.
      * If the drone is already active (waypoints being tracked), updates it in place so the
@@ -999,6 +1010,30 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return new ArrayList<>(ccs.caltopoProfiles);
     }
 
+    @NonNull
+    public static List<Pair<String, String>> GetMapBrowserProfileOptions() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        ArrayList<Pair<String, String>> options = new ArrayList<>();
+        if (ccs.caltopoProfiles == null) return options;
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            String label;
+            if ("HOME".equals(profile.profileType)) {
+                label = "Home";
+            } else if ("MUTUAL_AID".equals(profile.profileType)) {
+                label = (profile.displayName != null && !profile.displayName.isEmpty())
+                        ? profile.displayName
+                        : "Mutual Aid";
+            } else {
+                label = (profile.displayName != null && !profile.displayName.isEmpty())
+                        ? profile.displayName
+                        : profile.profileId;
+            }
+            options.add(Pair.create(profile.profileId, label));
+        }
+        return options;
+    }
+
     @Nullable
     public static CaltopoProfileRecord GetCaltopoProfileById(@NonNull String profileId) {
         ClientClassState ccs = GetState();
@@ -1051,7 +1086,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             boolean dedupeMatch = profile.importDedupeKey != null &&
                     !profile.importDedupeKey.isEmpty() &&
                     profile.importDedupeKey.equals(existing.importDedupeKey);
-            if (!idMatch && !dedupeMatch) continue;
+            boolean profileTypeSlotMatch =
+                    ("HOME".equals(profile.profileType) || "MUTUAL_AID".equals(profile.profileType)) &&
+                    profile.profileType.equals(existing.profileType);
+            if (!idMatch && !dedupeMatch && !profileTypeSlotMatch) continue;
             ccs.caltopoProfiles.set(i, profile);
             replaced = true;
             break;
@@ -1138,6 +1176,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 nowMs >= profile.expiresAtEpochMs;
     }
 
+    private static boolean HasUsableTrackerCredentials(@Nullable CaltopoProfileRecord profile) {
+        return profile != null &&
+                profile.trackerApiKey != null &&
+                !profile.trackerApiKey.isEmpty() &&
+                profile.trackerUrlPfx != null &&
+                !profile.trackerUrlPfx.isEmpty();
+    }
+
     @Nullable
     public static String FindFallbackHomeProfileId() {
         ClientClassState ccs = GetState();
@@ -1153,28 +1199,53 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     @Nullable
-    private static CaltopoProfileRecord GetPreferredTrackerProfile() {
+    private static CaltopoProfileRecord GetPreferredCoordinationTrackerProfile() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        long nowMs = System.currentTimeMillis();
+        String currentMapId = CaltopoMap.GetMapId();
+        if (ccs.caltopoProfiles != null && !currentMapId.isEmpty()) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if (!"MUTUAL_AID".equals(profile.profileType)) continue;
+                if (HasExpired(profile, nowMs)) continue;
+                if (!currentMapId.equals(profile.targetMapId)) continue;
+                if (!HasUsableTrackerCredentials(profile)) continue;
+                return profile;
+            }
+        }
+        CaltopoProfileRecord active = GetActiveCaltopoProfile();
+        if (HasUsableTrackerCredentials(active)) {
+            return active;
+        }
+        if (ccs.caltopoProfiles == null) return null;
+        for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+            if (!"HOME".equals(profile.profileType)) continue;
+            if (HasExpired(profile, nowMs)) continue;
+            if (!HasUsableTrackerCredentials(profile)) continue;
+            return profile;
+        }
+        return null;
+    }
+
+    @Nullable
+    private static CaltopoProfileRecord GetPreferredUploadTrackerProfile() {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
         CaltopoProfileRecord active = GetActiveCaltopoProfile();
         if (active != null &&
-                !"MUTUAL_AID".equals(active.profileType) &&
-                active.trackerApiKey != null &&
-                !active.trackerApiKey.isEmpty() &&
-                active.trackerUrlPfx != null &&
-                !active.trackerUrlPfx.isEmpty()) {
+                "HOME".equals(active.profileType) &&
+                HasUsableTrackerCredentials(active)) {
             return active;
         }
-        if (ccs.caltopoProfiles == null) return active;
+        if (ccs.caltopoProfiles == null) return null;
         long nowMs = System.currentTimeMillis();
         for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
             if (!"HOME".equals(profile.profileType)) continue;
             if (HasExpired(profile, nowMs)) continue;
-            if (profile.trackerApiKey == null || profile.trackerApiKey.isEmpty()) continue;
-            if (profile.trackerUrlPfx == null || profile.trackerUrlPfx.isEmpty()) continue;
+            if (!HasUsableTrackerCredentials(profile)) continue;
             return profile;
         }
-        return active;
+        return null;
     }
 
     @NonNull
@@ -1199,10 +1270,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
         CaltopoProfileRecord active = GetActiveCaltopoProfile();
-        CaltopoProfileRecord preferred = GetPreferredTrackerProfile();
+        boolean upload = "upload".equalsIgnoreCase(usage);
+        CaltopoProfileRecord preferred = upload
+                ? GetPreferredUploadTrackerProfile()
+                : GetPreferredCoordinationTrackerProfile();
         String source = "state";
         if (preferred != null) {
-            if (active != null && preferred.profileId.equals(active.profileId)) {
+            if ("MUTUAL_AID".equals(preferred.profileType) &&
+                    !CaltopoMap.GetMapId().isEmpty() &&
+                    CaltopoMap.GetMapId().equals(preferred.targetMapId)) {
+                source = "map-matched-mutual-aid";
+            } else if (active != null && preferred.profileId.equals(active.profileId)) {
                 source = "active-profile";
             } else {
                 source = "fallback-profile";
@@ -1232,22 +1310,46 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     @NonNull
     public static String GetTrackerUploadApiKey() {
-        return GetTrackerApiKey();
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetPreferredUploadTrackerProfile();
+        if (profile != null && profile.trackerApiKey != null && !profile.trackerApiKey.isEmpty()) {
+            return profile.trackerApiKey;
+        }
+        return "";
     }
 
     @NonNull
     public static String GetTrackerUploadUrlPfx() {
-        return GetTrackerUrlPfx();
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetPreferredUploadTrackerProfile();
+        if (profile != null && profile.trackerUrlPfx != null && !profile.trackerUrlPfx.isEmpty()) {
+            return profile.trackerUrlPfx;
+        }
+        return "";
     }
 
     @NonNull
     public static String GetTrackerCoordinationApiKey() {
-        return GetTrackerApiKey();
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetPreferredCoordinationTrackerProfile();
+        if (profile != null && profile.trackerApiKey != null && !profile.trackerApiKey.isEmpty()) {
+            return profile.trackerApiKey;
+        }
+        return ccs.trackerApiKey;
     }
 
     @NonNull
     public static String GetTrackerCoordinationUrlPfx() {
-        return GetTrackerUrlPfx();
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetPreferredCoordinationTrackerProfile();
+        if (profile != null && profile.trackerUrlPfx != null && !profile.trackerUrlPfx.isEmpty()) {
+            return profile.trackerUrlPfx;
+        }
+        return ccs.trackerUrlPfx;
     }
 
     public static int RemoveExpiredCaltopoProfiles(long nowMs, boolean disconnectIfActive) {
@@ -2299,13 +2401,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     @NonNull
     public static String GetTrackerApiKey() {
-        ClientClassState ccs = GetState();
-        ensureProfileStateFresh(ccs, false);
-        CaltopoProfileRecord profile = GetPreferredTrackerProfile();
-        if (profile != null && profile.trackerApiKey != null && !profile.trackerApiKey.isEmpty()) {
-            return profile.trackerApiKey;
-        }
-        return ccs.trackerApiKey;
+        return GetTrackerCoordinationApiKey();
     }
 
     public static void SetTrackerApiKey(@NonNull String apiKey) {
@@ -2320,13 +2416,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     @NonNull
     public static String GetTrackerUrlPfx() {
-        ClientClassState ccs = GetState();
-        ensureProfileStateFresh(ccs, false);
-        CaltopoProfileRecord profile = GetPreferredTrackerProfile();
-        if (profile != null && profile.trackerUrlPfx != null && !profile.trackerUrlPfx.isEmpty()) {
-            return profile.trackerUrlPfx;
-        }
-        return ccs.trackerUrlPfx;
+        return GetTrackerCoordinationUrlPfx();
     }
 
     public static void SetTrackerUrlPfx(@NonNull String urlPfx) {

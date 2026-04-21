@@ -35,6 +35,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import androidx.compose.material.icons.filled.Place
+import androidx.compose.material3.FilterChip
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -43,6 +44,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.ui.text.input.ImeAction
+import org.ncssar.rid2caltopo.ui.MapBrowserProfileOption
 
 
 fun formatCaltopoDate(timestamp: Long): String {
@@ -55,6 +57,8 @@ fun formatCaltopoDate(timestamp: Long): String {
 @Composable
 fun CaltopoHybridBrowser(
     rootNodes: List<CaltopoNode>,
+    profileOptions: List<MapBrowserProfileOption>,
+    selectedProfileId: String,
     onUIEvent: (UIEvent) -> Unit
 ) {
     val navigationStack = remember(rootNodes) { mutableStateListOf(rootNodes) }
@@ -79,6 +83,29 @@ fun CaltopoHybridBrowser(
                     text = "Team Maps",
                     style = MaterialTheme.typography.titleLarge
                 )
+            }
+
+            if (profileOptions.size > 1) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Browse Maps As",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    profileOptions.forEach { option ->
+                        FilterChip(
+                            selected = option.profileId == selectedProfileId,
+                            onClick = { onUIEvent(UIEvent.BrowseProfileSelected(option.profileId)) },
+                            label = { Text(option.label) },
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                    }
+                }
             }
 
             HorizontalDivider(thickness = 10.dp)
@@ -222,4 +249,3 @@ fun DirectoryRow(dir: CaltopoNode.Directory, onClick: () -> Unit) {
     }
     HorizontalDivider(modifier = Modifier.padding(start = 44.dp))
 }
-

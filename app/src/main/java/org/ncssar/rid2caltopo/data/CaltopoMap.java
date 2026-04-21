@@ -782,6 +782,9 @@ public class CaltopoMap {
                     getCurrentRuntime().getPeerCoordinator().updateMyPosition(
                             MyLocation != null ? MyLocation.getLatitude()  : 0,
                             MyLocation != null ? MyLocation.getLongitude() : 0);
+                    // Refresh our map marker after coordination starts so the marker color
+                    // reflects the active coordination health instead of the pre-start default.
+                    publishMyDeviceMarkerIfPossible(MyLocation);
                 } else {
                     CTWarn(TAG, "SetMapStatus(up): peer coordination disabled by developer override.");
                 }

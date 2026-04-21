@@ -25,10 +25,10 @@ import java.util.concurrent.Executors
  * Security model:
  *   The Drive file is publicly readable (anyone with the file ID can download
  *   it).  The ct_ridmap block is stored in plaintext — it contains no secrets.
- *   The ct_credentials block is XOR-obfuscated with an app-specific key before
- *   upload and decrypted locally after download, so credentials are never stored
- *   in plaintext on Drive.  The file ID is embedded in the QR token using the
- *   same obfuscation layer, so casual scanners see nothing useful.
+ *   The credential-bearing blocks are XOR-obfuscated with an app-specific key
+ *   before upload and decrypted locally after download, so credentials are
+ *   never stored in plaintext on Drive.  The file ID is embedded in the QR
+ *   token using the same obfuscation layer, so casual scanners see nothing useful.
  *
  * Tokens are stored in SharedPreferences so the app remembers which org it has
  * joined (useful for display in the UI and future re-apply).
@@ -40,9 +40,10 @@ object OrgConfigManager {
     private const val KEY_TOKEN = "join_token"
     private const val KEY_ORG_NAME = "org_name"
 
-    // Type tag used in the bundle JSON to mark an encrypted credentials block.
+    // Type tags used in the bundle JSON to mark encrypted credential blocks.
     private const val TYPE_CREDENTIALS_ENC = "ct_credentials_enc"
     private const val TYPE_CREDENTIALS     = "ct_credentials"
+    private const val TYPE_MUTUAL_AID_CREDENTIALS = "ct_mutual_aid_credentials"
 
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -82,8 +83,8 @@ object OrgConfigManager {
     // ── Credential encryption helpers ─────────────────────────────────────────
 
     /**
-     * Walk the "configs" array in [bundleJson] and replace any
-     * "ct_credentials" object with an encrypted surrogate containing only
+     * Walk the "configs" array in [bundleJson] and replace any credential-bearing
+     * object with an encrypted surrogate containing only
      * { "type": "ct_credentials_enc", "enc": "<XOR-base64>" }.
      */
     private fun encryptCredentialsInBundle(bundleJson: String): String {
@@ -92,7 +93,8 @@ object OrgConfigManager {
         val secured = JSONArray()
         for (i in 0 until configs.length()) {
             val item = configs.getJSONObject(i)
-            if (item.optString("type") == TYPE_CREDENTIALS) {
+            val type = item.optString("type")
+            if (type == TYPE_CREDENTIALS || type == TYPE_MUTUAL_AID_CREDENTIALS) {
                 val enc = OrgConfigToken.encryptPayload(item.toString())
                 secured.put(JSONObject().put("type", TYPE_CREDENTIALS_ENC).put("enc", enc))
             } else {
@@ -105,7 +107,7 @@ object OrgConfigManager {
 
     /**
      * Walk the "configs" array in [bundleJson] and replace any
-     * "ct_credentials_enc" surrogate with the decrypted credentials object.
+     * "ct_credentials_enc" surrogate with the decrypted original object.
      */
     private fun decryptCredentialsInBundle(bundleJson: String): String {
         val bundle = JSONObject(bundleJson)

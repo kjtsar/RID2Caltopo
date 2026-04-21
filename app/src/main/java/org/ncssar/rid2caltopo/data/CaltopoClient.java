@@ -1837,6 +1837,32 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 credentials.put("notam_scope",          ccs.notamScope);
             configs.put(credentials);
 
+            // ── ct_mutual_aid_credentials ───────────────────────────────────
+            MutualAidTemplateRecord template = ccs.mutualAidTemplate;
+            if (template != null &&
+                    ((template.teamId != null && !template.teamId.isEmpty()) ||
+                     (template.credentialId != null && !template.credentialId.isEmpty()) ||
+                     (template.credentialSecret != null && !template.credentialSecret.isEmpty()) ||
+                     (template.sourceLabel != null && !template.sourceLabel.isEmpty()) ||
+                     (template.targetFolderHint != null && !template.targetFolderHint.isEmpty()))) {
+                JSONObject mutualAidCredentials = new JSONObject();
+                mutualAidCredentials.put("type", "ct_mutual_aid_credentials");
+                mutualAidCredentials.put("file_version", "1.0");
+                if (template.teamId != null && !template.teamId.isEmpty())
+                    mutualAidCredentials.put("team_id", template.teamId);
+                if (template.credentialId != null && !template.credentialId.isEmpty())
+                    mutualAidCredentials.put("credential_id", template.credentialId);
+                if (template.credentialSecret != null && !template.credentialSecret.isEmpty())
+                    mutualAidCredentials.put("credential_secret", template.credentialSecret);
+                if (template.domainAndPort != null && !template.domainAndPort.isEmpty())
+                    mutualAidCredentials.put("domain_and_port", template.domainAndPort);
+                if (template.sourceLabel != null && !template.sourceLabel.isEmpty())
+                    mutualAidCredentials.put("source_label", template.sourceLabel);
+                if (template.targetFolderHint != null && !template.targetFolderHint.isEmpty())
+                    mutualAidCredentials.put("target_folder_hint", template.targetFolderHint);
+                configs.put(mutualAidCredentials);
+            }
+
             bundle.put("configs", configs);
             return bundle.toString(2);
 
@@ -1884,6 +1910,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     applied++;
                 } else if (type.equals("ct_credentials")) {
                     readCredentialsFileContent(config);
+                    applied++;
+                } else if (type.equals("ct_mutual_aid_credentials")) {
+                    readMutualAidCredentialsFileContent(config);
                     applied++;
                 } else {
                     CTWarn(TAG, "ApplyOrgConfigBundle(): unknown config type ignored: " + type);

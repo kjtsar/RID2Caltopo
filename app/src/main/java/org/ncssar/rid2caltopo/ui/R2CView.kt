@@ -8,6 +8,7 @@
 package org.ncssar.rid2caltopo.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -75,6 +76,13 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
         .fillMaxHeight()
         .background(MaterialTheme.colorScheme.surface)
         .height(IntrinsicSize.Min)
+    var showRidmapEntries by remember { mutableStateOf(false) }
+    if (showRidmapEntries) {
+        RidmapEntriesDialog(
+            entries = CaltopoClient.GetRidmapEntriesSnapshot(),
+            onDismiss = { showRidmapEntries = false }
+        )
+    }
     Row(
         modifier = Modifier
             .height(70.dp)
@@ -87,7 +95,7 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
         Column (modifier = colModifier) {
             Text(
                 text = "rid_map entries:\n${CaltopoClient.GetRidmapCount()}",
-                modifier = textMod,
+                modifier = textMod.clickable { showRidmapEntries = true },
                 style = MaterialTheme.typography.titleSmall,
                 textAlign = TextAlign.Center
             )
@@ -132,6 +140,41 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
             )
         }
     }
+}
+
+@Composable
+private fun RidmapEntriesDialog(
+    entries: List<String>,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        },
+        title = {
+            Text("rid_map entries (${entries.size})")
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (entries.isEmpty()) {
+                    Text("No cached rid_map entries.")
+                } else {
+                    Text(
+                        text = entries.joinToString("\n\n"),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+    )
 }
 
 @Composable

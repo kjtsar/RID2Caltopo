@@ -2033,6 +2033,25 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.cachedDroneSpecTable.size();
     }
 
+    @NonNull
+    public static List<String> GetRidmapEntriesSnapshot() {
+        ClientClassState ccs = GetState();
+        ArrayList<String> entries = new ArrayList<>();
+        for (Map.Entry<String, CtDroneSpec> map : ccs.cachedDroneSpecTable.entrySet()) {
+            CtDroneSpec ds = map.getValue();
+            if (ds == null) continue;
+            entries.add(String.format(Locale.US,
+                    "RID: %s\nMapped ID: %s\nOrg: %s\nModel: %s\nOwner: %s",
+                    ds.getRemoteId(),
+                    ds.getMappedId(),
+                    ds.getOrg(),
+                    ds.getModel(),
+                    ds.getOwner()));
+        }
+        entries.sort(String::compareToIgnoreCase);
+        return entries;
+    }
+
     public static void ResetPersistedClientState() {
         Ccstate = new ClientClassState();
         DebugLevel = DebugLevelDebug;

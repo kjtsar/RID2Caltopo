@@ -187,6 +187,7 @@ public class R2CMqttManager {
     private static volatile int suppressedMqttDisconnects = 0;
 
     private static volatile PeerListChangedListener peerListChangedListener;
+    @Nullable private static volatile PeerCoordinator.CoordinationIndicatorListener coordinationIndicatorListener;
     private static volatile boolean initialized = false;
     @Nullable private static volatile String subscribedTopicFilter = null; // set on successful subscribe
 
@@ -290,6 +291,7 @@ public class R2CMqttManager {
         peerTransport = null;
         subscribedTopicFilter = null;
         resetMqttDisconnectLogging();
+        notifyCoordinationIndicatorListener();
     }
 
     private static void noteMqttConnected(boolean reconnect, @NonNull String serverURI) {
@@ -304,6 +306,7 @@ public class R2CMqttManager {
             lastMqttDisconnectLogMs = 0L;
             suppressedMqttDisconnects = 0;
         }
+        notifyCoordinationIndicatorListener();
     }
 
     private static void noteMqttConnectionLost(@NonNull String detail) {
@@ -325,6 +328,7 @@ public class R2CMqttManager {
                 suppressedMqttDisconnects++;
             }
         }
+        notifyCoordinationIndicatorListener();
     }
 
     private static void resetMqttDisconnectLogging() {
@@ -334,6 +338,21 @@ public class R2CMqttManager {
             lastMqttDisconnectLogMs = 0L;
             suppressedMqttDisconnects = 0;
         }
+        notifyCoordinationIndicatorListener();
+    }
+
+    private static void notifyCoordinationIndicatorListener() {
+        PeerCoordinator.CoordinationIndicatorListener listener = coordinationIndicatorListener;
+        if (listener == null) return;
+        PeerCoordinator.CoordinationIndicatorState state;
+        if (!CaltopoClient.GetUsePeersFlag()) {
+            state = PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED;
+        } else if (isConnected()) {
+            state = PeerCoordinator.CoordinationIndicatorState.HEALTHY;
+        } else {
+            state = PeerCoordinator.CoordinationIndicatorState.DEGRADED;
+        }
+        listener.onCoordinationIndicatorStateChanged(state);
     }
 
     // ── called on successful MQTT connect ─────────────────────────────────────
@@ -990,6 +1009,11 @@ public class R2CMqttManager {
         peerListChangedListener = listener;
     }
 
+    public static void SetCoordinationIndicatorListener(@Nullable PeerCoordinator.CoordinationIndicatorListener listener) {
+        coordinationIndicatorListener = listener;
+        notifyCoordinationIndicatorListener();
+    }
+
     public static @NonNull List<PeerState> GetPeerList() {
         return new ArrayList<>(peers.values());
     }
@@ -1001,6 +1025,11 @@ public class R2CMqttManager {
     /** Returns true if the transport is currently connected (for tests and UI diagnostics). */
     public static boolean isConnected() {
         return initialized && peerTransport != null && peerTransport.isConnected();
+    }
+
+    @NonNull
+    public static String GetBrokerUri() {
+        return brokerUri != null ? brokerUri : DEFAULT_BROKER_URI;
     }
 
     /**
@@ -1128,6 +1157,11 @@ public class R2CMqttManager {
         @Override
         public void setPeerListChangedListener(@Nullable PeerListChangedListener listener) {
             R2CMqttManager.SetPeerListChangedListener(listener);
+        }
+
+        @Override
+        public void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener) {
+            R2CMqttManager.SetCoordinationIndicatorListener(listener);
         }
 
         @NonNull

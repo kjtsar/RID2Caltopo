@@ -6,6 +6,10 @@ import androidx.annotation.Nullable;
 import java.util.List;
 
 public interface PeerCoordinator {
+    interface CoordinationIndicatorListener {
+        void onCoordinationIndicatorStateChanged(@NonNull CoordinationIndicatorState state);
+    }
+
     enum CoordinationIndicatorState {
         HEALTHY,
         DEGRADED,
@@ -30,6 +34,7 @@ public interface PeerCoordinator {
     void updateCaltopoRtt(long rttMs);
     void updateMyPosition(double lat, double lon);
     void setPeerListChangedListener(@Nullable R2CMqttManager.PeerListChangedListener listener);
+    void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener);
     @NonNull List<R2CMqttManager.PeerState> getPeerList();
     @NonNull CoordinationIndicatorState getCoordinationIndicatorState();
 }

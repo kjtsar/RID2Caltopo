@@ -16,6 +16,7 @@ import org.opendroneid.android.data.Util;
 
 import java.util.ArrayList;
 import java.util.Hashtable;
+import java.util.List;
 import java.util.Locale;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
@@ -195,6 +196,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         boolean wasOwner = localOwner;
         localOwner = isOwner;
         if (isOwner && !wasOwner && mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
+            backfillQueuedPointsFromWaypointTrackIfNeeded();
             startNewTrack();
         }
     }
@@ -413,6 +415,26 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 CTError(TAG, "startNewTrack(): startLiveTrack() raised: ", e);
             }
         }
+    }
+
+    private void backfillQueuedPointsFromWaypointTrackIfNeeded() {
+        if (liveTrackId != null || startLiveTrackOp != null || linePointsSentCount != 0) return;
+
+        List<WaypointTrack.TrackPoint> snapshot = WaypointTrack.GetTrackPointsSnapshot(droneSpec);
+        if (snapshot.size() <= linePoints.size()) return;
+
+        linePoints.clear();
+        for (WaypointTrack.TrackPoint point : snapshot) {
+            linePoints.add(new QueuedPoint(
+                    point.lat,
+                    point.lng,
+                    point.ele,
+                    point.timestampMsec,
+                    null));
+        }
+        CTDebug(TAG, String.format(Locale.US,
+                "backfillQueuedPointsFromWaypointTrackIfNeeded(%s): queued %d pre-connect point(s).",
+                droneSpec.trackLabel(), linePoints.size()));
     }
 
     public void finishTrack(@NonNull String reason) {

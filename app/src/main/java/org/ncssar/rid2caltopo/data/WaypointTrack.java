@@ -91,6 +91,19 @@ import androidx.documentfile.provider.DocumentFile;
 
 
 public class WaypointTrack {
+    public static class TrackPoint {
+        public final double lat;
+        public final double lng;
+        public final double ele;
+        public final long timestampMsec;
+
+        public TrackPoint(double lat, double lng, double ele, long timestampMsec) {
+            this.lat = lat;
+            this.lng = lng;
+            this.ele = ele;
+            this.timestampMsec = timestampMsec;
+        }
+    }
 
     /** Holds one locally-archived clue for a track. */
     public static class ArchivedClue {
@@ -162,7 +175,38 @@ public class WaypointTrack {
 		track.addWaypoint(lat, lng, altitude, timestampInMillisec);
 	}
 
-    public static void ArchiveTrack(@NonNull String trackLabel) {
+    @NonNull
+    public static List<TrackPoint> GetTrackPointsSnapshot(@NonNull CtDroneSpec droneSpec) {
+        WaypointTrack track = TrackMap.get(droneSpec.trackLabel());
+        if (track == null) return new ArrayList<>();
+        return track.getTrackPointsSnapshot();
+    }
+
+    public static void RenameTrack(
+            @NonNull String oldTrackLabel,
+            @NonNull String newTrackLabel,
+            @NonNull CtDroneSpec droneSpec
+    ) {
+        if (oldTrackLabel.equals(newTrackLabel)) return;
+        WaypointTrack track = TrackMap.remove(oldTrackLabel);
+        if (track == null) return;
+
+        WaypointTrack existing = TrackMap.get(newTrackLabel);
+        if (existing != null) {
+            existing.absorb(track, droneSpec);
+            CTDebug(TAG, String.format(Locale.US,
+                    "RenameTrack(%s -> %s): merged into existing track.", oldTrackLabel, newTrackLabel));
+            return;
+        }
+
+        track.trackLabel = newTrackLabel;
+        track.droneSpec = droneSpec;
+        TrackMap.put(newTrackLabel, track);
+        CTDebug(TAG, String.format(Locale.US,
+                "RenameTrack(%s -> %s): track relabeled.", oldTrackLabel, newTrackLabel));
+    }
+
+	public static void ArchiveTrack(@NonNull String trackLabel) {
 		WaypointTrack track = TrackMap.remove(trackLabel);
 		if (null != track) track.archive();
 	}
@@ -179,6 +223,38 @@ public class WaypointTrack {
 			if (null != track) track.archive();
 		}
 	}
+
+    private void absorb(@NonNull WaypointTrack other, @NonNull CtDroneSpec updatedDroneSpec) {
+        this.droneSpec = updatedDroneSpec;
+        for (int i = 0; i < other.coordinates.length(); i++) {
+            Object point = other.coordinates.opt(i);
+            if (point != null) {
+                this.coordinates.put(point);
+            }
+        }
+        this.clues.addAll(other.clues);
+    }
+
+    @NonNull
+    private List<TrackPoint> getTrackPointsSnapshot() {
+        ArrayList<TrackPoint> snapshot = new ArrayList<>(coordinates.length());
+        for (int i = 0; i < coordinates.length(); i++) {
+            JSONArray point = coordinates.optJSONArray(i);
+            if (point == null || point.length() < 4) continue;
+            try {
+                double lng = point.getDouble(0);
+                double lat = point.getDouble(1);
+                double ele = point.getDouble(2);
+                long timestampMsec = point.getLong(3);
+                snapshot.add(new TrackPoint(lat, lng, ele, timestampMsec));
+            } catch (JSONException e) {
+                CTWarn(TAG, String.format(Locale.US,
+                        "getTrackPointsSnapshot(%s): skipping malformed point at index %d",
+                        trackLabel, i), e);
+            }
+        }
+        return snapshot;
+    }
 
 	private boolean prepareArchiveFile() {
         if (dataFilepath != null && fileName != null) return true;

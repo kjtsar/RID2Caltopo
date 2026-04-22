@@ -182,11 +182,16 @@ fun DroneItem(drone: CtDroneSpec,
             }
 
             Column(
-                modifier = Modifier.width(200.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
+                modifier = Modifier.width(240.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
-                Text(text = drone.remoteId, textAlign = TextAlign.End,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = drone.remoteId,
+                    textAlign = TextAlign.Center,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
             // BT4 count
             Column(

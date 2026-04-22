@@ -73,6 +73,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     @Nullable private volatile TrackerCoordinationTransport transport;
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
+    @Nullable private volatile CoordinationIndicatorListener coordinationIndicatorListener;
     @Nullable private volatile HardFailureListener hardFailureListener;
 
     @Nullable private volatile String mapId;
@@ -115,6 +116,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             this.myGuid = guid;
             this.myName = name;
             this.started = true;
+            notifyCoordinationIndicatorListener();
             return;
         }
 
@@ -140,6 +142,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 sendHello();
                 heartbeatTimer.start(TrackerPeerCoordinator.this::sendHeartbeat, 0L, HEARTBEAT_INTERVAL_MS);
                 replayPendingFirstSightings();
+                notifyCoordinationIndicatorListener();
             }
 
             @Override
@@ -151,6 +154,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             public void onClosed() {
                 CTWarn(TAG, "tracker websocket closed");
                 heartbeatTimer.stop();
+                notifyCoordinationIndicatorListener();
                 scheduleReconnect();
             }
 
@@ -170,11 +174,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     CTWarn(TAG, "tracker websocket failure: unknown");
                 }
                 heartbeatTimer.stop();
+                notifyCoordinationIndicatorListener();
                 notifyHardFailureIfNeeded(responseCode, responseMessage);
                 scheduleReconnect();
             }
         });
         transport.connect(this.trackerWsUrl, trackerApiKey);
+        notifyCoordinationIndicatorListener();
     }
 
     @Override
@@ -199,6 +205,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         started = false;
         hardFailureNotified = false;
+        notifyCoordinationIndicatorListener();
     }
 
     @Override
@@ -287,6 +294,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         peerListChangedListener = listener;
     }
 
+    @Override
+    public void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener) {
+        coordinationIndicatorListener = listener;
+        if (listener != null) {
+            listener.onCoordinationIndicatorStateChanged(getCoordinationIndicatorState());
+        }
+    }
+
     @NonNull
     @Override
     public List<R2CMqttManager.PeerState> getPeerList() {
@@ -307,6 +322,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private boolean isConnected() {
         TrackerCoordinationTransport activeTransport = transport;
         return activeTransport != null && activeTransport.isConnected();
+    }
+
+    private void notifyCoordinationIndicatorListener() {
+        CoordinationIndicatorListener listener = coordinationIndicatorListener;
+        if (listener != null) {
+            listener.onCoordinationIndicatorStateChanged(getCoordinationIndicatorState());
+        }
     }
 
     private void scheduleReconnect() {
@@ -583,13 +605,29 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         if (listener == null) return;
 
         List<R2CMqttManager.PeerState> snapshot = new ArrayList<>(peers.values());
+        if (myGuid != null && !myGuid.isEmpty()) {
+            R2CMqttManager.PeerState self = new R2CMqttManager.PeerState(myGuid);
+            self.name = myName != null && !myName.isEmpty() ? myName : myGuid;
+            self.lat = myLat;
+            self.lon = myLon;
+            self.caltopoRttMs = myCaltopoRttMs;
+            self.lastSeenMs = System.currentTimeMillis();
+            self.online = started;
+            snapshot.add(self);
+        }
         for (R2CMqttManager.PeerState ps : snapshot) {
             ps.ownedDrones.clear();
         }
         for (PendingDrone pending : pendingDrones.values()) {
             String ownerGuid = ownerByRemoteId.get(pending.droneSpec.getRemoteId());
-            if (ownerGuid == null || ownerGuid.equals(myGuid)) continue;
-            R2CMqttManager.PeerState ps = peers.get(ownerGuid);
+            if (ownerGuid == null) continue;
+            R2CMqttManager.PeerState ps = null;
+            for (R2CMqttManager.PeerState candidate : snapshot) {
+                if (ownerGuid.equals(candidate.guid)) {
+                    ps = candidate;
+                    break;
+                }
+            }
             if (ps != null) {
                 ps.ownedDrones.add(pending.droneSpec.copy());
             }

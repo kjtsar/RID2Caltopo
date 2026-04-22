@@ -784,10 +784,18 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         String oldMappedId= mappedId;
         String newStr = newMappedId.replaceAll(MAPPED_ID_FILTER_REGEX, "");
         if (!newStr.equals(oldMappedId)) {
+            String oldTrackLabel = trackLabel;
             mappedId = newStr;
             CTDebug(TAG, String.format(Locale.US, "setMappedId() changed from '%s' to '%s', listener:0x%x",
                     oldMappedId, newStr, System.identityHashCode(myListener)));
-            updateTrackLabel();
+            if (startMsecTimestamp > 0) {
+                updateTrackLabel();
+                if (oldTrackLabel != null &&
+                        !oldTrackLabel.isEmpty() &&
+                        !oldTrackLabel.equals(trackLabel)) {
+                    WaypointTrack.RenameTrack(oldTrackLabel, trackLabel, this);
+                }
+            }
             if (null != myLiveTrack) myLiveTrack.renameTrack();
             if (null != myListener) {
                 myListener.mappedIdChanged(this, oldMappedId, newStr);

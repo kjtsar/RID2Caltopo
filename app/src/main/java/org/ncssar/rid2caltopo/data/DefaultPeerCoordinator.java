@@ -37,6 +37,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @NonNull private final Map<String, ActiveTrackRegistration> activeTracks = new ConcurrentHashMap<>();
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
+    @Nullable private volatile CoordinationIndicatorListener coordinationIndicatorListener;
     @Nullable private volatile String startedMapId;
     @Nullable private volatile String startedGuid;
     @Nullable private volatile String startedName;
@@ -46,6 +47,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     private volatile double myLon;
     private volatile long myCaltopoRttMs = 2_000L;
     @NonNull private volatile PeerCoordinator activeCoordinator = getMqttCoordinator();
+    @NonNull private volatile CoordinationIndicatorState lastIndicatorState = CoordinationIndicatorState.UNCONFIGURED;
 
     private DefaultPeerCoordinator() { }
 
@@ -100,9 +102,11 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         if (peerListChangedListener != null) {
             activeCoordinator.setPeerListChangedListener(peerListChangedListener);
         }
+        activeCoordinator.setCoordinationIndicatorListener(this::handleChildCoordinationIndicatorStateChanged);
         activeCoordinator.start(mapId, guid, name, brokerUri);
         activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
         activeCoordinator.updateMyPosition(myLat, myLon);
+        emitCoordinationIndicatorIfChanged();
     }
 
     @Override
@@ -111,12 +115,14 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             TrackerPeerCoordinator.getInstance().setHardFailureListener(null);
         }
         activeCoordinator.stop();
+        activeCoordinator.setCoordinationIndicatorListener(null);
         trackerSelected = false;
         startedMapId = null;
         startedGuid = null;
         startedName = null;
         startedBrokerUri = null;
         activeTracks.clear();
+        emitCoordinationIndicatorIfChanged();
     }
 
     @Override
@@ -178,6 +184,14 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         activeCoordinator.setPeerListChangedListener(listener);
     }
 
+    @Override
+    public void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener) {
+        coordinationIndicatorListener = listener;
+        if (listener != null) {
+            listener.onCoordinationIndicatorStateChanged(getCoordinationIndicatorState());
+        }
+    }
+
     @NonNull
     @Override
     public List<R2CMqttManager.PeerState> getPeerList() {
@@ -208,6 +222,20 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         return CoordinationIndicatorState.UNCONFIGURED;
     }
 
+    private void handleChildCoordinationIndicatorStateChanged(@NonNull CoordinationIndicatorState ignoredState) {
+        emitCoordinationIndicatorIfChanged();
+    }
+
+    private synchronized void emitCoordinationIndicatorIfChanged() {
+        CoordinationIndicatorState current = getCoordinationIndicatorState();
+        if (current == lastIndicatorState) return;
+        lastIndicatorState = current;
+        CoordinationIndicatorListener listener = coordinationIndicatorListener;
+        if (listener != null) {
+            listener.onCoordinationIndicatorStateChanged(current);
+        }
+    }
+
     private boolean shouldUseTrackerCoordinator() {
         return CaltopoClient.GetUsePeersFlag()
                 && !CaltopoClient.GetTrackerApiKey().isEmpty()
@@ -236,6 +264,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         if (peerListChangedListener != null) {
             activeCoordinator.setPeerListChangedListener(peerListChangedListener);
         }
+        activeCoordinator.setCoordinationIndicatorListener(this::handleChildCoordinationIndicatorStateChanged);
         activeCoordinator.start(startedMapId, startedGuid, startedName, startedBrokerUri);
         activeCoordinator.updateCaltopoRtt(myCaltopoRttMs);
         activeCoordinator.updateMyPosition(myLat, myLon);
@@ -247,6 +276,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                     registration.firstSeenTs
             );
         }
+        emitCoordinationIndicatorIfChanged();
     }
 
     @NonNull

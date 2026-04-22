@@ -167,6 +167,7 @@ internal const val MAP_PANE_TAG = "SplitMapPane"
 internal const val MAP_PANE_VERBOSE_LOGS = false
 internal const val LOCAL_DEVICE_SYMBOL = "radiotower"
 internal const val LOCAL_DEVICE_COLOR_HEALTHY = "0000FF"
+internal const val LOCAL_DEVICE_COLOR_STARTING = "808080"
 internal const val LOCAL_DEVICE_COLOR_DEGRADED = "FFA500"
 internal const val LOCAL_DEVICE_COLOR_UNCONFIGURED = "FF0000"
 internal const val ICON_LATENCY_TAG = "RidIconLatency"
@@ -3920,7 +3921,12 @@ private fun artifactLogSummary(feature: JSONObject): String {
 }
 
 private fun localDeviceMarkerColor(): String {
-    return when (R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationIndicatorState) {
+    val state = R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationIndicatorState
+    if (CaltopoMap.IsInitialDeviceMarkerPublishPending() &&
+        state != PeerCoordinator.CoordinationIndicatorState.HEALTHY) {
+        return LOCAL_DEVICE_COLOR_STARTING
+    }
+    return when (state) {
         PeerCoordinator.CoordinationIndicatorState.HEALTHY -> LOCAL_DEVICE_COLOR_HEALTHY
         PeerCoordinator.CoordinationIndicatorState.DEGRADED -> LOCAL_DEVICE_COLOR_DEGRADED
         PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED -> LOCAL_DEVICE_COLOR_UNCONFIGURED

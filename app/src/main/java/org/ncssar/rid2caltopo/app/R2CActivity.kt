@@ -155,8 +155,11 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     override fun onPeerListChanged(peers: List<R2CMqttManager.PeerState>) {
+        val myGuid = CaltopoMap.GetMyUUID()
         remoteViewModels.clear()
-        remoteViewModels.addAll(peers.map { peer ->
+        remoteViewModels.addAll(peers.filter { peer ->
+            myGuid.isBlank() || peer.guid != myGuid
+        }.map { peer ->
             ViewModelProvider(this, R2CPeerViewModelFactory(peer)).get(peer.guid, R2CPeerViewModel::class.java)
         })
     }

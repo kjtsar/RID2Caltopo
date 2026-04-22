@@ -152,7 +152,7 @@ fun RestRidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(240.dp)
         ) {
             Text(
                 text = "",

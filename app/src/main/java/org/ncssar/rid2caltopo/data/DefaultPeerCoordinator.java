@@ -62,12 +62,14 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         PeerCoordinator nextCoordinator = nextTrackerSelected
                 ? TrackerPeerCoordinator.getInstance()
                 : getMqttCoordinator();
+        CoordinationIndicatorState currentState = activeCoordinator.getCoordinationIndicatorState();
         if (sameString(startedMapId, mapId) &&
                 sameString(startedGuid, guid) &&
                 sameString(startedName, name) &&
                 sameString(startedBrokerUri, brokerUri) &&
                 trackerSelected == nextTrackerSelected &&
-                activeCoordinator == nextCoordinator) {
+                activeCoordinator == nextCoordinator &&
+                currentState == CoordinationIndicatorState.HEALTHY) {
             CaltopoClient.CTDebug(
                     "DefaultPeerCoord",
                     String.format(
@@ -78,6 +80,22 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                     )
             );
             return;
+        }
+        if (sameString(startedMapId, mapId) &&
+                sameString(startedGuid, guid) &&
+                sameString(startedName, name) &&
+                sameString(startedBrokerUri, brokerUri) &&
+                trackerSelected == nextTrackerSelected &&
+                activeCoordinator == nextCoordinator &&
+                currentState != CoordinationIndicatorState.HEALTHY) {
+            CaltopoClient.CTWarn(
+                    "DefaultPeerCoord",
+                    String.format(
+                            "start(): duplicate start requested while %s coordination is %s; forcing restart.",
+                            trackerSelected ? "tracker" : "mqtt",
+                            currentState
+                    )
+            );
         }
         startedMapId = mapId;
         startedGuid = guid;

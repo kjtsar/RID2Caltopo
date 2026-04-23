@@ -8,7 +8,7 @@ interface TrackerCoordinationTransport {
     interface Callback {
         void onOpen();
         void onMessage(@NonNull String text);
-        void onClosed();
+        void onClosed(int code, @NonNull String reason);
         void onFailure(@Nullable Throwable throwable, int responseCode, @Nullable String responseMessage);
     }
 

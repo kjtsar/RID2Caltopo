@@ -93,7 +93,7 @@ final class OkHttpTrackerCoordinationTransport implements TrackerCoordinationTra
                         "websocket closed: code=" + code + " reason='" + reason + "'"
                 );
                 Callback cb = callback;
-                if (cb != null) cb.onClosed();
+                if (cb != null) cb.onClosed(code, reason);
             }
 
             @Override

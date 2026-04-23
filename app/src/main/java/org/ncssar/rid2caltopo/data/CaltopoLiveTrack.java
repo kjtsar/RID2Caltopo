@@ -70,6 +70,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             this.telemetry = telemetry;
         }
     }
+    private static final double DUPLICATE_COORD_EPSILON = 0.000001;
+    private static final double DUPLICATE_ALT_EPSILON_METERS = 0.5;
     private final LinkedList<QueuedPoint> linePoints = new LinkedList<>();
     private int linePointsSentCount;
     private int linePointsConfirmedCount;
@@ -410,7 +412,6 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 startLiveTrackOp = runtime.getCalTopoSessionGateway()
                         .startLiveTrack(myRemoteId, trackLabel, folderId,
                                 null, null, this::startLiveTrackComplete);
-                forwardNextWaypoints(null); // We've got at least one waypoint - get it on it's way.
             } catch (Exception e) {
                 CTError(TAG, "startNewTrack(): startLiveTrack() raised: ", e);
             }
@@ -478,6 +479,14 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             liveTrackId = op.id();
             CTDebug(TAG, String.format(Locale.US, "startLiveTrackComplete(%s): liveTrackId: '%s'",
                     trackLabel, liveTrackId));
+            if (!localOwner || shuttingDown || !active) {
+                CTDebug(TAG, String.format(Locale.US,
+                        "startLiveTrackComplete(%s): ownership no longer local; ignoring LiveTrack completion and leaving queued points buffered.",
+                        trackLabel));
+                liveTrackId = null;
+                startLiveTrackOp = null;
+                return;
+            }
             CaltopoMap.AddLiveTrack(liveTrackId, this);
         } catch (Exception e) {
             CTError(TAG, "startLiveTrackComplete(): raised:", e);
@@ -517,6 +526,13 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             long timestampMsec,
             @Nullable CtDroneSpec.PositionTelemetry telemetry,
             boolean notifyCoordinator) {
+        QueuedPoint previousPoint = linePoints.peekLast();
+        if (isDuplicateOfPreviousPoint(previousPoint, lat, lng, altitudeMeters, timestampMsec)) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "queueWaypoint(%s): dropping duplicate point %.6f,%.6f alt=%.1f ts=%d",
+                    droneSpec.trackLabel(), lat, lng, altitudeMeters, timestampMsec));
+            return;
+        }
         linePoints.add(new QueuedPoint(lat, lng, altitudeMeters, timestampMsec, telemetry));
         notifyLocalTrackPoint(lat, lng, altitudeMeters, timestampMsec);
         CTDebug(TAG, String.format(Locale.US,
@@ -545,6 +561,13 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         if (shuttingDown || !active) {
             CTDebug(TAG, "forwardNextWaypoints(): Not active.");
             return; // Don't send any more waypoints at this time.
+        }
+        if (!localOwner) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "forwardNextWaypoints(%s): not local owner; leaving %d queued point(s) buffered.",
+                    droneSpec.trackLabel(),
+                    Math.max(0, linePoints.size() - linePointsSentCount)));
+            return;
         }
         if (null != lastOp && lastOp.isDone()) {
             linePointsConfirmedCount++;
@@ -576,6 +599,19 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         } catch (Exception e) {
             CTError(TAG, "forwardNextWaypoints(): addLiveTrackPoint() raised: ", e);
         }
+    }
+
+    private boolean isDuplicateOfPreviousPoint(
+            @Nullable QueuedPoint previousPoint,
+            double lat,
+            double lng,
+            double altitudeMeters,
+            long timestampMsec) {
+        if (previousPoint == null) return false;
+        if (previousPoint.timestampMsec != timestampMsec) return false;
+        return Math.abs(previousPoint.lat - lat) <= DUPLICATE_COORD_EPSILON &&
+                Math.abs(previousPoint.lng - lng) <= DUPLICATE_COORD_EPSILON &&
+                Math.abs(previousPoint.ele - altitudeMeters) <= DUPLICATE_ALT_EPSILON_METERS;
     }
 
     private void notifyLocalTrackPoint(double lat, double lng, double altitudeMeters, long timestampMsec) {

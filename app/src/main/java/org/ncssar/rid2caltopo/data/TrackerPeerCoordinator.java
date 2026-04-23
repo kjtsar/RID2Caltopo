@@ -37,8 +37,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private static final long HEARTBEAT_INTERVAL_MS = 15_000L;
+    private static final long HELLO_ACK_TIMEOUT_MS = 10_000L;
+    private static final long HEARTBEAT_ACK_TIMEOUT_MS = 10_000L;
+    private static final long ACK_WATCHDOG_INTERVAL_MS = 5_000L;
+    private static final long HEARTBEAT_MIN_SEND_GAP_MS = 1_000L;
     private static final long CONNECT_GRACE_MS = 12_000L;
-    private static final long RECONNECT_DELAY_MS = 5_000L;
+    private static final long HANDOFF_DELAY_MS = 2_000L;
+    private static final long RECONNECT_BASE_DELAY_MS = 2_000L;
+    private static final long RECONNECT_MAX_DELAY_MS = 10_000L;
 
     private static volatile TrackerCoordinationTransportFactory transportFactory =
             OkHttpTrackerCoordinationTransport::new;
@@ -51,6 +57,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         final double distMeters;
         final long firstSeenTs;
         @NonNull final DelayedExec fallbackTimer = new DelayedExec();
+        @NonNull final DelayedExec ownershipActivationTimer = new DelayedExec();
         volatile boolean firstSightingSent;
 
         PendingDrone(@NonNull LiveTrackOwnerDelegate liveTrack,
@@ -70,6 +77,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private final ConcurrentHashMap<String, Long> leaseSeqByRemoteId = new ConcurrentHashMap<>();
     @NonNull private final DelayedExec heartbeatTimer = new DelayedExec();
     @NonNull private final DelayedExec reconnectTimer = new DelayedExec();
+    @NonNull private final DelayedExec ackWatchdogTimer = new DelayedExec();
+    @NonNull private final DelayedExec heartbeatCoalesceTimer = new DelayedExec();
 
     @Nullable private volatile TrackerCoordinationTransport transport;
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
@@ -86,6 +95,19 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private volatile long myCaltopoRttMs = 2_000L;
     private volatile boolean started;
     private volatile boolean hardFailureNotified;
+    private volatile long nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+    private volatile long helloSeqSentAtMs;
+    private volatile long helloAckAtMs;
+    private volatile long heartbeatSeqCounter;
+    private volatile long lastHeartbeatSeqSent;
+    private volatile long lastHeartbeatSeqAcked;
+    private volatile long lastHeartbeatSentAtMs;
+    private volatile long lastHeartbeatAckAtMs;
+    private volatile long lastOwnerLeaseExpireTs;
+    private volatile int lastCloseCode;
+    @NonNull private volatile String lastCloseReason = "";
+    @NonNull private volatile String lastReconnectCause = "";
+    private volatile boolean heartbeatSendQueued;
 
     private TrackerPeerCoordinator() {
     }
@@ -127,6 +149,18 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.trackerWsUrl = buildTrackerWebSocketUrl(trackerUrlPrefix);
         this.started = true;
         this.hardFailureNotified = false;
+        this.nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+        this.helloSeqSentAtMs = 0L;
+        this.helloAckAtMs = 0L;
+        this.heartbeatSeqCounter = 0L;
+        this.lastHeartbeatSeqSent = 0L;
+        this.lastHeartbeatSeqAcked = 0L;
+        this.lastHeartbeatSentAtMs = 0L;
+        this.lastHeartbeatAckAtMs = 0L;
+        this.lastOwnerLeaseExpireTs = 0L;
+        this.lastCloseCode = 0;
+        this.lastCloseReason = "";
+        this.lastReconnectCause = "";
         CTInfo(TAG, String.format(Locale.US,
                 "start(): wsUrl='%s' token=%s %s",
                 this.trackerWsUrl,
@@ -139,10 +173,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             public void onOpen() {
                 CTInfo(TAG, "tracker websocket connected");
                 reconnectTimer.stop();
-                sendHello();
-                heartbeatTimer.start(TrackerPeerCoordinator.this::sendHeartbeat, 0L, HEARTBEAT_INTERVAL_MS);
-                replayPendingFirstSightings();
-                notifyCoordinationIndicatorListener();
+                onTransportOpen(false);
             }
 
             @Override
@@ -151,11 +182,15 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             }
 
             @Override
-            public void onClosed() {
-                CTWarn(TAG, "tracker websocket closed");
+            public void onClosed(int code, @NonNull String reason) {
+                lastCloseCode = code;
+                lastCloseReason = reason;
+                CTWarn(TAG, String.format(Locale.US,
+                        "tracker websocket closed: code=%d reason='%s'", code, reason));
                 heartbeatTimer.stop();
+                ackWatchdogTimer.stop();
                 notifyCoordinationIndicatorListener();
-                scheduleReconnect();
+                scheduleReconnect("closed", -1L);
             }
 
             @Override
@@ -173,10 +208,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 } else {
                     CTWarn(TAG, "tracker websocket failure: unknown");
                 }
+                lastCloseCode = responseCode;
+                lastCloseReason = responseMessage != null ? responseMessage : "";
                 heartbeatTimer.stop();
+                ackWatchdogTimer.stop();
                 notifyCoordinationIndicatorListener();
                 notifyHardFailureIfNeeded(responseCode, responseMessage);
-                scheduleReconnect();
+                scheduleReconnect("failure", -1L);
             }
         });
         transport.connect(this.trackerWsUrl, trackerApiKey);
@@ -187,10 +225,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     public synchronized void stop() {
         heartbeatTimer.stop();
         reconnectTimer.stop();
+        ackWatchdogTimer.stop();
+        heartbeatCoalesceTimer.stop();
         Iterator<Map.Entry<String, PendingDrone>> iterator = pendingDrones.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, PendingDrone> entry = iterator.next();
             entry.getValue().fallbackTimer.stop();
+            entry.getValue().ownershipActivationTimer.stop();
             entry.getValue().liveTrack.setLocalOwner(false);
             iterator.remove();
         }
@@ -253,6 +294,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         PendingDrone pending = pendingDrones.remove(remoteId);
         if (pending != null) {
             pending.fallbackTimer.stop();
+            pending.ownershipActivationTimer.stop();
             pending.liveTrack.setLocalOwner(false);
         }
         ownerByRemoteId.remove(remoteId);
@@ -285,7 +327,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         myLat = lat;
         myLon = lon;
         if (started && isConnected()) {
-            sendHeartbeat();
+            requestHeartbeat("position");
         }
     }
 
@@ -332,8 +374,26 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private void scheduleReconnect() {
+        scheduleReconnect("retry", -1L);
+    }
+
+    private void scheduleReconnect(@NonNull String cause, long overrideDelayMs) {
         if (!started || trackerWsUrl == null || trackerApiKey == null) return;
-        reconnectTimer.start(this::reconnect, RECONNECT_DELAY_MS, 0L);
+        long delayMs = overrideDelayMs >= 0 ? overrideDelayMs : nextReconnectDelayMs;
+        lastReconnectCause = cause;
+        CTDebug(TAG, String.format(Locale.US,
+                "scheduleReconnect(): cause=%s delayMs=%d lastAckSeq=%d helloAckAgeMs=%d heartbeatAckAgeMs=%d closeCode=%d closeReason='%s'",
+                cause,
+                delayMs,
+                lastHeartbeatSeqAcked,
+                ageSince(helloAckAtMs),
+                ageSince(lastHeartbeatAckAtMs),
+                lastCloseCode,
+                lastCloseReason));
+        reconnectTimer.start(this::reconnect, delayMs, 0L);
+        if (overrideDelayMs < 0) {
+            nextReconnectDelayMs = Math.min(nextReconnectDelayMs * 2L, RECONNECT_MAX_DELAY_MS);
+        }
     }
 
     private synchronized void reconnect() {
@@ -348,9 +408,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             public void onOpen() {
                 CTInfo(TAG, "tracker websocket reconnected");
                 reconnectTimer.stop();
-                sendHello();
-                heartbeatTimer.start(TrackerPeerCoordinator.this::sendHeartbeat, 0L, HEARTBEAT_INTERVAL_MS);
-                replayPendingFirstSightings();
+                onTransportOpen(true);
             }
 
             @Override
@@ -359,9 +417,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             }
 
             @Override
-            public void onClosed() {
+            public void onClosed(int code, @NonNull String reason) {
+                lastCloseCode = code;
+                lastCloseReason = reason;
                 heartbeatTimer.stop();
-                scheduleReconnect();
+                ackWatchdogTimer.stop();
+                notifyCoordinationIndicatorListener();
+                scheduleReconnect("closed", -1L);
             }
 
             @Override
@@ -378,11 +440,26 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                         CTWarn(TAG, "tracker websocket reconnect failure: " + message);
                     }
                 }
+                lastCloseCode = responseCode;
+                lastCloseReason = responseMessage != null ? responseMessage : "";
+                notifyCoordinationIndicatorListener();
                 notifyHardFailureIfNeeded(responseCode, responseMessage);
-                scheduleReconnect();
+                scheduleReconnect("failure", -1L);
             }
         });
         activeTransport.connect(trackerWsUrl, trackerApiKey);
+    }
+
+    private void onTransportOpen(boolean reconnecting) {
+        nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+        lastReconnectCause = reconnecting ? "reconnected" : "connected";
+        sendHello();
+        heartbeatSendQueued = false;
+        heartbeatTimer.start(() -> requestHeartbeat("interval"), 0L, HEARTBEAT_INTERVAL_MS);
+        ackWatchdogTimer.start(TrackerPeerCoordinator.this::checkAckLiveness, ACK_WATCHDOG_INTERVAL_MS, ACK_WATCHDOG_INTERVAL_MS);
+        markAllPendingFirstSightingsDirty();
+        replayPendingFirstSightings();
+        notifyCoordinationIndicatorListener();
     }
 
     private void notifyHardFailureIfNeeded(int responseCode, @Nullable String responseMessage) {
@@ -401,7 +478,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 CTWarn(TAG, String.format(Locale.US,
                         "Fallback ownership for %s after tracker connect grace expired.",
                         pending.droneSpec.getRemoteId()));
-                applyOwnerAssignment(pending.droneSpec.getRemoteId(), myGuid, -1L);
+                applyOwnerAssignment(pending.droneSpec.getRemoteId(), myGuid, -1L, 0L);
             }
         }, CONNECT_GRACE_MS, 0L);
     }
@@ -412,9 +489,16 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
     }
 
+    private void markAllPendingFirstSightingsDirty() {
+        for (PendingDrone pending : pendingDrones.values()) {
+            pending.firstSightingSent = false;
+        }
+    }
+
     private void sendHello() {
         JSONObject jo = new JSONObject();
         try {
+            helloSeqSentAtMs = System.currentTimeMillis();
             jo.put("type", "hello");
             jo.put("mapId", mapId);
             jo.put("incidentId", mapId);
@@ -425,6 +509,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("lng", myLon);
             jo.put("appVersion", BuildConfig.VERSION_NAME);
             jo.put("caltopoRttMs", myCaltopoRttMs);
+            CTDebug(TAG, String.format(Locale.US,
+                    "sendHello(): mapId=%s zoneId=%s lat=%.6f lng=%.6f rttMs=%d",
+                    mapId, myGuid, myLat, myLon, myCaltopoRttMs));
             sendJson(jo);
         } catch (Exception e) {
             CTError(TAG, "sendHello() raised", e);
@@ -434,7 +521,20 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private void sendHeartbeat() {
         JSONObject jo = new JSONObject();
         try {
+            heartbeatSendQueued = false;
+            if (lastHeartbeatSeqSent > lastHeartbeatSeqAcked) {
+                long ackAgeMs = System.currentTimeMillis() - lastHeartbeatSentAtMs;
+                if (ackAgeMs > HEARTBEAT_ACK_TIMEOUT_MS) {
+                    forceReconnect(String.format(Locale.US,
+                            "missed heartbeat_ack seq=%d ageMs=%d", lastHeartbeatSeqSent, ackAgeMs));
+                }
+                return;
+            }
+            long seq = ++heartbeatSeqCounter;
+            lastHeartbeatSeqSent = seq;
+            lastHeartbeatSentAtMs = System.currentTimeMillis();
             jo.put("type", "heartbeat");
+            jo.put("seq", seq);
             jo.put("mapId", mapId);
             jo.put("zoneId", myGuid);
             jo.put("guid", myGuid);
@@ -442,10 +542,30 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("lat", myLat);
             jo.put("lng", myLon);
             jo.put("caltopoRttMs", myCaltopoRttMs);
+            CTDebug(TAG, String.format(Locale.US,
+                    "sendHeartbeat(): mapId=%s zoneId=%s lat=%.6f lng=%.6f rttMs=%d",
+                    mapId, myGuid, myLat, myLon, myCaltopoRttMs));
             sendJson(jo);
         } catch (Exception e) {
             CTError(TAG, "sendHeartbeat() raised", e);
         }
+    }
+
+    private void requestHeartbeat(@NonNull String reason) {
+        if (!started || !isConnected()) return;
+        if (heartbeatSendQueued) return;
+
+        long nowMs = System.currentTimeMillis();
+        long gapMs = nowMs - lastHeartbeatSentAtMs;
+        long delayMs = (lastHeartbeatSentAtMs <= 0 || gapMs >= HEARTBEAT_MIN_SEND_GAP_MS)
+                ? 0L
+                : (HEARTBEAT_MIN_SEND_GAP_MS - gapMs);
+        heartbeatSendQueued = true;
+        if (delayMs > 0L) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "requestHeartbeat(): coalescing reason=%s delayMs=%d", reason, delayMs));
+        }
+        heartbeatCoalesceTimer.start(this::sendHeartbeat, delayMs, 0L);
     }
 
     private void sendFirstSighting(@NonNull PendingDrone pending) {
@@ -471,6 +591,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("org", pending.droneSpec.getOrg());
             jo.put("model", pending.droneSpec.getModel());
             jo.put("ownerName", pending.droneSpec.getOwner());
+            CTDebug(TAG, String.format(Locale.US,
+                    "sendFirstSighting(): remoteId=%s mappedId=%s droneTs=%d dist=%.1f",
+                    pending.droneSpec.getRemoteId(),
+                    pending.droneSpec.getMappedId(),
+                    pending.firstSeenTs,
+                    pending.distMeters));
             sendJson(jo);
             pending.firstSightingSent = true;
         } catch (Exception e) {
@@ -484,13 +610,56 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         activeTransport.send(jo.toString());
     }
 
+    private void checkAckLiveness() {
+        if (!started || !isConnected()) return;
+        long nowMs = System.currentTimeMillis();
+        if (helloAckAtMs < helloSeqSentAtMs && helloSeqSentAtMs > 0 &&
+                nowMs - helloSeqSentAtMs > HELLO_ACK_TIMEOUT_MS) {
+            forceReconnect(String.format(Locale.US,
+                    "missed hello_ack ageMs=%d", nowMs - helloSeqSentAtMs));
+            return;
+        }
+        if (lastHeartbeatSeqSent > lastHeartbeatSeqAcked && lastHeartbeatSentAtMs > 0 &&
+                nowMs - lastHeartbeatSentAtMs > HEARTBEAT_ACK_TIMEOUT_MS) {
+            forceReconnect(String.format(Locale.US,
+                    "missed heartbeat_ack seq=%d ageMs=%d",
+                    lastHeartbeatSeqSent, nowMs - lastHeartbeatSentAtMs));
+        }
+    }
+
+    private synchronized void forceReconnect(@NonNull String cause) {
+        if (!started) return;
+        lastReconnectCause = cause;
+        CTWarn(TAG, String.format(Locale.US,
+                "forceReconnect(): cause=%s lastAckSeq=%d helloAckAgeMs=%d heartbeatAckAgeMs=%d closeCode=%d closeReason='%s'",
+                cause,
+                lastHeartbeatSeqAcked,
+                ageSince(helloAckAtMs),
+                ageSince(lastHeartbeatAckAtMs),
+                lastCloseCode,
+                lastCloseReason));
+        heartbeatTimer.stop();
+        ackWatchdogTimer.stop();
+        TrackerCoordinationTransport activeTransport = transport;
+        if (activeTransport != null) {
+            activeTransport.disconnect();
+        }
+        scheduleReconnect("forced-" + cause, 0L);
+    }
+
     private void handleIncomingMessage(@NonNull String text) {
         try {
             JSONObject jo = new JSONObject(text);
             String type = jo.optString("type");
             switch (type) {
                 case "hello_ack":
-                    CTInfo(TAG, "hello_ack received from tracker");
+                    helloAckAtMs = System.currentTimeMillis();
+                    CTDebug(TAG, String.format(Locale.US,
+                            "hello_ack received from tracker after %d ms",
+                            helloAckAtMs - helloSeqSentAtMs));
+                    break;
+                case "heartbeat_ack":
+                    onHeartbeatAck(jo);
                     break;
                 case "zone_update":
                     onZoneUpdate(jo.optJSONArray("zones"));
@@ -499,7 +668,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     applyOwnerAssignment(
                             jo.optString("remoteId"),
                             firstNonEmpty(jo.optString("ownerGuid"), jo.optString("ownerZoneId")),
-                            jo.optLong("leaseSeq", -1L));
+                            jo.optLong("leaseSeq", -1L),
+                            jo.optLong("leaseExpireTs", 0L));
                     break;
                 case "owner_expired":
                     clearOwner(jo.optString("remoteId"));
@@ -537,16 +707,61 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         notifyPeerListChanged();
     }
 
-    private void applyOwnerAssignment(@NonNull String remoteId, @Nullable String ownerGuid, long leaseSeq) {
+    private void onHeartbeatAck(@NonNull JSONObject jo) {
+        long nowMs = System.currentTimeMillis();
+        long ackSeq = jo.optLong("clientSeq", -1L);
+        long ownerLeaseExpireTs = jo.optLong("ownerLeaseExpireTs", 0L);
+        if (ackSeq <= 0) {
+            CTWarn(TAG, "heartbeat_ack missing/invalid clientSeq");
+            return;
+        }
+        if (ackSeq < lastHeartbeatSeqAcked) {
+            CTWarn(TAG, String.format(Locale.US,
+                    "heartbeat_ack stale seq=%d lastAckSeq=%d", ackSeq, lastHeartbeatSeqAcked));
+            return;
+        }
+        if (ackSeq != lastHeartbeatSeqSent) {
+            forceReconnect(String.format(Locale.US,
+                    "heartbeat_ack seq mismatch ack=%d expected=%d", ackSeq, lastHeartbeatSeqSent));
+            return;
+        }
+        lastHeartbeatSeqAcked = ackSeq;
+        lastHeartbeatAckAtMs = nowMs;
+        if (ownerLeaseExpireTs > 0) {
+            lastOwnerLeaseExpireTs = ownerLeaseExpireTs;
+        }
+        CTDebug(TAG, String.format(Locale.US,
+                "heartbeat_ack received: seq=%d rttMs=%d ownerLeaseExpireTs=%d",
+                ackSeq, nowMs - lastHeartbeatSentAtMs, ownerLeaseExpireTs));
+    }
+
+    private void applyOwnerAssignment(@NonNull String remoteId, @Nullable String ownerGuid, long leaseSeq, long leaseExpireTs) {
         if (remoteId.isEmpty() || ownerGuid == null || ownerGuid.isEmpty()) return;
         ownerByRemoteId.put(remoteId, ownerGuid);
         if (leaseSeq >= 0) {
             leaseSeqByRemoteId.put(remoteId, leaseSeq);
         }
+        if (leaseExpireTs > 0 && ownerGuid.equals(myGuid)) {
+            lastOwnerLeaseExpireTs = leaseExpireTs;
+        }
         PendingDrone pending = pendingDrones.get(remoteId);
         if (pending != null) {
             pending.fallbackTimer.stop();
-            pending.liveTrack.setLocalOwner(ownerGuid.equals(myGuid));
+            pending.ownershipActivationTimer.stop();
+            if (ownerGuid.equals(myGuid)) {
+                CTInfo(TAG, String.format(Locale.US,
+                        "applyOwnerAssignment(%s): ownership granted locally; publishing in %d ms",
+                        remoteId, HANDOFF_DELAY_MS));
+                pending.ownershipActivationTimer.start(() -> {
+                    if (!started) return;
+                    String currentOwnerGuid = ownerByRemoteId.get(remoteId);
+                    if (myGuid != null && myGuid.equals(currentOwnerGuid)) {
+                        pending.liveTrack.setLocalOwner(true);
+                    }
+                }, HANDOFF_DELAY_MS, 0L);
+            } else {
+                pending.liveTrack.setLocalOwner(false);
+            }
         }
         notifyPeerListChanged();
     }
@@ -556,6 +771,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         leaseSeqByRemoteId.remove(remoteId);
         PendingDrone pending = pendingDrones.get(remoteId);
         if (pending != null) {
+            pending.ownershipActivationTimer.stop();
             pending.liveTrack.setLocalOwner(false);
         }
         notifyPeerListChanged();
@@ -582,7 +798,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     void handleOwnerAssignedForTesting(@NonNull String remoteId, @NonNull String ownerGuid, long leaseSeq) {
-        applyOwnerAssignment(remoteId, ownerGuid, leaseSeq);
+        applyOwnerAssignment(remoteId, ownerGuid, leaseSeq, 0L);
     }
 
     void handleRelaySightingForTesting(
@@ -691,6 +907,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static String firstNonEmpty(@Nullable String first, @Nullable String second) {
         if (first != null && !first.isEmpty()) return first;
         return second != null ? second : "";
+    }
+
+    private long ageSince(long timestampMs) {
+        if (timestampMs <= 0) return -1L;
+        return System.currentTimeMillis() - timestampMs;
     }
 
     static void setTransportFactoryForTesting(@Nullable TrackerCoordinationTransportFactory factory) {

@@ -67,6 +67,7 @@ public final class OwnershipTestPeerCoordinator implements PeerCoordinator {
     @Nullable private volatile String name;
     @Nullable private volatile CalTopoSessionGateway calTopoSessionGateway;
     @Nullable private volatile TrackerPublisher trackerPublisher;
+    @Nullable private volatile CoordinationIndicatorListener coordinationIndicatorListener;
     private volatile long caltopoRttMs = 2_000L;
 
     public OwnershipTestPeerCoordinator(@NonNull String runtimeLabel,
@@ -92,6 +93,7 @@ public final class OwnershipTestPeerCoordinator implements PeerCoordinator {
         locallyOwnedRemoteIds.clear();
         startedTrackRemoteIds.clear();
         peerStates.clear();
+        coordinationIndicatorListener = null;
     }
 
     @Override
@@ -139,6 +141,11 @@ public final class OwnershipTestPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public long getCaltopoRttMs() {
+        return caltopoRttMs;
+    }
+
+    @Override
     public void updateMyPosition(double lat, double lon) {
         // Not needed for ownership tests yet.
     }
@@ -146,6 +153,14 @@ public final class OwnershipTestPeerCoordinator implements PeerCoordinator {
     @Override
     public void setPeerListChangedListener(@Nullable R2CMqttManager.PeerListChangedListener listener) {
         // Test coordinator does not currently push UI callbacks.
+    }
+
+    @Override
+    public void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener) {
+        coordinationIndicatorListener = listener;
+        if (listener != null) {
+            listener.onCoordinationIndicatorStateChanged(getCoordinationIndicatorState());
+        }
     }
 
     @NonNull

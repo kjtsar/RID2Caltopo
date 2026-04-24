@@ -157,9 +157,19 @@ public class CaltopoMap {
         return CurrentRuntime;
     }
 
+    private static void recordCaltopoSessionRtt(@Nullable CaltopoOp op, @NonNull String source) {
+        if (op == null || op.fail()) return;
+        long rttMs = op.roundTripTimeInMsec();
+        if (rttMs <= 0L) return;
+        CTDebug(TAG, String.format(Locale.US,
+                "recordCaltopoSessionRtt(%s): rttMs=%d", source, rttMs));
+        getCurrentRuntime().getPeerCoordinator().updateCaltopoRtt(rttMs);
+    }
+
     public static void SessionVerifyCallback(@NonNull CaltopoOp verifyOp) {
         VerifyTimer.stop();
         if (verifyOp.success()) {
+            recordCaltopoSessionRtt(verifyOp, "verify");
             CTDebug(TAG, String.format(Locale.US,
                     "SessionVerifyCallback(): Parsing team data. queued:%d, sent:%d, received:%d",
                     verifyOp.queuedTimestampMsec, verifyOp.sentTimestampMsec, verifyOp.receivedTimestampMsec ));
@@ -810,6 +820,7 @@ public class CaltopoMap {
                     GetMapId(), updateMapOp));
             return;  // keep timer running; next poll will retry
         }
+        recordCaltopoSessionRtt(updateMapOp, "updateMap");
 
         if (CaltopoClient.DebugLevel > CaltopoClient.DebugLevelDebug) {
             CTInfo(TAG, "updateMapFinished() dumping map updates to logfile...");
@@ -953,6 +964,7 @@ public class CaltopoMap {
             MapNode = null;
             return;
         }
+        recordCaltopoSessionRtt(lOpenMapOp, "openMap");
 
         JSONObject responseJson = lOpenMapOp.responseJson;
         JSONObject state = (responseJson != null) ? responseJson.optJSONObject("state") : null;

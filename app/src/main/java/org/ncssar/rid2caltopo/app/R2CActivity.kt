@@ -72,8 +72,6 @@ import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.MutualAidPackageImportDialog
 import org.ncssar.rid2caltopo.ui.ProximityAlertCenter
 import org.ncssar.rid2caltopo.ui.ProximityAlertHost
-import org.ncssar.rid2caltopo.ui.R2CPeerViewModel
-import org.ncssar.rid2caltopo.ui.R2CPeerViewModelFactory
 import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
@@ -111,7 +109,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     var locationRequest: LocationRequest? = null
     var locationCallback: LocationCallback? = null
     var mFusedLocationClient: FusedLocationProviderClient? = null
-    private val remoteViewModels = mutableStateListOf<R2CPeerViewModel>()
     private val outstandingPermissionsList = ArrayList<String?>()
     private lateinit var localViewModel: R2CViewModel
     private lateinit var streamsViewModel: StreamsViewModel
@@ -155,13 +152,9 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     override fun onPeerListChanged(peers: List<R2CMqttManager.PeerState>) {
-        val myGuid = CaltopoMap.GetMyUUID()
-        remoteViewModels.clear()
-        remoteViewModels.addAll(peers.filter { peer ->
-            myGuid.isBlank() || peer.guid != myGuid
-        }.map { peer ->
-            ViewModelProvider(this, R2CPeerViewModelFactory(peer)).get(peer.guid, R2CPeerViewModel::class.java)
-        })
+        // Peer list changes still matter to the coordination layer, but the peer-specific
+        // main-screen UI has been removed. Keep the listener registered so future diagnostics
+        // can still hook in without changing runtime wiring.
     }
 
     suspend fun listAvailableLogArchiveDays(): List<LogArchiveDayOption> = withContext(Dispatchers.IO) {
@@ -324,7 +317,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         displayManager?.registerDisplayListener(displayListener, null)
         reloadExternalDisplayConfig()
 
-        remoteViewModels.clear()
         setContent {
             RID2CaltopoTheme() {
                 val localContext =  LocalContext.current
@@ -339,7 +331,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     ActiveScreen.MAIN -> {
                         MainScreen(
                             localViewModel = localViewModel,
-                            remoteViewModels = remoteViewModels,
                             availableLogArchiveDaysProvider = {
                                 listAvailableLogArchiveDays()
                             },

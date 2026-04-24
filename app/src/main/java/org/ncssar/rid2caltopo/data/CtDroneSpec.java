@@ -10,6 +10,7 @@ package org.ncssar.rid2caltopo.data;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTInfo;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.TimeDatestampString;
 
 import android.location.Location;
@@ -225,6 +226,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     //  If 1 is present, but 2 is absent, but model is present, then try to extract abbreviated info from the Model field..
     //  If 1 is present, but 2 is absent and model is absent, tack on the remoteID.
     private void updateTrackLabel() {
+        String oldTrackLabel = trackLabel;
         String lModel, lMappedId, lCallsign;
         Matcher rexMatch = CallsignOptModelPattern.matcher(mappedId);
         if (!rexMatch.matches()) {
@@ -238,6 +240,13 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
         trackLabel = String.format(Locale.US, "%s_%s", lMappedId,
                 TimeDatestampString(startMsecTimestamp));
+        if ((oldTrackLabel != null && oldTrackLabel.isEmpty() != trackLabel.isEmpty())
+                || mappedId.isEmpty()
+                || lMappedId.isEmpty()) {
+            CTWarn(TAG, String.format(Locale.US,
+                    "updateTrackLabel(): remoteId=%s mappedId='%s' derivedMappedId='%s' oldTrackLabel='%s' newTrackLabel='%s' startTs=%d",
+                    remoteId, mappedId, lMappedId, oldTrackLabel, trackLabel, startMsecTimestamp));
+        }
     }
 
     public void setMyLiveTrack(@Nullable CaltopoLiveTrack newTrack) {
@@ -799,6 +808,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             if (null != myLiveTrack) myLiveTrack.renameTrack();
             if (null != myListener) {
                 myListener.mappedIdChanged(this, oldMappedId, newStr);
+            }
+            if (newStr.isEmpty() || trackLabel.isEmpty()) {
+                CTWarn(TAG, String.format(Locale.US,
+                        "setMappedId(): remoteId=%s oldMappedId='%s' newMappedId='%s' oldTrackLabel='%s' newTrackLabel='%s'",
+                        remoteId, oldMappedId, newStr, oldTrackLabel, trackLabel));
             }
         }
         return mappedId;

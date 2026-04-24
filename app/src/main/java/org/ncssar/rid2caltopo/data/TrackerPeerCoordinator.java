@@ -42,7 +42,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private static final long ACK_WATCHDOG_INTERVAL_MS = 5_000L;
     private static final long HEARTBEAT_MIN_SEND_GAP_MS = 1_000L;
     private static final long CONNECT_GRACE_MS = 12_000L;
-    private static final long HANDOFF_DELAY_MS = 2_000L;
+    private static final long DEFAULT_HANDOFF_DELAY_MS = 2_000L;
+    private static volatile long handoffDelayMs = DEFAULT_HANDOFF_DELAY_MS;
     private static final long RECONNECT_BASE_DELAY_MS = 2_000L;
     private static final long RECONNECT_MAX_DELAY_MS = 10_000L;
 
@@ -108,6 +109,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private volatile String lastCloseReason = "";
     @NonNull private volatile String lastReconnectCause = "";
     private volatile boolean heartbeatSendQueued;
+    private volatile long reconnectScheduledAtMs;
+    private volatile long reconnectTargetAtMs;
 
     private TrackerPeerCoordinator() {
     }
@@ -161,6 +164,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.lastCloseCode = 0;
         this.lastCloseReason = "";
         this.lastReconnectCause = "";
+        this.reconnectScheduledAtMs = 0L;
+        this.reconnectTargetAtMs = 0L;
         CTInfo(TAG, String.format(Locale.US,
                 "start(): wsUrl='%s' token=%s %s",
                 this.trackerWsUrl,
@@ -323,6 +328,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public long getCaltopoRttMs() {
+        return myCaltopoRttMs;
+    }
+
+    @Override
     public void updateMyPosition(double lat, double lon) {
         myLat = lat;
         myLon = lon;
@@ -381,6 +391,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         if (!started || trackerWsUrl == null || trackerApiKey == null) return;
         long delayMs = overrideDelayMs >= 0 ? overrideDelayMs : nextReconnectDelayMs;
         lastReconnectCause = cause;
+        reconnectScheduledAtMs = System.currentTimeMillis();
+        reconnectTargetAtMs = reconnectScheduledAtMs + delayMs;
         CTDebug(TAG, String.format(Locale.US,
                 "scheduleReconnect(): cause=%s delayMs=%d lastAckSeq=%d helloAckAgeMs=%d heartbeatAckAgeMs=%d closeCode=%d closeReason='%s'",
                 cause,
@@ -398,6 +410,21 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     private synchronized void reconnect() {
         if (!started || trackerWsUrl == null || trackerApiKey == null) return;
+        long reconnectStartedAtMs = System.currentTimeMillis();
+        long schedulerSkewMs = reconnectTargetAtMs > 0L
+                ? Math.max(reconnectStartedAtMs - reconnectTargetAtMs, 0L)
+                : -1L;
+        long queuedForMs = reconnectScheduledAtMs > 0L
+                ? Math.max(reconnectStartedAtMs - reconnectScheduledAtMs, 0L)
+                : -1L;
+        CTInfo(TAG, String.format(Locale.US,
+                "reconnect(): cause=%s queuedForMs=%d schedulerSkewMs=%d targetDelayMs=%d",
+                lastReconnectCause,
+                queuedForMs,
+                schedulerSkewMs,
+                reconnectTargetAtMs > reconnectScheduledAtMs
+                        ? (reconnectTargetAtMs - reconnectScheduledAtMs)
+                        : -1L));
         TrackerCoordinationTransport activeTransport = transport;
         if (activeTransport == null) {
             activeTransport = transportFactory.create();
@@ -750,16 +777,19 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             pending.ownershipActivationTimer.stop();
             if (ownerGuid.equals(myGuid)) {
                 CTInfo(TAG, String.format(Locale.US,
-                        "applyOwnerAssignment(%s): ownership granted locally; publishing in %d ms",
-                        remoteId, HANDOFF_DELAY_MS));
+                        "applyOwnerAssignment(%s): ownership granted locally; publishing in %d ms mappedId='%s' trackLabel='%s' queuedPoints=%d",
+                        remoteId, handoffDelayMs, pending.droneSpec.getMappedId(), pending.droneSpec.trackLabel(), pending.liveTrack.getQueuedPointCount()));
                 pending.ownershipActivationTimer.start(() -> {
                     if (!started) return;
                     String currentOwnerGuid = ownerByRemoteId.get(remoteId);
                     if (myGuid != null && myGuid.equals(currentOwnerGuid)) {
                         pending.liveTrack.setLocalOwner(true);
                     }
-                }, HANDOFF_DELAY_MS, 0L);
+                }, handoffDelayMs, 0L);
             } else {
+                CTInfo(TAG, String.format(Locale.US,
+                        "applyOwnerAssignment(%s): ownership assigned to peer guid='%s' mappedId='%s' trackLabel='%s'",
+                        remoteId, ownerGuid, pending.droneSpec.getMappedId(), pending.droneSpec.trackLabel()));
                 pending.liveTrack.setLocalOwner(false);
             }
         }
@@ -923,6 +953,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         trackerApiKeyOverrideForTesting = trackerApiKey;
     }
 
+    static void setHandoffDelayMsForTesting(long delayMs) {
+        handoffDelayMs = Math.max(0L, delayMs);
+    }
+
     void setHardFailureListenerForTesting(@Nullable HardFailureListener listener) {
         hardFailureListener = listener;
     }
@@ -947,5 +981,6 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         transportFactory = OkHttpTrackerCoordinationTransport::new;
         trackerUrlPrefixOverrideForTesting = null;
         trackerApiKeyOverrideForTesting = null;
+        handoffDelayMs = DEFAULT_HANDOFF_DELAY_MS;
     }
 }

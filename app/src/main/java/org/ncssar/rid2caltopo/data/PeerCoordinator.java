@@ -32,6 +32,7 @@ public interface PeerCoordinator {
     void onDroneLost(@NonNull String remoteId);
     boolean isLocalOwner(@NonNull String remoteId);
     void updateCaltopoRtt(long rttMs);
+    long getCaltopoRttMs();
     void updateMyPosition(double lat, double lon);
     void setPeerListChangedListener(@Nullable R2CMqttManager.PeerListChangedListener listener);
     void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener);

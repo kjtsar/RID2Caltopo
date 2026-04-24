@@ -114,7 +114,6 @@ private val REQUIRED_MAP_CACHE_TAGS = listOf(
 sealed interface MainScreenItem {
     object IncidentView : MainScreenItem
     data class LocalView(val viewModel: R2CViewModel) : MainScreenItem
-    data class RemoteView(val viewModel: R2CPeerViewModel) : MainScreenItem
     data class SpacerView(val height: Dp) : MainScreenItem
 }
 
@@ -168,7 +167,6 @@ private fun restartMediaMtxServer(context: android.content.Context) {
 @Composable
 fun MainScreen(
     localViewModel: R2CViewModel,
-    remoteViewModels: List<R2CPeerViewModel>,
     availableLogArchiveDaysProvider: suspend () -> List<LogArchiveDayOption>,
     onEmailLog: suspend (List<String>) -> Unit,
     onShowHelp: () -> Unit,
@@ -793,10 +791,6 @@ fun MainScreen(
         add(MainScreenItem.IncidentView)
         add(MainScreenItem.SpacerView(12.dp))
         add(MainScreenItem.LocalView(localViewModel))
-        if (remoteViewModels.isNotEmpty()) add(MainScreenItem.SpacerView(52.dp))
-        remoteViewModels.forEach {
-            add(MainScreenItem.RemoteView(it))
-        }
     }
 
     Scaffold(
@@ -823,19 +817,75 @@ fun MainScreen(
                         expanded = menuExpanded,
                         onDismissRequest = { menuExpanded = false }
                     ) {
-                        DropdownMenuItem(text = { Text("Settings") }, onClick = {
-                            localViewModel.showSettings()
+                        DropdownMenuItem(text = { Text("Live View")}, onClick = {
+                            localViewModel.showStreams()
+                            CaltopoClient.CTEvent(tag,"Stream Service Activated", null)
                             menuExpanded = false
                         })
-                        if (linkedDriveEmail.isNotBlank()) {
+                        DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
+                            showLogArchiveDialog = true
+                            loadingLogArchiveDays = true
+                            logArchiveDays = emptyList()
+                            selectedLogArchiveDays = emptySet()
+                            menuExpanded = false
+                            coroutineScope.launch {
+                                val loadedDays = availableLogArchiveDaysProvider()
+                                logArchiveDays = loadedDays
+                                selectedLogArchiveDays = loadedDays
+                                    .filter { it.isToday }
+                                    .mapTo(linkedSetOf()) { it.directoryName }
+                                    .ifEmpty { loadedDays.firstOrNull()?.let { linkedSetOf(it.directoryName) } ?: linkedSetOf() }
+                                loadingLogArchiveDays = false
+                            }
+                        })
+                        if (externalDisplayConnected && onSetExternalDisplayContent != null && externalDisplayContentMode != null) {
                             DropdownMenuItem(
-                                text = { Text("Disconnect Google Drive") },
+                                text = { Text("External: Streams View") },
                                 onClick = {
+                                    onSetExternalDisplayContent(ExternalDisplayContentMode.StreamsGrid)
                                     menuExpanded = false
-                                    disconnectDrive()
                                 }
                             )
                         }
+                        DropdownMenuItem(text = { Text("Status")}, onClick = {
+                            localViewModel.showScanner()
+                            CaltopoClient.CTEvent(tag,"ScannersDisplayed", null)
+                            menuExpanded = false
+                        })
+                        DropdownMenuItem(text = {
+                            Text("LogLevel:${level}") }, onClick = {
+                            CaltopoClient.BumpLoggingLevel()
+                            level = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
+                            if (CaltopoClient.DebugLevel == CaltopoClient.DebugLevelInfo) {
+                                showConfirmDialog = true;
+                            }
+                            menuExpanded = true
+                        })
+                        DropdownMenuItem(text = {
+                            val active = if (CaltopoClient.IsDebugTagFilterEnabled()) "on" else "off"
+                            Text("Debug Tags ($active)")
+                        }, onClick = {
+                            val currentFilterTags = parseCsvTags(CaltopoClient.GetDebugTagFilterCsv())
+                            val knownTags = (CaltopoClient.GetRegisteredDebugTags() + REQUIRED_MAP_CACHE_TAGS)
+                                .distinct()
+                                .sorted()
+                            val knownSet = knownTags.toSet()
+                            knownDebugTags = knownTags
+                            selectedKnownTags = currentFilterTags.filter { knownSet.contains(it) }.toSet()
+                            customDebugTagsText = currentFilterTags.filter { !knownSet.contains(it) }
+                                .joinToString(",")
+                            showDebugTagDialog = true
+                            menuExpanded = false
+                        })
+                        DropdownMenuItem(text = { Text("Proximity Pairs") }, onClick = {
+                            showProximityDebugDialog = true
+                            menuExpanded = false
+                        })
+
+                        DropdownMenuItem(text = { Text("Developer Tools") }, onClick = {
+                            showTestingToolsDialog = true
+                            menuExpanded = false
+                        })
                         DropdownMenuItem(text = { Text("Load config file") }, onClick = {
                             loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
                             menuExpanded = false
@@ -876,84 +926,13 @@ fun MainScreen(
                                 showMutualAidJoinDialog = true
                             }
                         )
-                        DropdownMenuItem(text = { Text("Send app log to Ken...") }, onClick = {
-                            showLogArchiveDialog = true
-                            loadingLogArchiveDays = true
-                            logArchiveDays = emptyList()
-                            selectedLogArchiveDays = emptySet()
-                            menuExpanded = false
-                            coroutineScope.launch {
-                                val loadedDays = availableLogArchiveDaysProvider()
-                                logArchiveDays = loadedDays
-                                selectedLogArchiveDays = loadedDays
-                                    .filter { it.isToday }
-                                    .mapTo(linkedSetOf()) { it.directoryName }
-                                    .ifEmpty { loadedDays.firstOrNull()?.let { linkedSetOf(it.directoryName) } ?: linkedSetOf() }
-                                loadingLogArchiveDays = false
-                            }
-                        })
-                        DropdownMenuItem(text = {
-                            Text("LogLevel:${level}") }, onClick = {
-                            CaltopoClient.BumpLoggingLevel()
-                            level = CaltopoClient.LoggingLevelName(CaltopoClient.DebugLevel)
-                            if (CaltopoClient.DebugLevel == CaltopoClient.DebugLevelInfo) {
-                                showConfirmDialog = true;
-                            }
-                            menuExpanded = true
-                        })
-                        DropdownMenuItem(text = {
-                            val active = if (CaltopoClient.IsDebugTagFilterEnabled()) "on" else "off"
-                            Text("Debug Tags ($active)")
-                        }, onClick = {
-                            val currentFilterTags = parseCsvTags(CaltopoClient.GetDebugTagFilterCsv())
-                            val knownTags = (CaltopoClient.GetRegisteredDebugTags() + REQUIRED_MAP_CACHE_TAGS)
-                                .distinct()
-                                .sorted()
-                            val knownSet = knownTags.toSet()
-                            knownDebugTags = knownTags
-                            selectedKnownTags = currentFilterTags.filter { knownSet.contains(it) }.toSet()
-                            customDebugTagsText = currentFilterTags.filter { !knownSet.contains(it) }
-                                .joinToString(",")
-                            showDebugTagDialog = true
-                            menuExpanded = false
-                        })
-                        DropdownMenuItem(text = { Text("Live View")}, onClick = {
-                            localViewModel.showStreams()
-                            CaltopoClient.CTEvent(tag,"Stream Service Activated", null)
-                            menuExpanded = false
-                        })
-                        if (externalDisplayConnected && onSetExternalDisplayContent != null && externalDisplayContentMode != null) {
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text("External: Streams View") },
-                                onClick = {
-                                    onSetExternalDisplayContent(ExternalDisplayContentMode.StreamsGrid)
-                                    menuExpanded = false
-                                }
-                            )
-                        }
-                        DropdownMenuItem(text = { Text("Status")}, onClick = {
-                            localViewModel.showScanner()
-                            CaltopoClient.CTEvent(tag,"ScannersDisplayed", null)
-                            menuExpanded = false
-                        })
-                        DropdownMenuItem(text = { Text("Proximity Pairs") }, onClick = {
-                            showProximityDebugDialog = true
-                            menuExpanded = false
-                        })
-
-                        DropdownMenuItem(text = { Text("Restart MediaMtx Server")}, onClick = {
-                           restartMediaMtxServer(context)
-                            CaltopoClient.CTEvent(tag,"RestartMediaMtxServer", null)
+                        DropdownMenuItem(text = { Text("Settings") }, onClick = {
+                            localViewModel.showSettings()
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Help") }, onClick = {
                             onShowHelp()
                             CaltopoClient.CTEvent(tag,"HelpDisplayed", null)
-                            menuExpanded = false
-                        })
-                        DropdownMenuItem(text = { Text("Developer Tools") }, onClick = {
-                            showTestingToolsDialog = true
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Quit") }, onClick = {
@@ -983,7 +962,6 @@ fun MainScreen(
                         // This key is now guaranteed to be unique and stable
                         when (item) {
                             is MainScreenItem.LocalView -> "local_view" // A constant key for the single local view
-                            is MainScreenItem.RemoteView -> item.viewModel.peerState.guid
                             is MainScreenItem.SpacerView -> "spacer_view_$index"
                             is MainScreenItem.IncidentView -> "incident_view"
                         }
@@ -1011,24 +989,6 @@ fun MainScreen(
                         }
                         is MainScreenItem.SpacerView -> {
                             HorizontalDivider(thickness = item.height)
-                        }
-                        is MainScreenItem.RemoteView -> {
-                            val remoteDrones by item.viewModel.drones.collectAsState()
-                            val remoteUptime by item.viewModel.remoteUptime.collectAsState()
-                            val remoteCtRttString by item.viewModel.remoteCtRtt.collectAsState()
-                            val remoteAppVersion by item.viewModel.remoteAppVersion.collectAsState()
-
-                            R2CPeerView(
-                                peerName = item.viewModel.peerState.name,
-                                drones = remoteDrones,
-                                remoteUptime = remoteUptime,
-                                appVersion = remoteAppVersion,
-                                viewModel = item.viewModel,
-                                ctRttString = remoteCtRttString,
-                                onMappedIdChange = { drone, newId ->
-                                    item.viewModel.updateMappedId(drone, newId)
-                                }
-                            )
                         }
                     }
                 }
@@ -1167,6 +1127,29 @@ fun MainScreen(
                     ) {
                         Text("Reset Persisted App State")
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            showTestingToolsDialog = false
+                            restartMediaMtxServer(context)
+                            CaltopoClient.CTEvent(tag,"RestartMediaMtxServer", null)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Restart MediaMtx Server")
+                    }
+                    if (linkedDriveEmail.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                showTestingToolsDialog = false
+                                disconnectDrive()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Disconnect Google Drive")
+                        }
+                    }
                     Spacer(modifier = Modifier.height(16.dp))
                     HorizontalDivider()
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1214,7 +1197,6 @@ fun MainScreen(
                 TextButton(
                     onClick = {
                         CaltopoClient.ResetPersistedClientState()
-                        forceArchiveDirPrompt = true
                         CaltopoClient.ShowToast("Persisted app state reset and backup state updated.")
                         showResetPersistentStateDialog = false
                     }

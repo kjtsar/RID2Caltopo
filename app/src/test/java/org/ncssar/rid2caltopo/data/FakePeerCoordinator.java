@@ -34,6 +34,7 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     @NonNull private final Set<String> locallyOwnedRemoteIds = ConcurrentHashMap.newKeySet();
 
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
+    @Nullable private volatile CoordinationIndicatorListener coordinationIndicatorListener;
     @Nullable private volatile String startedMapId;
     @Nullable private volatile String startedGuid;
     @Nullable private volatile String startedName;
@@ -97,6 +98,11 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public long getCaltopoRttMs() {
+        return 0L;
+    }
+
+    @Override
     public void updateMyPosition(double lat, double lon) {
         record("updateMyPosition", String.format(Locale.US, "%.6f,%.6f", lat, lon));
     }
@@ -104,6 +110,14 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     @Override
     public void setPeerListChangedListener(@Nullable R2CMqttManager.PeerListChangedListener listener) {
         peerListChangedListener = listener;
+    }
+
+    @Override
+    public void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener) {
+        coordinationIndicatorListener = listener;
+        if (listener != null) {
+            listener.onCoordinationIndicatorStateChanged(getCoordinationIndicatorState());
+        }
     }
 
     @NonNull
@@ -199,6 +213,7 @@ public final class FakePeerCoordinator implements PeerCoordinator {
         startedName = null;
         startedBrokerUri = null;
         peerListChangedListener = null;
+        coordinationIndicatorListener = null;
     }
 
     private void record(@NonNull String kind, @NonNull String summary) {

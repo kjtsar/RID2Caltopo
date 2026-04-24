@@ -190,6 +190,11 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public long getCaltopoRttMs() {
+        return myCaltopoRttMs;
+    }
+
+    @Override
     public void updateMyPosition(double lat, double lon) {
         myLat = lat;
         myLon = lon;

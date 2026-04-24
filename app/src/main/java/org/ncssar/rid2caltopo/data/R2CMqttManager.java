@@ -1150,6 +1150,11 @@ public class R2CMqttManager {
         }
 
         @Override
+        public long getCaltopoRttMs() {
+            return myCaltopoRttMs;
+        }
+
+        @Override
         public void updateMyPosition(double lat, double lon) {
             R2CMqttManager.updateMyPosition(lat, lon);
         }

@@ -181,6 +181,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         return myRemoteId;
     }
 
+    @Override
+    public int getQueuedPointCount() {
+        return linePoints.size();
+    }
+
     public boolean ownsLiveTrackId(@Nullable String trackId) {
         return null != trackId && trackId.equals(liveTrackId);
     }
@@ -273,6 +278,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         if (indexOfChar < 0) indexOfChar = caltopoTrackLabel.indexOf('-');
         if (indexOfChar > 0) {
             newLabel = caltopoTrackLabel.substring(0, indexOfChar);
+        }
+        if (newLabel.isEmpty()) {
+            CaltopoClient.CTWarn(TAG, String.format(Locale.US,
+                    "checkCaltopoTrackLabel(): empty title observed for remoteId=%s liveTrackId=%s localOwner=%s mappedId='%s' trackLabel='%s' rawTitle='%s'",
+                    myRemoteId, liveTrackId, localOwner, droneSpec.getMappedId(), trackLabel, caltopoTrackLabel));
         }
         String dsMappedId = droneSpec.setMappedId(newLabel);
         CTDebug(TAG, String.format(Locale.US,
@@ -406,8 +416,9 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             active = true;
             if (null == folderId) folderId = CaltopoMap.GetFolderId();
             String trackLabel = droneSpec.trackLabel();
-            CTDebug(TAG, String.format(Locale.US, "startNewTrack(DRONE-%s): Starting LiveTrack w/label:%s in folder:%s",
-                    myRemoteId, trackLabel, folderId));
+            CTDebug(TAG, String.format(Locale.US,
+                    "startNewTrack(DRONE-%s): Starting LiveTrack w/label:%s mappedId='%s' localOwner=%s queuedPoints=%d in folder:%s",
+                    myRemoteId, trackLabel, droneSpec.getMappedId(), localOwner, linePoints.size(), folderId));
             try {
                 startLiveTrackOp = runtime.getCalTopoSessionGateway()
                         .startLiveTrack(myRemoteId, trackLabel, folderId,

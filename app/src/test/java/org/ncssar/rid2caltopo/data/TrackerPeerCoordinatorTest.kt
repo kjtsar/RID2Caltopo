@@ -70,6 +70,7 @@ class TrackerPeerCoordinatorTest {
         transport = FakeTransport()
         TrackerPeerCoordinator.setTransportFactoryForTesting { transport }
         TrackerPeerCoordinator.setTrackerConfigForTesting("https://tracker.example.org", "tracker-token")
+        TrackerPeerCoordinator.setHandoffDelayMsForTesting(0L)
         coordinator = TrackerPeerCoordinator.getInstance()
     }
 

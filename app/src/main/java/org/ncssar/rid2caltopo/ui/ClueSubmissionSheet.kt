@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -56,6 +57,7 @@ fun ClueSubmissionSheet(
     pendingClue: PendingClue,
     onTitleChanged: (String) -> Unit,
     onDescriptionChanged: (String) -> Unit,
+    onGimbalAngleChanged: (Double) -> Unit,
     onCancel: () -> Unit,
     onSubmit: () -> Unit,
 ) {
@@ -77,6 +79,7 @@ fun ClueSubmissionSheet(
             clue = pendingClue,
             onTitleChange = onTitleChanged,
             onDescriptionChange = onDescriptionChanged,
+            onGimbalAngleChange = onGimbalAngleChanged,
             onSubmit = onSubmit,
             onCancel = onCancel
         )
@@ -89,6 +92,7 @@ fun ClueSheetContent (
     clue : PendingClue,
     onTitleChange: (String) -> Unit,
     onDescriptionChange: (String) -> Unit,
+    onGimbalAngleChange: (Double) -> Unit,
     onSubmit: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -172,13 +176,67 @@ fun ClueSheetContent (
             Text(
                 text = String.format(
                     Locale.US,
-                    "Lat %.5f, Lng %.5f, Alt %.1f m",
+                    "Clue location: %.5f, %.5f, alt %.0f ft",
                     clue.lat,
                     clue.lng,
-                    clue.alt
+                    clue.alt * 3.28084
                 ),
                 style = MaterialTheme.typography.bodySmall
             )
+
+            Text(
+                text = String.format(
+                    Locale.US,
+                    "Drone location: %.5f, %.5f, alt %.0f ft",
+                    clue.droneLat,
+                    clue.droneLng,
+                    clue.droneAlt * 3.28084
+                ),
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Text(
+                text = buildString {
+                    append(
+                        clue.headingDeg?.let {
+                            String.format(Locale.US, "Heading %.1f°", it)
+                        } ?: "Heading unavailable"
+                    )
+                    clue.headingSourceLabel?.let {
+                        append(" (")
+                        append(it)
+                        append(")")
+                    }
+                    append("  |  ")
+                    append(
+                        clue.aglMeters?.let {
+                            String.format(Locale.US, "AGL %.0f ft", it * 3.28084)
+                        } ?: "AGL unavailable"
+                    )
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Gimbal angle: ${clue.gimbalAngleDeg.toInt()}°",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Slider(
+                    value = clue.gimbalAngleDeg.toFloat(),
+                    onValueChange = { onGimbalAngleChange(it.toDouble()) },
+                    valueRange = -90f..0f,
+                    steps = 89,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "-90° = straight down. 0° = horizon.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
 
             // Title
             OutlinedTextField(

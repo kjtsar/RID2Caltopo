@@ -35,4 +35,9 @@ public interface LiveTrackOwnerDelegate {
             @Nullable CtDroneSpec.PositionTelemetry telemetry) {
         // Default no-op keeps simple tests and alternate implementations lightweight.
     }
+
+    /** Optional visibility into queued points for diagnostics. */
+    default int getQueuedPointCount() {
+        return -1;
+    }
 }

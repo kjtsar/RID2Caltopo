@@ -33,6 +33,7 @@ import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.data.CaltopoHybridBrowser
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.window.Dialog
@@ -119,7 +120,7 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
         Column(modifier = colModifier) {
             val rtt = String.format(
                 Locale.US, "%.3f sec",
-                CaltopoLiveTrack.GetCaltopoRttInMsec().toDouble() / 1000.0
+                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.getCaltopoRttMs().toDouble() / 1000.0
             )
             Text(
                 text = "Caltopo msg rtt:\n$rtt",

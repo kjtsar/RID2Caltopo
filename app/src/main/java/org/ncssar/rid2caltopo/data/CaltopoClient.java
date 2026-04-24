@@ -766,8 +766,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             String clueDescription,
             long clueTimestamp
     ) {
-        CTDebug(TAG, String.format(Locale.US, "SubmitClue() received for %s(%s):%s",
-                droneSpec.getMappedId(), droneSpec.getRemoteId(), clueTitle));
+        CTDebug(TAG, String.format(Locale.US,
+                "SubmitClue() received for %s(%s):%s lat=%.6f lng=%.6f alt=%.1f",
+                droneSpec.getMappedId(), droneSpec.getRemoteId(), clueTitle,
+                clueLat, clueLng, clueAlt));
         WaypointTrack.AddClueForTrack(droneSpec, clueLat, clueLng, clueAlt,
                 clueTimestamp, clueTitle, clueDescription, clueImage);
         CaltopoMap.SubmitClueWithPhoto(droneSpec, clueLat, clueLng, clueAlt, clueTitle, clueDescription, clueTimestamp, clueImage);
@@ -2981,14 +2983,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             return;
         }
         CaltopoClient.CTEvent(TAG, "MaxIdleExiting", null);
-        CTDebug(TAG, String.format(Locale.US,
-                "App has been idle for %.3f minutes.  Exiting to save battery.",
-                idleInMsec / 60000.0));
-        synchronized (ShutdownLock) {
-            AppExitRequested = true;
-        }
-        Activity activity = R2CActivity.getR2CActivity();
-        if (null != activity) activity.finishAffinity();
+        long lastWaypointMsec = CtDroneSpec.LastWaypointUpdateTimestampMsec();
+        CTWarn(TAG, String.format(Locale.US,
+                "CheckIdle(): app idle timeout expired after %.3f/%.3f minutes without valid RID updates (lastWaypoint=%s). Shutting down app and map to save battery.",
+                idleInMsec / 60000.0,
+                (double) maxIdleInMinutes,
+                TimeDatestampString(lastWaypointMsec)));
+        QuitApplication();
     }
 
     public static long GetMaxIdleTimeInMinutes() {

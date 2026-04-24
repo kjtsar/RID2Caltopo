@@ -17,6 +17,7 @@ import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +29,12 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.asin
+import kotlin.math.atan2
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.tan
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
@@ -48,13 +55,22 @@ import org.ncssar.rid2caltopo.video.StreamAdmissionGuardResult
 import org.ncssar.rid2caltopo.video.StreamAdmissionState
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
+import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 
 data class PendingClue(
     val droneSpec: CtDroneSpec,
     val designator: String,
+    val droneLat: Double,
+    val droneLng: Double,
+    val droneAlt: Double,
     val lat: Double,
     val lng: Double,
     val alt: Double,
+    val headingDeg: Double?,
+    val headingSourceLabel: String?,
+    val aglMeters: Double?,
+    val atoMeters: Double?,
+    val gimbalAngleDeg: Double,
     val timestamp: Long,
     val bitmap: Bitmap?,
     val preview: Bitmap?,
@@ -102,6 +118,15 @@ internal fun chooseResyncSnapshot(
 }
 
 private val clueTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+private const val DEFAULT_CLUE_GIMBAL_ANGLE_DEG = -90.0
+private const val METERS_TO_FEET = 3.28084
+private const val RID_INVALID_ALTITUDE_METERS = -1000.0
+
+internal data class ClueProjection(
+    val lat: Double,
+    val lng: Double,
+    val alt: Double,
+)
 
 internal fun buildClueDescriptionTemplate(
     timestampMs: Long,
@@ -111,6 +136,289 @@ internal fun buildClueDescriptionTemplate(
         .atZone(zoneId)
         .format(clueTimeFormatter)
     return "time: $localTime\nfound by: \nreported to IC: yes|no\n"
+}
+
+internal fun buildClueCaptureSummary(clue: PendingClue): String {
+    val lines = mutableListOf<String>()
+    lines += "Projected clue location:"
+    lines += String.format(
+        Locale.US,
+        "  Position: %.6f, %.6f alt %.0f'",
+        clue.lat,
+        clue.lng,
+        clue.alt * METERS_TO_FEET,
+    )
+    lines += clue.headingDeg?.let {
+        String.format(Locale.US, "  Heading used for clue: %.1f\u00b0", it)
+    } ?: "  Heading used for clue: N/A"
+    lines += "  Heading source: ${clue.headingSourceLabel ?: "N/A"}"
+    lines += String.format(Locale.US, "  Gimbal angle at capture: %.1f\u00b0", clue.gimbalAngleDeg)
+    return lines.joinToString("\n")
+}
+
+private data class HeadingSelection(
+    val headingDeg: Double?,
+    val sourceLabel: String?,
+)
+
+private fun selectClueHeading(
+    telemetry: StreamTelemetrySnapshot?,
+    displayHeadingDeg: Double?,
+    ridTrackDeg: Double?,
+): HeadingSelection {
+    val cameraYaw = telemetry?.cameraYawDeg?.takeIf { it.isFinite() }
+    if (cameraYaw != null) return HeadingSelection(cameraYaw, "Camera yaw")
+
+    val streamHeading = telemetry?.headingDeg?.takeIf { it.isFinite() }
+    if (streamHeading != null) return HeadingSelection(streamHeading, "Stream heading")
+
+    val displayHeading = displayHeadingDeg?.takeIf { it.isFinite() }
+    if (displayHeading != null) {
+        val ridTrack = ridTrackDeg?.takeIf { it.isFinite() }
+        val label = if (ridTrack != null && abs(displayHeading - ridTrack) < 0.1) {
+            "RID aircraft track"
+        } else {
+            "Movement fallback"
+        }
+        return HeadingSelection(displayHeading, label)
+    }
+
+    val ridTrack = ridTrackDeg?.takeIf { it.isFinite() }
+    if (ridTrack != null) return HeadingSelection(ridTrack, "RID aircraft track")
+
+    return HeadingSelection(null, null)
+}
+
+internal fun projectClueLocation(
+    droneLat: Double,
+    droneLng: Double,
+    droneAlt: Double,
+    headingDeg: Double?,
+    aglMeters: Double?,
+    gimbalAngleDeg: Double,
+): ClueProjection {
+    val validHeading = headingDeg?.takeIf { it.isFinite() }
+    val validAgl = aglMeters?.takeIf { it.isFinite() && it >= 0.0 }
+    val projectedAlt = if (droneAlt.isFinite() && droneAlt > RID_INVALID_ALTITUDE_METERS && validAgl != null) {
+        droneAlt - validAgl
+    } else {
+        droneAlt
+    }
+    if (validHeading == null || validAgl == null) {
+        return ClueProjection(droneLat, droneLng, projectedAlt)
+    }
+
+    val clampedAngle = gimbalAngleDeg
+        .takeIf { it.isFinite() }
+        ?.coerceIn(-90.0, 0.0)
+        ?: DEFAULT_CLUE_GIMBAL_ANGLE_DEG
+    val tiltFromHorizonDeg = abs(clampedAngle).coerceIn(0.1, 90.0)
+    val horizontalDistanceM = if (tiltFromHorizonDeg >= 89.9) {
+        0.0
+    } else {
+        validAgl / tan(Math.toRadians(tiltFromHorizonDeg))
+    }
+    if (!horizontalDistanceM.isFinite() || horizontalDistanceM <= 0.0) {
+        return ClueProjection(droneLat, droneLng, projectedAlt)
+    }
+
+    val destination = destinationPoint(
+        startLat = droneLat,
+        startLng = droneLng,
+        bearingDeg = validHeading,
+        distanceM = horizontalDistanceM,
+    )
+    return ClueProjection(destination.first, destination.second, projectedAlt)
+}
+
+internal suspend fun projectClueLocationWithDem(
+    demElevationService: DemElevationService,
+    droneLat: Double,
+    droneLng: Double,
+    droneAlt: Double,
+    headingDeg: Double?,
+    aglMeters: Double?,
+    gimbalAngleDeg: Double,
+): ClueProjection {
+    return projectClueLocationWithDemSamples(
+        droneLat = droneLat,
+        droneLng = droneLng,
+        droneAlt = droneAlt,
+        headingDeg = headingDeg,
+        aglMeters = aglMeters,
+        gimbalAngleDeg = gimbalAngleDeg,
+        sampleElevationMeters = { lat, lng ->
+            demElevationService.sampleElevationMeters(lat, lng)?.elevationMeters
+        },
+    )
+}
+
+internal suspend fun projectClueLocationWithDemSamples(
+    droneLat: Double,
+    droneLng: Double,
+    droneAlt: Double,
+    headingDeg: Double?,
+    aglMeters: Double?,
+    gimbalAngleDeg: Double,
+    sampleElevationMeters: suspend (Double, Double) -> Double?,
+): ClueProjection {
+    val flatProjection = projectClueLocation(
+        droneLat = droneLat,
+        droneLng = droneLng,
+        droneAlt = droneAlt,
+        headingDeg = headingDeg,
+        aglMeters = aglMeters,
+        gimbalAngleDeg = gimbalAngleDeg,
+    )
+    val validHeading = headingDeg?.takeIf { it.isFinite() } ?: return flatProjection
+    val validAgl = aglMeters?.takeIf { it.isFinite() && it > 0.0 } ?: return flatProjection
+    val clampedAngle = gimbalAngleDeg
+        .takeIf { it.isFinite() }
+        ?.coerceIn(-90.0, 0.0)
+        ?: DEFAULT_CLUE_GIMBAL_ANGLE_DEG
+    val tiltFromHorizonDeg = abs(clampedAngle).coerceIn(0.1, 90.0)
+    if (tiltFromHorizonDeg >= 89.9) return flatProjection
+
+    val slopeDown = tan(Math.toRadians(tiltFromHorizonDeg))
+    if (!slopeDown.isFinite() || slopeDown <= 0.0) return flatProjection
+
+    val flatDistanceM = validAgl / slopeDown
+    if (!flatDistanceM.isFinite() || flatDistanceM <= 0.0) return flatProjection
+
+    val flatGroundM = droneAlt - validAgl
+    val droneDemRaw = sampleElevationMeters(droneLat, droneLng)?.takeIf { it.isFinite() }
+    val demScaleToMeters = inferDemScaleToMeters(
+        droneAltMeters = droneAlt,
+        knownGroundMeters = flatGroundM,
+        droneDemRaw = droneDemRaw,
+    )
+
+    val maxDistanceM = (maxOf(flatDistanceM * 3.0, flatDistanceM + 250.0)).coerceIn(60.0, 2_500.0)
+    val stepM = when {
+        maxDistanceM <= 180.0 -> 10.0
+        maxDistanceM <= 600.0 -> 20.0
+        else -> 30.0
+    }
+
+    var previousDistanceM = 0.0
+    var previousPoint = Pair(droneLat, droneLng)
+    var previousGroundM = flatGroundM
+
+    var distanceM = stepM
+    while (distanceM <= maxDistanceM + 0.001) {
+        val candidate = destinationPoint(
+            startLat = droneLat,
+            startLng = droneLng,
+            bearingDeg = validHeading,
+            distanceM = distanceM,
+        )
+        val candidateDemRaw = sampleElevationMeters(candidate.first, candidate.second)
+        val groundM = normalizeDemGroundMeters(
+            candidateDemRaw = candidateDemRaw,
+            droneDemRaw = droneDemRaw,
+            flatGroundM = flatGroundM,
+            demScaleToMeters = demScaleToMeters,
+        ) ?: previousGroundM
+        val rayAltitudeM = droneAlt - (slopeDown * distanceM)
+        if (rayAltitudeM <= groundM) {
+            var lowDistanceM = previousDistanceM
+            var lowPoint = previousPoint
+            var lowGroundM = previousGroundM
+            var highDistanceM = distanceM
+            var highPoint = candidate
+            var highGroundM = groundM
+
+            repeat(6) {
+                val midDistanceM = (lowDistanceM + highDistanceM) / 2.0
+                val midPoint = destinationPoint(
+                    startLat = droneLat,
+                    startLng = droneLng,
+                    bearingDeg = validHeading,
+                    distanceM = midDistanceM,
+                )
+                val midGroundM = normalizeDemGroundMeters(
+                    candidateDemRaw = sampleElevationMeters(midPoint.first, midPoint.second),
+                    droneDemRaw = droneDemRaw,
+                    flatGroundM = flatGroundM,
+                    demScaleToMeters = demScaleToMeters,
+                ) ?: ((lowGroundM + highGroundM) / 2.0)
+                val midRayAltitudeM = droneAlt - (slopeDown * midDistanceM)
+                if (midRayAltitudeM <= midGroundM) {
+                    highDistanceM = midDistanceM
+                    highPoint = midPoint
+                    highGroundM = midGroundM
+                } else {
+                    lowDistanceM = midDistanceM
+                    lowPoint = midPoint
+                    lowGroundM = midGroundM
+                }
+            }
+
+            return ClueProjection(
+                lat = highPoint.first,
+                lng = highPoint.second,
+                alt = highGroundM,
+            )
+        }
+        previousDistanceM = distanceM
+        previousPoint = candidate
+        previousGroundM = groundM
+        distanceM += stepM
+    }
+
+    return flatProjection
+}
+
+internal fun inferDemScaleToMeters(
+    droneAltMeters: Double,
+    knownGroundMeters: Double,
+    droneDemRaw: Double?,
+): Double {
+    val raw = droneDemRaw?.takeIf { it.isFinite() } ?: return 1.0
+    val directGroundErrorM = abs(raw - knownGroundMeters)
+    val feetGroundErrorM = abs((raw * 0.3048) - knownGroundMeters)
+    val directAltitudeErrorM = abs(raw - droneAltMeters)
+    val feetAltitudeErrorM = abs((raw * 0.3048) - droneAltMeters)
+
+    return if (feetGroundErrorM + feetAltitudeErrorM < directGroundErrorM + directAltitudeErrorM) {
+        0.3048
+    } else {
+        1.0
+    }
+}
+
+internal fun normalizeDemGroundMeters(
+    candidateDemRaw: Double?,
+    droneDemRaw: Double?,
+    flatGroundM: Double,
+    demScaleToMeters: Double,
+): Double? {
+    val candidate = candidateDemRaw?.takeIf { it.isFinite() } ?: return null
+    val droneRaw = droneDemRaw?.takeIf { it.isFinite() } ?: return candidate * demScaleToMeters
+    return flatGroundM + ((candidate - droneRaw) * demScaleToMeters)
+}
+
+private fun destinationPoint(
+    startLat: Double,
+    startLng: Double,
+    bearingDeg: Double,
+    distanceM: Double,
+): Pair<Double, Double> {
+    val earthRadiusM = 6_371_000.0
+    val angularDistance = distanceM / earthRadiusM
+    val bearing = Math.toRadians(bearingDeg)
+    val lat1 = Math.toRadians(startLat)
+    val lon1 = Math.toRadians(startLng)
+
+    val lat2 = asin(
+        sin(lat1) * cos(angularDistance) +
+            cos(lat1) * sin(angularDistance) * cos(bearing)
+    )
+    val lon2 = lon1 + atan2(
+        sin(bearing) * sin(angularDistance) * cos(lat1),
+        cos(angularDistance) - sin(lat1) * sin(lat2)
+    )
+    return Pair(Math.toDegrees(lat2), Math.toDegrees(lon2))
 }
 
 @Stable
@@ -314,6 +622,7 @@ class StreamsViewModel(
     internal val baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption
         get() = _baseLayer.value
     private var persistedMapViewportState: MapViewportState? = null
+    private var clueProjectionJob: Job? = null
 
     private var lastLiveRevisions: Map<String, Long> = emptyMap()
     private var lastLivePublisherConnIds: Map<String, String?> = emptyMap()
@@ -514,14 +823,57 @@ class StreamsViewModel(
         val clueLng = telemetry?.longitude ?: droneSpec.lastLng
         val clueAlt = telemetry?.altitudeMeters ?: droneSpec.lastAlt
         val clueTimestamp = telemetry?.sourceTimestampUs?.let { it / 1000L } ?: droneSpec.mostRecentMsecTimestamp
+        val displayState = altitudeCoordinator.displayStateByDesignator[designator]
+        val headingSelection = selectClueHeading(
+            telemetry = telemetry,
+            displayHeadingDeg = displayState?.headingDeg,
+            ridTrackDeg = droneSpec.lastPositionTelemetry?.aircraftTrackDeg,
+        )
+        val clueBearing = headingSelection.headingDeg
+        val clueAglMeters = displayState?.aglFt?.div(METERS_TO_FEET)
+        val clueAtoMeters = displayState?.atoFt?.div(METERS_TO_FEET)
+        val clueGimbalAngle = telemetry?.gimbalPitchDeg
+            ?.takeIf { it.isFinite() }
+            ?.coerceIn(-90.0, 0.0)
+            ?: DEFAULT_CLUE_GIMBAL_ANGLE_DEG
+        val projectedLocation = projectClueLocation(
+            droneLat = clueLat,
+            droneLng = clueLng,
+            droneAlt = clueAlt,
+            headingDeg = clueBearing,
+            aglMeters = clueAglMeters,
+            gimbalAngleDeg = clueGimbalAngle,
+        )
+        CTDebug(tag, String.format(
+            Locale.US,
+            "onSnapshotCaptured(%s): projection inputs droneLat=%.6f droneLng=%.6f droneAlt=%.1f bearingDeg=%s aglM=%s gimbalDeg=%s projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f",
+            designator,
+            clueLat,
+            clueLng,
+            clueAlt,
+            clueBearing?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+            clueAglMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+            String.format(Locale.US, "%.1f", clueGimbalAngle),
+            projectedLocation.lat,
+            projectedLocation.lng,
+            projectedLocation.alt,
+        ))
         val summary = buildTelemetrySummary(designator, droneSpec, telemetry)
 
         _pendingClue.value = PendingClue(
             droneSpec = droneSpec,
             designator = designator,
-            lat = clueLat,
-            lng = clueLng,
-            alt = clueAlt,
+            droneLat = clueLat,
+            droneLng = clueLng,
+            droneAlt = clueAlt,
+            lat = projectedLocation.lat,
+            lng = projectedLocation.lng,
+            alt = projectedLocation.alt,
+            headingDeg = clueBearing,
+            headingSourceLabel = headingSelection.sourceLabel,
+            aglMeters = clueAglMeters,
+            atoMeters = clueAtoMeters,
+            gimbalAngleDeg = clueGimbalAngle,
             timestamp = clueTimestamp,
             bitmap = bitmap,
             preview = null,
@@ -529,6 +881,8 @@ class StreamsViewModel(
             description = buildClueDescriptionTemplate(clueTimestamp),
             streamTelemetrySummary = summary
         )
+
+        requestDemClueProjectionRefresh(designator)
 
         viewModelScope.launch(Dispatchers.Default) {
             val width = 600
@@ -557,10 +911,56 @@ class StreamsViewModel(
         _pendingClue.value = _pendingClue.value?.copy(description = description)
     }
 
+    fun updateClueGimbalAngle(gimbalAngleDeg: Double) {
+        _pendingClue.value = _pendingClue.value?.let { clue ->
+            val projection = projectClueLocation(
+                droneLat = clue.droneLat,
+                droneLng = clue.droneLng,
+                droneAlt = clue.droneAlt,
+                headingDeg = clue.headingDeg,
+                aglMeters = clue.aglMeters,
+                gimbalAngleDeg = gimbalAngleDeg,
+            )
+            CTDebug(tag, String.format(
+                Locale.US,
+                "updateClueGimbalAngle(): designator=%s bearingDeg=%s aglM=%s gimbalDeg=%.1f projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f",
+                clue.designator,
+                clue.headingDeg?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+                clue.aglMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+                gimbalAngleDeg,
+                projection.lat,
+                projection.lng,
+                projection.alt,
+            ))
+            clue.copy(
+                lat = projection.lat,
+                lng = projection.lng,
+                alt = projection.alt,
+                gimbalAngleDeg = gimbalAngleDeg,
+            )
+        }?.also { requestDemClueProjectionRefresh(it.designator) }
+    }
+
     fun submitClue() {
         val clue = pendingClue ?: return
-        CTDebug(tag, "submitting clue: '${clue.title}' for '${clue.droneSpec.trackLabel()}'")
-        val finalDescription = appendTelemetrySummary(clue.description, clue.streamTelemetrySummary)
+        CTDebug(tag, String.format(
+            Locale.US,
+            "submitting clue: '%s' for '%s' clueLat=%.6f clueLng=%.6f clueAlt=%.1f droneLat=%.6f droneLng=%.6f droneAlt=%.1f headingDeg=%s aglM=%s atoM=%s gimbalDeg=%.1f",
+            clue.title,
+            clue.droneSpec.trackLabel(),
+            clue.lat,
+            clue.lng,
+            clue.alt,
+            clue.droneLat,
+            clue.droneLng,
+            clue.droneAlt,
+            clue.headingDeg?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+            clue.aglMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+            clue.atoMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+            clue.gimbalAngleDeg,
+        ))
+        val withCaptureSummary = appendTelemetrySummary(clue.description, buildClueCaptureSummary(clue))
+        val finalDescription = appendTelemetrySummary(withCaptureSummary, clue.streamTelemetrySummary)
         CaltopoClient.SubmitClue(
             clue.droneSpec,
             clue.bitmap,
@@ -576,7 +976,50 @@ class StreamsViewModel(
     }
 
     fun clearPendingClue() {
+        clueProjectionJob?.cancel()
+        clueProjectionJob = null
         _pendingClue.value = null
+    }
+
+    private fun requestDemClueProjectionRefresh(designator: String) {
+        val clue = _pendingClue.value ?: return
+        if (clue.designator != designator) return
+        clueProjectionJob?.cancel()
+        clueProjectionJob = viewModelScope.launch(Dispatchers.Default) {
+            val refined = projectClueLocationWithDem(
+                demElevationService = altitudeCoordinator.demElevationService,
+                droneLat = clue.droneLat,
+                droneLng = clue.droneLng,
+                droneAlt = clue.droneAlt,
+                headingDeg = clue.headingDeg,
+                aglMeters = clue.aglMeters,
+                gimbalAngleDeg = clue.gimbalAngleDeg,
+            )
+            withContext(Dispatchers.Main) {
+                val current = _pendingClue.value ?: return@withContext
+                if (current.designator != clue.designator ||
+                    current.timestamp != clue.timestamp ||
+                    current.gimbalAngleDeg != clue.gimbalAngleDeg) {
+                    return@withContext
+                }
+                _pendingClue.value = current.copy(
+                    lat = refined.lat,
+                    lng = refined.lng,
+                    alt = refined.alt,
+                )
+                CTDebug(tag, String.format(
+                    Locale.US,
+                    "requestDemClueProjectionRefresh(%s): refined projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f headingDeg=%s aglM=%s gimbalDeg=%.1f",
+                    clue.designator,
+                    refined.lat,
+                    refined.lng,
+                    refined.alt,
+                    clue.headingDeg?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+                    clue.aglMeters?.let { String.format(Locale.US, "%.1f", it) } ?: "null",
+                    clue.gimbalAngleDeg,
+                ))
+            }
+        }
     }
 
     fun anomalyConfigFor(designator: String): AnomalyConfig {
@@ -640,8 +1083,14 @@ class StreamsViewModel(
 
         val lines = mutableListOf<String>()
         lines += "Designator: $designator"
-        lines += "RID: ${droneSpec.remoteId}"
         lines += "Telemetry:"
+        lines += String.format(
+            Locale.US,
+            "  Drone position: %.6f, %.6f alt %.0f'",
+            droneSpec.lastLat,
+            droneSpec.lastLng,
+            droneSpec.lastAlt * METERS_TO_FEET,
+        )
 
         // First three: Heading, AGL, ATO — use values computed by DroneAltitudeCoordinator
         val display = altitudeCoordinator.displayStateByDesignator[designator]
@@ -672,7 +1121,9 @@ class StreamsViewModel(
                 lines += "  RID candidates: ${telemetry.remoteIdCandidates.joinToString(",")}"
             }
             if (telemetry.latitude != null && telemetry.longitude != null) {
-                val altText = telemetry.altitudeMeters?.let { String.format(Locale.US, ", alt=%.1fm", it) } ?: ""
+                val altText = telemetry.altitudeMeters?.let {
+                    String.format(Locale.US, ", alt=%.0f'", it * METERS_TO_FEET)
+                } ?: ""
                 lines += String.format(Locale.US, "  Stream position: %.6f, %.6f%s", telemetry.latitude, telemetry.longitude, altText)
             }
             telemetry.gimbalPitchDeg?.let { lines += String.format(Locale.US, "  Gimbal pitch: %.1f\u00b0", it) }

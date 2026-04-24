@@ -221,6 +221,7 @@ fun StreamsScreen(
                         pendingClue = it,
                         onTitleChanged = viewModel::updateClueTitle,
                         onDescriptionChanged = viewModel::updateClueDescription,
+                        onGimbalAngleChanged = viewModel::updateClueGimbalAngle,
                         onSubmit = viewModel::submitClue,
                         onCancel = viewModel::clearPendingClue,
                     )

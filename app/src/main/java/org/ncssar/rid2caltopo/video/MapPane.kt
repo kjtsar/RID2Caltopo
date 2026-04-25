@@ -475,6 +475,7 @@ internal fun SplitMapPane(
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
     var badTilesMenuExpanded by remember { mutableStateOf(false) }
     var calibrateMenuExpanded by remember { mutableStateOf(false) }
+    var mapReloadInFlight by remember { mutableStateOf(false) }
     var showMapFoldersDialog by remember { mutableStateOf(false) }
     val hiddenFolderIds = viewModel.hiddenFolderIds
     val hiddenItemIds = viewModel.hiddenItemIds
@@ -2548,6 +2549,33 @@ internal fun SplitMapPane(
                     calibrateMenuExpanded = false
                 }
             ) {
+                DropdownMenuItem(
+                    text = { Text(if (mapReloadInFlight) "Reload Map..." else "Reload Map") },
+                    onClick = {
+                        settingsMenuExpanded = false
+                        if (mapReloadInFlight) {
+                            return@DropdownMenuItem
+                        }
+                        mapReloadInFlight = true
+                        CaltopoClient.ShowToast("Reloading map artifacts...")
+                        CaltopoMap.ReloadMapArtifactsNow(
+                            Runnable {
+                                uiScope.launch(Dispatchers.Main.immediate) {
+                                    hydrateArtifactsFromCaltopoSnapshot("manual-reload")
+                                    mapReloadInFlight = false
+                                    CaltopoClient.ShowToast("Map reloaded.")
+                                }
+                            }
+                        )
+                        uiScope.launch {
+                            delay(15_000L)
+                            if (mapReloadInFlight) {
+                                mapReloadInFlight = false
+                            }
+                        }
+                    },
+                    enabled = mapName != null && !mapReloadInFlight
+                )
                 DropdownMenuItem(
                     text = { Text("Base: ${baseLayer.label}") },
                     onClick = {

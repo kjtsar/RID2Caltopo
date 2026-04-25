@@ -477,6 +477,18 @@ public class CaltopoMap {
         PollMapUpdates();
     }
 
+    public static void ReloadMapArtifactsNow(@Nullable Runnable onComplete) {
+        if (ShutdownInProgress || MapNode == null) {
+            CTDebug(TAG, "ReloadMapArtifactsNow(): skipping due to shutdown or no map.");
+            return;
+        }
+        CTInfo(TAG, String.format(Locale.US,
+                "ReloadMapArtifactsNow(): reloading full artifact snapshot for map '%s'.",
+                GetMapId()));
+        getCurrentRuntime().getCalTopoSessionGateway()
+                .openMap(MapNode, 0, op -> ReloadMapArtifactsFinished(op, onComplete));
+    }
+
     public static void AddLiveTrack(@NonNull CaltopoLiveTrack track) {
         liveTracks.add(track);
     }
@@ -836,6 +848,40 @@ public class CaltopoMap {
         }
 
         SetMapStatus(MapStatusListener.mapStatus.up, null);
+    }
+
+    private static void ReloadMapArtifactsFinished(@Nullable CaltopoOp openMapOp,
+                                                   @Nullable Runnable onComplete) {
+        if (ShutdownInProgress) {
+            CTDebug(TAG, "ReloadMapArtifactsFinished(): ignoring callback during shutdown.");
+            return;
+        }
+        if (openMapOp == null || openMapOp.fail()) {
+            CTError(TAG, String.format(Locale.US,
+                    "ReloadMapArtifactsFinished(): not able to reload map '%s':\n  %s",
+                    GetMapId(), openMapOp));
+            ShowToast("Map reload failed.");
+            return;
+        }
+        recordCaltopoSessionRtt(openMapOp, "reloadMap");
+
+        JSONObject responseJson = openMapOp.responseJson;
+        JSONObject state = (responseJson != null) ? responseJson.optJSONObject("state") : null;
+        if (state == null) {
+            CTError(TAG, "ReloadMapArtifactsFinished(): state missing from response.");
+            ShowToast("Map reload failed.");
+            return;
+        }
+        try {
+            ParseMap(state);
+            SetMapStatus(MapStatusListener.mapStatus.up, null);
+            if (onComplete != null) {
+                onComplete.run();
+            }
+        } catch (Exception e) {
+            CTError(TAG, "ReloadMapArtifactsFinished(): parseMap() raised:", e);
+            ShowToast("Map reload failed.");
+        }
     }
 
     private static void PhotoMarkerTimeout() {

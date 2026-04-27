@@ -73,13 +73,11 @@ public class CaltopoOp implements Future <CaltopoOp> {
     }
 	
     public boolean success() {
-        boolean isDone = null == asyncFuture || asyncFuture.isDone();
-        return (isDone && this.goodResponse);
+        return isDone() && this.goodResponse;
 	    }
 
     public boolean fail() {
-        boolean isDone = null == asyncFuture || asyncFuture.isDone();
-        return (isDone && !this.goodResponse);
+        return isDone() && !this.goodResponse;
     }
 
     @Nullable
@@ -225,4 +223,3 @@ public class CaltopoOp implements Future <CaltopoOp> {
     }
 	
 } // end of CaltopoOp class spec.
-

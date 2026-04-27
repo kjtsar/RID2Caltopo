@@ -157,6 +157,7 @@ import org.ncssar.rid2caltopo.video.mapcache.BadTilePolicy
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheDebug
 import org.ncssar.rid2caltopo.video.mapcache.MapCachePolicy
+import org.ncssar.rid2caltopo.video.mapcache.MapCacheSettings
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheRoot
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheRootResolver
 import org.ncssar.rid2caltopo.video.mapcache.TileCacheMapProvider
@@ -472,10 +473,25 @@ internal fun SplitMapPane(
     val restoredViewport = viewModel.mapViewportState()
     val baseLayer = viewModel.baseLayer
     var settingsMenuExpanded by remember { mutableStateOf(false) }
+    var mapManagementMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
     var badTilesMenuExpanded by remember { mutableStateOf(false) }
     var calibrateMenuExpanded by remember { mutableStateOf(false) }
     var mapReloadInFlight by remember { mutableStateOf(false) }
+    var showMapCacheSizeDialog by remember { mutableStateOf(false) }
+    var showMapTileAgeDialog by remember { mutableStateOf(false) }
+    var mapCacheSizeInput by remember {
+        mutableStateOf(
+            String.format(
+                Locale.US,
+                "%.1f",
+                MapCacheSettings.maxCacheBytes(context).toDouble() / 1_000_000_000.0
+            )
+        )
+    }
+    var mapTileAgeDaysInput by remember {
+        mutableStateOf(MapCacheSettings.maxTileAgeDays(context).toString())
+    }
     var showMapFoldersDialog by remember { mutableStateOf(false) }
     val hiddenFolderIds = viewModel.hiddenFolderIds
     val hiddenItemIds = viewModel.hiddenItemIds
@@ -1694,6 +1710,92 @@ internal fun SplitMapPane(
         )
     }
 
+    if (showMapCacheSizeDialog) {
+        AlertDialog(
+            onDismissRequest = { showMapCacheSizeDialog = false },
+            title = { Text("Max Cache Size") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter the maximum tile cache size in decimal GB.")
+                    OutlinedTextField(
+                        value = mapCacheSizeInput,
+                        onValueChange = { mapCacheSizeInput = it },
+                        label = { Text("Decimal GB") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val gb = mapCacheSizeInput.toDoubleOrNull()
+                        if (gb == null || gb <= 0.0) {
+                            CaltopoClient.ShowToast("Enter a positive cache size in GB.")
+                            return@TextButton
+                        }
+                        val bytes = (gb * 1_000_000_000.0).toLong()
+                        MapCacheSettings.setMaxCacheBytes(context, bytes)
+                        offlinePrepTileCacheCapBytes = MapCachePolicy.tileCacheMaxBytes(context)
+                        mapCacheSizeInput = String.format(
+                            Locale.US,
+                            "%.1f",
+                            MapCacheSettings.maxCacheBytes(context).toDouble() / 1_000_000_000.0
+                        )
+                        showMapCacheSizeDialog = false
+                        CaltopoClient.ShowToast("Map cache size saved. Startup cache maintenance will use the new limit next launch.")
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMapCacheSizeDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showMapTileAgeDialog) {
+        AlertDialog(
+            onDismissRequest = { showMapTileAgeDialog = false },
+            title = { Text("Maximum Tile Age") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter the maximum tile retention age in days.")
+                    OutlinedTextField(
+                        value = mapTileAgeDaysInput,
+                        onValueChange = { mapTileAgeDaysInput = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("Days") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val days = mapTileAgeDaysInput.toLongOrNull()
+                        if (days == null || days <= 0L) {
+                            CaltopoClient.ShowToast("Enter a positive tile age in days.")
+                            return@TextButton
+                        }
+                        MapCacheSettings.setMaxTileAgeDays(context, days)
+                        mapTileAgeDaysInput = MapCacheSettings.maxTileAgeDays(context).toString()
+                        showMapTileAgeDialog = false
+                        CaltopoClient.ShowToast("Maximum tile age saved. Startup cache maintenance will use the new limit next launch.")
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMapTileAgeDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     openBubbleDesignator?.let { designator ->
         val point = dronePoints.firstOrNull { it.designator == designator }
         if (point != null) {
@@ -2544,38 +2646,12 @@ internal fun SplitMapPane(
                 expanded = settingsMenuExpanded,
                 onDismissRequest = {
                     settingsMenuExpanded = false
+                    mapManagementMenuExpanded = false
                     baseLayerMenuExpanded = false
                     badTilesMenuExpanded = false
                     calibrateMenuExpanded = false
                 }
             ) {
-                DropdownMenuItem(
-                    text = { Text(if (mapReloadInFlight) "Reload Map..." else "Reload Map") },
-                    onClick = {
-                        settingsMenuExpanded = false
-                        if (mapReloadInFlight) {
-                            return@DropdownMenuItem
-                        }
-                        mapReloadInFlight = true
-                        CaltopoClient.ShowToast("Reloading map artifacts...")
-                        CaltopoMap.ReloadMapArtifactsNow(
-                            Runnable {
-                                uiScope.launch(Dispatchers.Main.immediate) {
-                                    hydrateArtifactsFromCaltopoSnapshot("manual-reload")
-                                    mapReloadInFlight = false
-                                    CaltopoClient.ShowToast("Map reloaded.")
-                                }
-                            }
-                        )
-                        uiScope.launch {
-                            delay(15_000L)
-                            if (mapReloadInFlight) {
-                                mapReloadInFlight = false
-                            }
-                        }
-                    },
-                    enabled = mapName != null && !mapReloadInFlight
-                )
                 DropdownMenuItem(
                     text = { Text("Base: ${baseLayer.label}") },
                     onClick = {
@@ -2620,6 +2696,65 @@ internal fun SplitMapPane(
                         showMapFoldersDialog = true
                     },
                     enabled = buildMapFolderUiStates(artifactStoreById).isNotEmpty()
+                )
+                DropdownMenuItem(
+                    text = { Text("Map Management...") },
+                    onClick = {
+                        settingsMenuExpanded = false
+                        mapManagementMenuExpanded = true
+                    }
+                )
+            }
+            DropdownMenu(
+                expanded = mapManagementMenuExpanded,
+                onDismissRequest = { mapManagementMenuExpanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (mapReloadInFlight) "Reload Map..." else "Reload Map") },
+                    onClick = {
+                        mapManagementMenuExpanded = false
+                        if (mapReloadInFlight) {
+                            return@DropdownMenuItem
+                        }
+                        mapReloadInFlight = true
+                        CaltopoClient.ShowToast("Reloading map artifacts...")
+                        CaltopoMap.ReloadMapArtifactsNow(
+                            Runnable {
+                                uiScope.launch(Dispatchers.Main.immediate) {
+                                    hydrateArtifactsFromCaltopoSnapshot("manual-reload")
+                                    mapReloadInFlight = false
+                                    CaltopoClient.ShowToast("Map reloaded.")
+                                }
+                            }
+                        )
+                        uiScope.launch {
+                            delay(15_000L)
+                            if (mapReloadInFlight) {
+                                mapReloadInFlight = false
+                            }
+                        }
+                    },
+                    enabled = mapName != null && !mapReloadInFlight
+                )
+                DropdownMenuItem(
+                    text = { Text("Max Cache Size: ${MapCacheSettings.formatDecimalGb(MapCacheSettings.maxCacheBytes(context))}") },
+                    onClick = {
+                        mapManagementMenuExpanded = false
+                        mapCacheSizeInput = String.format(
+                            Locale.US,
+                            "%.1f",
+                            MapCacheSettings.maxCacheBytes(context).toDouble() / 1_000_000_000.0
+                        )
+                        showMapCacheSizeDialog = true
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Maximum Tile Age: ${MapCacheSettings.formatTileAge(MapCacheSettings.maxTileAgeDays(context))}") },
+                    onClick = {
+                        mapManagementMenuExpanded = false
+                        mapTileAgeDaysInput = MapCacheSettings.maxTileAgeDays(context).toString()
+                        showMapTileAgeDialog = true
+                    }
                 )
             }
             DropdownMenu(

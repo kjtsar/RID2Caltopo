@@ -11,4 +11,13 @@ internal interface BlobCacheStore {
     fun snapshot(): CacheStatsSnapshot
     fun markStaleServed()
     fun prewarm() {}
+    fun runMaintenance(maxEntryAgeCutoffMs: Long, trimToBytes: Long): CacheMaintenanceResult =
+        CacheMaintenanceResult()
 }
+
+internal data class CacheMaintenanceResult(
+    val agedOutEntries: Int = 0,
+    val trimEvictedEntries: Int = 0,
+    val bytesFreed: Long = 0L,
+    val bytesRemaining: Long = 0L
+)

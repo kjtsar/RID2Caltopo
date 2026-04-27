@@ -159,6 +159,82 @@ internal class BlobSqlDiskCache(
         staleServedCount.incrementAndGet()
     }
 
+    override fun runMaintenance(maxEntryAgeCutoffMs: Long, trimToBytes: Long): CacheMaintenanceResult {
+        synchronized(lock) {
+            var agedOutEntries = 0
+            var trimEvictedEntries = 0
+            var bytesFreed = 0L
+
+            if (maxEntryAgeCutoffMs > 0L) {
+                while (true) {
+                    val victims = ArrayList<Pair<String, Long>>()
+                    val cursor = db.query(
+                        "entries",
+                        arrayOf("cache_key", "size_bytes"),
+                        "created_at < ?",
+                        arrayOf(maxEntryAgeCutoffMs.toString()),
+                        null,
+                        null,
+                        "created_at ASC",
+                        "128"
+                    )
+                    cursor.use {
+                        while (it.moveToNext()) {
+                            victims += it.getString(0) to it.getLong(1)
+                        }
+                    }
+                    if (victims.isEmpty()) break
+                    for ((key, size) in victims) {
+                        if (db.delete("entries", "cache_key = ?", arrayOf(key)) > 0) {
+                            agedOutEntries += 1
+                            bytesFreed += size
+                        }
+                    }
+                }
+            }
+
+            var current = bytesUsedLocked()
+            val trimTarget = trimToBytes.coerceAtLeast(0L)
+            while (current > trimTarget) {
+                val victims = ArrayList<Pair<String, Long>>()
+                val cursor = db.query(
+                    "entries",
+                    arrayOf("cache_key", "size_bytes"),
+                    null,
+                    null,
+                    null,
+                    null,
+                    "accessed_at ASC",
+                    "128"
+                )
+                cursor.use {
+                    while (it.moveToNext()) {
+                        victims += it.getString(0) to it.getLong(1)
+                    }
+                }
+                if (victims.isEmpty()) break
+                for ((key, size) in victims) {
+                    if (db.delete("entries", "cache_key = ?", arrayOf(key)) > 0) {
+                        trimEvictedEntries += 1
+                        bytesFreed += size
+                        evictionCount.incrementAndGet()
+                        current -= size
+                    }
+                    if (current <= trimTarget) break
+                }
+            }
+
+            val remaining = bytesUsedLocked()
+            bytesUsedAtomic.set(remaining)
+            return CacheMaintenanceResult(
+                agedOutEntries = agedOutEntries,
+                trimEvictedEntries = trimEvictedEntries,
+                bytesFreed = bytesFreed,
+                bytesRemaining = remaining
+            )
+        }
+    }
+
     private fun evictToCapLocked() {
         var current = bytesUsedLocked()
         if (current <= maxBytes) return

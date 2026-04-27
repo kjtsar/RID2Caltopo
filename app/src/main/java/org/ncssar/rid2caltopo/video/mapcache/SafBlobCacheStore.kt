@@ -245,6 +245,111 @@ internal class SafBlobCacheStore(
         }
     }
 
+    override fun runMaintenance(maxEntryAgeCutoffMs: Long, trimToBytes: Long): CacheMaintenanceResult {
+        var agedOutEntries = 0
+        var trimEvictedEntries = 0
+        var bytesFreed = 0L
+
+        while (true) {
+            val victims: List<Triple<String, String, Long>> = synchronized(dbLock) {
+                val cursor = db.query(
+                    "saf_entries",
+                    arrayOf("cache_key", "file_uri", "size_bytes"),
+                    "namespace = ? AND created_at < ?",
+                    arrayOf(storageNamespace, maxEntryAgeCutoffMs.toString()),
+                    null,
+                    null,
+                    "created_at ASC",
+                    "128"
+                )
+                cursor.use {
+                    val out = ArrayList<Triple<String, String, Long>>(128)
+                    while (it.moveToNext()) {
+                        out += Triple(it.getString(0), it.getString(1), it.getLong(2))
+                    }
+                    out
+                }
+            }
+            if (victims.isEmpty()) break
+            for ((key, uri, size) in victims) {
+                try {
+                    DocumentFile.fromSingleUri(appContext, Uri.parse(uri))?.delete()
+                } catch (_: Exception) {
+                }
+                val rows = synchronized(dbLock) {
+                    namespaceFileIndex?.remove(keyToRelativePath(key))
+                    namespaceFileIndex?.remove(legacyFileNameForKey(key))
+                    db.delete(
+                        "saf_entries",
+                        "namespace = ? AND cache_key = ?",
+                        arrayOf(storageNamespace, key)
+                    )
+                }
+                if (rows > 0) {
+                    agedOutEntries += 1
+                    bytesFreed += size
+                }
+            }
+        }
+
+        val trimTarget = trimToBytes.coerceAtLeast(0L)
+        while (true) {
+            val victims: List<Triple<String, String, Long>> = synchronized(dbLock) {
+                val current = bytesUsedLocked()
+                bytesUsedAtomic.set(current)
+                if (current <= trimTarget) return@synchronized emptyList()
+                val cursor = db.query(
+                    "saf_entries",
+                    arrayOf("cache_key", "file_uri", "size_bytes"),
+                    "namespace = ?",
+                    arrayOf(storageNamespace),
+                    null,
+                    null,
+                    "accessed_at ASC",
+                    "128"
+                )
+                cursor.use {
+                    val out = ArrayList<Triple<String, String, Long>>(128)
+                    while (it.moveToNext()) {
+                        out += Triple(it.getString(0), it.getString(1), it.getLong(2))
+                    }
+                    out
+                }
+            }
+            if (victims.isEmpty()) break
+            for ((key, uri, size) in victims) {
+                try {
+                    DocumentFile.fromSingleUri(appContext, Uri.parse(uri))?.delete()
+                } catch (_: Exception) {
+                }
+                val rows = synchronized(dbLock) {
+                    namespaceFileIndex?.remove(keyToRelativePath(key))
+                    namespaceFileIndex?.remove(legacyFileNameForKey(key))
+                    db.delete(
+                        "saf_entries",
+                        "namespace = ? AND cache_key = ?",
+                        arrayOf(storageNamespace, key)
+                    )
+                }
+                if (rows > 0) {
+                    trimEvictedEntries += 1
+                    bytesFreed += size
+                    evictionCount.incrementAndGet()
+                }
+            }
+        }
+
+        val remaining = synchronized(dbLock) {
+            bytesUsedLocked().also { bytesUsedAtomic.set(it) }
+        }
+        return CacheMaintenanceResult(
+            agedOutEntries = agedOutEntries,
+            trimEvictedEntries = trimEvictedEntries,
+            bytesFreed = bytesFreed,
+            bytesRemaining = remaining
+        )
+    }
+
     private fun evictToCap() {
         while (true) {
             val victims: List<Triple<String, String, Long>> = synchronized(dbLock) {

@@ -6,6 +6,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
+import org.ncssar.rid2caltopo.video.mapcache.MapCacheStartupMaintenance
 
 class R2CApplication : Application() {
     val TAG = "R2CApplication"
@@ -21,6 +22,7 @@ class R2CApplication : Application() {
         AppConfigStore.initialize(this)
         NotamCenter.initialize(this)
         R2CMqttManager.InitializeNetworkAddressMonitor(this)
+        MapCacheStartupMaintenance.ensureStarted(this)
         CTDebug(TAG, "onCreate().")
     }
 

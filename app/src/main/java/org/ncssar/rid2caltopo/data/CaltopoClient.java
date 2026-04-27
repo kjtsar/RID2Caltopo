@@ -31,9 +31,6 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.documentfile.provider.DocumentFile;
 
-import java.net.URL;
-import javax.net.ssl.HttpsURLConnection;
-
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.time.Instant;
@@ -231,8 +228,6 @@ class ClientClassState {
     public MutualAidTemplateRecord mutualAidTemplate;
     public ArrayList<CaltopoProfileRecord> caltopoProfiles;
     public String activeCaltopoProfileId;
-    transient public boolean goLiveFlag;
-
     transient public Hashtable<String, CtDroneSpec> droneSpecTable; // app lifespan only.
     transient public boolean usePeersFlag; // newline separated list of configfile specs that we're loaded.
 
@@ -243,7 +238,6 @@ class ClientClassState {
         caltopoTrackFolder = "Drone Tracks";
         caltopoCredentials = new CaltopoCredentials();
         caltopoDomainAndPort = "caltopo.com";
-        goLiveFlag = false;
         usePeersFlag = true;
         newTrackDelayInSeconds = 30;
         maxIdleTimeInMinutes = 120;
@@ -1428,21 +1422,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), disconnectIfActive);
     }
 
-    public static void SetGoLiveFlag(boolean flag) {
-        ClientClassState ccs = GetState();
-        if (ccs.goLiveFlag != flag) {
-            ccs.goLiveFlag = flag;
-            NotifySettingsChanged();
-            ArchiveState("goLive changed to " + flag);
-        }
-    }
-
-    public static boolean GetGoLiveFlag() {
-        ClientClassState ccs = GetState();
-        return ccs.goLiveFlag;
-    }
-
-
     public static void SetUsePeers(boolean flag) {
         ClientClassState ccs = GetState();
         if (ccs.usePeersFlag != flag) {
@@ -2183,7 +2162,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             Bundle parameters = new Bundle();
             parameters.putString("r2c_map", CaltopoMap.GetMapName());
             parameters.putLong("r2c_ctCred", CaltopoCredentials.sniffTest(ccs.caltopoCredentials) ? 1L : 0L);
-            parameters.putLong("r2c_goLiveFlag", ccs.goLiveFlag ? 1L : 0L);
             parameters.putLong("r2c_newTrackDelayInSeconds", ccs.newTrackDelayInSeconds);
             parameters.putLong("r2c_minDistanceInFeet", ccs.minDistanceInFeet);
             parameters.putLong("r2c_usePeers", ccs.usePeersFlag ? 1L : 0L);
@@ -3015,102 +2993,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 "  rid:%s, mapped:%s", remoteId, droneSpec.getMappedId());
     }
 
-    private static void appendPositionTelemetryQuery(@NonNull StringBuilder sb,
-                                                     @Nullable CtDroneSpec.PositionTelemetry telemetry) {
-        if (telemetry == null) return;
-        JSONObject aircraft = new JSONObject();
-        JSONObject camera = new JSONObject();
-        try {
-            putFinite(aircraft, "altitude_rate", telemetry.aircraftAltitudeRateFpm);
-            putFinite(aircraft, "gs", telemetry.aircraftGsKnots);
-            putFinite(aircraft, "track", telemetry.aircraftTrackDeg);
-        } catch (Exception e) {
-            CTError(TAG, "appendPositionTelemetryQuery() JSON put raised", e);
-            return;
-        }
-
-        if (aircraft.length() > 0) {
-            sb.append("&aircraft=").append(Uri.encode(aircraft.toString()));
-        }
-        if (camera.length() > 0) {
-            sb.append("&camera=").append(Uri.encode(camera.toString()));
-        }
-    }
-
-    private static void putFinite(@NonNull JSONObject jo, @NonNull String key,
-                                  @Nullable Double value) throws JSONException {
-        if (value != null && Double.isFinite(value)) {
-            jo.put(key, value);
-        }
-    }
-
-    private static void putString(@NonNull JSONObject jo, @NonNull String key,
-                                  @Nullable String value) throws JSONException {
-        if (value != null && !value.isEmpty()) {
-            jo.put(key, value);
-        }
-    }
-
-    /* this is used when Caltopo Session is not used, requiring user to set up the
-     * LiveTrack in Caltopo web interface.
-     *
-     * FIXME: Should we move this to CaltopoLiveTrack and have LiveTrack support
-     *  the track writing without a map, but possibly with R2CPeers?  That
-     *  would make sense if we can get broadcast/rendezvous working.
-     */
-    public void bgPublishLive(String deviceId, double lat, double lng, long altitudeInMeters,
-                              @Nullable CtDroneSpec.PositionTelemetry telemetry) {
-        StringBuilder urlBuilder = new StringBuilder(String.format(Locale.US,
-                "%s%s?id=%s&lat=%.6f&lng=%.6f&elevation=%d",
-                BASE_URL, deviceId, deviceId, lat, lng, altitudeInMeters));
-        appendPositionTelemetryQuery(urlBuilder, telemetry);
-        String https_url = urlBuilder.toString();
-        try {
-            URL url = new URL(https_url);
-            HttpsURLConnection httpsConn;
-            int responseCode;
-
-            //    Log.i(TAG, "sending to caltopo: " + https_url);
-            httpsConn = (HttpsURLConnection) url.openConnection();
-            httpsConn.setRequestMethod("GET");
-            httpsConn.setRequestProperty("User-Agent", "RID2Caltopo/0.2");
-            responseCode = httpsConn.getResponseCode();
-            if (HttpsURLConnection.HTTP_OK != responseCode) {
-                // FIXME: Examine response.  If we get multiple failures and no successes,
-                //        we should stop publishing updates.
-                BufferedReader reader = new BufferedReader(new InputStreamReader(httpsConn.getErrorStream(),
-                        StandardCharsets.UTF_8));
-                StringBuilder response = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    response.append(line);
-                }
-                reader.close();
-                String responseString = response.toString();
-
-                CTError(TAG, "https bad response: " + responseCode + " :" + responseString);
-                Bundle parameters = new Bundle();
-                parameters.putInt("r2c_responseCode", responseCode);
-                parameters.putString("r2c_response", responseString);
-                CaltopoClient.CTEvent(TAG, "PublishToLivetrackFailed", parameters);
-            }
-        } catch (IOException e) {
-            CTError(TAG, "openConnection() raised:", e);
-        }
-    }
-
-    public void publishLive(double lat, double lng, long altitudeInMeters) {
-        if (IsExitRequested()) return;
-        try {
-            GetLivePublishExecutorPool().submit(() ->
-                    bgPublishLive(droneSpec.getRemoteId(), lat, lng, altitudeInMeters, droneSpec.getLastPositionTelemetry()));
-        } catch (RejectedExecutionException e) {
-            CTWarn(TAG, "publishLive(): executor rejected task", e);
-        } catch (Exception e) {
-            CTError(TAG, "executorPool.submit() raised:", e);
-        }
-    }
-
     private void terminateTrack(String msg, boolean updateDroneSpecs) {
         if (droneSpec.isActive()) {
             String trackLabel = droneSpec.trackLabel();
@@ -3254,7 +3136,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
     public boolean newWaypoint(double lat, double lng, double altitudeInMeters, long droneTimestampInMilliseconds,
                                CtDroneSpec.TransportTypeEnum transportType, @Nullable Boolean airborne) {
-        boolean goLiveFlag = GetGoLiveFlag();
         long longAltitudeInMeters = Math.round(altitudeInMeters);
         ArrayList<CtDroneSpec> proximityDrones = new ArrayList<>(GetState().droneSpecTable.values());
 
@@ -3276,16 +3157,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         } else {
             // Keep local map motion responsive even when the Teams/Caltopo live-track path is unavailable.
             CaltopoLiveTrack.NotifyLocalTrackPoint(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
-        }
-
-        // Preserve legacy personal-map behavior: when no Teams map is up,
-        // direct LiveTrack updates are controlled exclusively by the LiveUpdates toggle.
-        if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.down && goLiveFlag) {
-            try {
-                publishLive(lat, lng, longAltitudeInMeters);
-            } catch (Exception e) {
-                CTError(TAG, "publishLive() raised:", e);
-            }
         }
         return true;
     }

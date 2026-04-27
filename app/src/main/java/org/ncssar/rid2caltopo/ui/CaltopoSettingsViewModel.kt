@@ -29,9 +29,6 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _newTrackDelay = MutableStateFlow(CaltopoClient.GetNewTrackDelayInSeconds().toString())
     val newTrackDelay = _newTrackDelay.asStateFlow()
 
-    private val _goLiveFlag = MutableStateFlow(CaltopoClient.GetGoLiveFlag())
-    val goLiveFlag = _goLiveFlag.asStateFlow()
-
     private val _usePeers = MutableStateFlow(CaltopoClient.GetUsePeersFlag())
     val usePeers = _usePeers.asStateFlow()
 
@@ -92,7 +89,6 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     }
 
     override fun settingsChanged() {
-        _goLiveFlag.value = CaltopoClient.GetGoLiveFlag()
         _usePeers.value = CaltopoClient.GetUsePeersFlag()
         _captureIncomingVideo.value = CaltopoClient.GetCaptureVideoStreamsFlag()
         _predictiveHeadEnabled.value = CaltopoClient.GetPredictiveHeadEnabled()
@@ -130,9 +126,6 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _maxIdleTimeInMinutes.value = newVal
     }
 
-    fun onSendLiveChanged(goLiveFlag: Boolean) {
-        _goLiveFlag.value = goLiveFlag
-    }
     fun onUsePeersChanged(usePeers: Boolean) {
         _usePeers.value = usePeers
     }
@@ -194,7 +187,6 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
-        CaltopoClient.SetGoLiveFlag(_goLiveFlag.value)
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
         CaltopoClient.SetPredictiveHeadEnabled(_predictiveHeadEnabled.value)

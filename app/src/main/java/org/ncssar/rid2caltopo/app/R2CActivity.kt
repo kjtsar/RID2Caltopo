@@ -67,6 +67,7 @@ import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
+import org.ncssar.rid2caltopo.ui.ComplianceAlertHost
 import org.ncssar.rid2caltopo.ui.DroneSpecConfirmationDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.MutualAidPackageImportDialog
@@ -332,6 +333,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     ActiveScreen.MAIN -> {
                         MainScreen(
                             localViewModel = localViewModel,
+                            streamsViewModel = streamsViewModel,
                             availableLogArchiveDaysProvider = {
                                 listAvailableLogArchiveDays()
                             },
@@ -395,6 +397,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         ProximityAlertCenter.suspendCurrentAlert()
                     }
                 )
+                ComplianceAlertHost()
                 if (maPackageImportState !is org.ncssar.rid2caltopo.data.MutualAidPackageImportState.Idle) {
                     MutualAidPackageImportDialog(
                         state = maPackageImportState,

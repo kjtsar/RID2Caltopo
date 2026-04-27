@@ -47,6 +47,8 @@ import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DesignatorState
 import org.ncssar.rid2caltopo.app.MediaMTXService
+import org.ncssar.rid2caltopo.ui.ComplianceAlertCandidate
+import org.ncssar.rid2caltopo.ui.ComplianceAlertCenter
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
@@ -101,6 +103,18 @@ data class ProximityMapFocusTarget(
     val firstLng: Double,
     val secondLat: Double,
     val secondLng: Double
+)
+
+private const val COMPLIANCE_ALERT_AGL_LIMIT_FT = 200.0
+
+data class OverLimitDroneUiState(
+    val mappedId: String,
+    val aglFt: Double,
+    val thresholdFt: Double,
+    val muted: Boolean,
+    val staleDem: Boolean,
+    val usingDemAgl: Boolean,
+    val atoFt: Double?,
 )
 
 private data class ProcessLoadSnapshot(
@@ -468,6 +482,8 @@ data class DroneDisplayState(
     val aglFt: Double?,
     /** True when the AGL value is DEM-sourced but the DEM data is stale or the drone has moved. */
     val aglStale: Boolean = false,
+    /** True when aglFt is DEM-backed; false means we are falling back to ATO / flat-earth estimate. */
+    val aglUsesDem: Boolean = false,
     val atoFt: Double?,
 )
 
@@ -638,6 +654,9 @@ class StreamsViewModel(
         get() = _baseLayer.value
     private var persistedMapViewportState: MapViewportState? = null
     private var clueProjectionJob: Job? = null
+    private val mutedComplianceAlertDesignators = mutableStateSetOf<String>()
+    private val _overLimitDrones = MutableStateFlow<List<OverLimitDroneUiState>>(emptyList())
+    val overLimitDrones: StateFlow<List<OverLimitDroneUiState>> = _overLimitDrones.asStateFlow()
 
     private var lastLiveRevisions: Map<String, Long> = emptyMap()
     private var lastLivePublisherConnIds: Map<String, String?> = emptyMap()
@@ -662,6 +681,57 @@ class StreamsViewModel(
                 _droneStates.remove(key)
             }
         }
+        mutedComplianceAlertDesignators.retainAll(_droneStates.keys)
+        val overLimit = _droneStates.mapNotNull { (designator, _) ->
+            val displayState = altitudeCoordinator.displayStateByDesignator[designator] ?: return@mapNotNull null
+            val aglFt = displayState.aglFt ?: return@mapNotNull null
+            if (aglFt < COMPLIANCE_ALERT_AGL_LIMIT_FT) return@mapNotNull null
+            OverLimitDroneUiState(
+                mappedId = designator,
+                aglFt = aglFt,
+                thresholdFt = COMPLIANCE_ALERT_AGL_LIMIT_FT,
+                muted = designator in mutedComplianceAlertDesignators,
+                staleDem = displayState.aglStale,
+                usingDemAgl = displayState.aglUsesDem,
+                atoFt = displayState.atoFt
+            )
+        }.sortedByDescending { it.aglFt }
+        _overLimitDrones.value = overLimit
+        ComplianceAlertCenter.updateCandidates(
+            overLimit
+                .filterNot { it.muted }
+                .map {
+                    ComplianceAlertCandidate(
+                        mappedId = it.mappedId,
+                        aglFt = it.aglFt,
+                        thresholdFt = it.thresholdFt,
+                        staleDem = it.staleDem
+                    )
+                }
+        )
+    }
+
+    fun setComplianceAlertMuted(mappedId: String, muted: Boolean) {
+        if (muted) {
+            mutedComplianceAlertDesignators.add(mappedId)
+        } else {
+            mutedComplianceAlertDesignators.remove(mappedId)
+        }
+        _overLimitDrones.value = _overLimitDrones.value.map { drone ->
+            if (drone.mappedId == mappedId) drone.copy(muted = muted) else drone
+        }
+        ComplianceAlertCenter.updateCandidates(
+            _overLimitDrones.value
+                .filterNot { it.muted }
+                .map {
+                    ComplianceAlertCandidate(
+                        mappedId = it.mappedId,
+                        aglFt = it.aglFt,
+                        thresholdFt = it.thresholdFt,
+                        staleDem = it.staleDem
+                    )
+                }
+        )
     }
 
     fun isStreamVisible(stream: StreamInfo): Boolean {

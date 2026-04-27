@@ -75,6 +75,98 @@ data class ProximityDebugPair(
     val alerting: Boolean
 )
 
+data class ComplianceAlertCandidate(
+    val mappedId: String,
+    val aglFt: Double,
+    val thresholdFt: Double,
+    val staleDem: Boolean
+)
+
+data class ComplianceAlertUiState(
+    val alertInstanceId: Long,
+    val mappedId: String,
+    val aglFt: Double,
+    val thresholdFt: Double,
+    val highSeverity: Boolean,
+    val staleDem: Boolean
+)
+
+private enum class ComplianceAlertSeverity {
+    None,
+    Near,
+    Over
+}
+
+object ComplianceAlertCenter {
+    private const val NEAR_LIMIT_RATIO = 0.90
+    private const val NEAR_ALERT_COOLDOWN_MS = 30_000L
+    private const val OVER_ALERT_COOLDOWN_MS = 15_000L
+
+    private val _uiState = MutableStateFlow<ComplianceAlertUiState?>(null)
+    val uiState: StateFlow<ComplianceAlertUiState?> = _uiState.asStateFlow()
+
+    private var lastSeverity = ComplianceAlertSeverity.None
+    private var lastAlertToneAtMs = 0L
+    private var nextAlertInstanceId = 1L
+
+    fun updateCandidates(candidates: List<ComplianceAlertCandidate>) {
+        val bestCandidate = candidates
+            .filter { it.aglFt.isFinite() && it.thresholdFt > 0.0 }
+            .mapNotNull { candidate ->
+                val severity = when {
+                    candidate.aglFt >= candidate.thresholdFt -> ComplianceAlertSeverity.Over
+                    candidate.aglFt >= candidate.thresholdFt * NEAR_LIMIT_RATIO -> ComplianceAlertSeverity.Near
+                    else -> ComplianceAlertSeverity.None
+                }
+                if (severity == ComplianceAlertSeverity.None) null else candidate to severity
+            }
+            .maxWithOrNull(
+                compareBy<Pair<ComplianceAlertCandidate, ComplianceAlertSeverity>> { it.second.ordinal }
+                    .thenBy { it.first.aglFt }
+            )
+
+        if (bestCandidate == null) {
+            lastSeverity = ComplianceAlertSeverity.None
+            lastAlertToneAtMs = 0L
+            _uiState.value = null
+            return
+        }
+
+        val (candidate, severity) = bestCandidate
+        val nowMs = System.currentTimeMillis()
+        val cooldownMs =
+            if (severity == ComplianceAlertSeverity.Over) OVER_ALERT_COOLDOWN_MS else NEAR_ALERT_COOLDOWN_MS
+        val shouldNotify = severity != lastSeverity || nowMs - lastAlertToneAtMs >= cooldownMs
+
+        lastSeverity = severity
+
+        val currentState = _uiState.value
+        val highSeverity = severity == ComplianceAlertSeverity.Over
+        if (shouldNotify || currentState == null) {
+            _uiState.value = ComplianceAlertUiState(
+                alertInstanceId = nextAlertInstanceId++,
+                mappedId = candidate.mappedId,
+                aglFt = candidate.aglFt,
+                thresholdFt = candidate.thresholdFt,
+                highSeverity = highSeverity,
+                staleDem = candidate.staleDem
+            )
+            lastAlertToneAtMs = nowMs
+        } else if (currentState.mappedId == candidate.mappedId) {
+            _uiState.value = currentState.copy(
+                aglFt = candidate.aglFt,
+                thresholdFt = candidate.thresholdFt,
+                highSeverity = highSeverity,
+                staleDem = candidate.staleDem
+            )
+        }
+    }
+
+    fun dismissCurrentAlert() {
+        _uiState.value = null
+    }
+}
+
 object ProximityAlertCenter {
     private const val MIN_DRONE_MOVE_FT = 1.0
     private const val MAX_PROJECTION_MS = 2_000L
@@ -663,6 +755,42 @@ fun ProximityAlertHost(
 }
 
 @Composable
+fun ComplianceAlertHost() {
+    val context = LocalContext.current
+    val alert by ComplianceAlertCenter.uiState.collectAsState()
+    val toneGenerator = remember {
+        try {
+            ToneGenerator(AudioManager.STREAM_ALARM, 100)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { toneGenerator?.release() }
+    }
+
+    LaunchedEffect(alert?.alertInstanceId) {
+        alert?.let { uiState ->
+            val tone = if (uiState.highSeverity) {
+                ToneGenerator.TONE_CDMA_HIGH_SS
+            } else {
+                ToneGenerator.TONE_PROP_BEEP
+            }
+            toneGenerator?.startTone(tone, if (uiState.highSeverity) 350 else 220)
+            vibrateBriefly(context)
+            val staleSuffix = if (uiState.staleDem) " (DEM AGL may be stale)" else ""
+            val toastMessage = if (uiState.highSeverity) {
+                "${uiState.mappedId} above ${formatFeet(uiState.thresholdFt)} AGL at ${formatFeet(uiState.aglFt)}$staleSuffix"
+            } else {
+                "${uiState.mappedId} near ${formatFeet(uiState.thresholdFt)} AGL at ${formatFeet(uiState.aglFt)}$staleSuffix"
+            }
+            CaltopoClient.ShowToast(toastMessage)
+        }
+    }
+}
+
+@Composable
 fun ResumeProximityAlertButton() {
     val canResume by ProximityAlertCenter.canResumeAlert.collectAsState()
     if (canResume) {
@@ -759,10 +887,9 @@ private fun formatFeet(value: Double): String =
     String.format(Locale.US, "%.0f ft", value)
 
 private fun vibrateBriefly(context: Context) {
-    val effect = VibrationEffect.createWaveform(
-        longArrayOf(0L, 180L, 90L, 220L, 110L, 260L),
-        intArrayOf(0, 180, 0, 220, 0, 255),
-        -1
+    val effect = VibrationEffect.createOneShot(
+        180L,
+        VibrationEffect.DEFAULT_AMPLITUDE
     )
     val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val manager = context.getSystemService(VibratorManager::class.java)

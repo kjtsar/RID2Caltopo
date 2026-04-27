@@ -7,6 +7,7 @@
 
 package org.ncssar.rid2caltopo.ui
 
+import StreamsViewModel
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -63,6 +64,8 @@ import org.ncssar.rid2caltopo.data.RidReplayManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
+import org.ncssar.rid2caltopo.video.ComplianceAlertBell
+import org.ncssar.rid2caltopo.video.ComplianceAlertDialog
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -166,6 +169,7 @@ private fun restartMediaMtxServer(context: android.content.Context) {
 @Composable
 fun MainScreen(
     localViewModel: R2CViewModel,
+    streamsViewModel: StreamsViewModel,
     availableLogArchiveDaysProvider: suspend () -> List<LogArchiveDayOption>,
     onEmailLog: suspend (List<String>) -> Unit,
     onShowHelp: () -> Unit,
@@ -208,9 +212,11 @@ fun MainScreen(
     var selectedLogArchiveDays by remember { mutableStateOf(emptySet<String>()) }
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
     var locationOverrideText by remember { mutableStateOf("") }
+    var showCompliancePanel by remember { mutableStateOf(false) }
     var locationOverrideError by remember { mutableStateOf<String?>(null) }
     var locationOverrideLabel by remember { mutableStateOf(formatLocationOverride(CaltopoMap.GetMyLocationOverride())) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
+    val overLimitDrones by streamsViewModel.overLimitDrones.collectAsStateWithLifecycle()
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
     val coroutineScope = rememberCoroutineScope()
 
@@ -531,6 +537,14 @@ fun MainScreen(
             onDismiss = { showNotamPanel = false }
         )
     }
+    ComplianceAlertDialog(
+        visible = showCompliancePanel,
+        overLimitDrones = overLimitDrones,
+        onDismiss = { showCompliancePanel = false },
+        onToggleMuted = { mappedId, muted ->
+            streamsViewModel.setComplianceAlertMuted(mappedId, muted)
+        }
+    )
     if (showProximityDebugDialog) {
         AlertDialog(
             onDismissRequest = { showProximityDebugDialog = false },
@@ -809,6 +823,12 @@ fun MainScreen(
                     )
                 },
                 actions = {
+                    val allOverLimitMuted = overLimitDrones.isNotEmpty() && overLimitDrones.all { it.muted }
+                    ComplianceAlertBell(
+                        overLimitDrones = overLimitDrones,
+                        allOverLimitMuted = allOverLimitMuted,
+                        onClick = { showCompliancePanel = true }
+                    )
                     ResumeProximityAlertButton()
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More options")

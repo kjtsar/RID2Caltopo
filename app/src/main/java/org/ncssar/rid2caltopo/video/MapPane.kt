@@ -14,8 +14,6 @@ import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.location.Location
-import android.media.AudioManager
-import android.media.ToneGenerator
 import android.os.StatFs
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -603,15 +601,6 @@ internal fun SplitMapPane(
     val complianceByDesignator = remember { mutableStateMapOf<String, DroneComplianceState>() }
     // Tracks which drone's info-window bubble is open so it can be restored after each overlay rebuild.
     var openBubbleDesignator by remember { mutableStateOf<String?>(null) }
-    var lastAlertSeverity by remember { mutableStateOf(AlertSeverity.None) }
-    var lastAlertToneAtMs by remember { mutableStateOf(0L) }
-    val toneGenerator = remember {
-        try {
-            ToneGenerator(AudioManager.STREAM_NOTIFICATION, 55)
-        } catch (_: Exception) {
-            null
-        }
-    }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val proximityMapFocusTarget by viewModel.proximityMapFocusTarget.collectAsStateWithLifecycle()
@@ -1607,8 +1596,6 @@ internal fun SplitMapPane(
         viewModel.altitudeCoordinator.onMapReconnect()
         renderLatencyKeyByDesignator.clear()
         complianceByDesignator.clear()
-        lastAlertSeverity = AlertSeverity.None
-        lastAlertToneAtMs = 0L
         initialViewportApplied = persistedViewport != null
         initialViewportArtifactCount = -1
     }
@@ -1616,10 +1603,6 @@ internal fun SplitMapPane(
     DisposableEffect(Unit) {
         onDispose {
             tileMapProvider.detach()
-            try {
-                toneGenerator?.release()
-            } catch (_: Exception) {
-            }
         }
     }
 
@@ -2447,25 +2430,6 @@ internal fun SplitMapPane(
                     anyOver -> AlertSeverity.Over
                     anyNear -> AlertSeverity.Near
                     else -> AlertSeverity.None
-                }
-
-                val nowMs = System.currentTimeMillis()
-                val cooldownMs = if (severity == AlertSeverity.Over) OVER_ALERT_COOLDOWN_MS else NEAR_ALERT_COOLDOWN_MS
-                val shouldTone = severity != AlertSeverity.None &&
-                    (severity != lastAlertSeverity || nowMs - lastAlertToneAtMs >= cooldownMs)
-                if (shouldTone) {
-                    val toneType = if (severity == AlertSeverity.Over) {
-                        ToneGenerator.TONE_CDMA_HIGH_SS
-                    } else {
-                        ToneGenerator.TONE_PROP_BEEP
-                    }
-                    toneGenerator?.startTone(toneType, if (severity == AlertSeverity.Over) 250 else 140)
-                    lastAlertToneAtMs = nowMs
-                    if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(MAP_PANE_TAG, "Compliance alert tone: severity=$severity")
-                }
-                if (severity != lastAlertSeverity) {
-                    lastAlertSeverity = severity
-                    if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(MAP_PANE_TAG, "Compliance alert state changed: severity=$severity")
                 }
 
                 val renderStats =

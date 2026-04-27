@@ -409,7 +409,13 @@ internal class DroneAltitudeCoordinator(
         val atoFt = displayAtoMeters(altM, calibration, ridHeightAtoM)?.times(METERS_TO_FEET)
         val headingDeg = telemetryHeading[designator] ?: fallbackHeading[designator]
 
-        displayStateByDesignator[designator] = DroneDisplayState(headingDeg, aglFt, aglStale, atoFt)
+        displayStateByDesignator[designator] = DroneDisplayState(
+            headingDeg = headingDeg,
+            aglFt = aglFt,
+            aglStale = aglStale,
+            aglUsesDem = usingDemAgl,
+            atoFt = atoFt
+        )
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────────────────

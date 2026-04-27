@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.video
 
+import OverLimitDroneUiState
 import StreamsViewModel
 import android.content.Intent
 import androidx.compose.foundation.background
@@ -25,6 +26,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -33,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -113,6 +117,7 @@ fun StreamsScreen(
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
+    val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
     val mapStatus by remember(mapName) {
         derivedStateOf {
             if (mapName != null) {
@@ -134,6 +139,8 @@ fun StreamsScreen(
     }
     var showNotamPanel by remember { mutableStateOf(false) }
     var showPerformancePanel by remember { mutableStateOf(false) }
+    var showCompliancePanel by remember { mutableStateOf(false) }
+    val allOverLimitMuted = overLimitDrones.isNotEmpty() && overLimitDrones.all { it.muted }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -196,6 +203,11 @@ fun StreamsScreen(
                 },
                 actions = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        ComplianceAlertBell(
+                            overLimitDrones = overLimitDrones,
+                            allOverLimitMuted = allOverLimitMuted,
+                            onClick = { showCompliancePanel = true }
+                        )
                         ResumeProximityAlertButton()
                         if (layoutMode != StreamsLayoutMode.Both) {
                             LayoutToggleChip(
@@ -246,6 +258,15 @@ fun StreamsScreen(
                 }
             }
         }
+
+        ComplianceAlertDialog(
+            visible = showCompliancePanel,
+            overLimitDrones = overLimitDrones,
+            onDismiss = { showCompliancePanel = false },
+            onToggleMuted = { mappedId, muted ->
+                viewModel.setComplianceAlertMuted(mappedId, muted)
+            }
+        )
     }
 
     if (showNotamPanel) {
@@ -272,6 +293,113 @@ fun StreamsScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+fun ComplianceAlertBell(
+    overLimitDrones: List<OverLimitDroneUiState>,
+    allOverLimitMuted: Boolean,
+    onClick: () -> Unit
+) {
+    if (overLimitDrones.isEmpty()) return
+    IconButton(onClick = onClick) {
+        Icon(
+            imageVector = if (allOverLimitMuted) Icons.Default.NotificationsOff else Icons.Default.Notifications,
+            contentDescription = "Altitude alerts",
+            tint = if (allOverLimitMuted) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.error
+            }
+        )
+    }
+}
+
+@Composable
+fun ComplianceAlertDialog(
+    visible: Boolean,
+    overLimitDrones: List<OverLimitDroneUiState>,
+    onDismiss: () -> Unit,
+    onToggleMuted: (mappedId: String, muted: Boolean) -> Unit
+) {
+    if (!visible) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Altitude Alerts") },
+        text = {
+            if (overLimitDrones.isEmpty()) {
+                Text("No drones are currently above 200 ft AGL.")
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    overLimitDrones.forEach { drone ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(drone.mappedId)
+                                Text(
+                                    text = complianceAlertSummary(drone),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 13.sp
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    onToggleMuted(drone.mappedId, !drone.muted)
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = if (drone.muted) {
+                                        Icons.Default.NotificationsOff
+                                    } else {
+                                        Icons.Default.Notifications
+                                    },
+                                    contentDescription = if (drone.muted) {
+                                        "Enable alerts for ${drone.mappedId}"
+                                    } else {
+                                        "Mute alerts for ${drone.mappedId}"
+                                    },
+                                    tint = if (drone.muted) {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    } else {
+                                        MaterialTheme.colorScheme.error
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+private fun complianceAlertSummary(drone: OverLimitDroneUiState): String {
+    return if (drone.usingDemAgl) {
+        String.format(
+            java.util.Locale.US,
+            "%.0f' AGL%s",
+            drone.aglFt,
+            if (drone.staleDem) " (DEM stale)" else ""
+        )
+    } else {
+        val atoText = drone.atoFt?.let {
+            String.format(java.util.Locale.US, "%.0f' ATO", it)
+        } ?: String.format(java.util.Locale.US, "%.0f' ATO", drone.aglFt)
+        "$atoText (AGL not available)"
     }
 }
 

@@ -339,7 +339,11 @@ fun ComplianceAlertDialog(
                 ) {
                     overLimitDrones.forEach { drone ->
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onToggleMuted(drone.mappedId, !drone.muted)
+                                },
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {

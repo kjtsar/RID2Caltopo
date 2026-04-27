@@ -22,6 +22,7 @@ import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 enum class DriveSyncAction {
     RESTORE,
@@ -56,8 +57,15 @@ object GoogleDriveConfigSync {
     private const val DRIVE_PERMISSIONS_URL = "https://www.googleapis.com/drive/v3/files/%s/permissions"
     // Public (unauthenticated) download URL for files shared with "anyone with link".
     private const val PUBLIC_DOWNLOAD_URL = "https://drive.google.com/uc?export=download&id=%s"
+    private const val HTTP_CONNECT_TIMEOUT_SECONDS = 20L
+    private const val HTTP_READ_TIMEOUT_SECONDS = 45L
+    private const val HTTP_CALL_TIMEOUT_SECONDS = 90L
 
-    private val httpClient = OkHttpClient()
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(HTTP_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(HTTP_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .callTimeout(HTTP_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 

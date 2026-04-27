@@ -14,6 +14,7 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
+import android.app.ForegroundServiceStartNotAllowedException;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -21,6 +22,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.IBinder;
+import android.os.Build;
 import android.os.Process;
 
 import androidx.annotation.NonNull;
@@ -53,6 +55,8 @@ public class ScanningService extends Service {
     private BluetoothScanner btScanner;
     private WiFiScanner wiFiScanner;
     private boolean scanning = false;
+    private boolean foregroundStarted = false;
+    private boolean foregroundStartBlocked = false;
     private static volatile boolean serviceRunning = false;
     private static Context AppContext = R2CApplication.getAppCtxt();
     private static OpenDroneIdDataManager DataManager = new OpenDroneIdDataManager(null);
@@ -87,7 +91,6 @@ public class ScanningService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        serviceRunning = true;
         CTDebug(TAG, String.format(Locale.US,
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));
@@ -105,7 +108,17 @@ public class ScanningService extends Service {
         NotificationChannel serviceChannel = new NotificationChannel(CHANNEL_ID,
                 CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT);
         NotificationManager notManager = getSystemService(NotificationManager.class);
-        notManager.createNotificationChannel(serviceChannel);
+        if (notManager != null) {
+            notManager.createNotificationChannel(serviceChannel);
+        }
+
+        if (startForegroundSafely(buildForegroundNotification())) {
+            serviceRunning = true;
+        } else {
+            foregroundStartBlocked = true;
+            serviceRunning = false;
+            stopSelf();
+        }
     }
     @NonNull
     public static String UpTime() {
@@ -121,14 +134,12 @@ public class ScanningService extends Service {
     public void onDestroy() {
         CTDebug(TAG, String.format(Locale.US,
                 "onDestroy(): ScanningService 0x%x", this.hashCode()));
-        try {
-            stopForeground(true);
-        } catch (Exception e) {
-            CTDebug(TAG, "onDestroy(): stopForeground ignored: " + e.getMessage());
-        }
+        stopForegroundSafely();
         if (scanning) {
             stopScanning();
         }
+        foregroundStarted = false;
+        foregroundStartBlocked = false;
         serviceRunning = false;
         super.onDestroy();
     }
@@ -146,9 +157,14 @@ public class ScanningService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (foregroundStartBlocked) {
+            CTError(TAG, "onStartCommand(): foreground start blocked by Android.");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         if (intent != null && ACTION_STOP_SERVICE.equals(intent.getAction())) {
             CTDebug(TAG, "ScanningService shutting down.");
-            stopForeground(true);
+            stopForegroundSafely();
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -160,25 +176,11 @@ public class ScanningService extends Service {
             }
         }
         CTDebug(TAG, String.format(Locale.US, "onStartCommand(): AppContext:0x%x", AppContext.hashCode()));
-
-
-        intent = new Intent(AppContext, R2CActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | FLAG_ACTIVITY_NEW_TASK |
-                Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent pendingIntent = PendingIntent.getActivity(AppContext, 0, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        Notification notification = new NotificationCompat.Builder(AppContext, CHANNEL_ID)
-                .setContentTitle("OpenDroneID Scanning Service")
-                .setContentText("Scanning for remoteID broadcasts on Bluetooth and Wireless interfaces")
-                .setSmallIcon(R.drawable.ic_notification_drone)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .setContentIntent(pendingIntent)
-                .setAutoCancel(false)
-                .build();
-
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+        if (!foregroundStarted && !startForegroundSafely(buildForegroundNotification())) {
+            foregroundStartBlocked = true;
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         startScanning();
         return START_STICKY;
     }
@@ -186,10 +188,20 @@ public class ScanningService extends Service {
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         CTDebug(TAG, "onTaskRemoved()");
-        stopForeground(true);
+        stopForegroundSafely();
         stopSelf();
         CaltopoClient.ShutdownAsync();
         super.onTaskRemoved(rootIntent);
+    }
+
+    public static void requestStart(@NonNull Context context) {
+        Context appContext = context.getApplicationContext();
+        Intent startIntent = new Intent(appContext, ScanningService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.startForegroundService(appContext, startIntent);
+        } else {
+            appContext.startService(startIntent);
+        }
     }
 
     public static void requestStop(@NonNull Context context) {
@@ -210,5 +222,50 @@ public class ScanningService extends Service {
     @Override
     protected void dump(FileDescriptor fd, PrintWriter writer, String[] args) {
         super.dump(fd, writer, args);
+    }
+
+    private Notification buildForegroundNotification() {
+        Intent launchIntent = new Intent(AppContext, R2CActivity.class);
+        launchIntent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | FLAG_ACTIVITY_NEW_TASK |
+                Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pendingIntent = PendingIntent.getActivity(AppContext, 0, launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        return new NotificationCompat.Builder(AppContext, CHANNEL_ID)
+                .setContentTitle("OpenDroneID Scanning Service")
+                .setContentText("Scanning for remoteID broadcasts on Bluetooth and Wireless interfaces")
+                .setSmallIcon(R.drawable.ic_notification_drone)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(false)
+                .build();
+    }
+
+    private boolean startForegroundSafely(Notification notification) {
+        try {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            foregroundStarted = true;
+            return true;
+        } catch (ForegroundServiceStartNotAllowedException e) {
+            CTError(TAG, "Android blocked ScanningService foreground start", e);
+        } catch (IllegalStateException e) {
+            CTError(TAG, "ScanningService foreground start failed", e);
+        } catch (RuntimeException e) {
+            CTError(TAG, "Unexpected ScanningService foreground start failure", e);
+        }
+        foregroundStarted = false;
+        return false;
+    }
+
+    private void stopForegroundSafely() {
+        if (!foregroundStarted) return;
+        try {
+            stopForeground(true);
+        } catch (Exception e) {
+            CTDebug(TAG, "stopForeground() ignored: " + e.getMessage());
+        } finally {
+            foregroundStarted = false;
+        }
     }
 }

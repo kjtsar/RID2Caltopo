@@ -15,6 +15,7 @@ import android.os.Looper;
 
 import java.util.Locale;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -25,6 +26,8 @@ public class DelayedExec {
     private Runnable dispatcherRunnable;
     private long repeatMsec;  // zero == no repeat.
     private boolean running;
+    private final boolean preferMainLooper;
+    private ScheduledFuture<?> scheduledFuture;
 
     // Fallback executor used when Android Looper is unavailable (unit-test environments).
     private static final ScheduledExecutorService testExecutor =
@@ -35,6 +38,11 @@ public class DelayedExec {
             });
 
     public DelayedExec() {
+        this(true);
+    }
+
+    public DelayedExec(boolean preferMainLooper) {
+        this.preferMainLooper = preferMainLooper;
     }
 
     public static void RunAfterDelayInMsec(Runnable aRunnable, long delayInMsec) {
@@ -71,7 +79,7 @@ public class DelayedExec {
             }
 
             if (savedRunState) {
-                handler.postDelayed(dispatcherRunnable, repeatMsec);
+                schedule(repeatMsec);
             } else {
                 CTInfo(TAG, String.format(Locale.US,
                         "'%s' completed single delayed operation.", runnable.toString()));
@@ -86,32 +94,25 @@ public class DelayedExec {
     }
 
     public void start(Runnable runnable, long delayInMsec, long repeatDelayInMsec) {
-        if (null == handler) {
-            Looper mainLooper = Looper.getMainLooper();
-            if (mainLooper == null) {
-                // Unit-test fallback: schedule via shared executor; repeat is unsupported.
-                this.runnable = runnable;
-                running = true;
-                repeatMsec = repeatDelayInMsec;
-                testExecutor.schedule(this::dispatcher, delayInMsec, TimeUnit.MILLISECONDS);
-                return;
-            }
-            handler = new Handler(mainLooper);
-        }
         if (null == dispatcherRunnable) {
             dispatcherRunnable = this::dispatcher;
         }
         this.runnable = runnable;
-        handler.removeCallbacks(dispatcherRunnable);
+        stopScheduledFuture();
+        if (handler != null) {
+            handler.removeCallbacks(dispatcherRunnable);
+        }
         repeatMsec = repeatDelayInMsec;
         running = true;
-        handler.postDelayed(dispatcherRunnable, delayInMsec);
+        ensureHandlerIfNeeded();
+        schedule(delayInMsec);
     }
 
     public void stop() {
         if (handler != null && dispatcherRunnable != null) {
             handler.removeCallbacks(dispatcherRunnable);
         }
+        stopScheduledFuture();
         repeatMsec = 0;
         running = false;
     }
@@ -120,6 +121,30 @@ public class DelayedExec {
         if (handler != null && dispatcherRunnable != null) {
             handler.removeCallbacks(dispatcherRunnable);
         }
+        stopScheduledFuture();
         running = false;
+    }
+
+    private void ensureHandlerIfNeeded() {
+        if (!preferMainLooper || handler != null) return;
+        Looper mainLooper = Looper.getMainLooper();
+        if (mainLooper != null) {
+            handler = new Handler(mainLooper);
+        }
+    }
+
+    private void schedule(long delayInMsec) {
+        if (handler != null) {
+            handler.postDelayed(dispatcherRunnable, delayInMsec);
+        } else {
+            scheduledFuture = testExecutor.schedule(this::dispatcher, delayInMsec, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void stopScheduledFuture() {
+        if (scheduledFuture != null) {
+            scheduledFuture.cancel(false);
+            scheduledFuture = null;
+        }
     }
 }

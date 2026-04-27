@@ -9,6 +9,7 @@ import static java.lang.Thread.sleep;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
+import android.app.ForegroundServiceStartNotAllowedException;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -55,6 +56,8 @@ public class MediaMTXService extends Service {
     private static boolean recordingListenerRegistered = false;
     private static int processPid = 0;
     private static volatile boolean serviceRunning = false;
+    private boolean foregroundStarted = false;
+    private boolean foregroundStartBlocked = false;
     public static boolean IsRunning() { return serviceRunning; }
 
     public static void onNativeProcessExit(int pid, int status, int signaled) {
@@ -76,7 +79,6 @@ public class MediaMTXService extends Service {
 
     public void onCreate() {
         super.onCreate();
-        serviceRunning = true;
         createNotificationChannel();
         Intent launchIntent = new Intent(this, R2CActivity.class);
         launchIntent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
@@ -99,15 +101,27 @@ public class MediaMTXService extends Service {
                 .setOngoing(true)
                 .build();
 
-        startForeground(MEDIA_MTX_NOTIFICATION_ID, notification);
+        if (startForegroundSafely(notification)) {
+            serviceRunning = true;
+        } else {
+            serviceRunning = false;
+            foregroundStartBlocked = true;
+            MediaMTXStatus.onServerExited("foreground start blocked by Android");
+            stopSelf();
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (foregroundStartBlocked) {
+            CTInfo(TAG, "Ignoring start request because foreground launch was blocked.");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         String action = intent != null ? intent.getAction() : null;
         if (ACTION_STOP_SERVICE.equals(action)) {
             CTDebug(TAG, "MediaMTXService shutting down.");
-            stopForeground(true);
+            stopForegroundSafely();
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -138,12 +152,10 @@ public class MediaMTXService extends Service {
     @Override
     public void onDestroy() {
         serviceRunning = false;
+        foregroundStarted = false;
+        foregroundStartBlocked = false;
         processPid = 0;
-        try {
-            stopForeground(true);
-        } catch (Exception e) {
-            CTDebug(TAG, "onDestroy(): stopForeground ignored: " + e.getMessage());
-        }
+        stopForegroundSafely();
         new Thread(MediaMTXNative::stop, "mediamtx-native-stop").start();
         // Run syncAll on a background thread to avoid ForegroundServiceDidNotStopInTimeException.
         // Android 14+ enforces a ~20 s shutdown timeout on the main thread; copying large video
@@ -197,12 +209,25 @@ public class MediaMTXService extends Service {
     }
 
     public static void requestRestart(Context context) {
+        Context appContext = context.getApplicationContext();
         Intent restartIntent = new Intent(context, MediaMTXService.class);
         restartIntent.setAction(ACTION_RESTART_SERVICE);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(restartIntent);
+        if (IsRunning()) {
+            appContext.startService(restartIntent);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.startForegroundService(appContext, restartIntent);
         } else {
-            context.startService(restartIntent);
+            appContext.startService(restartIntent);
+        }
+    }
+
+    public static void requestStart(Context context) {
+        Context appContext = context.getApplicationContext();
+        Intent startIntent = new Intent(appContext, MediaMTXService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.startForegroundService(appContext, startIntent);
+        } else {
+            appContext.startService(startIntent);
         }
     }
 
@@ -220,10 +245,37 @@ public class MediaMTXService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        stopForeground(true);
+        stopForegroundSafely();
         stopSelf();
         CaltopoClient.ShutdownAsync();
         super.onTaskRemoved(rootIntent);
+    }
+
+    private boolean startForegroundSafely(Notification notification) {
+        try {
+            startForeground(MEDIA_MTX_NOTIFICATION_ID, notification);
+            foregroundStarted = true;
+            return true;
+        } catch (ForegroundServiceStartNotAllowedException e) {
+            CTError(TAG, "Android blocked MediaMTX foreground start", e);
+        } catch (IllegalStateException e) {
+            CTError(TAG, "MediaMTX foreground start failed", e);
+        } catch (RuntimeException e) {
+            CTError(TAG, "Unexpected MediaMTX foreground start failure", e);
+        }
+        foregroundStarted = false;
+        return false;
+    }
+
+    private void stopForegroundSafely() {
+        if (!foregroundStarted) return;
+        try {
+            stopForeground(true);
+        } catch (Exception e) {
+            CTDebug(TAG, "stopForeground() ignored: " + e.getMessage());
+        } finally {
+            foregroundStarted = false;
+        }
     }
 
     private void createNotificationChannel() {

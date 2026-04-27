@@ -1,9 +1,14 @@
 package org.ncssar.rid2caltopo.notam
 
 import android.location.Location
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -114,7 +119,7 @@ internal class NotamRepository {
                 }
                 fetched.notices
             } catch (e: Exception) {
-                lastErrorMessage = e.message ?: "NOTAM request failed"
+                lastErrorMessage = classifyNotamErrorMessage(e)
                 if (CTDebugEnabled(TAG)) {
                     CTDebug(TAG, "Fetch failed: ${lastErrorMessage}")
                 }
@@ -204,18 +209,11 @@ internal class NotamRepository {
         }
         val request = Request.Builder()
             .url(url)
-            .header("Authorization", "Bearer ${NotamAuthManager.getBearerToken()}")
+            .header("Authorization", "Bearer ${withContext(Dispatchers.IO) { NotamAuthManager.getBearerToken() }}")
             .header("nmsResponseFormat", "GEOJSON")
             .get()
             .build()
-        client.newCall(request).execute().use { response ->
-            if (CTDebugEnabled(TAG)) {
-                CTDebug(TAG, "NOTAM query response http=${response.code}")
-            }
-            if (!response.isSuccessful) {
-                throw IllegalStateException("NOTAM query failed with HTTP ${response.code}")
-            }
-            val body = response.body?.string().orEmpty()
+        return executeNotamRequest(request, "NOTAM query") { body ->
             val json = JSONObject(body)
             val data = json.optJSONObject("data") ?: throw IllegalStateException("NOTAM response did not include data")
             val features = data.optJSONArray("geojson") ?: JSONArray()
@@ -227,7 +225,7 @@ internal class NotamRepository {
                 val feature = features.optJSONObject(i) ?: continue
                 notices += featureToNearbyNotam(feature, current)
             }
-            return NotamPolicy.sort(notices)
+            NotamPolicy.sort(notices)
         }
     }
 
@@ -246,18 +244,11 @@ internal class NotamRepository {
         }
         val request = Request.Builder()
             .url(url)
-            .header("Authorization", "Bearer ${NotamAuthManager.getBearerToken()}")
+            .header("Authorization", "Bearer ${withContext(Dispatchers.IO) { NotamAuthManager.getBearerToken() }}")
             .header("nmsResponseFormat", "GEOJSON")
             .get()
             .build()
-        client.newCall(request).execute().use { response ->
-            if (CTDebugEnabled(TAG)) {
-                CTDebug(TAG, "NOTAM delta query response http=${response.code}")
-            }
-            if (!response.isSuccessful) {
-                throw IllegalStateException("NOTAM delta query failed with HTTP ${response.code}")
-            }
-            val body = response.body?.string().orEmpty()
+        return executeNotamRequest(request, "NOTAM delta query") { body ->
             val json = JSONObject(body)
             val data = json.optJSONObject("data") ?: throw IllegalStateException("NOTAM delta response did not include data")
             val features = data.optJSONArray("geojson") ?: JSONArray()
@@ -269,7 +260,49 @@ internal class NotamRepository {
                 val feature = features.optJSONObject(i) ?: continue
                 notices += featureToNearbyNotam(feature, current)
             }
-            return notices
+            notices
+        }
+    }
+
+    private suspend fun <T> executeNotamRequest(
+        request: Request,
+        requestLabel: String,
+        parseBody: suspend (String) -> T
+    ): T = withContext(Dispatchers.IO) {
+        try {
+            client.newCall(request).execute().use { response ->
+                if (CTDebugEnabled(TAG)) {
+                    CTDebug(TAG, "$requestLabel response http=${response.code}")
+                }
+                if (!response.isSuccessful) {
+                    val message = when (response.code) {
+                        401, 403 -> "NOTAM authentication failed (HTTP ${response.code})."
+                        else -> "$requestLabel failed with HTTP ${response.code}."
+                    }
+                    throw IOException(message)
+                }
+                parseBody(response.body?.string().orEmpty())
+            }
+        } catch (e: UnknownHostException) {
+            throw IOException("NOTAM host lookup failed. Keeping last results.", e)
+        } catch (e: SocketTimeoutException) {
+            throw IOException("NOTAM request timed out. Keeping last results.", e)
+        } catch (e: NotamAuthManager.NotamAuthException) {
+            throw e
+        } catch (e: IOException) {
+            throw IOException(e.message ?: "NOTAM network error. Keeping last results.", e)
+        }
+    }
+
+    private fun classifyNotamErrorMessage(error: Throwable): String {
+        return when (error) {
+            is NotamAuthManager.NotamAuthException.Authorization -> error.message ?: "NOTAM authentication failed."
+            is NotamAuthManager.NotamAuthException.Network -> error.message ?: "NOTAM network unavailable. Keeping last results."
+            is NotamAuthManager.NotamAuthException.Service -> error.message ?: "NOTAM service error."
+            is UnknownHostException -> "NOTAM host lookup failed. Keeping last results."
+            is SocketTimeoutException -> "NOTAM request timed out. Keeping last results."
+            is IOException -> error.message ?: "NOTAM network error. Keeping last results."
+            else -> error.message ?: "NOTAM request failed"
         }
     }
 

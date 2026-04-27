@@ -8,6 +8,9 @@ import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 internal object NotamAuthManager {
@@ -25,6 +28,12 @@ internal object NotamAuthManager {
 
     @Volatile
     private var cachedTokenExpiryEpochMs: Long = 0L
+
+    sealed class NotamAuthException(message: String, cause: Throwable? = null) : IOException(message, cause) {
+        class Network(message: String, cause: Throwable? = null) : NotamAuthException(message, cause)
+        class Authorization(message: String) : NotamAuthException(message)
+        class Service(message: String) : NotamAuthException(message)
+    }
 
     fun isConfigured(): Boolean {
         return resolvedApiBaseUrl().isNotBlank() &&
@@ -72,27 +81,40 @@ internal object NotamAuthManager {
             )
             .build()
 
-        client.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (CTDebugEnabled(TAG)) {
-                val preview = body.replace('\n', ' ').take(240)
-                CTDebug(TAG, "Token response http=${response.code} body='$preview'")
+        try {
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (CTDebugEnabled(TAG)) {
+                    val preview = body.replace('\n', ' ').take(240)
+                    CTDebug(TAG, "Token response http=${response.code} body='$preview'")
+                }
+                if (!response.isSuccessful) {
+                    if (response.code == 401 || response.code == 403) {
+                        throw NotamAuthException.Authorization("NOTAM authentication failed (HTTP ${response.code}).")
+                    }
+                    throw NotamAuthException.Service("NOTAM token request failed with HTTP ${response.code}.")
+                }
+                val json = JSONObject(body)
+                val token = json.optString("access_token")
+                if (token.isBlank()) {
+                    throw NotamAuthException.Service("NOTAM token response did not include an access token.")
+                }
+                val expiresInSeconds = json.optLong("expires_in", 1800L)
+                cachedToken = token
+                cachedTokenExpiryEpochMs = now + (expiresInSeconds.coerceAtLeast(60L) * 1000L)
+                if (CTDebugEnabled(TAG)) {
+                    CTDebug(TAG, "Retrieved bearer token expiresInSeconds=$expiresInSeconds scope='${json.optString("scope")}'")
+                }
+                return token
             }
-            if (!response.isSuccessful) {
-                throw IllegalStateException("Token request failed with HTTP ${response.code}")
-            }
-            val json = JSONObject(body)
-            val token = json.optString("access_token")
-            if (token.isBlank()) {
-                throw IllegalStateException("Token response did not include an access token")
-            }
-            val expiresInSeconds = json.optLong("expires_in", 1800L)
-            cachedToken = token
-            cachedTokenExpiryEpochMs = now + (expiresInSeconds.coerceAtLeast(60L) * 1000L)
-            if (CTDebugEnabled(TAG)) {
-                CTDebug(TAG, "Retrieved bearer token expiresInSeconds=$expiresInSeconds scope='${json.optString("scope")}'")
-            }
-            return token
+        } catch (e: NotamAuthException) {
+            throw e
+        } catch (e: UnknownHostException) {
+            throw NotamAuthException.Network("NOTAM token request could not resolve host.", e)
+        } catch (e: SocketTimeoutException) {
+            throw NotamAuthException.Network("NOTAM token request timed out.", e)
+        } catch (e: IOException) {
+            throw NotamAuthException.Network("NOTAM token request failed due to network error.", e)
         }
     }
 }

@@ -663,15 +663,13 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     this.hashCode()
                 )
             )
-            val scanningServiceIntent = Intent(this, ScanningService::class.java)
-            applicationContext.startForegroundService(scanningServiceIntent)
+            ScanningService.requestStart(applicationContext)
         } else {
             CTDebug(TAG, "onCreate(): ScanningService already running; skipping duplicate start.")
         }
         if (!RestartingFlag || !MediaMTXService.IsRunning()) {
             CTDebug(TAG, "Starting MediaMTXService...")
-            val mediaMtxServiceIntent = Intent(this, MediaMTXService::class.java)
-            applicationContext.startForegroundService(mediaMtxServiceIntent)
+            MediaMTXService.requestStart(applicationContext)
         } else {
             CTDebug(TAG, "onCreate(): MediaMTXService already running; skipping duplicate start.")
         }

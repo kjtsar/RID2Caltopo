@@ -15,6 +15,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.KeyStore
@@ -103,6 +104,7 @@ object MutualAidPackageTransferManager {
     private const val FLUSH_INTERVAL_BYTES = 1L * 1024L * 1024L
     private const val READ_STALL_LOG_MS = 1_500L
     private const val WRITE_STALL_LOG_MS = 1_500L
+    private const val IMPORT_IDLE_TIMEOUT_MS = 30_000L
     private const val IMPORT_MAX_ATTEMPTS = 3
     private const val IMPORT_RETRY_BASE_DELAY_MS = 1_500L
     private val ioExecutor = Executors.newSingleThreadExecutor()
@@ -268,11 +270,12 @@ object MutualAidPackageTransferManager {
                     "downloadPackageWithRetries(): attempt $attempt/$IMPORT_MAX_ATTEMPTS failed; retrying in ${delayMs}ms",
                     e
                 )
+                val retryReason = describeImportRetryReason(e)
                 _importState.value = MutualAidPackageImportState.Downloading(
                     packageName,
                     0L,
                     config.sizeBytes,
-                    "Retrying download ($attempt/$IMPORT_MAX_ATTEMPTS)"
+                    "$retryReason Retrying (${attempt + 1}/$IMPORT_MAX_ATTEMPTS)"
                 )
                 Thread.sleep(delayMs)
                 attempt++
@@ -449,8 +452,9 @@ object MutualAidPackageTransferManager {
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustManager)
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .writeTimeout(0, TimeUnit.MILLISECONDS)
+            .readTimeout(IMPORT_IDLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
             .build()
     }
 
@@ -685,7 +689,18 @@ object MutualAidPackageTransferManager {
             is InterruptedIOException -> true
             is SocketException -> true
             is SocketTimeoutException -> true
+            is UnknownHostException -> true
             else -> false
+        }
+    }
+
+    private fun describeImportRetryReason(error: Throwable): String {
+        return when (error) {
+            is SocketTimeoutException -> "No transfer progress for 30s."
+            is UnknownHostException -> "Could not resolve sender host."
+            is InterruptedIOException -> "Transfer interrupted."
+            is SocketException -> "Connection dropped."
+            else -> "Transfer stalled."
         }
     }
 }

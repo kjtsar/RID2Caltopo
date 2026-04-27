@@ -154,10 +154,7 @@ class OpenArchiveDir() : ActivityResultContracts.OpenDocumentTree() {
 
 private fun restartMediaMtxServer(context: android.content.Context) {
     val appContext = context.applicationContext
-    val restartIntent = Intent(appContext, MediaMTXService::class.java).apply {
-        action = "RESTART_SERVICE"
-    }
-    appContext.startForegroundService(restartIntent)
+    MediaMTXService.requestRestart(appContext)
     CaltopoClient.ShowToast("Streams server restarted. Connected publishers will reconnect if supported.")
     CTDebug("MainMenu", "User requested MediaMTXService restart from menu.")
 }

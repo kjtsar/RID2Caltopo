@@ -122,7 +122,6 @@ fun StreamTile(
                 }
             }
         }
-
         Box(
             modifier = Modifier
                 .matchParentSize()

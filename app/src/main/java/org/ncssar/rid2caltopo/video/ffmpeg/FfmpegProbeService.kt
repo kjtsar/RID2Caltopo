@@ -37,6 +37,16 @@ data class TelemetryMergeResult(
     val addedRemoteId: String? = null,
 )
 
+data class StreamRuntimeSnapshot(
+    val decodedFrameCount: Long,
+    val renderedFrameCount: Long,
+    val avgDecodedFps: Double,
+    val avgRenderedFps: Double,
+    val idlePollCount: Int,
+    val lastFrameAgeMs: Long,
+    val renderDelayMs: Long?,
+)
+
 object FfmpegTelemetryReducer {
     fun merge(
         existing: FfmpegTelemetry?,
@@ -93,6 +103,7 @@ private data class UpstreamRepublishMarker(
 
 private data class ManagedRenderSession(
     val designator: String,
+    val createdAtMs: Long,
     var phase: RenderSessionPhase,
     var phaseChangedAtMs: Long,
     var lastReaderWaitAtMs: Long? = null,
@@ -708,6 +719,26 @@ class FfmpegProbeService {
         )
     }
 
+    fun runtimeSnapshot(designator: String): StreamRuntimeSnapshot? {
+        val nowMs = System.currentTimeMillis()
+        return synchronized(stateLock) {
+            val sessionId = renderSessions[designator] ?: return@synchronized null
+            val session = managedRenderSessions[sessionId] ?: return@synchronized null
+            val elapsedMs = (nowMs - session.createdAtMs).coerceAtLeast(1L)
+            val decodedFps = (session.decodedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
+            val renderedFps = (session.renderedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
+            StreamRuntimeSnapshot(
+                decodedFrameCount = session.decodedFrameCount,
+                renderedFrameCount = session.renderedFrameCount,
+                avgDecodedFps = decodedFps,
+                avgRenderedFps = renderedFps,
+                idlePollCount = session.idlePollCount,
+                lastFrameAgeMs = session.lastFrameAtMs?.let { nowMs - it } ?: -1L,
+                renderDelayMs = renderDelayMsByDesignator[designator],
+            )
+        }
+    }
+
     fun hasRecentFrame(designator: String, maxAgeMs: Long = 2_500L): Boolean {
         val now = System.currentTimeMillis()
         return synchronized(stateLock) {
@@ -781,6 +812,7 @@ class FfmpegProbeService {
                 renderSessions[designator] = sessionId
                 val created = ManagedRenderSession(
                     designator = designator,
+                    createdAtMs = System.currentTimeMillis(),
                     phase = RenderSessionPhase.STARTING,
                     phaseChangedAtMs = System.currentTimeMillis(),
                 )

@@ -1,7 +1,9 @@
 import android.app.Application
 import android.graphics.Bitmap
 import android.os.Debug
+import android.os.Build
 import android.os.Process
+import android.os.PowerManager
 import android.view.Surface
 import org.osmdroid.api.IGeoPoint
 import androidx.compose.runtime.Stable
@@ -47,6 +49,7 @@ import org.ncssar.rid2caltopo.data.DesignatorState
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
+import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
 import org.ncssar.rid2caltopo.video.PlaybackIndicatorState
@@ -104,6 +107,14 @@ private data class ProcessLoadSnapshot(
     val sampleWindowMs: Long,
     val processCpuFraction: Double,
     val mainThreadCpuFraction: Double,
+    val javaHeapUsedMb: Long,
+    val javaHeapMaxMb: Long,
+    val nativeHeapUsedMb: Long,
+    val liveStreamCount: Int,
+    val ffmpegStreamCount: Int,
+    val anomalyEnabledCount: Int,
+    val thermalStatusLabel: String,
+    val anomalyHeadroomLabel: String,
 )
 
 internal fun chooseResyncSnapshot(
@@ -464,10 +475,11 @@ class StreamsViewModel(
     CaltopoMap.MapStatusListener {
 
     private val tag = "StreamsViewModel"
-    private val processLoadSampleIntervalMs = 5_000L
+    private val processLoadSampleIntervalMs = 1_000L
     private val hotProcessCpuFractionForSecondStream = 0.85
     private val hotProcessCpuFractionForThirdOrFourthStream = 0.55
     private val hotMainThreadCpuFractionForThirdOrFourthStream = 0.30
+    private val processLoadLogIntervalMs = 5_000L
     private val ffmpegProbeService: FfmpegProbeService? = try {
         FfmpegProbeService()
     } catch (t: Throwable) {
@@ -545,8 +557,8 @@ class StreamsViewModel(
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
     private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
     private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
-    @Volatile
-    private var latestProcessLoadSnapshot: ProcessLoadSnapshot? = null
+    private var latestProcessLoadSnapshot by mutableStateOf<ProcessLoadSnapshot?>(null)
+    private var lastProcessLoadLogAtMs = 0L
     /** Coordinator that owns all DEM / AGL / ATO / heading computation. */
     internal val altitudeCoordinator = DroneAltitudeCoordinator(
         scope = viewModelScope,
@@ -1353,6 +1365,8 @@ class StreamsViewModel(
             var lastObservedAtMs = 0L
             var lastProcessCpuMs = 0L
             var lastMainThreadCpuNs = 0L
+            var smoothedProcessCpuFraction = 0.0
+            var smoothedMainThreadCpuFraction = 0.0
             val cpuCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
             while (true) {
                 kotlinx.coroutines.delay(processLoadSampleIntervalMs)
@@ -1362,18 +1376,77 @@ class StreamsViewModel(
                 if (lastObservedAtMs != 0L) {
                     val windowMs = nowMs - lastObservedAtMs
                     if (windowMs > 0L) {
-                        val processCpuFraction =
+                        val rawProcessCpuFraction =
                             ((processCpuMs - lastProcessCpuMs).toDouble() / windowMs.toDouble() / cpuCount.toDouble())
                                 .coerceIn(0.0, 1.0)
-                        val mainThreadCpuFraction =
+                        val rawMainThreadCpuFraction =
                             (((mainThreadCpuNs - lastMainThreadCpuNs) / 1_000_000.0) / windowMs.toDouble())
                                 .coerceIn(0.0, 1.0)
+                        smoothedProcessCpuFraction = if (smoothedProcessCpuFraction == 0.0) {
+                            rawProcessCpuFraction
+                        } else {
+                            (smoothedProcessCpuFraction * 0.7) + (rawProcessCpuFraction * 0.3)
+                        }
+                        smoothedMainThreadCpuFraction = if (smoothedMainThreadCpuFraction == 0.0) {
+                            rawMainThreadCpuFraction
+                        } else {
+                            (smoothedMainThreadCpuFraction * 0.7) + (rawMainThreadCpuFraction * 0.3)
+                        }
+                        val runtime = Runtime.getRuntime()
+                        val javaHeapUsedMb =
+                            ((runtime.totalMemory() - runtime.freeMemory()) / (1024L * 1024L)).coerceAtLeast(0L)
+                        val javaHeapMaxMb = (runtime.maxMemory() / (1024L * 1024L)).coerceAtLeast(1L)
+                        val nativeHeapUsedMb =
+                            (Debug.getNativeHeapAllocatedSize() / (1024L * 1024L)).coerceAtLeast(0L)
+                        val liveStreamCount = streamInfoByDesignator.values.count { it.state == StreamState.LIVE }
+                        val ffmpegStreamCount = streamInfoByDesignator.values.count { info ->
+                            info.state == StreamState.LIVE && shouldUseFfmpegRender(info.designator)
+                        }
+                        val anomalyEnabledCount = _anomalyConfigByDesignator.values.count { it.enabled }
+                        val thermalStatusLabel = currentThermalStatusLabel()
+                        val anomalyHeadroomLabel = estimateAnomalyHeadroom(
+                            processCpuFraction = smoothedProcessCpuFraction,
+                            mainThreadCpuFraction = smoothedMainThreadCpuFraction,
+                            thermalStatusLabel = thermalStatusLabel,
+                            liveStreamCount = liveStreamCount,
+                            ffmpegStreamCount = ffmpegStreamCount,
+                            anomalyEnabledCount = anomalyEnabledCount,
+                        )
                         latestProcessLoadSnapshot = ProcessLoadSnapshot(
                             observedAtMs = nowMs,
                             sampleWindowMs = windowMs,
-                            processCpuFraction = processCpuFraction,
-                            mainThreadCpuFraction = mainThreadCpuFraction,
+                            processCpuFraction = smoothedProcessCpuFraction,
+                            mainThreadCpuFraction = smoothedMainThreadCpuFraction,
+                            javaHeapUsedMb = javaHeapUsedMb,
+                            javaHeapMaxMb = javaHeapMaxMb,
+                            nativeHeapUsedMb = nativeHeapUsedMb,
+                            liveStreamCount = liveStreamCount,
+                            ffmpegStreamCount = ffmpegStreamCount,
+                            anomalyEnabledCount = anomalyEnabledCount,
+                            thermalStatusLabel = thermalStatusLabel,
+                            anomalyHeadroomLabel = anomalyHeadroomLabel,
                         )
+                        if (liveStreamCount > 0 && nowMs - lastProcessLoadLogAtMs >= processLoadLogIntervalMs) {
+                            lastProcessLoadLogAtMs = nowMs
+                            CTDebug(
+                                tag,
+                                String.format(
+                                    Locale.US,
+                                    "Device load: cpu=%d%% ui=%d%% java=%d/%dMB native=%dMB live=%d ffmpeg=%d anomaly=%d thermal=%s headroom=%s windowMs=%d",
+                                    (smoothedProcessCpuFraction * 100.0).toInt(),
+                                    (smoothedMainThreadCpuFraction * 100.0).toInt(),
+                                    javaHeapUsedMb,
+                                    javaHeapMaxMb,
+                                    nativeHeapUsedMb,
+                                    liveStreamCount,
+                                    ffmpegStreamCount,
+                                    anomalyEnabledCount,
+                                    thermalStatusLabel,
+                                    anomalyHeadroomLabel,
+                                    windowMs,
+                                )
+                            )
+                        }
                     }
                 }
                 lastObservedAtMs = nowMs
@@ -1418,6 +1491,78 @@ class StreamsViewModel(
             )
         }
         return StreamAdmissionGuardResult(allow = true)
+    }
+
+    fun deviceLoadOverlayText(): String? {
+        val snapshot = latestProcessLoadSnapshot ?: return null
+        val ageMs = System.currentTimeMillis() - snapshot.observedAtMs
+        if (ageMs > processLoadSampleIntervalMs * 3) return null
+        return String.format(
+            Locale.US,
+            "CPU %d%% UI %d%% MEM %d/%dM N %dM S%d F%d A%d T%s H%s",
+            (snapshot.processCpuFraction * 100.0).toInt(),
+            (snapshot.mainThreadCpuFraction * 100.0).toInt(),
+            snapshot.javaHeapUsedMb,
+            snapshot.javaHeapMaxMb,
+            snapshot.nativeHeapUsedMb,
+            snapshot.liveStreamCount,
+            snapshot.ffmpegStreamCount,
+            snapshot.anomalyEnabledCount,
+            snapshot.thermalStatusLabel,
+            snapshot.anomalyHeadroomLabel,
+        )
+    }
+
+    fun streamPerformanceOverlayText(designator: String): String? {
+        val runtime = ffmpegProbeService?.runtimeSnapshot(designator) ?: return null
+        return String.format(
+            Locale.US,
+            "FPS d/r %.1f/%.1f FR %d/%d AGE %dms%s",
+            runtime.avgDecodedFps,
+            runtime.avgRenderedFps,
+            runtime.decodedFrameCount,
+            runtime.renderedFrameCount,
+            runtime.lastFrameAgeMs,
+            runtime.renderDelayMs?.let { " LAT ${it}ms" } ?: "",
+        )
+    }
+
+    private fun currentThermalStatusLabel(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return "n/a"
+        val pm = getApplication<Application>().getSystemService(PowerManager::class.java) ?: return "n/a"
+        return when (pm.currentThermalStatus) {
+            PowerManager.THERMAL_STATUS_NONE -> "cool"
+            PowerManager.THERMAL_STATUS_LIGHT -> "light"
+            PowerManager.THERMAL_STATUS_MODERATE -> "mod"
+            PowerManager.THERMAL_STATUS_SEVERE -> "sev"
+            PowerManager.THERMAL_STATUS_CRITICAL -> "crit"
+            PowerManager.THERMAL_STATUS_EMERGENCY -> "emrg"
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> "sdwn"
+            else -> "unk"
+        }
+    }
+
+    private fun estimateAnomalyHeadroom(
+        processCpuFraction: Double,
+        mainThreadCpuFraction: Double,
+        thermalStatusLabel: String,
+        liveStreamCount: Int,
+        ffmpegStreamCount: Int,
+        anomalyEnabledCount: Int,
+    ): String {
+        if (thermalStatusLabel == "sev" || thermalStatusLabel == "crit" ||
+            thermalStatusLabel == "emrg" || thermalStatusLabel == "sdwn") {
+            return "hot"
+        }
+        if (processCpuFraction >= 0.85 || mainThreadCpuFraction >= 0.40) {
+            return "hot"
+        }
+        if (processCpuFraction >= 0.65 || mainThreadCpuFraction >= 0.25 ||
+            ffmpegStreamCount >= 2 || anomalyEnabledCount >= 1 || liveStreamCount >= 3 ||
+            thermalStatusLabel == "mod") {
+            return "limit"
+        }
+        return "ok"
     }
 
     private fun applyFocusedAnomalyPolicy(liveDesignators: Set<String>) {

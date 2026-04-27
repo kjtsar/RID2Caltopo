@@ -106,6 +106,7 @@ fun StreamsScreen(
         serverExitReason.isNotEmpty() -> "\uD83D\uDD34 Server exited: $serverExitReason"
         else             -> "\uD83D\uDFE1 Starting"
     }
+    val performanceStatus = viewModel.deviceLoadOverlayText()
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val mapStatus by remember(mapName) {
@@ -153,7 +154,7 @@ fun StreamsScreen(
                                 }
                         ) {
                             Text(
-                                text = "$serverStatus - $mapStatus",
+                                text = "${performanceStatus ?: serverStatus} - $mapStatus",
                                 fontSize = 14.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,

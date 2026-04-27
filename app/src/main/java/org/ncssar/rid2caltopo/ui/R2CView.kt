@@ -95,7 +95,7 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
         }
         Column (modifier = colModifier) {
             Text(
-                text = "rid_map entries:\n${CaltopoClient.GetRidmapCount()}",
+                text = "Team Drones:\n${CaltopoClient.GetRidmapCount()}",
                 modifier = textMod.clickable { showRidmapEntries = true },
                 style = MaterialTheme.typography.titleSmall,
                 textAlign = TextAlign.Center

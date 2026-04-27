@@ -114,6 +114,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     val activeScreen : StateFlow<ActiveScreen> = _activeScreen.asStateFlow()
     private val promptedFlightKeys = linkedSetOf<String>()
     private var screenBeforeConfirmation: ActiveScreen? = null
+    private var screenBeforeConnectionOverlay: ActiveScreen? = null
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
@@ -176,7 +177,22 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         pendingProfileSwitch = null
     }
 
+    fun openConnectionOverlayFromCurrentScreen() {
+        val currentScreen = _activeScreen.value
+        screenBeforeConnectionOverlay = if (currentScreen != ActiveScreen.MAIN) {
+            currentScreen
+        } else {
+            null
+        }
+        if (currentScreen != ActiveScreen.MAIN) {
+            CTDebug(tag, "openConnectionOverlayFromCurrentScreen(): $currentScreen -> ${ActiveScreen.MAIN}")
+            showMain()
+        }
+        onUIEvent(UIEvent.HeaderClicked)
+    }
+
     fun onUIEvent(uiEvent: UIEvent) {
+        val previousOverlay = overlay
         val oldState = "      PRE: Overlay='${overlay}' ConnectionState: '${connectionState}'"
 
         when (uiEvent) {
@@ -281,7 +297,9 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                         CaltopoConnectionState.CredentialsVerified
                     }
                     CaltopoMap.MapStatusListener.mapStatus.up -> {
-                        overlay = OverlayState.None
+                        if (previousOverlay is OverlayState.Connecting) {
+                            overlay = OverlayState.None
+                        }
                         CaltopoConnectionState.MapSelected(CaltopoMap.GetMapNode())
                     }
                     CaltopoMap.MapStatusListener.mapStatus.down -> {
@@ -303,6 +321,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
 
         val newState = "     POST: Overlay='${overlay}' ConnectionState: '${connectionState}'"
         CTDebug(tag, "onUIEvent(${uiEvent})\n$oldState\n$newState")
+        restoreScreenAfterConnectionOverlay(uiEvent, previousOverlay)
     }
 
     override fun mapStatusUpdate(status: CaltopoMap.MapStatusListener.mapStatus, mapNode: CaltopoNode.MapNode?, optErrmsg: String?) {
@@ -501,6 +520,26 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         screenBeforeConfirmation = null
         if (priorScreen != null && _activeScreen.value == ActiveScreen.MAIN && priorScreen != ActiveScreen.MAIN) {
             CTDebug(tag, "restoreScreenAfterConfirmation(): MAIN -> $priorScreen")
+            _activeScreen.value = priorScreen
+        }
+    }
+
+    private fun restoreScreenAfterConnectionOverlay(
+        uiEvent: UIEvent,
+        previousOverlay: OverlayState
+    ) {
+        val shouldRestore = when (uiEvent) {
+            is UIEvent.DismissRequested,
+            is UIEvent.DisconnectRequested -> overlay == OverlayState.None
+            is UIEvent.ConnectionStatusChanged ->
+                previousOverlay is OverlayState.Connecting && overlay == OverlayState.None
+            else -> false
+        }
+        if (!shouldRestore) return
+        val priorScreen = screenBeforeConnectionOverlay
+        screenBeforeConnectionOverlay = null
+        if (priorScreen != null && _activeScreen.value == ActiveScreen.MAIN && priorScreen != ActiveScreen.MAIN) {
+            CTDebug(tag, "restoreScreenAfterConnectionOverlay(): MAIN -> $priorScreen")
             _activeScreen.value = priorScreen
         }
     }

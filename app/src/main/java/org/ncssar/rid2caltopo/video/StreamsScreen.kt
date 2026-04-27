@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +53,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
@@ -81,6 +84,7 @@ private fun restartMediaMtxServer(context: android.content.Context) {
 fun StreamsScreen(
     viewModel: StreamsViewModel = viewModel(),
     onBack: () -> Unit,
+    onMapStatusTap: () -> Unit = {},
     showNavigation: Boolean = true,
     externalContentMode: ExternalDisplayContentMode? = null,
     allowModalDialogs: Boolean = true,
@@ -106,7 +110,7 @@ fun StreamsScreen(
         serverExitReason.isNotEmpty() -> "\uD83D\uDD34 Server exited: $serverExitReason"
         else             -> "\uD83D\uDFE1 Starting"
     }
-    val performanceStatus = viewModel.deviceLoadOverlayText()
+    val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val mapStatus by remember(mapName) {
@@ -129,6 +133,7 @@ fun StreamsScreen(
         null -> persistedLayoutMode
     }
     var showNotamPanel by remember { mutableStateOf(false) }
+    var showPerformancePanel by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -136,6 +141,11 @@ fun StreamsScreen(
     ) {
         Column {
             TopAppBar(
+                modifier = Modifier.pointerInput(onBack) {
+                    detectTapGestures(
+                        onDoubleTap = { onBack() }
+                    )
+                },
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         NotamStatusChip(
@@ -144,17 +154,27 @@ fun StreamsScreen(
                             outerPadding = PaddingValues(0.dp)
                         )
                         Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = serverStatus,
+                            modifier = Modifier
+                                .clickable { showPerformancePanel = true }
+                                .padding(end = 8.dp),
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                         Box(
                             modifier = Modifier
                                 .weight(1f, fill = false)
-                                .pointerInput(onBack) {
+                                .pointerInput(onMapStatusTap, onBack) {
                                     detectTapGestures(
+                                        onTap = { onMapStatusTap() },
                                         onDoubleTap = { onBack() }
                                     )
                                 }
                         ) {
                             Text(
-                                text = "${performanceStatus ?: serverStatus} - $mapStatus",
+                                text = mapStatus,
                                 fontSize = 14.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -232,6 +252,25 @@ fun StreamsScreen(
         NotamPanel(
             state = notamUiState,
             onDismiss = { showNotamPanel = false }
+        )
+    }
+    if (showPerformancePanel) {
+        AlertDialog(
+            onDismissRequest = { showPerformancePanel = false },
+            title = { Text("Performance") },
+            text = {
+                Box(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        text = viewModel.performancePanelText(focusedPath),
+                        fontSize = 14.sp,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPerformancePanel = false }) {
+                    Text("Close")
+                }
+            }
         )
     }
 }

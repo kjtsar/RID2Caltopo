@@ -60,6 +60,52 @@ public class MediaMTXService extends Service {
     private boolean foregroundStartBlocked = false;
     public static boolean IsRunning() { return serviceRunning; }
 
+    public static int findNativeServerPid() {
+        File procDir = new File("/proc");
+        File[] entries = procDir.listFiles();
+        if (entries == null) return 0;
+        final int myPid = Process.myPid();
+        final int myUid = Process.myUid();
+        for (File entry : entries) {
+            String name = entry.getName();
+            if (name == null || name.isEmpty()) continue;
+            boolean numeric = true;
+            for (int i = 0; i < name.length(); i++) {
+                if (!Character.isDigit(name.charAt(i))) {
+                    numeric = false;
+                    break;
+                }
+            }
+            if (!numeric) continue;
+            int pid;
+            try {
+                pid = Integer.parseInt(name);
+            } catch (NumberFormatException ignored) {
+                continue;
+            }
+            if (pid <= 0 || pid == myPid) continue;
+            try {
+                File statusFile = new File(entry, "status");
+                String status = new String(
+                        java.nio.file.Files.readAllBytes(statusFile.toPath()),
+                        StandardCharsets.UTF_8
+                );
+                if (!status.contains("Uid:\t" + myUid) && !status.contains("Uid:\t" + myUid + "\t")) {
+                    continue;
+                }
+                File cmdlineFile = new File(entry, "cmdline");
+                byte[] raw = java.nio.file.Files.readAllBytes(cmdlineFile.toPath());
+                if (raw.length == 0) continue;
+                String cmdline = new String(raw, StandardCharsets.UTF_8).replace('\u0000', ' ').trim();
+                if (cmdline.contains("mediamtx")) {
+                    return pid;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return 0;
+    }
+
     public static void onNativeProcessExit(int pid, int status, int signaled) {
         CTDebug(TAG, "MediaMTX exited pid=" + pid +
                 " status=" + status +

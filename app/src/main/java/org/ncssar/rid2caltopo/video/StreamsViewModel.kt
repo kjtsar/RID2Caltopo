@@ -46,6 +46,7 @@ import org.ncssar.rid2caltopo.data.CaltopoMap.MapStatusListener.mapStatus
 import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DesignatorState
+import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
@@ -110,6 +111,8 @@ private data class ProcessLoadSnapshot(
     val javaHeapUsedMb: Long,
     val javaHeapMaxMb: Long,
     val nativeHeapUsedMb: Long,
+    val mediaMtxPid: Int,
+    val mediaMtxCpuFraction: Double,
     val liveStreamCount: Int,
     val ffmpegStreamCount: Int,
     val anomalyEnabledCount: Int,
@@ -1365,14 +1368,19 @@ class StreamsViewModel(
             var lastObservedAtMs = 0L
             var lastProcessCpuMs = 0L
             var lastMainThreadCpuNs = 0L
+            var lastMediaMtxPid = 0
+            var lastMediaMtxCpuTicks = 0L
             var smoothedProcessCpuFraction = 0.0
             var smoothedMainThreadCpuFraction = 0.0
+            var smoothedMediaMtxCpuFraction = 0.0
             val cpuCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
             while (true) {
                 kotlinx.coroutines.delay(processLoadSampleIntervalMs)
                 val nowMs = System.currentTimeMillis()
                 val processCpuMs = Process.getElapsedCpuTime()
                 val mainThreadCpuNs = Debug.threadCpuTimeNanos()
+                val mediaMtxPid = if (MediaMTXService.IsRunning()) MediaMTXService.findNativeServerPid() else 0
+                val mediaMtxCpuTicks = if (mediaMtxPid > 0) readProcCpuTicks(mediaMtxPid) else null
                 if (lastObservedAtMs != 0L) {
                     val windowMs = nowMs - lastObservedAtMs
                     if (windowMs > 0L) {
@@ -1391,6 +1399,20 @@ class StreamsViewModel(
                             rawMainThreadCpuFraction
                         } else {
                             (smoothedMainThreadCpuFraction * 0.7) + (rawMainThreadCpuFraction * 0.3)
+                        }
+                        val rawMediaMtxCpuFraction = if (mediaMtxPid > 0 &&
+                            mediaMtxPid == lastMediaMtxPid &&
+                            mediaMtxCpuTicks != null &&
+                            lastMediaMtxCpuTicks > 0L) {
+                            (((mediaMtxCpuTicks - lastMediaMtxCpuTicks).toDouble() * 10.0) /
+                                windowMs.toDouble() / cpuCount.toDouble()).coerceIn(0.0, 1.0)
+                        } else {
+                            0.0
+                        }
+                        smoothedMediaMtxCpuFraction = if (smoothedMediaMtxCpuFraction == 0.0) {
+                            rawMediaMtxCpuFraction
+                        } else {
+                            (smoothedMediaMtxCpuFraction * 0.7) + (rawMediaMtxCpuFraction * 0.3)
                         }
                         val runtime = Runtime.getRuntime()
                         val javaHeapUsedMb =
@@ -1420,6 +1442,8 @@ class StreamsViewModel(
                             javaHeapUsedMb = javaHeapUsedMb,
                             javaHeapMaxMb = javaHeapMaxMb,
                             nativeHeapUsedMb = nativeHeapUsedMb,
+                            mediaMtxPid = mediaMtxPid,
+                            mediaMtxCpuFraction = smoothedMediaMtxCpuFraction,
                             liveStreamCount = liveStreamCount,
                             ffmpegStreamCount = ffmpegStreamCount,
                             anomalyEnabledCount = anomalyEnabledCount,
@@ -1432,8 +1456,9 @@ class StreamsViewModel(
                                 tag,
                                 String.format(
                                     Locale.US,
-                                    "Device load: cpu=%d%% ui=%d%% java=%d/%dMB native=%dMB live=%d ffmpeg=%d anomaly=%d thermal=%s headroom=%s windowMs=%d",
+                                    "Device load: cpu=%d%% mediamtx=%d%% ui=%d%% java=%d/%dMB native=%dMB live=%d ffmpeg=%d anomaly=%d thermal=%s headroom=%s windowMs=%d",
                                     (smoothedProcessCpuFraction * 100.0).toInt(),
+                                    (smoothedMediaMtxCpuFraction * 100.0).toInt(),
                                     (smoothedMainThreadCpuFraction * 100.0).toInt(),
                                     javaHeapUsedMb,
                                     javaHeapMaxMb,
@@ -1452,6 +1477,8 @@ class StreamsViewModel(
                 lastObservedAtMs = nowMs
                 lastProcessCpuMs = processCpuMs
                 lastMainThreadCpuNs = mainThreadCpuNs
+                lastMediaMtxPid = mediaMtxPid
+                lastMediaMtxCpuTicks = mediaMtxCpuTicks ?: 0L
             }
         }
     }
@@ -1499,8 +1526,9 @@ class StreamsViewModel(
         if (ageMs > processLoadSampleIntervalMs * 3) return null
         return String.format(
             Locale.US,
-            "CPU %d%% UI %d%% MEM %d/%dM N %dM S%d F%d A%d T%s H%s",
+            "CPU %d%% MX %d%% UI %d%% MEM %d/%dM N %dM S%d F%d A%d T%s H%s",
             (snapshot.processCpuFraction * 100.0).toInt(),
+            (snapshot.mediaMtxCpuFraction * 100.0).toInt(),
             (snapshot.mainThreadCpuFraction * 100.0).toInt(),
             snapshot.javaHeapUsedMb,
             snapshot.javaHeapMaxMb,
@@ -1525,6 +1553,63 @@ class StreamsViewModel(
             runtime.lastFrameAgeMs,
             runtime.renderDelayMs?.let { " LAT ${it}ms" } ?: "",
         )
+    }
+
+    fun performancePanelText(focusedDesignator: String?): String {
+        val lines = mutableListOf<String>()
+        val snapshot = latestProcessLoadSnapshot
+        if (snapshot == null) {
+            lines += "Performance sample: not available yet."
+        } else {
+            val ageMs = System.currentTimeMillis() - snapshot.observedAtMs
+            lines += "Device load"
+            lines += String.format(Locale.US, "  App CPU load: %d%% of available core capacity", (snapshot.processCpuFraction * 100.0).toInt())
+            lines += if (snapshot.mediaMtxPid > 0) {
+                String.format(
+                    Locale.US,
+                    "  MediaMTX CPU load: %d%% of available core capacity (pid %d)",
+                    (snapshot.mediaMtxCpuFraction * 100.0).toInt(),
+                    snapshot.mediaMtxPid,
+                )
+            } else {
+                "  MediaMTX CPU load: not available"
+            }
+            lines += String.format(Locale.US, "  Main-thread CPU load: %d%%", (snapshot.mainThreadCpuFraction * 100.0).toInt())
+            lines += String.format(Locale.US, "  Java heap: %d MB used of %d MB max", snapshot.javaHeapUsedMb, snapshot.javaHeapMaxMb)
+            lines += String.format(Locale.US, "  Native heap: %d MB", snapshot.nativeHeapUsedMb)
+            lines += String.format(Locale.US, "  Live streams: %d", snapshot.liveStreamCount)
+            lines += String.format(Locale.US, "  FFmpeg streams: %d", snapshot.ffmpegStreamCount)
+            lines += String.format(Locale.US, "  Anomaly-enabled streams: %d", snapshot.anomalyEnabledCount)
+            lines += "  Thermal status: ${snapshot.thermalStatusLabel}"
+            lines += "  Estimated anomaly headroom: ${snapshot.anomalyHeadroomLabel}"
+            lines += String.format(Locale.US, "  Sample age: %d ms over a %d ms window", ageMs, snapshot.sampleWindowMs)
+        }
+
+        if (!focusedDesignator.isNullOrBlank()) {
+            lines += ""
+            lines += "Focused stream: $focusedDesignator"
+            val runtime = ffmpegProbeService?.runtimeSnapshot(focusedDesignator)
+            if (runtime == null) {
+                lines += "  Stream runtime stats: not available for current renderer."
+            } else {
+                lines += String.format(Locale.US, "  Average decoded FPS: %.1f", runtime.avgDecodedFps)
+                lines += String.format(Locale.US, "  Average rendered FPS: %.1f", runtime.avgRenderedFps)
+                lines += String.format(Locale.US, "  Decoded frames: %d", runtime.decodedFrameCount)
+                lines += String.format(Locale.US, "  Rendered frames: %d", runtime.renderedFrameCount)
+                lines += String.format(Locale.US, "  Last frame age: %d ms", runtime.lastFrameAgeMs)
+                runtime.renderDelayMs?.let {
+                    lines += String.format(Locale.US, "  Render latency: %d ms", it)
+                }
+                lines += String.format(Locale.US, "  Idle poll count: %d", runtime.idlePollCount)
+            }
+        }
+
+        lines += ""
+        lines += "Headroom guide"
+        lines += "  ok: device appears to have room for anomaly work."
+        lines += "  limit: usable, but additional streams or anomaly load may cause lag."
+        lines += "  hot: thermal or CPU pressure is high; anomaly work may be risky."
+        return lines.joinToString("\n")
     }
 
     private fun currentThermalStatusLabel(): String {
@@ -1563,6 +1648,22 @@ class StreamsViewModel(
             return "limit"
         }
         return "ok"
+    }
+
+    private fun readProcCpuTicks(pid: Int): Long? {
+        if (pid <= 0) return null
+        return try {
+            val stat = java.io.File("/proc/$pid/stat").readText()
+            val closingParen = stat.lastIndexOf(')')
+            if (closingParen < 0 || closingParen + 2 >= stat.length) return null
+            val parts = stat.substring(closingParen + 2).trim().split(Regex("\\s+"))
+            if (parts.size <= 12) return null
+            val utimeTicks = parts[11].toLongOrNull() ?: return null
+            val stimeTicks = parts[12].toLongOrNull() ?: return null
+            utimeTicks + stimeTicks
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun applyFocusedAnomalyPolicy(liveDesignators: Set<String>) {

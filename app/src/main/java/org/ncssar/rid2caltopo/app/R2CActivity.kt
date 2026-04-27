@@ -75,6 +75,7 @@ import org.ncssar.rid2caltopo.ui.ProximityAlertHost
 import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
+import org.ncssar.rid2caltopo.ui.UIEvent
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
@@ -355,6 +356,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     ActiveScreen.STREAMS -> {
                         StreamsScreen(
                             onBack = { localViewModel.showMain() },
+                            onMapStatusTap = { localViewModel.openConnectionOverlayFromCurrentScreen() },
                             viewModel = streamsViewModel
                         )
                     }

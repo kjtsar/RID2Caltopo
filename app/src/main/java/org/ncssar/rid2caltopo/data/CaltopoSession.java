@@ -231,6 +231,14 @@ public class CaltopoSession {
         return responseCode == 408 || responseCode == 429 || responseCode >= 500;
     }
 
+    private static boolean isAcceptedErrorCode(CaltopoOp op) {
+        if (op.acceptedErrorCodes == null) return false;
+        for (int code : op.acceptedErrorCodes) {
+            if (code == op.responseCode) return true;
+        }
+        return false;
+    }
+
     private static long RetryDelayMsecForAttempt(int attemptNum) {
         long expDelay = BASE_RETRY_DELAY_MS << Math.max(0, attemptNum - 1);
         expDelay = Math.min(expDelay, MAX_RETRY_DELAY_MS);
@@ -421,6 +429,9 @@ public class CaltopoSession {
                                 CTError(TAG, "parse JSON result raised: ", e);
                             }
                         }
+                    } else if (isAcceptedErrorCode(op)) {
+                        goodResponse = true;
+                        CTInfo(TAG, "BgSendRequest() treating code " + op.responseCode + " as 'already gone' for " + op.url);
                     } else {
                         CTError(TAG, "BgSendRequest() failed w/code " + op.responseCode + ":\n" + op.response);
                         Bundle eventParams = new Bundle();
@@ -717,11 +728,17 @@ public class CaltopoSession {
 
 	@NonNull
 	public static CaltopoOp DeleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+        return DeleteLiveTrackWithId(objId, onComplete, (int[]) null);
+    }
+
+    public static CaltopoOp DeleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete,
+                                                   int... acceptedErrorCodes) {
         if (null == MapId)
             throw new RuntimeException("DeleteLiveTrackWithId(): Map not specified - call OpenMap() first");
 
         String urlEnd = CALTOPO_MAP_API_V1 + MapId + "/LiveTrack/" + objId;
 		CaltopoOp op  = new CaltopoOp(onComplete);
+        op.acceptedErrorCodes = acceptedErrorCodes;
 		SendRequest(op, CtsMethod_t.DELETE, urlEnd, null, false);
 		return op;
 	}

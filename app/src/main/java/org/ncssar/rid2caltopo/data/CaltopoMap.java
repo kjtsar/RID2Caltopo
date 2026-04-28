@@ -1263,7 +1263,8 @@ public class CaltopoMap {
                         .deleteLiveTrackWithId(trackId, deleteOp ->
                                 CTInfo(TAG, String.format(Locale.US,
                                         "archiveFeature(): delete liveTrackId=%s success=%s responseCode=%d",
-                                        trackId, deleteOp.success(), deleteOp.responseCode)));  // Then delete LiveTrack.
+                                        trackId, deleteOp.success(), deleteOp.responseCode)),
+                                400, 404);  // Then delete LiveTrack; 400/404 = already gone, treat as success.
                 if (maxWaitInMilliseconds > 0) op.syncOp(maxWaitInMilliseconds);
             }
         } catch (Exception e) {

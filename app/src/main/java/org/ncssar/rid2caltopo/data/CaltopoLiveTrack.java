@@ -328,7 +328,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                         "archiveTrackOnCaltopo(): no longer owner; deleting orphaned live track '%s' for remoteId=%s",
                         liveTrackId, myRemoteId));
                 try {
-                    runtime.getCalTopoSessionGateway().deleteLiveTrackWithId(liveTrackId, null);
+                    runtime.getCalTopoSessionGateway().deleteLiveTrackWithId(liveTrackId, null, 400, 404);
                 } catch (Exception e) {
                     CTError(TAG, "archiveTrackOnCaltopo(): deleteLiveTrackWithId() raised: ", e);
                 }

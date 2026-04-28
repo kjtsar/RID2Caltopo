@@ -78,6 +78,11 @@ public final class DefaultCalTopoSessionGateway implements CalTopoSessionGateway
         return CaltopoSession.DeleteLiveTrackWithId(objId, onComplete);
     }
 
+    public CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete,
+                                           int... acceptedErrorCodes) {
+        return CaltopoSession.DeleteLiveTrackWithId(objId, onComplete, acceptedErrorCodes);
+    }
+
     @NonNull
     @Override
     public CaltopoOp editObjectWithId(@NonNull String objectType, @NonNull String objId, @NonNull JSONObject featureSet, @Nullable Consumer<CaltopoOp> onComplete) {

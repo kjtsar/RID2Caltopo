@@ -24,6 +24,7 @@ public interface CalTopoSessionGateway {
     @NonNull CaltopoOp deleteShapeWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete);
     @NonNull CaltopoOp deleteMarkerWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete);
     @NonNull CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete);
+    @NonNull CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete, int... acceptedErrorCodes);
     @NonNull CaltopoOp editObjectWithId(@NonNull String objectType, @NonNull String objId,
                                         @NonNull JSONObject featureSet, @Nullable Consumer<CaltopoOp> onComplete);
     @NonNull CaltopoOp startLiveTrack(@NonNull String deviceId, @NonNull String label,

@@ -51,6 +51,7 @@ public class CaltopoOp implements Future <CaltopoOp> {
     public Future<CaltopoOp> asyncFuture; // if op was scheduled for execution.
 	public int responseCode;
     public boolean goodResponse;    // Valid if receivedTimestampInMsec != 0;
+    public int[] acceptedErrorCodes; // response codes to treat as success rather than firing CaltopoOpFailed
     public String response;    // if receivedTimestampInMsec && goodResponse == false;
     public JSONObject responseJson; // if receivedTimestampInMsec && goodResponse == true;
 	public boolean goNaked;

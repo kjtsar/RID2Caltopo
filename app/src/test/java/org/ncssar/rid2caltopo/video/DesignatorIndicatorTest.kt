@@ -10,8 +10,8 @@ import org.ncssar.rid2caltopo.data.DesignatorState
 class DesignatorIndicatorTest {
     @Test
     fun formatLiveState_reportsLiveUntilLagIsMaterial() {
-        assertEquals("Live", formatLiveState(null))
-        assertEquals("Live", formatLiveState(450L))
+        assertEquals("Starting", formatLiveState(null))
+        assertEquals("lag:450ms", formatLiveState(450L))
     }
 
     @Test

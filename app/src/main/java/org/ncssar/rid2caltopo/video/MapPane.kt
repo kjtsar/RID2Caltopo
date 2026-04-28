@@ -370,6 +370,8 @@ internal data class BadTileDialogState(
     val hash: String
 )
 
+private fun localTrackDesignator(mappedId: String): String = mappedId.ifBlank { "unmapped" }
+
 private fun closedPolylinePoints(points: List<GeoPoint>): List<GeoPoint> {
     if (points.isEmpty()) return points
     val first = points.first()
@@ -543,6 +545,7 @@ internal fun SplitMapPane(
     val mapName = viewModel.mapName
     val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
+    val currentFlightTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val managedOverlays = remember { mutableListOf<Overlay>() }
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
     var lastRenderStats by remember { mutableStateOf("") }
@@ -1590,6 +1593,7 @@ internal fun SplitMapPane(
         val persistedViewport = viewModel.mapViewportState()
         hydrateArtifactsFromCaltopoSnapshot("mapName=$mapName")
         localTrackPointsByMappedId.clear()
+        currentFlightTrackPointsByMappedId.clear()
         lastRenderStats = ""
         lastAlignmentStats = ""
         lastCacheStats = ""
@@ -1896,8 +1900,9 @@ internal fun SplitMapPane(
                 if (!lat.isFinite() || !lng.isFinite()) return@launch
                 if (lat == 0.0 && lng == 0.0) return@launch
                 val nowWallMsec = System.currentTimeMillis()
-                val key = mappedId.ifBlank { "unmapped" }
+                val key = localTrackDesignator(mappedId)
                 val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+                val flightList = currentFlightTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
                 val point = LocalTrackPoint(
                     mappedId = key,
                     lat = lat,
@@ -1907,6 +1912,7 @@ internal fun SplitMapPane(
                     receivedAtMsec = nowWallMsec
                 )
                 list.add(point)
+                flightList.add(point)
                 if (CTDebugEnabled(ICON_LATENCY_TAG))  CTDebug(
                     ICON_LATENCY_TAG,
                     "track_ingest designator=$key wall=$nowWallMsec droneTs=$timestampMsec " +
@@ -1915,6 +1921,16 @@ internal fun SplitMapPane(
                 if (list.size > 500) {
                     list.removeAt(0)
                 }
+                if (flightList.size > 10_000) {
+                    flightList.removeAt(0)
+                }
+            }
+        }
+        val localTrackFinishedListener = CaltopoLiveTrack.LocalTrackFinishedListener { _, mappedId, _ ->
+            uiScope.launch(Dispatchers.Main.immediate) {
+                val key = localTrackDesignator(mappedId)
+                localTrackPointsByMappedId.remove(key)
+                currentFlightTrackPointsByMappedId.remove(key)
             }
         }
         // Seed localTrackPointsByMappedId from current droneStates so drones already known
@@ -1926,21 +1942,28 @@ internal fun SplitMapPane(
             if (seedLat.isFinite() && seedLng.isFinite() && !(seedLat == 0.0 && seedLng == 0.0)
                     && state.source.mostRecentMsecTimestamp > 0) {
                 val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+                val flightList = currentFlightTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
                 if (list.isEmpty()) {
-                    list.add(LocalTrackPoint(
+                    val point = LocalTrackPoint(
                         mappedId = key,
                         lat = seedLat,
                         lng = seedLng,
                         altitudeM = state.lastAlt,
                         timestampMsec = state.source.mostRecentMsecTimestamp,
                         receivedAtMsec = seedTimeMs
-                    ))
+                    )
+                    list.add(point)
+                    if (flightList.isEmpty()) {
+                        flightList.add(point)
+                    }
                 }
             }
         }
         CaltopoLiveTrack.AddLocalTrackListener(localTrackListener)
+        CaltopoLiveTrack.AddLocalTrackFinishedListener(localTrackFinishedListener)
         onDispose {
             CaltopoLiveTrack.RemoveLocalTrackListener(localTrackListener)
+            CaltopoLiveTrack.RemoveLocalTrackFinishedListener(localTrackFinishedListener)
         }
     }
 
@@ -2154,6 +2177,17 @@ internal fun SplitMapPane(
                     }
                 }
                 expiredTrackIds.forEach { localTrackPointsByMappedId.remove(it) }
+
+                currentFlightTrackPointsByMappedId.forEach { (mappedId, points) ->
+                    if (points.size < 2) return@forEach
+                    val line = Polyline(mapView).apply {
+                        setPoints(points.map { GeoPoint(it.lat, it.lng) })
+                        title = "Flight track: $mappedId (${points.size})"
+                        applyPolylineStyle(this, AndroidColor.parseColor("#FF00FF"), 2.0f)
+                    }
+                    mapView.overlays.add(line)
+                    managedOverlays.add(line)
+                }
 
                 localTrackPointsByMappedId.forEach { (mappedId, points) ->
                     if (points.size < 2) return@forEach

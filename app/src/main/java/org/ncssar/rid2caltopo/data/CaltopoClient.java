@@ -3001,6 +3001,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             if (null != liveTrack) {
                 CTDebug(TAG, msg);
                 liveTrack.finishTrack(msg);
+            } else {
+                CaltopoLiveTrack.NotifyLocalTrackFinished(droneSpec, msg);
             }
             droneSpec.reset();
             idleTimeoutPoll.stop();

@@ -47,11 +47,19 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 long timestampMsec
         );
     }
+    public interface LocalTrackFinishedListener {
+        void onLocalTrackFinished(
+                @NonNull String remoteId,
+                @NonNull String mappedId,
+                @NonNull String reason
+        );
+    }
 
     private static final String TAG = "CaltopoLiveTrack";
     private static final Util.SimpleMovingAverage CaltopoRttInMsec = new Util.SimpleMovingAverage(10);
     private static final Hashtable<String, CaltopoLiveTrack> LiveTrackByRemoteId = new Hashtable<>(16);
     private static final LinkedList<LocalTrackListener> LocalTrackListeners = new LinkedList<>();
+    private static final LinkedList<LocalTrackFinishedListener> LocalTrackFinishedListeners = new LinkedList<>();
     private CaltopoOp startLiveTrackOp;
     private String liveTrackId;
     private static class QueuedPoint {
@@ -229,6 +237,16 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         LocalTrackListeners.remove(listener);
     }
 
+    public static void AddLocalTrackFinishedListener(@NonNull LocalTrackFinishedListener listener) {
+        if (!LocalTrackFinishedListeners.contains(listener)) {
+            LocalTrackFinishedListeners.add(listener);
+        }
+    }
+
+    public static void RemoveLocalTrackFinishedListener(@NonNull LocalTrackFinishedListener listener) {
+        LocalTrackFinishedListeners.remove(listener);
+    }
+
     public static void NotifyLocalTrackPoint(@NonNull CtDroneSpec droneSpec,
                                              double lat, double lng, double altitudeMeters,
                                              long timestampMsec) {
@@ -244,6 +262,16 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             listener.onLocalTrackPoint(remoteId, mappedId, lat, lng, altitudeMeters, timestampMsec);
         } catch (Exception e) {
             CTError(TAG, "NotifyLocalTrackPoint() listener raised", e);
+        }
+    }
+
+    public static void NotifyLocalTrackFinished(@NonNull CtDroneSpec droneSpec, @NonNull String reason) {
+        String remoteId = droneSpec.getRemoteId();
+        String mappedId = droneSpec.getMappedId();
+        for (LocalTrackFinishedListener listener : LocalTrackFinishedListeners) try {
+            listener.onLocalTrackFinished(remoteId, mappedId, reason);
+        } catch (Exception e) {
+            CTError(TAG, "NotifyLocalTrackFinished() listener raised", e);
         }
     }
 
@@ -455,6 +483,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(0);
+            NotifyLocalTrackFinished(droneSpec, reason);
             if (wasOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
             localOwner = false;
             active = false;

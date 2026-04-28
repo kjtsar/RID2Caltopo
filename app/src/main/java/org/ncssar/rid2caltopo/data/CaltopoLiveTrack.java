@@ -490,18 +490,19 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     public void finishTrack(@NonNull String reason) {
-        if (active && null != liveTrackId) try {
-            boolean wasOwner = localOwner;
-            CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
+        if (!active) return;
+        boolean wasOwner = localOwner;
+        CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
+        if (null != liveTrackId) try {
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(0);
-            NotifyLocalTrackFinished(droneSpec, reason);
-            if (wasOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
-            localOwner = false;
-            active = false;
         } catch (Exception e) {
-            CTError(TAG, String.format(Locale.US, "finishTrack(%s) '%s' failed:", droneSpec.trackLabel(), reason), e);
+            CTError(TAG, String.format(Locale.US, "finishTrack(%s) '%s' Caltopo cleanup failed:", droneSpec.trackLabel(), reason), e);
         }
+        NotifyLocalTrackFinished(droneSpec, reason);
+        if (wasOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
+        localOwner = false;
+        active = false;
     }
 
     public boolean isActive() {return active; }

@@ -216,7 +216,7 @@ and point to the root folder. Then Build -> Make Project.
 
 ## MediaMtx
 The latest version of this app bundles a version of the MediaMtx 1.16.2 server that has been tailored
-to pamper the sensitivities of the various DJI and Autel drone controllers and to support low latency
+to pamper to the sensitivities of the various DJI and Autel drone controllers and to support low latency
 playback.  Please contact me <kjtsar@kjt.us> to get a copy of the changes or the mediamtx executable.
 
 

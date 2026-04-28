@@ -92,12 +92,16 @@ public class CaltopoMap {
     private static final int MAX_MAP_STARTUP_DELAY_IN_SECONDS = 45;
     private static final String LOCAL_DEVICE_MARKER_SYMBOL = "radiotower";
     private static final String LOCAL_DEVICE_MARKER_TITLE_PREFIX = "R2C: ";
+    private static final String LOCAL_DEVICE_MARKER_GUID_PROP = "r2c-guid";
+    private static final String LOCAL_DEVICE_MARKER_NAME_PROP = "r2c-name";
+    private static final String LOCAL_DEVICE_MARKER_LAST_SEEN_PROP = "r2c-last-seen-epoch-ms";
     private static final String LOCAL_DEVICE_COLOR_STARTING = "#808080";
     private static final String LOCAL_DEVICE_COLOR_HEALTHY = "#0000FF";
     private static final String LOCAL_DEVICE_COLOR_DEGRADED = "#FFA500";
     private static final String LOCAL_DEVICE_COLOR_UNCONFIGURED = "#FF0000";
     private static final long INITIAL_MARKER_POLL_MS = 500L;
     private static final long INITIAL_MARKER_WAIT_MS = 8_000L;
+    private static final long STALE_DEVICE_MARKER_GRACE_MS = 15_000L;
 
     // my peers by GUID (MQTT-based):
     private static final Hashtable<String, R2CMqttManager.PeerState> PeerIdMap = new Hashtable<>(16);
@@ -286,6 +290,36 @@ public class CaltopoMap {
         if (ShutdownInProgress || DisconnectInProgress || MapStatus != MapStatusListener.mapStatus.up) return;
         CTDebug(TAG, "onCoordinationIndicatorStateChanged(): " + state);
         refreshDeviceMarkerColorIfNeeded();
+    }
+
+    private static long getDeviceMarkerStaleAfterMs() {
+        return Math.max(RepeatMapUpdateTimeInSeconds * 2L * 1000L, STALE_DEVICE_MARKER_GRACE_MS);
+    }
+
+    private static long getMarkerLastSeenEpochMs(@Nullable JSONObject properties) {
+        if (properties == null) return 0L;
+        Object rawValue = properties.opt(LOCAL_DEVICE_MARKER_LAST_SEEN_PROP);
+        if (rawValue instanceof Number) {
+            return ((Number) rawValue).longValue();
+        }
+        if (rawValue instanceof String) {
+            try {
+                return Long.parseLong((String) rawValue);
+            } catch (NumberFormatException ignored) {
+                return 0L;
+            }
+        }
+        return 0L;
+    }
+
+    private static boolean isManagedR2cMarker(
+            @Nullable JSONObject properties,
+            @NonNull String expectedTitlePrefix
+    ) {
+        if (properties == null) return false;
+        if (!"Marker".equals(properties.optString("class", ""))) return false;
+        if (properties.has(LOCAL_DEVICE_MARKER_GUID_PROP)) return true;
+        return properties.optString("title", "").startsWith(expectedTitlePrefix);
     }
 
     /***
@@ -1335,9 +1369,11 @@ public class CaltopoMap {
         String markerId = GetMyUUID();
         if (markerId.isEmpty()) return;
         try {
+            long nowMs = System.currentTimeMillis();
             JSONObject extraProperties = new JSONObject();
-            extraProperties.put("r2c-name", R2CActivity.MyDeviceName);
-            extraProperties.put("r2c-guid", markerId);
+            extraProperties.put(LOCAL_DEVICE_MARKER_NAME_PROP, R2CActivity.MyDeviceName);
+            extraProperties.put(LOCAL_DEVICE_MARKER_GUID_PROP, markerId);
+            extraProperties.put(LOCAL_DEVICE_MARKER_LAST_SEEN_PROP, nowMs);
             extraProperties.put("description", buildMyDeviceMarkerDescription());
             extraProperties.put("marker-color", getLocalDeviceMarkerColor());
             getCurrentRuntime().getCalTopoSessionGateway().addMarker(
@@ -1369,18 +1405,22 @@ public class CaltopoMap {
         String markerId = GetMyUUID();
         if (markerId.isEmpty()) return;
         String markerTitle = LOCAL_DEVICE_MARKER_TITLE_PREFIX + R2CActivity.MyDeviceName;
+        long nowMs = System.currentTimeMillis();
+        long staleAfterMs = getDeviceMarkerStaleAfterMs();
         ArrayList<String> staleIds = new ArrayList<>();
         synchronized (ArtifactLock) {
             for (JSONObject feature : ArtifactFeaturesById.values()) {
                 if (feature == null) continue;
                 String featureId = feature.optString("id", "");
                 if (featureId.isEmpty() || markerId.equals(featureId)) continue;
+                if (ResolvedMyDeviceMarkerId != null && ResolvedMyDeviceMarkerId.equals(featureId)) continue;
                 JSONObject properties = feature.optJSONObject("properties");
-                if (properties == null) continue;
-                if (!"Marker".equals(properties.optString("class", ""))) continue;
-                boolean sameGuid = markerId.equals(properties.optString("r2c-guid", ""));
+                if (!isManagedR2cMarker(properties, LOCAL_DEVICE_MARKER_TITLE_PREFIX)) continue;
+                boolean sameGuid = markerId.equals(properties.optString(LOCAL_DEVICE_MARKER_GUID_PROP, ""));
                 boolean sameTitle = markerTitle.equals(properties.optString("title", ""));
-                if (sameGuid || sameTitle) {
+                long lastSeenEpochMs = getMarkerLastSeenEpochMs(properties);
+                boolean staleHeartbeat = lastSeenEpochMs > 0L && (nowMs - lastSeenEpochMs) > staleAfterMs;
+                if (sameGuid || sameTitle || staleHeartbeat) {
                     staleIds.add(featureId);
                 }
             }

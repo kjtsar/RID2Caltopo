@@ -881,6 +881,9 @@ public class CaltopoMap {
             }
         }
 
+        if (!InitialMarkerPublishPending && !DisconnectInProgress) {
+            publishMyDeviceMarkerIfPossible(GetMyLocation());
+        }
         SetMapStatus(MapStatusListener.mapStatus.up, null);
     }
 

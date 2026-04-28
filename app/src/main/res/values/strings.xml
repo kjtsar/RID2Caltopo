@@ -123,9 +123,7 @@
         models have been verified to work with this app.&lt;br&gt;&lt;br&gt;
 	If you want to publish tracks in real-time, this app requires
 	&lt;a href=&quot;https://training.caltopo.com/all_users/team-accounts/teamapi&quot;&gt;Caltopo Teams Credentials&lt;/a&gt;
-        to write into your team maps.&lt;br&gt;&lt;br&gt;  You can also write tracks from this app using the
-        &lt;a href=&quot;https://training.caltopo.com/all_users/share/live-tracking&quot;&gt;Caltopo Live Tracking U/I&lt;/a&gt;,
-        but this requires you manage the LiveTrack using the Caltopo User Interface before and after each flight.&lt;br&gt;&lt;br&gt;
+        to write into your team maps.&lt;br&gt;&lt;br&gt;
         The developer of this app very much appreciates the &lt;a href=&quot;https://www.caltopo.com&quot;&gt;Caltopo&lt;/a&gt; product
         and the app uses the Caltopo API, but is not a product of or supported by the Caltopo team.   Similarly,
         the developer appreciates the work of the &lt;a href=&quot;https://github.com/opendroneid&quot;&gt;opendronid&lt;/a&gt;

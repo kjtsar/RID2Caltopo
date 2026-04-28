@@ -38,7 +38,7 @@ to be.
 
 This app's settings menu option allows the user to quickly change options that are likely to vary 
 from one invocation to the next.  Support for more involved or sensitive configuration information 
-is provided by the app's "load config file" menu option, which currently supports two .json 
+is provided by the app's "load config file" menu option, which currently supports three .json 
 configuration file formats:
 
 ## ridmap.json:
@@ -127,27 +127,36 @@ menu and "Load Config File", then select the left-hand hamburger menu in the fil
 These tracker settings also flow through shared org config and Mutual Aid profile
 payloads so multi-agency searches can coordinate against the same tracker service
 when the participating organizations choose to use it.
-option and scroll down to your Google Drive option to load the files securely from your
-Google Drive.
 
-If you don't have a valid Teams account, you can still go into the Caltopo User Interface 
-and manually configure [Fleet Live Tracking](https://training.caltopo.com/all_users/share/live-tracking#set-up), 
-by specifying the Remote Id for each drone you want to track.  Use "DRONE" for the GroupId field.
+## ct_mutual_aid_credentials
+If you can enlist the help of your Caltopo Teams Admin, have them create a subteam account 
+that only has update permissions for a single team folder.  We called ours DroneMa.  When
+your admin finishes, they will provide you with a team_id, credential_id, and credential_secret
+tuple for that account.  Enter those values as follows into your ma_config.json file:
 
-This is considered live tracking mode, where the _use_direct_flag_ settings toggle is false.  If 
-you've configured the LiveTrack in Caltopo correctly, incoming RID2Caltopo waypoints will be 
-forwarded to the corresponding Caltopo live tracks.   You'll need to stop the LiveTracks and restart 
-them manually in Caltopo when the drone lands and before it takes off again respectively.  Fortunately 
-the Caltopo U/I thoughtfully supplies the GroupId-RemoteId pairing as an option, so you don't need 
-to retype each time.  Remember to give each new LiveTrack a unique label to differentiate your flights
-and make sure you use "DRONE" in place of GroupId.
+<blockquote><code>
+{
+  "type": "ct_mutual_aid_credentials",
+  "file_version": "1.0",
+  "editor" = "Admin <admin@nasar.org>",
+  "updated" = "Sat Apr 11 15:04:41 PDT 2025",
+  "org_name" : "NASAR_MAI",    
+  "team_id": "ma team id",
+  "credential_id": "ma credential id",
+  "credential_secret": "ma credential secret",
+  "domain_and_port": "caltopo.com",
+  "source_label": "NASAR Mutual Aid",
+  "target_folder_hint": "DroneMA"
+}
+</code></blockquote>
 
-The _track_folder_ is the name of the folder to create in the map to receive drone tracks when the 
-_use_direct_flag_ is set to true.   To recap, you must specify _map_id_, _group_id_, 
-_use_direct_flag_ = true, and the credentials tuple in order for RID2Caltopo to programmatically 
-configure, start, stop, and archive tracks directly.   For LiveTrack mode, just configure a 
-non-empty _group_id_ field and set _use_direct_flag_ = false in which case you'll need to manually
-configure, start, stop, and archive the track with the Caltopo application.
+When loaded into RID2Caltopo, this permits your app to publish a Mutual Aid package for visiting
+RID2Caltopo teams to use during a mutual aid search(Ref Menu->Export MA Package).  Just create a 
+bookmark in your team's DroneMA folder that points to the Mutual Aid Incident Map and visiting 
+teams will be able to connect to it and publish their drone tracks.   If the publishing RID2Caltopo
+map already has all the relevant map tiles downloaded they will be pushed out in the MA Package,
+allowing the receiving app to hit the ground running.
+
 
 ## Support for multiple apps writing to same map at the same time:
 Each DroneScout Bridge has a limited detection range.  Many factors contribute to the maximum
@@ -200,42 +209,16 @@ consider placing the cell phone running RID2Caltopo on the same tripod.  It isn'
 place the device running RID2Caltopo right next to the bridge, but by placing the entire setup at 
 higher locations, you can improve your chance of getting cell coverage.
 
-## User Interface Summary
-Hopefully the user interface is self-explanatory, but I'll walk you thru a quick overview.
-
-The first thing you see when the app starts is the name of the device with the version of 
-the software directly below it.   To the right of that is the amount of time the app has
-been running.   Note that you may need to scroll the screen horizontally to see all the fields.
-To the right of the uptime are the current settings for the MapId field.  These
-fields can be specified in the _Settings_ menu item.  The final field on the right is the
-Caltopo Round-Trip_time.  The three fields on the right are blank/0 if a Caltopo map is not
-specified.  With valid settings for those values and authorized credentials, the app will try
-to connect to the map as will be indicated by a spinning icon to the left of the device name.
-When the device is connected to the map, the dynamic icon is replaced by a small globe.  If you
-check your caltopo map, you'll see a _Drone Tracks_ folder with an _Antenna_ symbol and 
-corresponding "R2C: _device_name_" label.  If you have debugs enabled (ref. Logging:_level_
-hamburger menu item), the available interfaces that your device has will be listed.
-
 ## How to build
 To build the application, use Android Studio.
 Import the project (File -> New -> Import Project, or just Open on newer versions of Android Studio) 
 and point to the root folder. Then Build -> Make Project.
 
-## Android Studio "Stop" button note
-After quitting from the app UI, Android may keep an **empty cached process** for this package.
-This can leave Android Studio's red "Stop" button active even though the app has no active services.
+## MediaMtx
+The latest version of this app bundles a version of the MediaMtx 1.16.2 server that has been tailored
+to pamper the sensitivities of the various DJI and Autel drone controllers and to support low latency
+playback.  Please contact me <kjtsar@kjt.us> to get a copy of the changes or the mediamtx executable.
 
-Use this helper to verify process state:
-
-```bash
-./tools/android_process_status.sh
-```
-
-Optional force-stop for a clean development handoff:
-
-```bash
-./tools/android_process_status.sh org.ncssar.rid2caltopo --force-stop
-```
 
 ## Supported interfaces and protocols
 Bluetooth 4 (legacy bluetooth), Bluetooth 5 (long range/coded phy), WiFi Beacon, and WiFi NaN are all 
@@ -246,8 +229,3 @@ support one or more of the other capabilities.
 This app doesn't collect or disseminate any information except in the service of connecting to 
 and updating a caltopo map.  For more specifics, please see the corresponding 
 [Privacy Policy](PrivacyPolicy.md) document.
-
-## High level SW Architecture
-A KenDraw(tm) view of the class structure can be seen in the figure below:
-
-![T.B.S.](images/RID2Caltopo.png)

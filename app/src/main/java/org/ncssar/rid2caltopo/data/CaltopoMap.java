@@ -959,8 +959,12 @@ public class CaltopoMap {
 
 
     private static void SetMapStatus(MapStatusListener.mapStatus mapStatus, @Nullable String optEmsg) {
+        MapStatusListener.mapStatus previousStatus = MapStatus;
+        boolean statusChanged = !previousStatus.name().equals(mapStatus.name());
+        boolean enteredUp = mapStatus == MapStatusListener.mapStatus.up &&
+                previousStatus != MapStatusListener.mapStatus.up;
 
-        if (!MapStatus.name().equals(mapStatus.name())) {
+        if (statusChanged) {
             Bundle parameters = new Bundle();
             parameters.putString("r2c_mapId", MapNode != null ? MapNode.getTitle(): "");
             parameters.putInt("r2c_listenerCount", MapListeners.size());
@@ -973,8 +977,10 @@ public class CaltopoMap {
             for (MapStatusListener Listener : MapListeners) Listener.mapStatusUpdate(MapStatus, MapNode, optEmsg);
         }
         if (mapStatus == MapStatusListener.mapStatus.up) {
-            ProfileExpiryPoll.start(CaltopoMap::pollActiveProfileExpiry, PROFILE_EXPIRY_POLL_MS, PROFILE_EXPIRY_POLL_MS);
-            if (MapNode != null) {
+            if (enteredUp) {
+                ProfileExpiryPoll.start(CaltopoMap::pollActiveProfileExpiry, PROFILE_EXPIRY_POLL_MS, PROFILE_EXPIRY_POLL_MS);
+            }
+            if (MapNode != null && enteredUp) {
                 // Start peer coordination for this map.
                 // The runtime chooses tracker-backed coordination when configured,
                 // otherwise it falls back to MQTT.

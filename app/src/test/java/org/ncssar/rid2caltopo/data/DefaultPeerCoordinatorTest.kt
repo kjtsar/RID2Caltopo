@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.data
 
 import org.junit.Assert.assertEquals
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -9,6 +10,8 @@ import org.junit.Test
 class DefaultPeerCoordinatorTest {
     private class FakeTransport : TrackerCoordinationTransport {
         var connected = false
+        var connectCount = 0
+        var autoOpen = true
         private var callback: TrackerCoordinationTransport.Callback? = null
 
         override fun setCallback(callback: TrackerCoordinationTransport.Callback?) {
@@ -16,8 +19,11 @@ class DefaultPeerCoordinatorTest {
         }
 
         override fun connect(websocketUrl: String, apiKey: String?) {
-            connected = true
-            callback?.onOpen()
+            connectCount++
+            if (autoOpen) {
+                connected = true
+                callback?.onOpen()
+            }
         }
 
         override fun disconnect() {
@@ -79,5 +85,17 @@ class DefaultPeerCoordinatorTest {
         assertTrue(mqttFallback.isStarted())
         assertEquals("MAP1", mqttFallback.getStartedMapId())
         assertEquals(1, mqttFallback.countEvents("onLiveTrackCreated"))
+    }
+
+    @Test
+    fun duplicateStartWhileTrackerDegraded_doesNotForceRestart() {
+        transport.autoOpen = false
+        val coordinator = DefaultPeerCoordinator.getInstance()
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        assertEquals(1, transport.connectCount)
+        assertFalse(transport.connected)
     }
 }

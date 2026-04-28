@@ -116,6 +116,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private volatile boolean heartbeatSendQueued;
     private volatile long reconnectScheduledAtMs;
     private volatile long reconnectTargetAtMs;
+    private volatile boolean reconnectPending;
 
     private TrackerPeerCoordinator() {
     }
@@ -172,6 +173,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.forcedReconnectCount = 0L;
         this.reconnectScheduledAtMs = 0L;
         this.reconnectTargetAtMs = 0L;
+        this.reconnectPending = false;
         CTInfo(TAG, String.format(Locale.US,
                 "start(): wsUrl='%s' token=%s %s",
                 this.trackerWsUrl,
@@ -257,6 +259,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         started = false;
         hardFailureNotified = false;
+        reconnectPending = false;
         notifyCoordinationIndicatorListener();
     }
 
@@ -396,9 +399,20 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private void scheduleReconnect(@NonNull String cause, long overrideDelayMs) {
         if (!started || trackerWsUrl == null || trackerApiKey == null) return;
         long delayMs = overrideDelayMs >= 0 ? overrideDelayMs : nextReconnectDelayMs;
+        long scheduledAtMs = nowMs();
+        long targetAtMs = scheduledAtMs + delayMs;
+        if (reconnectPending && reconnectTargetAtMs > 0L && reconnectTargetAtMs <= targetAtMs) {
+            CTDebug(TAG, String.format(Locale.US,
+                    "scheduleReconnect(): ignoring duplicate cause=%s existingDelayMs=%d requestedDelayMs=%d",
+                    cause,
+                    Math.max(reconnectTargetAtMs - reconnectScheduledAtMs, 0L),
+                    delayMs));
+            return;
+        }
+        reconnectPending = true;
         lastReconnectCause = cause;
-        reconnectScheduledAtMs = nowMs();
-        reconnectTargetAtMs = reconnectScheduledAtMs + delayMs;
+        reconnectScheduledAtMs = scheduledAtMs;
+        reconnectTargetAtMs = targetAtMs;
         CTDebug(TAG, String.format(Locale.US,
                 "scheduleReconnect(): cause=%s delayMs=%d lastAckSeq=%d helloAckAgeMs=%d heartbeatAckAgeMs=%d closeCode=%d closeReason='%s'",
                 cause,
@@ -415,7 +429,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private synchronized void reconnect() {
-        if (!started || trackerWsUrl == null || trackerApiKey == null) return;
+        if (!started || trackerWsUrl == null || trackerApiKey == null) {
+            reconnectPending = false;
+            return;
+        }
         long reconnectStartedAtMs = nowMs();
         long schedulerSkewMs = reconnectTargetAtMs > 0L
                 ? Math.max(reconnectStartedAtMs - reconnectTargetAtMs, 0L)
@@ -484,6 +501,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private void onTransportOpen(boolean reconnecting) {
+        reconnectPending = false;
         nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
         lastReconnectCause = reconnecting ? "reconnected" : "connected";
         sendHello();
@@ -662,6 +680,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     private synchronized void forceReconnect(@NonNull String cause) {
         if (!started) return;
+        if (reconnectPending) {
+            CTWarn(TAG, String.format(Locale.US,
+                    "forceReconnect(): reconnect already pending; ignoring duplicate cause=%s lastReconnectCause=%s",
+                    cause,
+                    lastReconnectCause));
+            return;
+        }
         forcedReconnectCount++;
         lastReconnectCause = cause;
         CTWarn(TAG, String.format(Locale.US,
@@ -674,6 +699,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 lastCloseReason));
         heartbeatTimer.stop();
         ackWatchdogTimer.stop();
+        heartbeatCoalesceTimer.stop();
         TrackerCoordinationTransport activeTransport = transport;
         if (activeTransport != null) {
             activeTransport.disconnect();

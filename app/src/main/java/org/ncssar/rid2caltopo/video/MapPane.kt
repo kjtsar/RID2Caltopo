@@ -59,6 +59,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -546,6 +547,7 @@ internal fun SplitMapPane(
     val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val currentFlightTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
+    var trackOverlayRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
     var lastRenderStats by remember { mutableStateOf("") }
@@ -1594,6 +1596,7 @@ internal fun SplitMapPane(
         hydrateArtifactsFromCaltopoSnapshot("mapName=$mapName")
         localTrackPointsByMappedId.clear()
         currentFlightTrackPointsByMappedId.clear()
+        trackOverlayRefreshToken++
         lastRenderStats = ""
         lastAlignmentStats = ""
         lastCacheStats = ""
@@ -1913,6 +1916,7 @@ internal fun SplitMapPane(
                 )
                 list.add(point)
                 flightList.add(point)
+                trackOverlayRefreshToken++
                 if (CTDebugEnabled(ICON_LATENCY_TAG))  CTDebug(
                     ICON_LATENCY_TAG,
                     "track_ingest designator=$key wall=$nowWallMsec droneTs=$timestampMsec " +
@@ -1931,6 +1935,7 @@ internal fun SplitMapPane(
                 val key = localTrackDesignator(mappedId)
                 localTrackPointsByMappedId.remove(key)
                 currentFlightTrackPointsByMappedId.remove(key)
+                trackOverlayRefreshToken++
             }
         }
         // Seed localTrackPointsByMappedId from current droneStates so drones already known
@@ -1956,6 +1961,7 @@ internal fun SplitMapPane(
                     if (flightList.isEmpty()) {
                         flightList.add(point)
                     }
+                    trackOverlayRefreshToken++
                 }
             }
         }
@@ -2008,6 +2014,7 @@ internal fun SplitMapPane(
                 }
             },
             update = { mapView ->
+                trackOverlayRefreshToken
                 val uiNowWallMsec = System.currentTimeMillis()
                 mapBounds = mapView.boundingBox
                 val tileSource = when (baseLayer) {

@@ -261,6 +261,28 @@ class TrackerPeerCoordinatorTest {
         }
     }
 
+    @Test
+    fun repeatedMissedHeartbeatAckWhileReconnectPending_isCoalesced() {
+        transport.autoOpen = false
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.open()
+        coordinator.handleHelloAckForTesting()
+        coordinator.markHeartbeatSentForTesting(9L, clock.now())
+        clock.advanceBy(10_001L)
+
+        coordinator.checkAckLivenessForTesting()
+        awaitTrue("expected reconnect attempt after missed heartbeat ack") {
+            transport.connectCount >= 2
+        }
+        val forcedReconnectsAfterFirstCheck = coordinator.getForcedReconnectCountForTesting()
+
+        coordinator.checkAckLivenessForTesting()
+
+        assertEquals(forcedReconnectsAfterFirstCheck, coordinator.getForcedReconnectCountForTesting())
+        assertEquals(2, transport.connectCount)
+    }
+
     private fun awaitTrue(message: String, timeoutMs: Long = 500L, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {

@@ -21,6 +21,7 @@ import java.util.Locale;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
+import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -322,7 +323,18 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
      */
     public void archiveTrackOnCaltopo(long maxWaitInMilliseconds) {
         if (!localOwner) {
-            CTDebug(TAG, "archiveTrackOnCaltopo(): not the owner — skipping.");
+            if (liveTrackId != null) {
+                CTWarn(TAG, String.format(Locale.US,
+                        "archiveTrackOnCaltopo(): no longer owner; deleting orphaned live track '%s' for remoteId=%s",
+                        liveTrackId, myRemoteId));
+                try {
+                    runtime.getCalTopoSessionGateway().deleteLiveTrackWithId(liveTrackId, null);
+                } catch (Exception e) {
+                    CTError(TAG, "archiveTrackOnCaltopo(): deleteLiveTrackWithId() raised: ", e);
+                }
+            } else {
+                CTDebug(TAG, "archiveTrackOnCaltopo(): not the owner — skipping.");
+            }
             resetLiveTrack();
             return;
         }

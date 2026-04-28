@@ -68,34 +68,23 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                 sameString(startedName, name) &&
                 sameString(startedBrokerUri, brokerUri) &&
                 trackerSelected == nextTrackerSelected &&
-                activeCoordinator == nextCoordinator &&
-                currentState == CoordinationIndicatorState.HEALTHY) {
-            CaltopoClient.CTDebug(
-                    "DefaultPeerCoord",
-                    String.format(
-                            "start(): ignoring duplicate start for mapId='%s' guid='%s' using %s coordination",
-                            mapId,
-                            guid,
-                            trackerSelected ? "tracker" : "mqtt"
-                    )
+                activeCoordinator == nextCoordinator) {
+            String message = String.format(
+                    "start(): ignoring duplicate start for mapId='%s' guid='%s' using %s coordination state=%s",
+                    mapId,
+                    guid,
+                    trackerSelected ? "tracker" : "mqtt",
+                    currentState
             );
+            if (currentState == CoordinationIndicatorState.HEALTHY) {
+                CaltopoClient.CTDebug("DefaultPeerCoord", message);
+            } else {
+                CaltopoClient.CTWarn(
+                        "DefaultPeerCoord",
+                        message + " and allowing the existing coordinator to recover in place."
+                );
+            }
             return;
-        }
-        if (sameString(startedMapId, mapId) &&
-                sameString(startedGuid, guid) &&
-                sameString(startedName, name) &&
-                sameString(startedBrokerUri, brokerUri) &&
-                trackerSelected == nextTrackerSelected &&
-                activeCoordinator == nextCoordinator &&
-                currentState != CoordinationIndicatorState.HEALTHY) {
-            CaltopoClient.CTWarn(
-                    "DefaultPeerCoord",
-                    String.format(
-                            "start(): duplicate start requested while %s coordination is %s; forcing restart.",
-                            trackerSelected ? "tracker" : "mqtt",
-                            currentState
-                    )
-            );
         }
         startedMapId = mapId;
         startedGuid = guid;

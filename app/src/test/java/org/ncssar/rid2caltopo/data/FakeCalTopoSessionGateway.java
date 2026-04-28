@@ -169,6 +169,12 @@ public final class FakeCalTopoSessionGateway implements CalTopoSessionGateway {
     @NonNull
     @Override
     public CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete) {
+        return deleteLiveTrackWithId(objId, onComplete, new int[0]);
+    }
+
+    @NonNull
+    @Override
+    public CaltopoOp deleteLiveTrackWithId(@NonNull String objId, @Nullable Consumer<CaltopoOp> onComplete, int... successCodes) {
         record("deleteLiveTrack", objId, null);
         return completedOp(objId);
     }

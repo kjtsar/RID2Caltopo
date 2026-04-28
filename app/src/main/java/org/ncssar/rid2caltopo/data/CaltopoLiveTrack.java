@@ -533,10 +533,12 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             CTDebug(TAG, String.format(Locale.US, "startLiveTrackComplete(%s): liveTrackId: '%s'",
                     trackLabel, liveTrackId));
             if (!localOwner || shuttingDown || !active) {
+                if (liveTrackId != null && !liveTrackId.isEmpty()) {
+                    CaltopoMap.AddLiveTrack(liveTrackId, this);
+                }
                 CTDebug(TAG, String.format(Locale.US,
-                        "startLiveTrackComplete(%s): ownership no longer local; ignoring LiveTrack completion and leaving queued points buffered.",
+                        "startLiveTrackComplete(%s): ownership no longer local; retaining liveTrackId for orphan cleanup and leaving queued points buffered.",
                         trackLabel));
-                liveTrackId = null;
                 startLiveTrackOp = null;
                 return;
             }

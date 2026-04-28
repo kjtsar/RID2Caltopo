@@ -20,6 +20,9 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.location.Location;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Bundle;
 import android.provider.Settings;
 
@@ -102,6 +105,7 @@ public class CaltopoMap {
     private static final long INITIAL_MARKER_POLL_MS = 500L;
     private static final long INITIAL_MARKER_WAIT_MS = 8_000L;
     private static final long STALE_DEVICE_MARKER_GRACE_MS = 15_000L;
+    private static final long MARKER_DELETE_WAIT_MS = 4_000L;
 
     // my peers by GUID (MQTT-based):
     private static final Hashtable<String, R2CMqttManager.PeerState> PeerIdMap = new Hashtable<>(16);
@@ -648,7 +652,7 @@ public class CaltopoMap {
         InitialMarkerPublishPending = false;
         InitialMarkerWaitStartedMs = 0L;
         resetArtifactStore("ResetMapConnection");
-        removeMyDeviceMarker();
+        removeMyDeviceMarker(maxWaitInMilliseconds);
         ResolvedMyDeviceMarkerId = null;
         LastPublishedMyDeviceMarkerColor = null;
         long startTime = System.currentTimeMillis();
@@ -1300,7 +1304,7 @@ public class CaltopoMap {
             // Drain active map-owned LiveTracks through the normal archive path
             // before tearing down the CalTopo session.
             ResetMapConnection(10_000L);
-            removeMyDeviceMarker();
+            removeMyDeviceMarker(10_000L);
             MapNode = null;
             SessionNodeMap = null;
             SetMapStatus(MapStatusListener.mapStatus.down, "Shutdown in progress.");
@@ -1449,29 +1453,60 @@ public class CaltopoMap {
         }
     }
 
-    private static void removeMyDeviceMarker() {
+    private static void removeMyDeviceMarker(long maxWaitInMilliseconds) {
         if (MapNode == null) return;
         String markerId = GetMyUUID();
         if (markerId.isEmpty()) return;
+        long waitBudgetMs = shouldWaitForMarkerDeleteAck()
+                ? Math.min(maxWaitInMilliseconds, MARKER_DELETE_WAIT_MS)
+                : 0L;
         try {
-            getCurrentRuntime().getCalTopoSessionGateway()
+            CaltopoOp deletePrimaryOp = getCurrentRuntime().getCalTopoSessionGateway()
                     .deleteMarkerWithId(markerId, deleteOp ->
                             CTDebug(TAG, String.format(Locale.US,
                                     "removeMyDeviceMarker(): markerId=%s success=%s responseCode=%d",
                                     markerId, deleteOp != null && deleteOp.success(),
                                     deleteOp != null ? deleteOp.responseCode : -1)));
+            if (waitBudgetMs > 0L) {
+                deletePrimaryOp.syncOp(waitBudgetMs);
+            }
             if (ResolvedMyDeviceMarkerId != null && !ResolvedMyDeviceMarkerId.isEmpty() &&
                     !ResolvedMyDeviceMarkerId.equals(markerId)) {
                 String resolvedId = ResolvedMyDeviceMarkerId;
-                getCurrentRuntime().getCalTopoSessionGateway()
+                CaltopoOp deleteResolvedOp = getCurrentRuntime().getCalTopoSessionGateway()
                         .deleteMarkerWithId(resolvedId, deleteOp ->
                                 CTDebug(TAG, String.format(Locale.US,
                                         "removeMyDeviceMarker(): resolvedMarkerId=%s success=%s responseCode=%d",
                                         resolvedId, deleteOp != null && deleteOp.success(),
                                         deleteOp != null ? deleteOp.responseCode : -1)));
+                if (waitBudgetMs > 0L) {
+                    deleteResolvedOp.syncOp(waitBudgetMs);
+                }
             }
+        } catch (java.util.concurrent.TimeoutException e) {
+            CTWarn(TAG, String.format(Locale.US,
+                    "removeMyDeviceMarker(): timed out waiting %d ms for delete acknowledgement.",
+                    waitBudgetMs));
         } catch (Exception e) {
             CTWarn(TAG, "removeMyDeviceMarker() raised", e);
+        }
+    }
+
+    private static boolean shouldWaitForMarkerDeleteAck() {
+        Context context = R2CApplication.getAppCtxt();
+        if (context == null) return false;
+        try {
+            ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
+            if (cm == null) return false;
+            Network activeNetwork = cm.getActiveNetwork();
+            if (activeNetwork == null) return false;
+            NetworkCapabilities caps = cm.getNetworkCapabilities(activeNetwork);
+            if (caps == null) return false;
+            return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        } catch (Exception e) {
+            CTWarn(TAG, "shouldWaitForMarkerDeleteAck() raised", e);
+            return false;
         }
     }
 

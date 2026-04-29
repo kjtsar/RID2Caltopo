@@ -55,7 +55,7 @@ data class AnomalyConfig(
     val sensitivity: Float = 0.60f,
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.WhiteHot,
-    val scanZone: Float = 0.80f,
+    val scanZone: Float = 0.60f,
     val minHits: Int = 2,
 ) {
     val sensitivityLabel: String

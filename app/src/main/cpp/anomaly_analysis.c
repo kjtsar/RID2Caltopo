@@ -191,6 +191,13 @@ void anomaly_state_reset(anomaly_state_t *state) {
     }
     state->prev_luma_width  = 0;
     state->prev_luma_height = 0;
+    if (state->bg_luma != NULL) {
+        free(state->bg_luma);
+        state->bg_luma = NULL;
+    }
+    state->bg_sg_w  = 0;
+    state->bg_sg_h  = 0;
+    state->bg_warmup = 0;
 }
 
 void anomaly_state_cleanup(anomaly_state_t *state) {
@@ -359,60 +366,88 @@ int anomaly_process_frame(
         }
     }
 
-    // ── Statistics pass: global + per-tile local stats ──────────────────
-    // Global stats are the fallback for tiles with too few samples.
-    // Local tile stats are what we actually use for scoring — they make the
-    // detector ask "is this pixel anomalous for its immediate neighbourhood?"
-    // rather than "is this pixel the global extreme?".  At 600 ft altitude a
-    // person's warm legs may not be the hottest thing in the whole frame, but
-    // they will stand out clearly within the surrounding 1/8-frame tile.
-#define T ANOMALY_LOCAL_TILE_SIZE
-    double sum_y = 0.0, sum_y2 = 0.0;
-    double sum_u = 0.0, sum_u2 = 0.0;
-    double sum_v = 0.0, sum_v2 = 0.0;
-    int sample_count = 0;
-
-    double tile_sum_y[T][T],  tile_sum_y2[T][T];
-    double tile_sum_u[T][T],  tile_sum_u2[T][T];
-    double tile_sum_v[T][T],  tile_sum_v2[T][T];
-    int    tile_n[T][T];
-    for (int tr = 0; tr < T; tr++)
-        for (int tc = 0; tc < T; tc++) {
-            tile_sum_y[tr][tc] = tile_sum_y2[tr][tc] = 0.0;
-            tile_sum_u[tr][tc] = tile_sum_u2[tr][tc] = 0.0;
-            tile_sum_v[tr][tc] = tile_sum_v2[tr][tc] = 0.0;
-            tile_n[tr][tc] = 0;
-        }
+    // ── Statistics pass ──────────────────────────────────────────────────
+    // Thermal detection uses integral-image local statistics so each sample
+    // point is compared against its immediate pixel neighbourhood rather than
+    // a coarse tile.  This is critical for aerial SAR footage: the scene has
+    // high global variance (tree crowns vs. clearings) so any tile large
+    // enough to contain reliable statistics also spans multiple features,
+    // making a person's subtle warmth statistically invisible at 8σ.
+    // With a small window (ANOMALY_THERMAL_WIN_RADIUS sampled pixels ≈
+    // RADIUS×sample_step real pixels) the window usually stays inside one
+    // clearing, giving the person's darker signature a fair local comparison.
+    //
+    // Color detection retains the tile-grid approach (ANOMALY_LOCAL_TILE_SIZE);
+    // in IR footage all channels are near-greyscale so colour is less useful,
+    // and the tile grid is cheap to keep for visible-light modes.
 
     int roi_w = roi_x1 - roi_x0;
     int roi_h = roi_y1 - roi_y0;
     if (roi_w <= 0) roi_w = 1;
     if (roi_h <= 0) roi_h = 1;
 
-    for (int y = roi_y0; y < roi_y1; y += sample_step) {
-        int tr = (y - roi_y0) * T / roi_h;
-        if (tr < 0) tr = 0; if (tr >= T) tr = T - 1;
+    // Sampled-grid dimensions for integral images.
+    int sg_w = (roi_w + sample_step - 1) / sample_step;
+    int sg_h = (roi_h + sample_step - 1) / sample_step;
+
+    // Heap-allocate integral image arrays (freed at end of this function).
+    // Two channels: luma sum and luma sum-of-squares for variance.
+    double *sg_luma  = (double *)malloc((size_t)sg_w * sg_h * sizeof(double));
+    double *ii_sum   = (double *)malloc((size_t)sg_w * sg_h * sizeof(double));
+    double *ii_sum2  = (double *)malloc((size_t)sg_w * sg_h * sizeof(double));
+    if (!sg_luma || !ii_sum || !ii_sum2) {
+        free(sg_luma); free(ii_sum); free(ii_sum2);
+        if (curr_luma) { free(state->prev_luma); state->prev_luma = curr_luma;
+                         state->prev_luma_width = motion_w; state->prev_luma_height = motion_h; }
+        return 0;
+    }
+
+    // Colour tile accumulators (kept for ANOMALY_ALGO_COLOR).
+#define T ANOMALY_LOCAL_TILE_SIZE
+    double tile_sum_u[T][T], tile_sum_u2[T][T];
+    double tile_sum_v[T][T], tile_sum_v2[T][T];
+    int    tile_n[T][T];
+    for (int tr = 0; tr < T; tr++)
+        for (int tc = 0; tc < T; tc++) {
+            tile_sum_u[tr][tc] = tile_sum_u2[tr][tc] = 0.0;
+            tile_sum_v[tr][tc] = tile_sum_v2[tr][tc] = 0.0;
+            tile_n[tr][tc] = 0;
+        }
+
+    // Global sums (used for color-tile fallback and early-exit check).
+    double sum_u = 0.0, sum_u2 = 0.0;
+    double sum_v = 0.0, sum_v2 = 0.0;
+    int sample_count = 0;
+
+    // Fill sampled-luma grid + colour tile accumulators in one pass.
+    for (int sy = 0; sy < sg_h; sy++) {
+        int y  = roi_y0 + sy * sample_step;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        int tr = sy * T / sg_h;
+        if (tr >= T) tr = T - 1;
         const uint8_t *row = rgba + (y * rgba_stride);
-        for (int x = roi_x0; x < roi_x1; x += sample_step) {
-            int tc = (x - roi_x0) * T / roi_w;
-            if (tc < 0) tc = 0; if (tc >= T) tc = T - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            int x  = roi_x0 + sx * sample_step;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            int tc = sx * T / sg_w;
+            if (tc >= T) tc = T - 1;
             const uint8_t *px = row + (x * 4);
             double r = (double)px[0], g = (double)px[1], b = (double)px[2];
             double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
             double u   = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
             double v   = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
-            sum_y += lum; sum_y2 += lum * lum;
-            sum_u += u;   sum_u2 += u * u;
-            sum_v += v;   sum_v2 += v * v;
-            sample_count++;
-            tile_sum_y[tr][tc]  += lum; tile_sum_y2[tr][tc] += lum * lum;
-            tile_sum_u[tr][tc]  += u;   tile_sum_u2[tr][tc] += u * u;
-            tile_sum_v[tr][tc]  += v;   tile_sum_v2[tr][tc] += v * v;
+            sg_luma[sy * sg_w + sx] = lum;
+            sum_u  += u;  sum_u2  += u * u;
+            sum_v  += v;  sum_v2  += v * v;
+            tile_sum_u[tr][tc]  += u;  tile_sum_u2[tr][tc]  += u * u;
+            tile_sum_v[tr][tc]  += v;  tile_sum_v2[tr][tc]  += v * v;
             tile_n[tr][tc]++;
+            sample_count++;
         }
     }
 
     if (sample_count <= 1) {
+        free(sg_luma); free(ii_sum); free(ii_sum2);
         if (curr_luma != NULL) {
             if (state->prev_luma != NULL) free(state->prev_luma);
             state->prev_luma        = curr_luma;
@@ -422,17 +457,28 @@ int anomaly_process_frame(
         return 0;
     }
 
-    // Global fallback stats.
-    double g_mean_y = sum_y / (double)sample_count;
-    double g_std_y  = sqrt(fmax((sum_y2 / (double)sample_count) - g_mean_y * g_mean_y, 1.0));
-    double g_mean_u = sum_u / (double)sample_count;
-    double g_std_u  = sqrt(fmax((sum_u2 / (double)sample_count) - g_mean_u * g_mean_u, 1.0));
-    double g_mean_v = sum_v / (double)sample_count;
-    double g_std_v  = sqrt(fmax((sum_v2 / (double)sample_count) - g_mean_v * g_mean_v, 1.0));
+    // Build 2-D integral images from sg_luma (in-place row-then-column scan).
+    for (int sy = 0; sy < sg_h; sy++) {
+        for (int sx = 0; sx < sg_w; sx++) {
+            double v  = sg_luma[sy * sg_w + sx];
+            double v2 = v * v;
+            double a  = (sy > 0) ? ii_sum [(sy-1)*sg_w + sx]   : 0.0;
+            double l  = (sx > 0) ? ii_sum [sy*sg_w + (sx-1)]   : 0.0;
+            double al = (sy > 0 && sx > 0) ? ii_sum [(sy-1)*sg_w + (sx-1)] : 0.0;
+            ii_sum [sy*sg_w + sx] = v  + a  + l  - al;
+            double a2  = (sy > 0) ? ii_sum2[(sy-1)*sg_w + sx]   : 0.0;
+            double l2  = (sx > 0) ? ii_sum2[sy*sg_w + (sx-1)]   : 0.0;
+            double al2 = (sy > 0 && sx > 0) ? ii_sum2[(sy-1)*sg_w + (sx-1)] : 0.0;
+            ii_sum2[sy*sg_w + sx] = v2 + a2 + l2 - al2;
+        }
+    }
 
-    // Per-tile mean/std arrays; tiles with < ANOMALY_LOCAL_TILE_MIN_N samples
-    // fall back to the global values.
-    double tile_mean_y[T][T], tile_std_y[T][T];
+    // Colour tile mean/std (fall back to global if tile too sparse).
+    double g_mean_u = sum_u / (double)sample_count;
+    double g_std_u  = sqrt(fmax((sum_u2/(double)sample_count) - g_mean_u*g_mean_u, 1.0));
+    double g_mean_v = sum_v / (double)sample_count;
+    double g_std_v  = sqrt(fmax((sum_v2/(double)sample_count) - g_mean_v*g_mean_v, 1.0));
+
     double tile_mean_u[T][T], tile_std_u[T][T];
     double tile_mean_v[T][T], tile_std_v[T][T];
     for (int tr = 0; tr < T; tr++) {
@@ -440,14 +486,11 @@ int anomaly_process_frame(
             int n = tile_n[tr][tc];
             if (n >= ANOMALY_LOCAL_TILE_MIN_N) {
                 double fn = (double)n;
-                tile_mean_y[tr][tc] = tile_sum_y[tr][tc] / fn;
-                tile_std_y[tr][tc]  = sqrt(fmax(tile_sum_y2[tr][tc]/fn - tile_mean_y[tr][tc]*tile_mean_y[tr][tc], 1.0));
                 tile_mean_u[tr][tc] = tile_sum_u[tr][tc] / fn;
                 tile_std_u[tr][tc]  = sqrt(fmax(tile_sum_u2[tr][tc]/fn - tile_mean_u[tr][tc]*tile_mean_u[tr][tc], 1.0));
                 tile_mean_v[tr][tc] = tile_sum_v[tr][tc] / fn;
                 tile_std_v[tr][tc]  = sqrt(fmax(tile_sum_v2[tr][tc]/fn - tile_mean_v[tr][tc]*tile_mean_v[tr][tc], 1.0));
             } else {
-                tile_mean_y[tr][tc] = g_mean_y; tile_std_y[tr][tc] = g_std_y;
                 tile_mean_u[tr][tc] = g_mean_u; tile_std_u[tr][tc] = g_std_u;
                 tile_mean_v[tr][tc] = g_mean_v; tile_std_v[tr][tc] = g_std_v;
             }
@@ -455,35 +498,66 @@ int anomaly_process_frame(
     }
 #undef T
 
-    // ── Per-pixel scoring over ROI (local tile stats) ────────────────────
+    // ── Per-pixel scoring ────────────────────────────────────────────────
+    // Thermal: integral-image local window of radius ANOMALY_THERMAL_WIN_RADIUS
+    //   sampled pixels.  At sample_step=4 (HD/FHD) that is a
+    //   (2R+1)×(2R+1) window of roughly (2R+1)×4 real pixels on each side.
+    //   R=3 → 7×7 samples ≈ 28×28 real pixels — small enough to stay inside
+    //   a single clearing yet large enough for reliable statistics (49 samples).
+    //   Produces a best-candidate pixel (best_thermal) used as fallback during
+    //   EMA background warmup; after warmup the temporal pass below replaces it.
+    // Color: 8×8 tile grid (unchanged).
+
+    // Inline integral-image rectangle query.
+#define II_QUERY(II, sx0, sy0, sx1, sy1) ( \
+    (II)[(sy1)*sg_w+(sx1)] \
+    - ((sx0)>0 ? (II)[(sy1)*sg_w+((sx0)-1)] : 0.0) \
+    - ((sy0)>0 ? (II)[((sy0)-1)*sg_w+(sx1)] : 0.0) \
+    + ((sx0)>0&&(sy0)>0 ? (II)[((sy0)-1)*sg_w+((sx0)-1)] : 0.0) \
+)
+
     float best_color = -1.0f, best_thermal = -1.0f;
     int   best_color_x = 0, best_color_y = 0;
     int   best_thermal_x = 0, best_thermal_y = 0;
 
-    for (int y = roi_y0; y < roi_y1; y += sample_step) {
-        int tr = (y - roi_y0) * ANOMALY_LOCAL_TILE_SIZE / roi_h;
-        if (tr < 0) tr = 0; if (tr >= ANOMALY_LOCAL_TILE_SIZE) tr = ANOMALY_LOCAL_TILE_SIZE - 1;
-        const uint8_t *row = rgba + (y * rgba_stride);
-        for (int x = roi_x0; x < roi_x1; x += sample_step) {
-            int tc = (x - roi_x0) * ANOMALY_LOCAL_TILE_SIZE / roi_w;
-            if (tc < 0) tc = 0; if (tc >= ANOMALY_LOCAL_TILE_SIZE) tc = ANOMALY_LOCAL_TILE_SIZE - 1;
-            const uint8_t *px = row + (x * 4);
-            double r = (double)px[0], g = (double)px[1], b = (double)px[2];
-            double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+    const int R = ANOMALY_THERMAL_WIN_RADIUS;
+
+    for (int sy = 0; sy < sg_h; sy++) {
+        int y  = roi_y0 + sy * sample_step;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        int tr = sy * ANOMALY_LOCAL_TILE_SIZE / sg_h;
+        if (tr >= ANOMALY_LOCAL_TILE_SIZE) tr = ANOMALY_LOCAL_TILE_SIZE - 1;
+
+        for (int sx = 0; sx < sg_w; sx++) {
+            int x  = roi_x0 + sx * sample_step;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            int tc = sx * ANOMALY_LOCAL_TILE_SIZE / sg_w;
+            if (tc >= ANOMALY_LOCAL_TILE_SIZE) tc = ANOMALY_LOCAL_TILE_SIZE - 1;
+
+            double lum = sg_luma[sy * sg_w + sx];
+
             if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0) {
-                double mean_y   = tile_mean_y[tr][tc];
-                double std_y    = tile_std_y[tr][tc];
+                // Integral-image window query.
+                int wx0 = sx - R; if (wx0 < 0) wx0 = 0;
+                int wx1 = sx + R; if (wx1 >= sg_w) wx1 = sg_w - 1;
+                int wy0 = sy - R; if (wy0 < 0) wy0 = 0;
+                int wy1 = sy + R; if (wy1 >= sg_h) wy1 = sg_h - 1;
+                int    n    = (wx1-wx0+1) * (wy1-wy0+1);
+                double wsum  = II_QUERY(ii_sum,  wx0, wy0, wx1, wy1);
+                double wsum2 = II_QUERY(ii_sum2, wx0, wy0, wx1, wy1);
+                double mean  = wsum / (double)n;
+                double std   = sqrt(fmax(wsum2/(double)n - mean*mean, 1.0));
                 double abs_delta = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
-                                   ? (mean_y - lum) : (lum - mean_y);
-                // Absolute-delta gate: reject noise and HEVC block artifacts in
-                // near-uniform tiles (cold sky, open clearings) that would otherwise
-                // produce gigantic Z-scores due to the tiny local σ.
+                                   ? (mean - lum) : (lum - mean);
                 if (abs_delta >= (double)ANOMALY_THERMAL_MIN_DELTA) {
-                    float ts = (float)(abs_delta / std_y);
+                    float ts = (float)(abs_delta / std);
                     if (ts > best_thermal) { best_thermal = ts; best_thermal_x = x; best_thermal_y = y; }
                 }
             }
+
             if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0) {
+                const uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
+                double r = (double)px[0], g = (double)px[1], b = (double)px[2];
                 double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
                 double v = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
                 float cs = (float)(fabs((u - tile_mean_u[tr][tc]) / tile_std_u[tr][tc])
@@ -492,6 +566,119 @@ int anomaly_process_frame(
             }
         }
     }
+#undef II_QUERY
+
+    // ── One-sided EMA thermal background: score + update ────────────────
+    // The background model tracks each pixel's "cold" (background) state.
+    // Fast adaptation toward brighter/colder (α=ALPHA_COOL per analyzed frame)
+    // means legitimate scene changes (drone drift, lighting) are absorbed
+    // quickly.  Slow adaptation toward darker/warmer (α=ALPHA_WARM) means a
+    // subject that is persistently warmer than its local history scores high
+    // every frame the camera is on them.  Score = (bg - current) / NORM.
+    //
+    // This second thermal pass REPLACES the spatial score from the loop above
+    // once the background model has warmed up.  During the first
+    // ANOMALY_THERMAL_BG_WARMUP analyzed frames after init or scene cut, the
+    // spatial integral-image score above provides uninterrupted coverage.
+    int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
+
+    bool bg_valid = (state->bg_luma != NULL
+                     && state->bg_sg_w == sg_w
+                     && state->bg_sg_h == sg_h
+                     && state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP
+                     && !scene_discontinuity);
+
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && bg_valid) {
+        // Temporal background score replaces the spatial integral-image score.
+        // Two-pass approach implementing per-frame noise-floor normalisation:
+        //   When the camera pans over warm vegetation the bg_delta map has a
+        //   high mean and high spread — nearly all pixels look "warm."  Scoring
+        //   each pixel relative to the frame's own bg_delta distribution (mean
+        //   and std) automatically raises the bar in high-motion frames and
+        //   lowers it in quiet frames.  A subject that is merely the warmest
+        //   warm thing in a sea of panning-induced warmth scores only modestly;
+        //   a subject that is dramatically warmer than the frame's temporal
+        //   noise floor scores very high.
+        //
+        //   Pass 1: accumulate positive bg_delta statistics (mean, std).
+        //   Pass 2: score = (delta - delta_mean) / delta_norm
+        //     where delta_norm = max(delta_std, ANOMALY_THERMAL_BG_NORM).
+        //   Using the fixed NORM as a floor ensures the formula degrades
+        //   gracefully to the old fixed-threshold behaviour in quiet frames.
+
+        // Pass 1 — frame bg_delta statistics.
+        double sum_d = 0.0, sum_d2 = 0.0;
+        int    cnt_d = 0;
+        for (int i = 0; i < sg_w * sg_h; i++) {
+            float d = black_hot
+                ? (state->bg_luma[i] - (float)sg_luma[i])
+                : ((float)sg_luma[i] - state->bg_luma[i]);
+            if (d > 0.0f) { sum_d += d; sum_d2 += (double)d * d; cnt_d++; }
+        }
+        double delta_mean = cnt_d > 0 ? sum_d / (double)cnt_d : 0.0;
+        double delta_var  = cnt_d > 1
+            ? fmax(sum_d2 / (double)cnt_d - delta_mean * delta_mean, 0.0) : 0.0;
+        // Use max(observed std, NORM) so we never divide by near-zero in
+        // stationary/low-signal frames.
+        double delta_norm = sqrt(delta_var);
+        if (delta_norm < (double)ANOMALY_THERMAL_BG_NORM)
+            delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
+
+        // Pass 2 — find the pixel with the highest relative temporal score.
+        best_thermal   = -1.0f;
+        best_thermal_x = 0;
+        best_thermal_y = 0;
+        for (int sy = 0; sy < sg_h; sy++) {
+            int y = roi_y0 + sy * sample_step;
+            if (y >= roi_y1) y = roi_y1 - 1;
+            for (int sx = 0; sx < sg_w; sx++) {
+                double lum = sg_luma[sy * sg_w + sx];
+                float  bg  = state->bg_luma[sy * sg_w + sx];
+                // Positive delta: pixel is warmer than its stored background.
+                float delta = black_hot ? (bg - (float)lum) : ((float)lum - bg);
+                if (delta < (float)ANOMALY_THERMAL_MIN_DELTA) continue;
+                // Relative score: std-devs above the frame's temporal mean.
+                float ts = (float)((delta - delta_mean) / delta_norm);
+                if (ts > best_thermal) {
+                    best_thermal   = ts;
+                    best_thermal_x = roi_x0 + sx * sample_step;
+                    best_thermal_y = roi_y0 + sy * sample_step;
+                }
+            }
+        }
+    }
+
+    // Update (or initialise) the background EMA.
+    if (scene_discontinuity || state->bg_luma == NULL
+            || state->bg_sg_w != sg_w || state->bg_sg_h != sg_h) {
+        // (Re-)initialise: seed background with the current frame's luma.
+        free(state->bg_luma);
+        state->bg_luma = (float *)malloc((size_t)sg_w * sg_h * sizeof(float));
+        state->bg_sg_w  = sg_w;
+        state->bg_sg_h  = sg_h;
+        state->bg_warmup = 0;
+        if (state->bg_luma) {
+            for (int i = 0; i < sg_w * sg_h; i++)
+                state->bg_luma[i] = (float)sg_luma[i];
+        }
+    } else {
+        // EMA update: fast toward colder/brighter, slow toward warmer/darker.
+        // black_hot is already declared in the temporal scoring section above.
+        for (int i = 0; i < sg_w * sg_h; i++) {
+            float cur = (float)sg_luma[i];
+            float bg  = state->bg_luma[i];
+            float delta = cur - bg;   // positive = pixel got brighter (colder in BH)
+            // In black-hot: brighter = colder = background direction → fast adapt.
+            // In white-hot: darker   = colder = background direction → fast adapt.
+            bool toward_cold = black_hot ? (delta > 0.0f) : (delta < 0.0f);
+            float alpha = toward_cold ? ANOMALY_THERMAL_BG_ALPHA_COOL
+                                      : ANOMALY_THERMAL_BG_ALPHA_WARM;
+            state->bg_luma[i] = bg + alpha * delta;
+        }
+        state->bg_warmup++;
+    }
+
+    free(sg_luma); free(ii_sum); free(ii_sum2);
 
     // ── GMV-compensated motion scoring over ROI ──────────────────────────
     float best_motion = -1.0f;

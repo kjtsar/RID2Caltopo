@@ -21,7 +21,7 @@
 #define ANOMALY_DEFAULT_FRAME_STRIDE      3
 #define ANOMALY_DEFAULT_SCORE_THRESHOLD   1.8f
 #define ANOMALY_DEFAULT_MIN_AREA_FRACTION 0.0015f
-#define ANOMALY_SCAN_ZONE_DEFAULT         0.80f
+#define ANOMALY_SCAN_ZONE_DEFAULT         0.60f
 #define ANOMALY_DEFAULT_MIN_HITS          2
 
 // ── Local tile normalization ───────────────────────────────────────────────
@@ -34,6 +34,14 @@
 // Minimum samples per tile before falling back to global stats.
 #define ANOMALY_LOCAL_TILE_SIZE    8
 #define ANOMALY_LOCAL_TILE_MIN_N   4
+
+// Thermal scoring window radius (in sampled-pixel units).
+// The integral-image window for thermal detection is (2R+1)×(2R+1) sampled
+// pixels.  At the HD/FHD decimation step of 4 px, R=3 → 7×7 samples covering
+// roughly 28×28 real pixels — small enough to stay within a single clearing
+// yet large enough for 49-sample statistics.
+// Increase R to smooth out noise; decrease it for more spatial precision.
+#define ANOMALY_THERMAL_WIN_RADIUS  3
 
 // Minimum absolute luma difference (0–255 scale) required before computing a
 // thermal Z-score.  Local tile normalization makes near-uniform regions
@@ -58,6 +66,32 @@
 #define ANOMALY_ACC_GATE_RADIUS  0.15f
 #define ANOMALY_ACC_HOLD_FRAMES  8
 #define ANOMALY_ACC_MAX_HITS     10
+
+// ── Thermal background model (one-sided EMA) ───────────────────────────────
+// The background represents "what this pixel looks like when no warm body is
+// present."  It adapts quickly toward colder/brighter values (legitimate scene
+// changes) but very slowly toward warmer/darker values (so a subject is never
+// absorbed into the background model over the typical search dwell time).
+//
+// Score = (bg_luma - current_luma) / ANOMALY_THERMAL_BG_NORM
+// A pixel that is persistently warmer than its own history scores high every
+// frame; a one-shot noise spike decays within a few frames.
+//
+// ALPHA_COOL: per-frame EMA step toward colder (brighter in BH).
+//   0.15 → adapts ~50% of the way in 4 analyzed frames (~0.4 s at stride=1).
+// ALPHA_WARM: per-frame EMA step toward warmer (darker in BH).
+//   0.01 → takes ~69 analyzed frames (~7 s at stride=1) before a subject
+//   is 50% absorbed.  Lowering this value also slows adaptation of warm
+//   background objects (vegetation, rocks), creating more persistent false
+//   positives rather than fewer — so 0.01 is a good practical balance.
+// NORM: fixed luma-unit denominator.  Tune to set "1σ" of the temporal score.
+//   12 means a 12-unit persistent delta → score 1.0; 24 units → score 2.0.
+// WARMUP: analyzed frames before temporal scoring activates (background must
+//   stabilise before we trust it).
+#define ANOMALY_THERMAL_BG_ALPHA_COOL  0.15f
+#define ANOMALY_THERMAL_BG_ALPHA_WARM  0.01f
+#define ANOMALY_THERMAL_BG_NORM        12.0f
+#define ANOMALY_THERMAL_BG_WARMUP      8
 
 #define ANOMALY_MAX_BOXES_PER_FRAME 3
 
@@ -96,6 +130,14 @@ typedef struct {
     uint8_t *prev_luma;
     int      prev_luma_width;
     int      prev_luma_height;
+    // One-sided EMA thermal background model.
+    // Stored at sampled-grid resolution (one float per sample point).
+    // Adapts fast toward colder, slowly toward warmer — subjects are never
+    // absorbed.  Score = (bg - current) / ANOMALY_THERMAL_BG_NORM.
+    float   *bg_luma;
+    int      bg_sg_w;       // sampled-grid width matching bg_luma
+    int      bg_sg_h;       // sampled-grid height matching bg_luma
+    int      bg_warmup;     // analyzed frames since last background reset
 } anomaly_state_t;
 
 // Returned from anomaly_process_frame(); caller may inspect detections.

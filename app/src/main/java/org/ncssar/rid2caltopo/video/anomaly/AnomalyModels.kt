@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video.anomaly
 
 import java.util.Locale
+import kotlin.math.pow
 
 enum class AnomalyAlgorithm(
     val nativeMask: Int,
@@ -43,6 +44,8 @@ data class NativeAnomalyConfig(
     val scoreThreshold: Float,
     val minAreaFraction: Float,
     val thermalPolarity: Int,
+    val scanZone: Float,
+    val minHits: Int,
 )
 
 data class AnomalyConfig(
@@ -52,17 +55,20 @@ data class AnomalyConfig(
     val sensitivity: Float = 0.60f,
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.WhiteHot,
+    val scanZone: Float = 0.80f,
+    val minHits: Int = 2,
 ) {
     val sensitivityLabel: String
-        get() {
-            return String.format(Locale.US, "%d%%", (sensitivity.coerceIn(0f, 1f) * 100f).toInt())
-        }
+        get() = String.format(Locale.US, "%d%%", (sensitivity.coerceIn(0f, 1f) * 100f).toInt())
+
+    val scanZoneLabel: String
+        get() = String.format(Locale.US, "%d%%", (scanZone.coerceIn(0.5f, 1f) * 100f).toInt())
 
     fun toNativeConfig(enabledOverride: Boolean? = null): NativeAnomalyConfig {
         val mask = algorithms.fold(0) { acc, algo -> acc or algo.nativeMask }
         val sensitivityClamped = sensitivity.coerceIn(0f, 1f)
-        // Lower sensitivity means stricter thresholding and much smaller target area.
-        val scoreThreshold = (5.8f - (4.8f * sensitivityClamped)).coerceIn(1.0f, 6.0f)
+        // Logarithmic curve: 0% → ~15σ (essentially silent), 60% → ~2.8σ (default), 100% → 1.0σ.
+        val scoreThreshold = 15.0.pow(1.0 - sensitivityClamped.toDouble()).toFloat().coerceIn(1.0f, 15.0f)
         val areaScale = 0.10f + (4.90f * sensitivityClamped * sensitivityClamped)
         val effectiveMinAreaFraction = (minAreaFraction * areaScale).coerceIn(0.00005f, 0.03f)
         return NativeAnomalyConfig(
@@ -72,6 +78,8 @@ data class AnomalyConfig(
             scoreThreshold = scoreThreshold,
             minAreaFraction = effectiveMinAreaFraction,
             thermalPolarity = thermalPolarity.nativeValue,
+            scanZone = scanZone.coerceIn(0.5f, 1.0f),
+            minHits = minHits.coerceIn(1, 10),
         )
     }
 }

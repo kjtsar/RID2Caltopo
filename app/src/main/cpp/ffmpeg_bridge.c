@@ -35,14 +35,7 @@
 
 #define TAG "ffmpeg_bridge"
 #define MAX_SESSIONS 32
-#define ANOMALY_ALGO_COLOR 0x01
-#define ANOMALY_ALGO_THERMAL 0x02
-#define ANOMALY_ALGO_MOTION 0x04
-#define ANOMALY_THERMAL_WHITE_HOT 1
-#define ANOMALY_THERMAL_BLACK_HOT 2
-#define ANOMALY_DEFAULT_FRAME_STRIDE 3
-#define ANOMALY_DEFAULT_SCORE_THRESHOLD 1.8f
-#define ANOMALY_DEFAULT_MIN_AREA_FRACTION 0.0015f
+#include "anomaly_analysis.h"
 #define RENDER_MIN_INTERVAL_MS 5
 #define RENDER_MAX_INTERVAL_MS 1000
 #define RENDER_DEFAULT_FPS 30
@@ -161,6 +154,7 @@ typedef struct {
     uint8_t r;
     uint8_t g;
     uint8_t b;
+    float weight;   // stroke scale 0.0–1.0: thin on first hit, full at sustained detections
 } anomaly_box_t;
 #endif
 
@@ -175,13 +169,8 @@ typedef struct {
 
     jobject surface_global_ref;
     ANativeWindow *window;
-    bool anomaly_enabled;
-    int anomaly_algorithm_mask;
-    int anomaly_frame_stride;
-    float anomaly_score_threshold;
-    float anomaly_min_area_fraction;
-    int anomaly_thermal_polarity;
-    int64_t anomaly_frame_counter;
+    anomaly_config_t anomaly_cfg;    // protected by g_lock
+    anomaly_state_t  anomaly_state;  // owned by decode thread; no locking needed
     // Manual render stride — set via nativeSetRenderStride().
     // When render_stride > 1, every (render_stride - 1) out of render_stride
     // non-keyframe packets are dropped *before* decode.  Keyframe (IDR) packets
@@ -275,9 +264,6 @@ typedef struct {
     int anomaly_rgba_width;
     int anomaly_rgba_height;
     enum AVPixelFormat anomaly_src_fmt;
-    uint8_t *anomaly_prev_luma;
-    int anomaly_prev_luma_width;
-    int anomaly_prev_luma_height;
 #endif
 #endif
 } ffmpeg_session_t;
@@ -672,183 +658,7 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
     session->anomaly_rgba_height = height;
     session->anomaly_src_fmt = src_fmt;
 
-    if (session->anomaly_prev_luma != NULL) {
-        free(session->anomaly_prev_luma);
-        session->anomaly_prev_luma = NULL;
-    }
-    session->anomaly_prev_luma_width = 0;
-    session->anomaly_prev_luma_height = 0;
-    session->anomaly_frame_counter = 0;
-}
-
-static inline float clamp01f(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
-    return v;
-}
-
-static inline int clamp_i32(int value, int min_value, int max_value) {
-    if (value < min_value) return min_value;
-    if (value > max_value) return max_value;
-    return value;
-}
-
-static void draw_rgba_hline(uint8_t *rgba,
-                            int rgba_stride,
-                            int width,
-                            int height,
-                            int x0,
-                            int x1,
-                            int y,
-                            uint8_t r,
-                            uint8_t g,
-                            uint8_t b) {
-    if (rgba == NULL || width <= 0 || height <= 0) return;
-    if (y < 0 || y >= height) return;
-    if (x0 > x1) {
-        int t = x0;
-        x0 = x1;
-        x1 = t;
-    }
-    x0 = clamp_i32(x0, 0, width - 1);
-    x1 = clamp_i32(x1, 0, width - 1);
-    uint8_t *row = rgba + (y * rgba_stride);
-    for (int x = x0; x <= x1; x++) {
-        uint8_t *px = row + (x * 4);
-        px[0] = r;
-        px[1] = g;
-        px[2] = b;
-        px[3] = 0xFF;
-    }
-}
-
-static void draw_rgba_vline(uint8_t *rgba,
-                            int rgba_stride,
-                            int width,
-                            int height,
-                            int y0,
-                            int y1,
-                            int x,
-                            uint8_t r,
-                            uint8_t g,
-                            uint8_t b) {
-    if (rgba == NULL || width <= 0 || height <= 0) return;
-    if (x < 0 || x >= width) return;
-    if (y0 > y1) {
-        int t = y0;
-        y0 = y1;
-        y1 = t;
-    }
-    y0 = clamp_i32(y0, 0, height - 1);
-    y1 = clamp_i32(y1, 0, height - 1);
-    for (int y = y0; y <= y1; y++) {
-        uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
-        px[0] = r;
-        px[1] = g;
-        px[2] = b;
-        px[3] = 0xFF;
-    }
-}
-
-static void append_anomaly_box(anomaly_box_t *boxes,
-                               int *box_count,
-                               float center_x_norm,
-                               float center_y_norm,
-                               float box_w_norm,
-                               float box_h_norm,
-                               uint8_t r,
-                               uint8_t g,
-                               uint8_t b) {
-    if (boxes == NULL || box_count == NULL) return;
-    if (*box_count >= ANOMALY_MAX_BOXES_PER_FRAME) return;
-    float half_w = box_w_norm * 0.5f;
-    float half_h = box_h_norm * 0.5f;
-    float left = clamp01f(center_x_norm - half_w);
-    float right = clamp01f(center_x_norm + half_w);
-    float top = clamp01f(center_y_norm - half_h);
-    float bottom = clamp01f(center_y_norm + half_h);
-    if (right <= left || bottom <= top) return;
-    anomaly_box_t *slot = &boxes[*box_count];
-    slot->left_norm = left;
-    slot->top_norm = top;
-    slot->right_norm = right;
-    slot->bottom_norm = bottom;
-    slot->r = r;
-    slot->g = g;
-    slot->b = b;
-    *box_count += 1;
-}
-
-static void draw_anomaly_boxes_rgba(uint8_t *rgba,
-                                    int rgba_stride,
-                                    int width,
-                                    int height,
-                                    const anomaly_box_t *boxes,
-                                    int box_count) {
-    if (rgba == NULL || boxes == NULL || width <= 0 || height <= 0 || box_count <= 0) return;
-    int min_dim = (width < height) ? width : height;
-    int stroke = clamp_i32((int) lroundf((double) min_dim * 0.006), 2, 8);
-    int cross_half = clamp_i32((int) lroundf((double) min_dim * 0.018), 6, 16);
-    for (int i = 0; i < box_count; i++) {
-        const anomaly_box_t *box = &boxes[i];
-        int left = clamp_i32((int) lroundf(box->left_norm * (float) (width - 1)), 0, width - 1);
-        int right = clamp_i32((int) lroundf(box->right_norm * (float) (width - 1)), 0, width - 1);
-        int top = clamp_i32((int) lroundf(box->top_norm * (float) (height - 1)), 0, height - 1);
-        int bottom = clamp_i32((int) lroundf(box->bottom_norm * (float) (height - 1)), 0, height - 1);
-        if (right <= left || bottom <= top) continue;
-
-        for (int t = 0; t < stroke; t++) {
-            int top_y = top + t;
-            int bottom_y = bottom - t;
-            int left_x = left + t;
-            int right_x = right - t;
-            if (top_y <= bottom_y) {
-                draw_rgba_hline(rgba, rgba_stride, width, height, left, right, top_y, box->r, box->g, box->b);
-                if (bottom_y != top_y) {
-                    draw_rgba_hline(rgba, rgba_stride, width, height, left, right, bottom_y, box->r, box->g, box->b);
-                }
-            }
-            if (left_x <= right_x) {
-                draw_rgba_vline(rgba, rgba_stride, width, height, top, bottom, left_x, box->r, box->g, box->b);
-                if (right_x != left_x) {
-                    draw_rgba_vline(rgba, rgba_stride, width, height, top, bottom, right_x, box->r, box->g, box->b);
-                }
-            }
-        }
-
-        int cx = (left + right) / 2;
-        int cy = (top + bottom) / 2;
-        int cross_start_x = cx - cross_half;
-        int cross_end_x = cx + cross_half;
-        int cross_start_y = cy - cross_half;
-        int cross_end_y = cy + cross_half;
-        for (int t = 0; t < stroke; t++) {
-            int horiz_y = cy - (stroke / 2) + t;
-            int vert_x = cx - (stroke / 2) + t;
-            draw_rgba_hline(
-                    rgba,
-                    rgba_stride,
-                    width,
-                    height,
-                    cross_start_x,
-                    cross_end_x,
-                    horiz_y,
-                    box->r,
-                    box->g,
-                    box->b);
-            draw_rgba_vline(
-                    rgba,
-                    rgba_stride,
-                    width,
-                    height,
-                    cross_start_y,
-                    cross_end_y,
-                    vert_x,
-                    box->r,
-                    box->g,
-                    box->b);
-        }
-    }
+    anomaly_state_reset(&session->anomaly_state);
 }
 
 static bool analyze_rgba_frame(ffmpeg_session_t *session,
@@ -857,220 +667,21 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                                uint8_t *rgba,
                                int rgba_stride,
                                int64_t source_ts_us) {
-    (void) source_ts_us;
-    bool anomaly_enabled = false;
-    int algorithm_mask = 0;
-    int frame_stride = 1;
-    float score_threshold = ANOMALY_DEFAULT_SCORE_THRESHOLD;
-    float min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION;
-    int thermal_polarity = ANOMALY_THERMAL_WHITE_HOT;
-    int64_t frame_counter = 0;
-
+    anomaly_config_t cfg;
     pthread_mutex_lock(&g_lock);
-    anomaly_enabled = session->anomaly_enabled;
-    algorithm_mask = session->anomaly_algorithm_mask;
-    frame_stride = session->anomaly_frame_stride;
-    score_threshold = session->anomaly_score_threshold;
-    min_area_fraction = session->anomaly_min_area_fraction;
-    thermal_polarity = session->anomaly_thermal_polarity;
-    session->anomaly_frame_counter += 1;
-    frame_counter = session->anomaly_frame_counter;
+    cfg = session->anomaly_cfg;
     pthread_mutex_unlock(&g_lock);
-
-    if (!anomaly_enabled || algorithm_mask == 0) return false;
-    if (frame_stride < 1) frame_stride = 1;
-    if ((frame_counter % frame_stride) != 0) return false;
-
-    int sample_step = (width >= 1280 || height >= 720) ? 4 : 2;
-    double sum_y = 0.0;
-    double sum_y2 = 0.0;
-    double sum_u = 0.0;
-    double sum_u2 = 0.0;
-    double sum_v = 0.0;
-    double sum_v2 = 0.0;
-    int sample_count = 0;
-
-    for (int y = 0; y < height; y += sample_step) {
-        const uint8_t *row = rgba + (y * rgba_stride);
-        for (int x = 0; x < width; x += sample_step) {
-            const uint8_t *px = row + (x * 4);
-            double r = (double) px[0];
-            double g = (double) px[1];
-            double b = (double) px[2];
-            double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
-            double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
-            double v = (0.61500 * r) - (0.51499 * g) - (0.10001 * b);
-            sum_y += lum;
-            sum_y2 += lum * lum;
-            sum_u += u;
-            sum_u2 += u * u;
-            sum_v += v;
-            sum_v2 += v * v;
-            sample_count += 1;
-        }
-    }
-    if (sample_count <= 1) return false;
-
-    double mean_y = sum_y / (double) sample_count;
-    double var_y = (sum_y2 / (double) sample_count) - (mean_y * mean_y);
-    double std_y = sqrt(fmax(var_y, 1.0));
-    double mean_u = sum_u / (double) sample_count;
-    double var_u = (sum_u2 / (double) sample_count) - (mean_u * mean_u);
-    double std_u = sqrt(fmax(var_u, 1.0));
-    double mean_v = sum_v / (double) sample_count;
-    double var_v = (sum_v2 / (double) sample_count) - (mean_v * mean_v);
-    double std_v = sqrt(fmax(var_v, 1.0));
-
-    float best_color = -1.0f;
-    int best_color_x = 0;
-    int best_color_y = 0;
-    float best_thermal = -1.0f;
-    int best_thermal_x = 0;
-    int best_thermal_y = 0;
-    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
-    int box_count = 0;
-
-    for (int y = 0; y < height; y += sample_step) {
-        const uint8_t *row = rgba + (y * rgba_stride);
-        for (int x = 0; x < width; x += sample_step) {
-            const uint8_t *px = row + (x * 4);
-            double r = (double) px[0];
-            double g = (double) px[1];
-            double b = (double) px[2];
-            double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
-            if ((algorithm_mask & ANOMALY_ALGO_THERMAL) != 0) {
-                float thermal_score = (thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
-                                      ? (float) ((mean_y - lum) / std_y)
-                                      : (float) ((lum - mean_y) / std_y);
-                if (thermal_score > best_thermal) {
-                    best_thermal = thermal_score;
-                    best_thermal_x = x;
-                    best_thermal_y = y;
-                }
-            }
-            if ((algorithm_mask & ANOMALY_ALGO_COLOR) != 0) {
-                double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
-                double v = (0.61500 * r) - (0.51499 * g) - (0.10001 * b);
-                float color_score = (float) (fabs((u - mean_u) / std_u) + fabs((v - mean_v) / std_v));
-                if (color_score > best_color) {
-                    best_color = color_score;
-                    best_color_x = x;
-                    best_color_y = y;
-                }
-            }
-        }
-    }
-
-    float box_side = sqrtf(fmaxf(min_area_fraction, 0.0001f));
-    box_side = fminf(fmaxf(box_side, 0.02f), 0.18f);
-    if ((algorithm_mask & ANOMALY_ALGO_COLOR) != 0 && best_color >= score_threshold) {
-        append_anomaly_box(
-                boxes,
-                &box_count,
-                ((float) best_color_x) / (float) fmax(width - 1, 1),
-                ((float) best_color_y) / (float) fmax(height - 1, 1),
-                box_side,
-                box_side,
-                0xE6,
-                0x7E,
-                0x22);
-    }
-    if ((algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && best_thermal >= score_threshold) {
-        append_anomaly_box(
-                boxes,
-                &box_count,
-                ((float) best_thermal_x) / (float) fmax(width - 1, 1),
-                ((float) best_thermal_y) / (float) fmax(height - 1, 1),
-                box_side,
-                box_side,
-                0xFB,
-                0x4D,
-                0x3D);
-    }
-
-    if ((algorithm_mask & ANOMALY_ALGO_MOTION) != 0) {
-        int motion_step = sample_step * 2;
-        int motion_w = (width + motion_step - 1) / motion_step;
-        int motion_h = (height + motion_step - 1) / motion_step;
-        size_t motion_count = (size_t) motion_w * (size_t) motion_h;
-        if (motion_count == 0) return false;
-
-        uint8_t *curr_luma = (uint8_t *) malloc(motion_count);
-        if (curr_luma == NULL) return false;
-
-        int idx = 0;
-        for (int y = 0; y < height && idx < (int) motion_count; y += motion_step) {
-            const uint8_t *row = rgba + (y * rgba_stride);
-            for (int x = 0; x < width && idx < (int) motion_count; x += motion_step) {
-                const uint8_t *px = row + (x * 4);
-                int lum = (int) ((54 * px[0] + 183 * px[1] + 18 * px[2]) >> 8);
-                curr_luma[idx++] = (uint8_t) lum;
-            }
-        }
-
-        if (session->anomaly_prev_luma != NULL &&
-            session->anomaly_prev_luma_width == motion_w &&
-            session->anomaly_prev_luma_height == motion_h) {
-            double diff_sum = 0.0;
-            double diff_sum2 = 0.0;
-            int diff_count = (int) motion_count;
-            for (int i = 0; i < diff_count; i++) {
-                int diff = abs((int) curr_luma[i] - (int) session->anomaly_prev_luma[i]);
-                diff_sum += (double) diff;
-                diff_sum2 += (double) diff * (double) diff;
-            }
-            if (diff_count > 1) {
-                double diff_mean = diff_sum / (double) diff_count;
-                double diff_var = (diff_sum2 / (double) diff_count) - (diff_mean * diff_mean);
-                double diff_std = sqrt(fmax(diff_var, 1.0));
-                float best_motion = -1.0f;
-                int best_motion_idx = -1;
-                for (int i = 0; i < diff_count; i++) {
-                    int diff = abs((int) curr_luma[i] - (int) session->anomaly_prev_luma[i]);
-                    float motion_score = (float) (((double) diff - diff_mean) / diff_std);
-                    if (motion_score > best_motion) {
-                        best_motion = motion_score;
-                        best_motion_idx = i;
-                    }
-                }
-                if (best_motion_idx >= 0 && best_motion >= score_threshold) {
-                    int mx = best_motion_idx % motion_w;
-                    int my = best_motion_idx / motion_w;
-                    float cx_norm = ((float) (mx * motion_step + (motion_step / 2))) / (float) fmax(width - 1, 1);
-                    float cy_norm = ((float) (my * motion_step + (motion_step / 2))) / (float) fmax(height - 1, 1);
-                    append_anomaly_box(
-                            boxes,
-                            &box_count,
-                            cx_norm,
-                            cy_norm,
-                            box_side * 1.3f,
-                            box_side * 1.3f,
-                            0x26,
-                            0xC6,
-                            0xDA);
-                }
-            }
-        }
-
-        if (session->anomaly_prev_luma != NULL) {
-            free(session->anomaly_prev_luma);
-            session->anomaly_prev_luma = NULL;
-        }
-        session->anomaly_prev_luma = curr_luma;
-        session->anomaly_prev_luma_width = motion_w;
-        session->anomaly_prev_luma_height = motion_h;
-    }
-    if (box_count > 0) {
-        draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, boxes, box_count);
-    }
-    return box_count > 0;
+    return anomaly_process_frame(&session->anomaly_state, &cfg,
+                                 rgba, rgba_stride, width, height,
+                                 source_ts_us, NULL) > 0;
 }
+
 
 static bool anomaly_processing_enabled(ffmpeg_session_t *session) {
     if (session == NULL) return false;
     bool enabled = false;
     pthread_mutex_lock(&g_lock);
-    enabled = session->anomaly_enabled && (session->anomaly_algorithm_mask != 0);
+    enabled = session->anomaly_cfg.enabled && (session->anomaly_cfg.algorithm_mask != 0);
     pthread_mutex_unlock(&g_lock);
     return enabled;
 }
@@ -2718,16 +2329,11 @@ static void close_decoder(ffmpeg_session_t *session) {
         av_free(session->anomaly_rgba_buffer);
         session->anomaly_rgba_buffer = NULL;
     }
-    if (session->anomaly_prev_luma != NULL) {
-        free(session->anomaly_prev_luma);
-        session->anomaly_prev_luma = NULL;
-    }
+    anomaly_state_cleanup(&session->anomaly_state);
     session->anomaly_rgba_buffer_size = 0;
     session->anomaly_rgba_width = 0;
     session->anomaly_rgba_height = 0;
     session->anomaly_src_fmt = AV_PIX_FMT_NONE;
-    session->anomaly_prev_luma_width = 0;
-    session->anomaly_prev_luma_height = 0;
 #endif
     if (session->codec != NULL) {
         avcodec_free_context(&session->codec);
@@ -3232,13 +2838,15 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->active = true;
     slot->running = true;
     slot->is_render = is_render;
-    slot->anomaly_enabled = false;
-    slot->anomaly_algorithm_mask = ANOMALY_ALGO_THERMAL;
-    slot->anomaly_frame_stride = ANOMALY_DEFAULT_FRAME_STRIDE;
-    slot->anomaly_score_threshold = ANOMALY_DEFAULT_SCORE_THRESHOLD;
-    slot->anomaly_min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION;
-    slot->anomaly_thermal_polarity = ANOMALY_THERMAL_WHITE_HOT;
-    slot->anomaly_frame_counter = 0;
+    slot->anomaly_cfg.enabled           = false;
+    slot->anomaly_cfg.algorithm_mask    = ANOMALY_ALGO_THERMAL;
+    slot->anomaly_cfg.frame_stride      = ANOMALY_DEFAULT_FRAME_STRIDE;
+    slot->anomaly_cfg.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
+    slot->anomaly_cfg.min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION;
+    slot->anomaly_cfg.thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT;
+    slot->anomaly_cfg.scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT;
+    slot->anomaly_cfg.min_hits          = ANOMALY_DEFAULT_MIN_HITS;
+    anomaly_state_init(&slot->anomaly_state);
     slot->render_stride = 1;
     slot->render_stride_counter = 0;
     // Render sessions start paused: no frames decoded until the TextureView surface
@@ -3522,22 +3130,28 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jint frame_stride,
         jfloat score_threshold,
         jfloat min_area_fraction,
-        jint thermal_polarity
+        jint thermal_polarity,
+        jfloat scan_zone,
+        jint min_hits
 ) {
     (void) env;
     (void) thiz;
     pthread_mutex_lock(&g_lock);
     ffmpeg_session_t *session = find_session_locked(session_id);
     if (session != NULL && session->active) {
-        session->anomaly_enabled = (enabled == JNI_TRUE);
-        session->anomaly_algorithm_mask = (int) algorithm_mask;
-        session->anomaly_frame_stride = ((int) frame_stride < 1) ? 1 : (int) frame_stride;
-        session->anomaly_score_threshold = (float) fmaxf(0.1f, score_threshold);
-        session->anomaly_min_area_fraction = (float) fminf(fmaxf(min_area_fraction, 0.0001f), 0.20f);
-        session->anomaly_thermal_polarity =
-                ((int) thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
-                ? ANOMALY_THERMAL_BLACK_HOT
-                : ANOMALY_THERMAL_WHITE_HOT;
+        float sz = (float) scan_zone;
+        int   mh = (int)   min_hits;
+        session->anomaly_cfg.enabled           = (enabled == JNI_TRUE);
+        session->anomaly_cfg.algorithm_mask    = (int) algorithm_mask;
+        session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (int) frame_stride;
+        session->anomaly_cfg.score_threshold   = fmaxf(0.1f, score_threshold);
+        session->anomaly_cfg.min_area_fraction = fminf(fmaxf(min_area_fraction, 0.0001f), 0.20f);
+        session->anomaly_cfg.thermal_polarity  = ((int) thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
+                                                 ? ANOMALY_THERMAL_BLACK_HOT : ANOMALY_THERMAL_WHITE_HOT;
+        session->anomaly_cfg.scan_zone         = sz < 0.5f ? 0.5f : (sz > 1.0f ? 1.0f : sz);
+        session->anomaly_cfg.min_hits          = mh < 1 ? 1 : (mh > 10 ? 10 : mh);
+        // Reset accumulators so stale boxes don't persist across config changes.
+        anomaly_state_reset(&session->anomaly_state);
     }
     pthread_mutex_unlock(&g_lock);
 }

@@ -22,7 +22,7 @@ class AnomalyConfigTest {
         assertFalse(native.enabled)
         assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask or AnomalyAlgorithm.Motion.nativeMask, native.algorithmMask)
         assertEquals(8, native.frameStride)
-        assertTrue(native.scoreThreshold in 1.0f..6.0f)
+        assertTrue(native.scoreThreshold in 1.0f..15.0f)
         assertTrue(native.minAreaFraction in 0.00005f..0.03f)
         assertEquals(ThermalPolarity.WhiteHot.nativeValue, native.thermalPolarity)
     }

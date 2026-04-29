@@ -62,6 +62,7 @@ fun StreamTile(
     var showUnmatchDialog by remember { mutableStateOf(false) }
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
     var showSensitivityDialog by remember { mutableStateOf(false) }
+    var showScanZoneDialog by remember { mutableStateOf(false) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
 
     // Keep the altitude coordinator active while this tile is on screen.
@@ -241,6 +242,20 @@ fun StreamTile(
                             showSensitivityDialog = true
                         }
                     )
+                    DropdownMenuItem(
+                        text = { Text("Scan Zone: ${anomalyConfig.scanZoneLabel}") },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            showScanZoneDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Min Hits: ${anomalyConfig.minHits}") },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            viewModel.cycleMinHits(streamDesignator)
+                        }
+                    )
                 }
             }
             if (showSensitivityDialog) {
@@ -284,6 +299,52 @@ fun StreamTile(
                     },
                     dismissButton = {
                         TextButton(onClick = { showSensitivityDialog = false }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+            if (showScanZoneDialog) {
+                var sliderValue by remember(streamDesignator, anomalyConfig.scanZone) {
+                    mutableStateOf(anomalyConfig.scanZone.coerceIn(0.5f, 1f))
+                }
+                AlertDialog(
+                    onDismissRequest = { showScanZoneDialog = false },
+                    title = { Text("Scan Zone") },
+                    text = {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "Sets the centered portion of the frame scanned for anomalies. Reduce to exclude wide-angle lens distortion at the frame edges."
+                            )
+                            Text(text = "Current: ${(sliderValue * 100f).toInt()}%")
+                            Slider(
+                                value = sliderValue,
+                                onValueChange = { sliderValue = it },
+                                valueRange = 0.5f..1f
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("50% (center only)")
+                                Text("100% (full frame)")
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                viewModel.setScanZone(streamDesignator, sliderValue)
+                                showScanZoneDialog = false
+                            }
+                        ) {
+                            Text("Apply")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showScanZoneDialog = false }) {
                             Text("Cancel")
                         }
                     }

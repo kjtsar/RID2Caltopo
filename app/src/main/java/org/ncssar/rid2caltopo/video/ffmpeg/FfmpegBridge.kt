@@ -91,6 +91,8 @@ object FfmpegBridge {
             scoreThreshold = config.scoreThreshold,
             minAreaFraction = config.minAreaFraction,
             thermalPolarity = config.thermalPolarity,
+            scanZone = config.scanZone,
+            minHits = config.minHits,
         )
     }
 
@@ -180,6 +182,8 @@ object FfmpegBridge {
         scoreThreshold: Float,
         minAreaFraction: Float,
         thermalPolarity: Int,
+        scanZone: Float,
+        minHits: Int,
     )
     private external fun nativeStop(sessionId: Long)
 }

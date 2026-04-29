@@ -1152,6 +1152,19 @@ class StreamsViewModel(
         }
     }
 
+    fun setScanZone(designator: String, scanZone: Float) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(scanZone = scanZone.coerceIn(0.5f, 1.0f))
+        }
+    }
+
+    fun cycleMinHits(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            val next = if (current.minHits >= 5) 1 else current.minHits + 1
+            current.copy(minHits = next)
+        }
+    }
+
     fun cycleAnomalyThermalPolarity(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(thermalPolarity = current.thermalPolarity.next())

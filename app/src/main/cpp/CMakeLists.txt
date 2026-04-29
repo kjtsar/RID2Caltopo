@@ -10,6 +10,7 @@ add_library(
     ffmpeg_bridge
     SHARED
     ffmpeg_bridge.c
+    anomaly_analysis.c
 )
 
 set(FFMPEG_LIB_DIR "${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")

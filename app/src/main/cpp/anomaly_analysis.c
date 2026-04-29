@@ -359,15 +359,43 @@ int anomaly_process_frame(
         }
     }
 
-    // ── Statistics pass over ROI ─────────────────────────────────────────
+    // ── Statistics pass: global + per-tile local stats ──────────────────
+    // Global stats are the fallback for tiles with too few samples.
+    // Local tile stats are what we actually use for scoring — they make the
+    // detector ask "is this pixel anomalous for its immediate neighbourhood?"
+    // rather than "is this pixel the global extreme?".  At 600 ft altitude a
+    // person's warm legs may not be the hottest thing in the whole frame, but
+    // they will stand out clearly within the surrounding 1/8-frame tile.
+#define T ANOMALY_LOCAL_TILE_SIZE
     double sum_y = 0.0, sum_y2 = 0.0;
     double sum_u = 0.0, sum_u2 = 0.0;
     double sum_v = 0.0, sum_v2 = 0.0;
     int sample_count = 0;
 
+    double tile_sum_y[T][T],  tile_sum_y2[T][T];
+    double tile_sum_u[T][T],  tile_sum_u2[T][T];
+    double tile_sum_v[T][T],  tile_sum_v2[T][T];
+    int    tile_n[T][T];
+    for (int tr = 0; tr < T; tr++)
+        for (int tc = 0; tc < T; tc++) {
+            tile_sum_y[tr][tc] = tile_sum_y2[tr][tc] = 0.0;
+            tile_sum_u[tr][tc] = tile_sum_u2[tr][tc] = 0.0;
+            tile_sum_v[tr][tc] = tile_sum_v2[tr][tc] = 0.0;
+            tile_n[tr][tc] = 0;
+        }
+
+    int roi_w = roi_x1 - roi_x0;
+    int roi_h = roi_y1 - roi_y0;
+    if (roi_w <= 0) roi_w = 1;
+    if (roi_h <= 0) roi_h = 1;
+
     for (int y = roi_y0; y < roi_y1; y += sample_step) {
+        int tr = (y - roi_y0) * T / roi_h;
+        if (tr < 0) tr = 0; if (tr >= T) tr = T - 1;
         const uint8_t *row = rgba + (y * rgba_stride);
         for (int x = roi_x0; x < roi_x1; x += sample_step) {
+            int tc = (x - roi_x0) * T / roi_w;
+            if (tc < 0) tc = 0; if (tc >= T) tc = T - 1;
             const uint8_t *px = row + (x * 4);
             double r = (double)px[0], g = (double)px[1], b = (double)px[2];
             double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
@@ -377,6 +405,10 @@ int anomaly_process_frame(
             sum_u += u;   sum_u2 += u * u;
             sum_v += v;   sum_v2 += v * v;
             sample_count++;
+            tile_sum_y[tr][tc]  += lum; tile_sum_y2[tr][tc] += lum * lum;
+            tile_sum_u[tr][tc]  += u;   tile_sum_u2[tr][tc] += u * u;
+            tile_sum_v[tr][tc]  += v;   tile_sum_v2[tr][tc] += v * v;
+            tile_n[tr][tc]++;
         }
     }
 
@@ -390,25 +422,57 @@ int anomaly_process_frame(
         return 0;
     }
 
-    double mean_y = sum_y / (double)sample_count;
-    double std_y  = sqrt(fmax((sum_y2 / (double)sample_count) - mean_y * mean_y, 1.0));
-    double mean_u = sum_u / (double)sample_count;
-    double std_u  = sqrt(fmax((sum_u2 / (double)sample_count) - mean_u * mean_u, 1.0));
-    double mean_v = sum_v / (double)sample_count;
-    double std_v  = sqrt(fmax((sum_v2 / (double)sample_count) - mean_v * mean_v, 1.0));
+    // Global fallback stats.
+    double g_mean_y = sum_y / (double)sample_count;
+    double g_std_y  = sqrt(fmax((sum_y2 / (double)sample_count) - g_mean_y * g_mean_y, 1.0));
+    double g_mean_u = sum_u / (double)sample_count;
+    double g_std_u  = sqrt(fmax((sum_u2 / (double)sample_count) - g_mean_u * g_mean_u, 1.0));
+    double g_mean_v = sum_v / (double)sample_count;
+    double g_std_v  = sqrt(fmax((sum_v2 / (double)sample_count) - g_mean_v * g_mean_v, 1.0));
 
-    // ── Per-pixel scoring over ROI ──────────────────────────���────────────
+    // Per-tile mean/std arrays; tiles with < ANOMALY_LOCAL_TILE_MIN_N samples
+    // fall back to the global values.
+    double tile_mean_y[T][T], tile_std_y[T][T];
+    double tile_mean_u[T][T], tile_std_u[T][T];
+    double tile_mean_v[T][T], tile_std_v[T][T];
+    for (int tr = 0; tr < T; tr++) {
+        for (int tc = 0; tc < T; tc++) {
+            int n = tile_n[tr][tc];
+            if (n >= ANOMALY_LOCAL_TILE_MIN_N) {
+                double fn = (double)n;
+                tile_mean_y[tr][tc] = tile_sum_y[tr][tc] / fn;
+                tile_std_y[tr][tc]  = sqrt(fmax(tile_sum_y2[tr][tc]/fn - tile_mean_y[tr][tc]*tile_mean_y[tr][tc], 1.0));
+                tile_mean_u[tr][tc] = tile_sum_u[tr][tc] / fn;
+                tile_std_u[tr][tc]  = sqrt(fmax(tile_sum_u2[tr][tc]/fn - tile_mean_u[tr][tc]*tile_mean_u[tr][tc], 1.0));
+                tile_mean_v[tr][tc] = tile_sum_v[tr][tc] / fn;
+                tile_std_v[tr][tc]  = sqrt(fmax(tile_sum_v2[tr][tc]/fn - tile_mean_v[tr][tc]*tile_mean_v[tr][tc], 1.0));
+            } else {
+                tile_mean_y[tr][tc] = g_mean_y; tile_std_y[tr][tc] = g_std_y;
+                tile_mean_u[tr][tc] = g_mean_u; tile_std_u[tr][tc] = g_std_u;
+                tile_mean_v[tr][tc] = g_mean_v; tile_std_v[tr][tc] = g_std_v;
+            }
+        }
+    }
+#undef T
+
+    // ── Per-pixel scoring over ROI (local tile stats) ────────────────────
     float best_color = -1.0f, best_thermal = -1.0f;
     int   best_color_x = 0, best_color_y = 0;
     int   best_thermal_x = 0, best_thermal_y = 0;
 
     for (int y = roi_y0; y < roi_y1; y += sample_step) {
+        int tr = (y - roi_y0) * ANOMALY_LOCAL_TILE_SIZE / roi_h;
+        if (tr < 0) tr = 0; if (tr >= ANOMALY_LOCAL_TILE_SIZE) tr = ANOMALY_LOCAL_TILE_SIZE - 1;
         const uint8_t *row = rgba + (y * rgba_stride);
         for (int x = roi_x0; x < roi_x1; x += sample_step) {
+            int tc = (x - roi_x0) * ANOMALY_LOCAL_TILE_SIZE / roi_w;
+            if (tc < 0) tc = 0; if (tc >= ANOMALY_LOCAL_TILE_SIZE) tc = ANOMALY_LOCAL_TILE_SIZE - 1;
             const uint8_t *px = row + (x * 4);
             double r = (double)px[0], g = (double)px[1], b = (double)px[2];
             double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
             if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0) {
+                double mean_y = tile_mean_y[tr][tc];
+                double std_y  = tile_std_y[tr][tc];
                 float ts = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
                            ? (float)((mean_y - lum) / std_y)
                            : (float)((lum - mean_y) / std_y);
@@ -417,7 +481,8 @@ int anomaly_process_frame(
             if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0) {
                 double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
                 double v = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
-                float cs = (float)(fabs((u - mean_u) / std_u) + fabs((v - mean_v) / std_v));
+                float cs = (float)(fabs((u - tile_mean_u[tr][tc]) / tile_std_u[tr][tc])
+                                 + fabs((v - tile_mean_v[tr][tc]) / tile_std_v[tr][tc]));
                 if (cs > best_color) { best_color = cs; best_color_x = x; best_color_y = y; }
             }
         }

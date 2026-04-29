@@ -24,6 +24,17 @@
 #define ANOMALY_SCAN_ZONE_DEFAULT         0.80f
 #define ANOMALY_DEFAULT_MIN_HITS          2
 
+// ── Local tile normalization ───────────────────────────────────────────────
+// The ROI is divided into a LOCAL_TILE_SIZE × LOCAL_TILE_SIZE grid.  Mean and
+// std are computed per tile so that scoring is relative to the immediate
+// neighbourhood rather than the whole frame.  This is the "needle in a
+// haystack" fix: a person at 600 ft whose legs are 3° warmer than surrounding
+// grass scores highly within their tile even if a hot rock elsewhere in the
+// frame would dominate the global statistics.
+// Minimum samples per tile before falling back to global stats.
+#define ANOMALY_LOCAL_TILE_SIZE    8
+#define ANOMALY_LOCAL_TILE_MIN_N   4
+
 // ── GMV / similarity-transform tuning ─────────────────────────────────────
 #define ANOMALY_GMV_SEARCH_RADIUS   20
 #define ANOMALY_GMV_PATCH_HALF       2

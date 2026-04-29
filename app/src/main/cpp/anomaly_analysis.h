@@ -44,7 +44,8 @@
 typedef struct {
     float left_norm, top_norm, right_norm, bottom_norm;
     uint8_t r, g, b;
-    float weight;   // stroke scale 0–1: thin on first visible hit, full at sustained
+    float weight;       // stroke scale 0–1: thin on first visible hit, full at sustained
+    int   algorithm;    // which detector fired: ANOMALY_ALGO_COLOR/THERMAL/MOTION
 } anomaly_box_t;
 
 // All config values read from Kotlin via JNI; must be accessed under g_lock

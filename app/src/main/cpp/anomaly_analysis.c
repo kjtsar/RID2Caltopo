@@ -566,6 +566,7 @@ int anomaly_process_frame(
         {0x26, 0xC6, 0xDA},  // Motion: cyan
     };
     static const float algo_box_scale[3] = {1.0f, 1.0f, 1.3f};
+    static const int   algo_bits[3]      = {ANOMALY_ALGO_COLOR, ANOMALY_ALGO_THERMAL, ANOMALY_ALGO_MOTION};
 
     anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
     int box_count = 0;
@@ -583,6 +584,8 @@ int anomaly_process_frame(
                            bw, bw,
                            algo_rgb[ai][0], algo_rgb[ai][1], algo_rgb[ai][2],
                            weight);
+        if (box_count > 0)
+            boxes[box_count - 1].algorithm = algo_bits[ai];
     }
 
     if (result_out != NULL) {

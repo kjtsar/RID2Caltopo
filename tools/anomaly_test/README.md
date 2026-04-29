@@ -80,121 +80,73 @@ Real video catches things synthetic frames cannot: codec artefacts, rolling
 shutter, compression noise, lighting changes, and the specific motion
 profiles of each drone model.
 
-### Step 1 — capture a clip
+### The video driver — `anomaly_video_test`
 
-Record a short clip (10–30 seconds) from the RID2Caltopo streams screen while
-flying, or save an existing RTMP recording.  MP4 or MOV work fine.
+The driver (`anomaly_video_test.c`) takes an MP4 directly — no manual frame
+extraction needed.  It produces two output files in the same directory as the
+input:
 
-### Step 2 — extract raw RGBA frames
+| Output | Purpose |
+|---|---|
+| `<clip>_annotated.mp4` | Original video with detection boxes drawn on every frame |
+| `<clip>_detections.csv` | One row per visible box per frame, with a blank **label** column |
 
+**Quick start for IR / black-hot footage:**
 ```sh
-ffmpeg -i your_clip.mp4 \
-       -vf fps=10 \
-       -pix_fmt rgba \
-       frames/frame_%04d.rgba
-```
-
-Also save the frame dimensions (you'll need them in the driver):
-```sh
-ffprobe -v error -select_streams v:0 \
-        -show_entries stream=width,height \
-        -of csv=p=0 your_clip.mp4
-```
-
-`fps=10` keeps the frame count manageable.  Adjust to match the original
-frame rate if you need the timing to be realistic.
-
-### Step 3 — write a video driver
-
-Add a new source file alongside `test_anomaly.c`, for example
-`test_video.c`:
-
-```c
-#include "anomaly_analysis.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-// Run all frames in a directory through the detector and report detections.
-// Usage: anomaly_video_test <frame_dir> <width> <height> [score_threshold]
-int main(int argc, char **argv) {
-    if (argc < 4) {
-        fprintf(stderr, "usage: %s <frame_dir> <width> <height> [threshold]\n", argv[0]);
-        return 1;
-    }
-    const char *dir   = argv[1];
-    int W             = atoi(argv[2]);
-    int H             = atoi(argv[3]);
-    float threshold   = argc > 4 ? atof(argv[4]) : ANOMALY_DEFAULT_SCORE_THRESHOLD;
-
-    anomaly_config_t cfg = {
-        .enabled           = true,
-        .algorithm_mask    = ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION,
-        .frame_stride      = 1,
-        .score_threshold   = threshold,
-        .min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION,
-        .thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT,
-        .scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT,
-        .min_hits          = ANOMALY_DEFAULT_MIN_HITS,
-    };
-
-    anomaly_state_t state;
-    anomaly_state_init(&state);
-
-    size_t frame_bytes = (size_t)W * H * 4;
-    uint8_t *rgba = malloc(frame_bytes);
-
-    int frame_num = 1, detections = 0;
-    char path[512];
-    while (1) {
-        snprintf(path, sizeof(path), "%s/frame_%04d.rgba", dir, frame_num);
-        FILE *f = fopen(path, "rb");
-        if (!f) break;
-        if (fread(rgba, 1, frame_bytes, f) != frame_bytes) { fclose(f); break; }
-        fclose(f);
-
-        anomaly_result_t result;
-        int boxes = anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, 0, &result);
-        if (boxes > 0) {
-            printf("frame %4d: %d box(es)", frame_num, boxes);
-            for (int i = 0; i < boxes; i++) {
-                const anomaly_box_t *b = &result.boxes[i];
-                printf("  [cx=%.2f cy=%.2f w=%.2f h=%.2f]",
-                       (b->left_norm + b->right_norm) * 0.5f,
-                       (b->top_norm  + b->bottom_norm) * 0.5f,
-                       b->right_norm - b->left_norm,
-                       b->bottom_norm - b->top_norm);
-            }
-            printf("\n");
-            detections++;
-        }
-        frame_num++;
-    }
-
-    printf("\nProcessed %d frames, %d with detections.\n", frame_num - 1, detections);
-    anomaly_state_cleanup(&state);
-    free(rgba);
-    return 0;
-}
-```
-
-Add it to `CMakeLists.txt`:
-```cmake
-add_executable(anomaly_video_test
-    test_video.c
-    ../../app/src/main/cpp/anomaly_analysis.c
-)
-target_include_directories(anomaly_video_test PRIVATE ../../app/src/main/cpp)
-target_link_libraries(anomaly_video_test m)
-```
-
-Then run:
-```sh
+cd tools/anomaly_test
 cmake --build build
-mkdir frames
-ffmpeg -i your_clip.mp4 -vf fps=10 -pix_fmt rgba frames/frame_%04d.rgba
-./build/anomaly_video_test frames 1920 1080 2.8
+./build/anomaly_video_test path/to/clip.mp4 -p bh -a 6 -t 2.8
 ```
+
+`-p bh` = black-hot polarity  
+`-a 6`  = thermal + motion only (skip color outlier, which is less useful in IR)  
+`-t 2.8` = score threshold (higher = fewer, more confident detections)
+
+**All options:**
+```
+-o <file.mp4>    Annotated video  (default: <input>_annotated.mp4)
+-c <file.csv>    Detection log    (default: <input>_detections.csv)
+--no-video       CSV only; skip annotated video output
+
+-t <float>       Score threshold  (default: 1.8)
+-m <int>         Min consecutive hits before showing box (default: 2)
+-s <float>       Scan zone 0.5–1.0 (default: 0.8)
+-a <int>         Algorithm mask: 1=color 2=thermal 4=motion (default: 7=all)
+-p <wh|bh>       Thermal polarity: wh=white-hot bh=black-hot (default: wh)
+--stride <int>   Analyze every Nth frame (default: 1)
+```
+
+Requires `ffmpeg` and `ffprobe` on PATH.
+
+### Reviewing detections and labelling
+
+1. Open `<clip>_annotated.mp4` in QuickTime (or any player).
+2. Open `<clip>_detections.csv` in Numbers or Excel — the `time_s` column
+   is your scrub target.
+3. For each row, jump to that timestamp in the video and fill in the
+   **label** column:
+   - `G` — good detection / true positive (the subject is there)
+   - `B` — bad detection / false positive (noise, background, irrelevant object)
+   - `?` — unsure; come back to it
+
+The CSV header lines document the exact settings used, so the file is
+self-contained if you re-run with different parameters.
+
+### Tuning the detector
+
+The CSV + annotated video loop is the primary tuning tool.  Common
+adjustments:
+
+| Too many false positives | Too many missed detections |
+|---|---|
+| Raise `-t` (threshold) | Lower `-t` |
+| Raise `-m` (min hits) | Lower `-m` |
+| Lower `-s` (scan zone) to trim edges | Raise `-s` |
+| Remove `-a 1` (color algo) | Add more algorithm bits |
+
+Once you've found a threshold where most labels in the CSV are `G`, that's
+your operating point.  Note the settings — you'll use them when extracting
+regression frames in the next step.
 
 ### Step 4 — tune and add regression tests
 

@@ -14,5 +14,14 @@ target_include_directories(anomaly_test PRIVATE
 
 target_link_libraries(anomaly_test m)
 
+add_executable(anomaly_video_test
+    anomaly_video_test.c
+    ../../app/src/main/cpp/anomaly_analysis.c
+)
+target_include_directories(anomaly_video_test PRIVATE
+    ../../app/src/main/cpp
+)
+target_link_libraries(anomaly_video_test m)
+
 enable_testing()
 add_test(NAME anomaly_test COMMAND anomaly_test)

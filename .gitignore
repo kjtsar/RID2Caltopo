@@ -14,3 +14,10 @@
 .cxx
 local.properties
 /keystore.properties
+
+# Real-world capture files — too large and potentially sensitive for the repo.
+# Tuning/regression frames derived from these live in tools/anomaly_test/frames/
+app/src/test/resources/vidcap/
+
+# Native test build output
+tools/anomaly_test/build/

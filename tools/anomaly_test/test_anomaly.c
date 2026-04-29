@@ -220,8 +220,18 @@ static void test_black_hot_thermal(void) {
 }
 
 static void test_high_threshold_no_detection(void) {
-    // A mildly bright pixel (+3 gray units above background) scores ~3σ with
-    // the variance floor.  That fires at threshold=1.8 but NOT at threshold=15.
+    // With local tile normalization an isolated outlier in N tile samples scores
+    // ≈ √N σ regardless of its absolute magnitude (both deviation and σ scale
+    // together).  For a 160×120 frame sampled every 2 px over an 8×8 tile grid
+    // each center tile holds roughly 48 samples → outlier score ≈ √48 ≈ 6.9 σ.
+    //
+    // The pixel must also pass ANOMALY_THERMAL_MIN_DELTA (currently 10 luma
+    // units) before Z-scoring even begins — this blocks HEVC/noise artefacts
+    // in near-uniform regions.  We therefore use a +20-unit outlier (well above
+    // the gate) and bracket the threshold around √48:
+    //   threshold = 3.0  → fires   (6.9 > 3.0)
+    //   threshold = 15.0 → silent  (6.9 < 15.0)
+    //
     // Use separate frame copies: process_frame draws boxes in-place, so
     // reusing the same buffer across runs would corrupt the second test.
     const int W = 160, H = 120;
@@ -229,14 +239,14 @@ static void test_high_threshold_no_detection(void) {
     // Verify it DOES fire at low threshold (sanity check).
     {
         uint8_t *frame = make_gray_frame(W, H, 64);
-        set_pixel(frame, W * 4, W / 2, H / 2, 67, 67, 67);
+        set_pixel(frame, W * 4, W / 2, H / 2, 84, 84, 84);  // +20 units, > MIN_DELTA
         anomaly_state_t st; anomaly_state_init(&st);
         anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
-        cfg.score_threshold = 1.8f;
+        cfg.score_threshold = 3.0f;
         cfg.min_hits = 1;
         anomaly_result_t res;
         int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
-        EXPECT(boxes > 0, "threshold=1.8: mild outlier fires");
+        EXPECT(boxes > 0, "threshold=3.0: outlier above MIN_DELTA fires");
         anomaly_state_cleanup(&st);
         free(frame);
     }
@@ -244,14 +254,14 @@ static void test_high_threshold_no_detection(void) {
     // Verify it does NOT fire at high threshold.
     {
         uint8_t *frame = make_gray_frame(W, H, 64);
-        set_pixel(frame, W * 4, W / 2, H / 2, 67, 67, 67);
+        set_pixel(frame, W * 4, W / 2, H / 2, 84, 84, 84);  // same +20-unit outlier
         anomaly_state_t st; anomaly_state_init(&st);
         anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
         cfg.score_threshold = 15.0f;
         cfg.min_hits = 1;
         anomaly_result_t res;
         int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
-        EXPECT(boxes == 0, "threshold=15: mild outlier suppressed");
+        EXPECT(boxes == 0, "threshold=15: same outlier suppressed");
         anomaly_state_cleanup(&st);
         free(frame);
     }

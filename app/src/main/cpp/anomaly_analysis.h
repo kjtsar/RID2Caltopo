@@ -35,6 +35,17 @@
 #define ANOMALY_LOCAL_TILE_SIZE    8
 #define ANOMALY_LOCAL_TILE_MIN_N   4
 
+// Minimum absolute luma difference (0–255 scale) required before computing a
+// thermal Z-score.  Local tile normalization makes near-uniform regions
+// dangerous: a tile that is homogeneous white (cold sky, open clearing) has
+// an extremely small σ, so even a 2-count sensor-noise spike or HEVC block
+// artifact produces a gigantic Z-score.  This gate ensures we never flag a
+// pixel unless it is genuinely darker (black-hot) or brighter (white-hot)
+// than its tile mean by at least this many luma units.
+// Empirically: SAR subjects at 600 ft produce 15–40 unit differences;
+// HEVC compression artifacts in flat regions are typically < 10 units.
+#define ANOMALY_THERMAL_MIN_DELTA  10.0f
+
 // ── GMV / similarity-transform tuning ─────────────────────────────────────
 #define ANOMALY_GMV_SEARCH_RADIUS   20
 #define ANOMALY_GMV_PATCH_HALF       2

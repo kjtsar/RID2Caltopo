@@ -471,12 +471,17 @@ int anomaly_process_frame(
             double r = (double)px[0], g = (double)px[1], b = (double)px[2];
             double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
             if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0) {
-                double mean_y = tile_mean_y[tr][tc];
-                double std_y  = tile_std_y[tr][tc];
-                float ts = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
-                           ? (float)((mean_y - lum) / std_y)
-                           : (float)((lum - mean_y) / std_y);
-                if (ts > best_thermal) { best_thermal = ts; best_thermal_x = x; best_thermal_y = y; }
+                double mean_y   = tile_mean_y[tr][tc];
+                double std_y    = tile_std_y[tr][tc];
+                double abs_delta = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
+                                   ? (mean_y - lum) : (lum - mean_y);
+                // Absolute-delta gate: reject noise and HEVC block artifacts in
+                // near-uniform tiles (cold sky, open clearings) that would otherwise
+                // produce gigantic Z-scores due to the tiny local σ.
+                if (abs_delta >= (double)ANOMALY_THERMAL_MIN_DELTA) {
+                    float ts = (float)(abs_delta / std_y);
+                    if (ts > best_thermal) { best_thermal = ts; best_thermal_x = x; best_thermal_y = y; }
+                }
             }
             if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0) {
                 double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);

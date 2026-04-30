@@ -6,12 +6,15 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
+import android.net.Uri
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -45,9 +48,11 @@ class StreamSessionService(
     private val scope: CoroutineScope,
     private val policy: StreamRecoveryPolicy = StreamRecoveryPolicy(),
     private val sourcePathProvider: (String) -> String = { it },
+    private val localPlaybackUriProvider: (String) -> Uri? = { null },
     private val burstyHlsSourceProvider: (String) -> Boolean = { false },
     private val restartCooldownProvider: (String) -> Long = { policy.restartCooldownMs },
     private val preferredModeProvider: (String) -> ProtocolMode = { ProtocolMode.HLS },
+    private val isLocalPlaybackProvider: (String) -> Boolean = { false },
     private val listener: Listener? = null,
 ) {
     interface Listener {
@@ -394,6 +399,11 @@ class StreamSessionService(
         mode: ProtocolMode,
         burstyHls: Boolean,
     ): androidx.media3.exoplayer.source.MediaSource {
+        localPlaybackUriProvider(designator)?.let { localUri ->
+            CTDebug(tag, "Starting local playback for $designator uri='$localUri'")
+            return ProgressiveMediaSource.Factory(DefaultDataSource.Factory(context))
+                .createMediaSource(MediaItem.fromUri(localUri))
+        }
         val sourcePath = sourcePathProvider(designator)
         return when (mode) {
             ProtocolMode.RTSP -> {
@@ -437,6 +447,7 @@ class StreamSessionService(
     }
 
     private fun maybeSwitchProtocol(designator: String, error: PlaybackException): Boolean {
+        if (isLocalPlaybackProvider(designator)) return false
         val current = modeFor(designator)
         val scores = modeScoresByDesignator[designator] ?: return false
         // If the current mode's score has fallen below every alternative, switch now.

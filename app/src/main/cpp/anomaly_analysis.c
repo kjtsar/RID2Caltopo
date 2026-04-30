@@ -21,6 +21,201 @@ static inline int clamp_i32(int value, int min_value, int max_value) {
     return value;
 }
 
+static inline float effective_thermal_min_delta(const anomaly_config_t *cfg) {
+    if (cfg == NULL || cfg->thermal_min_delta <= 0.0f) {
+        return ANOMALY_THERMAL_MIN_DELTA;
+    }
+    return cfg->thermal_min_delta;
+}
+
+static inline double ii_query(const double *ii, int stride,
+                              int sx0, int sy0, int sx1, int sy1) {
+    return ii[sy1 * stride + sx1]
+           - (sx0 > 0 ? ii[sy1 * stride + (sx0 - 1)] : 0.0)
+           - (sy0 > 0 ? ii[(sy0 - 1) * stride + sx1] : 0.0)
+           + (sx0 > 0 && sy0 > 0 ? ii[(sy0 - 1) * stride + (sx0 - 1)] : 0.0);
+}
+
+static void build_patch_selection_map(
+        const float *score_map,
+        int          sg_w,
+        int          sg_h,
+        float       *selection_map) {
+    if (selection_map == NULL || sg_w <= 0 || sg_h <= 0) return;
+    for (int sy = 0; sy < sg_h; sy++) {
+        for (int sx = 0; sx < sg_w; sx++) {
+            float center = score_map[sy * sg_w + sx];
+            selection_map[sy * sg_w + sx] = -1.0f;
+            if (center <= 0.0f) continue;
+
+            // Require a local maximum so clutter edges don't drag the centroid.
+            bool is_peak = true;
+            for (int ny = sy - 1; ny <= sy + 1 && is_peak; ny++) {
+                if (ny < 0 || ny >= sg_h) continue;
+                for (int nx = sx - 1; nx <= sx + 1; nx++) {
+                    if (nx < 0 || nx >= sg_w) continue;
+                    if (nx == sx && ny == sy) continue;
+                    if (score_map[ny * sg_w + nx] > center) {
+                        is_peak = false;
+                        break;
+                    }
+                }
+            }
+            if (!is_peak) continue;
+
+            float top1 = center, top2 = -1.0f, top3 = -1.0f;
+            int support = 0;
+            float sum_w = 0.0f;
+            float sum_dx = 0.0f, sum_dy = 0.0f;
+            float sum_dx2 = 0.0f, sum_dy2 = 0.0f, sum_dxdy = 0.0f;
+            for (int ny = sy - 1; ny <= sy + 1; ny++) {
+                if (ny < 0 || ny >= sg_h) continue;
+                for (int nx = sx - 1; nx <= sx + 1; nx++) {
+                    if (nx < 0 || nx >= sg_w) continue;
+                    float v = score_map[ny * sg_w + nx];
+                    if (v <= 0.0f) continue;
+                    support++;
+                    float dx = (float)(nx - sx);
+                    float dy = (float)(ny - sy);
+                    sum_w += v;
+                    sum_dx += dx * v;
+                    sum_dy += dy * v;
+                    sum_dx2 += dx * dx * v;
+                    sum_dy2 += dy * dy * v;
+                    sum_dxdy += dx * dy * v;
+                    if (v > top1) {
+                        top3 = top2;
+                        top2 = top1;
+                        top1 = v;
+                    } else if (v > top2) {
+                        top3 = top2;
+                        top2 = v;
+                    } else if (v > top3) {
+                        top3 = v;
+                    }
+                }
+            }
+
+            float sum = top1;
+            int n = 1;
+            if (top2 > 0.0f) { sum += top2; n++; }
+            if (top3 > 0.0f) { sum += top3; n++; }
+            float score = sum / (float)n;
+
+            // Small support bonus rewards a tiny coherent cluster but never
+            // dominates the raw darkness score; we still want very small targets.
+            float support_bonus = 0.08f * (float)(support > 1 ? (support - 1) : 0);
+            if (support_bonus > 0.32f) support_bonus = 0.32f;
+            score += support_bonus;
+
+            // Penalise elongated / edge-like support that tends to occur on
+            // foliage boundaries and clearing edges. Small compact peaks keep
+            // most of their score; broad one-sided ridges lose some of it.
+            if (sum_w > 0.0f) {
+                float mean_dx = sum_dx / sum_w;
+                float mean_dy = sum_dy / sum_w;
+                float var_x = fmaxf(sum_dx2 / sum_w - mean_dx * mean_dx, 0.0f);
+                float var_y = fmaxf(sum_dy2 / sum_w - mean_dy * mean_dy, 0.0f);
+                float cov_xy = (sum_dxdy / sum_w) - mean_dx * mean_dy;
+                float tr = var_x + var_y;
+                float det_term = (var_x - var_y) * (var_x - var_y) + 4.0f * cov_xy * cov_xy;
+                float root = sqrtf(fmaxf(det_term, 0.0f));
+                float major = 0.5f * (tr + root);
+                float minor = 0.5f * (tr - root);
+                float anisotropy = (major + minor) > 1e-4f
+                    ? (major - minor) / (major + minor)
+                    : 0.0f;
+                float center_share = center / sum_w;
+                float offset_mag = sqrtf(mean_dx * mean_dx + mean_dy * mean_dy);
+
+                float elongation_penalty = 0.55f * anisotropy;
+                float offset_penalty = 0.35f * offset_mag;
+                float center_penalty = 0.0f;
+                if (center_share < 0.34f) {
+                    center_penalty = (0.34f - center_share) * 2.0f;
+                }
+                float compact_penalty = elongation_penalty + offset_penalty + center_penalty;
+                if (compact_penalty > 1.10f) compact_penalty = 1.10f;
+                score -= compact_penalty;
+            }
+            selection_map[sy * sg_w + sx] = score;
+        }
+    }
+}
+
+static void choose_best_dark_patch(
+        const float *selection_map,
+        int          sg_w,
+        int          sg_h,
+        int          roi_x0,
+        int          roi_y0,
+        int          sample_step,
+        float       *best_score_out,
+        int         *best_x_out,
+        int         *best_y_out) {
+    if (best_score_out != NULL) *best_score_out = -1.0f;
+    if (best_x_out != NULL) *best_x_out = 0;
+    if (best_y_out != NULL) *best_y_out = 0;
+    if (selection_map == NULL || sg_w <= 0 || sg_h <= 0) return;
+
+    float best_score = -1.0f;
+    int best_sx = 0, best_sy = 0;
+    for (int sy = 0; sy < sg_h; sy++) {
+        for (int sx = 0; sx < sg_w; sx++) {
+            float score = selection_map[sy * sg_w + sx];
+            if (score > best_score) {
+                best_score = score;
+                best_sx = sx;
+                best_sy = sy;
+            }
+        }
+    }
+
+    if (best_score_out != NULL) *best_score_out = best_score;
+    if (best_x_out != NULL) *best_x_out = roi_x0 + best_sx * sample_step;
+    if (best_y_out != NULL) *best_y_out = roi_y0 + best_sy * sample_step;
+}
+
+static void maybe_insert_top_candidate(
+        anomaly_debug_candidate_t *candidates,
+        int                      *count,
+        int                       max_count,
+        int                       pixel_x,
+        int                       pixel_y,
+        float                     x_norm,
+        float                     y_norm,
+        float                     spatial_score,
+        float                     temporal_score,
+        float                     combined_score) {
+    if (candidates == NULL || count == NULL || max_count <= 0 || combined_score <= 0.0f) return;
+
+    int insert_at = *count;
+    if (insert_at > max_count) insert_at = max_count;
+    for (int i = 0; i < *count && i < max_count; i++) {
+        if (combined_score > candidates[i].combined_score) {
+            insert_at = i;
+            break;
+        }
+    }
+    if (insert_at >= max_count) return;
+
+    int limit = *count < max_count ? *count : (max_count - 1);
+    for (int i = limit; i > insert_at; i--) {
+        candidates[i] = candidates[i - 1];
+    }
+    if (*count < max_count) (*count)++;
+
+    anomaly_debug_candidate_t *slot = &candidates[insert_at];
+    slot->valid = true;
+    slot->pixel_x = pixel_x;
+    slot->pixel_y = pixel_y;
+    slot->x_norm = x_norm;
+    slot->y_norm = y_norm;
+    slot->spatial_score = spatial_score;
+    slot->temporal_score = temporal_score;
+    slot->combined_score = combined_score;
+}
+
 static void draw_rgba_hline(uint8_t *rgba, int rgba_stride,
                             int width, int height,
                             int x0, int x1, int y,
@@ -171,6 +366,163 @@ similarity_2d_t fit_similarity_2d(
     return r;
 }
 
+bool anomaly_probe_thermal_point(
+        const anomaly_state_t  *state,
+        const anomaly_config_t *cfg,
+        const uint8_t          *rgba,
+        int                     rgba_stride,
+        int                     width,
+        int                     height,
+        float                   point_x_norm,
+        float                   point_y_norm,
+        anomaly_probe_t        *probe_out) {
+    if (probe_out == NULL) return false;
+    memset(probe_out, 0, sizeof(*probe_out));
+    if (cfg == NULL || rgba == NULL || width <= 0 || height <= 0) return false;
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) == 0) return false;
+
+    probe_out->thermal_min_delta = effective_thermal_min_delta(cfg);
+
+    float margin = (1.0f - cfg->scan_zone) * 0.5f;
+    int roi_x0 = (int)(margin * (float)width);
+    int roi_x1 = width - roi_x0;
+    int roi_y0 = (int)(margin * (float)height);
+    int roi_y1 = height - roi_y0;
+    if (roi_x1 <= roi_x0) { roi_x0 = 0; roi_x1 = width;  }
+    if (roi_y1 <= roi_y0) { roi_y0 = 0; roi_y1 = height; }
+
+    int px = clamp_i32((int)lroundf(clamp01f(point_x_norm) * (float)(width - 1)), 0, width - 1);
+    int py = clamp_i32((int)lroundf(clamp01f(point_y_norm) * (float)(height - 1)), 0, height - 1);
+    probe_out->pixel_x = px;
+    probe_out->pixel_y = py;
+    probe_out->inside_scan_zone = (px >= roi_x0 && px < roi_x1 && py >= roi_y0 && py < roi_y1);
+    if (!probe_out->inside_scan_zone) return true;
+
+    int sample_step = (width >= 1280 || height >= 720) ? 4 : 2;
+    int roi_w = roi_x1 - roi_x0;
+    int roi_h = roi_y1 - roi_y0;
+    if (roi_w <= 0) roi_w = 1;
+    if (roi_h <= 0) roi_h = 1;
+    int sg_w = (roi_w + sample_step - 1) / sample_step;
+    int sg_h = (roi_h + sample_step - 1) / sample_step;
+    if (sg_w <= 0 || sg_h <= 0) return false;
+
+    int sx = clamp_i32((px - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+    int sy = clamp_i32((py - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+    probe_out->sample_x = sx;
+    probe_out->sample_y = sy;
+
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    double *sg_luma = (double *)malloc(sg_count * sizeof(double));
+    double *ii_sum = (double *)malloc(sg_count * sizeof(double));
+    double *ii_sum2 = (double *)malloc(sg_count * sizeof(double));
+    if (sg_luma == NULL || ii_sum == NULL || ii_sum2 == NULL) {
+        free(sg_luma);
+        free(ii_sum);
+        free(ii_sum2);
+        return false;
+    }
+
+    for (int gy = 0; gy < sg_h; gy++) {
+        int y = roi_y0 + gy * sample_step;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        const uint8_t *row = rgba + (y * rgba_stride);
+        for (int gx = 0; gx < sg_w; gx++) {
+            int x = roi_x0 + gx * sample_step;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            const uint8_t *p = row + (x * 4);
+            double r = (double)p[0], g = (double)p[1], b = (double)p[2];
+            sg_luma[gy * sg_w + gx] = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+        }
+    }
+
+    for (int gy = 0; gy < sg_h; gy++) {
+        for (int gx = 0; gx < sg_w; gx++) {
+            double v = sg_luma[gy * sg_w + gx];
+            double v2 = v * v;
+            double a = (gy > 0) ? ii_sum[(gy - 1) * sg_w + gx] : 0.0;
+            double l = (gx > 0) ? ii_sum[gy * sg_w + (gx - 1)] : 0.0;
+            double al = (gy > 0 && gx > 0) ? ii_sum[(gy - 1) * sg_w + (gx - 1)] : 0.0;
+            ii_sum[gy * sg_w + gx] = v + a + l - al;
+
+            double a2 = (gy > 0) ? ii_sum2[(gy - 1) * sg_w + gx] : 0.0;
+            double l2 = (gx > 0) ? ii_sum2[gy * sg_w + (gx - 1)] : 0.0;
+            double al2 = (gy > 0 && gx > 0) ? ii_sum2[(gy - 1) * sg_w + (gx - 1)] : 0.0;
+            ii_sum2[gy * sg_w + gx] = v2 + a2 + l2 - al2;
+        }
+    }
+
+    const int R = ANOMALY_THERMAL_WIN_RADIUS;
+    int wx0 = sx - R; if (wx0 < 0) wx0 = 0;
+    int wx1 = sx + R; if (wx1 >= sg_w) wx1 = sg_w - 1;
+    int wy0 = sy - R; if (wy0 < 0) wy0 = 0;
+    int wy1 = sy + R; if (wy1 >= sg_h) wy1 = sg_h - 1;
+    int n = (wx1 - wx0 + 1) * (wy1 - wy0 + 1);
+    double lum = sg_luma[sy * sg_w + sx];
+    double mean = ii_query(ii_sum, sg_w, wx0, wy0, wx1, wy1) / (double)n;
+    double sum2 = ii_query(ii_sum2, sg_w, wx0, wy0, wx1, wy1);
+    double std = sqrt(fmax(sum2 / (double)n - mean * mean, 1.0));
+    int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
+    double abs_delta = black_hot ? (mean - lum) : (lum - mean);
+
+    probe_out->valid = true;
+    probe_out->sample_luma = (float)lum;
+    probe_out->spatial_mean = (float)mean;
+    probe_out->spatial_std = (float)std;
+    probe_out->spatial_abs_delta = (float)abs_delta;
+    probe_out->spatial_score = (abs_delta >= (double)probe_out->thermal_min_delta)
+                               ? (float)(abs_delta / std) : -1.0f;
+
+    bool bg_ready = (state != NULL
+                     && state->bg_luma != NULL
+                     && state->bg_sg_w == sg_w
+                     && state->bg_sg_h == sg_h
+                     && state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP);
+    probe_out->bg_ready = bg_ready;
+    probe_out->used_temporal_score = bg_ready;
+    probe_out->effective_score = probe_out->spatial_score;
+
+    if (bg_ready) {
+        double sum_d = 0.0, sum_d2 = 0.0;
+        int cnt_d = 0;
+        for (int i = 0; i < sg_w * sg_h; i++) {
+            float d = black_hot
+                      ? (state->bg_luma[i] - (float)sg_luma[i])
+                      : ((float)sg_luma[i] - state->bg_luma[i]);
+            if (d > 0.0f) {
+                sum_d += d;
+                sum_d2 += (double)d * d;
+                cnt_d++;
+            }
+        }
+        double delta_mean = cnt_d > 0 ? sum_d / (double)cnt_d : 0.0;
+        double delta_var = cnt_d > 1
+                           ? fmax(sum_d2 / (double)cnt_d - delta_mean * delta_mean, 0.0)
+                           : 0.0;
+        double delta_norm = sqrt(delta_var);
+        if (delta_norm < (double)ANOMALY_THERMAL_BG_NORM) {
+            delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
+        }
+        float delta = black_hot
+                      ? (state->bg_luma[sy * sg_w + sx] - (float)lum)
+                      : ((float)lum - state->bg_luma[sy * sg_w + sx]);
+        probe_out->temporal_delta = delta;
+        probe_out->temporal_mean = (float)delta_mean;
+        probe_out->temporal_norm = (float)delta_norm;
+        probe_out->temporal_score = (delta >= probe_out->thermal_min_delta)
+                                    ? (float)((delta - delta_mean) / delta_norm)
+                                    : -1.0f;
+        probe_out->effective_score = probe_out->temporal_score;
+    } else {
+        probe_out->temporal_score = -1.0f;
+    }
+
+    free(sg_luma);
+    free(ii_sum);
+    free(ii_sum2);
+    return true;
+}
+
 // ── State lifecycle ───────────────────────���────────────────────────────────
 
 void anomaly_state_init(anomaly_state_t *state) {
@@ -218,6 +570,7 @@ int anomaly_process_frame(
     (void)source_ts_us;
 
     if (result_out != NULL) {
+        memset(result_out, 0, sizeof(*result_out));
         result_out->box_count        = 0;
         result_out->had_discontinuity = false;
     }
@@ -226,6 +579,7 @@ int anomaly_process_frame(
     if (width <= 0 || height <= 0) return 0;
 
     int frame_stride = cfg->frame_stride < 1 ? 1 : cfg->frame_stride;
+    float thermal_min_delta = effective_thermal_min_delta(cfg);
     state->frame_counter += 1;
     if ((state->frame_counter % frame_stride) != 0) return 0;
 
@@ -349,7 +703,7 @@ int anomaly_process_frame(
 
     // ── Compensate accumulators for camera motion (or wipe on discontinuity)
     // T⁻¹(p) = Aᵀ * (p - t) / (a²+b²)  where Aᵀ = [[a,b],[-b,a]]
-    for (int ai = 0; ai < 3; ai++) {
+    for (int ai = 0; ai < 4; ai++) {
         if (scene_discontinuity) {
             state->acc_active[ai] = false;
             state->acc_hits[ai]   = 0;
@@ -404,17 +758,20 @@ int anomaly_process_frame(
 
     // Colour tile accumulators (kept for ANOMALY_ALGO_COLOR).
 #define T ANOMALY_LOCAL_TILE_SIZE
+    double tile_sum_l[T][T], tile_sum_l2[T][T];
     double tile_sum_u[T][T], tile_sum_u2[T][T];
     double tile_sum_v[T][T], tile_sum_v2[T][T];
     int    tile_n[T][T];
     for (int tr = 0; tr < T; tr++)
         for (int tc = 0; tc < T; tc++) {
+            tile_sum_l[tr][tc] = tile_sum_l2[tr][tc] = 0.0;
             tile_sum_u[tr][tc] = tile_sum_u2[tr][tc] = 0.0;
             tile_sum_v[tr][tc] = tile_sum_v2[tr][tc] = 0.0;
             tile_n[tr][tc] = 0;
         }
 
     // Global sums (used for color-tile fallback and early-exit check).
+    double sum_l = 0.0, sum_l2 = 0.0;
     double sum_u = 0.0, sum_u2 = 0.0;
     double sum_v = 0.0, sum_v2 = 0.0;
     int sample_count = 0;
@@ -437,8 +794,10 @@ int anomaly_process_frame(
             double u   = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
             double v   = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
             sg_luma[sy * sg_w + sx] = lum;
+            sum_l  += lum; sum_l2 += lum * lum;
             sum_u  += u;  sum_u2  += u * u;
             sum_v  += v;  sum_v2  += v * v;
+            tile_sum_l[tr][tc]  += lum; tile_sum_l2[tr][tc]  += lum * lum;
             tile_sum_u[tr][tc]  += u;  tile_sum_u2[tr][tc]  += u * u;
             tile_sum_v[tr][tc]  += v;  tile_sum_v2[tr][tc]  += v * v;
             tile_n[tr][tc]++;
@@ -474,11 +833,14 @@ int anomaly_process_frame(
     }
 
     // Colour tile mean/std (fall back to global if tile too sparse).
+    double g_mean_l = sum_l / (double)sample_count;
+    double g_std_l  = sqrt(fmax((sum_l2/(double)sample_count) - g_mean_l*g_mean_l, 1.0));
     double g_mean_u = sum_u / (double)sample_count;
     double g_std_u  = sqrt(fmax((sum_u2/(double)sample_count) - g_mean_u*g_mean_u, 1.0));
     double g_mean_v = sum_v / (double)sample_count;
     double g_std_v  = sqrt(fmax((sum_v2/(double)sample_count) - g_mean_v*g_mean_v, 1.0));
 
+    double tile_mean_l[T][T], tile_std_l[T][T];
     double tile_mean_u[T][T], tile_std_u[T][T];
     double tile_mean_v[T][T], tile_std_v[T][T];
     for (int tr = 0; tr < T; tr++) {
@@ -486,11 +848,14 @@ int anomaly_process_frame(
             int n = tile_n[tr][tc];
             if (n >= ANOMALY_LOCAL_TILE_MIN_N) {
                 double fn = (double)n;
+                tile_mean_l[tr][tc] = tile_sum_l[tr][tc] / fn;
+                tile_std_l[tr][tc]  = sqrt(fmax(tile_sum_l2[tr][tc]/fn - tile_mean_l[tr][tc]*tile_mean_l[tr][tc], 1.0));
                 tile_mean_u[tr][tc] = tile_sum_u[tr][tc] / fn;
                 tile_std_u[tr][tc]  = sqrt(fmax(tile_sum_u2[tr][tc]/fn - tile_mean_u[tr][tc]*tile_mean_u[tr][tc], 1.0));
                 tile_mean_v[tr][tc] = tile_sum_v[tr][tc] / fn;
                 tile_std_v[tr][tc]  = sqrt(fmax(tile_sum_v2[tr][tc]/fn - tile_mean_v[tr][tc]*tile_mean_v[tr][tc], 1.0));
             } else {
+                tile_mean_l[tr][tc] = g_mean_l; tile_std_l[tr][tc] = g_std_l;
                 tile_mean_u[tr][tc] = g_mean_u; tile_std_u[tr][tc] = g_std_u;
                 tile_mean_v[tr][tc] = g_mean_v; tile_std_v[tr][tc] = g_std_v;
             }
@@ -509,16 +874,24 @@ int anomaly_process_frame(
     // Color: 8×8 tile grid (unchanged).
 
     // Inline integral-image rectangle query.
-#define II_QUERY(II, sx0, sy0, sx1, sy1) ( \
-    (II)[(sy1)*sg_w+(sx1)] \
-    - ((sx0)>0 ? (II)[(sy1)*sg_w+((sx0)-1)] : 0.0) \
-    - ((sy0)>0 ? (II)[((sy0)-1)*sg_w+(sx1)] : 0.0) \
-    + ((sx0)>0&&(sy0)>0 ? (II)[((sy0)-1)*sg_w+((sx0)-1)] : 0.0) \
-)
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    float *saliency_spatial_map = NULL;
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+        saliency_spatial_map = (float *)malloc(sg_count * sizeof(float));
+        if (saliency_spatial_map != NULL) {
+            for (size_t i = 0; i < sg_count; i++) saliency_spatial_map[i] = -1.0f;
+        }
+    }
 
-    float best_color = -1.0f, best_thermal = -1.0f;
+    float best_color = -1.0f, best_thermal = -1.0f, best_persist = -1.0f;
     int   best_color_x = 0, best_color_y = 0;
     int   best_thermal_x = 0, best_thermal_y = 0;
+    int   best_persist_x = 0, best_persist_y = 0;
+    anomaly_debug_candidate_t saliency_top[ANOMALY_DEBUG_TOP_CANDIDATES];
+    memset(saliency_top, 0, sizeof(saliency_top));
+    int saliency_top_count = 0;
+    float saliency_tracked_score_pre = -1.0f;
+    bool saliency_switch_suppressed = false;
 
     const int R = ANOMALY_THERMAL_WIN_RADIUS;
 
@@ -536,22 +909,34 @@ int anomaly_process_frame(
 
             double lum = sg_luma[sy * sg_w + sx];
 
-            if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0) {
+            if ((cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
                 // Integral-image window query.
                 int wx0 = sx - R; if (wx0 < 0) wx0 = 0;
                 int wx1 = sx + R; if (wx1 >= sg_w) wx1 = sg_w - 1;
                 int wy0 = sy - R; if (wy0 < 0) wy0 = 0;
                 int wy1 = sy + R; if (wy1 >= sg_h) wy1 = sg_h - 1;
                 int    n    = (wx1-wx0+1) * (wy1-wy0+1);
-                double wsum  = II_QUERY(ii_sum,  wx0, wy0, wx1, wy1);
-                double wsum2 = II_QUERY(ii_sum2, wx0, wy0, wx1, wy1);
+                double wsum  = ii_query(ii_sum,  sg_w, wx0, wy0, wx1, wy1);
+                double wsum2 = ii_query(ii_sum2, sg_w, wx0, wy0, wx1, wy1);
                 double mean  = wsum / (double)n;
                 double std   = sqrt(fmax(wsum2/(double)n - mean*mean, 1.0));
                 double abs_delta = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
                                    ? (mean - lum) : (lum - mean);
-                if (abs_delta >= (double)ANOMALY_THERMAL_MIN_DELTA) {
+                if (abs_delta >= (double)thermal_min_delta) {
                     float ts = (float)(abs_delta / std);
-                    if (ts > best_thermal) { best_thermal = ts; best_thermal_x = x; best_thermal_y = y; }
+                    float global_dark_score = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
+                        ? (float)((g_mean_l - lum) / g_std_l)
+                        : (float)((lum - g_mean_l) / g_std_l);
+                    if (global_dark_score < 0.0f) global_dark_score = 0.0f;
+                    if (global_dark_score > 3.0f) global_dark_score = 3.0f;
+                    float saliency_spatial = ts + 0.85f * global_dark_score;
+                    if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 &&
+                        ts > best_thermal) {
+                        best_thermal = ts; best_thermal_x = x; best_thermal_y = y;
+                    }
+                    if (saliency_spatial_map != NULL) {
+                        saliency_spatial_map[sy * sg_w + sx] = saliency_spatial;
+                    }
                 }
             }
 
@@ -566,8 +951,65 @@ int anomaly_process_frame(
             }
         }
     }
-#undef II_QUERY
-
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+        size_t score_count = (size_t)sg_w * (size_t)sg_h;
+        float *patch_score_map = (float *)malloc(score_count * sizeof(float));
+        float *patch_selection_map = (float *)malloc(score_count * sizeof(float));
+        if (patch_score_map != NULL && patch_selection_map != NULL) {
+            memset(saliency_top, 0, sizeof(saliency_top));
+            saliency_top_count = 0;
+            for (int sy = 0; sy < sg_h; sy++) {
+                for (int sx = 0; sx < sg_w; sx++) {
+                    float spatial_score = saliency_spatial_map != NULL
+                                          ? saliency_spatial_map[sy * sg_w + sx]
+                                          : -1.0f;
+                    if (spatial_score <= 0.0f) {
+                        patch_score_map[sy * sg_w + sx] = -1.0f;
+                        continue;
+                    }
+                    patch_score_map[sy * sg_w + sx] = spatial_score;
+                    if (result_out != NULL) {
+                        int px = roi_x0 + sx * sample_step;
+                        int py = roi_y0 + sy * sample_step;
+                        maybe_insert_top_candidate(
+                                saliency_top, &saliency_top_count, ANOMALY_DEBUG_TOP_CANDIDATES,
+                                px, py,
+                                (float)px / (float)(width > 1 ? width - 1 : 1),
+                                (float)py / (float)(height > 1 ? height - 1 : 1),
+                                spatial_score, 0.0f, spatial_score);
+                    }
+                }
+            }
+            build_patch_selection_map(patch_score_map, sg_w, sg_h, patch_selection_map);
+            memset(saliency_top, 0, sizeof(saliency_top));
+            saliency_top_count = 0;
+            for (int sy = 0; sy < sg_h; sy++) {
+                for (int sx = 0; sx < sg_w; sx++) {
+                    float final_score = patch_selection_map[sy * sg_w + sx];
+                    if (final_score <= 0.0f) continue;
+                    int px = roi_x0 + sx * sample_step;
+                    int py = roi_y0 + sy * sample_step;
+                    float spatial_score = patch_score_map[sy * sg_w + sx];
+                    maybe_insert_top_candidate(
+                            saliency_top, &saliency_top_count, ANOMALY_DEBUG_TOP_CANDIDATES,
+                            px, py,
+                            (float)px / (float)(width > 1 ? width - 1 : 1),
+                            (float)py / (float)(height > 1 ? height - 1 : 1),
+                            spatial_score, 0.0f, final_score);
+                }
+            }
+            choose_best_dark_patch(
+                    patch_selection_map,
+                    sg_w, sg_h,
+                    roi_x0, roi_y0, sample_step,
+                    &best_persist, &best_persist_x, &best_persist_y);
+            free(patch_selection_map);
+            free(patch_score_map);
+        } else {
+            free(patch_selection_map);
+            free(patch_score_map);
+        }
+    }
     // ── One-sided EMA thermal background: score + update ────────────────
     // The background model tracks each pixel's "cold" (background) state.
     // Fast adaptation toward brighter/colder (α=ALPHA_COOL per analyzed frame)
@@ -587,6 +1029,9 @@ int anomaly_process_frame(
                      && state->bg_sg_h == sg_h
                      && state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP
                      && !scene_discontinuity);
+    if (result_out != NULL) {
+        result_out->saliency_debug.bg_ready = bg_valid;
+    }
 
     if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && bg_valid) {
         // Temporal background score replaces the spatial integral-image score.
@@ -629,14 +1074,12 @@ int anomaly_process_frame(
         best_thermal_x = 0;
         best_thermal_y = 0;
         for (int sy = 0; sy < sg_h; sy++) {
-            int y = roi_y0 + sy * sample_step;
-            if (y >= roi_y1) y = roi_y1 - 1;
             for (int sx = 0; sx < sg_w; sx++) {
                 double lum = sg_luma[sy * sg_w + sx];
                 float  bg  = state->bg_luma[sy * sg_w + sx];
                 // Positive delta: pixel is warmer than its stored background.
                 float delta = black_hot ? (bg - (float)lum) : ((float)lum - bg);
-                if (delta < (float)ANOMALY_THERMAL_MIN_DELTA) continue;
+                if (delta < thermal_min_delta) continue;
                 // Relative score: std-devs above the frame's temporal mean.
                 float ts = (float)((delta - delta_mean) / delta_norm);
                 if (ts > best_thermal) {
@@ -645,6 +1088,112 @@ int anomaly_process_frame(
                     best_thermal_y = roi_y0 + sy * sample_step;
                 }
             }
+        }
+    }
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0 && bg_valid) {
+        double sum_d = 0.0, sum_d2 = 0.0;
+        int cnt_d = 0;
+        for (int i = 0; i < sg_w * sg_h; i++) {
+            float d = black_hot
+                ? (state->bg_luma[i] - (float)sg_luma[i])
+                : ((float)sg_luma[i] - state->bg_luma[i]);
+            if (d > 0.0f) { sum_d += d; sum_d2 += (double)d * d; cnt_d++; }
+        }
+        double delta_mean = cnt_d > 0 ? sum_d / (double)cnt_d : 0.0;
+        double delta_var  = cnt_d > 1
+            ? fmax(sum_d2 / (double)cnt_d - delta_mean * delta_mean, 0.0) : 0.0;
+        double delta_norm = sqrt(delta_var);
+        if (delta_norm < (double)ANOMALY_THERMAL_BG_NORM)
+            delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
+
+        size_t score_count = (size_t)sg_w * (size_t)sg_h;
+        float *patch_score_map = (float *)malloc(score_count * sizeof(float));
+        float *patch_selection_map = (float *)malloc(score_count * sizeof(float));
+        if (patch_score_map != NULL && patch_selection_map != NULL) {
+            for (int sy = 0; sy < sg_h; sy++) {
+                for (int sx = 0; sx < sg_w; sx++) {
+                    double lum = sg_luma[sy * sg_w + sx];
+                    float bg = state->bg_luma[sy * sg_w + sx];
+                    float delta = black_hot ? (bg - (float)lum) : ((float)lum - bg);
+                    float spatial_score = saliency_spatial_map != NULL
+                        ? saliency_spatial_map[sy * sg_w + sx]
+                        : 0.0f;
+                    if (delta < thermal_min_delta && spatial_score <= 0.0f) {
+                        patch_score_map[sy * sg_w + sx] = -1.0f;
+                        continue;
+                    }
+                    float temporal_score = delta >= thermal_min_delta
+                        ? (float)((delta - delta_mean) / delta_norm)
+                        : 0.0f;
+                    float saliency = 0.60f * spatial_score;
+                    if (temporal_score > 0.0f) saliency += temporal_score;
+                    patch_score_map[sy * sg_w + sx] = saliency > 0.0f ? saliency : -1.0f;
+                    if (result_out != NULL && saliency > 0.0f) {
+                        int px = roi_x0 + sx * sample_step;
+                        int py = roi_y0 + sy * sample_step;
+                        maybe_insert_top_candidate(
+                                saliency_top, &saliency_top_count, ANOMALY_DEBUG_TOP_CANDIDATES,
+                                px, py,
+                                (float)px / (float)(width > 1 ? width - 1 : 1),
+                                (float)py / (float)(height > 1 ? height - 1 : 1),
+                                spatial_score, temporal_score, saliency);
+                    }
+                }
+            }
+            build_patch_selection_map(patch_score_map, sg_w, sg_h, patch_selection_map);
+            memset(saliency_top, 0, sizeof(saliency_top));
+            saliency_top_count = 0;
+            for (int sy = 0; sy < sg_h; sy++) {
+                for (int sx = 0; sx < sg_w; sx++) {
+                    float final_score = patch_selection_map[sy * sg_w + sx];
+                    if (final_score <= 0.0f) continue;
+                    int px = roi_x0 + sx * sample_step;
+                    int py = roi_y0 + sy * sample_step;
+                    float spatial_score = saliency_spatial_map != NULL
+                        ? saliency_spatial_map[sy * sg_w + sx] : 0.0f;
+                    float bg = state->bg_luma[sy * sg_w + sx];
+                    float lum = (float)sg_luma[sy * sg_w + sx];
+                    float delta = black_hot ? (bg - lum) : (lum - bg);
+                    float temporal_score = delta >= thermal_min_delta
+                        ? (float)((delta - delta_mean) / delta_norm)
+                        : 0.0f;
+                    maybe_insert_top_candidate(
+                            saliency_top, &saliency_top_count, ANOMALY_DEBUG_TOP_CANDIDATES,
+                            px, py,
+                            (float)px / (float)(width > 1 ? width - 1 : 1),
+                            (float)py / (float)(height > 1 ? height - 1 : 1),
+                            spatial_score, temporal_score, final_score);
+                }
+            }
+            if (state->acc_active[3]) {
+                float dbg_fw = (float)(width > 1 ? width - 1 : 1);
+                float dbg_fh = (float)(height > 1 ? height - 1 : 1);
+                int track_x = clamp_i32((int)lroundf(state->acc_cx[3] * dbg_fw), roi_x0, roi_x1 - 1);
+                int track_y = clamp_i32((int)lroundf(state->acc_cy[3] * dbg_fh), roi_y0, roi_y1 - 1);
+                int track_sx = clamp_i32((track_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                int track_sy = clamp_i32((track_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                saliency_tracked_score_pre = -1.0f;
+                for (int ny = track_sy - 1; ny <= track_sy + 1; ny++) {
+                    if (ny < 0 || ny >= sg_h) continue;
+                    for (int nx = track_sx - 1; nx <= track_sx + 1; nx++) {
+                        if (nx < 0 || nx >= sg_w) continue;
+                        float nearby = patch_selection_map[ny * sg_w + nx];
+                        if (nearby > saliency_tracked_score_pre) {
+                            saliency_tracked_score_pre = nearby;
+                        }
+                    }
+                }
+            }
+            choose_best_dark_patch(
+                    patch_selection_map,
+                    sg_w, sg_h,
+                    roi_x0, roi_y0, sample_step,
+                    &best_persist, &best_persist_x, &best_persist_y);
+            free(patch_selection_map);
+            free(patch_score_map);
+        } else {
+            free(patch_selection_map);
+            free(patch_score_map);
         }
     }
 
@@ -678,6 +1227,7 @@ int anomaly_process_frame(
         state->bg_warmup++;
     }
 
+    free(saliency_spatial_map);
     free(sg_luma); free(ii_sum); free(ii_sum2);
 
     // ── GMV-compensated motion scoring over ROI ──────────────────────────
@@ -759,8 +1309,8 @@ int anomaly_process_frame(
     float fw = (float)(width  > 1 ? width  - 1 : 1);
     float fh = (float)(height > 1 ? height - 1 : 1);
 
-    float raw_cx[3] = {-1.0f, -1.0f, -1.0f};
-    float raw_cy[3] = {-1.0f, -1.0f, -1.0f};
+    float raw_cx[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+    float raw_cy[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
     if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR)   && best_color   >= cfg->score_threshold) {
         raw_cx[0] = (float)best_color_x   / fw;
         raw_cy[0] = (float)best_color_y   / fh;
@@ -773,10 +1323,21 @@ int anomaly_process_frame(
         raw_cx[2] = (float)best_motion_x  / fw;
         raw_cy[2] = (float)best_motion_y  / fh;
     }
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) && bg_valid &&
+        best_persist >= cfg->score_threshold) {
+        raw_cx[3] = (float)best_persist_x / fw;
+        raw_cy[3] = (float)best_persist_y / fh;
+    }
+
+    bool saliency_acc_pre_active = state->acc_active[3];
+    int saliency_acc_pre_hits = state->acc_hits[3];
+    float saliency_acc_pre_x = state->acc_cx[3];
+    float saliency_acc_pre_y = state->acc_cy[3];
+    int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
 
     float gate  = ANOMALY_ACC_GATE_RADIUS;
     float alpha = ANOMALY_ACC_EMA_ALPHA;
-    for (int ai = 0; ai < 3; ai++) {
+    for (int ai = 0; ai < 4; ai++) {
         if (raw_cx[ai] >= 0.0f) {
             if (!state->acc_active[ai]) {
                 state->acc_cx[ai]     = raw_cx[ai];
@@ -788,16 +1349,48 @@ int anomaly_process_frame(
                 float ddx  = raw_cx[ai] - state->acc_cx[ai];
                 float ddy  = raw_cy[ai] - state->acc_cy[ai];
                 float dist = sqrtf(ddx * ddx + ddy * ddy);
+                bool suppress_switch = false;
+                float blend_alpha = alpha;
+                if (ai == 3 && saliency_acc_pre_active && saliency_acc_pre_hits >= min_hits) {
+                    float switch_margin = 1.10f;
+                    float inner_gate = gate * 0.45f;
+                    if (saliency_tracked_score_pre > 0.0f &&
+                        dist > inner_gate &&
+                        best_persist < saliency_tracked_score_pre + switch_margin) {
+                        suppress_switch = true;
+                    }
+                    // If the tracked neighborhood has gone weak but the raw saliency
+                    // winner is clearly stronger, pull the latch back quickly instead
+                    // of letting the EMA trail behind the true winner for dozens of frames.
+                    if (!suppress_switch &&
+                        saliency_tracked_score_pre > 0.0f &&
+                        best_persist > saliency_tracked_score_pre + 2.0f &&
+                        dist > gate * 0.08f) {
+                        blend_alpha = 0.75f;
+                    }
+                }
                 if (dist <= gate) {
-                    state->acc_cx[ai] += alpha * ddx;
-                    state->acc_cy[ai] += alpha * ddy;
-                    int h = state->acc_hits[ai] + 1;
-                    state->acc_hits[ai] = h > ANOMALY_ACC_MAX_HITS ? ANOMALY_ACC_MAX_HITS : h;
+                    if (suppress_switch) {
+                        saliency_switch_suppressed = true;
+                        int h = state->acc_hits[ai] + 1;
+                        state->acc_hits[ai] = h > ANOMALY_ACC_MAX_HITS ? ANOMALY_ACC_MAX_HITS : h;
+                    } else {
+                        state->acc_cx[ai] += blend_alpha * ddx;
+                        state->acc_cy[ai] += blend_alpha * ddy;
+                        int h = state->acc_hits[ai] + 1;
+                        state->acc_hits[ai] = h > ANOMALY_ACC_MAX_HITS ? ANOMALY_ACC_MAX_HITS : h;
+                    }
                 } else {
-                    // Detection jumped to a new region; reset to new location.
-                    state->acc_cx[ai]   = raw_cx[ai];
-                    state->acc_cy[ai]   = raw_cy[ai];
-                    state->acc_hits[ai] = 1;
+                    if (suppress_switch) {
+                        saliency_switch_suppressed = true;
+                        int h = state->acc_hits[ai] + 1;
+                        state->acc_hits[ai] = h > ANOMALY_ACC_MAX_HITS ? ANOMALY_ACC_MAX_HITS : h;
+                    } else {
+                        // Detection jumped to a new region; reset to new location.
+                        state->acc_cx[ai]   = raw_cx[ai];
+                        state->acc_cy[ai]   = raw_cy[ai];
+                        state->acc_hits[ai] = 1;
+                    }
                 }
                 state->acc_hold[ai] = ANOMALY_ACC_HOLD_FRAMES;
             }
@@ -817,19 +1410,19 @@ int anomaly_process_frame(
     float box_side = sqrtf(fmaxf(cfg->min_area_fraction, 0.0001f));
     box_side = (box_side < 0.02f) ? 0.02f : (box_side > 0.18f ? 0.18f : box_side);
 
-    static const uint8_t algo_rgb[3][3] = {
-        {0xE6, 0x7E, 0x22},  // Color Outlier: orange
-        {0xFB, 0x4D, 0x3D},  // Thermal Hotspot: red
-        {0x26, 0xC6, 0xDA},  // Motion: cyan
+    static const uint8_t algo_rgb[4][3] = {
+        {0x2D, 0x6C, 0xFF},  // Color Outlier: blue
+        {0xF2, 0x30, 0x30},  // Thermal Hotspot: red
+        {0x23, 0xC5, 0x52},  // Motion: green
+        {0xFF, 0xE0, 0x3B},  // Thermal Saliency: yellow
     };
-    static const float algo_box_scale[3] = {1.0f, 1.0f, 1.3f};
-    static const int   algo_bits[3]      = {ANOMALY_ALGO_COLOR, ANOMALY_ALGO_THERMAL, ANOMALY_ALGO_MOTION};
+    static const float algo_box_scale[4] = {1.0f, 1.0f, 1.3f, 0.9f};
+    static const int   algo_bits[4]      = {ANOMALY_ALGO_COLOR, ANOMALY_ALGO_THERMAL, ANOMALY_ALGO_MOTION, ANOMALY_ALGO_PERSIST};
 
     anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
     int box_count = 0;
 
-    int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
-    for (int ai = 0; ai < 3; ai++) {
+    for (int ai = 0; ai < 4; ai++) {
         if (!state->acc_active[ai]) continue;
         if (state->acc_hits[ai] < min_hits) continue;
         // Weight: 0.35 at min_hits, scaling to 1.0 at min_hits+5.
@@ -849,6 +1442,26 @@ int anomaly_process_frame(
         result_out->box_count = box_count;
         for (int i = 0; i < box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++)
             result_out->boxes[i] = boxes[i];
+        result_out->saliency_debug.raw_candidate_valid = (best_persist >= 0.0f);
+        result_out->saliency_debug.raw_score = best_persist;
+        result_out->saliency_debug.raw_x_norm = (best_persist_x > 0 || best_persist_y > 0)
+            ? ((float)best_persist_x / fw) : 0.0f;
+        result_out->saliency_debug.raw_y_norm = (best_persist_x > 0 || best_persist_y > 0)
+            ? ((float)best_persist_y / fh) : 0.0f;
+        result_out->saliency_debug.tracked_score_pre = saliency_tracked_score_pre;
+        result_out->saliency_debug.acc_pre_active = saliency_acc_pre_active;
+        result_out->saliency_debug.acc_pre_hits = saliency_acc_pre_hits;
+        result_out->saliency_debug.acc_pre_x_norm = saliency_acc_pre_x;
+        result_out->saliency_debug.acc_pre_y_norm = saliency_acc_pre_y;
+        result_out->saliency_debug.acc_post_active = state->acc_active[3];
+        result_out->saliency_debug.acc_post_hits = state->acc_hits[3];
+        result_out->saliency_debug.acc_post_x_norm = state->acc_cx[3];
+        result_out->saliency_debug.acc_post_y_norm = state->acc_cy[3];
+        result_out->saliency_debug.switch_suppressed = saliency_switch_suppressed;
+        result_out->saliency_debug.top_candidate_count = saliency_top_count;
+        for (int i = 0; i < saliency_top_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+            result_out->saliency_debug.top_candidates[i] = saliency_top[i];
+        }
     }
 
     if (box_count > 0 && rgba != NULL)

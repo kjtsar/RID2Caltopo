@@ -7,6 +7,7 @@ import android.view.TextureView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.rememberScrollState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
@@ -72,6 +74,7 @@ fun StreamTile(
     }
     val isFocused = (focusedPath == streamDesignator)
     CTDebug(tag, "StreamTile(): isFocused:${isFocused}, designator:${streamDesignator}, focusedPath:$focusedPath")
+    val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
     val currentIsFocused by rememberUpdatedState(isFocused)
@@ -97,7 +100,7 @@ fun StreamTile(
         )
 
         // ATO / AGL / HDG overlay — shown whenever the stream is live and we have a linked drone.
-        if (streamState == StreamState.LIVE) {
+        if (streamState == StreamState.LIVE && !isLocalPlayback) {
             val displayState = viewModel.droneDisplayStateFor(streamDesignator)
             val atoStr = displayState?.atoFt
                 ?.let { "${"%.0f".format(it)}ATO" } ?: "--ATO"
@@ -133,6 +136,7 @@ fun StreamTile(
                             onToggleFocus()
                         },
                         onLongPress = {
+                            if (isLocalPlayback) return@detectTapGestures
                             CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
                             when (designatorState) {
                                 is DesignatorState.Yellow -> showPicker = true
@@ -141,6 +145,7 @@ fun StreamTile(
                             }
                         },
                         onDoubleTap = {
+                            if (isLocalPlayback) return@detectTapGestures
                             if (!currentIsFocused) {
                                 CaltopoClient.ShowToast("Single-tap view to focus before submitting clue.")
                                 return@detectTapGestures
@@ -167,7 +172,7 @@ fun StreamTile(
                     )
                 }
         )
-        if (isFocused && streamState == StreamState.LIVE) {
+        if ((isFocused || isLocalPlayback) && streamState == StreamState.LIVE) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -195,13 +200,15 @@ fun StreamTile(
                             onCloseStream()
                         }
                     )
-                    DropdownMenuItem(
-                        text = { Text("Restart Streams Server") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            onRestartServer()
-                        }
-                    )
+                    if (!isLocalPlayback) {
+                        DropdownMenuItem(
+                            text = { Text("Restart Streams Server") },
+                            onClick = {
+                                anomalyMenuExpanded = false
+                                onRestartServer()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Anomaly Detection: ${if (anomalyConfig.enabled) "On" else "Off"}") },
                         onClick = { viewModel.toggleAnomalyEnabled(streamDesignator) }
@@ -257,6 +264,57 @@ fun StreamTile(
                         }
                     )
                 }
+            }
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(6.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (anomalyConfig.enabled) "AD On" else "AD Off",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.enabled) {
+                        detectTapGestures(onTap = { viewModel.toggleAnomalyEnabled(streamDesignator) })
+                    }
+                )
+                Text(
+                    text = "Sens ${anomalyConfig.sensitivityLabel}",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.sensitivity) {
+                        detectTapGestures(onTap = { showSensitivityDialog = true })
+                    }
+                )
+                Text(
+                    text = "Zone ${anomalyConfig.scanZoneLabel}",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.scanZone) {
+                        detectTapGestures(onTap = { showScanZoneDialog = true })
+                    }
+                )
+                Text(
+                    text = "Hits ${anomalyConfig.minHits}",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.minHits) {
+                        detectTapGestures(onTap = { viewModel.cycleMinHits(streamDesignator) })
+                    }
+                )
+                Text(
+                    text = anomalyConfig.thermalPolarity.label,
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
+                        detectTapGestures(onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) })
+                    }
+                )
             }
             if (showSensitivityDialog) {
                 var sliderValue by remember(streamDesignator, anomalyConfig.sensitivity) {
@@ -357,6 +415,7 @@ fun StreamTile(
             streamErrorDetail = streamErrorDetail,
             viewModel = viewModel,
             onLongPress = {
+                if (isLocalPlayback) return@DesignatorIndicator
                 when (designatorState) {
                     is DesignatorState.Yellow -> showPicker = true
                     is DesignatorState.Green  -> showUnmatchDialog = true

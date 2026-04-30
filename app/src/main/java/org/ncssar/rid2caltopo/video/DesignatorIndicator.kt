@@ -55,6 +55,7 @@ fun DesignatorIndicator(
     val renderDelayMs = viewModel.renderDelayMsFor(streamDesignator)
     val playbackIndicatorState = viewModel.playbackIndicatorStateFor(streamDesignator)
     val droneDisplayState = viewModel.droneDisplayStateFor(streamDesignator)
+    val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
     val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
     var coordinateMenuExpanded by remember(streamDesignator) { mutableStateOf(false) }
     val streamStateText = when (streamState) {
@@ -67,6 +68,35 @@ fun DesignatorIndicator(
     var mapStatus = "Standalone"
     if (null != mapName) {
         mapStatus = "Connected to $mapName"
+    }
+    if (isLocalPlayback) {
+        val palette = IndicatorPalette(
+            fillColor = Color.White,
+            outlineColor = Color.Black
+        )
+        Column {
+            OutlinedIndicatorText(
+                text = "$streamDesignator - Captured Video",
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                palette = palette,
+                modifier = Modifier
+                    .padding(10.dp)
+                    .background(Color.Transparent)
+            )
+            OutlinedIndicatorText(
+                text = "Tap to focus. Use the tile controls to review playback settings.",
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                palette = palette,
+                modifier = Modifier
+                    .padding(horizontal = 10.dp)
+                    .background(Color.Transparent)
+            )
+        }
+        return
     }
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val showCompactTopTelemetry = designatorState is DesignatorState.Green && streamState == StreamState.LIVE

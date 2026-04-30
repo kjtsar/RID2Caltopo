@@ -2846,6 +2846,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT;
     slot->anomaly_cfg.scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT;
     slot->anomaly_cfg.min_hits          = ANOMALY_DEFAULT_MIN_HITS;
+    slot->anomaly_cfg.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
     anomaly_state_init(&slot->anomaly_state);
     slot->render_stride = 1;
     slot->render_stride_counter = 0;
@@ -3132,7 +3133,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jfloat min_area_fraction,
         jint thermal_polarity,
         jfloat scan_zone,
-        jint min_hits
+        jint min_hits,
+        jfloat thermal_min_delta
 ) {
     (void) env;
     (void) thiz;
@@ -3150,6 +3152,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                                                  ? ANOMALY_THERMAL_BLACK_HOT : ANOMALY_THERMAL_WHITE_HOT;
         session->anomaly_cfg.scan_zone         = sz < 0.5f ? 0.5f : (sz > 1.0f ? 1.0f : sz);
         session->anomaly_cfg.min_hits          = mh < 1 ? 1 : (mh > 10 ? 10 : mh);
+        session->anomaly_cfg.thermal_min_delta = thermal_min_delta > 0.0f
+                                                 ? thermal_min_delta : ANOMALY_THERMAL_MIN_DELTA;
         // Reset accumulators so stale boxes don't persist across config changes.
         anomaly_state_reset(&session->anomaly_state);
     }

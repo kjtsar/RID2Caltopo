@@ -62,6 +62,7 @@ static anomaly_config_t default_cfg(int algorithm_mask) {
     c.thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT;
     c.scan_zone         = 1.0f;  // full frame for most tests
     c.min_hits          = 1;     // show on first hit unless overridden
+    c.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
     return c;
 }
 
@@ -267,6 +268,60 @@ static void test_high_threshold_no_detection(void) {
     }
 }
 
+static void test_runtime_min_delta_override(void) {
+    const int W = 160, H = 120;
+    uint8_t *frame = make_gray_frame(W, H, 64);
+    set_pixel(frame, W * 4, W / 2, H / 2, 84, 84, 84);  // +20 units
+
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    cfg.score_threshold = 2.0f;
+    cfg.thermal_min_delta = 30.0f;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes == 0, "runtime min_delta override suppresses +20-unit outlier");
+
+    anomaly_state_cleanup(&st);
+    free(frame);
+}
+
+static void test_thermal_saliency_detected(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *warm_frame = make_gray_frame(W, H, 200);
+    uint8_t *frame = make_gray_frame(W, H, 200);
+    set_pixel(frame, W * 4, W / 2,     H / 2,     0, 0, 0);
+    set_pixel(frame, W * 4, W / 2 + 2, H / 2,     8, 8, 8);
+    set_pixel(frame, W * 4, W / 2,     H / 2 + 2, 6, 6, 6);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_PERSIST);
+    cfg.thermal_polarity = ANOMALY_THERMAL_BLACK_HOT;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = 0;
+    for (int i = 0; i < ANOMALY_THERMAL_BG_WARMUP + 1; i++) {
+        anomaly_process_frame(&st, &cfg, warm_frame, W * 4, W, H, 0, &res);
+    }
+    for (int i = 0; i < 2; i++) {
+        boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    }
+    EXPECT(boxes > 0, "thermal saliency: compact black-hot patch detected");
+    if (boxes > 0) {
+        EXPECT(res.boxes[0].algorithm == ANOMALY_ALGO_PERSIST,
+               "thermal saliency: algorithm tag preserved");
+    }
+
+    anomaly_state_cleanup(&st);
+    free(warm_frame);
+    free(frame);
+}
+
 static void test_min_hits_gate(void) {
     // min_hits=2: first frame should not show a box, second should.
     const int W = 160, H = 120;
@@ -457,6 +512,8 @@ int main(void) {
     test_color_outlier_detected();
     test_black_hot_thermal();
     test_high_threshold_no_detection();
+    test_runtime_min_delta_override();
+    test_thermal_saliency_detected();
     test_min_hits_gate();
     test_scan_zone_excludes_corner();
     test_motion_static_scene();

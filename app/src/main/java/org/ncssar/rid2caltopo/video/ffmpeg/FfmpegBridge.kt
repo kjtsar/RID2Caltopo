@@ -93,6 +93,7 @@ object FfmpegBridge {
             thermalPolarity = config.thermalPolarity,
             scanZone = config.scanZone,
             minHits = config.minHits,
+            thermalMinDelta = config.thermalMinDelta,
         )
     }
 
@@ -184,6 +185,7 @@ object FfmpegBridge {
         thermalPolarity: Int,
         scanZone: Float,
         minHits: Int,
+        thermalMinDelta: Float,
     )
     private external fun nativeStop(sessionId: Long)
 }

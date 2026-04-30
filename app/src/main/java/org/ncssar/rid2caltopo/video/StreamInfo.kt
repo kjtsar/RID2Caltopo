@@ -8,6 +8,8 @@ data class StreamInfo(
     val designator: String,    // Display name shown in UI; usually the stream path leaf.
     val sourcePath: String = designator, // Full MediaMTX path, including any controller prefix.
     val controllerProfile: StreamControllerProfile = StreamControllerProfile.GENERIC,
+    val playbackUri: Uri? = null,
+    val isLocalPlayback: Boolean = false,
     //val protocol: Protocol,  // MediaMTX protocol
     val state: StreamState,
     val errorDetail: String? = null,

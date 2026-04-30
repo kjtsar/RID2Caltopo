@@ -8,11 +8,10 @@
 // timestamp, and fill in G (good / true-positive), B (bad / false-positive),
 // or ? (unsure).  Those labels become the ground truth for regression tests.
 //
-// --probe cx,cy  diagnostic mode: for every frame, sample a local 41×41-pixel
-//   window around the given normalised position and report luma, local mean,
-//   local std, abs_delta, and Z-score to a separate _probe.csv file.  This
-//   tells you exactly what thermal signal strength the detector sees at the
-//   subject's known location — use it to tune threshold and MIN_DELTA.
+// --probe cx,cy  diagnostic mode: for every frame, sample the same detector-side
+//   thermal statistics used by anomaly_analysis.c at the given normalised
+//   position and write them to a separate _probe.csv file.  This tells you what
+//   score the live detector sees at the subject's known location.
 //
 // Build:  cmake --build build
 // Usage:  ./build/anomaly_video_test <input.mp4> [options]
@@ -30,6 +29,395 @@
 #include <string.h>
 #include <time.h>
 
+// ── pixel-font frame-number overlay ───────────────────────────────────────
+// 5×7 bitmap glyphs for digits 0-9.  Each byte is one row, MSB = leftmost px.
+static const uint8_t kDigitFont[10][7] = {
+    { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E }, // 0
+    { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E }, // 1
+    { 0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F }, // 2
+    { 0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E }, // 3
+    { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, // 4
+    { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E }, // 5
+    { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, // 6
+    { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 }, // 7
+    { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, // 8
+    { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C }, // 9
+};
+static const uint8_t kLetterCFont[7] = { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E };
+static const uint8_t kLetterSFont[7] = { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E };
+static const uint8_t kLetterTFont[7] = { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 };
+static const uint8_t kMinusFont[7]   = { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 };
+#define FONT_W 5
+#define FONT_H 7
+
+// Draw a single scaled pixel at (px,py) with RGBA colour; clips to frame.
+static void put_pixel(uint8_t *rgba, int stride, int W, int H,
+                      int px, int py, uint8_t r, uint8_t g, uint8_t b) {
+    if (px < 0 || py < 0 || px >= W || py >= H) return;
+    uint8_t *p = rgba + py * stride + px * 4;
+    p[0] = r; p[1] = g; p[2] = b; p[3] = 0xFF;
+}
+
+// Draw one digit at pixel origin (ox, oy) with the given scale and colour.
+static void draw_digit(uint8_t *rgba, int stride, int W, int H,
+                       int digit, int ox, int oy, int scale,
+                       uint8_t r, uint8_t g, uint8_t b) {
+    if (digit < 0 || digit > 9) return;
+    const uint8_t *glyph = kDigitFont[digit];
+    for (int row = 0; row < FONT_H; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < FONT_W; col++) {
+            if (bits & (0x10 >> col)) {
+                for (int sy = 0; sy < scale; sy++)
+                    for (int sx = 0; sx < scale; sx++)
+                        put_pixel(rgba, stride, W, H,
+                                  ox + col * scale + sx,
+                                  oy + row * scale + sy, r, g, b);
+            }
+        }
+    }
+}
+
+static const uint8_t *glyph_for_char(char ch) {
+    if (ch >= '0' && ch <= '9') return kDigitFont[ch - '0'];
+    switch (ch) {
+        case 'C': return kLetterCFont;
+        case 'S': return kLetterSFont;
+        case 'T': return kLetterTFont;
+        case '-': return kMinusFont;
+        default:  return NULL;
+    }
+}
+
+static void draw_char(uint8_t *rgba, int stride, int W, int H,
+                      char ch, int ox, int oy, int scale,
+                      uint8_t r, uint8_t g, uint8_t b) {
+    const uint8_t *glyph = glyph_for_char(ch);
+    if (glyph == NULL) return;
+    for (int row = 0; row < FONT_H; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < FONT_W; col++) {
+            if (bits & (0x10 >> col)) {
+                for (int sy = 0; sy < scale; sy++)
+                    for (int sx = 0; sx < scale; sx++)
+                        put_pixel(rgba, stride, W, H,
+                                  ox + col * scale + sx,
+                                  oy + row * scale + sy, r, g, b);
+            }
+        }
+    }
+}
+
+static void draw_text(uint8_t *rgba, int stride, int W, int H,
+                      const char *text, int x0, int y0, int scale,
+                      uint8_t r, uint8_t g, uint8_t b) {
+    if (text == NULL) return;
+    int glyph_w = FONT_W * scale + scale;
+    for (int i = 0; text[i] != '\0'; i++) {
+        draw_char(rgba, stride, W, H, text[i], x0 + i * glyph_w, y0, scale, r, g, b);
+    }
+}
+
+static void fill_rect(uint8_t *rgba, int stride, int W, int H,
+                      int x0, int y0, int x1, int y1,
+                      uint8_t r, uint8_t g, uint8_t b) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (x1 < 0 || y1 < 0 || x0 >= W || y0 >= H) return;
+    if (x0 < 0) x0 = 0; if (x1 >= W) x1 = W - 1;
+    if (y0 < 0) y0 = 0; if (y1 >= H) y1 = H - 1;
+    for (int y = y0; y <= y1; y++) {
+        uint8_t *row = rgba + y * stride;
+        for (int x = x0; x <= x1; x++) {
+            uint8_t *p = row + x * 4;
+            p[0] = r; p[1] = g; p[2] = b; p[3] = 0xFF;
+        }
+    }
+}
+
+static void stroke_rect(uint8_t *rgba, int stride, int W, int H,
+                        int x0, int y0, int x1, int y1, int stroke,
+                        uint8_t r, uint8_t g, uint8_t b) {
+    if (stroke < 1) stroke = 1;
+    for (int t = 0; t < stroke; t++) {
+        fill_rect(rgba, stride, W, H, x0, y0 + t, x1, y0 + t, r, g, b);
+        fill_rect(rgba, stride, W, H, x0, y1 - t, x1, y1 - t, r, g, b);
+        fill_rect(rgba, stride, W, H, x0 + t, y0, x0 + t, y1, r, g, b);
+        fill_rect(rgba, stride, W, H, x1 - t, y0, x1 - t, y1, r, g, b);
+    }
+}
+
+static void draw_crosshair(uint8_t *rgba, int stride, int W, int H,
+                           int cx, int cy, int half, int stroke,
+                           uint8_t r, uint8_t g, uint8_t b) {
+    if (stroke < 1) stroke = 1;
+    for (int t = 0; t < stroke; t++) {
+        fill_rect(rgba, stride, W, H, cx - half, cy + t, cx + half, cy + t, r, g, b);
+        fill_rect(rgba, stride, W, H, cx + t, cy - half, cx + t, cy + half, r, g, b);
+    }
+}
+
+static float rgba_luma(const uint8_t *px) {
+    return (0.2126f * (float)px[0]) + (0.7152f * (float)px[1]) + (0.0722f * (float)px[2]);
+}
+
+static void compute_pixel_support(const uint8_t *rgba, int stride, int W, int H,
+                                  int cx, int cy, int black_hot,
+                                  float *center_out, float *mean9_out,
+                                  float *top3mean_out, int *near_count_out) {
+    if (center_out) *center_out = 0.0f;
+    if (mean9_out) *mean9_out = 0.0f;
+    if (top3mean_out) *top3mean_out = 0.0f;
+    if (near_count_out) *near_count_out = 0;
+    if (rgba == NULL || W <= 0 || H <= 0) return;
+
+    float vals[9];
+    int n = 0;
+    for (int y = cy - 1; y <= cy + 1; y++) {
+        int yy = y < 0 ? 0 : (y >= H ? H - 1 : y);
+        const uint8_t *row = rgba + yy * stride;
+        for (int x = cx - 1; x <= cx + 1; x++) {
+            int xx = x < 0 ? 0 : (x >= W ? W - 1 : x);
+            vals[n++] = rgba_luma(row + xx * 4);
+        }
+    }
+
+    float center = vals[4];
+    float sum = 0.0f;
+    for (int i = 0; i < 9; i++) sum += vals[i];
+    for (int i = 0; i < 9 - 1; i++) {
+        for (int j = i + 1; j < 9; j++) {
+            bool swap = black_hot ? (vals[j] < vals[i]) : (vals[j] > vals[i]);
+            if (swap) {
+                float t = vals[i];
+                vals[i] = vals[j];
+                vals[j] = t;
+            }
+        }
+    }
+    float top3 = (vals[0] + vals[1] + vals[2]) / 3.0f;
+    float near_threshold = 8.0f;
+    int near_count = 0;
+    for (int i = 0; i < 9; i++) {
+        float v = vals[i];
+        if (black_hot ? (v <= center + near_threshold) : (v >= center - near_threshold)) {
+            near_count++;
+        }
+    }
+
+    if (center_out) *center_out = center;
+    if (mean9_out) *mean9_out = sum / 9.0f;
+    if (top3mean_out) *top3mean_out = top3;
+    if (near_count_out) *near_count_out = near_count;
+}
+
+static void find_extreme_pixel(const uint8_t *rgba, int stride, int W, int H,
+                               const anomaly_config_t *cfg,
+                               int *best_x_out, int *best_y_out, float *best_luma_out) {
+    if (best_x_out) *best_x_out = 0;
+    if (best_y_out) *best_y_out = 0;
+    if (best_luma_out) *best_luma_out = 0.0f;
+    if (rgba == NULL || cfg == NULL || W <= 0 || H <= 0) return;
+
+    float margin = (1.0f - cfg->scan_zone) * 0.5f;
+    int roi_x0 = (int)(margin * (float)W);
+    int roi_x1 = W - roi_x0;
+    int roi_y0 = (int)(margin * (float)H);
+    int roi_y1 = H - roi_y0;
+    if (roi_x1 <= roi_x0) { roi_x0 = 0; roi_x1 = W; }
+    if (roi_y1 <= roi_y0) { roi_y0 = 0; roi_y1 = H; }
+
+    int best_x = roi_x0;
+    int best_y = roi_y0;
+    float best_luma = rgba_luma(rgba + roi_y0 * stride + roi_x0 * 4);
+    int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
+
+    for (int y = roi_y0; y < roi_y1; y++) {
+        const uint8_t *row = rgba + y * stride;
+        for (int x = roi_x0; x < roi_x1; x++) {
+            float luma = rgba_luma(row + x * 4);
+            if ((black_hot && luma < best_luma) || (!black_hot && luma > best_luma)) {
+                best_luma = luma;
+                best_x = x;
+                best_y = y;
+            }
+        }
+    }
+
+    if (best_x_out) *best_x_out = best_x;
+    if (best_y_out) *best_y_out = best_y;
+    if (best_luma_out) *best_luma_out = best_luma;
+}
+
+static void draw_number_badge(uint8_t *rgba, int stride, int W, int H,
+                              int x0, int y0, int number, int scale,
+                              uint8_t bg_r, uint8_t bg_g, uint8_t bg_b,
+                              uint8_t fg_r, uint8_t fg_g, uint8_t fg_b) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d", number);
+    int ndigits = (int)strlen(buf);
+    int glyph_w = FONT_W * scale + scale;
+    int glyph_h = FONT_H * scale;
+    int pad = scale;
+    fill_rect(rgba, stride, W, H,
+              x0, y0,
+              x0 + ndigits * glyph_w - scale + pad * 2,
+              y0 + glyph_h + pad * 2,
+              bg_r, bg_g, bg_b);
+    for (int i = 0; i < ndigits; i++) {
+        draw_digit(rgba, stride, W, H, buf[i] - '0',
+                   x0 + pad + i * glyph_w, y0 + pad, scale,
+                   fg_r, fg_g, fg_b);
+    }
+}
+
+static void draw_text_badge(uint8_t *rgba, int stride, int W, int H,
+                            int x0, int y0, const char *text, int scale,
+                            uint8_t bg_r, uint8_t bg_g, uint8_t bg_b,
+                            uint8_t fg_r, uint8_t fg_g, uint8_t fg_b) {
+    if (text == NULL) return;
+    int nchars = (int)strlen(text);
+    int glyph_w = FONT_W * scale + scale;
+    int glyph_h = FONT_H * scale;
+    int pad = scale;
+    fill_rect(rgba, stride, W, H,
+              x0, y0,
+              x0 + nchars * glyph_w - scale + pad * 2,
+              y0 + glyph_h + pad * 2,
+              bg_r, bg_g, bg_b);
+    draw_text(rgba, stride, W, H, text, x0 + pad, y0 + pad, scale, fg_r, fg_g, fg_b);
+}
+
+// Render the frame number in the top-left corner.
+// White text on an opaque black badge for maximum legibility.
+static void draw_frame_number(uint8_t *rgba, int W, int H, int frame_num) {
+    // Choose scale so the label is comfortably readable at any resolution.
+    int scale = (W >= 1280 || H >= 720) ? 5 : 3;
+    int glyph_w = FONT_W * scale + scale;   // inter-character gap
+    int glyph_h = FONT_H * scale;
+
+    // Convert frame number to digit array (up to 6 digits).
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d", frame_num);
+    int ndigits = (int)strlen(buf);
+
+    int margin = scale * 2;
+    int pad = scale * 2;
+    int bg_x0 = margin - pad;
+    int bg_y0 = margin - pad;
+    int bg_x1 = margin + ndigits * glyph_w - scale + pad;
+    int bg_y1 = margin + glyph_h + pad;
+    fill_rect(rgba, W * 4, W, H, bg_x0, bg_y0, bg_x1, bg_y1, 0, 0, 0);
+
+    // White foreground with a thicker black outline.
+    for (int d = 0; d < ndigits; d++) {
+        int digit = buf[d] - '0';
+        int ox    = margin + d * glyph_w;
+        int oy    = margin;
+        draw_digit(rgba, W * 4, W, H, digit, ox - 2, oy,     scale, 0, 0, 0);
+        draw_digit(rgba, W * 4, W, H, digit, ox + 2, oy,     scale, 0, 0, 0);
+        draw_digit(rgba, W * 4, W, H, digit, ox,     oy - 2, scale, 0, 0, 0);
+        draw_digit(rgba, W * 4, W, H, digit, ox,     oy + 2, scale, 0, 0, 0);
+        draw_digit(rgba, W * 4, W, H, digit, ox,     oy,     scale, 255, 255, 255);
+    }
+}
+
+static void draw_saliency_debug_overlay(uint8_t *rgba, int W, int H,
+                                        const uint8_t *raw_rgba,
+                                        const anomaly_config_t *cfg,
+                                        const anomaly_result_t *result) {
+    if (rgba == NULL || raw_rgba == NULL || cfg == NULL || result == NULL) return;
+    const anomaly_debug_saliency_t *dbg = &result->saliency_debug;
+    int min_dim = W < H ? W : H;
+    int stroke = (W >= 1280 || H >= 720) ? 2 : 1;
+    int label_scale = (W >= 1280 || H >= 720) ? 2 : 1;
+    int cross_half = min_dim / 60;
+    int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
+    if (cross_half < 6) cross_half = 6;
+    if (cross_half > 14) cross_half = 14;
+
+    float box_side = sqrtf(fmaxf(cfg->min_area_fraction, 0.0001f));
+    box_side = (box_side < 0.02f) ? 0.02f : (box_side > 0.18f ? 0.18f : box_side);
+    box_side *= 0.9f;  // match saliency box scale in anomaly_analysis.c
+    int half_w = (int)lroundf(box_side * 0.5f * (float)(W - 1));
+    int half_h = (int)lroundf(box_side * 0.5f * (float)(H - 1));
+
+    for (int i = 0; i < dbg->top_candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+        const anomaly_debug_candidate_t *c = &dbg->top_candidates[i];
+        if (!c->valid) continue;
+        int cx = c->pixel_x;
+        int cy = c->pixel_y;
+        int x0 = cx - half_w;
+        int y0 = cy - half_h;
+        int x1 = cx + half_w;
+        int y1 = cy + half_h;
+        uint8_t r = (i == 0) ? 255 : 255;
+        uint8_t g = (i == 0) ? 255 : 255;
+        uint8_t b = (i == 0) ? 255 : 255;
+        stroke_rect(rgba, W * 4, W, H, x0, y0, x1, y1, stroke, r, g, b);
+        draw_number_badge(rgba, W * 4, W, H,
+                          x0, y0 - (FONT_H * label_scale + label_scale * 2 + 2),
+                          i + 1, label_scale,
+                          0, 0, 0,
+                          255, 255, 255);
+        char score_buf[32];
+        int s10 = (int)lroundf(c->spatial_score * 10.0f);
+        int t10 = (int)lroundf(c->temporal_score * 10.0f);
+        int c10 = (int)lroundf(c->combined_score * 10.0f);
+        snprintf(score_buf, sizeof(score_buf), "S%dT%dC%d", s10, t10, c10);
+        draw_text_badge(rgba, W * 4, W, H,
+                        x0, y1 + 2,
+                        score_buf, label_scale,
+                        0, 0, 0,
+                        255, 255, 255);
+        float center = 0.0f, mean9 = 0.0f, top3 = 0.0f;
+        int near_count = 0;
+        compute_pixel_support(raw_rgba, W * 4, W, H, cx, cy, black_hot,
+                              &center, &mean9, &top3, &near_count);
+        char support_buf[32];
+        snprintf(support_buf, sizeof(support_buf), "N%dK%d", near_count, (int)lroundf(top3));
+        draw_text_badge(rgba, W * 4, W, H,
+                        x0, y1 + (FONT_H * label_scale + label_scale * 2 + 4),
+                        support_buf, label_scale,
+                        0, 0, 0,
+                        255, 255, 255);
+    }
+
+    if (dbg->acc_post_active) {
+        int cx = (int)lroundf(dbg->acc_post_x_norm * (float)(W - 1));
+        int cy = (int)lroundf(dbg->acc_post_y_norm * (float)(H - 1));
+        draw_crosshair(rgba, W * 4, W, H, cx, cy, cross_half, stroke + 1, 0x23, 0xC5, 0x52);
+        draw_number_badge(rgba, W * 4, W, H,
+                          6, H - (FONT_H * label_scale + label_scale * 2 + 10),
+                          dbg->acc_post_hits, label_scale,
+                          0, 0, 0,
+                          0x23, 0xC5, 0x52);
+    }
+
+    int extreme_x = 0, extreme_y = 0;
+    float extreme_luma = 0.0f;
+    find_extreme_pixel(raw_rgba, W * 4, W, H, cfg, &extreme_x, &extreme_y, &extreme_luma);
+    draw_crosshair(rgba, W * 4, W, H, extreme_x, extreme_y, cross_half / 2, stroke + 1, 0xF2, 0x30, 0x30);
+    float extreme_mean9 = 0.0f, extreme_top3 = 0.0f;
+    int extreme_near_count = 0;
+    compute_pixel_support(raw_rgba, W * 4, W, H, extreme_x, extreme_y, black_hot,
+                          NULL, &extreme_mean9, &extreme_top3, &extreme_near_count);
+    char extreme_buf[32];
+    snprintf(extreme_buf, sizeof(extreme_buf), "X%dN%d", (int)lroundf(extreme_luma), extreme_near_count);
+    draw_text_badge(rgba, W * 4, W, H,
+                    extreme_x + cross_half / 2 + 4, extreme_y,
+                    extreme_buf, label_scale,
+                    0, 0, 0,
+                    0xF2, 0x30, 0x30);
+
+    draw_number_badge(rgba, W * 4, W, H,
+                      6 + (FONT_W * label_scale + label_scale) * 2,
+                      H - (FONT_H * label_scale + label_scale * 2 + 10),
+                      dbg->bg_ready ? 1 : 0, label_scale,
+                      0, 0, 0,
+                      255, 255, 255);
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 static const char *algo_label(int algo) {
@@ -37,8 +425,64 @@ static const char *algo_label(int algo) {
         case ANOMALY_ALGO_COLOR:   return "color";
         case ANOMALY_ALGO_THERMAL: return "thermal";
         case ANOMALY_ALGO_MOTION:  return "motion";
+        case ANOMALY_ALGO_PERSIST: return "saliency";
         default:                   return "unknown";
     }
+}
+
+static void dump_saliency_debug(FILE *out, int frame_num, double time_s,
+                                const uint8_t *raw_rgba, int W, int H,
+                                const anomaly_config_t *cfg,
+                                const anomaly_result_t *result) {
+    if (out == NULL || raw_rgba == NULL || cfg == NULL || result == NULL) return;
+    const anomaly_debug_saliency_t *dbg = &result->saliency_debug;
+    int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
+    fprintf(out, "\nSaliency debug for frame %d (%.3fs)\n", frame_num, time_s);
+    fprintf(out, "  bg_ready=%d raw_valid=%d raw_score=%.3f raw_xy=(%.4f, %.4f)\n",
+            dbg->bg_ready ? 1 : 0,
+            dbg->raw_candidate_valid ? 1 : 0,
+            (double)dbg->raw_score,
+            (double)dbg->raw_x_norm,
+            (double)dbg->raw_y_norm);
+    fprintf(out, "  tracked_score_pre=%.3f switch_suppressed=%d\n",
+            (double)dbg->tracked_score_pre,
+            dbg->switch_suppressed ? 1 : 0);
+    fprintf(out, "  acc_pre:  active=%d hits=%d xy=(%.4f, %.4f)\n",
+            dbg->acc_pre_active ? 1 : 0, dbg->acc_pre_hits,
+            (double)dbg->acc_pre_x_norm, (double)dbg->acc_pre_y_norm);
+    fprintf(out, "  acc_post: active=%d hits=%d xy=(%.4f, %.4f)\n",
+            dbg->acc_post_active ? 1 : 0, dbg->acc_post_hits,
+            (double)dbg->acc_post_x_norm, (double)dbg->acc_post_y_norm);
+    fprintf(out, "  top candidates (%d):\n", dbg->top_candidate_count);
+    for (int i = 0; i < dbg->top_candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+        const anomaly_debug_candidate_t *c = &dbg->top_candidates[i];
+        float center = 0.0f, mean9 = 0.0f, top3 = 0.0f;
+        int near_count = 0;
+        compute_pixel_support(raw_rgba, W * 4, W, H, c->pixel_x, c->pixel_y, black_hot,
+                              &center, &mean9, &top3, &near_count);
+        fprintf(out, "    #%d px=(%d,%d) xy=(%.4f,%.4f) spatial=%.3f temporal=%.3f combined=%.3f\n",
+                i + 1, c->pixel_x, c->pixel_y,
+                (double)c->x_norm, (double)c->y_norm,
+                (double)c->spatial_score,
+                (double)c->temporal_score,
+                (double)c->combined_score);
+        fprintf(out, "       support: center=%.1f mean9=%.1f top3=%.1f near_count=%d\n",
+                (double)center, (double)mean9, (double)top3, near_count);
+    }
+    if (result->box_count > 0) {
+        fprintf(out, "  visible boxes:\n");
+        for (int i = 0; i < result->box_count; i++) {
+            const anomaly_box_t *b = &result->boxes[i];
+            fprintf(out, "    box[%d] algo=%s center=(%.4f,%.4f) size=(%.4f,%.4f) weight=%.2f\n",
+                    i, algo_label(b->algorithm),
+                    (double)((b->left_norm + b->right_norm) * 0.5f),
+                    (double)((b->top_norm + b->bottom_norm) * 0.5f),
+                    (double)(b->right_norm - b->left_norm),
+                    (double)(b->bottom_norm - b->top_norm),
+                    (double)b->weight);
+        }
+    }
+    fflush(out);
 }
 
 // Remove extension and directory prefix to get a bare basename.
@@ -50,53 +494,6 @@ static void basename_noext(const char *path, char *out, size_t out_sz) {
     if (len >= out_sz) len = out_sz - 1;
     memcpy(out, name, len);
     out[len] = '\0';
-}
-
-// ── probe helper ───────────────────────────────────────────────────────────
-// Sample a local window around (px, py) in the RGBA frame and return the
-// centre pixel luma, window mean, window std, abs_delta (black-hot sense),
-// and z-score.  window_r is the half-width in pixels.
-typedef struct {
-    double luma;
-    double mean;
-    double std;
-    double abs_delta;   // mean - luma  (positive = pixel darker = warmer in BH)
-    double z;
-} probe_result_t;
-
-static probe_result_t probe_location(const uint8_t *rgba, int stride,
-                                     int W, int H,
-                                     int px, int py, int window_r,
-                                     int black_hot) {
-    probe_result_t r = {0};
-    // Centre pixel luma.
-    const uint8_t *c = rgba + py * stride + px * 4;
-    r.luma = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-
-    // Window stats.
-    double sum = 0.0, sum2 = 0.0;
-    int    n   = 0;
-    int    x0 = px - window_r, x1 = px + window_r;
-    int    y0 = py - window_r, y1 = py + window_r;
-    if (x0 < 0) x0 = 0;  if (x1 >= W) x1 = W - 1;
-    if (y0 < 0) y0 = 0;  if (y1 >= H) y1 = H - 1;
-    for (int y = y0; y <= y1; y++) {
-        const uint8_t *row = rgba + y * stride;
-        for (int x = x0; x <= x1; x++) {
-            const uint8_t *p = row + x * 4;
-            double lum = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
-            sum  += lum;
-            sum2 += lum * lum;
-            n++;
-        }
-    }
-    if (n < 1) return r;
-    r.mean    = sum / n;
-    double var = (sum2 / n) - r.mean * r.mean;
-    r.std     = sqrt(var < 1.0 ? 1.0 : var);
-    r.abs_delta = black_hot ? (r.mean - r.luma) : (r.luma - r.mean);
-    r.z       = r.abs_delta / r.std;
-    return r;
 }
 
 static void usage(const char *prog) {
@@ -112,16 +509,18 @@ static void usage(const char *prog) {
         "  -t <float>       Score threshold  (default: %.1f)\n"
         "  -m <int>         Min hits to show box (default: %d)\n"
         "  -s <float>       Scan zone 0.5–1.0    (default: %.2f)\n"
-        "  -a <int>         Algorithm mask 1=color 2=thermal 4=motion (default: 7)\n"
+        "  -a <int>         Algorithm mask 1=color 2=thermal 4=motion 8=saliency (default: 7)\n"
         "  -p <wh|bh>       Thermal polarity: wh=white-hot bh=black-hot (default: wh)\n"
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
+        "  --debug-frame N  Dump saliency candidate details for frame N\n"
+        "  --debug-overlay  Burn saliency candidate ranks / latch marker into video\n"
         "\n"
         "Diagnostic:\n"
-        "  --probe cx,cy    Sample a 41×41 window at the given normalised position\n"
-        "                   every frame; write luma/mean/std/delta/z to _probe.csv.\n"
-        "                   Use this to measure the actual thermal signal at a known\n"
-        "                   subject location and tune threshold / min-delta accordingly.\n"
+        "  --probe cx,cy    Sample the detector's scored point nearest the given\n"
+        "                   normalised position\n"
+        "                   every frame; write detector-side spatial/temporal scores\n"
+        "                   to _probe.csv. Use this to tune threshold / min-delta.\n"
         "\n"
         "Tip for IR/thermal footage: add  -p bh -a 6  (thermal + motion, black-hot)\n",
         prog,
@@ -153,12 +552,15 @@ int main(int argc, char **argv) {
         .thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT,
         .scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT,
         .min_hits          = ANOMALY_DEFAULT_MIN_HITS,
+        .thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA,
     };
 
     // Probe state (--probe cx,cy).
     int    probe_active  = 0;
     float  probe_cx      = 0.0f, probe_cy = 0.0f;
     char   probe_csv_path[1024] = "";
+    int    debug_frame = -1;
+    int    debug_overlay = 0;
     // min-delta override (0 = use compiled-in constant).
     float  min_delta_override = 0.0f;
 
@@ -182,6 +584,12 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Error: --probe expects cx,cy (e.g. --probe 0.42,0.28)\n");
                 return 1;
             }
+        }
+        else if (!strcmp(argv[i], "--debug-frame") && i+1 < argc) {
+            debug_frame = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--debug-overlay")) {
+            debug_overlay = 1;
         }
         else if (!strcmp(argv[i], "--no-video")) write_video = 0;
         else { fprintf(stderr, "Unknown option: %s\n\n", argv[i]); usage(argv[0]); return 1; }
@@ -234,6 +642,7 @@ int main(int argc, char **argv) {
     double effective_min_delta = (min_delta_override > 0.0f)
                                  ? (double)min_delta_override
                                  : (double)ANOMALY_THERMAL_MIN_DELTA;
+    cfg.thermal_min_delta = (float)effective_min_delta;
 
     // ── Print run summary ────────────────────────────────────────────────
     fprintf(stderr, "\n");
@@ -253,7 +662,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "  algorithm  = %d (%s%s%s)\n", cfg.algorithm_mask,
         (cfg.algorithm_mask & ANOMALY_ALGO_COLOR)   ? "color "   : "",
         (cfg.algorithm_mask & ANOMALY_ALGO_THERMAL) ? "thermal " : "",
-        (cfg.algorithm_mask & ANOMALY_ALGO_MOTION)  ? "motion"   : "");
+        (cfg.algorithm_mask & ANOMALY_ALGO_MOTION)  ? "motion "  : "");
+    if (cfg.algorithm_mask & ANOMALY_ALGO_PERSIST)
+        fprintf(stderr, "               %s\n", "saliency");
     fprintf(stderr, "  polarity   = %s\n",
         cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "black-hot" : "white-hot");
     fprintf(stderr, "  stride     = %d\n",   cfg.frame_stride);
@@ -264,7 +675,9 @@ int main(int argc, char **argv) {
     // ── Allocate frame buffer ────────────────────────────────────────────
     size_t frame_bytes = (size_t)W * H * 4;
     uint8_t *rgba = malloc(frame_bytes);
+    uint8_t *raw_rgba = debug_overlay ? malloc(frame_bytes) : NULL;
     if (!rgba) { fprintf(stderr, "Out of memory\n"); return 1; }
+    if (debug_overlay && !raw_rgba) { fprintf(stderr, "Out of memory\n"); free(rgba); return 1; }
 
     // ── Open CSV ─────────────────────────────────────────────────────────
     FILE *csv = fopen(output_csv, "w");
@@ -311,18 +724,19 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Cannot write probe CSV: %s\n", probe_csv_path);
             return 1;
         }
-        int bh = (cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
         fprintf(probe_csv, "# probe location: cx=%.4f cy=%.4f  polarity=%s\n",
-                (double)probe_cx, (double)probe_cy, bh ? "black-hot" : "white-hot");
-        fprintf(probe_csv, "# window: 41x41 pixels around probe point\n");
-        fprintf(probe_csv, "# abs_delta = %s  (positive = subject warmer than surround)\n",
-                bh ? "win_mean - pixel_luma" : "pixel_luma - win_mean");
-        fprintf(probe_csv, "# z = abs_delta / win_std  "
-                           "(current threshold=%.2f  min_delta=%.1f)\n",
+                (double)probe_cx, (double)probe_cy,
+                cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "black-hot" : "white-hot");
+        fprintf(probe_csv, "# effective_score matches anomaly_analysis.c exactly:\n");
+        fprintf(probe_csv, "#   warmup  -> spatial_abs_delta / spatial_std\n");
+        fprintf(probe_csv, "#   bg_ready -> (temporal_delta - temporal_mean) / temporal_norm\n");
+        fprintf(probe_csv, "# threshold=%.2f  min_delta=%.1f\n",
                 (double)cfg.score_threshold, effective_min_delta);
         fprintf(probe_csv,
-                "frame,time_s,px,py,pixel_luma,win_mean,win_std,abs_delta,z,"
-                "passes_min_delta,passes_threshold\n");
+                "frame,time_s,px,py,inside_scan_zone,bg_ready,used_temporal,"
+                "sample_luma,spatial_mean,spatial_std,spatial_abs_delta,spatial_score,"
+                "temporal_delta,temporal_mean,temporal_norm,temporal_score,"
+                "effective_score,passes_min_delta,passes_threshold\n");
     }
 
     // ── Process frames ───────────────────────────────────────────────────
@@ -337,29 +751,41 @@ int main(int argc, char **argv) {
     while (fread(rgba, 1, frame_bytes, in_pipe) == frame_bytes) {
         frame_num++;
         double time_s = (double)(frame_num - 1) / fps;
-
-        anomaly_result_t result;
-        anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, 0, &result);
+        if (raw_rgba) memcpy(raw_rgba, rgba, frame_bytes);
 
         // ── Per-frame probe ──────────────────────────────────────────────
         if (probe_csv) {
-            int px = (int)(probe_cx * (float)(W - 1) + 0.5f);
-            int py = (int)(probe_cy * (float)(H - 1) + 0.5f);
-            if (px < 0) px = 0; if (px >= W) px = W - 1;
-            if (py < 0) py = 0; if (py >= H) py = H - 1;
-            int bh = (cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
-            // Match the detector's integral-image window radius:
-            // ANOMALY_THERMAL_WIN_RADIUS sampled pixels × sample_step real px.
-            int sample_step_est = (W >= 1280 || H >= 720) ? 4 : 2;
-            int probe_r = ANOMALY_THERMAL_WIN_RADIUS * sample_step_est;
-            probe_result_t pr = probe_location(rgba, W * 4, W, H, px, py, probe_r, bh);
-            int passes_delta     = (pr.abs_delta >= effective_min_delta);
-            int passes_threshold = (pr.z >= (double)cfg.score_threshold);
+            anomaly_probe_t probe;
+            int ok = anomaly_probe_thermal_point(&state, &cfg, rgba, W * 4, W, H,
+                                                 probe_cx, probe_cy, &probe);
+            int passes_delta = ok && probe.valid && probe.inside_scan_zone
+                               && ((probe.used_temporal_score ? probe.temporal_delta : probe.spatial_abs_delta)
+                                   >= (float)effective_min_delta);
+            int passes_threshold = ok && probe.valid && probe.inside_scan_zone
+                                   && (probe.effective_score >= cfg.score_threshold);
             fprintf(probe_csv,
-                    "%d,%.3f,%d,%d,%.1f,%.1f,%.2f,%.2f,%.2f,%d,%d\n",
-                    frame_num, time_s, px, py,
-                    pr.luma, pr.mean, pr.std, pr.abs_delta, pr.z,
+                    "%d,%.3f,%d,%d,%d,%d,%d,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d\n",
+                    frame_num, time_s, probe.pixel_x, probe.pixel_y,
+                    probe.inside_scan_zone ? 1 : 0,
+                    probe.bg_ready ? 1 : 0,
+                    probe.used_temporal_score ? 1 : 0,
+                    probe.sample_luma,
+                    probe.spatial_mean,
+                    probe.spatial_std,
+                    probe.spatial_abs_delta,
+                    probe.spatial_score,
+                    probe.temporal_delta,
+                    probe.temporal_mean,
+                    probe.temporal_norm,
+                    probe.temporal_score,
+                    probe.effective_score,
                     passes_delta, passes_threshold);
+        }
+
+        anomaly_result_t result;
+        anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, 0, &result);
+        if (debug_frame > 0 && frame_num == debug_frame) {
+            dump_saliency_debug(stderr, frame_num, time_s, raw_rgba, W, H, &cfg, &result);
         }
 
         if (result.box_count > 0) {
@@ -395,7 +821,13 @@ int main(int argc, char **argv) {
             fflush(stderr);
         }
 
-        if (out_pipe) fwrite(rgba, 1, frame_bytes, out_pipe);
+        if (out_pipe) {
+            if (debug_overlay && (cfg.algorithm_mask & ANOMALY_ALGO_PERSIST)) {
+                draw_saliency_debug_overlay(rgba, W, H, raw_rgba, &cfg, &result);
+            }
+            draw_frame_number(rgba, W, H, frame_num);
+            fwrite(rgba, 1, frame_bytes, out_pipe);
+        }
     }
     fprintf(stderr, "\n\n");
 
@@ -406,6 +838,7 @@ int main(int argc, char **argv) {
     if (probe_csv) fclose(probe_csv);
     anomaly_state_cleanup(&state);
     free(rgba);
+    free(raw_rgba);
 
     // ── Summary ──────────────────────────────────────────────────────────
     int elapsed = (int)(time(NULL) - t_start);
@@ -423,15 +856,17 @@ int main(int argc, char **argv) {
     fprintf(stderr, "\n");
     if (probe_active) {
         fprintf(stderr, "Probe interpretation:\n");
-        fprintf(stderr, "  abs_delta = how many luma units darker (BH) the probe pixel is\n");
-        fprintf(stderr, "              than its 41x41-pixel neighbourhood mean.\n");
-        fprintf(stderr, "  z         = abs_delta / local std.  Compare to your threshold.\n");
-        fprintf(stderr, "  If abs_delta is small (< %.0f) but z is large → noise in uniform\n",
+        fprintf(stderr, "  spatial_* rows describe the sampled-window score used during\n");
+        fprintf(stderr, "    thermal background warmup.\n");
+        fprintf(stderr, "  temporal_* rows describe the background-delta score used once\n");
+        fprintf(stderr, "    bg_ready=1.\n");
+        fprintf(stderr, "  effective_score is the exact value compared against threshold.\n");
+        fprintf(stderr, "  If abs_delta/delta is small (< %.0f) but effective_score is large,\n",
                 effective_min_delta);
-        fprintf(stderr, "    region.  If both are small → subject not thermally distinct.\n");
-        fprintf(stderr, "  If abs_delta > %.0f and z > %.1f → should fire.  Check probe\n",
-                effective_min_delta, (double)cfg.score_threshold);
-        fprintf(stderr, "    location is inside the scan zone (%.0f%% of frame).\n\n",
+        fprintf(stderr, "    investigate a noisy uniform region or a high frame delta mean.\n");
+        fprintf(stderr, "  If effective_score > %.1f with min_delta > %.0f, the detector should\n",
+                (double)cfg.score_threshold, effective_min_delta);
+        fprintf(stderr, "    fire, assuming the probe location is inside the scan zone (%.0f%%).\n\n",
                 100.0 * cfg.scan_zone);
     } else {
         fprintf(stderr, "Next step: open the CSV in Numbers/Excel and watch the\n");

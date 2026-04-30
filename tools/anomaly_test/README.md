@@ -100,7 +100,7 @@ cmake --build build
 
 `-p bh` = black-hot polarity  
 `-a 6`  = thermal + motion only (skip color outlier, which is less useful in IR)  
-`-t 2.8` = score threshold (higher = fewer, more confident detections)
+`-t 2.8` = app-like threshold for the default 60% sensitivity setting (higher = fewer detections)
 
 **All options:**
 ```
@@ -108,12 +108,13 @@ cmake --build build
 -c <file.csv>    Detection log    (default: <input>_detections.csv)
 --no-video       CSV only; skip annotated video output
 
--t <float>       Score threshold  (default: 1.8)
+-t <float>       Score threshold  (default: 1.8 in the native struct; app default at 60% sensitivity is ~2.8)
 -m <int>         Min consecutive hits before showing box (default: 2)
--s <float>       Scan zone 0.5–1.0 (default: 0.8)
+-s <float>       Scan zone 0.5–1.0 (default: 0.60)
 -a <int>         Algorithm mask: 1=color 2=thermal 4=motion (default: 7=all)
 -p <wh|bh>       Thermal polarity: wh=white-hot bh=black-hot (default: wh)
 --stride <int>   Analyze every Nth frame (default: 1)
+--min-delta <f>  Thermal minimum absolute luma delta (default: 10.0)
 ```
 
 Requires `ffmpeg` and `ffprobe` on PATH.
@@ -190,10 +191,11 @@ two-frame sequence is usually enough to pin down a specific bug.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `score_threshold` | 1.8σ | Min Z-score to register a detection. Log-mapped from the 0–100% sensitivity slider: 0%→15σ (very quiet), 60%→~2.8σ, 100%→1.0σ |
+| `score_threshold` | 1.8σ native / ~2.8 app default | Min score to register a detection. The app's 60% sensitivity slider maps to ~2.8; the standalone harness default remains the raw native value 1.8 unless you pass `-t` |
 | `min_hits` | 2 | Consecutive analyzed frames a detection must persist before a box is drawn. Eliminates single-frame false positives |
-| `scan_zone` | 0.80 | Centered fraction of the frame that is scanned. Values < 1.0 exclude wide-angle lens distortion at the edges |
+| `scan_zone` | 0.60 | Centered fraction of the frame that is scanned. Values < 1.0 exclude wide-angle lens distortion at the edges |
 | `frame_stride` | 3 | Analyze every Nth frame. Higher values reduce CPU; combine with min_hits (total latency ≈ stride × min_hits × frame interval) |
+| `thermal_min_delta` | 10.0 luma units | Minimum absolute thermal contrast before either the warmup spatial score or the steady-state temporal score is considered |
 | `ANOMALY_ACC_HOLD_FRAMES` | 8 | Analyzed frames a box stays visible after the detection signal disappears |
 | `ANOMALY_GMV_SEARCH_RADIUS` | 20 | Block-match search radius (in motion-grid cells) for camera motion estimation |
 | `ANOMALY_GMV_RESIDUAL_THRESH` | 0.05 | Max mean fit residual before declaring a scene discontinuity and wiping accumulators |

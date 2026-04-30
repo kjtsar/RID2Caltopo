@@ -1,5 +1,6 @@
 import android.app.Application
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Debug
 import android.os.Build
 import android.os.Process
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -519,6 +521,7 @@ class StreamsViewModel(
         // stream so ExoPlayer handles inter-burst silences without needless buffering.
         burstyHlsSourceProvider = { true },
         sourcePathProvider = { designator -> streamInfoByDesignator[designator]?.sourcePath ?: designator },
+        localPlaybackUriProvider = { designator -> streamInfoByDesignator[designator]?.playbackUri },
         listener = object : StreamSessionService.Listener {
             override fun onBuffering(designator: String) {
                 _playbackIndicatorStateByDesignator[designator] = PlaybackIndicatorState.BUFFERING
@@ -553,10 +556,18 @@ class StreamsViewModel(
                 }
             }
         },
+        isLocalPlaybackProvider = { designator -> streamInfoByDesignator[designator]?.isLocalPlayback == true },
     )
 
+    private val _localPlaybackEntries = MutableStateFlow<Map<String, StreamInfo>>(emptyMap())
+
     val streams: StateFlow<Map<String, StreamInfo>> =
-        StreamRegistry.streams.stateIn(
+        combine(StreamRegistry.streams, _localPlaybackEntries) { liveStreams, localPlaybackEntries ->
+            buildMap<String, StreamInfo> {
+                putAll(liveStreams)
+                putAll(localPlaybackEntries)
+            }
+        }.stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = emptyMap()
@@ -738,6 +749,10 @@ class StreamsViewModel(
         return dismissedStreamRevisions[stream.designator] != stream.revision
     }
 
+    fun isLocalPlayback(designator: String): Boolean {
+        return streamInfoByDesignator[designator]?.isLocalPlayback == true
+    }
+
     fun useFfmpegRender(designator: String): Boolean {
         return renderRouteByDesignator[designator] == true
     }
@@ -751,6 +766,54 @@ class StreamsViewModel(
     }
 
     fun getExoPlayerFor(designator: String): ExoPlayer? = streamSessionService.playerFor(designator)
+
+    fun openCapturedVideo(uri: Uri, displayName: String) {
+        val normalizedName = displayName.ifBlank { "Captured Video" }
+        val existingNames = buildSet {
+            addAll(streams.value.keys)
+            addAll(_localPlaybackEntries.value.keys)
+        }
+        var designator = normalizedName
+        var suffix = 2
+        while (designator in existingNames) {
+            designator = "$normalizedName ($suffix)"
+            suffix += 1
+        }
+
+        val newInfo = StreamInfo(
+            designator = designator,
+            sourcePath = uri.toString(),
+            playbackUri = uri,
+            isLocalPlayback = true,
+            state = StreamState.LIVE,
+            revision = 1L,
+        )
+        _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
+            this[designator] = newInfo
+        }
+        _focusedPath.value = designator
+        syncStreamSessions(currentResyncSnapshot())
+    }
+
+    fun closeStream(designator: String) {
+        if (_localPlaybackEntries.value.containsKey(designator)) {
+            _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
+                remove(designator)
+            }
+            dismissedStreamRevisions.remove(designator)
+            if (_focusedPath.value == designator) {
+                _focusedPath.value = null
+            }
+            applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+            syncStreamSessions(currentResyncSnapshot())
+            CaltopoClient.ShowToast("Closed $designator.")
+            return
+        }
+        if (_focusedPath.value != designator) {
+            _focusedPath.value = designator
+        }
+        dismissFocusedStream()
+    }
 
     fun toggleFocus(designator: String) {
         var fString = "has"
@@ -829,6 +892,7 @@ class StreamsViewModel(
     }
 
     fun designatorStateFor(designator: String): DesignatorState {
+        if (isLocalPlayback(designator)) return DesignatorState.Red
         if (_droneStates.isEmpty()) return DesignatorState.Red
 
         val dss = _droneStates[designator]
@@ -1245,6 +1309,7 @@ class StreamsViewModel(
     }
 
     private fun shouldUseFfmpegRender(designator: String): Boolean {
+        if (streamInfoByDesignator[designator]?.isLocalPlayback == true) return false
         return StreamRenderRouter.useFfmpeg(
             designator = designator,
             liveStreams = streamInfoByDesignator,
@@ -1419,6 +1484,10 @@ class StreamsViewModel(
 
     fun dismissFocusedStream() {
         val designator = _focusedPath.value ?: return
+        if (_localPlaybackEntries.value.containsKey(designator)) {
+            closeStream(designator)
+            return
+        }
         val info = streams.value[designator] ?: return
         dismissedStreamRevisions[designator] = info.revision
         CTDebug(tag, "dismissFocusedStream(): hiding $designator at revision=${info.revision}")

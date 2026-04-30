@@ -3,6 +3,9 @@ package org.ncssar.rid2caltopo.video
 import OverLimitDroneUiState
 import StreamsViewModel
 import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -33,10 +36,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Button
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -59,6 +62,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
@@ -75,6 +80,41 @@ import org.ncssar.rid2caltopo.notam.NotamStatusChip
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
 import org.ncssar.rid2caltopo.ui.ResumeProximityAlertButton
 import org.opendroneid.android.bluetooth.WiFiScanner
+import androidx.documentfile.provider.DocumentFile
+
+private class OpenCapturedVideoDocument : ActivityResultContracts.OpenDocument() {
+    override fun createIntent(context: android.content.Context, input: Array<String>): Intent {
+        val initialUri = CaltopoClient.GetTodaysTrackDir()?.uri
+            ?: CaltopoClient.GetArchiveUri()
+            ?: CaltopoClient.GetArchiveUriSelectionHint()
+        return super.createIntent(context, input).apply {
+            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+            putExtra("android.content.extra.NO_CACHE", true)
+            if (initialUri != null) {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
+            }
+        }
+    }
+}
+
+private fun resolveCapturedVideoDisplayName(
+    context: android.content.Context,
+    uri: Uri,
+): String {
+    try {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) {
+                val name = cursor.getString(nameIndex)?.trim().orEmpty()
+                if (name.isNotEmpty()) return name
+            }
+        }
+    } catch (_: Exception) {
+    }
+    return DocumentFile.fromSingleUri(context, uri)?.name?.takeIf { it.isNotBlank() }
+        ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+        ?: "Captured Video"
+}
 
 private fun restartMediaMtxServer(context: android.content.Context) {
     val appContext = context.applicationContext
@@ -576,6 +616,23 @@ private fun StreamsGrid(
     val singleVisibleDesignator = remember(visibleEntries, focusedPath) {
         if (focusedPath == null && visibleEntries.size == 1) visibleEntries[0].key else null
     }
+    val capturedVideoLauncher = rememberLauncherForActivityResult(
+        contract = OpenCapturedVideoDocument(),
+        onResult = { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {
+            }
+            viewModel.openCapturedVideo(
+                uri = uri,
+                displayName = resolveCapturedVideoDisplayName(context, uri)
+            )
+        }
+    )
 
     LaunchedEffect(singleVisibleDesignator) {
         singleVisibleDesignator?.let { designator ->
@@ -588,6 +645,7 @@ private fun StreamsGrid(
             CTDebug(tag, "No streams to show.")
             EmptyStreamsView(
                 mapStatus = mapStatus,
+                onPlayCapturedVideo = { capturedVideoLauncher.launch(arrayOf("video/*")) },
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -625,10 +683,7 @@ private fun StreamsGrid(
                                 streamState = info.state,
                                 streamErrorDetail = info.errorDetail,
                                 onCloseStream = {
-                                    if (focusedPath != path) {
-                                        viewModel.toggleFocus(path)
-                                    }
-                                    viewModel.dismissFocusedStream()
+                                    viewModel.closeStream(path)
                                 },
                                 onRestartServer = {
                                     restartMediaMtxServer(context)
@@ -647,7 +702,12 @@ private fun StreamsGrid(
 }
 
 @Composable
-private fun EmptyStreamsView(mapStatus: String, myIpAddress: String = R2CMqttManager.GetMyIpAddress(), modifier: Modifier = Modifier) {
+private fun EmptyStreamsView(
+    mapStatus: String,
+    myIpAddress: String = R2CMqttManager.GetMyIpAddress(),
+    onPlayCapturedVideo: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -659,6 +719,11 @@ private fun EmptyStreamsView(mapStatus: String, myIpAddress: String = R2CMqttMan
         ) {
             val ssid = WiFiScanner.WiFiSSID(LocalContext.current)
             Text("Stream video to: 'rtmp://$myIpAddress/<droneDesig>' on $ssid network")
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = onPlayCapturedVideo) {
+                Text("Play Captured Video")
+            }
+            Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = mapStatus,
                 style = MaterialTheme.typography.titleLarge

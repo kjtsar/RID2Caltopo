@@ -9,7 +9,8 @@ enum class AnomalyAlgorithm(
 ) {
     ColorOutlier(nativeMask = 0x01, label = "Color Outlier"),
     ThermalHotspot(nativeMask = 0x02, label = "Thermal Hotspot"),
-    Motion(nativeMask = 0x04, label = "Motion");
+    Motion(nativeMask = 0x04, label = "Motion"),
+    PersistentDarkPatch(nativeMask = 0x08, label = "Thermal Saliency");
 
     companion object {
         fun fromNativeName(name: String): AnomalyAlgorithm? {
@@ -18,6 +19,8 @@ enum class AnomalyAlgorithm(
                 "color", "color_outlier", "color-outlier" -> ColorOutlier
                 "thermal", "thermal_hotspot", "thermal-hotspot", "hotspot" -> ThermalHotspot
                 "motion", "movement" -> Motion
+                "persist", "persistent", "persistent_dark_patch", "persistent-dark-patch", "dark-patch",
+                "saliency", "thermal_saliency", "thermal-saliency" -> PersistentDarkPatch
                 else -> null
             }
         }
@@ -46,6 +49,7 @@ data class NativeAnomalyConfig(
     val thermalPolarity: Int,
     val scanZone: Float,
     val minHits: Int,
+    val thermalMinDelta: Float,
 )
 
 data class AnomalyConfig(
@@ -80,6 +84,7 @@ data class AnomalyConfig(
             thermalPolarity = thermalPolarity.nativeValue,
             scanZone = scanZone.coerceIn(0.5f, 1.0f),
             minHits = minHits.coerceIn(1, 10),
+            thermalMinDelta = 10.0f,
         )
     }
 }

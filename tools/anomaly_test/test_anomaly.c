@@ -322,6 +322,30 @@ static void test_thermal_saliency_detected(void) {
     free(frame);
 }
 
+static void test_unified_saliency_color_support(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 128);
+    set_pixel(frame, W * 4, W / 2, H / 2, 240, 20, 20);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_PERSIST);
+    cfg.score_threshold = 1.2f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes > 0, "unified saliency: vivid color outlier contributes salient detection");
+    if (boxes > 0) {
+        EXPECT(res.boxes[0].algorithm == ANOMALY_ALGO_PERSIST,
+               "unified saliency: color-supported detection keeps saliency tag");
+    }
+
+    anomaly_state_cleanup(&st);
+    free(frame);
+}
+
 static void test_min_hits_gate(void) {
     // min_hits=2: first frame should not show a box, second should.
     const int W = 160, H = 120;
@@ -514,6 +538,7 @@ int main(void) {
     test_high_threshold_no_detection();
     test_runtime_min_delta_override();
     test_thermal_saliency_detected();
+    test_unified_saliency_color_support();
     test_min_hits_gate();
     test_scan_zone_excludes_corner();
     test_motion_static_scene();

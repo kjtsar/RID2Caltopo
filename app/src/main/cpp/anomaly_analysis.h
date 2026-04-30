@@ -12,7 +12,7 @@
 #define ANOMALY_ALGO_COLOR    0x01
 #define ANOMALY_ALGO_THERMAL  0x02
 #define ANOMALY_ALGO_MOTION   0x04
-#define ANOMALY_ALGO_PERSIST  0x08  // Experimental thermal saliency path
+#define ANOMALY_ALGO_PERSIST  0x08  // Experimental multi-cue saliency path
 
 // ── Thermal polarity ───────────────────────────────────────────────────────
 #define ANOMALY_THERMAL_WHITE_HOT 1
@@ -124,7 +124,7 @@ typedef struct {
 typedef struct {
     int64_t  frame_counter;
     // Per-algorithm temporal accumulators:
-    //   0=color, 1=thermal, 2=motion, 3=thermal saliency
+    //   0=color, 1=thermal, 2=motion, 3=multi-cue saliency
     float    acc_cx[4];
     float    acc_cy[4];
     int      acc_hits[4];

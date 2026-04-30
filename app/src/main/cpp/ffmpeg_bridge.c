@@ -2604,6 +2604,8 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             // reconnect signal because publisher churn appears as end-of-stream.
             av_packet_unref(pkt);
             if (local_file_source) {
+                dispatch_probe_event(session->designator, "local_playback_eof", session->session_id, 0,
+                                     NAN, NAN, NAN, NAN, NAN, NAN);
                 local_file_eof = true;
                 break;
             }

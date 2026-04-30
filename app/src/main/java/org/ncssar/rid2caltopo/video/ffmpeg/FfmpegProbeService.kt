@@ -147,6 +147,7 @@ class FfmpegProbeService(
     private val retiringSessionIds = mutableSetOf<Long>()
     private val managedRenderSessions = mutableMapOf<Long, ManagedRenderSession>()
     private val telemetryByDesignator = mutableMapOf<String, FfmpegTelemetry>()
+    private val localPlaybackEofByDesignator = mutableSetOf<String>()
     private val remoteIdCandidatesByDesignator = mutableMapOf<String, LinkedHashSet<String>>()
     private val renderDelayMsByDesignator = mutableMapOf<String, Long>()
     private val renderDelayBaseMsByDesignator = mutableMapOf<String, Long>()
@@ -225,6 +226,9 @@ class FfmpegProbeService(
                 }
             }
             "decoder_open_error" -> handleDecoderOpenError(designator, sessionId)
+            "local_playback_eof" -> synchronized(stateLock) {
+                localPlaybackEofByDesignator += designator
+            }
             "session_stopped" -> handleSessionStopped(designator, sessionId)
         }
         if (eventType == "frame_decoded") {
@@ -287,6 +291,9 @@ class FfmpegProbeService(
 
     fun onStreamBecameLive(designator: String) {
         val now = System.currentTimeMillis()
+        synchronized(stateLock) {
+            localPlaybackEofByDesignator.remove(designator)
+        }
         CTDebug(
             tag,
             "Stream became live for $designator renderEnabled=${isRenderEnabled(designator)} " +
@@ -437,6 +444,7 @@ class FfmpegProbeService(
         synchronized(stateLock) {
             sessionIds = sessionIdsForDesignatorLocked(designator)
             startingRenderDesignators.remove(designator)
+            localPlaybackEofByDesignator.remove(designator)
             lastFrameAtMs.remove(designator)
             sourcePathByDesignator.remove(designator)
             renderEnabledDesignators.remove(designator)
@@ -1015,6 +1023,7 @@ class FfmpegProbeService(
         var localPlaybackEnded = false
         synchronized(stateLock) {
             val isLocalFile = sourcePathByDesignator[designator]?.startsWith("file://", ignoreCase = true) == true
+            val eofObserved = localPlaybackEofByDesignator.contains(designator)
             if (renderSessions[designator] == sessionId) {
                 renderSessions.remove(designator)
                 lastFrameAtMs.remove(designator)
@@ -1025,10 +1034,12 @@ class FfmpegProbeService(
             }
             managedRenderSessions.remove(sessionId)
             if (isLocalFile &&
+                eofObserved &&
                 renderSessions[designator] == null &&
                 suspendedRenderSessions[designator] == null &&
                 managedRenderSessions.values.none { it.designator == designator }
             ) {
+                localPlaybackEofByDesignator.remove(designator)
                 localPlaybackEnded = true
             }
         }

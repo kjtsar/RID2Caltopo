@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -45,8 +46,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
+import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
+import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.ui.StreamPlayerView
 
 
@@ -66,6 +70,7 @@ fun StreamTile(
     var showPicker by remember { mutableStateOf(false) }
     var showUnmatchDialog by remember { mutableStateOf(false) }
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
+    var showAnomalySettingsDialog by remember { mutableStateOf(false) }
     var showSensitivityDialog by remember { mutableStateOf(false) }
     var showScanZoneDialog by remember { mutableStateOf(false) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
@@ -80,6 +85,7 @@ fun StreamTile(
     val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
+    val resolvedAppearanceMode = viewModel.resolvedAppearanceModeFor(streamDesignator)
     val currentIsFocused by rememberUpdatedState(isFocused)
     val currentDesignatorState by rememberUpdatedState(designatorState)
 
@@ -216,60 +222,6 @@ fun StreamTile(
                             }
                         )
                     }
-                    DropdownMenuItem(
-                        text = { Text("Anomaly Detection: ${if (anomalyConfig.enabled) "On" else "Off"}") },
-                        onClick = { viewModel.toggleAnomalyEnabled(streamDesignator) }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            val on = anomalyConfig.algorithms.contains(AnomalyAlgorithm.ColorOutlier)
-                            Text("${AnomalyAlgorithm.ColorOutlier.label}: ${if (on) "On" else "Off"}")
-                        },
-                        onClick = { viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.ColorOutlier) }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            val on = anomalyConfig.algorithms.contains(AnomalyAlgorithm.ThermalHotspot)
-                            Text("${AnomalyAlgorithm.ThermalHotspot.label}: ${if (on) "On" else "Off"}")
-                        },
-                        onClick = { viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.ThermalHotspot) }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            val on = anomalyConfig.algorithms.contains(AnomalyAlgorithm.Motion)
-                            Text("${AnomalyAlgorithm.Motion.label}: ${if (on) "On" else "Off"}")
-                        },
-                        onClick = { viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Frame Stride: ${anomalyConfig.frameStride}x") },
-                        onClick = { viewModel.cycleAnomalyFrameStride(streamDesignator) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Thermal Palette: ${anomalyConfig.thermalPolarity.label}") },
-                        onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Sensitivity: ${anomalyConfig.sensitivityLabel}") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            showSensitivityDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Scan Zone: ${anomalyConfig.scanZoneLabel}") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            showScanZoneDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Min Hits: ${anomalyConfig.minHits}") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            viewModel.cycleMinHits(streamDesignator)
-                        }
-                    )
                 }
             }
             Row(
@@ -278,7 +230,10 @@ fun StreamTile(
                     .padding(6.dp)
                     .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                    .pointerInput(streamDesignator, anomalyConfig, resolvedAppearanceMode) {
+                        detectTapGestures(onTap = { showAnomalySettingsDialog = true })
+                    },
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -314,8 +269,13 @@ fun StreamTile(
                         detectTapGestures(onTap = { viewModel.cycleMinHits(streamDesignator) })
                     }
                 )
-                if (anomalyConfig.enabled) {
-                    if (anomalyConfig.algorithms.contains(AnomalyAlgorithm.ThermalHotspot)) {
+                Text(
+                    text = "Stride ${anomalyConfig.frameStride}x",
+                    color = Color.White,
+                    fontSize = 11.sp
+                )
+                when (resolvedAppearanceMode) {
+                    AppearanceAnomalyMode.Thermal -> {
                         val thermalShortLabel = when (anomalyConfig.thermalPolarity) {
                             org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.WhiteHot -> "WH"
                             org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.BlackHot -> "BH"
@@ -329,28 +289,33 @@ fun StreamTile(
                             }
                         )
                     }
-                    if (anomalyConfig.algorithms.contains(AnomalyAlgorithm.Motion)) {
-                        OutlinedLegendText(
-                            text = "Motion",
-                            fillColor = Color.Green,
-                            fontSize = 11.sp
-                        )
-                    }
-                    if (anomalyConfig.algorithms.contains(AnomalyAlgorithm.ColorOutlier)) {
+                    AppearanceAnomalyMode.Color -> {
                         OutlinedLegendText(
                             text = "Color Outlier",
                             fillColor = Color.Blue,
                             fontSize = 11.sp
                         )
                     }
+                }
+                if (anomalyConfig.resolvedAlgorithms(viewModel.resolvedAppearanceModeFor(streamDesignator)).contains(AnomalyAlgorithm.Motion)) {
+                    if (anomalyConfig.enabled) {
+                        OutlinedLegendText(
+                            text = "Motion",
+                            fillColor = Color.Green,
+                            fontSize = 11.sp
+                        )
+                    } else {
+                        Text(
+                            text = "Motion Off",
+                            color = Color.White,
+                            fontSize = 11.sp
+                        )
+                    }
                 } else {
                     Text(
-                        text = anomalyConfig.thermalPolarity.label,
+                        text = "Motion Off",
                         color = Color.White,
-                        fontSize = 11.sp,
-                        modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
-                            detectTapGestures(onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) })
-                        }
+                        fontSize = 11.sp
                     )
                 }
             }
@@ -442,6 +407,145 @@ fun StreamTile(
                     dismissButton = {
                         TextButton(onClick = { showScanZoneDialog = false }) {
                             Text("Cancel")
+                        }
+                    }
+                )
+            }
+            if (showAnomalySettingsDialog) {
+                var sensitivityValue by remember(streamDesignator, anomalyConfig.sensitivity) {
+                    mutableStateOf(anomalyConfig.sensitivity.coerceIn(0f, 1f))
+                }
+                var scanZoneValue by remember(streamDesignator, anomalyConfig.scanZone) {
+                    mutableStateOf(anomalyConfig.scanZone.coerceIn(0.5f, 1f))
+                }
+                var minHitsValue by remember(streamDesignator, anomalyConfig.minHits) {
+                    mutableStateOf(anomalyConfig.minHits.coerceIn(1, 5))
+                }
+                var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
+                    mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 4))
+                }
+                AlertDialog(
+                    onDismissRequest = { showAnomalySettingsDialog = false },
+                    title = { Text("Anomaly Detector") },
+                    text = {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Detection")
+                                TextButton(onClick = { viewModel.toggleAnomalyEnabled(streamDesignator) }) {
+                                    Text(if (anomalyConfig.enabled) "On" else "Off")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Appearance")
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = {
+                                            viewModel.setAppearanceAnomalySelection(
+                                                streamDesignator,
+                                                AppearanceAnomalySelection.Thermal
+                                            )
+                                        }
+                                    ) {
+                                        Text("Thermal")
+                                    }
+                                    Button(
+                                        onClick = {
+                                            viewModel.setAppearanceAnomalySelection(
+                                                streamDesignator,
+                                                AppearanceAnomalySelection.Color
+                                            )
+                                        }
+                                    ) {
+                                        Text("Color")
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Motion")
+                                TextButton(onClick = {
+                                    viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
+                                }) {
+                                    Text(
+                                        if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) {
+                                            "On"
+                                        } else {
+                                            "Off"
+                                        }
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Thermal Palette")
+                                TextButton(onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }) {
+                                    Text(anomalyConfig.thermalPolarity.label)
+                                }
+                            }
+                            Text("Sensitivity ${((sensitivityValue * 100f).toInt())}%")
+                            Slider(
+                                value = sensitivityValue,
+                                onValueChange = { sensitivityValue = it },
+                                valueRange = 0f..1f
+                            )
+                            Text("Scan Zone ${((scanZoneValue * 100f).toInt())}%")
+                            Slider(
+                                value = scanZoneValue,
+                                onValueChange = { scanZoneValue = it },
+                                valueRange = 0.5f..1f
+                            )
+                            Text("Min Hits $minHitsValue")
+                            Slider(
+                                value = minHitsValue.toFloat(),
+                                onValueChange = { minHitsValue = it.toInt().coerceIn(1, 5) },
+                                valueRange = 1f..5f,
+                                steps = 3
+                            )
+                            Text("Frame Stride ${frameStrideValue}x")
+                            Slider(
+                                value = frameStrideValue.toFloat(),
+                                onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 4) },
+                                valueRange = 1f..4f,
+                                steps = 2
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                viewModel.setAnomalySensitivity(streamDesignator, sensitivityValue)
+                                viewModel.setScanZone(streamDesignator, scanZoneValue)
+                                while (viewModel.anomalyConfigFor(streamDesignator).minHits != minHitsValue) {
+                                    viewModel.cycleMinHits(streamDesignator)
+                                }
+                                while (viewModel.anomalyConfigFor(streamDesignator).frameStride != frameStrideValue) {
+                                    viewModel.cycleAnomalyFrameStride(streamDesignator)
+                                }
+                                showAnomalySettingsDialog = false
+                            }
+                        ) {
+                            Text("Apply")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showAnomalySettingsDialog = false }) {
+                            Text("Close")
                         }
                     }
                 )

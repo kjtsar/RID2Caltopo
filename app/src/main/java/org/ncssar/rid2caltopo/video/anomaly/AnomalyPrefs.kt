@@ -6,6 +6,7 @@ object AnomalyPrefs {
     private const val PREFS_NAME = "anomaly_prefs"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_ALGORITHMS = "algorithms"
+    private const val KEY_APPEARANCE_SELECTION = "appearance_selection"
     private const val KEY_FRAME_STRIDE = "frame_stride"
     private const val KEY_SENSITIVITY = "sensitivity"
     private const val KEY_MIN_AREA_FRACTION = "min_area_fraction"
@@ -20,8 +21,10 @@ object AnomalyPrefs {
         val algorithms = prefs.getStringSet(KEY_ALGORITHMS, null)
             ?.mapNotNull { name -> runCatching { AnomalyAlgorithm.valueOf(name) }.getOrNull() }
             ?.toSet()
-            ?.takeIf { it.isNotEmpty() }
             ?: defaults.algorithms
+        val appearanceSelection = prefs.getString(KEY_APPEARANCE_SELECTION, defaults.appearanceSelection.name)
+            ?.let { name -> runCatching { AppearanceAnomalySelection.valueOf(name) }.getOrNull() }
+            ?: defaults.appearanceSelection
         val polarity = prefs.getString(KEY_THERMAL_POLARITY, defaults.thermalPolarity.name)
             ?.let { name -> runCatching { ThermalPolarity.valueOf(name) }.getOrNull() }
             ?: defaults.thermalPolarity
@@ -29,6 +32,7 @@ object AnomalyPrefs {
         return AnomalyConfig(
             enabled = prefs.getBoolean(KEY_ENABLED, defaults.enabled),
             algorithms = algorithms,
+            appearanceSelection = appearanceSelection,
             frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 8),
             sensitivity = prefs.getFloat(KEY_SENSITIVITY, defaults.sensitivity).coerceIn(0f, 1f),
             minAreaFraction = prefs.getFloat(KEY_MIN_AREA_FRACTION, defaults.minAreaFraction)
@@ -41,16 +45,18 @@ object AnomalyPrefs {
 
     @JvmStatic
     fun save(context: Context, config: AnomalyConfig) {
+        val normalized = config.copy(algorithms = config.nonAppearanceAlgorithms)
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putBoolean(KEY_ENABLED, config.enabled)
-            .putStringSet(KEY_ALGORITHMS, config.algorithms.map { it.name }.toSet())
-            .putInt(KEY_FRAME_STRIDE, config.frameStride.coerceIn(1, 8))
-            .putFloat(KEY_SENSITIVITY, config.sensitivity.coerceIn(0f, 1f))
-            .putFloat(KEY_MIN_AREA_FRACTION, config.minAreaFraction.coerceIn(0.00005f, 0.03f))
-            .putString(KEY_THERMAL_POLARITY, config.thermalPolarity.name)
-            .putFloat(KEY_SCAN_ZONE, config.scanZone.coerceIn(0.5f, 1.0f))
-            .putInt(KEY_MIN_HITS, config.minHits.coerceIn(1, 10))
+            .putBoolean(KEY_ENABLED, normalized.enabled)
+            .putStringSet(KEY_ALGORITHMS, normalized.algorithms.map { it.name }.toSet())
+            .putString(KEY_APPEARANCE_SELECTION, normalized.appearanceSelection.name)
+            .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 8))
+            .putFloat(KEY_SENSITIVITY, normalized.sensitivity.coerceIn(0f, 1f))
+            .putFloat(KEY_MIN_AREA_FRACTION, normalized.minAreaFraction.coerceIn(0.00005f, 0.03f))
+            .putString(KEY_THERMAL_POLARITY, normalized.thermalPolarity.name)
+            .putFloat(KEY_SCAN_ZONE, normalized.scanZone.coerceIn(0.5f, 1.0f))
+            .putInt(KEY_MIN_HITS, normalized.minHits.coerceIn(1, 10))
             .apply()
     }
 }

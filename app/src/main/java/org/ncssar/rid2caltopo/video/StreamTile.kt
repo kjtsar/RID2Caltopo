@@ -280,6 +280,13 @@ fun StreamTile(
                     color = Color.White,
                     fontSize = 11.sp
                 )
+                if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) {
+                    Text(
+                        text = "Mot ${anomalyConfig.motionEvidenceSensitivityLabel}",
+                        color = Color.White,
+                        fontSize = 11.sp
+                    )
+                }
                 when (resolvedAppearanceMode) {
                     AppearanceAnomalyMode.Thermal -> {
                         val thermalShortLabel = when (anomalyConfig.thermalPolarity) {
@@ -424,6 +431,9 @@ fun StreamTile(
                 var scanZoneValue by remember(streamDesignator, anomalyConfig.scanZone) {
                     mutableStateOf(anomalyConfig.scanZone.coerceIn(0.5f, 1f))
                 }
+                var motionEvidenceSensitivityValue by remember(streamDesignator, anomalyConfig.motionEvidenceSensitivity) {
+                    mutableStateOf(anomalyConfig.motionEvidenceSensitivity.coerceIn(0f, 1f))
+                }
                 var minHitsValue by remember(streamDesignator, anomalyConfig.minHits) {
                     mutableStateOf(anomalyConfig.minHits.coerceIn(1, 5))
                 }
@@ -518,6 +528,12 @@ fun StreamTile(
                                 onValueChange = { sensitivityValue = it },
                                 valueRange = 0f..1f
                             )
+                            Text("Motion Evidence ${((motionEvidenceSensitivityValue * 100f).toInt())}%")
+                            Slider(
+                                value = motionEvidenceSensitivityValue,
+                                onValueChange = { motionEvidenceSensitivityValue = it },
+                                valueRange = 0f..1f
+                            )
                             Text("Scan Zone ${((scanZoneValue * 100f).toInt())}%")
                             Slider(
                                 value = scanZoneValue,
@@ -557,6 +573,7 @@ fun StreamTile(
                         TextButton(
                             onClick = {
                                 viewModel.setAnomalySensitivity(streamDesignator, sensitivityValue)
+                                viewModel.setMotionEvidenceSensitivity(streamDesignator, motionEvidenceSensitivityValue)
                                 viewModel.setScanZone(streamDesignator, scanZoneValue)
                                 while (viewModel.anomalyConfigFor(streamDesignator).minHits != minHitsValue) {
                                     viewModel.cycleMinHits(streamDesignator)

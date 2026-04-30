@@ -35,6 +35,15 @@ static inline int effective_sample_step(const anomaly_config_t *cfg, int width, 
     return (width >= 1280 || height >= 720) ? 4 : 2;
 }
 
+static inline float effective_motion_evidence_scale(const anomaly_config_t *cfg) {
+    if (cfg == NULL) return 1.0f;
+    float scale = cfg->motion_evidence_scale;
+    if (!isfinite(scale)) return 1.0f;
+    if (scale < 0.10f) return 0.10f;
+    if (scale > 4.00f) return 4.00f;
+    return scale;
+}
+
 static int gmv_feature_score(const uint8_t *luma, int w, int h, int x, int y) {
     if (luma == NULL || w <= 0 || h <= 0) return 0;
     if (x <= 0 || x >= w - 1 || y <= 0 || y >= h - 1) return 0;
@@ -1368,6 +1377,7 @@ int anomaly_process_frame(
     // ── GMV-compensated motion scoring over ROI ──────────────────────────
     float best_motion = -1.0f;
     int   best_motion_x = 0, best_motion_y = 0;
+    float motion_evidence_scale = effective_motion_evidence_scale(cfg);
     int   motion_top_count = 0;
     anomaly_debug_candidate_t motion_top[ANOMALY_DEBUG_TOP_CANDIDATES];
     memset(motion_top, 0, sizeof(motion_top));
@@ -1455,6 +1465,9 @@ int anomaly_process_frame(
                     float ms = (motion_selection_map != NULL)
                         ? motion_selection_map[my * motion_w + mx]
                         : -1.0f;
+                    if (ms > 0.0f) {
+                        ms *= motion_evidence_scale;
+                    }
                     int pixel_x = mx * motion_step + motion_step / 2;
                     int pixel_y = my * motion_step + motion_step / 2;
                     maybe_insert_top_candidate(

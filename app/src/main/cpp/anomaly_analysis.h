@@ -119,6 +119,7 @@ typedef struct {
     int   frame_stride;
     int   pixel_step;
     float score_threshold;
+    float motion_evidence_scale;
     float min_area_fraction;
     int   thermal_polarity;
     float scan_zone;

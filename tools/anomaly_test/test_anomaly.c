@@ -59,6 +59,7 @@ static anomaly_config_t default_cfg(int algorithm_mask) {
     c.frame_stride      = 1;
     c.pixel_step        = 0;
     c.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
+    c.motion_evidence_scale = 1.0f;
     c.min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION;
     c.thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT;
     c.scan_zone         = 1.0f;  // full frame for most tests
@@ -409,6 +410,7 @@ static void test_motion_static_scene(void) {
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
     cfg.score_threshold = 2.0f;
     cfg.min_hits = 1;
+    cfg.motion_evidence_scale = 2.0f;
 
     anomaly_result_t res1, res2;
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res1);  // establishes prev_luma

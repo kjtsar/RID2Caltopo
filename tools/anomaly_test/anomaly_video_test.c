@@ -673,6 +673,7 @@ int main(int argc, char **argv) {
         .algorithm_mask    = ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION,
         .frame_stride      = 1,
         .score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD,
+        .motion_evidence_scale = 1.0f,
         .min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION,
         .thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT,
         .scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT,

@@ -70,6 +70,7 @@ data class NativeAnomalyConfig(
     val frameStride: Int,
     val pixelStep: Int,
     val scoreThreshold: Float,
+    val motionEvidenceScale: Float,
     val minAreaFraction: Float,
     val thermalPolarity: Int,
     val scanZone: Float,
@@ -84,6 +85,7 @@ data class AnomalyConfig(
     val frameStride: Int = 3,
     val pixelStep: Int = 0,
     val sensitivity: Float = 0.60f,
+    val motionEvidenceSensitivity: Float = 0.60f,
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.WhiteHot,
     val scanZone: Float = 0.60f,
@@ -102,6 +104,9 @@ data class AnomalyConfig(
 
     val pixelStepLabel: String
         get() = if (pixelStep <= 0) "Auto" else "${pixelStep}px"
+
+    val motionEvidenceSensitivityLabel: String
+        get() = String.format(Locale.US, "%d%%", (motionEvidenceSensitivity.coerceIn(0f, 1f) * 100f).toInt())
 
     fun resolvedAppearanceMode(
         detectedMode: AppearanceAnomalyMode? = null,
@@ -136,8 +141,11 @@ data class AnomalyConfig(
     ): NativeAnomalyConfig {
         val mask = resolvedAlgorithms(detectedAppearanceMode).fold(0) { acc, algo -> acc or algo.nativeMask }
         val sensitivityClamped = sensitivity.coerceIn(0f, 1f)
+        val motionSensitivityClamped = motionEvidenceSensitivity.coerceIn(0f, 1f)
         // Logarithmic curve: 0% → ~15σ (essentially silent), 60% → ~2.8σ (default), 100% → 1.0σ.
         val scoreThreshold = 15.0.pow(1.0 - sensitivityClamped.toDouble()).toFloat().coerceIn(1.0f, 15.0f)
+        val motionEvidenceScale =
+            (0.25f + (1.75f * motionSensitivityClamped * motionSensitivityClamped)).coerceIn(0.25f, 2.0f)
         val areaScale = 0.10f + (4.90f * sensitivityClamped * sensitivityClamped)
         val effectiveMinAreaFraction = (minAreaFraction * areaScale).coerceIn(0.00005f, 0.03f)
         return NativeAnomalyConfig(
@@ -146,6 +154,7 @@ data class AnomalyConfig(
             frameStride = frameStride.coerceIn(1, 8),
             pixelStep = pixelStep.coerceIn(0, 8),
             scoreThreshold = scoreThreshold,
+            motionEvidenceScale = motionEvidenceScale,
             minAreaFraction = effectiveMinAreaFraction,
             thermalPolarity = thermalPolarity.nativeValue,
             scanZone = scanZone.coerceIn(0.5f, 1.0f),

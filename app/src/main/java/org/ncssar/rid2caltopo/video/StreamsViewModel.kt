@@ -1351,6 +1351,12 @@ class StreamsViewModel(
         }
     }
 
+    fun setMotionEvidenceSensitivity(designator: String, sensitivity: Float) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(motionEvidenceSensitivity = sensitivity.coerceIn(0f, 1f))
+        }
+    }
+
     fun setScanZone(designator: String, scanZone: Float) {
         updateAnomalyConfig(designator) { current ->
             current.copy(scanZone = scanZone.coerceIn(0.5f, 1.0f))

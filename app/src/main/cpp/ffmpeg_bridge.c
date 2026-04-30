@@ -2919,6 +2919,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.frame_stride      = ANOMALY_DEFAULT_FRAME_STRIDE;
     slot->anomaly_cfg.pixel_step        = 0;
     slot->anomaly_cfg.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
+    slot->anomaly_cfg.motion_evidence_scale = 1.0f;
     slot->anomaly_cfg.min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION;
     slot->anomaly_cfg.thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT;
     slot->anomaly_cfg.scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT;
@@ -3223,6 +3224,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jint frame_stride,
         jint pixel_step,
         jfloat score_threshold,
+        jfloat motion_evidence_scale,
         jfloat min_area_fraction,
         jint thermal_polarity,
         jfloat scan_zone,
@@ -3241,6 +3243,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (int) frame_stride;
         session->anomaly_cfg.pixel_step        = ((int) pixel_step < 0) ? 0 : (int) pixel_step;
         session->anomaly_cfg.score_threshold   = fmaxf(0.1f, score_threshold);
+        session->anomaly_cfg.motion_evidence_scale = fminf(fmaxf(motion_evidence_scale, 0.1f), 4.0f);
         session->anomaly_cfg.min_area_fraction = fminf(fmaxf(min_area_fraction, 0.0001f), 0.20f);
         session->anomaly_cfg.thermal_polarity  = ((int) thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
                                                  ? ANOMALY_THERMAL_BLACK_HOT : ANOMALY_THERMAL_WHITE_HOT;

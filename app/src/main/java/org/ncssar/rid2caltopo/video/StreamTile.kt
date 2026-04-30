@@ -37,6 +37,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -133,7 +136,11 @@ fun StreamTile(
                     detectTapGestures(
                         onTap = {
                             CTDebug(tag, "StreamTile{${streamDesignator}) onTap")
-                            onToggleFocus()
+                            if (isLocalPlayback) {
+                                viewModel.ensureFocus(streamDesignator)
+                            } else {
+                                onToggleFocus()
+                            }
                         },
                         onLongPress = {
                             if (isLocalPlayback) return@detectTapGestures
@@ -307,14 +314,45 @@ fun StreamTile(
                         detectTapGestures(onTap = { viewModel.cycleMinHits(streamDesignator) })
                     }
                 )
-                Text(
-                    text = anomalyConfig.thermalPolarity.label,
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
-                        detectTapGestures(onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) })
+                if (anomalyConfig.enabled) {
+                    if (anomalyConfig.algorithms.contains(AnomalyAlgorithm.ThermalHotspot)) {
+                        val thermalShortLabel = when (anomalyConfig.thermalPolarity) {
+                            org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.WhiteHot -> "WH"
+                            org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.BlackHot -> "BH"
+                        }
+                        OutlinedLegendText(
+                            text = "Thermal ($thermalShortLabel)",
+                            fillColor = Color.Red,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
+                                detectTapGestures(onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) })
+                            }
+                        )
                     }
-                )
+                    if (anomalyConfig.algorithms.contains(AnomalyAlgorithm.Motion)) {
+                        OutlinedLegendText(
+                            text = "Motion",
+                            fillColor = Color.Green,
+                            fontSize = 11.sp
+                        )
+                    }
+                    if (anomalyConfig.algorithms.contains(AnomalyAlgorithm.ColorOutlier)) {
+                        OutlinedLegendText(
+                            text = "Color Outlier",
+                            fillColor = Color.Blue,
+                            fontSize = 11.sp
+                        )
+                    }
+                } else {
+                    Text(
+                        text = anomalyConfig.thermalPolarity.label,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
+                            detectTapGestures(onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) })
+                        }
+                    )
+                }
             }
             if (showSensitivityDialog) {
                 var sliderValue by remember(streamDesignator, anomalyConfig.sensitivity) {
@@ -466,6 +504,33 @@ fun StreamTile(
                 onDismiss = {showPicker = false}
             )
         }
+    }
+}
+
+@Composable
+private fun OutlinedLegendText(
+    text: String,
+    fillColor: Color,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    modifier: Modifier = Modifier,
+) {
+    val style = TextStyle(
+        fontSize = fontSize,
+        fontWeight = FontWeight.Black,
+    )
+    Box(modifier = modifier) {
+        Text(
+            text = text,
+            color = Color.White,
+            style = style.copy(drawStyle = Stroke(width = 3f, miter = 2f)),
+            modifier = Modifier.align(Alignment.CenterStart)
+        )
+        Text(
+            text = text,
+            color = fillColor,
+            style = style,
+            modifier = Modifier.align(Alignment.CenterStart)
+        )
     }
 }
 

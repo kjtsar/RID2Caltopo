@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import java.util.Locale
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.Text
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 internal data class IndicatorPalette(
     val fillColor: Color,
@@ -51,6 +52,7 @@ fun DesignatorIndicator(
     streamErrorDetail: String?,
     onLongPress: () -> Unit
 ) {
+    val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val errorSummary = formatStreamErrorDetail(streamErrorDetail)
     val renderDelayMs = viewModel.renderDelayMsFor(streamDesignator)
     val playbackIndicatorState = viewModel.playbackIndicatorStateFor(streamDesignator)
@@ -74,6 +76,11 @@ fun DesignatorIndicator(
             fillColor = Color.White,
             outlineColor = Color.Black
         )
+        val helperText = if (focusedPath == streamDesignator) {
+            "Captured video playback. Use the tile controls to review playback settings."
+        } else {
+            "Tap to focus. Use the tile controls to review playback settings."
+        }
         Column {
             OutlinedIndicatorText(
                 text = "$streamDesignator - Captured Video",
@@ -86,7 +93,7 @@ fun DesignatorIndicator(
                     .background(Color.Transparent)
             )
             OutlinedIndicatorText(
-                text = "Tap to focus. Use the tile controls to review playback settings.",
+                text = helperText,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,

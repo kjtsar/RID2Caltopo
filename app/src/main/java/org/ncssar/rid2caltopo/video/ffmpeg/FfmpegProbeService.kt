@@ -123,7 +123,9 @@ private data class ManagedRenderSession(
     var lastStartupRecoveryDeferredLogAtMs: Long = 0L,
 )
 
-class FfmpegProbeService {
+class FfmpegProbeService(
+    private val onLocalPlaybackEnded: (String) -> Unit = {},
+) {
     private val tag = "FfmpegProbeService"
     private val recentReaderWaitPenaltyMs = 5_000L
     private val readerWaitRecoveryFramesToClear = 3
@@ -791,13 +793,18 @@ class FfmpegProbeService {
         val streamPath = synchronized(stateLock) {
             sourcePathByDesignator[designator]
         } ?: designator
-        val rtspUrl = "rtsp://127.0.0.1:8554/$streamPath"
+        val inputUrl =
+            if (streamPath.contains("://")) {
+                streamPath
+            } else {
+                "rtsp://127.0.0.1:8554/$streamPath"
+            }
         CTDebug(
             tag,
-            "Starting FFmpeg render for $designator url=$rtspUrl " +
+            "Starting FFmpeg render for $designator url=$inputUrl " +
                 upstreamCorrelationSummary(designator, System.currentTimeMillis())
         )
-        val sessionId = FfmpegBridge.startRender(designator, rtspUrl)
+        val sessionId = FfmpegBridge.startRender(designator, inputUrl)
         if (sessionId > 0L) {
             var duplicateSessionId: Long? = null
             var existingSessionId: Long? = null
@@ -1005,7 +1012,9 @@ class FfmpegProbeService {
     }
 
     private fun handleSessionStopped(designator: String, sessionId: Long) {
+        var localPlaybackEnded = false
         synchronized(stateLock) {
+            val isLocalFile = sourcePathByDesignator[designator]?.startsWith("file://", ignoreCase = true) == true
             if (renderSessions[designator] == sessionId) {
                 renderSessions.remove(designator)
                 lastFrameAtMs.remove(designator)
@@ -1015,6 +1024,16 @@ class FfmpegProbeService {
                 suspendedRenderSessions.remove(designator)
             }
             managedRenderSessions.remove(sessionId)
+            if (isLocalFile &&
+                renderSessions[designator] == null &&
+                suspendedRenderSessions[designator] == null &&
+                managedRenderSessions.values.none { it.designator == designator }
+            ) {
+                localPlaybackEnded = true
+            }
+        }
+        if (localPlaybackEnded) {
+            onLocalPlaybackEnded(designator)
         }
     }
 

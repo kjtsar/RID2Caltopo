@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -53,6 +54,7 @@ import org.ncssar.rid2caltopo.ui.ComplianceAlertCandidate
 import org.ncssar.rid2caltopo.ui.ComplianceAlertCenter
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyPrefs
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
@@ -502,7 +504,15 @@ class StreamsViewModel(
     private val hotMainThreadCpuFractionForThirdOrFourthStream = 0.30
     private val processLoadLogIntervalMs = 5_000L
     private val ffmpegProbeService: FfmpegProbeService? = try {
-        FfmpegProbeService()
+        FfmpegProbeService(
+            onLocalPlaybackEnded = { designator ->
+                viewModelScope.launch {
+                    if (isLocalPlayback(designator)) {
+                        closeStream(designator)
+                    }
+                }
+            }
+        )
     } catch (t: Throwable) {
         CTError(tag, "FFmpeg probe service unavailable; stream playback will remain unavailable.", Exception(t))
         null
@@ -582,6 +592,8 @@ class StreamsViewModel(
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
     private val _anomalyConfigByDesignator = mutableStateMapOf<String, AnomalyConfig>()
+    private var defaultAnomalyConfig by mutableStateOf(AnomalyConfig())
+    private var lastCapturedVideoSelectionUri: Uri? by mutableStateOf(null)
     private val _renderDelayMsByDesignator = mutableStateMapOf<String, Long>()
     private val _playbackIndicatorStateByDesignator = mutableStateMapOf<String, PlaybackIndicatorState>()
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
@@ -767,7 +779,15 @@ class StreamsViewModel(
 
     fun getExoPlayerFor(designator: String): ExoPlayer? = streamSessionService.playerFor(designator)
 
+    fun capturedVideoPickerInitialUri(): Uri? {
+        return lastCapturedVideoSelectionUri
+            ?: CaltopoClient.GetTodaysTrackDir()?.uri
+            ?: CaltopoClient.GetArchiveUri()
+            ?: CaltopoClient.GetArchiveUriSelectionHint()
+    }
+
     fun openCapturedVideo(uri: Uri, displayName: String) {
+        lastCapturedVideoSelectionUri = uri
         val normalizedName = displayName.ifBlank { "Captured Video" }
         val existingNames = buildSet {
             addAll(streams.value.keys)
@@ -780,26 +800,56 @@ class StreamsViewModel(
             suffix += 1
         }
 
-        val newInfo = StreamInfo(
+        val pendingInfo = StreamInfo(
             designator = designator,
             sourcePath = uri.toString(),
             playbackUri = uri,
             isLocalPlayback = true,
-            state = StreamState.LIVE,
+            state = StreamState.CONNECTING,
             revision = 1L,
         )
         _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
-            this[designator] = newInfo
+            this[designator] = pendingInfo
         }
         _focusedPath.value = designator
         syncStreamSessions(currentResyncSnapshot())
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolvedInfo = try {
+                val cachedUri = stageCapturedVideoForPlayback(designator, uri, displayName)
+                pendingInfo.copy(
+                    sourcePath = cachedUri.toString(),
+                    playbackUri = cachedUri,
+                    state = StreamState.LIVE,
+                    revision = pendingInfo.revision + 1L,
+                )
+            } catch (t: Throwable) {
+                pendingInfo.copy(
+                    state = StreamState.ERROR,
+                    errorDetail = t.message ?: "Unable to prepare captured video",
+                    revision = pendingInfo.revision + 1L,
+                )
+            }
+            withContext(Dispatchers.Main) {
+                val current = _localPlaybackEntries.value[designator] ?: return@withContext
+                _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
+                    this[designator] = resolvedInfo.copy(revision = maxOf(current.revision + 1L, resolvedInfo.revision))
+                }
+                syncStreamSessions(currentResyncSnapshot())
+            }
+        }
     }
 
     fun closeStream(designator: String) {
-        if (_localPlaybackEntries.value.containsKey(designator)) {
+        _localPlaybackEntries.value[designator]?.let { localInfo ->
             _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
                 remove(designator)
             }
+            localInfo.playbackUri
+                ?.takeIf { it.scheme.equals("file", ignoreCase = true) }
+                ?.path
+                ?.let { path ->
+                    runCatching { File(path).delete() }
+                }
             dismissedStreamRevisions.remove(designator)
             if (_focusedPath.value == designator) {
                 _focusedPath.value = null
@@ -1172,7 +1222,7 @@ class StreamsViewModel(
     }
 
     fun anomalyConfigFor(designator: String): AnomalyConfig {
-        return _anomalyConfigByDesignator[designator] ?: AnomalyConfig()
+        return _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
     }
 
     fun toggleAnomalyEnabled(designator: String) {
@@ -1309,7 +1359,15 @@ class StreamsViewModel(
     }
 
     private fun shouldUseFfmpegRender(designator: String): Boolean {
-        if (streamInfoByDesignator[designator]?.isLocalPlayback == true) return false
+        val info = streamInfoByDesignator[designator]
+        if (info?.isLocalPlayback == true) {
+            val config = _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
+            return ffmpegProbeService != null &&
+                config.enabled &&
+                _focusedPath.value == designator &&
+                displayedTileCountForCurrentLayout() == 1 &&
+                info.state == StreamState.LIVE
+        }
         return StreamRenderRouter.useFfmpeg(
             designator = designator,
             liveStreams = streamInfoByDesignator,
@@ -1501,9 +1559,11 @@ class StreamsViewModel(
         designator: String,
         reducer: (AnomalyConfig) -> AnomalyConfig,
     ) {
-        val current = _anomalyConfigByDesignator[designator] ?: AnomalyConfig()
+        val current = _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
         val updated = reducer(current)
         _anomalyConfigByDesignator[designator] = updated
+        defaultAnomalyConfig = updated
+        AnomalyPrefs.save(getApplication<Application>().applicationContext, updated)
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
         syncStreamSessions(currentResyncSnapshot())
     }
@@ -1820,8 +1880,8 @@ class StreamsViewModel(
 
     private fun applyFocusedAnomalyPolicy(liveDesignators: Set<String>) {
         val focused = _focusedPath.value
-        liveDesignators.forEach { designator ->
-            val config = _anomalyConfigByDesignator[designator] ?: AnomalyConfig()
+        (liveDesignators + _localPlaybackEntries.value.keys).forEach { designator ->
+            val config = _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
             val enableForDesignator = focused == designator && config.enabled
             ffmpegProbeService?.setAnomalyConfig(
                 designator,
@@ -1830,14 +1890,40 @@ class StreamsViewModel(
         }
     }
 
+    private fun stageCapturedVideoForPlayback(designator: String, sourceUri: Uri, displayName: String): Uri {
+        val context = getApplication<Application>().applicationContext
+        val sanitizedBase = displayName
+            .substringBeforeLast('.', displayName)
+            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+            .trim('_')
+            .ifBlank { "captured_video" }
+        val extension = displayName.substringAfterLast('.', "").takeIf { it.isNotBlank() } ?: "mp4"
+        val targetFile = File(
+            context.cacheDir,
+            "${sanitizedBase}_${designator.hashCode().toUInt().toString(16)}.$extension"
+        )
+        context.contentResolver.openInputStream(sourceUri)?.use { input ->
+            targetFile.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        } ?: error("Unable to read selected video")
+        return Uri.fromFile(targetFile)
+    }
+
     init {
+        defaultAnomalyConfig = AnomalyPrefs.load(application.applicationContext)
         CaltopoMap.AddMapStatusListener(this)
         CaltopoClient.AddDroneSpecsChangedListener(this)
         StreamRegistry.setAdmissionGuard(::admissionGuardDecision)
         startProcessLoadMonitor()
 
         viewModelScope.launch {
-            StreamRegistry.streams.collect { map ->
+            combine(StreamRegistry.streams, _localPlaybackEntries) { liveStreams, localPlaybackEntries ->
+                buildMap<String, StreamInfo> {
+                    putAll(liveStreams)
+                    putAll(localPlaybackEntries)
+                }
+            }.collect { map ->
                 syncStreamSessions(map)
             }
         }

@@ -131,7 +131,6 @@
 #define RENDER_CONTROL_LOG_INTERVAL_MS 1000
 #define RENDER_NO_SURFACE_LOG_INTERVAL_MS 2000
 #define IO_STARTUP_INTERRUPT_MS 4000
-#define ANOMALY_MAX_BOXES_PER_FRAME 3
 // Set to 1 to enable telemetry extraction from packet side-data and frame
 // metadata (drone flight data embedded in the stream).  This is expensive on
 // CPU-constrained devices and has not yet yielded actionable insights, so it
@@ -145,17 +144,6 @@ typedef struct {
     int64_t source_ts_us;
     int64_t enqueued_at_ms;
 } render_queue_slot_t;
-
-typedef struct {
-    float left_norm;
-    float top_norm;
-    float right_norm;
-    float bottom_norm;
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-    float weight;   // stroke scale 0.0–1.0: thin on first hit, full at sustained detections
-} anomaly_box_t;
 #endif
 
 typedef struct {
@@ -170,7 +158,9 @@ typedef struct {
     jobject surface_global_ref;
     ANativeWindow *window;
     anomaly_config_t anomaly_cfg;    // protected by g_lock
-    anomaly_state_t  anomaly_state;  // owned by decode thread; no locking needed
+    anomaly_state_t  anomaly_state;  // decode-owned, synchronized via anomaly_lock for resets
+    pthread_mutex_t anomaly_lock;
+    bool anomaly_lock_ready;
     // Manual render stride — set via nativeSetRenderStride().
     // When render_stride > 1, every (render_stride - 1) out of render_stride
     // non-keyframe packets are dropped *before* decode.  Keyframe (IDR) packets
@@ -221,6 +211,8 @@ typedef struct {
     int64_t gap_samples_ms[RENDER_SAMPLE_WINDOW_CAPACITY];
     int gap_sample_count;
     int gap_sample_head;
+    int64_t local_playback_last_pts_us;
+    int64_t local_playback_last_render_at_ms;
     int64_t reader_stall_started_at_ms;
     int64_t last_reader_stall_log_at_ms;
     int64_t reader_stall_timeout_events;
@@ -535,6 +527,11 @@ static ANativeWindow *acquire_window(ffmpeg_session_t *session) {
     return window;
 }
 
+static bool is_local_file_source(const ffmpeg_session_t *session) {
+    if (session == NULL) return false;
+    return strncmp(session->url, "file://", 7) == 0;
+}
+
 #if HAVE_FFMPEG && HAVE_SWSCALE
 static void ensure_rgba_resources(ffmpeg_session_t *session, int width, int height, enum AVPixelFormat src_fmt) {
     if (session->sws != NULL && session->rgba_width == width && session->rgba_height == height) {
@@ -658,7 +655,13 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
     session->anomaly_rgba_height = height;
     session->anomaly_src_fmt = src_fmt;
 
-    anomaly_state_reset(&session->anomaly_state);
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_lock(&session->anomaly_lock);
+        anomaly_state_reset(&session->anomaly_state);
+        pthread_mutex_unlock(&session->anomaly_lock);
+    } else {
+        anomaly_state_reset(&session->anomaly_state);
+    }
 }
 
 static bool analyze_rgba_frame(ffmpeg_session_t *session,
@@ -671,9 +674,16 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
     pthread_mutex_lock(&g_lock);
     cfg = session->anomaly_cfg;
     pthread_mutex_unlock(&g_lock);
-    return anomaly_process_frame(&session->anomaly_state, &cfg,
-                                 rgba, rgba_stride, width, height,
-                                 source_ts_us, NULL) > 0;
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_lock(&session->anomaly_lock);
+    }
+    bool annotated = anomaly_process_frame(&session->anomaly_state, &cfg,
+                                           rgba, rgba_stride, width, height,
+                                           source_ts_us, NULL) > 0;
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_unlock(&session->anomaly_lock);
+    }
+    return annotated;
 }
 
 
@@ -731,8 +741,15 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
                                     AVFrame *decoded,
                                     int64_t source_ts_us,
                                     int64_t render_latency_ms) {
+    bool use_render_lock = session->render_sync_ready;
+    if (use_render_lock) {
+        pthread_mutex_lock(&session->render_lock);
+    }
     ensure_rgba_resources(session, decoded->width, decoded->height, decoded->format);
     if (session->sws == NULL || session->rgba_frame == NULL) {
+        if (use_render_lock) {
+            pthread_mutex_unlock(&session->render_lock);
+        }
         dispatch_probe_event(session->designator, "render_skipped_no_rgba", session->session_id, source_ts_us,
                              NAN, NAN, NAN, NAN, NAN, NAN);
         return;
@@ -749,6 +766,9 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
 
     ANativeWindow *window = acquire_window(session);
     if (window == NULL) {
+        if (use_render_lock) {
+            pthread_mutex_unlock(&session->render_lock);
+        }
         int64_t now_ms = monotonic_ms();
         if (now_ms - session->last_no_surface_log_at_ms >= RENDER_NO_SURFACE_LOG_INTERVAL_MS) {
             session->last_no_surface_log_at_ms = now_ms;
@@ -807,6 +827,9 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
     }
 
     ANativeWindow_release(window);
+    if (use_render_lock) {
+        pthread_mutex_unlock(&session->render_lock);
+    }
 }
 #endif
 
@@ -1539,6 +1562,29 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session, bool obs
     memset(session->gap_samples_ms, 0, sizeof(session->gap_samples_ms));
     session->gap_sample_count = 0;
     session->gap_sample_head = 0;
+    session->local_playback_last_pts_us = 0;
+    session->local_playback_last_render_at_ms = 0;
+}
+
+static void pace_local_file_playback(ffmpeg_session_t *session, int64_t pts_us) {
+    if (session == NULL || pts_us <= 0) return;
+    if (session->local_playback_last_pts_us > 0 &&
+        session->local_playback_last_render_at_ms > 0 &&
+        pts_us > session->local_playback_last_pts_us) {
+        int64_t delta_us = pts_us - session->local_playback_last_pts_us;
+        if (delta_us > 250000) delta_us = 250000;
+        int64_t target_ms = session->local_playback_last_render_at_ms + (delta_us / 1000);
+        while (session_running(session)) {
+            int64_t now_ms = monotonic_ms();
+            if (now_ms >= target_ms) break;
+            int64_t sleep_us = (target_ms - now_ms) * 1000;
+            if (sleep_us > 5000) sleep_us = 5000;
+            if (sleep_us < 1000) sleep_us = 1000;
+            usleep((useconds_t) sleep_us);
+        }
+    }
+    session->local_playback_last_pts_us = pts_us;
+    session->local_playback_last_render_at_ms = monotonic_ms();
 }
 
 static void trim_render_queue_to_latest(ffmpeg_session_t *session, int keep_latest) {
@@ -2303,6 +2349,9 @@ static int open_decoder(ffmpeg_session_t *session) {
 
 static void close_decoder(ffmpeg_session_t *session) {
 #if HAVE_SWSCALE
+    if (session->render_sync_ready) {
+        pthread_mutex_lock(&session->render_lock);
+    }
     if (session->sws != NULL) {
         sws_freeContext(session->sws);
         session->sws = NULL;
@@ -2329,11 +2378,20 @@ static void close_decoder(ffmpeg_session_t *session) {
         av_free(session->anomaly_rgba_buffer);
         session->anomaly_rgba_buffer = NULL;
     }
-    anomaly_state_cleanup(&session->anomaly_state);
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_lock(&session->anomaly_lock);
+        anomaly_state_cleanup(&session->anomaly_state);
+        pthread_mutex_unlock(&session->anomaly_lock);
+    } else {
+        anomaly_state_cleanup(&session->anomaly_state);
+    }
     session->anomaly_rgba_buffer_size = 0;
     session->anomaly_rgba_width = 0;
     session->anomaly_rgba_height = 0;
     session->anomaly_src_fmt = AV_PIX_FMT_NONE;
+    if (session->render_sync_ready) {
+        pthread_mutex_unlock(&session->render_lock);
+    }
 #endif
     if (session->codec != NULL) {
         avcodec_free_context(&session->codec);
@@ -2385,7 +2443,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                  session->designator,
                  RENDER_STARTUP_OBSERVE_MS);
 #if HAVE_SWSCALE
-        if (session->render_sync_ready) {
+        if (session->render_sync_ready && !is_local_file_source(session)) {
             pthread_mutex_lock(&session->render_lock);
             session->render_thread_stop = false;
             clear_render_queue(session);
@@ -2420,6 +2478,8 @@ static void run_decode_loop(ffmpeg_session_t *session) {
     // The render thread stays alive throughout; reader_reconnecting_since_ms
     // tells it to hold the current frame instead of draining the queue.
     bool first_open = true;
+    bool local_file_source = is_local_file_source(session);
+    bool local_file_eof = false;
     int64_t reconnect_delay_ms = 150; // head-start: DJI media arrives ~220 ms after connect
     int reconnect_failures = 0;
 
@@ -2539,10 +2599,14 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                 }
             }
         if (rc == AVERROR_EOF) {
-            // Stream ended (publisher disconnected from mediamtx).
-            // Break out of the inner loop so the outer reconnect loop can
-            // close and reopen the decoder rather than spinning on a dead socket.
+            // Local-file playback should stop cleanly at EOF instead of reopening
+            // the file from the beginning. Live/RTSP sources still use EOF as the
+            // reconnect signal because publisher churn appears as end-of-stream.
             av_packet_unref(pkt);
+            if (local_file_source) {
+                local_file_eof = true;
+                break;
+            }
             break;
         }
         if (rc < 0) {
@@ -2744,6 +2808,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                 session->designator);
                     }
                 } else {
+                    if (is_local_file_source(session)) {
+                        pace_local_file_playback(session, pts_us);
+                    }
                     render_frame_to_surface(session, frame, pts_us, 0);
                     session->next_render_due_ms = monotonic_ms() + current_render_interval_ms(session);
                 }
@@ -2751,11 +2818,18 @@ static void run_decode_loop(ffmpeg_session_t *session) {
 #endif
             av_frame_unref(frame);
         }
+        if (local_file_eof) {
+            break;
+        }
     } // ── end inner decode loop ───────────────────────────────────────────
 
     // Close the decoder so we can reopen it cleanly on the next iteration.
     // The render thread stays alive between reconnects.
     close_decoder(session);
+
+    if (local_file_eof) {
+        break;
+    }
 
     } // ── end outer reconnect loop ─────────────────────────────────────────
 
@@ -2848,6 +2922,15 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.min_hits          = ANOMALY_DEFAULT_MIN_HITS;
     slot->anomaly_cfg.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
     anomaly_state_init(&slot->anomaly_state);
+    if (pthread_mutex_init(&slot->anomaly_lock, NULL) != 0) {
+        ct_error(TAG, "pthread_mutex_init failed for anomaly lock");
+        memset(slot, 0, sizeof(*slot));
+        pthread_mutex_unlock(&g_lock);
+        (*env)->ReleaseStringUTFChars(env, designator, d);
+        (*env)->ReleaseStringUTFChars(env, url, u);
+        return 0;
+    }
+    slot->anomaly_lock_ready = true;
     slot->render_stride = 1;
     slot->render_stride_counter = 0;
     // Render sessions start paused: no frames decoded until the TextureView surface
@@ -2861,6 +2944,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     if (slot->is_render) {
         if (pthread_mutex_init(&slot->render_lock, NULL) != 0) {
             ct_error(TAG, "pthread_mutex_init failed for render_lock");
+            pthread_mutex_destroy(&slot->anomaly_lock);
             memset(slot, 0, sizeof(*slot));
             pthread_mutex_unlock(&g_lock);
             (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -2870,6 +2954,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
         if (pthread_cond_init(&slot->render_cond, NULL) != 0) {
             ct_error(TAG, "pthread_cond_init failed for render_cond");
             pthread_mutex_destroy(&slot->render_lock);
+            pthread_mutex_destroy(&slot->anomaly_lock);
             memset(slot, 0, sizeof(*slot));
             pthread_mutex_unlock(&g_lock);
             (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -2910,6 +2995,10 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
             slot->render_sync_ready = false;
         }
 #endif
+        if (slot->anomaly_lock_ready) {
+            pthread_mutex_destroy(&slot->anomaly_lock);
+            slot->anomaly_lock_ready = false;
+        }
         memset(slot, 0, sizeof(*slot));
         pthread_mutex_unlock(&g_lock);
         (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -3155,7 +3244,13 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.thermal_min_delta = thermal_min_delta > 0.0f
                                                  ? thermal_min_delta : ANOMALY_THERMAL_MIN_DELTA;
         // Reset accumulators so stale boxes don't persist across config changes.
-        anomaly_state_reset(&session->anomaly_state);
+        if (session->anomaly_lock_ready) {
+            pthread_mutex_lock(&session->anomaly_lock);
+            anomaly_state_reset(&session->anomaly_state);
+            pthread_mutex_unlock(&session->anomaly_lock);
+        } else {
+            anomaly_state_reset(&session->anomaly_state);
+        }
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -3225,6 +3320,10 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStop(
         session->render_sync_ready = false;
     }
 #endif
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_destroy(&session->anomaly_lock);
+        session->anomaly_lock_ready = false;
+    }
     memset(session, 0, sizeof(*session));
     pthread_mutex_unlock(&g_lock);
 

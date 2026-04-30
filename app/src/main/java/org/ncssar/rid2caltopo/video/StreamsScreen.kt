@@ -63,7 +63,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
@@ -82,18 +82,21 @@ import org.ncssar.rid2caltopo.ui.ResumeProximityAlertButton
 import org.opendroneid.android.bluetooth.WiFiScanner
 import androidx.documentfile.provider.DocumentFile
 
-private class OpenCapturedVideoDocument : ActivityResultContracts.OpenDocument() {
-    override fun createIntent(context: android.content.Context, input: Array<String>): Intent {
-        val initialUri = CaltopoClient.GetTodaysTrackDir()?.uri
-            ?: CaltopoClient.GetArchiveUri()
-            ?: CaltopoClient.GetArchiveUriSelectionHint()
-        return super.createIntent(context, input).apply {
+private class OpenCapturedVideoDocument : ActivityResultContract<Uri?, Uri?>() {
+    override fun createIntent(context: android.content.Context, input: Uri?): Intent {
+        return Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "video/*"
             putExtra(Intent.EXTRA_LOCAL_ONLY, true)
             putExtra("android.content.extra.NO_CACHE", true)
-            if (initialUri != null) {
-                putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
+            if (input != null) {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, input)
             }
         }
+    }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Uri? {
+        return if (resultCode == android.app.Activity.RESULT_OK) intent?.data else null
     }
 }
 
@@ -645,7 +648,7 @@ private fun StreamsGrid(
             CTDebug(tag, "No streams to show.")
             EmptyStreamsView(
                 mapStatus = mapStatus,
-                onPlayCapturedVideo = { capturedVideoLauncher.launch(arrayOf("video/*")) },
+                onPlayCapturedVideo = { capturedVideoLauncher.launch(viewModel.capturedVideoPickerInitialUri()) },
                 modifier = Modifier.fillMaxSize()
             )
         } else {

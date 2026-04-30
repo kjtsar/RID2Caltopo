@@ -661,13 +661,25 @@ int anomaly_process_frame(
                 for (int dy = -sr; dy <= sr; dy++) {
                     for (int dx = -sr; dx <= sr; dx++) {
                         long sad = 0;
+                        bool valid_patch = true;
                         for (int ky = -ph; ky <= ph; ky++) {
                             for (int kx = -ph; kx <= ph; kx++) {
-                                int cv = curr_luma[(ay + ky) * motion_w + (ax + kx)];
-                                int pv = state->prev_luma[(ay + dy + ky) * motion_w + (ax + dx + kx)];
+                                int cx = ax + kx;
+                                int cy = ay + ky;
+                                int px = ax + dx + kx;
+                                int py = ay + dy + ky;
+                                if (cx < 0 || cx >= motion_w || cy < 0 || cy >= motion_h ||
+                                    px < 0 || px >= motion_w || py < 0 || py >= motion_h) {
+                                    valid_patch = false;
+                                    break;
+                                }
+                                int cv = curr_luma[cy * motion_w + cx];
+                                int pv = state->prev_luma[py * motion_w + px];
                                 int d = cv - pv; sad += d < 0 ? -d : d;
                             }
+                            if (!valid_patch) break;
                         }
+                        if (!valid_patch) continue;
                         if (sad < best_sad) { best_sad = sad; best_dx = dx; best_dy = dy; }
                     }
                 }

@@ -68,6 +68,7 @@ data class NativeAnomalyConfig(
     val enabled: Boolean,
     val algorithmMask: Int,
     val frameStride: Int,
+    val pixelStep: Int,
     val scoreThreshold: Float,
     val minAreaFraction: Float,
     val thermalPolarity: Int,
@@ -81,6 +82,7 @@ data class AnomalyConfig(
     val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.ThermalHotspot),
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
     val frameStride: Int = 3,
+    val pixelStep: Int = 0,
     val sensitivity: Float = 0.60f,
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.WhiteHot,
@@ -97,6 +99,9 @@ data class AnomalyConfig(
 
     val scanZoneLabel: String
         get() = String.format(Locale.US, "%d%%", (scanZone.coerceIn(0.5f, 1f) * 100f).toInt())
+
+    val pixelStepLabel: String
+        get() = if (pixelStep <= 0) "Auto" else "${pixelStep}px"
 
     fun resolvedAppearanceMode(
         detectedMode: AppearanceAnomalyMode? = null,
@@ -139,6 +144,7 @@ data class AnomalyConfig(
             enabled = enabledOverride ?: enabled,
             algorithmMask = mask,
             frameStride = frameStride.coerceIn(1, 8),
+            pixelStep = pixelStep.coerceIn(0, 8),
             scoreThreshold = scoreThreshold,
             minAreaFraction = effectiveMinAreaFraction,
             thermalPolarity = thermalPolarity.nativeValue,

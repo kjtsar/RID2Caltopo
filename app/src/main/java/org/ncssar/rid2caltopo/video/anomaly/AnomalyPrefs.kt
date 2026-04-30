@@ -8,6 +8,7 @@ object AnomalyPrefs {
     private const val KEY_ALGORITHMS = "algorithms"
     private const val KEY_APPEARANCE_SELECTION = "appearance_selection"
     private const val KEY_FRAME_STRIDE = "frame_stride"
+    private const val KEY_PIXEL_STEP = "pixel_step"
     private const val KEY_SENSITIVITY = "sensitivity"
     private const val KEY_MIN_AREA_FRACTION = "min_area_fraction"
     private const val KEY_THERMAL_POLARITY = "thermal_polarity"
@@ -34,6 +35,7 @@ object AnomalyPrefs {
             algorithms = algorithms,
             appearanceSelection = appearanceSelection,
             frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 8),
+            pixelStep = prefs.getInt(KEY_PIXEL_STEP, defaults.pixelStep).coerceIn(0, 8),
             sensitivity = prefs.getFloat(KEY_SENSITIVITY, defaults.sensitivity).coerceIn(0f, 1f),
             minAreaFraction = prefs.getFloat(KEY_MIN_AREA_FRACTION, defaults.minAreaFraction)
                 .coerceIn(0.00005f, 0.03f),
@@ -52,6 +54,7 @@ object AnomalyPrefs {
             .putStringSet(KEY_ALGORITHMS, normalized.algorithms.map { it.name }.toSet())
             .putString(KEY_APPEARANCE_SELECTION, normalized.appearanceSelection.name)
             .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 8))
+            .putInt(KEY_PIXEL_STEP, normalized.pixelStep.coerceIn(0, 8))
             .putFloat(KEY_SENSITIVITY, normalized.sensitivity.coerceIn(0f, 1f))
             .putFloat(KEY_MIN_AREA_FRACTION, normalized.minAreaFraction.coerceIn(0.00005f, 0.03f))
             .putString(KEY_THERMAL_POLARITY, normalized.thermalPolarity.name)

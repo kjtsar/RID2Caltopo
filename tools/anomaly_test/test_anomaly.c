@@ -57,6 +57,7 @@ static anomaly_config_t default_cfg(int algorithm_mask) {
     c.enabled           = true;
     c.algorithm_mask    = algorithm_mask;
     c.frame_stride      = 1;
+    c.pixel_step        = 0;
     c.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
     c.min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION;
     c.thermal_polarity  = ANOMALY_THERMAL_WHITE_HOT;
@@ -436,8 +437,11 @@ static void test_motion_moving_patch(void) {
     // Frame 1: patch at x=160, y=88
     uint8_t *f1 = make_gray_frame(W, H, 80);
     for (int y = 20; y < H - 20; y += 40)
-        for (int x = 20; x < W - 20; x += 40)
+        for (int x = 20; x < W - 20; x += 40) {
             set_pixel(f1, W * 4, x, y, 120, 120, 120);
+            if (x + 4 < W) set_pixel(f1, W * 4, x + 4, y, 40, 40, 40);
+            if (y + 4 < H) set_pixel(f1, W * 4, x, y + 4, 200, 200, 200);
+        }
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++)
             set_pixel(f1, W * 4, 160 + dx, 88 + dy, 240, 240, 240);
@@ -445,8 +449,11 @@ static void test_motion_moving_patch(void) {
     // Frame 2: patch jumped to x=120, y=88 (moved 40px left; x=120 is grid-aligned)
     uint8_t *f2 = make_gray_frame(W, H, 80);
     for (int y = 20; y < H - 20; y += 40)
-        for (int x = 20; x < W - 20; x += 40)
+        for (int x = 20; x < W - 20; x += 40) {
             set_pixel(f2, W * 4, x, y, 120, 120, 120);
+            if (x + 4 < W) set_pixel(f2, W * 4, x + 4, y, 40, 40, 40);
+            if (y + 4 < H) set_pixel(f2, W * 4, x, y + 4, 200, 200, 200);
+        }
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++)
             set_pixel(f2, W * 4, 120 + dx, 88 + dy, 240, 240, 240);

@@ -57,10 +57,14 @@
 
 // ── GMV / similarity-transform tuning ─────────────────────────────────────
 #define ANOMALY_GMV_SEARCH_RADIUS   20
-#define ANOMALY_GMV_PATCH_HALF       2
+#define ANOMALY_GMV_PATCH_HALF       3
 #define ANOMALY_GMV_RESIDUAL_THRESH  0.05f
 #define ANOMALY_GMV_MIN_SCALE        0.70f
 #define ANOMALY_GMV_MAX_SCALE        1.43f
+#define ANOMALY_GMV_MIN_TEXTURE_SCORE 20
+#define ANOMALY_GMV_MIN_MATCH_MARGIN  4
+#define ANOMALY_GMV_ZONE_GRID         4
+#define ANOMALY_GMV_MIN_ANCHORS       6
 
 // ── Temporal accumulator tuning ────────────────────────────────────────────
 #define ANOMALY_ACC_EMA_ALPHA    0.30f
@@ -96,6 +100,7 @@
 
 #define ANOMALY_MAX_BOXES_PER_FRAME 4
 #define ANOMALY_DEBUG_TOP_CANDIDATES 5
+#define ANOMALY_GMV_MAX_DEBUG_ANCHORS (ANOMALY_GMV_ZONE_GRID * ANOMALY_GMV_ZONE_GRID)
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -112,6 +117,7 @@ typedef struct {
     bool  enabled;
     int   algorithm_mask;
     int   frame_stride;
+    int   pixel_step;
     float score_threshold;
     float min_area_fraction;
     int   thermal_polarity;
@@ -175,11 +181,60 @@ typedef struct {
     anomaly_debug_candidate_t top_candidates[ANOMALY_DEBUG_TOP_CANDIDATES];
 } anomaly_debug_saliency_t;
 
+typedef struct {
+    bool  valid;
+    bool  scene_discontinuity;
+    int   sample_step;
+    int   motion_step;
+    int   sample_count;
+    float residual_mean;
+    float residual_std;
+    bool  raw_candidate_valid;
+    float raw_score;
+    float raw_x_norm;
+    float raw_y_norm;
+    int   top_candidate_count;
+    anomaly_debug_candidate_t top_candidates[ANOMALY_DEBUG_TOP_CANDIDATES];
+} anomaly_debug_motion_t;
+
+typedef struct {
+    bool  valid;
+    int   zone_gx;
+    int   zone_gy;
+    int   pixel_x;
+    int   pixel_y;
+    float x_norm;
+    float y_norm;
+    int   texture_score;
+    int   match_dx;
+    int   match_dy;
+    int   best_sad;
+    int   second_best_sad;
+} anomaly_debug_gmv_anchor_t;
+
+typedef struct {
+    bool  valid;
+    bool  scene_discontinuity;
+    int   sample_step;
+    int   motion_step;
+    int   anchor_count;
+    float fit_a;
+    float fit_b;
+    float fit_tx;
+    float fit_ty;
+    float fit_scale;
+    float fit_theta_deg;
+    float fit_mean_residual;
+    anomaly_debug_gmv_anchor_t anchors[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+} anomaly_debug_gmv_t;
+
 // Returned from anomaly_process_frame(); caller may inspect detections.
 typedef struct {
     int           box_count;
     anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
     bool          had_discontinuity;  // true when a scene cut was detected
+    anomaly_debug_gmv_t gmv_debug;
+    anomaly_debug_motion_t motion_debug;
     anomaly_debug_saliency_t saliency_debug;
 } anomaly_result_t;
 

@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
@@ -274,6 +275,11 @@ fun StreamTile(
                     color = Color.White,
                     fontSize = 11.sp
                 )
+                Text(
+                    text = "Detail ${anomalyConfig.pixelStepLabel}",
+                    color = Color.White,
+                    fontSize = 11.sp
+                )
                 when (resolvedAppearanceMode) {
                     AppearanceAnomalyMode.Thermal -> {
                         val thermalShortLabel = when (anomalyConfig.thermalPolarity) {
@@ -424,11 +430,19 @@ fun StreamTile(
                 var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
                     mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 4))
                 }
+                var pixelStepValue by remember(streamDesignator, anomalyConfig.pixelStep) {
+                    mutableStateOf(anomalyConfig.pixelStep.coerceIn(0, 4))
+                }
                 AlertDialog(
                     onDismissRequest = { showAnomalySettingsDialog = false },
                     title = { Text("Anomaly Detector") },
                     text = {
+                        val settingsScroll = rememberScrollState()
                         Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(settingsScroll),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Row(
@@ -524,6 +538,19 @@ fun StreamTile(
                                 valueRange = 1f..4f,
                                 steps = 2
                             )
+                            Text(
+                                if (pixelStepValue <= 0) {
+                                    "Detail Auto"
+                                } else {
+                                    "Detail ${pixelStepValue}px step"
+                                }
+                            )
+                            Slider(
+                                value = pixelStepValue.toFloat(),
+                                onValueChange = { pixelStepValue = it.toInt().coerceIn(0, 4) },
+                                valueRange = 0f..4f,
+                                steps = 3
+                            )
                         }
                     },
                     confirmButton = {
@@ -537,6 +564,7 @@ fun StreamTile(
                                 while (viewModel.anomalyConfigFor(streamDesignator).frameStride != frameStrideValue) {
                                     viewModel.cycleAnomalyFrameStride(streamDesignator)
                                 }
+                                viewModel.setAnomalyPixelStep(streamDesignator, pixelStepValue)
                                 showAnomalySettingsDialog = false
                             }
                         ) {

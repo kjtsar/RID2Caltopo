@@ -28,6 +28,29 @@ static inline float effective_thermal_min_delta(const anomaly_config_t *cfg) {
     return cfg->thermal_min_delta;
 }
 
+static inline int effective_sample_step(const anomaly_config_t *cfg, int width, int height) {
+    if (cfg != NULL && cfg->pixel_step > 0) {
+        return clamp_i32(cfg->pixel_step, 1, 8);
+    }
+    return (width >= 1280 || height >= 720) ? 4 : 2;
+}
+
+static int gmv_feature_score(const uint8_t *luma, int w, int h, int x, int y) {
+    if (luma == NULL || w <= 0 || h <= 0) return 0;
+    if (x <= 0 || x >= w - 1 || y <= 0 || y >= h - 1) return 0;
+    int c = luma[y * w + x];
+    int score = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            int v = luma[(y + dy) * w + (x + dx)];
+            int d = c - v;
+            score += d < 0 ? -d : d;
+        }
+    }
+    return score;
+}
+
 static inline double ii_query(const double *ii, int stride,
                               int sx0, int sy0, int sx1, int sy1) {
     return ii[sy1 * stride + sx1]
@@ -141,6 +164,154 @@ static void build_patch_selection_map(
             selection_map[sy * sg_w + sx] = score;
         }
     }
+}
+
+static void build_motion_selection_map(
+        const float *motion_z_map,
+        int          motion_w,
+        int          motion_h,
+        float       *selection_map) {
+    if (selection_map == NULL || motion_z_map == NULL || motion_w <= 0 || motion_h <= 0) return;
+    size_t cell_count = (size_t)motion_w * (size_t)motion_h;
+    int *component_map = (int *)malloc(cell_count * sizeof(int));
+    int *queue = (int *)malloc(cell_count * sizeof(int));
+    if (component_map == NULL || queue == NULL) {
+        free(component_map);
+        free(queue);
+        for (size_t i = 0; i < cell_count; i++) selection_map[i] = -1.0f;
+        return;
+    }
+
+    for (size_t i = 0; i < cell_count; i++) {
+        selection_map[i] = -1.0f;
+        component_map[i] = -1;
+    }
+
+    int component_id = 0;
+    for (int my = 0; my < motion_h; my++) {
+        for (int mx = 0; mx < motion_w; mx++) {
+            int seed_idx = my * motion_w + mx;
+            float seed_excess = motion_z_map[seed_idx] - 1.0f;
+            if (seed_excess <= 0.0f || component_map[seed_idx] >= 0) continue;
+
+            int head = 0, tail = 0;
+            queue[tail++] = seed_idx;
+            component_map[seed_idx] = component_id;
+
+            int min_x = mx, max_x = mx;
+            int min_y = my, max_y = my;
+            int area = 0;
+            float peak_excess = seed_excess;
+            float sum_excess = 0.0f;
+
+            while (head < tail) {
+                int idx = queue[head++];
+                int cx = idx % motion_w;
+                int cy = idx / motion_w;
+                float excess = motion_z_map[idx] - 1.0f;
+                if (excess <= 0.0f) continue;
+
+                area++;
+                sum_excess += excess;
+                if (excess > peak_excess) peak_excess = excess;
+                if (cx < min_x) min_x = cx;
+                if (cx > max_x) max_x = cx;
+                if (cy < min_y) min_y = cy;
+                if (cy > max_y) max_y = cy;
+
+                for (int ny = cy - 1; ny <= cy + 1; ny++) {
+                    if (ny < 0 || ny >= motion_h) continue;
+                    for (int nx = cx - 1; nx <= cx + 1; nx++) {
+                        if (nx < 0 || nx >= motion_w) continue;
+                        int nidx = ny * motion_w + nx;
+                        if (component_map[nidx] >= 0) continue;
+                        if ((motion_z_map[nidx] - 1.0f) <= 0.0f) continue;
+                        component_map[nidx] = component_id;
+                        queue[tail++] = nidx;
+                    }
+                }
+            }
+
+            if (area <= 0) {
+                component_id++;
+                continue;
+            }
+
+            float mean_excess = sum_excess / (float)area;
+            int box_w = max_x - min_x + 1;
+            int box_h = max_y - min_y + 1;
+            int box_area = box_w * box_h;
+            float fill_ratio = box_area > 0 ? ((float)area / (float)box_area) : 0.0f;
+            float aspect = (box_w > box_h)
+                ? ((float)box_w / (float)(box_h > 0 ? box_h : 1))
+                : ((float)box_h / (float)(box_w > 0 ? box_w : 1));
+
+            int pad = 3;
+            int rx0 = clamp_i32(min_x - pad, 0, motion_w - 1);
+            int rx1 = clamp_i32(max_x + pad, 0, motion_w - 1);
+            int ry0 = clamp_i32(min_y - pad, 0, motion_h - 1);
+            int ry1 = clamp_i32(max_y + pad, 0, motion_h - 1);
+            float outer_sum = 0.0f;
+            int outer_count = 0;
+            int quiet_count = 0;
+            int moving_count = 0;
+            for (int ry = ry0; ry <= ry1; ry++) {
+                for (int rx = rx0; rx <= rx1; rx++) {
+                    int ridx = ry * motion_w + rx;
+                    if (component_map[ridx] == component_id) continue;
+                    float excess = motion_z_map[ridx] - 1.0f;
+                    if (excess < 0.0f) excess = 0.0f;
+                    outer_sum += excess;
+                    outer_count++;
+                    if (excess <= 0.35f) {
+                        quiet_count++;
+                    } else {
+                        moving_count++;
+                    }
+                }
+            }
+            float outer_mean = outer_count > 0 ? (outer_sum / (float)outer_count) : 0.0f;
+            float quiet_fraction = outer_count > 0 ? ((float)quiet_count / (float)outer_count) : 0.0f;
+            float moving_fraction = outer_count > 0 ? ((float)moving_count / (float)outer_count) : 0.0f;
+
+            float contrast_ratio = (mean_excess + 0.50f) / (outer_mean + 0.50f);
+            if (contrast_ratio < 0.10f) contrast_ratio = 0.10f;
+            if (contrast_ratio > 2.50f) contrast_ratio = 2.50f;
+
+            float score = peak_excess;
+            if (area <= 1) {
+                score *= 0.15f;
+            } else {
+                float area_bonus = 0.22f * (float)(area - 1);
+                if (area_bonus > 1.10f) area_bonus = 1.10f;
+                score += area_bonus;
+            }
+
+            score *= contrast_ratio;
+            score *= (0.45f + 0.85f * quiet_fraction);
+            score -= 2.40f * moving_fraction;
+
+            if (fill_ratio < 0.45f) {
+                score -= (0.45f - fill_ratio) * 2.0f;
+            }
+            if (aspect > 2.5f) {
+                float aspect_penalty = (aspect - 2.5f) * 0.55f;
+                if (aspect_penalty > 2.0f) aspect_penalty = 2.0f;
+                score -= aspect_penalty;
+            }
+
+            for (int i = 0; i < tail; i++) {
+                int idx = queue[i];
+                float excess = motion_z_map[idx] - 1.0f;
+                if (excess <= 0.0f) continue;
+                selection_map[idx] = score + 0.08f * (excess - mean_excess);
+            }
+            component_id++;
+        }
+    }
+
+    free(component_map);
+    free(queue);
 }
 
 static void choose_best_dark_patch(
@@ -398,7 +569,7 @@ bool anomaly_probe_thermal_point(
     probe_out->inside_scan_zone = (px >= roi_x0 && px < roi_x1 && py >= roi_y0 && py < roi_y1);
     if (!probe_out->inside_scan_zone) return true;
 
-    int sample_step = (width >= 1280 || height >= 720) ? 4 : 2;
+    int sample_step = effective_sample_step(cfg, width, height);
     int roi_w = roi_x1 - roi_x0;
     int roi_h = roi_y1 - roi_y0;
     if (roi_w <= 0) roi_w = 1;
@@ -592,7 +763,7 @@ int anomaly_process_frame(
     if (roi_x1 <= roi_x0) { roi_x0 = 0; roi_x1 = width;  }
     if (roi_y1 <= roi_y0) { roi_y0 = 0; roi_y1 = height; }
 
-    int sample_step = (width >= 1280 || height >= 720) ? 4 : 2;
+    int sample_step = effective_sample_step(cfg, width, height);
 
     // ── Build full-frame luma grid (needed for GMV offset lookups) ───────
     int motion_step  = sample_step * 2;
@@ -624,6 +795,9 @@ int anomaly_process_frame(
     // Handles pan (tx/ty), yaw rotation (a=cosθ, b=sinθ), and zoom (s=√(a²+b²)).
     similarity_2d_t sim = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
     bool scene_discontinuity = false;
+    anomaly_debug_gmv_anchor_t gmv_debug_anchors[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    int gmv_debug_anchor_count = 0;
+    memset(gmv_debug_anchors, 0, sizeof(gmv_debug_anchors));
 
     if (curr_luma != NULL &&
         state->prev_luma != NULL &&
@@ -645,19 +819,39 @@ int anomaly_process_frame(
         float fw = (float)(width  > 1 ? width  - 1 : 1);
         float fh = (float)(height > 1 ? height - 1 : 1);
 
-        int anchor_dx[9], anchor_dy[9];
-        int anchor_ax[9], anchor_ay[9];
+        int anchor_dx[ANOMALY_GMV_MAX_DEBUG_ANCHORS], anchor_dy[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+        int anchor_ax[ANOMALY_GMV_MAX_DEBUG_ANCHORS], anchor_ay[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
         int anchor_count = 0;
 
-        for (int gy = 0; gy < 3; gy++) {
-            for (int gx = 0; gx < 3; gx++) {
-                int ax = roi_mgx0 + (roi_mgx1 - roi_mgx0) * (gx + 1) / 4;
-                int ay = roi_mgy0 + (roi_mgy1 - roi_mgy0) * (gy + 1) / 4;
-                if (ax < ph + sr || ax > motion_w - 1 - ph - sr) continue;
-                if (ay < ph + sr || ay > motion_h - 1 - ph - sr) continue;
+        for (int gy = 0; gy < ANOMALY_GMV_ZONE_GRID; gy++) {
+            for (int gx = 0; gx < ANOMALY_GMV_ZONE_GRID; gx++) {
+                int zx0 = roi_mgx0 + (roi_mgx1 - roi_mgx0) * gx / ANOMALY_GMV_ZONE_GRID;
+                int zx1 = roi_mgx0 + (roi_mgx1 - roi_mgx0) * (gx + 1) / ANOMALY_GMV_ZONE_GRID;
+                int zy0 = roi_mgy0 + (roi_mgy1 - roi_mgy0) * gy / ANOMALY_GMV_ZONE_GRID;
+                int zy1 = roi_mgy0 + (roi_mgy1 - roi_mgy0) * (gy + 1) / ANOMALY_GMV_ZONE_GRID;
+                zx0 = clamp_i32(zx0, ph + sr, motion_w - 1 - ph - sr);
+                zx1 = clamp_i32(zx1, ph + sr, motion_w - 1 - ph - sr);
+                zy0 = clamp_i32(zy0, ph + sr, motion_h - 1 - ph - sr);
+                zy1 = clamp_i32(zy1, ph + sr, motion_h - 1 - ph - sr);
+                if (zx1 < zx0 || zy1 < zy0) continue;
+
+                int ax = -1, ay = -1;
+                int best_feature = -1;
+                for (int cy = zy0; cy <= zy1; cy++) {
+                    for (int cx = zx0; cx <= zx1; cx++) {
+                        int feature = gmv_feature_score(curr_luma, motion_w, motion_h, cx, cy);
+                        if (feature > best_feature) {
+                            best_feature = feature;
+                            ax = cx;
+                            ay = cy;
+                        }
+                    }
+                }
+                if (ax < 0 || ay < 0 || best_feature < ANOMALY_GMV_MIN_TEXTURE_SCORE) continue;
 
                 int  best_dx = 0, best_dy = 0;
                 long best_sad = 0x7FFFFFFFL;
+                long second_best_sad = 0x7FFFFFFFL;
                 for (int dy = -sr; dy <= sr; dy++) {
                     for (int dx = -sr; dx <= sr; dx++) {
                         long sad = 0;
@@ -680,8 +874,34 @@ int anomaly_process_frame(
                             if (!valid_patch) break;
                         }
                         if (!valid_patch) continue;
-                        if (sad < best_sad) { best_sad = sad; best_dx = dx; best_dy = dy; }
+                        if (sad < best_sad) {
+                            second_best_sad = best_sad;
+                            best_sad = sad;
+                            best_dx = dx;
+                            best_dy = dy;
+                        } else if (sad < second_best_sad) {
+                            second_best_sad = sad;
+                        }
                     }
+                }
+                if (second_best_sad < 0x7FFFFFFFL &&
+                    (second_best_sad - best_sad) < ANOMALY_GMV_MIN_MATCH_MARGIN) {
+                    continue;
+                }
+                if (gmv_debug_anchor_count < ANOMALY_GMV_MAX_DEBUG_ANCHORS) {
+                    anomaly_debug_gmv_anchor_t *dbg = &gmv_debug_anchors[gmv_debug_anchor_count++];
+                    dbg->valid = true;
+                    dbg->zone_gx = gx;
+                    dbg->zone_gy = gy;
+                    dbg->pixel_x = ax * motion_step;
+                    dbg->pixel_y = ay * motion_step;
+                    dbg->x_norm = (float)dbg->pixel_x / fw;
+                    dbg->y_norm = (float)dbg->pixel_y / fh;
+                    dbg->texture_score = best_feature;
+                    dbg->match_dx = best_dx;
+                    dbg->match_dy = best_dy;
+                    dbg->best_sad = best_sad >= 0x7FFFFFFFL ? -1 : (int)best_sad;
+                    dbg->second_best_sad = second_best_sad >= 0x7FFFFFFFL ? -1 : (int)second_best_sad;
                 }
                 anchor_ax[anchor_count] = ax;
                 anchor_ay[anchor_count] = ay;
@@ -691,8 +911,9 @@ int anomaly_process_frame(
             }
         }
 
-        if (anchor_count >= 2) {
-            float src_x[9], src_y[9], dst_x[9], dst_y[9];
+        if (anchor_count >= ANOMALY_GMV_MIN_ANCHORS) {
+            float src_x[ANOMALY_GMV_MAX_DEBUG_ANCHORS], src_y[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+            float dst_x[ANOMALY_GMV_MAX_DEBUG_ANCHORS], dst_y[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
             for (int i = 0; i < anchor_count; i++) {
                 src_x[i] = (float)(anchor_ax[i] * motion_step) / fw;
                 src_y[i] = (float)(anchor_ay[i] * motion_step) / fh;
@@ -700,6 +921,37 @@ int anomaly_process_frame(
                 dst_y[i] = (float)((anchor_ay[i] + anchor_dy[i]) * motion_step) / fh;
             }
             sim = fit_similarity_2d(src_x, src_y, dst_x, dst_y, anchor_count);
+
+            if (sim.valid && anchor_count >= 3) {
+                float worst_residual = -1.0f;
+                int worst_idx = -1;
+                for (int i = 0; i < anchor_count; i++) {
+                    float ex = sim.a * src_x[i] - sim.b * src_y[i] + sim.tx - dst_x[i];
+                    float ey = sim.b * src_x[i] + sim.a * src_y[i] + sim.ty - dst_y[i];
+                    float residual = sqrtf(ex * ex + ey * ey);
+                    if (residual > worst_residual) {
+                        worst_residual = residual;
+                        worst_idx = i;
+                    }
+                }
+                if (worst_idx >= 0 && worst_residual > (ANOMALY_GMV_RESIDUAL_THRESH * 1.5f)) {
+                    float src_x2[ANOMALY_GMV_MAX_DEBUG_ANCHORS], src_y2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+                    float dst_x2[ANOMALY_GMV_MAX_DEBUG_ANCHORS], dst_y2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+                    int kept = 0;
+                    for (int i = 0; i < anchor_count; i++) {
+                        if (i == worst_idx) continue;
+                        src_x2[kept] = src_x[i];
+                        src_y2[kept] = src_y[i];
+                        dst_x2[kept] = dst_x[i];
+                        dst_y2[kept] = dst_y[i];
+                        kept++;
+                    }
+                    similarity_2d_t refit = fit_similarity_2d(src_x2, src_y2, dst_x2, dst_y2, kept);
+                    if (refit.valid && refit.mean_residual < sim.mean_residual) {
+                        sim = refit;
+                    }
+                }
+            }
 
             float scale = sqrtf(sim.a * sim.a + sim.b * sim.b);
             if (!sim.valid ||
@@ -712,6 +964,26 @@ int anomaly_process_frame(
     }
 
     if (result_out != NULL) result_out->had_discontinuity = scene_discontinuity;
+    if (result_out != NULL) {
+        result_out->gmv_debug.valid = (curr_luma != NULL &&
+            state->prev_luma != NULL &&
+            state->prev_luma_width == motion_w &&
+            state->prev_luma_height == motion_h);
+        result_out->gmv_debug.scene_discontinuity = scene_discontinuity;
+        result_out->gmv_debug.sample_step = sample_step;
+        result_out->gmv_debug.motion_step = motion_step;
+        result_out->gmv_debug.anchor_count = gmv_debug_anchor_count;
+        result_out->gmv_debug.fit_a = sim.a;
+        result_out->gmv_debug.fit_b = sim.b;
+        result_out->gmv_debug.fit_tx = sim.tx;
+        result_out->gmv_debug.fit_ty = sim.ty;
+        result_out->gmv_debug.fit_scale = sqrtf(sim.a * sim.a + sim.b * sim.b);
+        result_out->gmv_debug.fit_theta_deg = atan2f(sim.b, sim.a) * (180.0f / 3.14159265f);
+        result_out->gmv_debug.fit_mean_residual = sim.mean_residual;
+        for (int i = 0; i < gmv_debug_anchor_count && i < ANOMALY_GMV_MAX_DEBUG_ANCHORS; i++) {
+            result_out->gmv_debug.anchors[i] = gmv_debug_anchors[i];
+        }
+    }
 
     // ── Compensate accumulators for camera motion (or wipe on discontinuity)
     // T⁻¹(p) = Aᵀ * (p - t) / (a²+b²)  where Aᵀ = [[a,b],[-b,a]]
@@ -1096,6 +1368,9 @@ int anomaly_process_frame(
     // ── GMV-compensated motion scoring over ROI ──────────────────────────
     float best_motion = -1.0f;
     int   best_motion_x = 0, best_motion_y = 0;
+    int   motion_top_count = 0;
+    anomaly_debug_candidate_t motion_top[ANOMALY_DEBUG_TOP_CANDIDATES];
+    memset(motion_top, 0, sizeof(motion_top));
 
     if ((cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_PERSIST)) != 0 &&
         curr_luma != NULL &&
@@ -1138,6 +1413,23 @@ int anomaly_process_frame(
         if (diff_count > 1) {
             double diff_mean = diff_sum / (double)diff_count;
             double diff_std  = sqrt(fmax((diff_sum2 / (double)diff_count) - diff_mean * diff_mean, 1.0));
+            if (result_out != NULL) {
+                result_out->motion_debug.valid = true;
+                result_out->motion_debug.scene_discontinuity = scene_discontinuity;
+                result_out->motion_debug.sample_step = sample_step;
+                result_out->motion_debug.motion_step = motion_step;
+                result_out->motion_debug.sample_count = diff_count;
+                result_out->motion_debug.residual_mean = (float)diff_mean;
+                result_out->motion_debug.residual_std = (float)diff_std;
+            }
+            float *motion_z_map = (float *)malloc(motion_count * sizeof(float));
+            float *motion_selection_map = (float *)malloc(motion_count * sizeof(float));
+            if (motion_z_map != NULL && motion_selection_map != NULL) {
+                for (size_t i = 0; i < motion_count; i++) {
+                    motion_z_map[i] = -1.0f;
+                    motion_selection_map[i] = -1.0f;
+                }
+            }
             for (int my = roi_mgy0; my < roi_mgy1; my++) {
                 float cy_n = (float)(my * motion_step) / fh_m;
                 for (int mx = roi_mgx0; mx < roi_mgx1; mx++) {
@@ -1150,12 +1442,38 @@ int anomaly_process_frame(
                     int d = abs((int)curr_luma[my * motion_w + mx] -
                                 (int)state->prev_luma[py_idx * motion_w + px_idx]);
                     float ms = (float)(((double)d - diff_mean) / diff_std);
+                    if (motion_z_map != NULL) {
+                        motion_z_map[my * motion_w + mx] = ms;
+                    }
+                }
+            }
+            if (motion_z_map != NULL && motion_selection_map != NULL) {
+                build_motion_selection_map(motion_z_map, motion_w, motion_h, motion_selection_map);
+            }
+            for (int my = roi_mgy0; my < roi_mgy1; my++) {
+                for (int mx = roi_mgx0; mx < roi_mgx1; mx++) {
+                    float ms = (motion_selection_map != NULL)
+                        ? motion_selection_map[my * motion_w + mx]
+                        : -1.0f;
+                    int pixel_x = mx * motion_step + motion_step / 2;
+                    int pixel_y = my * motion_step + motion_step / 2;
+                    maybe_insert_top_candidate(
+                        motion_top,
+                        &motion_top_count,
+                        ANOMALY_DEBUG_TOP_CANDIDATES,
+                        pixel_x,
+                        pixel_y,
+                        (float)pixel_x / fw_m,
+                        (float)pixel_y / fh_m,
+                        motion_z_map != NULL ? motion_z_map[my * motion_w + mx] : -1.0f,
+                        0.0f,
+                        ms);
                     if (saliency_motion_map != NULL) {
-                        float motion_support = ms - 1.0f;
+                        float motion_support = ms;
                         if (motion_support > 0.0f) {
                             if (motion_support > 4.0f) motion_support = 4.0f;
-                            int sample_x = mx * motion_step + motion_step / 2;
-                            int sample_y = my * motion_step + motion_step / 2;
+                            int sample_x = pixel_x;
+                            int sample_y = pixel_y;
                             int sal_sx = clamp_i32((sample_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
                             int sal_sy = clamp_i32((sample_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
                             float *slot = &saliency_motion_map[sal_sy * sg_w + sal_sx];
@@ -1165,11 +1483,13 @@ int anomaly_process_frame(
                     if ((cfg->algorithm_mask & ANOMALY_ALGO_MOTION) != 0 &&
                         ms > best_motion) {
                         best_motion   = ms;
-                        best_motion_x = mx * motion_step + motion_step / 2;
-                        best_motion_y = my * motion_step + motion_step / 2;
+                        best_motion_x = pixel_x;
+                        best_motion_y = pixel_y;
                     }
                 }
             }
+            free(motion_z_map);
+            free(motion_selection_map);
         }
     }
 
@@ -1439,6 +1759,16 @@ int anomaly_process_frame(
         result_out->box_count = box_count;
         for (int i = 0; i < box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++)
             result_out->boxes[i] = boxes[i];
+        result_out->motion_debug.raw_candidate_valid = (best_motion >= 0.0f);
+        result_out->motion_debug.raw_score = best_motion;
+        result_out->motion_debug.raw_x_norm = (best_motion_x > 0 || best_motion_y > 0)
+            ? ((float)best_motion_x / fw) : 0.0f;
+        result_out->motion_debug.raw_y_norm = (best_motion_x > 0 || best_motion_y > 0)
+            ? ((float)best_motion_y / fh) : 0.0f;
+        result_out->motion_debug.top_candidate_count = motion_top_count;
+        for (int i = 0; i < motion_top_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+            result_out->motion_debug.top_candidates[i] = motion_top[i];
+        }
         result_out->saliency_debug.raw_candidate_valid = (best_persist >= 0.0f);
         result_out->saliency_debug.raw_score = best_persist;
         result_out->saliency_debug.raw_x_norm = (best_persist_x > 0 || best_persist_y > 0)

@@ -418,6 +418,63 @@ static void draw_saliency_debug_overlay(uint8_t *rgba, int W, int H,
                       255, 255, 255);
 }
 
+static void draw_motion_debug_overlay(uint8_t *rgba, int W, int H,
+                                      const anomaly_result_t *result) {
+    if (rgba == NULL || result == NULL) return;
+    const anomaly_debug_motion_t *dbg = &result->motion_debug;
+    if (!dbg->valid) return;
+
+    int label_scale = (W >= 1280 || H >= 720) ? 2 : 1;
+    int stroke = (W >= 1280 || H >= 720) ? 2 : 1;
+    float box_side = 0.06f;
+    int half_w = (int)lroundf(box_side * 0.5f * (float)(W - 1));
+    int half_h = (int)lroundf(box_side * 0.5f * (float)(H - 1));
+
+    for (int i = 0; i < dbg->top_candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+        const anomaly_debug_candidate_t *c = &dbg->top_candidates[i];
+        if (!c->valid) continue;
+        int cx = c->pixel_x;
+        int cy = c->pixel_y;
+        int x0 = cx - half_w;
+        int y0 = cy - half_h;
+        int x1 = cx + half_w;
+        int y1 = cy + half_h;
+        stroke_rect(rgba, W * 4, W, H, x0, y0, x1, y1, stroke, 0x23, 0xC5, 0x52);
+        draw_number_badge(rgba, W * 4, W, H,
+                          x0, y0 - (FONT_H * label_scale + label_scale * 2 + 2),
+                          i + 1, label_scale,
+                          0, 0, 0,
+                          0x23, 0xC5, 0x52);
+        char score_buf[32];
+        int z10 = (int)lroundf(c->spatial_score * 10.0f);
+        int c10 = (int)lroundf(c->combined_score * 10.0f);
+        snprintf(score_buf, sizeof(score_buf), "Z%dC%d", z10, c10);
+        draw_text_badge(rgba, W * 4, W, H,
+                        x0, y1 + 2,
+                        score_buf, label_scale,
+                        0, 0, 0,
+                        0x23, 0xC5, 0x52);
+    }
+
+    if (dbg->raw_candidate_valid) {
+        int cx = (int)lroundf(dbg->raw_x_norm * (float)(W - 1));
+        int cy = (int)lroundf(dbg->raw_y_norm * (float)(H - 1));
+        draw_crosshair(rgba, W * 4, W, H, cx, cy, 8, stroke + 1, 0x23, 0xC5, 0x52);
+    }
+
+    char stats_buf[96];
+    snprintf(stats_buf, sizeof(stats_buf), "M%d S%d U%d V%d",
+             (int)lroundf(dbg->residual_mean),
+             (int)lroundf(dbg->residual_std),
+             dbg->sample_step,
+             dbg->motion_step);
+    draw_text_badge(rgba, W * 4, W, H,
+                    6, 26,
+                    stats_buf, label_scale,
+                    0, 0, 0,
+                    0x23, 0xC5, 0x52);
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 static const char *algo_label(int algo) {
@@ -483,6 +540,74 @@ static void dump_saliency_debug(FILE *out, int frame_num, double time_s,
         }
     }
     fflush(out);
+}
+
+static void dump_motion_debug(FILE *out, int frame_num, double time_s,
+                              const anomaly_result_t *result) {
+    if (out == NULL || result == NULL) return;
+    const anomaly_debug_motion_t *dbg = &result->motion_debug;
+    if (!dbg->valid) return;
+    fprintf(out, "\nMotion debug for frame %d (%.3fs)\n", frame_num, time_s);
+    fprintf(out, "  discontinuity=%d sample_step=%d motion_step=%d samples=%d\n",
+            dbg->scene_discontinuity ? 1 : 0,
+            dbg->sample_step,
+            dbg->motion_step,
+            dbg->sample_count);
+    fprintf(out, "  residual_mean=%.3f residual_std=%.3f\n",
+            (double)dbg->residual_mean,
+            (double)dbg->residual_std);
+    fprintf(out, "  raw_valid=%d raw_score=%.3f raw_xy=(%.4f, %.4f)\n",
+            dbg->raw_candidate_valid ? 1 : 0,
+            (double)dbg->raw_score,
+            (double)dbg->raw_x_norm,
+            (double)dbg->raw_y_norm);
+    fprintf(out, "  top motion candidates (%d):\n", dbg->top_candidate_count);
+    for (int i = 0; i < dbg->top_candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+        const anomaly_debug_candidate_t *c = &dbg->top_candidates[i];
+        fprintf(out, "    #%d px=(%d,%d) xy=(%.4f,%.4f) z=%.3f combined=%.3f\n",
+                i + 1, c->pixel_x, c->pixel_y,
+                (double)c->x_norm, (double)c->y_norm,
+                (double)c->spatial_score,
+                (double)c->combined_score);
+    }
+}
+
+static void dump_gmv_debug(FILE *out, int frame_num, double time_s,
+                           const anomaly_result_t *result) {
+    if (out == NULL || result == NULL) return;
+    const anomaly_debug_gmv_t *dbg = &result->gmv_debug;
+    if (!dbg->valid) return;
+    fprintf(out, "\nGMV debug for frame %d (%.3fs)\n", frame_num, time_s);
+    fprintf(out, "  discontinuity=%d sample_step=%d motion_step=%d anchors=%d\n",
+            dbg->scene_discontinuity ? 1 : 0,
+            dbg->sample_step,
+            dbg->motion_step,
+            dbg->anchor_count);
+    fprintf(out, "  fit: a=%.5f b=%.5f tx=%.5f ty=%.5f scale=%.5f theta=%.2fdeg residual=%.5f\n",
+            (double)dbg->fit_a,
+            (double)dbg->fit_b,
+            (double)dbg->fit_tx,
+            (double)dbg->fit_ty,
+            (double)dbg->fit_scale,
+            (double)dbg->fit_theta_deg,
+            (double)dbg->fit_mean_residual);
+    for (int i = 0; i < dbg->anchor_count && i < ANOMALY_GMV_MAX_DEBUG_ANCHORS; i++) {
+        const anomaly_debug_gmv_anchor_t *a = &dbg->anchors[i];
+        fprintf(out,
+                "    anchor[%d] zone=(%d,%d) px=(%d,%d) xy=(%.4f,%.4f) tex=%d match=(%d,%d) sad=%d second=%d\n",
+                i,
+                a->zone_gx,
+                a->zone_gy,
+                a->pixel_x,
+                a->pixel_y,
+                (double)a->x_norm,
+                (double)a->y_norm,
+                a->texture_score,
+                a->match_dx,
+                a->match_dy,
+                a->best_sad,
+                a->second_best_sad);
+    }
 }
 
 // Remove extension and directory prefix to get a bare basename.
@@ -785,7 +910,9 @@ int main(int argc, char **argv) {
         anomaly_result_t result;
         anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, 0, &result);
         if (debug_frame > 0 && frame_num == debug_frame) {
+            dump_gmv_debug(stderr, frame_num, time_s, &result);
             dump_saliency_debug(stderr, frame_num, time_s, raw_rgba, W, H, &cfg, &result);
+            dump_motion_debug(stderr, frame_num, time_s, &result);
         }
 
         if (result.box_count > 0) {
@@ -824,6 +951,9 @@ int main(int argc, char **argv) {
         if (out_pipe) {
             if (debug_overlay && (cfg.algorithm_mask & ANOMALY_ALGO_PERSIST)) {
                 draw_saliency_debug_overlay(rgba, W, H, raw_rgba, &cfg, &result);
+            }
+            if (debug_overlay && (cfg.algorithm_mask & ANOMALY_ALGO_MOTION)) {
+                draw_motion_debug_overlay(rgba, W, H, &result);
             }
             draw_frame_number(rgba, W, H, frame_num);
             fwrite(rgba, 1, frame_bytes, out_pipe);

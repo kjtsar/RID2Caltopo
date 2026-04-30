@@ -1329,6 +1329,12 @@ class StreamsViewModel(
         }
     }
 
+    fun setAnomalyPixelStep(designator: String, pixelStep: Int) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(pixelStep = pixelStep.coerceIn(0, 8))
+        }
+    }
+
     fun cycleAnomalySensitivity(designator: String) {
         val sensitivitySteps = listOf(0.25f, 0.60f, 0.90f)
         updateAnomalyConfig(designator) { current ->

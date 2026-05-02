@@ -149,6 +149,7 @@ typedef struct {
 // in the bridge but are passed by value into anomaly_process_frame().
 typedef struct {
     bool  enabled;
+    bool  show_hot_overlay;
     int   algorithm_mask;
     int   frame_stride;
     int   pixel_step;

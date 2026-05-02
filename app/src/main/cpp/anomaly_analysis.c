@@ -1095,6 +1095,287 @@ static void draw_rgba_vline(uint8_t *rgba, int rgba_stride,
     }
 }
 
+static void draw_rgba_circle(uint8_t *rgba, int rgba_stride,
+                             int width, int height,
+                             int cx, int cy, int radius, int stroke,
+                             uint8_t r, uint8_t g, uint8_t b) {
+    if (rgba == NULL || width <= 0 || height <= 0 || radius <= 0 || stroke <= 0) return;
+    for (int band = 0; band < stroke; band++) {
+        int rr = radius + band;
+        int x = rr;
+        int y = 0;
+        int err = 1 - x;
+        while (x >= y) {
+            int points[8][2] = {
+                {cx + x, cy + y}, {cx + y, cy + x},
+                {cx - y, cy + x}, {cx - x, cy + y},
+                {cx - x, cy - y}, {cx - y, cy - x},
+                {cx + y, cy - x}, {cx + x, cy - y},
+            };
+            for (int i = 0; i < 8; i++) {
+                int px = points[i][0];
+                int py = points[i][1];
+                if (px < 0 || px >= width || py < 0 || py >= height) continue;
+                uint8_t *dst = rgba + (py * rgba_stride) + (px * 4);
+                dst[0] = r; dst[1] = g; dst[2] = b; dst[3] = 0xFF;
+            }
+            y++;
+            if (err < 0) {
+                err += 2 * y + 1;
+            } else {
+                x--;
+                err += 2 * (y - x + 1);
+            }
+        }
+    }
+}
+
+static inline double rgba_luma_at(const uint8_t *px) {
+    return (0.2126 * (double)px[0]) + (0.7152 * (double)px[1]) + (0.0722 * (double)px[2]);
+}
+
+static bool row_has_active_content_range(const uint8_t *rgba, int rgba_stride,
+                                         int width, int height, int y,
+                                         int x0, int x1) {
+    if (rgba == NULL || y < 0 || y >= height || width <= 0) return false;
+    if (x0 < 0) x0 = 0;
+    if (x1 >= width) x1 = width - 1;
+    if (x1 <= x0) return false;
+    const uint8_t *row = rgba + (y * rgba_stride);
+    double min_luma = 0.0;
+    double max_luma = 0.0;
+    int textured_samples = 0;
+    int sample_count = 0;
+    bool first = true;
+    int span = x1 - x0 + 1;
+    int step = span > 320 ? 2 : 1;
+    double prev_luma = 0.0;
+    bool prev_valid = false;
+    for (int x = x0; x <= x1; x += step) {
+        double luma = rgba_luma_at(row + (x * 4));
+        if (first) {
+            min_luma = max_luma = luma;
+            first = false;
+        } else {
+            if (luma < min_luma) min_luma = luma;
+            if (luma > max_luma) max_luma = luma;
+        }
+        if (prev_valid && fabs(luma - prev_luma) >= 10.0) {
+            textured_samples++;
+        }
+        prev_luma = luma;
+        prev_valid = true;
+        sample_count++;
+    }
+    if ((max_luma - min_luma) < 8.0) return false;
+    if (sample_count <= 1) return false;
+    double textured_fraction = (double)textured_samples / (double)(sample_count - 1);
+    return textured_fraction >= 0.10;
+}
+
+static bool col_has_active_content_range(const uint8_t *rgba, int rgba_stride,
+                                         int width, int height, int x,
+                                         int y0, int y1) {
+    if (rgba == NULL || x < 0 || x >= width || height <= 0) return false;
+    if (y0 < 0) y0 = 0;
+    if (y1 >= height) y1 = height - 1;
+    if (y1 <= y0) return false;
+    double min_luma = 0.0;
+    double max_luma = 0.0;
+    int textured_samples = 0;
+    int sample_count = 0;
+    bool first = true;
+    int span = y1 - y0 + 1;
+    int step = span > 320 ? 2 : 1;
+    double prev_luma = 0.0;
+    bool prev_valid = false;
+    for (int y = y0; y <= y1; y += step) {
+        const uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
+        double luma = rgba_luma_at(px);
+        if (first) {
+            min_luma = max_luma = luma;
+            first = false;
+        } else {
+            if (luma < min_luma) min_luma = luma;
+            if (luma > max_luma) max_luma = luma;
+        }
+        if (prev_valid && fabs(luma - prev_luma) >= 10.0) {
+            textured_samples++;
+        }
+        prev_luma = luma;
+        prev_valid = true;
+        sample_count++;
+    }
+    if ((max_luma - min_luma) < 8.0) return false;
+    if (sample_count <= 1) return false;
+    double textured_fraction = (double)textured_samples / (double)(sample_count - 1);
+    return textured_fraction >= 0.10;
+}
+
+typedef bool (*active_span_fn)(const uint8_t *rgba, int rgba_stride,
+                               int width, int height, int index,
+                               int aux0, int aux1);
+
+static void detect_best_active_span(const uint8_t *rgba, int rgba_stride,
+                                    int width, int height,
+                                    int length, int aux0, int aux1,
+                                    active_span_fn is_active,
+                                    int *start_out, int *end_out) {
+    int best_start = 0;
+    int best_end = length - 1;
+    int best_len = -1;
+    int center = length / 2;
+    bool best_contains_center = false;
+    int best_center_distance = length;
+
+    int run_start = -1;
+    for (int i = 0; i <= length; i++) {
+        bool active = (i < length) && is_active(rgba, rgba_stride, width, height, i, aux0, aux1);
+        if (active) {
+            if (run_start < 0) run_start = i;
+            continue;
+        }
+        if (run_start < 0) continue;
+        int run_end = i - 1;
+        int run_len = run_end - run_start + 1;
+        bool contains_center = (run_start <= center && center <= run_end);
+        int run_center = (run_start + run_end) / 2;
+        int center_distance = abs(run_center - center);
+        bool better = false;
+        if (best_len < 0) {
+            better = true;
+        } else if (contains_center != best_contains_center) {
+            better = contains_center;
+        } else if (run_len != best_len) {
+            better = run_len > best_len;
+        } else if (center_distance != best_center_distance) {
+            better = center_distance < best_center_distance;
+        }
+        if (better) {
+            best_start = run_start;
+            best_end = run_end;
+            best_len = run_len;
+            best_contains_center = contains_center;
+            best_center_distance = center_distance;
+        }
+        run_start = -1;
+    }
+
+    if (best_len < 0) {
+        best_start = 0;
+        best_end = length - 1;
+    }
+    if (start_out) *start_out = best_start;
+    if (end_out) *end_out = best_end;
+}
+
+static void detect_active_content_bounds(const uint8_t *rgba, int rgba_stride,
+                                         int width, int height,
+                                         int *x0_out, int *y0_out,
+                                         int *x1_out, int *y1_out) {
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = width - 1;
+    int y1 = height - 1;
+    detect_best_active_span(rgba, rgba_stride, width, height,
+                            height, 0, width - 1,
+                            row_has_active_content_range,
+                            &y0, &y1);
+    detect_best_active_span(rgba, rgba_stride, width, height,
+                            width, y0, y1,
+                            col_has_active_content_range,
+                            &x0, &x1);
+    detect_best_active_span(rgba, rgba_stride, width, height,
+                            height, x0, x1,
+                            row_has_active_content_range,
+                            &y0, &y1);
+
+    if ((x1 - x0 + 1) < width / 3 || (y1 - y0 + 1) < height / 3) {
+        x0 = 0;
+        y0 = 0;
+        x1 = width - 1;
+        y1 = height - 1;
+    }
+    if (x0_out) *x0_out = x0;
+    if (y0_out) *y0_out = y0;
+    if (x1_out) *x1_out = x1;
+    if (y1_out) *y1_out = y1;
+}
+
+static void draw_hot_overlay_rgba(uint8_t *rgba, int rgba_stride,
+                                  int width, int height,
+                                  int thermal_polarity) {
+    if (rgba == NULL || width <= 0 || height <= 0) return;
+    int content_x0 = 0, content_y0 = 0, content_x1 = width - 1, content_y1 = height - 1;
+    detect_active_content_bounds(rgba, rgba_stride, width, height, &content_x0, &content_y0, &content_x1, &content_y1);
+    double sum_luma = 0.0;
+    double hottest_luma = 0.0;
+    int hottest_x = 0;
+    int hottest_y = 0;
+    bool black_hot = (thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
+    bool first = true;
+    for (int y = content_y0; y <= content_y1; y++) {
+        const uint8_t *row = rgba + (y * rgba_stride);
+        for (int x = content_x0; x <= content_x1; x++) {
+            const uint8_t *px = row + (x * 4);
+            double luma = rgba_luma_at(px);
+            sum_luma += luma;
+            if (first ||
+                (black_hot && luma < hottest_luma) ||
+                (!black_hot && luma > hottest_luma)) {
+                hottest_luma = luma;
+                hottest_x = x;
+                hottest_y = y;
+                first = false;
+            }
+        }
+    }
+    if (first) return;
+
+    int content_width = content_x1 - content_x0 + 1;
+    int content_height = content_y1 - content_y0 + 1;
+    double mean_luma = sum_luma / (double)(content_width * content_height);
+    bool hottest_is_hot = black_hot ? (hottest_luma < mean_luma) : (hottest_luma > mean_luma);
+    if (!hottest_is_hot) return;
+
+    int min_dim = width < height ? width : height;
+    int vicinity = clamp_i32((int)lround((double)min_dim * 0.028), 10, 24);
+    int hot_left = hottest_x;
+    int hot_right = hottest_x;
+    int hot_top = hottest_y;
+    int hot_bottom = hottest_y;
+    int hot_count = 0;
+    for (int y = hottest_y - vicinity; y <= hottest_y + vicinity; y++) {
+        if (y < content_y0 || y > content_y1) continue;
+        const uint8_t *row = rgba + (y * rgba_stride);
+        for (int x = hottest_x - vicinity; x <= hottest_x + vicinity; x++) {
+            if (x < content_x0 || x > content_x1) continue;
+            int dx = x - hottest_x;
+            int dy = y - hottest_y;
+            if ((dx * dx) + (dy * dy) > (vicinity * vicinity)) continue;
+            const uint8_t *px = row + (x * 4);
+            double luma = rgba_luma_at(px);
+            bool is_hot = black_hot ? (luma < mean_luma) : (luma > mean_luma);
+            if (!is_hot) continue;
+            hot_count++;
+            if (x < hot_left) hot_left = x;
+            if (x > hot_right) hot_right = x;
+            if (y < hot_top) hot_top = y;
+            if (y > hot_bottom) hot_bottom = y;
+        }
+    }
+
+    int center_x = (hot_left + hot_right) / 2;
+    int center_y = (hot_top + hot_bottom) / 2;
+    int half_w = (hot_right - hot_left + 1) / 2;
+    int half_h = (hot_bottom - hot_top + 1) / 2;
+    int content_radius = (int)ceil(sqrt((double)(half_w * half_w + half_h * half_h)));
+    int padding = clamp_i32((int)lround((double)min_dim * 0.008), 4, 8);
+    int radius = clamp_i32(content_radius + padding, 8, min_dim / 5);
+    int stroke = clamp_i32(2 + (hot_count / 24), 2, 5);
+    draw_rgba_circle(rgba, rgba_stride, width, height, center_x, center_y, radius, stroke, 0xFF, 0x30, 0x30);
+}
+
 static void append_anomaly_box(anomaly_box_t *boxes, int *box_count,
                                float center_x_norm, float center_y_norm,
                                float box_w_norm, float box_h_norm,
@@ -1483,32 +1764,43 @@ int anomaly_process_frame(
         result_out->had_discontinuity = false;
     }
 
-    if (cfg == NULL || !cfg->enabled || cfg->algorithm_mask == 0) return 0;
+    if (cfg == NULL) return 0;
+    bool show_hot_overlay = cfg->show_hot_overlay;
+    bool anomaly_detection_active = cfg->enabled && cfg->algorithm_mask != 0;
+    if (!anomaly_detection_active && !show_hot_overlay) return 0;
     if (width <= 0 || height <= 0) return 0;
 
     int frame_stride = cfg->frame_stride < 1 ? 1 : cfg->frame_stride;
     float thermal_min_delta = effective_thermal_min_delta(cfg);
     state->frame_counter += 1;
     if ((state->frame_counter % frame_stride) != 0) {
-        const int skipped_motion_box_algorithm =
-                (cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0
-                ? ANOMALY_ALGO_MOTION_TOLERANCE
-                : ANOMALY_ALGO_MOTION;
+        int skipped_box_count = 0;
         anomaly_box_t skipped_boxes[ANOMALY_MAX_BOXES_PER_FRAME];
-        int skipped_box_count = assemble_anomaly_boxes(
-                state,
-                cfg,
-                skipped_motion_box_algorithm,
-                skipped_boxes,
-                ANOMALY_MAX_BOXES_PER_FRAME);
+        if (anomaly_detection_active) {
+            const int skipped_motion_box_algorithm =
+                    (cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0
+                    ? ANOMALY_ALGO_MOTION_TOLERANCE
+                    : ANOMALY_ALGO_MOTION;
+            skipped_box_count = assemble_anomaly_boxes(
+                    state,
+                    cfg,
+                    skipped_motion_box_algorithm,
+                    skipped_boxes,
+                    ANOMALY_MAX_BOXES_PER_FRAME);
+        }
         if (result_out != NULL) {
             result_out->box_count = skipped_box_count;
             for (int i = 0; i < skipped_box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++) {
                 result_out->boxes[i] = skipped_boxes[i];
             }
         }
-        if (skipped_box_count > 0 && rgba != NULL) {
-            draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, skipped_boxes, skipped_box_count);
+        if (rgba != NULL) {
+            if (show_hot_overlay) {
+                draw_hot_overlay_rgba(rgba, rgba_stride, width, height, cfg->thermal_polarity);
+            }
+            if (skipped_box_count > 0) {
+                draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, skipped_boxes, skipped_box_count);
+            }
         }
         return skipped_box_count;
     }
@@ -1923,7 +2215,7 @@ int anomaly_process_frame(
     float *saliency_color_map = NULL;
     float *saliency_motion_map = NULL;
     float *saliency_registration_map = NULL;
-    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
         saliency_spatial_map = (float *)malloc(sg_count * sizeof(float));
         saliency_color_map   = (float *)malloc(sg_count * sizeof(float));
         saliency_motion_map  = (float *)malloc(sg_count * sizeof(float));
@@ -1968,7 +2260,7 @@ int anomaly_process_frame(
 
             double lum = sg_luma[sy * sg_w + sx];
 
-            if ((cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
+            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
                 // Integral-image window query.
                 int wx0 = sx - R; if (wx0 < 0) wx0 = 0;
                 int wx1 = sx + R; if (wx1 >= sg_w) wx1 = sg_w - 1;
@@ -1999,7 +2291,7 @@ int anomaly_process_frame(
                 }
             }
 
-            if ((cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_PERSIST)) != 0) {
+            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_PERSIST)) != 0) {
                 const uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
                 double r = (double)px[0], g = (double)px[1], b = (double)px[2];
                 double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
@@ -2044,7 +2336,7 @@ int anomaly_process_frame(
         result_out->saliency_debug.bg_ready = bg_valid;
     }
 
-    if (bg_valid && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
+    if (anomaly_detection_active && bg_valid && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
         double sum_d = 0.0, sum_d2 = 0.0;
         int cnt_d = 0;
         for (int i = 0; i < sg_w * sg_h; i++) {
@@ -2061,7 +2353,7 @@ int anomaly_process_frame(
             delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
     }
 
-    if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && bg_valid) {
+    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && bg_valid) {
         // Temporal background score replaces the spatial integral-image score.
         // Two-pass approach implementing per-frame noise-floor normalisation:
         //   When the camera pans over warm vegetation the bg_delta map has a
@@ -2150,7 +2442,8 @@ int anomaly_process_frame(
 
     bool use_motion_tolerance = (cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0;
     bool use_stable_motion = ((cfg->algorithm_mask & ANOMALY_ALGO_MOTION) != 0) && !use_motion_tolerance;
-    if ((cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0 &&
+    if (anomaly_detection_active &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0 &&
         curr_luma != NULL &&
         state->prev_luma != NULL &&
         state->prev_luma_width  == motion_w &&
@@ -2747,7 +3040,7 @@ int anomaly_process_frame(
         free(region_valid_field);
     }
 
-    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
         size_t score_count = (size_t)sg_w * (size_t)sg_h;
         float *patch_score_map = (float *)malloc(score_count * sizeof(float));
         float *patch_selection_map = (float *)malloc(score_count * sizeof(float));
@@ -2887,20 +3180,22 @@ int anomaly_process_frame(
 
     float raw_cx[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
     float raw_cy[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
-    if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR)   && best_color   >= cfg->score_threshold) {
+    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_COLOR)   && best_color   >= cfg->score_threshold) {
         raw_cx[0] = (float)best_color_x   / fw;
         raw_cy[0] = (float)best_color_y   / fh;
     }
-    if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) && best_thermal >= cfg->score_threshold) {
+    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) && best_thermal >= cfg->score_threshold) {
         raw_cx[1] = (float)best_thermal_x / fw;
         raw_cy[1] = (float)best_thermal_y / fh;
     }
-    if ((cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE)) &&
+    if (anomaly_detection_active &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE)) &&
         best_motion  >= cfg->score_threshold) {
         raw_cx[2] = (float)best_motion_x  / fw;
         raw_cy[2] = (float)best_motion_y  / fh;
     }
-    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) &&
+    if (anomaly_detection_active &&
+        (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) &&
         best_persist >= cfg->score_threshold) {
         raw_cx[3] = (float)best_persist_x / fw;
         raw_cy[3] = (float)best_persist_y / fh;
@@ -2990,14 +3285,17 @@ int anomaly_process_frame(
     }
 
     // ── Assemble and draw boxes ─────────────────────��─────────────────��──
-    const int motion_box_algorithm = use_motion_tolerance ? ANOMALY_ALGO_MOTION_TOLERANCE : ANOMALY_ALGO_MOTION;
     anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
-    int box_count = assemble_anomaly_boxes(
-            state,
-            cfg,
-            motion_box_algorithm,
-            boxes,
-            ANOMALY_MAX_BOXES_PER_FRAME);
+    int box_count = 0;
+    if (anomaly_detection_active) {
+        const int motion_box_algorithm = use_motion_tolerance ? ANOMALY_ALGO_MOTION_TOLERANCE : ANOMALY_ALGO_MOTION;
+        box_count = assemble_anomaly_boxes(
+                state,
+                cfg,
+                motion_box_algorithm,
+                boxes,
+                ANOMALY_MAX_BOXES_PER_FRAME);
+    }
 
     if (result_out != NULL) {
         result_out->box_count = box_count;
@@ -3045,8 +3343,14 @@ int anomaly_process_frame(
         }
     }
 
-    if (box_count > 0 && rgba != NULL)
-        draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, boxes, box_count);
+    if (rgba != NULL) {
+        if (show_hot_overlay) {
+            draw_hot_overlay_rgba(rgba, rgba_stride, width, height, cfg->thermal_polarity);
+        }
+        if (box_count > 0) {
+            draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, boxes, box_count);
+        }
+    }
 
     free(saliency_motion_map);
     free(saliency_color_map);

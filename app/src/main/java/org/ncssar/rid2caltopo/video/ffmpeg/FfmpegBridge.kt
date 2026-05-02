@@ -86,6 +86,7 @@ object FfmpegBridge {
         nativeUpdateAnomalyConfig(
             sessionId = sessionId,
             enabled = config.enabled,
+            showHotOverlay = config.showHotOverlay,
             algorithmMask = config.algorithmMask,
             frameStride = config.frameStride,
             pixelStep = config.pixelStep,
@@ -205,6 +206,7 @@ object FfmpegBridge {
     private external fun nativeUpdateAnomalyConfig(
         sessionId: Long,
         enabled: Boolean,
+        showHotOverlay: Boolean,
         algorithmMask: Int,
         frameStride: Int,
         pixelStep: Int,

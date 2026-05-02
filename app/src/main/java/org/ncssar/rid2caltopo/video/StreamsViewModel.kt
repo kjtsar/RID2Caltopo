@@ -628,6 +628,7 @@ class StreamsViewModel(
     private val localPlaybackPausedState = mutableStateMapOf<String, Boolean>()
     private val localPlaybackReviewByDesignator = mutableStateMapOf<String, LocalPlaybackReviewFile>()
     private var pendingLocalPlaybackReviewExport by mutableStateOf<PendingLocalPlaybackReviewExport?>(null)
+    private val dirtyLocalPlaybackReviews = mutableStateSetOf<String>()
     private val _streamsUiActive = MutableStateFlow(false)
     private val streamsUiConsumerLock = Any()
     private val streamsUiConsumers = mutableSetOf<Any>()
@@ -863,6 +864,7 @@ class StreamsViewModel(
                 CTDebug(tag, "Review export failed for ${pending.designator}: ${error.message}")
             }.onSuccess {
                 CaltopoClient.ShowToast("Saved review for ${pending.designator}.")
+                dirtyLocalPlaybackReviews.remove(pending.designator)
             }
         }
         pendingLocalPlaybackReviewExport = null
@@ -937,6 +939,7 @@ class StreamsViewModel(
             frames = updatedFrames.sortedBy { it.sourceTimestampUs }.toMutableList(),
         )
         localPlaybackReviewByDesignator[designator] = updated
+        dirtyLocalPlaybackReviews += designator
         viewModelScope.launch(Dispatchers.IO) {
             writeLocalPlaybackReviewToDisk(updated, sidecarPath)
         }
@@ -1031,6 +1034,7 @@ class StreamsViewModel(
                         annotationSidecarPath = resolvedInfo.annotationSidecarPath,
                         updatedAtMs = 0L,
                     )
+                dirtyLocalPlaybackReviews.remove(designator)
                 _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
                     this[designator] = resolvedInfo.copy(revision = maxOf(current.revision + 1L, resolvedInfo.revision))
                 }
@@ -1043,6 +1047,7 @@ class StreamsViewModel(
         _localPlaybackEntries.value[designator]?.let { localInfo ->
             queueLocalPlaybackReviewExportIfNeeded(localInfo)
             localPlaybackPausedState.remove(designator)
+            dirtyLocalPlaybackReviews.remove(designator)
             localPlaybackReviewByDesignator.remove(designator)
             _detectedAppearanceModeByDesignator.remove(designator)
             appearanceObservationStateByDesignator.remove(designator)
@@ -1473,6 +1478,12 @@ class StreamsViewModel(
     fun toggleAnomalyAlgorithm(designator: String, algorithm: AnomalyAlgorithm) {
         updateAnomalyConfig(designator) { current ->
             current.toggledAlgorithm(algorithm)
+        }
+    }
+
+    fun toggleShowHotOverlay(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(showHotOverlay = !current.showHotOverlay)
         }
     }
 
@@ -2242,6 +2253,7 @@ class StreamsViewModel(
 
     private fun queueLocalPlaybackReviewExportIfNeeded(streamInfo: StreamInfo) {
         val review = localPlaybackReviewByDesignator[streamInfo.designator] ?: return
+        if (streamInfo.designator !in dirtyLocalPlaybackReviews) return
         if (review.frames.isEmpty()) return
         val baseName = streamInfo.designator.substringBeforeLast('.', streamInfo.designator)
             .replace(Regex("[^A-Za-z0-9._-]+"), "_")

@@ -427,6 +427,14 @@ fun StreamTile(
                     color = Color.White,
                     fontSize = 11.sp
                 )
+                Text(
+                    text = if (anomalyConfig.showHotOverlay) "ShowHot On" else "ShowHot Off",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.showHotOverlay) {
+                        detectTapGestures(onTap = { viewModel.toggleShowHotOverlay(streamDesignator) })
+                    }
+                )
                 if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) {
                     Text(
                         text = "Mot ${anomalyConfig.motionEvidenceSensitivityLabel}",
@@ -657,6 +665,16 @@ fun StreamTile(
                                             "Off"
                                         }
                                     )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Show Hottest Region")
+                                TextButton(onClick = { viewModel.toggleShowHotOverlay(streamDesignator) }) {
+                                    Text(if (anomalyConfig.showHotOverlay) "On" else "Off")
                                 }
                             }
                             Row(

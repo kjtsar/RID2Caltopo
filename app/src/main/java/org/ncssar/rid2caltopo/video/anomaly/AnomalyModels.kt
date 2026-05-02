@@ -66,6 +66,7 @@ enum class ThermalPolarity(
 
 data class NativeAnomalyConfig(
     val enabled: Boolean,
+    val showHotOverlay: Boolean,
     val algorithmMask: Int,
     val frameStride: Int,
     val pixelStep: Int,
@@ -80,6 +81,7 @@ data class NativeAnomalyConfig(
 
 data class AnomalyConfig(
     val enabled: Boolean = false,
+    val showHotOverlay: Boolean = false,
     val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.ThermalHotspot),
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
     val frameStride: Int = 3,
@@ -150,6 +152,7 @@ data class AnomalyConfig(
         val effectiveMinAreaFraction = (minAreaFraction * areaScale).coerceIn(0.00005f, 0.03f)
         return NativeAnomalyConfig(
             enabled = enabledOverride ?: enabled,
+            showHotOverlay = showHotOverlay,
             algorithmMask = mask,
             frameStride = frameStride.coerceIn(1, 8),
             pixelStep = pixelStep.coerceIn(0, 8),

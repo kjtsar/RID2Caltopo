@@ -3162,6 +3162,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->running = true;
     slot->is_render = is_render;
     slot->anomaly_cfg.enabled           = false;
+    slot->anomaly_cfg.show_hot_overlay  = false;
     slot->anomaly_cfg.algorithm_mask    = ANOMALY_ALGO_THERMAL;
     slot->anomaly_cfg.frame_stride      = ANOMALY_DEFAULT_FRAME_STRIDE;
     slot->anomaly_cfg.pixel_step        = 0;
@@ -3469,6 +3470,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jobject thiz,
         jlong session_id,
         jboolean enabled,
+        jboolean show_hot_overlay,
         jint algorithm_mask,
         jint frame_stride,
         jint pixel_step,
@@ -3488,6 +3490,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         float sz = (float) scan_zone;
         int   mh = (int)   min_hits;
         session->anomaly_cfg.enabled           = (enabled == JNI_TRUE);
+        session->anomaly_cfg.show_hot_overlay  = (show_hot_overlay == JNI_TRUE);
         session->anomaly_cfg.algorithm_mask    = (int) algorithm_mask;
         session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (int) frame_stride;
         session->anomaly_cfg.pixel_step        = ((int) pixel_step < 0) ? 0 : (int) pixel_step;

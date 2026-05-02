@@ -673,11 +673,6 @@ private fun StreamsGrid(
             viewModel.ensureFocus(designator)
         }
     }
-    LaunchedEffect(pendingReviewExport?.designator, pendingReviewExport?.suggestedFileName) {
-        val export = pendingReviewExport ?: return@LaunchedEffect
-        reviewExportLauncher.launch(export.suggestedFileName)
-    }
-
     Box(modifier = modifier) {
         if (visibleEntries.isEmpty()) {
             CTDebug(tag, "No streams to show.")
@@ -736,6 +731,28 @@ private fun StreamsGrid(
             }
         }
 
+    }
+
+    if (pendingReviewExport != null) {
+        AlertDialog(
+            onDismissRequest = { viewModel.clearPendingLocalPlaybackReviewExport() },
+            title = { Text("Save Review Sidecar?") },
+            text = {
+                Text("Save the updated review annotations for ${pendingReviewExport.designator} as ${pendingReviewExport.suggestedFileName}?") 
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { reviewExportLauncher.launch(pendingReviewExport.suggestedFileName) }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.clearPendingLocalPlaybackReviewExport() }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

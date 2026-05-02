@@ -45,6 +45,16 @@ data class StreamRuntimeSnapshot(
     val idlePollCount: Int,
     val lastFrameAgeMs: Long,
     val renderDelayMs: Long?,
+    val anomalyAnalyzedFrameCount: Long,
+    val anomalyAnnotatedFrameCount: Long,
+    val anomalyAvgProcessMs: Double?,
+    val anomalyMaxProcessMs: Double?,
+    val anomalyLastProcessMs: Double?,
+    val localPlaybackRealtimeFactor: Double?,
+    val localPlaybackMediaSpanMs: Long?,
+    val localPlaybackWallSpanMs: Long?,
+    val currentSourceTimestampUs: Long?,
+    val anomalyDebugSummary: String?,
 )
 
 object FfmpegTelemetryReducer {
@@ -153,6 +163,7 @@ class FfmpegProbeService(
     private val renderDelayBaseMsByDesignator = mutableMapOf<String, Long>()
     private val renderDelayMeasuredAtMsByDesignator = mutableMapOf<String, Long>()
     private val anomalyConfigByDesignator = mutableMapOf<String, NativeAnomalyConfig>()
+    private val localPlaybackPausedByDesignator = mutableMapOf<String, Boolean>()
     private val pendingRepublishByDesignator = mutableMapOf<String, UpstreamRepublishMarker>()
     private val _renderDelayMsByDesignator = MutableStateFlow<Map<String, Long>>(emptyMap())
     val renderDelayMsByDesignatorFlow: StateFlow<Map<String, Long>> =
@@ -445,6 +456,7 @@ class FfmpegProbeService(
             sessionIds = sessionIdsForDesignatorLocked(designator)
             startingRenderDesignators.remove(designator)
             localPlaybackEofByDesignator.remove(designator)
+            localPlaybackPausedByDesignator.remove(designator)
             lastFrameAtMs.remove(designator)
             sourcePathByDesignator.remove(designator)
             renderEnabledDesignators.remove(designator)
@@ -732,11 +744,33 @@ class FfmpegProbeService(
     fun runtimeSnapshot(designator: String): StreamRuntimeSnapshot? {
         val nowMs = System.currentTimeMillis()
         return synchronized(stateLock) {
-            val sessionId = renderSessions[designator] ?: return@synchronized null
+            val sessionId = renderSessions[designator] ?: suspendedRenderSessions[designator] ?: return@synchronized null
             val session = managedRenderSessions[sessionId] ?: return@synchronized null
             val elapsedMs = (nowMs - session.createdAtMs).coerceAtLeast(1L)
             val decodedFps = (session.decodedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
             val renderedFps = (session.renderedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
+            val perfStats = FfmpegBridge.sessionPerfStats(sessionId)
+            val anomalyAnalyzedFrameCount = perfStats?.getOrNull(0) ?: 0L
+            val anomalyAnnotatedFrameCount = perfStats?.getOrNull(1) ?: 0L
+            val anomalyTotalProcessUs = perfStats?.getOrNull(2) ?: 0L
+            val anomalyMaxProcessUs = perfStats?.getOrNull(3) ?: 0L
+            val anomalyLastProcessUs = perfStats?.getOrNull(4) ?: 0L
+            val localPlaybackFirstPtsUs = perfStats?.getOrNull(5) ?: 0L
+            val localPlaybackLastPtsUs = perfStats?.getOrNull(6) ?: 0L
+            val localPlaybackFirstRenderAtMs = perfStats?.getOrNull(7) ?: 0L
+            val localPlaybackLastRenderAtMs = perfStats?.getOrNull(8) ?: 0L
+            val localPlaybackMediaSpanMs =
+                ((localPlaybackLastPtsUs - localPlaybackFirstPtsUs) / 1000L).takeIf { it > 0L }
+            val localPlaybackWallSpanMs =
+                (localPlaybackLastRenderAtMs - localPlaybackFirstRenderAtMs).takeIf { it > 0L }
+            val currentSourceTimestampUs = perfStats?.getOrNull(9)?.takeIf { it > 0L }
+            val localPlaybackRealtimeFactor =
+                if (localPlaybackMediaSpanMs != null && localPlaybackWallSpanMs != null && localPlaybackWallSpanMs > 0L) {
+                    localPlaybackMediaSpanMs.toDouble() / localPlaybackWallSpanMs.toDouble()
+                } else {
+                    null
+                }
+            val anomalyDebugSummary = FfmpegBridge.sessionDebugSummary(sessionId)
             StreamRuntimeSnapshot(
                 decodedFrameCount = session.decodedFrameCount,
                 renderedFrameCount = session.renderedFrameCount,
@@ -745,7 +779,60 @@ class FfmpegProbeService(
                 idlePollCount = session.idlePollCount,
                 lastFrameAgeMs = session.lastFrameAtMs?.let { nowMs - it } ?: -1L,
                 renderDelayMs = renderDelayMsByDesignator[designator],
+                anomalyAnalyzedFrameCount = anomalyAnalyzedFrameCount,
+                anomalyAnnotatedFrameCount = anomalyAnnotatedFrameCount,
+                anomalyAvgProcessMs =
+                    if (anomalyAnalyzedFrameCount > 0L) {
+                        anomalyTotalProcessUs.toDouble() / anomalyAnalyzedFrameCount.toDouble() / 1000.0
+                    } else {
+                        null
+                    },
+                anomalyMaxProcessMs = anomalyMaxProcessUs.takeIf { it > 0L }?.toDouble()?.div(1000.0),
+                anomalyLastProcessMs = anomalyLastProcessUs.takeIf { it > 0L }?.toDouble()?.div(1000.0),
+                localPlaybackRealtimeFactor = localPlaybackRealtimeFactor,
+                localPlaybackMediaSpanMs = localPlaybackMediaSpanMs,
+                localPlaybackWallSpanMs = localPlaybackWallSpanMs,
+                currentSourceTimestampUs = currentSourceTimestampUs,
+                anomalyDebugSummary = anomalyDebugSummary,
             )
+        }
+    }
+
+    fun isLocalPlaybackPaused(designator: String): Boolean {
+        return synchronized(stateLock) {
+            localPlaybackPausedByDesignator[designator] == true
+        }
+    }
+
+    fun setLocalPlaybackPaused(designator: String, paused: Boolean) {
+        val sessionIds = synchronized(stateLock) {
+            localPlaybackPausedByDesignator[designator] = paused
+            sessionIdsForDesignatorLocked(designator)
+        }
+        sessionIds.forEach { sessionId ->
+            FfmpegBridge.setLocalPlaybackPaused(sessionId, paused)
+        }
+    }
+
+    fun stepLocalPlayback(designator: String, frameCount: Int = 1) {
+        val sessionIds = synchronized(stateLock) {
+            localPlaybackPausedByDesignator[designator] = true
+            sessionIdsForDesignatorLocked(designator)
+        }
+        sessionIds.forEach { sessionId ->
+            FfmpegBridge.setLocalPlaybackPaused(sessionId, true)
+            FfmpegBridge.stepLocalPlayback(sessionId, frameCount)
+        }
+    }
+
+    fun stepLocalPlaybackBack(designator: String) {
+        val sessionIds = synchronized(stateLock) {
+            localPlaybackPausedByDesignator[designator] = true
+            sessionIdsForDesignatorLocked(designator)
+        }
+        sessionIds.forEach { sessionId ->
+            FfmpegBridge.setLocalPlaybackPaused(sessionId, true)
+            FfmpegBridge.stepLocalPlaybackBack(sessionId)
         }
     }
 
@@ -847,6 +934,7 @@ class FfmpegProbeService(
                 }
             }
             applyAnomalyConfigToSession(designator, sessionId)
+            applyLocalPlaybackControlsToSession(designator, sessionId)
             return sessionId
         }
         synchronized(stateLock) {
@@ -909,10 +997,15 @@ class FfmpegProbeService(
     }
 
     private fun classifySessionHealthLocked(
+        designator: String,
         sessionState: ManagedRenderSession,
         useRenderedProgress: Boolean,
         nowMs: Long,
     ): RenderSessionHealth {
+        val localPlaybackHeld =
+            sourcePathByDesignator[designator]?.startsWith("file://", ignoreCase = true) == true &&
+                localPlaybackPausedByDesignator[designator] == true
+        if (localPlaybackHeld) return RenderSessionHealth.HEALTHY
         if (sessionState.idlePollCount == 0) return RenderSessionHealth.HEALTHY
         if (useRenderedProgress &&
             sessionState.renderedFrameCount > 0L &&
@@ -1168,7 +1261,7 @@ class FfmpegProbeService(
                     sessionState = activeSession,
                     useRenderedProgress = useRenderedProgress,
                 )
-                when (classifySessionHealthLocked(activeSession, useRenderedProgress, now)) {
+                when (classifySessionHealthLocked(designator, activeSession, useRenderedProgress, now)) {
                     RenderSessionHealth.HEALTHY,
                     RenderSessionHealth.STALLED,
                     -> Unit
@@ -1367,6 +1460,13 @@ class FfmpegProbeService(
             anomalyConfigByDesignator[designator]
         } ?: return
         FfmpegBridge.updateAnomalyConfig(sessionId, config)
+    }
+
+    private fun applyLocalPlaybackControlsToSession(designator: String, sessionId: Long) {
+        val paused = synchronized(stateLock) {
+            localPlaybackPausedByDesignator[designator] == true
+        }
+        FfmpegBridge.setLocalPlaybackPaused(sessionId, paused)
     }
 }
 

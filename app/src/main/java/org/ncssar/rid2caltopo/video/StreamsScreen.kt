@@ -64,6 +64,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContract
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
@@ -273,6 +274,7 @@ fun StreamsScreen(
                     StreamsLayoutMode.Both -> {
                         SplitStreamsAndMap(
                             viewModel = viewModel,
+                            allowCapturedVideoPicker = allowModalDialogs,
                             splitFraction = splitFraction,
                             onSplitFractionChange = { splitFraction = it },
                             onStreamsPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
@@ -281,7 +283,11 @@ fun StreamsScreen(
                     }
 
                     StreamsLayoutMode.Streams -> {
-                        StreamsGrid(viewModel = viewModel, modifier = Modifier.fillMaxSize())
+                        StreamsGrid(
+                            viewModel = viewModel,
+                            allowCapturedVideoPicker = allowModalDialogs,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
 
                     StreamsLayoutMode.Map -> {
@@ -453,6 +459,7 @@ private fun complianceAlertSummary(drone: OverLimitDroneUiState): String {
 @Composable
 private fun SplitStreamsAndMap(
     viewModel: StreamsViewModel,
+    allowCapturedVideoPicker: Boolean,
     splitFraction: Float,
     onSplitFractionChange: (Float) -> Unit,
     onStreamsPaneTap: () -> Unit,
@@ -482,7 +489,11 @@ private fun SplitStreamsAndMap(
                             detectTapGestures(onTap = { onStreamsPaneTap() })
                         }
                 ) {
-                    StreamsGrid(viewModel = viewModel, modifier = Modifier.fillMaxSize())
+                    StreamsGrid(
+                        viewModel = viewModel,
+                        allowCapturedVideoPicker = allowCapturedVideoPicker,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
                 Box(
                     modifier = Modifier
@@ -530,7 +541,11 @@ private fun SplitStreamsAndMap(
                             detectTapGestures(onTap = { onStreamsPaneTap() })
                         }
                 ) {
-                    StreamsGrid(viewModel = viewModel, modifier = Modifier.fillMaxSize())
+                    StreamsGrid(
+                        viewModel = viewModel,
+                        allowCapturedVideoPicker = allowCapturedVideoPicker,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
                 Box(
                     modifier = Modifier
@@ -590,6 +605,7 @@ fun <T> List<T>.padTo(size: Int): List<T?> =
 @Composable
 private fun StreamsGrid(
     viewModel: StreamsViewModel,
+    allowCapturedVideoPicker: Boolean,
     modifier: Modifier = Modifier
 ) {
     val tag = "StreamsGrid"
@@ -619,21 +635,36 @@ private fun StreamsGrid(
     val singleVisibleDesignator = remember(visibleEntries, focusedPath) {
         if (focusedPath == null && visibleEntries.size == 1) visibleEntries[0].key else null
     }
-    val capturedVideoLauncher = rememberLauncherForActivityResult(
-        contract = OpenCapturedVideoDocument(),
-        onResult = { uri ->
-            if (uri == null) return@rememberLauncherForActivityResult
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) {
-            }
-            viewModel.openCapturedVideo(
-                uri = uri,
-                displayName = resolveCapturedVideoDisplayName(context, uri)
+    val onPlayCapturedVideo =
+        if (allowCapturedVideoPicker) {
+            val capturedVideoLauncher = rememberLauncherForActivityResult(
+                contract = OpenCapturedVideoDocument(),
+                onResult = { uri ->
+                    if (uri == null) return@rememberLauncherForActivityResult
+                    try {
+                        context.contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                    } catch (_: SecurityException) {
+                    }
+                    viewModel.openCapturedVideo(
+                        uri = uri,
+                        displayName = resolveCapturedVideoDisplayName(context, uri)
+                    )
+                }
             )
+            remember(viewModel, capturedVideoLauncher) {
+                { capturedVideoLauncher.launch(viewModel.capturedVideoPickerInitialUri()) }
+            }
+        } else {
+            null
+        }
+    val pendingReviewExport = viewModel.pendingLocalPlaybackReviewExport()
+    val reviewExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+        onResult = { uri ->
+            viewModel.completeLocalPlaybackReviewExport(uri)
         }
     )
 
@@ -642,13 +673,17 @@ private fun StreamsGrid(
             viewModel.ensureFocus(designator)
         }
     }
+    LaunchedEffect(pendingReviewExport?.designator, pendingReviewExport?.suggestedFileName) {
+        val export = pendingReviewExport ?: return@LaunchedEffect
+        reviewExportLauncher.launch(export.suggestedFileName)
+    }
 
     Box(modifier = modifier) {
         if (visibleEntries.isEmpty()) {
             CTDebug(tag, "No streams to show.")
             EmptyStreamsView(
                 mapStatus = mapStatus,
-                onPlayCapturedVideo = { capturedVideoLauncher.launch(viewModel.capturedVideoPickerInitialUri()) },
+                onPlayCapturedVideo = onPlayCapturedVideo,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -708,7 +743,7 @@ private fun StreamsGrid(
 private fun EmptyStreamsView(
     mapStatus: String,
     myIpAddress: String = R2CMqttManager.GetMyIpAddress(),
-    onPlayCapturedVideo: () -> Unit,
+    onPlayCapturedVideo: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -723,8 +758,10 @@ private fun EmptyStreamsView(
             val ssid = WiFiScanner.WiFiSSID(LocalContext.current)
             Text("Stream video to: 'rtmp://$myIpAddress/<droneDesig>' on $ssid network")
             Spacer(modifier = Modifier.height(16.dp))
-            Button(onClick = onPlayCapturedVideo) {
-                Text("Play Captured Video")
+            if (onPlayCapturedVideo != null) {
+                Button(onClick = onPlayCapturedVideo) {
+                    Text("Play Captured Video")
+                }
             }
             Spacer(modifier = Modifier.height(12.dp))
             Text(

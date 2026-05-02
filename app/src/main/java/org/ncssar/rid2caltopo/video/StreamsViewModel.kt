@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -64,11 +65,22 @@ import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
 import org.ncssar.rid2caltopo.video.PlaybackIndicatorState
+import org.ncssar.rid2caltopo.video.LocalPlaybackAnnotationType
+import org.ncssar.rid2caltopo.video.LocalPlaybackAnnotationVerdict
+import org.ncssar.rid2caltopo.video.LocalPlaybackFrameReview
+import org.ncssar.rid2caltopo.video.LocalPlaybackPointAnnotation
+import org.ncssar.rid2caltopo.video.LocalPlaybackReviewKind
+import org.ncssar.rid2caltopo.video.LocalPlaybackReviewFile
+import org.ncssar.rid2caltopo.video.LocalPlaybackScenario
+import org.ncssar.rid2caltopo.video.PendingLocalPlaybackReviewExport
 import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamAdmissionGuardResult
 import org.ncssar.rid2caltopo.video.StreamAdmissionState
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.StreamState
+import org.ncssar.rid2caltopo.video.buildLocalPlaybackFrameAnnotationSummary
+import org.ncssar.rid2caltopo.video.localPlaybackReviewFromJson
+import org.ncssar.rid2caltopo.video.toJson
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 
 data class PendingClue(
@@ -613,6 +625,9 @@ class StreamsViewModel(
 
     private val _focusedPath = MutableStateFlow<String?>(null)
     val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
+    private val localPlaybackPausedState = mutableStateMapOf<String, Boolean>()
+    private val localPlaybackReviewByDesignator = mutableStateMapOf<String, LocalPlaybackReviewFile>()
+    private var pendingLocalPlaybackReviewExport by mutableStateOf<PendingLocalPlaybackReviewExport?>(null)
     private val _streamsUiActive = MutableStateFlow(false)
     private val streamsUiConsumerLock = Any()
     private val streamsUiConsumers = mutableSetOf<Any>()
@@ -795,6 +810,138 @@ class StreamsViewModel(
         return streamInfoByDesignator[designator]?.isLocalPlayback == true
     }
 
+    fun isLocalPlaybackPaused(designator: String): Boolean {
+        return localPlaybackPausedState[designator]
+            ?: (ffmpegProbeService?.isLocalPlaybackPaused(designator) == true)
+    }
+
+    fun toggleLocalPlaybackPaused(designator: String) {
+        val probeService = ffmpegProbeService ?: return
+        val paused = probeService.isLocalPlaybackPaused(designator)
+        val nextPaused = !paused
+        localPlaybackPausedState[designator] = nextPaused
+        probeService.setLocalPlaybackPaused(designator, nextPaused)
+    }
+
+    fun stepLocalPlaybackFrame(designator: String, frameCount: Int = 1) {
+        localPlaybackPausedState[designator] = true
+        ffmpegProbeService?.stepLocalPlayback(designator, frameCount)
+    }
+
+    fun stepLocalPlaybackBack(designator: String) {
+        localPlaybackPausedState[designator] = true
+        ffmpegProbeService?.stepLocalPlaybackBack(designator)
+    }
+
+    fun runtimeSnapshotFor(designator: String): StreamRuntimeSnapshot? {
+        return ffmpegProbeService?.runtimeSnapshot(designator)
+    }
+
+    fun localPlaybackFrameCounterText(designator: String): String? {
+        val timestampUs = runtimeSnapshotFor(designator)?.currentSourceTimestampUs ?: return null
+        return "T ${formatPlaybackTimestampUs(timestampUs)}"
+    }
+
+    fun pendingLocalPlaybackReviewExport(): PendingLocalPlaybackReviewExport? {
+        return pendingLocalPlaybackReviewExport
+    }
+
+    fun clearPendingLocalPlaybackReviewExport() {
+        pendingLocalPlaybackReviewExport = null
+    }
+
+    fun completeLocalPlaybackReviewExport(targetUri: Uri?) {
+        val pending = pendingLocalPlaybackReviewExport ?: return
+        if (targetUri != null) {
+            val context = getApplication<Application>().applicationContext
+            runCatching {
+                context.contentResolver.openOutputStream(targetUri, "wt")?.use { output ->
+                    output.write(pending.jsonText.toByteArray(Charsets.UTF_8))
+                } ?: error("Unable to open export destination")
+            }.onFailure { error ->
+                CaltopoClient.ShowToast("Review export failed: ${error.message ?: "unknown error"}")
+                CTDebug(tag, "Review export failed for ${pending.designator}: ${error.message}")
+            }.onSuccess {
+                CaltopoClient.ShowToast("Saved review for ${pending.designator}.")
+            }
+        }
+        pendingLocalPlaybackReviewExport = null
+    }
+
+    fun localPlaybackFrameAnnotations(
+        designator: String,
+        sourceTimestampUs: Long?,
+    ): List<LocalPlaybackPointAnnotation> {
+        val timestampUs = sourceTimestampUs?.takeIf { it > 0L } ?: return emptyList()
+        val review = localPlaybackReviewByDesignator[designator] ?: return emptyList()
+        return review.frames.firstOrNull { it.sourceTimestampUs == timestampUs }?.annotations.orEmpty()
+    }
+
+    fun localPlaybackFrameAnnotationSummary(
+        designator: String,
+        sourceTimestampUs: Long?,
+    ): String? {
+        return buildLocalPlaybackFrameAnnotationSummary(localPlaybackFrameAnnotations(designator, sourceTimestampUs))
+    }
+
+    fun addLocalPlaybackPointAnnotation(
+        designator: String,
+        sourceTimestampUs: Long,
+        xNorm: Float,
+        yNorm: Float,
+        verdict: LocalPlaybackAnnotationVerdict,
+        reviewKind: LocalPlaybackReviewKind,
+        objectType: LocalPlaybackAnnotationType,
+        scenario: LocalPlaybackScenario?,
+        note: String,
+        anomalyDebugSummary: String?,
+    ) {
+        val streamInfo = _localPlaybackEntries.value[designator] ?: return
+        val sidecarPath = streamInfo.annotationSidecarPath ?: return
+        val nowMs = System.currentTimeMillis()
+        val existing = localPlaybackReviewByDesignator[designator]
+            ?: loadLocalPlaybackReviewFromDisk(streamInfo)
+            ?: LocalPlaybackReviewFile(
+                sourceDisplayName = streamInfo.designator,
+                originalSourceUri = streamInfo.originalSourceUri?.toString(),
+                playbackUri = streamInfo.playbackUri?.toString(),
+                annotationSidecarPath = sidecarPath,
+                updatedAtMs = nowMs,
+            )
+        val frameIndex = existing.frames.indexOfFirst { it.sourceTimestampUs == sourceTimestampUs }
+        val annotation = LocalPlaybackPointAnnotation(
+            xNorm = xNorm.coerceIn(0f, 1f),
+            yNorm = yNorm.coerceIn(0f, 1f),
+            verdict = verdict,
+            reviewKind = reviewKind,
+            objectType = objectType,
+            scenario = scenario,
+            note = note.trim(),
+            createdAtMs = nowMs,
+            anomalyDebugSummary = anomalyDebugSummary,
+        )
+        val updatedFrames = existing.frames.toMutableList()
+        if (frameIndex >= 0) {
+            val frame = updatedFrames[frameIndex]
+            updatedFrames[frameIndex] = frame.copy(
+                annotations = frame.annotations.toMutableList().apply { add(annotation) }
+            )
+        } else {
+            updatedFrames += LocalPlaybackFrameReview(
+                sourceTimestampUs = sourceTimestampUs,
+                annotations = mutableListOf(annotation),
+            )
+        }
+        val updated = existing.copy(
+            updatedAtMs = nowMs,
+            frames = updatedFrames.sortedBy { it.sourceTimestampUs }.toMutableList(),
+        )
+        localPlaybackReviewByDesignator[designator] = updated
+        viewModelScope.launch(Dispatchers.IO) {
+            writeLocalPlaybackReviewToDisk(updated, sidecarPath)
+        }
+    }
+
     fun useFfmpegRender(designator: String): Boolean {
         return renderRouteByDesignator[designator] == true
     }
@@ -834,6 +981,7 @@ class StreamsViewModel(
             designator = designator,
             sourcePath = uri.toString(),
             playbackUri = uri,
+            originalSourceUri = uri,
             isLocalPlayback = true,
             state = StreamState.CONNECTING,
             revision = 1L,
@@ -846,6 +994,7 @@ class StreamsViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val resolvedInfo = try {
                 val cachedUri = stageCapturedVideoForPlayback(designator, uri, displayName)
+                val annotationSidecarPath = annotationSidecarPathForPlaybackUri(cachedUri)
                 val appearanceGuess = guessCapturedVideoAppearance(cachedUri)
                 CTDebug(
                     tag,
@@ -860,6 +1009,8 @@ class StreamsViewModel(
                 pendingInfo.copy(
                     sourcePath = cachedUri.toString(),
                     playbackUri = cachedUri,
+                    originalSourceUri = uri,
+                    annotationSidecarPath = annotationSidecarPath,
                     state = StreamState.LIVE,
                     revision = pendingInfo.revision + 1L,
                 )
@@ -872,6 +1023,14 @@ class StreamsViewModel(
             }
             withContext(Dispatchers.Main) {
                 val current = _localPlaybackEntries.value[designator] ?: return@withContext
+                localPlaybackReviewByDesignator[designator] = loadLocalPlaybackReviewFromDisk(resolvedInfo)
+                    ?: LocalPlaybackReviewFile(
+                        sourceDisplayName = resolvedInfo.designator,
+                        originalSourceUri = resolvedInfo.originalSourceUri?.toString(),
+                        playbackUri = resolvedInfo.playbackUri?.toString(),
+                        annotationSidecarPath = resolvedInfo.annotationSidecarPath,
+                        updatedAtMs = 0L,
+                    )
                 _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
                     this[designator] = resolvedInfo.copy(revision = maxOf(current.revision + 1L, resolvedInfo.revision))
                 }
@@ -882,6 +1041,9 @@ class StreamsViewModel(
 
     fun closeStream(designator: String) {
         _localPlaybackEntries.value[designator]?.let { localInfo ->
+            queueLocalPlaybackReviewExportIfNeeded(localInfo)
+            localPlaybackPausedState.remove(designator)
+            localPlaybackReviewByDesignator.remove(designator)
             _detectedAppearanceModeByDesignator.remove(designator)
             appearanceObservationStateByDesignator.remove(designator)
             _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
@@ -1852,15 +2014,23 @@ class StreamsViewModel(
 
     fun streamPerformanceOverlayText(designator: String): String? {
         val runtime = ffmpegProbeService?.runtimeSnapshot(designator) ?: return null
+        val anomalyText = runtime.anomalyAvgProcessMs?.let {
+            String.format(Locale.US, " ANO %.1fms", it)
+        } ?: ""
+        val realtimeText = runtime.localPlaybackRealtimeFactor?.let {
+            String.format(Locale.US, " RT %.2fx", it)
+        } ?: ""
         return String.format(
             Locale.US,
-            "FPS d/r %.1f/%.1f FR %d/%d AGE %dms%s",
+            "FPS d/r %.1f/%.1f FR %d/%d AGE %dms%s%s%s",
             runtime.avgDecodedFps,
             runtime.avgRenderedFps,
             runtime.decodedFrameCount,
             runtime.renderedFrameCount,
             runtime.lastFrameAgeMs,
             runtime.renderDelayMs?.let { " LAT ${it}ms" } ?: "",
+            anomalyText,
+            realtimeText,
         )
     }
 
@@ -1908,6 +2078,37 @@ class StreamsViewModel(
                 lines += String.format(Locale.US, "  Last frame age: %d ms", runtime.lastFrameAgeMs)
                 runtime.renderDelayMs?.let {
                     lines += String.format(Locale.US, "  Render latency: %d ms", it)
+                }
+                runtime.anomalyAvgProcessMs?.let {
+                    lines += String.format(
+                        Locale.US,
+                        "  Anomaly processing: avg %.2f ms max %.2f ms last %.2f ms",
+                        it,
+                        runtime.anomalyMaxProcessMs ?: 0.0,
+                        runtime.anomalyLastProcessMs ?: 0.0,
+                    )
+                    lines += String.format(
+                        Locale.US,
+                        "  Anomaly analyzed frames: %d (%d annotated)",
+                        runtime.anomalyAnalyzedFrameCount,
+                        runtime.anomalyAnnotatedFrameCount,
+                    )
+                }
+                runtime.localPlaybackRealtimeFactor?.let {
+                    lines += String.format(Locale.US, "  Local playback speed: %.2fx realtime", it)
+                    val mediaSpanMs = runtime.localPlaybackMediaSpanMs
+                    val wallSpanMs = runtime.localPlaybackWallSpanMs
+                    if (mediaSpanMs != null && wallSpanMs != null) {
+                        lines += String.format(
+                            Locale.US,
+                            "  Local playback sample: %.1f s media over %.1f s wall time",
+                            mediaSpanMs / 1000.0,
+                            wallSpanMs / 1000.0,
+                        )
+                    }
+                }
+                runtime.anomalyDebugSummary?.takeIf { it.isNotBlank() }?.let {
+                    lines += "  Anomaly debug: $it"
                 }
                 lines += String.format(Locale.US, "  Idle poll count: %d", runtime.idlePollCount)
             }
@@ -2008,6 +2209,57 @@ class StreamsViewModel(
             }
         } ?: error("Unable to read selected video")
         return Uri.fromFile(targetFile)
+    }
+
+    private fun annotationSidecarPathForPlaybackUri(playbackUri: Uri): String? {
+        val playbackPath = playbackUri.path ?: return null
+        val playbackFile = File(playbackPath)
+        val baseName = playbackFile.name.substringBeforeLast('.', playbackFile.name)
+        return File(playbackFile.parentFile, "$baseName.review.json").absolutePath
+    }
+
+    private fun loadLocalPlaybackReviewFromDisk(streamInfo: StreamInfo): LocalPlaybackReviewFile? {
+        val sidecarPath = streamInfo.annotationSidecarPath ?: return null
+        val reviewFile = File(sidecarPath)
+        if (!reviewFile.exists()) return null
+        return runCatching {
+            localPlaybackReviewFromJson(JSONObject(reviewFile.readText()))
+        }.getOrElse { error ->
+            CTDebug(tag, "Local playback review read failed for $sidecarPath: ${error.message}")
+            null
+        }
+    }
+
+    private fun writeLocalPlaybackReviewToDisk(review: LocalPlaybackReviewFile, sidecarPath: String) {
+        runCatching {
+            val reviewFile = File(sidecarPath)
+            reviewFile.parentFile?.mkdirs()
+            reviewFile.writeText(review.toJson().toString(2))
+        }.onFailure { error ->
+            CTDebug(tag, "Local playback review write failed for $sidecarPath: ${error.message}")
+        }
+    }
+
+    private fun queueLocalPlaybackReviewExportIfNeeded(streamInfo: StreamInfo) {
+        val review = localPlaybackReviewByDesignator[streamInfo.designator] ?: return
+        if (review.frames.isEmpty()) return
+        val baseName = streamInfo.designator.substringBeforeLast('.', streamInfo.designator)
+            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+            .trim('_')
+            .ifBlank { "captured_video" }
+        pendingLocalPlaybackReviewExport = PendingLocalPlaybackReviewExport(
+            designator = streamInfo.designator,
+            suggestedFileName = "$baseName.review.json",
+            jsonText = review.copy(updatedAtMs = System.currentTimeMillis()).toJson().toString(2),
+        )
+    }
+
+    private fun formatPlaybackTimestampUs(timestampUs: Long): String {
+        val totalMs = (timestampUs / 1000L).coerceAtLeast(0L)
+        val minutes = totalMs / 60_000L
+        val seconds = (totalMs % 60_000L) / 1000L
+        val millis = totalMs % 1000L
+        return String.format(Locale.US, "%02d:%02d.%03d", minutes, seconds, millis)
     }
 
     private fun guessCapturedVideoAppearance(sourceUri: Uri): CapturedVideoAppearanceGuess {

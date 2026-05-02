@@ -99,6 +99,31 @@ object FfmpegBridge {
         )
     }
 
+    fun sessionPerfStats(sessionId: Long): LongArray? {
+        if (!nativeLoaded || sessionId <= 0L) return null
+        return nativeGetSessionPerfStats(sessionId)
+    }
+
+    fun sessionDebugSummary(sessionId: Long): String? {
+        if (!nativeLoaded || sessionId <= 0L) return null
+        return nativeGetSessionDebugSummary(sessionId)
+    }
+
+    fun setLocalPlaybackPaused(sessionId: Long, paused: Boolean) {
+        if (!nativeLoaded || sessionId <= 0L) return
+        nativeSetLocalPlaybackPaused(sessionId, paused)
+    }
+
+    fun stepLocalPlayback(sessionId: Long, frameCount: Int = 1) {
+        if (!nativeLoaded || sessionId <= 0L) return
+        nativeStepLocalPlayback(sessionId, frameCount.coerceAtLeast(1))
+    }
+
+    fun stepLocalPlaybackBack(sessionId: Long) {
+        if (!nativeLoaded || sessionId <= 0L) return
+        nativeStepLocalPlaybackBack(sessionId)
+    }
+
     private fun normalizeTelemetryFromNative(
         sourceTag: String,
         confidence: Double,
@@ -191,5 +216,10 @@ object FfmpegBridge {
         minHits: Int,
         thermalMinDelta: Float,
     )
+    private external fun nativeGetSessionPerfStats(sessionId: Long): LongArray?
+    private external fun nativeGetSessionDebugSummary(sessionId: Long): String?
+    private external fun nativeSetLocalPlaybackPaused(sessionId: Long, paused: Boolean)
+    private external fun nativeStepLocalPlayback(sessionId: Long, frameCount: Int)
+    private external fun nativeStepLocalPlaybackBack(sessionId: Long)
     private external fun nativeStop(sessionId: Long)
 }

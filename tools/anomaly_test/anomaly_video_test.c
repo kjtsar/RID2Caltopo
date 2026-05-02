@@ -462,12 +462,14 @@ static void draw_motion_debug_overlay(uint8_t *rgba, int W, int H,
         draw_crosshair(rgba, W * 4, W, H, cx, cy, 8, stroke + 1, 0x23, 0xC5, 0x52);
     }
 
-    char stats_buf[96];
-    snprintf(stats_buf, sizeof(stats_buf), "M%d S%d U%d V%d",
+    char stats_buf[128];
+    snprintf(stats_buf, sizeof(stats_buf), "M%d S%d U%d V%d Z%d B%d",
              (int)lroundf(dbg->residual_mean),
              (int)lroundf(dbg->residual_std),
              dbg->sample_step,
-             dbg->motion_step);
+             dbg->motion_step,
+             (int)lroundf(dbg->zoom_motion_scale * 100.0f),
+             (int)lroundf(dbg->broad_motion_scale * 100.0f));
     draw_text_badge(rgba, W * 4, W, H,
                     6, 26,
                     stats_buf, label_scale,
@@ -482,6 +484,7 @@ static const char *algo_label(int algo) {
         case ANOMALY_ALGO_COLOR:   return "color";
         case ANOMALY_ALGO_THERMAL: return "thermal";
         case ANOMALY_ALGO_MOTION:  return "motion";
+        case ANOMALY_ALGO_MOTION_TOLERANCE: return "motion_tolerance";
         case ANOMALY_ALGO_PERSIST: return "saliency";
         default:                   return "unknown";
     }
@@ -556,6 +559,14 @@ static void dump_motion_debug(FILE *out, int frame_num, double time_s,
     fprintf(out, "  residual_mean=%.3f residual_std=%.3f\n",
             (double)dbg->residual_mean,
             (double)dbg->residual_std);
+    fprintf(out, "  zoom_scale=%.3f broad_scale=%.3f motion_load=%.3f winner(tex=%.2f str=%.2f sup=%.2f pers=%.2f)\n",
+            (double)dbg->zoom_motion_scale,
+            (double)dbg->broad_motion_scale,
+            (double)dbg->global_motion_load,
+            (double)dbg->winner_texture_scale,
+            (double)dbg->winner_structure_scale,
+            (double)dbg->winner_support_scale,
+            (double)dbg->winner_persistence_scale);
     fprintf(out, "  raw_valid=%d raw_score=%.3f raw_xy=(%.4f, %.4f)\n",
             dbg->raw_candidate_valid ? 1 : 0,
             (double)dbg->raw_score,
@@ -789,6 +800,8 @@ int main(int argc, char **argv) {
         (cfg.algorithm_mask & ANOMALY_ALGO_COLOR)   ? "color "   : "",
         (cfg.algorithm_mask & ANOMALY_ALGO_THERMAL) ? "thermal " : "",
         (cfg.algorithm_mask & ANOMALY_ALGO_MOTION)  ? "motion "  : "");
+    if (cfg.algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE)
+        fprintf(stderr, "               %s\n", "motion_tolerance");
     if (cfg.algorithm_mask & ANOMALY_ALGO_PERSIST)
         fprintf(stderr, "               %s\n", "saliency");
     fprintf(stderr, "  polarity   = %s\n",

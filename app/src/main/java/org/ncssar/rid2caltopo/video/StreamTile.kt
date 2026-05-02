@@ -1,11 +1,14 @@
 package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
+import android.content.Context
 import android.graphics.SurfaceTexture
 import android.view.Surface
 import android.view.TextureView
+import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -21,7 +24,10 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -29,7 +35,17 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -39,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -84,11 +101,33 @@ fun StreamTile(
     val isFocused = (focusedPath == streamDesignator)
     CTDebug(tag, "StreamTile(): isFocused:${isFocused}, designator:${streamDesignator}, focusedPath:$focusedPath")
     val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
+    val isLocalPlaybackPaused = if (isLocalPlayback) viewModel.isLocalPlaybackPaused(streamDesignator) else false
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
     val resolvedAppearanceMode = viewModel.resolvedAppearanceModeFor(streamDesignator)
     val currentIsFocused by rememberUpdatedState(isFocused)
     val currentDesignatorState by rememberUpdatedState(designatorState)
+    var pendingAnnotationPoint by remember(streamDesignator) { mutableStateOf<Offset?>(null) }
+    val localRuntimeSnapshot by produceState<org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot?>(
+        initialValue = null,
+        streamDesignator,
+        isLocalPlayback,
+        isLocalPlaybackPaused,
+        streamRevision,
+    ) {
+        if (!isLocalPlayback) {
+            value = null
+            return@produceState
+        }
+        while (true) {
+            value = viewModel.runtimeSnapshotFor(streamDesignator)
+            delay(if (isLocalPlaybackPaused) 120L else 400L)
+        }
+    }
+    val currentFrameTimestampUs = localRuntimeSnapshot?.currentSourceTimestampUs
+    val currentFrameAnnotations = viewModel.localPlaybackFrameAnnotations(streamDesignator, currentFrameTimestampUs)
+    val currentFrameAnnotationSummary = viewModel.localPlaybackFrameAnnotationSummary(streamDesignator, currentFrameTimestampUs)
+    val currentFrameCounterText = if (isLocalPlayback) viewModel.localPlaybackFrameCounterText(streamDesignator) else null
 
     Box(
         modifier = Modifier
@@ -108,6 +147,66 @@ fun StreamTile(
             viewModel = viewModel,
             onTextureViewReady = { tv -> textureViewRef.value = tv }
         )
+        if (isLocalPlayback) {
+            if (currentFrameAnnotations.isNotEmpty()) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                ) {
+                    currentFrameAnnotations.forEach { annotation ->
+                        val markerColor = when (annotation.verdict) {
+                            LocalPlaybackAnnotationVerdict.Good -> Color.Green
+                            LocalPlaybackAnnotationVerdict.Bad -> Color.Red
+                            LocalPlaybackAnnotationVerdict.Unsure -> Color.Yellow
+                        }
+                        val center = Offset(
+                            x = annotation.xNorm.coerceIn(0f, 1f) * size.width,
+                            y = annotation.yNorm.coerceIn(0f, 1f) * size.height,
+                        )
+                        val radius = 10.dp.toPx()
+                        val strokeWidth = 2.dp.toPx()
+                        drawCircle(
+                            color = markerColor,
+                            radius = radius,
+                            center = center,
+                            style = Stroke(width = strokeWidth)
+                        )
+                        drawLine(
+                            color = markerColor,
+                            start = Offset(center.x - radius * 0.75f, center.y),
+                            end = Offset(center.x + radius * 0.75f, center.y),
+                            strokeWidth = strokeWidth
+                        )
+                        drawLine(
+                            color = markerColor,
+                            start = Offset(center.x, center.y - radius * 0.75f),
+                            end = Offset(center.x, center.y + radius * 0.75f),
+                            strokeWidth = strokeWidth
+                        )
+                    }
+                }
+            }
+            if (isLocalPlaybackPaused && currentFrameTimestampUs != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .pointerInput(streamDesignator, currentFrameTimestampUs, isLocalPlaybackPaused) {
+                            detectTapGestures(
+                                onTap = { tapOffset ->
+                                    val width = size.width.toFloat().coerceAtLeast(1f)
+                                    val height = size.height.toFloat().coerceAtLeast(1f)
+                                    pendingAnnotationPoint = Offset(
+                                        x = (tapOffset.x / width).coerceIn(0f, 1f),
+                                        y = (tapOffset.y / height).coerceIn(0f, 1f),
+                                    )
+                                }
+                            )
+                        }
+                )
+            }
+        }
 
         // ATO / AGL / HDG overlay — shown whenever the stream is live and we have a linked drone.
         if (streamState == StreamState.LIVE && !isLocalPlayback) {
@@ -139,52 +238,58 @@ fun StreamTile(
         Box(
             modifier = Modifier
                 .matchParentSize()
-                .pointerInput(streamDesignator, designatorState, currentIsFocused, currentDesignatorState) {
-                    detectTapGestures(
-                        onTap = {
-                            CTDebug(tag, "StreamTile{${streamDesignator}) onTap")
-                            if (isLocalPlayback) {
-                                viewModel.ensureFocus(streamDesignator)
-                            } else {
-                                onToggleFocus()
-                            }
-                        },
-                        onLongPress = {
-                            if (isLocalPlayback) return@detectTapGestures
-                            CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
-                            when (designatorState) {
-                                is DesignatorState.Yellow -> showPicker = true
-                                is DesignatorState.Green  -> showUnmatchDialog = true
-                                else -> {}
-                            }
-                        },
-                        onDoubleTap = {
-                            if (isLocalPlayback) return@detectTapGestures
-                            if (!currentIsFocused) {
-                                CaltopoClient.ShowToast("Single-tap view to focus before submitting clue.")
-                                return@detectTapGestures
-                            }
-                            if (currentDesignatorState !is DesignatorState.Green) {
-                                CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
-                                return@detectTapGestures
-                            }
+                .then(
+                    if (isLocalPlayback && isLocalPlaybackPaused) {
+                        Modifier
+                    } else {
+                        Modifier.pointerInput(streamDesignator, designatorState, currentIsFocused, currentDesignatorState) {
+                            detectTapGestures(
+                                onTap = {
+                                    CTDebug(tag, "StreamTile{${streamDesignator}) onTap")
+                                    if (isLocalPlayback) {
+                                        viewModel.ensureFocus(streamDesignator)
+                                    } else {
+                                        onToggleFocus()
+                                    }
+                                },
+                                onLongPress = {
+                                    if (isLocalPlayback) return@detectTapGestures
+                                    CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
+                                    when (designatorState) {
+                                        is DesignatorState.Yellow -> showPicker = true
+                                        is DesignatorState.Green  -> showUnmatchDialog = true
+                                        else -> {}
+                                    }
+                                },
+                                onDoubleTap = {
+                                    if (isLocalPlayback) return@detectTapGestures
+                                    if (!currentIsFocused) {
+                                        CaltopoClient.ShowToast("Single-tap view to focus before submitting clue.")
+                                        return@detectTapGestures
+                                    }
+                                    if (currentDesignatorState !is DesignatorState.Green) {
+                                        CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
+                                        return@detectTapGestures
+                                    }
 
-                            val tv = textureViewRef.value
-                            if (tv == null) {
-                                CTDebug(tag, "TextureView not ready yet")
-                                return@detectTapGestures
-                            }
+                                    val tv = textureViewRef.value
+                                    if (tv == null) {
+                                        CTDebug(tag, "TextureView not ready yet")
+                                        return@detectTapGestures
+                                    }
 
-                            val bitmap = tv.bitmap
-                            if (bitmap == null) {
-                                CTDebug(tag, "Failed to capture bitmap from TextureView")
-                                return@detectTapGestures
-                            }
+                                    val bitmap = tv.bitmap
+                                    if (bitmap == null) {
+                                        CTDebug(tag, "Failed to capture bitmap from TextureView")
+                                        return@detectTapGestures
+                                    }
 
-                            viewModel.onSnapshotCaptured(streamDesignator, bitmap)
+                                    viewModel.onSnapshotCaptured(streamDesignator, bitmap)
+                                }
+                            )
                         }
-                    )
-                }
+                    }
+                )
         )
         if ((isFocused || isLocalPlayback) && streamState == StreamState.LIVE) {
             Box(
@@ -231,13 +336,55 @@ fun StreamTile(
                     .padding(6.dp)
                     .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
-                    .pointerInput(streamDesignator, anomalyConfig, resolvedAppearanceMode) {
-                        detectTapGestures(onTap = { showAnomalySettingsDialog = true })
-                    },
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (isLocalPlayback) {
+                    currentFrameCounterText?.let { frameText ->
+                        Text(
+                            text = frameText,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    Text(
+                        text = "Back",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        modifier = Modifier.pointerInput(streamDesignator) {
+                            detectTapGestures(onTap = { viewModel.stepLocalPlaybackBack(streamDesignator) })
+                        }
+                    )
+                    Text(
+                        text = if (isLocalPlaybackPaused) "Run" else "Pause",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        modifier = Modifier.pointerInput(streamDesignator, isLocalPlaybackPaused) {
+                            detectTapGestures(onTap = { viewModel.toggleLocalPlaybackPaused(streamDesignator) })
+                        }
+                    )
+                    Text(
+                        text = "Step",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        modifier = Modifier.pointerInput(streamDesignator) {
+                            detectTapGestures(onTap = { viewModel.stepLocalPlaybackFrame(streamDesignator) })
+                        }
+                    )
+                    if (isLocalPlaybackPaused) {
+                        Text(
+                            text = "Dialog",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    Text(
+                        text = currentFrameAnnotationSummary ?: "0 notes",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                    )
+                }
                 Text(
                     text = if (anomalyConfig.enabled) "AD On" else "AD Off",
                     color = Color.White,
@@ -653,6 +800,27 @@ fun StreamTile(
                 onDismiss = {showPicker = false}
             )
         }
+        if (isLocalPlayback && isLocalPlaybackPaused && pendingAnnotationPoint != null && currentFrameTimestampUs != null) {
+            LocalPlaybackAnnotationDialog(
+                initialPoint = pendingAnnotationPoint!!,
+                onDismiss = { pendingAnnotationPoint = null },
+                onSave = { verdict, reviewKind, objectType, scenario, note ->
+                    viewModel.addLocalPlaybackPointAnnotation(
+                        designator = streamDesignator,
+                        sourceTimestampUs = currentFrameTimestampUs,
+                        xNorm = pendingAnnotationPoint!!.x,
+                        yNorm = pendingAnnotationPoint!!.y,
+                        verdict = verdict,
+                        reviewKind = reviewKind,
+                        objectType = objectType,
+                        scenario = scenario,
+                        note = note,
+                        anomalyDebugSummary = localRuntimeSnapshot?.anomalyDebugSummary,
+                    )
+                    pendingAnnotationPoint = null
+                }
+            )
+        }
     }
 }
 
@@ -680,6 +848,219 @@ private fun OutlinedLegendText(
             style = style,
             modifier = Modifier.align(Alignment.CenterStart)
         )
+    }
+}
+
+@Composable
+private fun LocalPlaybackAnnotationDialog(
+    initialPoint: Offset,
+    onDismiss: () -> Unit,
+    onSave: (
+        LocalPlaybackAnnotationVerdict,
+        LocalPlaybackReviewKind,
+        LocalPlaybackAnnotationType,
+        LocalPlaybackScenario?,
+        String,
+    ) -> Unit,
+) {
+    var verdict by remember(initialPoint) { mutableStateOf(LocalPlaybackAnnotationVerdict.Bad) }
+    var reviewKind by remember(initialPoint) { mutableStateOf(LocalPlaybackReviewKind.FalsePositive) }
+    var objectType by remember(initialPoint) { mutableStateOf(LocalPlaybackAnnotationType.Person) }
+    var scenario by remember(initialPoint) { mutableStateOf<LocalPlaybackScenario?>(null) }
+    var note by remember(initialPoint) { mutableStateOf("") }
+    var scenarioMenuExpanded by remember(initialPoint) { mutableStateOf(false) }
+    val context = LocalContext.current
+    val view = LocalView.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    fun forceHideKeyboard() {
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(view.windowToken, 0)
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .imePadding()
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = {
+                        forceHideKeyboard()
+                    })
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(0.88f)
+                    .pointerInput(Unit) {
+                        detectTapGestures(onTap = { })
+                    },
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+                shadowElevation = 8.dp,
+            ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Annotate Frame Point",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = {
+                                forceHideKeyboard()
+                            }
+                        ) {
+                            Text("Hide")
+                        }
+                        TextButton(onClick = onDismiss) {
+                            Text("Cancel")
+                        }
+                        TextButton(
+                            onClick = { onSave(verdict, reviewKind, objectType, scenario, note) }
+                        ) {
+                            Text("Save")
+                        }
+                    }
+                }
+                Text(
+                    text = "Point ${(initialPoint.x * 100f).toInt()}%, ${(initialPoint.y * 100f).toInt()}%"
+                )
+                    val dialogScroll = rememberScrollState()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 280.dp, max = 340.dp)
+                            .verticalScroll(dialogScroll),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("Review")
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                LocalPlaybackReviewKind.MissedTarget,
+                                LocalPlaybackReviewKind.FalsePositive,
+                                LocalPlaybackReviewKind.CorrectDetection,
+                                LocalPlaybackReviewKind.Unsure,
+                            ).forEach { candidate ->
+                                TextButton(onClick = { reviewKind = candidate }) {
+                                    Text(if (reviewKind == candidate) "[${candidate.shortLabel}]" else candidate.shortLabel)
+                                }
+                            }
+                        }
+                        Text("Verdict")
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            LocalPlaybackAnnotationVerdict.entries.forEach { candidate ->
+                                TextButton(onClick = { verdict = candidate }) {
+                                    Text(if (verdict == candidate) "[${candidate.shortLabel}]" else candidate.shortLabel)
+                                }
+                            }
+                        }
+                        Text("Type")
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            LocalPlaybackAnnotationType.entries.forEach { candidate ->
+                                TextButton(onClick = { objectType = candidate }) {
+                                    Text(if (objectType == candidate) "[${candidate.shortLabel}]" else candidate.shortLabel)
+                                }
+                            }
+                        }
+                        Text("Scenario")
+                        Box {
+                            TextButton(onClick = { scenarioMenuExpanded = true }) {
+                                Text(scenario?.shortLabel ?: "Choose Scenario")
+                            }
+                            DropdownMenu(
+                                expanded = scenarioMenuExpanded,
+                                onDismissRequest = { scenarioMenuExpanded = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("None") },
+                                    onClick = {
+                                        scenario = null
+                                        scenarioMenuExpanded = false
+                                    }
+                                )
+                                LocalPlaybackScenario.entries.forEach { candidate ->
+                                    DropdownMenuItem(
+                                        text = { Text(candidate.shortLabel) },
+                                        onClick = {
+                                            scenario = candidate
+                                            scenarioMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        OutlinedTextField(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(132.dp),
+                            value = note,
+                            onValueChange = { note = it },
+                            singleLine = false,
+                            minLines = 4,
+                            maxLines = 4,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    forceHideKeyboard()
+                                }
+                            ),
+                            textStyle = TextStyle(color = Color.Black),
+                            label = { Text("Note") },
+                            placeholder = { Text("What is here or what is happening?") },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.Black,
+                                unfocusedTextColor = Color.Black,
+                                focusedBorderColor = Color(0xFF1E88E5),
+                                unfocusedBorderColor = Color.DarkGray,
+                                focusedLabelColor = Color.Black,
+                                unfocusedLabelColor = Color.DarkGray,
+                                focusedPlaceholderColor = Color.Gray,
+                                unfocusedPlaceholderColor = Color.Gray,
+                                focusedContainerColor = Color.White,
+                                unfocusedContainerColor = Color.White,
+                                cursorColor = Color(0xFF1E88E5),
+                            ),
+                        )
+                        Text(
+                            text = "Use Done, Hide Keyboard, or tap outside the field to dismiss the keyboard.",
+                            color = Color.DarkGray,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

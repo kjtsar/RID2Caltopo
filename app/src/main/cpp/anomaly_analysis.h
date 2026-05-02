@@ -13,6 +13,7 @@
 #define ANOMALY_ALGO_THERMAL  0x02
 #define ANOMALY_ALGO_MOTION   0x04
 #define ANOMALY_ALGO_PERSIST  0x08  // Experimental multi-cue saliency path
+#define ANOMALY_ALGO_MOTION_TOLERANCE 0x10  // Experimental residual-displacement motion path
 
 // ── Thermal polarity ───────────────────────────────────────────────────────
 #define ANOMALY_THERMAL_WHITE_HOT 1
@@ -66,11 +67,44 @@
 #define ANOMALY_GMV_ZONE_GRID         4
 #define ANOMALY_GMV_MIN_ANCHORS       6
 
+// ── Motion-parallax suppression tuning ────────────────────────────────────
+// Forest canopy parallax tends to create smooth residual motion over a local
+// neighborhood, while a true moving subject is more likely to produce a
+// compact local outlier. Suppress candidates whose center residual does not
+// stand out enough from nearby residual motion.
+#define ANOMALY_MOTION_NEIGHBOR_MARGIN_PX        1.50f
+#define ANOMALY_MOTION_NEIGHBOR_MARGIN_SCALE     0.35f
+#define ANOMALY_MOTION_NEIGHBOR_COHERENCE_PX     1.25f
+#define ANOMALY_MOTION_NEIGHBOR_MIN_SCALE        0.12f
+#define ANOMALY_MOTION_NEIGHBOR_MAX_BONUS        1.75f
+#define ANOMALY_MOTION_COMPONENT_TARGET_AREA_FRAC 0.010f
+#define ANOMALY_MOTION_COMPONENT_MAX_AREA_FRAC    0.035f
+#define ANOMALY_MOTION_COMPONENT_TARGET_SPAN_FRAC 0.12f
+#define ANOMALY_MOTION_COMPONENT_MAX_SPAN_FRAC    0.28f
+#define ANOMALY_MOTION_COMPONENT_TARGET_FILL_RATIO 0.62f
+#define ANOMALY_MOTION_COMPONENT_MIN_FILL_RATIO    0.38f
+#define ANOMALY_MOTION_COMPONENT_SPARSE_FILL_RATIO 0.30f
+#define ANOMALY_MOTION_COMPONENT_FRAGMENT_FILL_VETO 0.34f
+#define ANOMALY_MOTION_COMPONENT_COMPACT_ASPECT    1.9f
+#define ANOMALY_MOTION_COMPONENT_FRAGMENT_AREA_MAX 4
+#define ANOMALY_MOTION_COMPONENT_FRAGMENT_SPAN_VETO 0.030f
+#define ANOMALY_MOTION_COMPONENT_FRAGMENT_AREA_HARD_MAX 8
+#define ANOMALY_MOTION_COMPONENT_MIN_TONE_COHERENCE 0.85f
+#define ANOMALY_MOTION_COMPONENT_TARGET_TONE_COHERENCE 1.40f
+#define ANOMALY_MOTION_HOMOGENEOUS_MASS_DELTA 8.0f
+#define ANOMALY_MOTION_HOMOGENEOUS_MASS_PAD 5
+#define ANOMALY_MOTION_HOMOGENEOUS_MASS_SOFT_COUNT 12
+#define ANOMALY_MOTION_HOMOGENEOUS_MASS_HARD_COUNT 20
+#define ANOMALY_MOTION_HOMOGENEOUS_MASS_SOFT_FRAC 0.32f
+#define ANOMALY_MOTION_HOMOGENEOUS_MASS_HARD_FRAC 0.50f
+
 // ── Temporal accumulator tuning ────────────────────────────────────────────
 #define ANOMALY_ACC_EMA_ALPHA    0.30f
 #define ANOMALY_ACC_GATE_RADIUS  0.15f
 #define ANOMALY_ACC_HOLD_FRAMES  8
 #define ANOMALY_ACC_MAX_HITS     10
+#define ANOMALY_MOTION_PRESENCE_WINDOW 3
+#define ANOMALY_MOTION_PRESENCE_MIN_HITS 2
 
 // ── Thermal background model (one-sided EMA) ───────────────────────────────
 // The background represents "what this pixel looks like when no warm body is
@@ -137,10 +171,15 @@ typedef struct {
     int      acc_hits[4];
     int      acc_hold[4];
     bool     acc_active[4];
+    uint8_t  acc_presence_mask[4];
     // Previous-frame luma grid for motion estimation
     uint8_t *prev_luma;
     int      prev_luma_width;
     int      prev_luma_height;
+    // Decaying motion persistence map at motion-grid resolution.
+    float   *motion_persist;
+    int      motion_persist_w;
+    int      motion_persist_h;
     // One-sided EMA thermal background model.
     // Stored at sampled-grid resolution (one float per sample point).
     // Adapts fast toward colder, slowly toward warmer — subjects are never
@@ -190,10 +229,20 @@ typedef struct {
     int   sample_count;
     float residual_mean;
     float residual_std;
+    float zoom_motion_scale;
+    float broad_motion_scale;
+    float global_motion_load;
     bool  raw_candidate_valid;
     float raw_score;
     float raw_x_norm;
     float raw_y_norm;
+    float winner_component_area_frac;
+    float winner_component_span_frac;
+    float winner_component_fill_ratio;
+    float winner_texture_scale;
+    float winner_structure_scale;
+    float winner_support_scale;
+    float winner_persistence_scale;
     int   top_candidate_count;
     anomaly_debug_candidate_t top_candidates[ANOMALY_DEBUG_TOP_CANDIDATES];
 } anomaly_debug_motion_t;

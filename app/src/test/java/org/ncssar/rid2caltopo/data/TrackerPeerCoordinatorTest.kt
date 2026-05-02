@@ -7,6 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import org.json.JSONObject
 import java.util.concurrent.CopyOnWriteArrayList
 
 class TrackerPeerCoordinatorTest {
@@ -117,6 +118,22 @@ class TrackerPeerCoordinatorTest {
 
         assertTrue(track.localOwnerFlag)
         assertTrue(coordinator.isLocalOwner("DRONE1"))
+    }
+
+    @Test
+    fun localArchiveOnlyDrone_neverRequestsTrackerOwnership() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1").apply { setLocalArchiveOnly(true) }
+        val track = FakeLiveTrack("DRONE1")
+
+        coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        coordinator.onWaypointReceived(drone, 39.1, -121.2, 120.0, 50.0, 2000L, null)
+
+        assertFalse(track.localOwnerFlag)
+        val messages = transport.sentMessages.map { JSONObject(it) }
+        assertTrue(messages.none { it.optString("type") == "first_sighting" && it.optString("remoteId") == "DRONE1" })
+        assertEquals("DRONE1", coordinator.getLastWaypointRemoteIdForTesting())
+        assertFalse(coordinator.isLocalOwner("DRONE1"))
     }
 
     @Test

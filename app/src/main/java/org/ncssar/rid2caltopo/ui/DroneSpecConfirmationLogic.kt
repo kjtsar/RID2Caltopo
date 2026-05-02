@@ -7,6 +7,8 @@ data class DroneSpecConfirmationUiState(
     val organization: String,
     val pilotCallsign: String,
     val droneDescription: String,
+    val initialPilotCallsign: String = pilotCallsign,
+    val initialDroneDescription: String = droneDescription,
     val warning: String? = null
 )
 
@@ -16,18 +18,15 @@ object DroneSpecConfirmationLogic {
         defaultOrganization: String
     ): DroneSpecConfirmationUiState {
         val hasKnownSpecFields = drone.org.isNotBlank() || drone.model.isNotBlank() || drone.owner.isNotBlank()
+        val guessedDescription = CtDroneSpec.GuessMakeModel(drone.remoteId)
         val droneDescription = drone.model
             .takeIf { it.isNotBlank() }
-            ?: if (drone.mappedId == drone.remoteId) CtDroneSpec.GuessMakeModel(drone.remoteId) else ""
+            ?: if (drone.mappedId == drone.remoteId) guessedDescription else ""
         val organization = drone.org
             .takeIf { it.isNotBlank() }
             ?: defaultOrganization
         val pilotCallsign = if (hasKnownSpecFields && drone.mappedId != drone.remoteId) {
-            CtDroneSpec.GuessPilotCallsign(
-                drone.mappedId,
-                droneDescription,
-                drone.remoteId
-            )
+            guessPilotCallsign(drone, droneDescription, guessedDescription)
         } else {
             ""
         }
@@ -41,7 +40,45 @@ object DroneSpecConfirmationLogic {
             organization = organization,
             pilotCallsign = pilotCallsign,
             droneDescription = droneDescription,
+            initialPilotCallsign = pilotCallsign,
+            initialDroneDescription = droneDescription,
             warning = warning
         )
+    }
+
+    fun shouldPreserveMappedId(
+        existingMappedId: String,
+        remoteId: String,
+        initialPilotCallsign: String,
+        savedPilotCallsign: String,
+        initialDroneDescription: String,
+        savedDroneDescription: String
+    ): Boolean {
+        if (existingMappedId.isBlank() || existingMappedId == remoteId) return false
+        return initialPilotCallsign.trim() == savedPilotCallsign.trim() &&
+            initialDroneDescription.trim() == savedDroneDescription.trim()
+    }
+
+    private fun guessPilotCallsign(
+        drone: CtDroneSpec,
+        droneDescription: String,
+        guessedDescription: String
+    ): String {
+        val mappedId = drone.mappedId.trim()
+        if (mappedId.isEmpty() || mappedId == drone.remoteId) return ""
+
+        val candidateDescriptions = linkedSetOf<String>().apply {
+            if (droneDescription.isNotBlank()) add(droneDescription)
+            if (guessedDescription.isNotBlank()) add(guessedDescription)
+            if (drone.model.isNotBlank()) add(drone.model)
+        }
+        for (description in candidateDescriptions) {
+            val callsign = CtDroneSpec.GuessPilotCallsign(mappedId, description, drone.remoteId)
+            if (callsign.isNotBlank() && callsign.length < mappedId.length) {
+                return callsign
+            }
+        }
+        val fallback = CtDroneSpec.GuessPilotCallsign(mappedId, "", drone.remoteId)
+        return if (fallback.length < mappedId.length) fallback else ""
     }
 }

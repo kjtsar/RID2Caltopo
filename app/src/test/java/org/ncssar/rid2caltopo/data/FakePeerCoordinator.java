@@ -175,6 +175,17 @@ public final class FakePeerCoordinator implements PeerCoordinator {
         return count;
     }
 
+    @Nullable
+    public Event latestEventOfKind(@NonNull String kind) {
+        synchronized (events) {
+            for (int i = events.size() - 1; i >= 0; i--) {
+                Event event = events.get(i);
+                if (kind.equals(event.kind)) return event;
+            }
+        }
+        return null;
+    }
+
     public void setLocalOwnership(@NonNull String remoteId, boolean isOwner) {
         if (isOwner) {
             locallyOwnedRemoteIds.add(remoteId);

@@ -84,6 +84,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private final DelayedExec reconnectTimer = new DelayedExec(false);
     @NonNull private final DelayedExec ackWatchdogTimer = new DelayedExec(false);
     @NonNull private final DelayedExec heartbeatCoalesceTimer = new DelayedExec(false);
+    @Nullable private volatile String lastOutboundJsonForTesting;
+    @Nullable private volatile String lastWaypointRemoteIdForTesting;
 
     @Nullable private volatile TrackerCoordinationTransport transport;
     @Nullable private volatile R2CMqttManager.PeerListChangedListener peerListChangedListener;
@@ -268,6 +270,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                                    @NonNull CtDroneSpec droneSpec,
                                    double distMeters,
                                    long firstSeenTs) {
+        if (droneSpec.isLocalArchiveOnly()) {
+            liveTrack.setLocalOwner(false);
+            pendingDrones.remove(droneSpec.getRemoteId());
+            ownerByRemoteId.remove(droneSpec.getRemoteId());
+            leaseSeqByRemoteId.remove(droneSpec.getRemoteId());
+            return;
+        }
         PendingDrone pending = new PendingDrone(liveTrack, droneSpec, distMeters, firstSeenTs);
         pendingDrones.put(droneSpec.getRemoteId(), pending);
         scheduleFallbackOwnership(pending);
@@ -282,6 +291,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                                    double distMeters,
                                    long timestampMsec,
                                    @Nullable CtDroneSpec.PositionTelemetry telemetry) {
+        lastWaypointRemoteIdForTesting = droneSpec.getRemoteId();
         JSONObject jo = new JSONObject();
         try {
             jo.put("type", "sighting");
@@ -306,6 +316,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @Override
     public void onDroneLost(@NonNull String remoteId) {
         PendingDrone pending = pendingDrones.remove(remoteId);
+        boolean localArchiveOnly = pending != null && pending.droneSpec.isLocalArchiveOnly();
         if (pending != null) {
             pending.fallbackTimer.stop();
             pending.ownershipActivationTimer.stop();
@@ -656,6 +667,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private void sendJson(@NonNull JSONObject jo) {
+        lastOutboundJsonForTesting = jo.toString();
         TrackerCoordinationTransport activeTransport = transport;
         if (activeTransport == null || !activeTransport.isConnected()) return;
         activeTransport.send(jo.toString());
@@ -930,6 +942,16 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         return forcedReconnectCount;
     }
 
+    @Nullable
+    String getLastOutboundJsonForTesting() {
+        return lastOutboundJsonForTesting;
+    }
+
+    @Nullable
+    String getLastWaypointRemoteIdForTesting() {
+        return lastWaypointRemoteIdForTesting;
+    }
+
     long getLastHeartbeatSeqSentForTesting() {
         return lastHeartbeatSeqSent;
     }
@@ -1079,6 +1101,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         INSTANCE.hardFailureListener = null;
         INSTANCE.hardFailureNotified = false;
         INSTANCE.forcedReconnectCount = 0L;
+        INSTANCE.lastOutboundJsonForTesting = null;
+        INSTANCE.lastWaypointRemoteIdForTesting = null;
         transportFactory = OkHttpTrackerCoordinationTransport::new;
         trackerUrlPrefixOverrideForTesting = null;
         trackerApiKeyOverrideForTesting = null;

@@ -175,6 +175,17 @@ class R2CMqttManagerTest {
         )
     }
 
+    @Test
+    fun onLiveTrackCreated_localArchiveOnlyNeverClaimsOwnership() {
+        val track = FakeLiveTrack("DRONE1")
+        val drone = fakeDroneSpec("DRONE1").apply { setLocalArchiveOnly(true) }
+
+        R2CMqttManager.onLiveTrackCreated(track, drone, 50.0, 1000L)
+
+        assertEquals("local-archive-only tracks should not be claimed", 1, track.callCount())
+        assertFalse(track.wasSetOwner())
+    }
+
     // ── two-peer ownership arbitration ────────────────────────────────────────
 
     /**

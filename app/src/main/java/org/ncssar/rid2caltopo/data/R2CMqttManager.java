@@ -688,6 +688,10 @@ public class R2CMqttManager {
                                            @NonNull CtDroneSpec droneSpec,
                                            double distMeters,
                                            long firstSeenTs) {
+        if (droneSpec.isLocalArchiveOnly()) {
+            liveTrack.setLocalOwner(false);
+            return;
+        }
         onLiveTrackCreatedImpl(liveTrack, droneSpec, distMeters, firstSeenTs, false);
     }
 
@@ -752,6 +756,8 @@ public class R2CMqttManager {
                                            double droneLat, double droneLon, double droneAlt,
                                            double distMeters) {
         if (!initialized) return;
+        CtDroneSpec activeSpec = CaltopoClient.GetDroneSpec(remoteId);
+        if (activeSpec != null && activeSpec.isLocalArchiveOnly()) return;
 
         DroneState ds = drones.get(remoteId);
         if (ds == null) return;
@@ -908,6 +914,7 @@ public class R2CMqttManager {
         if (!initialized || peerTransport == null || !peerTransport.isConnected()) return;
         CtDroneSpec spec = CaltopoClient.GetDroneSpec(remoteId);
         if (spec == null) return;
+        if (spec.isLocalArchiveOnly()) return;
         String mid = spec.getMappedId();
         if (mid.isEmpty() || mid.equals(remoteId)) return; // don't publish trivial (unset) spec
         try {

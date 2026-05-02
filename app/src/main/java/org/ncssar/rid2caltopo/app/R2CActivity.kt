@@ -376,8 +376,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         onSave = {
                             localViewModel.savePendingDroneConfirmation()
                         },
-                        onDismiss = {
-                            localViewModel.dismissPendingDroneConfirmation()
+                        onUnknown = {
+                            localViewModel.markPendingDroneConfirmationUnknown()
                         },
                     )
                 }

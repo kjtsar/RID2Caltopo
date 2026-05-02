@@ -2070,8 +2070,52 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             activeDs.setOwner(trimmedOwner);
             activeDs.setMappedId(trimmedMappedId);
         }
+        activeDs.setLocalArchiveOnly(false);
 
         UpdateDroneSpecs();
+    }
+
+    public static void SaveDroneSpecUnknownConfirmation(@NonNull String remoteId) {
+        ClientClassState ccs = GetState();
+        CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
+        if (activeDs == null) {
+            activeDs = new CtDroneSpec(remoteId);
+            ccs.droneSpecTable.put(remoteId, activeDs);
+        }
+        activeDs.setLocalArchiveOnly(true);
+
+        UpdateDroneSpecs();
+    }
+
+    public static void PromoteLocalArchiveOnlyDrone(@NonNull String remoteId) {
+        promoteLocalArchiveOnlyDrone(remoteId, null);
+    }
+
+    static void promoteLocalArchiveOnlyDrone(@NonNull String remoteId,
+                                             @Nullable LiveTrackOwnerDelegate liveTrackOverride) {
+        ClientClassState ccs = GetState();
+        CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
+        if (activeDs == null || !activeDs.isLocalArchiveOnly()) return;
+
+        activeDs.setLocalArchiveOnly(false);
+        UpdateDroneSpecs();
+        R2CMqttManager.onDroneSpecChanged(remoteId);
+
+        if (!activeDs.isActive()) return;
+
+        LiveTrackOwnerDelegate liveTrack = liveTrackOverride != null
+                ? liveTrackOverride
+                : CaltopoLiveTrack.GetLiveTrackForRemoteId(remoteId);
+        if (liveTrack == null) return;
+
+        double distMeters = CaltopoMap.DistanceFromMeInMeters(activeDs.lastLat, activeDs.lastLng);
+        long firstSeenTs = -1L;
+        if (liveTrack instanceof CaltopoLiveTrack caltopoLiveTrack) {
+            firstSeenTs = caltopoLiveTrack.getFirstTimestamp();
+        }
+        R2cRuntimeRegistry.getDefaultRuntime()
+                .getPeerCoordinator()
+                .onLiveTrackCreated(liveTrack, activeDs, distMeters, firstSeenTs);
     }
 
     public static String GetConfigFilesLoadedRecord() {

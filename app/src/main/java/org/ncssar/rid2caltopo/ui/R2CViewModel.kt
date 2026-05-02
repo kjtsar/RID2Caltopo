@@ -354,7 +354,12 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     }
 
     fun updateMappedId(drone: CtDroneSpec, newMappedId: String) {
-        drone.setMappedId(newMappedId)
+        val resolvedMappedId = drone.setMappedId(newMappedId)
+        if (drone.isLocalArchiveOnly &&
+            resolvedMappedId.isNotBlank() &&
+            resolvedMappedId != drone.remoteId) {
+            CaltopoClient.PromoteLocalArchiveOnlyDrone(drone.remoteId)
+        }
     }
 
     fun updatePendingDroneConfirmation(
@@ -371,11 +376,14 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     }
 
     /**
-     * The operator doesn't recognise this drone. Dismiss the panel without saving a dronespec.
+     * The operator doesn't recognise this drone. Keep logging local waypoints for this flight,
+     * but suppress CalTopo ownership/publishing and tracker-site reporting.
      * The flight key was already added to [promptedFlightKeys] when the dialog was first shown,
      * so the panel will not reappear for the remainder of this flight.
      */
-    fun dismissPendingDroneConfirmation() {
+    fun markPendingDroneConfirmationUnknown() {
+        val current = _pendingDroneConfirmation.value ?: return
+        CaltopoClient.SaveDroneSpecUnknownConfirmation(current.remoteId.trim())
         _pendingDroneConfirmation.value = null
         restoreScreenAfterConfirmation()
     }
@@ -390,9 +398,17 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             return
         }
         val existingMappedId = CaltopoClient.GetDroneSpec(remoteId)?.mappedId?.trim().orEmpty()
-        val mappedId = if (existingMappedId.isNotEmpty() && existingMappedId != remoteId) {
+        val mappedId = if (DroneSpecConfirmationLogic.shouldPreserveMappedId(
+                existingMappedId = existingMappedId,
+                remoteId = remoteId,
+                initialPilotCallsign = current.initialPilotCallsign,
+                savedPilotCallsign = callsign,
+                initialDroneDescription = current.initialDroneDescription,
+                savedDroneDescription = droneDescription
+            )) {
             // Preserve an explicit stream-to-drone mapping made via long-press instead of
-            // regenerating the mappedId from the confirmation fields.
+            // regenerating the mappedId from the confirmation fields when the operator
+            // has not changed the callsign/description shown in the confirmation panel.
             existingMappedId
         } else {
             CtDroneSpec.BuildMappedId(callsign, droneDescription, remoteId)

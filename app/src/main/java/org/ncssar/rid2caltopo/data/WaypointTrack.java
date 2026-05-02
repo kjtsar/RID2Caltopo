@@ -289,6 +289,7 @@ public class WaypointTrack {
             r2cProp.put("org", droneSpec.getOrg());
             r2cProp.put("rid", droneSpec.getRemoteId());
             r2cProp.put("mid", droneSpec.getMappedId());
+            r2cProp.put("local_archive_only", droneSpec.isLocalArchiveOnly());
             r2cProp.put("incident", incident);
             r2cProp.put("op_period", opPeriod);
             r2cProp.put("map_id", mapId);
@@ -441,6 +442,18 @@ public class WaypointTrack {
         return responseCode;
     }
 
+    private static boolean IsLocalArchiveOnly(@Nullable JSONObject waypointTrack) {
+        if (waypointTrack == null) return false;
+        JSONArray features = waypointTrack.optJSONArray("features");
+        if (features == null || features.length() <= 0) return false;
+        JSONObject feature = features.optJSONObject(0);
+        if (feature == null) return false;
+        JSONObject properties = feature.optJSONObject("properties");
+        if (properties == null) return false;
+        JSONObject r2cProp = properties.optJSONObject("r2c_prop");
+        return r2cProp != null && r2cProp.optBoolean("local_archive_only", false);
+    }
+
 
     /* BgPollUnreportedTracks()
      *  Called from CaltopoClient by one of it's background threads if it's been
@@ -509,6 +522,11 @@ public class WaypointTrack {
                     continue;
                 }
                 if (null == waypointTrack) continue;
+                if (IsLocalArchiveOnly(waypointTrack)) {
+                    CTInfo(TAG, "BgPollUnreportedTracks() skipping local-archive-only file " + filename);
+                    ReportStatsForFile(finalReportedFilepath, filename);
+                    continue;
+                }
                 String geoJsonString = waypointTrack.toString();
                 CTDebug(TAG, "BgPollUnreportedTracks() publishing " + filename);
                 int responseCode = PublishGeoJsonStatsWithRetry(
@@ -586,7 +604,7 @@ public class WaypointTrack {
             }
             CTDebug(TAG, String.format(Locale.US, "archive(): wrote %d coordinates to %s",
                     numCoords, dataFilepath.getUri()));
-            if (null != droneSpec && droneSpec.okToLog()) {
+            if (null != droneSpec && droneSpec.okToLog() && !droneSpec.isLocalArchiveOnly()) {
                 CTDebug(TAG, String.format(Locale.US,
                         "archive(%s): Publishing...", fileName));
                 int responseCode = PublishGeoJsonStatsWithRetry(

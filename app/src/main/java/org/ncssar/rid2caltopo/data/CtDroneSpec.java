@@ -135,6 +135,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient int goodCount; // only the number of good waypoints.
     private transient int nonCount;  // bad or duplicate waypoints.
     private boolean okToLog;
+    private transient boolean localArchiveOnly;
     @Nullable private transient Boolean airborne = Boolean.FALSE;
 
     @NonNull
@@ -147,6 +148,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         retval.put("org", org);
         retval.put("owner", owner);
         retval.put("model", model);
+        retval.put("localArchiveOnly", localArchiveOnly);
         retval.put("startTimeInMsec", startMsecTimestamp);
         retval.put("mostRecentTimeInMsec", mostRecentMsecTimestamp);
         retval.put("mostRecentFlightTimeInMsec", mostRecentFlightMsecTimestamp);
@@ -169,6 +171,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastLat = 0.0F;
         lastLng = 0.0F;
         okToLog = true;
+        localArchiveOnly = false;
         impliedTakeoffAltM        = null;
         impliedTakeoffSampleCount = 0;
         impliedTakeoffSealed      = false;
@@ -211,6 +214,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         int rssiLen = TransportTypeEnum.values().length;
         for (int i = 0; i < rssiLen; i++) lastRssiByTransport[i] = 0;
         okToLog = true;
+        localArchiveOnly = false;
         airborne = Boolean.FALSE;
         startMsecTimestamp = mostRecentMsecTimestamp = mostRecentFlightMsecTimestamp = 0;
         int length = TransportTypeEnum.values().length;
@@ -257,6 +261,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public boolean publishingLocally() {return (null != myLiveTrack && myLiveTrack.publishingLocally());}
 
     public boolean okToLog() {return okToLog;}
+    public boolean isLocalArchiveOnly() { return localArchiveOnly; }
+    public void setLocalArchiveOnly(boolean localArchiveOnly) { this.localArchiveOnly = localArchiveOnly; }
 
     public String getDurationInSecAsString() {
         long durationInMsec = 0;
@@ -447,6 +453,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         this.org = "";
         this.model = "";
         this.owner = "";
+        this.localArchiveOnly = false;
     }
 
     public CtDroneSpec(JSONObject jo) {
@@ -457,6 +464,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         model = jo.optString("model");
         goodCount = jo.optInt("goodCount");
         okToLog = false;
+        localArchiveOnly = jo.optBoolean("localArchiveOnly", false);
         distanceInFeet = 0.0F;
         lastLat = 0.0F;
         lastLng = 0.0F;
@@ -480,6 +488,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             throw new RuntimeException("missing/invalid required remoteId spec.");
         }
         okToLog = true;
+        localArchiveOnly = false;
         distanceInFeet = 0.0F;
         lastLat = 0.0F;
         lastLng = 0.0F;
@@ -500,7 +509,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
 
     public CtDroneSpec copy() {
-        return new CtDroneSpec(remoteId, mappedId, org, model, owner);
+        CtDroneSpec copy = new CtDroneSpec(remoteId, mappedId, org, model, owner);
+        copy.setLocalArchiveOnly(localArchiveOnly);
+        return copy;
     }
 
     public void setDroneSpecListener(@Nullable CtDroneSpecListener myListener) {

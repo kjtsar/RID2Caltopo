@@ -137,6 +137,11 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                                    @NonNull CtDroneSpec droneSpec,
                                    double distMeters,
                                    long firstSeenTs) {
+        if (droneSpec.isLocalArchiveOnly()) {
+            liveTrack.setLocalOwner(false);
+            activeTracks.remove(droneSpec.getRemoteId());
+            return;
+        }
         activeTracks.put(droneSpec.getRemoteId(),
                 new ActiveTrackRegistration(liveTrack, droneSpec, distMeters, firstSeenTs));
         activeCoordinator.onLiveTrackCreated(liveTrack, droneSpec, distMeters, firstSeenTs);
@@ -163,7 +168,8 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void onDroneLost(@NonNull String remoteId) {
-        activeTracks.remove(remoteId);
+        ActiveTrackRegistration registration = activeTracks.remove(remoteId);
+        if (registration != null && registration.droneSpec.isLocalArchiveOnly()) return;
         activeCoordinator.onDroneLost(remoteId);
     }
 

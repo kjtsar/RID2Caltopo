@@ -374,7 +374,7 @@ fun DroneSpecConfirmationDialog(
     state: DroneSpecConfirmationUiState,
     onFieldChange: (organization: String?, pilotCallsign: String?, droneDescription: String?) -> Unit,
     onSave: () -> Unit,
-    onDismiss: () -> Unit,
+    onUnknown: () -> Unit,
 ) {
     val organization = state.organization.trim()
     val pilotCallsign = state.pilotCallsign.trim()
@@ -438,8 +438,8 @@ fun DroneSpecConfirmationDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Not recognized")
+            TextButton(onClick = onUnknown) {
+                Text("Unknown")
             }
         },
     )

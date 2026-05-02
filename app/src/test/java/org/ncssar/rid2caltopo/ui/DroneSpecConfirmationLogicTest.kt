@@ -104,4 +104,59 @@ class DroneSpecConfirmationLogicTest {
         assertEquals("", state.droneDescription)
         assertNull(state.warning)
     }
+
+    @Test
+    fun knownDroneWithBlankModel_usesRemoteIdGuessToStripMappedIdSuffix() {
+        val drone = CtDroneSpec(
+            "1910F916ABC12345",
+            "1P16PtnscAtm2lt",
+            "NCSSAR",
+            "",
+            "Pilot Known"
+        )
+
+        val state = DroneSpecConfirmationLogic.buildInitialState(drone, defaultOrganization = "DEFAULT")
+
+        assertEquals("NCSSAR", state.organization)
+        assertEquals("1P16", state.pilotCallsign)
+        assertEquals("", state.droneDescription)
+        assertNull(state.warning)
+    }
+
+    @Test
+    fun shouldPreserveMappedId_onlyWhenCallsignUnchangedFromInitialPrompt() {
+        assertEquals(
+            true,
+            DroneSpecConfirmationLogic.shouldPreserveMappedId(
+                existingMappedId = "1SAR7mm4p",
+                remoteId = "1581F6Z9C24BH0036EJL",
+                initialPilotCallsign = "1SAR7",
+                savedPilotCallsign = "1SAR7",
+                initialDroneDescription = "DJI Mini 4 Pro",
+                savedDroneDescription = "DJI Mini 4 Pro"
+            )
+        )
+        assertEquals(
+            false,
+            DroneSpecConfirmationLogic.shouldPreserveMappedId(
+                existingMappedId = "1SAR7mm4p",
+                remoteId = "1581F6Z9C24BH0036EJL",
+                initialPilotCallsign = "1SAR7",
+                savedPilotCallsign = "1SAR8",
+                initialDroneDescription = "DJI Mini 4 Pro",
+                savedDroneDescription = "DJI Mini 4 Pro"
+            )
+        )
+        assertEquals(
+            false,
+            DroneSpecConfirmationLogic.shouldPreserveMappedId(
+                existingMappedId = "1SAR7mm4p",
+                remoteId = "1581F6Z9C24BH0036EJL",
+                initialPilotCallsign = "1SAR7",
+                savedPilotCallsign = "1SAR7",
+                initialDroneDescription = "DJI Mini 4 Pro",
+                savedDroneDescription = "DJI Mini 4 Pro Spotlight"
+            )
+        )
+    }
 }

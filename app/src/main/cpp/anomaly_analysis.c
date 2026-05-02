@@ -14,6 +14,11 @@
 #define ANOMALY_LOCAL_MOTION_MIN_SAMPLES 10
 #define ANOMALY_LOCAL_MOTION_INLIER_RADIUS_CELLS 1.35f
 #define ANOMALY_LOCAL_MOTION_MIN_SCALE 0.12f
+#define ANOMALY_REG_RESIDUAL_CENTER_HALF 1
+#define ANOMALY_REG_RESIDUAL_RING_HALF 3
+#define ANOMALY_REG_RESIDUAL_SOFT_THRESH 0.60f
+#define ANOMALY_REG_RESIDUAL_HARD_THRESH 0.25f
+#define ANOMALY_REG_RESIDUAL_MIN_SCALE 0.12f
 #define ANOMALY_SALIENCY_RING_MARGIN 0.55f
 #define ANOMALY_SALIENCY_RING_SOFT_SCALE 1.35f
 #define ANOMALY_SALIENCY_RING_HARD_SCALE 0.18f
@@ -26,6 +31,12 @@ static inline float clamp01f(float v) {
 }
 
 static inline int clamp_i32(int value, int min_value, int max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static inline float clampf(float value, float min_value, float max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
     return value;
@@ -382,6 +393,98 @@ static bool find_residual_motion_displacement(
     if (best_dy_out != NULL) *best_dy_out = best_dy;
     if (best_sad_out != NULL) *best_sad_out = best_sad >= 0x7FFFFFFFL ? -1 : (int)best_sad;
     return true;
+}
+
+static bool bilinear_sample_u8(
+        const uint8_t *grid,
+        int            w,
+        int            h,
+        float          x,
+        float          y,
+        float         *out_value) {
+    if (grid == NULL || out_value == NULL || w <= 1 || h <= 1) return false;
+    if (x < 0.0f || y < 0.0f || x > (float)(w - 1) || y > (float)(h - 1)) return false;
+    int x0 = (int)floorf(x);
+    int y0 = (int)floorf(y);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    if (x1 >= w) x1 = w - 1;
+    if (y1 >= h) y1 = h - 1;
+    float fx = x - (float)x0;
+    float fy = y - (float)y0;
+    float p00 = (float)grid[y0 * w + x0];
+    float p10 = (float)grid[y0 * w + x1];
+    float p01 = (float)grid[y1 * w + x0];
+    float p11 = (float)grid[y1 * w + x1];
+    *out_value =
+        p00 * (1.0f - fx) * (1.0f - fy) +
+        p10 * fx * (1.0f - fy) +
+        p01 * (1.0f - fx) * fy +
+        p11 * fx * fy;
+    return true;
+}
+
+static float registration_residual_standout_score(
+        const uint8_t      *curr_luma,
+        const uint8_t      *prev_luma,
+        int                 motion_w,
+        int                 motion_h,
+        int                 motion_step,
+        int                 width,
+        int                 height,
+        similarity_2d_t     sim,
+        int                 mx,
+        int                 my) {
+    if (curr_luma == NULL || prev_luma == NULL || motion_w <= 1 || motion_h <= 1 ||
+        width <= 1 || height <= 1 || !sim.valid) {
+        return 0.0f;
+    }
+
+    const int center_half = ANOMALY_REG_RESIDUAL_CENTER_HALF;
+    const int ring_half = ANOMALY_REG_RESIDUAL_RING_HALF;
+    float fw = (float)(width - 1);
+    float fh = (float)(height - 1);
+    float center_sum = 0.0f;
+    int center_count = 0;
+    float ring_sum = 0.0f;
+    float ring_sum2 = 0.0f;
+    int ring_count = 0;
+
+    for (int oy = -ring_half; oy <= ring_half; oy++) {
+        for (int ox = -ring_half; ox <= ring_half; ox++) {
+            int sx = mx + ox;
+            int sy = my + oy;
+            if (sx < 0 || sx >= motion_w || sy < 0 || sy >= motion_h) continue;
+
+            float x_norm = ((float)(sx * motion_step)) / fw;
+            float y_norm = ((float)(sy * motion_step)) / fh;
+            float prev_x_norm = sim.a * x_norm - sim.b * y_norm + sim.tx;
+            float prev_y_norm = sim.b * x_norm + sim.a * y_norm + sim.ty;
+            float prev_x = (prev_x_norm * fw) / (float)motion_step;
+            float prev_y = (prev_y_norm * fh) / (float)motion_step;
+            float prev_sample = 0.0f;
+            if (!bilinear_sample_u8(prev_luma, motion_w, motion_h, prev_x, prev_y, &prev_sample)) continue;
+
+            float resid = fabsf((float)curr_luma[sy * motion_w + sx] - prev_sample);
+            if (abs(ox) <= center_half && abs(oy) <= center_half) {
+                center_sum += resid;
+                center_count++;
+            } else {
+                ring_sum += resid;
+                ring_sum2 += resid * resid;
+                ring_count++;
+            }
+        }
+    }
+
+    if (center_count <= 0 || ring_count < 8) return 0.0f;
+    float center_mean = center_sum / (float)center_count;
+    float ring_mean = ring_sum / (float)ring_count;
+    float ring_var = ring_sum2 / (float)ring_count - ring_mean * ring_mean;
+    if (ring_var < 0.0f) ring_var = 0.0f;
+    float ring_std = sqrtf(ring_var);
+    if (ring_std < 1.0f) ring_std = 1.0f;
+    return (center_mean - ring_mean) / ring_std;
 }
 
 static int gmv_feature_score(const uint8_t *luma, int w, int h, int x, int y) {
@@ -1819,10 +1922,12 @@ int anomaly_process_frame(
     float *saliency_spatial_map = NULL;
     float *saliency_color_map = NULL;
     float *saliency_motion_map = NULL;
+    float *saliency_registration_map = NULL;
     if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
         saliency_spatial_map = (float *)malloc(sg_count * sizeof(float));
         saliency_color_map   = (float *)malloc(sg_count * sizeof(float));
         saliency_motion_map  = (float *)malloc(sg_count * sizeof(float));
+        saliency_registration_map = (float *)malloc(sg_count * sizeof(float));
         if (saliency_spatial_map != NULL) {
             for (size_t i = 0; i < sg_count; i++) saliency_spatial_map[i] = -1.0f;
         }
@@ -1831,6 +1936,9 @@ int anomaly_process_frame(
         }
         if (saliency_motion_map != NULL) {
             for (size_t i = 0; i < sg_count; i++) saliency_motion_map[i] = 0.0f;
+        }
+        if (saliency_registration_map != NULL) {
+            for (size_t i = 0; i < sg_count; i++) saliency_registration_map[i] = 1.0f;
         }
     }
 
@@ -2229,6 +2337,7 @@ int anomaly_process_frame(
             float *motion_component_area_frac_map = (float *)malloc(motion_count * sizeof(float));
             float *motion_component_span_frac_map = (float *)malloc(motion_count * sizeof(float));
             float *motion_component_fill_ratio_map = (float *)malloc(motion_count * sizeof(float));
+            float *registration_residual_scale_map = (float *)malloc(motion_count * sizeof(float));
             if (motion_z_map != NULL && motion_selection_map != NULL) {
                 for (size_t i = 0; i < motion_count; i++) {
                     motion_z_map[i] = -1.0f;
@@ -2247,6 +2356,9 @@ int anomaly_process_frame(
             if (motion_component_area_frac_map != NULL) memset(motion_component_area_frac_map, 0, motion_count * sizeof(float));
             if (motion_component_span_frac_map != NULL) memset(motion_component_span_frac_map, 0, motion_count * sizeof(float));
             if (motion_component_fill_ratio_map != NULL) memset(motion_component_fill_ratio_map, 0, motion_count * sizeof(float));
+            if (registration_residual_scale_map != NULL) {
+                for (size_t i = 0; i < motion_count; i++) registration_residual_scale_map[i] = 1.0f;
+            }
             int strong_motion_cells = 0;
             int scored_motion_cells = 0;
             for (int my = roi_mgy0; my < roi_mgy1; my++) {
@@ -2457,6 +2569,35 @@ int anomaly_process_frame(
                     } else if (ms_raw > 1.0f) {
                         ms_raw = 1.0f + (ms_raw - 1.0f) * support_scale;
                     }
+                    float registration_scale = 1.0f;
+                    float registration_score = registration_residual_standout_score(
+                        curr_luma,
+                        state->prev_luma,
+                        motion_w,
+                        motion_h,
+                        motion_step,
+                        width,
+                        height,
+                        sim,
+                        mx,
+                        my);
+                    if (registration_score < ANOMALY_REG_RESIDUAL_SOFT_THRESH) {
+                        float t = registration_score / ANOMALY_REG_RESIDUAL_SOFT_THRESH;
+                        registration_scale =
+                            ANOMALY_REG_RESIDUAL_MIN_SCALE +
+                            (1.0f - ANOMALY_REG_RESIDUAL_MIN_SCALE) * clampf(t, 0.0f, 1.0f);
+                        if (registration_score <= ANOMALY_REG_RESIDUAL_HARD_THRESH) {
+                            registration_scale = ANOMALY_REG_RESIDUAL_MIN_SCALE;
+                        }
+                    }
+                    if (registration_residual_scale_map != NULL) {
+                        registration_residual_scale_map[map_idx] = registration_scale;
+                    }
+                    if (ms_raw > 1.0f) {
+                        ms_raw = 1.0f + (ms_raw - 1.0f) * registration_scale;
+                    } else {
+                        ms_raw *= registration_scale;
+                    }
                     scored_motion_cells++;
                     if (ms_raw > 1.5f) {
                         strong_motion_cells++;
@@ -2550,6 +2691,9 @@ int anomaly_process_frame(
                     if (saliency_motion_map != NULL) {
                         float motion_support = ms;
                         if (motion_support > 0.0f) {
+                            if (registration_residual_scale_map != NULL) {
+                                motion_support *= registration_residual_scale_map[my * motion_w + mx];
+                            }
                             if (motion_support > 4.0f) motion_support = 4.0f;
                             int sample_x = pixel_x;
                             int sample_y = pixel_y;
@@ -2557,6 +2701,11 @@ int anomaly_process_frame(
                             int sal_sy = clamp_i32((sample_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
                             float *slot = &saliency_motion_map[sal_sy * sg_w + sal_sx];
                             if (motion_support > *slot) *slot = motion_support;
+                            if (saliency_registration_map != NULL) {
+                                float *reg_slot = &saliency_registration_map[sal_sy * sg_w + sal_sx];
+                                float reg_scale = registration_residual_scale_map[my * motion_w + mx];
+                                if (reg_scale < *reg_slot) *reg_slot = reg_scale;
+                            }
                         }
                     }
                     if ((use_stable_motion || use_motion_tolerance) &&
@@ -2586,6 +2735,7 @@ int anomaly_process_frame(
             free(motion_component_area_frac_map);
             free(motion_component_span_frac_map);
             free(motion_component_fill_ratio_map);
+            free(registration_residual_scale_map);
         }
         free(motion_dx_map);
         free(motion_dy_map);
@@ -2610,6 +2760,7 @@ int anomaly_process_frame(
                     float thermal_spatial = saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
                     float color_support = saliency_color_map != NULL ? saliency_color_map[idx] : 0.0f;
                     float motion_support = saliency_motion_map != NULL ? saliency_motion_map[idx] : 0.0f;
+                    float registration_support = saliency_registration_map != NULL ? saliency_registration_map[idx] : 1.0f;
                     float thermal_temporal = 0.0f;
                     if (bg_valid) {
                         float bg = state->bg_luma[idx];
@@ -2632,6 +2783,7 @@ int anomaly_process_frame(
                     float saliency = bg_valid
                         ? (0.75f * spatial_evidence) + temporal_evidence
                         : spatial_evidence + temporal_evidence;
+                    saliency *= registration_support;
                     if (saliency <= 0.0f) {
                         patch_score_map[idx] = -1.0f;
                         continue;
@@ -2663,8 +2815,10 @@ int anomaly_process_frame(
                     float thermal_spatial = saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
                     float color_support = saliency_color_map != NULL ? saliency_color_map[idx] : 0.0f;
                     float motion_support = saliency_motion_map != NULL ? saliency_motion_map[idx] : 0.0f;
+                    float registration_support = saliency_registration_map != NULL ? saliency_registration_map[idx] : 1.0f;
                     float spatial_evidence = thermal_spatial > 0.0f ? thermal_spatial : 0.0f;
                     if (color_support > 0.0f) spatial_evidence += 0.60f * color_support;
+                    spatial_evidence *= registration_support;
                     float temporal_evidence = 0.0f;
                     if (bg_valid) {
                         float bg = state->bg_luma[idx];
@@ -2678,6 +2832,7 @@ int anomaly_process_frame(
                         temporal_evidence += bg_valid ? (0.60f * motion_support)
                                                       : (0.45f * motion_support);
                     }
+                    temporal_evidence *= registration_support;
                     maybe_insert_top_candidate(
                             saliency_top, &saliency_top_count, ANOMALY_DEBUG_TOP_CANDIDATES,
                             px, py,
@@ -2895,6 +3050,7 @@ int anomaly_process_frame(
 
     free(saliency_motion_map);
     free(saliency_color_map);
+    free(saliency_registration_map);
     free(saliency_spatial_map);
     free(sg_luma);
     free(ii_sum);

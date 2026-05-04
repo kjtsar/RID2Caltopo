@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // ── Algorithm selector bits ────────────────────────────────────────────────
@@ -25,6 +26,7 @@
 #define ANOMALY_DEFAULT_MIN_AREA_FRACTION 0.0015f
 #define ANOMALY_SCAN_ZONE_DEFAULT         0.60f
 #define ANOMALY_DEFAULT_MIN_HITS          2
+#define ANOMALY_SALIENCY_EXTRA_TRACKS     1
 
 // ── Local tile normalization ───────────────────────────────────────────────
 // The ROI is divided into a LOCAL_TILE_SIZE × LOCAL_TILE_SIZE grid.  Mean and
@@ -141,6 +143,7 @@
 typedef struct {
     float left_norm, top_norm, right_norm, bottom_norm;
     uint8_t r, g, b;
+    uint8_t draw_crosshair;
     float weight;       // stroke scale 0–1: thin on first visible hit, full at sustained
     int   algorithm;    // which detector fired: ANOMALY_ALGO_COLOR/THERMAL/MOTION/PERSIST
 } anomaly_box_t;
@@ -150,6 +153,7 @@ typedef struct {
 typedef struct {
     bool  enabled;
     bool  show_hot_overlay;
+    bool  show_candidate_blobs;
     int   algorithm_mask;
     int   frame_stride;
     int   pixel_step;
@@ -177,6 +181,7 @@ typedef struct {
     uint8_t *prev_luma;
     int      prev_luma_width;
     int      prev_luma_height;
+    size_t   prev_luma_capacity;
     // Decaying motion persistence map at motion-grid resolution.
     float   *motion_persist;
     int      motion_persist_w;
@@ -189,6 +194,32 @@ typedef struct {
     int      bg_sg_w;       // sampled-grid width matching bg_luma
     int      bg_sg_h;       // sampled-grid height matching bg_luma
     int      bg_warmup;     // analyzed frames since last background reset
+    // Short-lived prior for compact thermal candidates at sampled-grid resolution.
+    float   *thermal_target_persist;
+    int      thermal_target_persist_w;
+    int      thermal_target_persist_h;
+    float    saliency_aux_cx[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    float    saliency_aux_cy[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    int      saliency_aux_hits[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    int      saliency_aux_hold[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    bool     saliency_aux_active[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    int      saliency_display_algorithm;
+    int      saliency_aux_display_algorithm[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    // Reusable scratch buffers to avoid per-frame allocation churn.
+    uint8_t *scratch_luma;
+    size_t   scratch_luma_capacity;
+    double  *scratch_sg_luma;
+    double  *scratch_ii_sum;
+    double  *scratch_ii_sum2;
+    size_t   scratch_sampled_grid_capacity;
+    float   *scratch_saliency_spatial;
+    float   *scratch_saliency_color;
+    float   *scratch_saliency_motion;
+    float   *scratch_saliency_registration;
+    size_t   scratch_saliency_capacity;
+    float   *scratch_patch_score;
+    float   *scratch_patch_selection;
+    size_t   scratch_patch_capacity;
 } anomaly_state_t;
 
 typedef struct {

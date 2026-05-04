@@ -886,6 +886,30 @@ class StreamsViewModel(
         return buildLocalPlaybackFrameAnnotationSummary(localPlaybackFrameAnnotations(designator, sourceTimestampUs))
     }
 
+    fun clearLocalPlaybackReviewAnnotations(designator: String) {
+        val streamInfo = _localPlaybackEntries.value[designator] ?: return
+        val sidecarPath = streamInfo.annotationSidecarPath
+        localPlaybackReviewByDesignator[designator] = LocalPlaybackReviewFile(
+            sourceDisplayName = streamInfo.designator,
+            originalSourceUri = streamInfo.originalSourceUri?.toString(),
+            playbackUri = streamInfo.playbackUri?.toString(),
+            annotationSidecarPath = sidecarPath,
+            updatedAtMs = System.currentTimeMillis(),
+            frames = mutableListOf(),
+        )
+        dirtyLocalPlaybackReviews.remove(designator)
+        pendingLocalPlaybackReviewExport =
+            pendingLocalPlaybackReviewExport?.takeUnless { it.designator == designator }
+        if (!sidecarPath.isNullOrBlank()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { File(sidecarPath).delete() }
+                    .onFailure { error ->
+                        CTDebug(tag, "Failed clearing local playback review for $designator: ${error.message}")
+                    }
+            }
+        }
+    }
+
     fun addLocalPlaybackPointAnnotation(
         designator: String,
         sourceTimestampUs: Long,
@@ -1475,6 +1499,12 @@ class StreamsViewModel(
         }
     }
 
+    fun resetAnomalyRealtimeDefaults(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            AnomalyConfig().copy(enabled = current.enabled)
+        }
+    }
+
     fun toggleAnomalyAlgorithm(designator: String, algorithm: AnomalyAlgorithm) {
         updateAnomalyConfig(designator) { current ->
             current.toggledAlgorithm(algorithm)
@@ -1484,6 +1514,12 @@ class StreamsViewModel(
     fun toggleShowHotOverlay(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(showHotOverlay = !current.showHotOverlay)
+        }
+    }
+
+    fun toggleShowCandidateBlobs(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(showCandidateBlobs = !current.showCandidateBlobs)
         }
     }
 
@@ -1499,6 +1535,15 @@ class StreamsViewModel(
             val idx = frameStrideSteps.indexOf(current.frameStride)
             val next = if (idx < 0) frameStrideSteps[0] else frameStrideSteps[(idx + 1) % frameStrideSteps.size]
             current.copy(frameStride = next)
+        }
+    }
+
+    fun cycleAnomalyPixelStep(designator: String) {
+        val pixelStepSteps = listOf(0, 1, 2, 3, 4)
+        updateAnomalyConfig(designator) { current ->
+            val idx = pixelStepSteps.indexOf(current.pixelStep.coerceIn(0, 4))
+            val next = if (idx < 0) pixelStepSteps[0] else pixelStepSteps[(idx + 1) % pixelStepSteps.size]
+            current.copy(pixelStep = next)
         }
     }
 
@@ -1527,6 +1572,16 @@ class StreamsViewModel(
     fun setMotionEvidenceSensitivity(designator: String, sensitivity: Float) {
         updateAnomalyConfig(designator) { current ->
             current.copy(motionEvidenceSensitivity = sensitivity.coerceIn(0f, 1f))
+        }
+    }
+
+    fun cycleMotionEvidenceSensitivity(designator: String) {
+        val sensitivitySteps = listOf(0.25f, 0.60f, 0.90f)
+        updateAnomalyConfig(designator) { current ->
+            val currentClamped = current.motionEvidenceSensitivity.coerceIn(0f, 1f)
+            val idx = sensitivitySteps.indexOfFirst { kotlin.math.abs(it - currentClamped) < 0.01f }
+            val next = if (idx < 0) sensitivitySteps[1] else sensitivitySteps[(idx + 1) % sensitivitySteps.size]
+            current.copy(motionEvidenceSensitivity = next)
         }
     }
 

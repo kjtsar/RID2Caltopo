@@ -23,6 +23,31 @@
 #define ANOMALY_SALIENCY_RING_SOFT_SCALE 1.35f
 #define ANOMALY_SALIENCY_RING_HARD_SCALE 0.18f
 #define ANOMALY_SALIENCY_PLATEAU_SUPPORT 6
+#define ANOMALY_MAX_MOTION_CANDIDATES 3
+#define ANOMALY_MAX_OVERLAY_BOXES 8
+#define ANOMALY_MOTION_CANDIDATE_NMS_RADIUS 2
+#define ANOMALY_MOTION_LOCAL_RADIUS_CELLS 2
+#define ANOMALY_MOTION_GLOBAL_STRIDE_CELLS 4
+#define ANOMALY_MOTION_LOCAL_MIN_SAMPLES 4
+#define ANOMALY_THERMAL_MOTION_BOOST 0.45f
+#define ANOMALY_COLOR_MOTION_BOOST 0.35f
+#define ANOMALY_THERMAL_FOOTPRINT_RADIUS 3
+#define ANOMALY_THERMAL_GROWTH_MAX_RADIUS 10
+#define ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX 20
+#define ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX 10
+#define ANOMALY_THERMAL_REPRESENTATIVE_RADIUS 5
+#define ANOMALY_THERMAL_REPRESENTATIVE_MIN_AREA 6
+#define ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS 8
+#define ANOMALY_THERMAL_TARGET_HISTORY_RADIUS 1
+#define ANOMALY_THERMAL_TARGET_HISTORY_DECAY 0.84f
+#define ANOMALY_THERMAL_TARGET_HISTORY_GAIN 0.34f
+#define ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION 0.070f
+#define ANOMALY_SALIENCY_SECONDARY_SCORE_MARGIN 1.20f
+#define ANOMALY_SALIENCY_SECONDARY_TRACKED_SCORE_MARGIN 2.10f
+#define ANOMALY_SALIENCY_SECONDARY_TRACK_REACQUIRE_GATE 0.090f
+#define ANOMALY_SALIENCY_SECONDARY_HOLD_BONUS 6
+#define ANOMALY_SALIENCY_SECONDARY_LOCAL_RADIUS_CELLS 2
+#define ANOMALY_SALIENCY_SECONDARY_LOCAL_THRESHOLD_SLACK 0.70f
 
 static inline float clamp01f(float v) {
     if (v < 0.0f) return 0.0f;
@@ -40,6 +65,39 @@ static inline float clampf(float value, float min_value, float max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
     return value;
+}
+
+static bool ensure_u8_capacity(uint8_t **buffer, size_t *capacity, size_t count) {
+    if (buffer == NULL || capacity == NULL) return false;
+    if (count == 0) return true;
+    if (*buffer != NULL && *capacity >= count) return true;
+    uint8_t *grown = (uint8_t *)realloc(*buffer, count * sizeof(uint8_t));
+    if (grown == NULL) return false;
+    *buffer = grown;
+    *capacity = count;
+    return true;
+}
+
+static bool ensure_float_capacity(float **buffer, size_t *capacity, size_t count) {
+    if (buffer == NULL || capacity == NULL) return false;
+    if (count == 0) return true;
+    if (*buffer != NULL && *capacity >= count) return true;
+    float *grown = (float *)realloc(*buffer, count * sizeof(float));
+    if (grown == NULL) return false;
+    *buffer = grown;
+    *capacity = count;
+    return true;
+}
+
+static bool ensure_double_capacity(double **buffer, size_t *capacity, size_t count) {
+    if (buffer == NULL || capacity == NULL) return false;
+    if (count == 0) return true;
+    if (*buffer != NULL && *capacity >= count) return true;
+    double *grown = (double *)realloc(*buffer, count * sizeof(double));
+    if (grown == NULL) return false;
+    *buffer = grown;
+    *capacity = count;
+    return true;
 }
 
 static inline int popcount_u8(uint8_t value) {
@@ -178,6 +236,167 @@ static int compare_float_qsort(const void *a, const void *b) {
     if (fa < fb) return -1;
     if (fa > fb) return 1;
     return 0;
+}
+
+typedef struct {
+    int sg_x;
+    int sg_y;
+    int pixel_x;
+    int pixel_y;
+    float proposal_score;
+    float thermal_score;
+    float color_score;
+} anomaly_motion_candidate_t;
+
+static void collect_motion_candidates(
+        const float *thermal_map,
+        const float *color_map,
+        int          sg_w,
+        int          sg_h,
+        int          roi_x0,
+        int          roi_y0,
+        int          sample_step,
+        anomaly_motion_candidate_t *out_candidates,
+        int         *out_count) {
+    if (out_count != NULL) *out_count = 0;
+    if (out_candidates == NULL || out_count == NULL || sg_w <= 0 || sg_h <= 0) return;
+
+    for (int sy = 0; sy < sg_h; sy++) {
+        for (int sx = 0; sx < sg_w; sx++) {
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            float thermal_score = thermal_map != NULL ? thermal_map[idx] : -1.0f;
+            if (thermal_score < 0.0f) thermal_score = 0.0f;
+            float color_score = color_map != NULL ? color_map[idx] : 0.0f;
+            if (color_score < 0.0f) color_score = 0.0f;
+            float proposal_score = thermal_score;
+            if (color_score > 0.0f) {
+                proposal_score += thermal_score > 0.0f ? (0.60f * color_score)
+                                                       : (0.85f * color_score);
+            }
+            if (proposal_score <= 0.0f) continue;
+
+            bool is_peak = true;
+            for (int ny = sy - 1; ny <= sy + 1 && is_peak; ny++) {
+                if (ny < 0 || ny >= sg_h) continue;
+                for (int nx = sx - 1; nx <= sx + 1; nx++) {
+                    if (nx < 0 || nx >= sg_w || (nx == sx && ny == sy)) continue;
+                    size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+                    float nthermal = thermal_map != NULL ? thermal_map[nidx] : -1.0f;
+                    if (nthermal < 0.0f) nthermal = 0.0f;
+                    float ncolor = color_map != NULL ? color_map[nidx] : 0.0f;
+                    if (ncolor < 0.0f) ncolor = 0.0f;
+                    float neighbor_score = nthermal;
+                    if (ncolor > 0.0f) {
+                        neighbor_score += nthermal > 0.0f ? (0.60f * ncolor)
+                                                           : (0.85f * ncolor);
+                    }
+                    if (neighbor_score > proposal_score) {
+                        is_peak = false;
+                        break;
+                    }
+                }
+            }
+            if (!is_peak) continue;
+
+            int insert_at = *out_count;
+            bool rejected = false;
+            for (int i = 0; i < *out_count; i++) {
+                int ddx = abs(out_candidates[i].sg_x - sx);
+                int ddy = abs(out_candidates[i].sg_y - sy);
+                if (ddx <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS &&
+                    ddy <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS) {
+                    if (proposal_score > out_candidates[i].proposal_score) {
+                        out_candidates[i].sg_x = sx;
+                        out_candidates[i].sg_y = sy;
+                        out_candidates[i].pixel_x = roi_x0 + sx * sample_step;
+                        out_candidates[i].pixel_y = roi_y0 + sy * sample_step;
+                        out_candidates[i].proposal_score = proposal_score;
+                        out_candidates[i].thermal_score = thermal_score;
+                        out_candidates[i].color_score = color_score;
+                    }
+                    rejected = true;
+                    break;
+                }
+                if (proposal_score > out_candidates[i].proposal_score) {
+                    insert_at = i;
+                    break;
+                }
+            }
+            if (rejected) continue;
+            if (insert_at >= ANOMALY_MAX_MOTION_CANDIDATES) continue;
+
+            int move_limit = *out_count < ANOMALY_MAX_MOTION_CANDIDATES
+                ? *out_count
+                : (ANOMALY_MAX_MOTION_CANDIDATES - 1);
+            for (int i = move_limit; i > insert_at; i--) {
+                out_candidates[i] = out_candidates[i - 1];
+            }
+            if (*out_count < ANOMALY_MAX_MOTION_CANDIDATES) (*out_count)++;
+
+            out_candidates[insert_at].sg_x = sx;
+            out_candidates[insert_at].sg_y = sy;
+            out_candidates[insert_at].pixel_x = roi_x0 + sx * sample_step;
+            out_candidates[insert_at].pixel_y = roi_y0 + sy * sample_step;
+            out_candidates[insert_at].proposal_score = proposal_score;
+            out_candidates[insert_at].thermal_score = thermal_score;
+            out_candidates[insert_at].color_score = color_score;
+        }
+    }
+}
+
+static bool project_motion_cell(
+        similarity_2d_t sim,
+        int             width,
+        int             height,
+        int             motion_step,
+        int             motion_w,
+        int             motion_h,
+        int             mx,
+        int             my,
+        int            *px_idx_out,
+        int            *py_idx_out) {
+    if (width <= 1 || height <= 1 || motion_step <= 0 || motion_w <= 0 || motion_h <= 0) {
+        return false;
+    }
+    float fw = (float)(width - 1);
+    float fh = (float)(height - 1);
+    float cx_n = (float)(mx * motion_step) / fw;
+    float cy_n = (float)(my * motion_step) / fh;
+    float px_n = sim.a * cx_n - sim.b * cy_n + sim.tx;
+    float py_n = sim.b * cx_n + sim.a * cy_n + sim.ty;
+    int px_idx = (int)(px_n * fw / (float)motion_step + 0.5f);
+    int py_idx = (int)(py_n * fh / (float)motion_step + 0.5f);
+    if (px_idx < 0 || px_idx >= motion_w || py_idx < 0 || py_idx >= motion_h) return false;
+    if (px_idx_out != NULL) *px_idx_out = px_idx;
+    if (py_idx_out != NULL) *py_idx_out = py_idx;
+    return true;
+}
+
+static void stamp_motion_support(
+        float *saliency_motion_map,
+        float *saliency_registration_map,
+        int    sg_w,
+        int    sg_h,
+        int    sg_x,
+        int    sg_y,
+        float  support,
+        float  registration_scale) {
+    if (saliency_motion_map == NULL || sg_w <= 0 || sg_h <= 0 || support <= 0.0f) return;
+    for (int oy = -1; oy <= 1; oy++) {
+        int sy = sg_y + oy;
+        if (sy < 0 || sy >= sg_h) continue;
+        for (int ox = -1; ox <= 1; ox++) {
+            int sx = sg_x + ox;
+            if (sx < 0 || sx >= sg_w) continue;
+            float scale = (ox == 0 && oy == 0) ? 1.0f : 0.55f;
+            float stamped = support * scale;
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (stamped > saliency_motion_map[idx]) saliency_motion_map[idx] = stamped;
+            if (saliency_registration_map != NULL && registration_scale < saliency_registration_map[idx]) {
+                saliency_registration_map[idx] = registration_scale;
+            }
+        }
+    }
 }
 
 static bool estimate_local_motion_region(
@@ -634,6 +853,1146 @@ static void build_patch_selection_map(
                 }
             }
             selection_map[sy * sg_w + sx] = score;
+        }
+    }
+}
+
+static void estimate_representative_blob_delta_stats(
+        const float *score_map,
+        const float *bg_luma,
+        const double *sg_luma,
+        int          sg_w,
+        int          sg_h,
+        int          sample_step,
+        const anomaly_motion_candidate_t *candidates,
+        int          candidate_count,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta,
+        double       delta_norm,
+        float       *ratio_out,
+        float       *std_out) {
+    if (ratio_out != NULL) *ratio_out = 0.0f;
+    if (std_out != NULL) *std_out = 0.0f;
+    if (score_map == NULL || bg_luma == NULL || sg_luma == NULL ||
+        candidates == NULL || candidate_count <= 0 || sg_w <= 0 || sg_h <= 0 ||
+        !bg_valid) {
+        return;
+    }
+
+    float weighted_ratio = 0.0f;
+    float weighted_std = 0.0f;
+    float total_weight = 0.0f;
+    int growth_radius_cells = ANOMALY_THERMAL_REPRESENTATIVE_RADIUS;
+    if (sample_step > 0) {
+        int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (2 * sample_step) - 1) / (2 * sample_step);
+        if (bounded < 3) bounded = 3;
+        if (bounded < growth_radius_cells) growth_radius_cells = bounded;
+    }
+
+    for (int ci = 0; ci < candidate_count; ci++) {
+        int sx = candidates[ci].sg_x;
+        int sy = candidates[ci].sg_y;
+        if (sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) continue;
+        size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+        float seed_delta = black_hot
+            ? (bg_luma[seed_idx] - (float)sg_luma[seed_idx])
+            : ((float)sg_luma[seed_idx] - bg_luma[seed_idx]);
+        if (seed_delta < thermal_min_delta) continue;
+
+        float score_center = score_map[seed_idx];
+        if (score_center <= 0.0f) continue;
+
+        int rx0 = clamp_i32(sx - growth_radius_cells, 0, sg_w - 1);
+        int rx1 = clamp_i32(sx + growth_radius_cells, 0, sg_w - 1);
+        int ry0 = clamp_i32(sy - growth_radius_cells, 0, sg_h - 1);
+        int ry1 = clamp_i32(sy + growth_radius_cells, 0, sg_h - 1);
+        float seed_floor = fmaxf(
+            thermal_min_delta,
+            fmaxf(seed_delta * 0.58f, seed_delta - fmaxf(2.0f, (float)delta_norm * 0.75f)));
+
+        int area = 0;
+        int min_x = sx, max_x = sx, min_y = sy, max_y = sy;
+        double sum_delta = 0.0;
+        double sum_delta2 = 0.0;
+        for (int gy = ry0; gy <= ry1; gy++) {
+            for (int gx = rx0; gx <= rx1; gx++) {
+                int ring = abs(gx - sx);
+                int dy = abs(gy - sy);
+                if (dy > ring) ring = dy;
+                if (ring > growth_radius_cells) continue;
+                size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                float score = score_map[idx];
+                if (score <= 0.0f) continue;
+                float delta = black_hot
+                    ? (bg_luma[idx] - (float)sg_luma[idx])
+                    : ((float)sg_luma[idx] - bg_luma[idx]);
+                if (delta < seed_floor) continue;
+                area++;
+                sum_delta += (double)delta;
+                sum_delta2 += (double)delta * (double)delta;
+                if (gx < min_x) min_x = gx;
+                if (gx > max_x) max_x = gx;
+                if (gy < min_y) min_y = gy;
+                if (gy > max_y) max_y = gy;
+            }
+        }
+        if (area < ANOMALY_THERMAL_REPRESENTATIVE_MIN_AREA) continue;
+
+        float span = (float)((max_x - min_x) > (max_y - min_y)
+            ? (max_x - min_x + 1)
+            : (max_y - min_y + 1));
+        float mean_delta = (float)(sum_delta / (double)area);
+        float var_delta = area > 1
+            ? (float)fmax(sum_delta2 / (double)area - (double)mean_delta * (double)mean_delta, 0.0)
+            : 0.0f;
+        float std_delta = sqrtf(var_delta);
+        float mean_ratio = mean_delta / fmaxf(seed_delta, 1.0f);
+        if (mean_ratio <= 0.0f) continue;
+
+        float weight = (float)area * fmaxf(span, 1.0f);
+        weighted_ratio += weight * mean_ratio;
+        weighted_std += weight * std_delta;
+        total_weight += weight;
+    }
+
+    if (total_weight > 0.0f) {
+        if (ratio_out != NULL) *ratio_out = weighted_ratio / total_weight;
+        if (std_out != NULL) *std_out = weighted_std / total_weight;
+    }
+}
+
+static void estimate_framewide_blob_contrast_stats(
+        const float *bg_luma,
+        const double *sg_luma,
+        int          sg_w,
+        int          sg_h,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta,
+        float       *contrast_mean_out,
+        float       *contrast_std_out) {
+    if (contrast_mean_out != NULL) *contrast_mean_out = 0.0f;
+    if (contrast_std_out != NULL) *contrast_std_out = 0.0f;
+    if (!bg_valid || bg_luma == NULL || sg_luma == NULL || sg_w <= 0 || sg_h <= 0) return;
+
+    double sum = 0.0;
+    double sum2 = 0.0;
+    int count = 0;
+    for (int sy = 0; sy < sg_h; sy++) {
+        for (int sx = 0; sx < sg_w; sx++) {
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            float delta0 = black_hot
+                ? (bg_luma[idx] - (float)sg_luma[idx])
+                : ((float)sg_luma[idx] - bg_luma[idx]);
+            if (delta0 < thermal_min_delta) continue;
+            if (sx + 1 < sg_w) {
+                size_t nidx = idx + 1u;
+                float delta1 = black_hot
+                    ? (bg_luma[nidx] - (float)sg_luma[nidx])
+                    : ((float)sg_luma[nidx] - bg_luma[nidx]);
+                if (delta1 >= thermal_min_delta) {
+                    float hi = delta0 > delta1 ? delta0 : delta1;
+                    float lo = delta0 > delta1 ? delta1 : delta0;
+                    float ratio = lo / fmaxf(hi, 1.0f);
+                    if (ratio >= 0.72f) {
+                        float diff = fabsf(delta0 - delta1);
+                        sum += (double)diff;
+                        sum2 += (double)diff * (double)diff;
+                        count++;
+                    }
+                }
+            }
+            if (sy + 1 < sg_h) {
+                size_t nidx = idx + (size_t)sg_w;
+                float delta1 = black_hot
+                    ? (bg_luma[nidx] - (float)sg_luma[nidx])
+                    : ((float)sg_luma[nidx] - bg_luma[nidx]);
+                if (delta1 >= thermal_min_delta) {
+                    float hi = delta0 > delta1 ? delta0 : delta1;
+                    float lo = delta0 > delta1 ? delta1 : delta0;
+                    float ratio = lo / fmaxf(hi, 1.0f);
+                    if (ratio >= 0.72f) {
+                        float diff = fabsf(delta0 - delta1);
+                        sum += (double)diff;
+                        sum2 += (double)diff * (double)diff;
+                        count++;
+                    }
+                }
+            }
+        }
+    }
+    if (count > 0) {
+        float mean = (float)(sum / (double)count);
+        float var = count > 1
+            ? (float)fmax(sum2 / (double)count - (double)mean * (double)mean, 0.0)
+            : 0.0f;
+        if (contrast_mean_out != NULL) *contrast_mean_out = mean;
+        if (contrast_std_out != NULL) *contrast_std_out = sqrtf(var);
+    }
+}
+
+static float thermal_candidate_seed_context_scale(
+        const float *bg_luma,
+        const double *sg_luma,
+        int          sg_w,
+        int          sg_h,
+        int          sx,
+        int          sy,
+        int          sample_step,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta,
+        float        representative_delta_ratio,
+        float        frame_contrast_mean,
+        float        frame_contrast_std,
+        double       delta_norm) {
+    if (!bg_valid || bg_luma == NULL || sg_luma == NULL ||
+        sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
+        return 1.0f;
+    }
+
+    size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+    float seed_delta = black_hot
+        ? (bg_luma[seed_idx] - (float)sg_luma[seed_idx])
+        : ((float)sg_luma[seed_idx] - bg_luma[seed_idx]);
+    if (seed_delta < thermal_min_delta) return 0.45f;
+
+    int radius = ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS;
+    if (sample_step > 0) {
+        int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (8 * sample_step) - 1) / sample_step;
+        if (bounded < 6) bounded = 6;
+        if (bounded < radius) radius = bounded;
+    }
+    static const int dirs[8][2] = {
+        { 0, -1}, { 1, -1}, { 1,  0}, { 1,  1},
+        { 0,  1}, {-1,  1}, {-1,  0}, {-1, -1},
+    };
+    int reach[8] = {0};
+    int warm_dirs = 0;
+    int cool_dirs = 0;
+    float near_ratio_sum = 0.0f;
+    int near_ratio_count = 0;
+    float near_drop_sum = 0.0f;
+    int near_drop_count = 0;
+    int flat_dirs = 0;
+    float sustain_floor = fmaxf(
+        thermal_min_delta,
+        fmaxf(seed_delta * 0.72f, seed_delta - fmaxf(2.25f, (float)delta_norm * 0.80f)));
+    float near_floor = fmaxf(
+        thermal_min_delta,
+        fmaxf(seed_delta * 0.60f, seed_delta - fmaxf(3.25f, (float)delta_norm)));
+    float frame_band = frame_contrast_mean + 1.10f * frame_contrast_std;
+    if (frame_band < 0.8f) frame_band = 0.8f;
+    float max_band = fmaxf(1.3f, seed_delta * 0.22f);
+    if (frame_band > max_band) frame_band = max_band;
+
+    for (int di = 0; di < 8; di++) {
+        bool first_step_seen = false;
+        for (int step = 1; step <= radius; step++) {
+            int gx = sx + dirs[di][0] * step;
+            int gy = sy + dirs[di][1] * step;
+            if (gx < 0 || gx >= sg_w || gy < 0 || gy >= sg_h) break;
+            size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+            float delta = black_hot
+                ? (bg_luma[idx] - (float)sg_luma[idx])
+                : ((float)sg_luma[idx] - bg_luma[idx]);
+            if (step == 1) {
+                first_step_seen = true;
+                if (delta > 0.0f) {
+                    float drop = seed_delta - delta;
+                    near_drop_sum += drop;
+                    near_drop_count++;
+                    if (drop < frame_band) flat_dirs++;
+                } else {
+                    near_drop_sum += seed_delta;
+                    near_drop_count++;
+                }
+            }
+            if (step <= 2 && delta > 0.0f) {
+                near_ratio_sum += delta / fmaxf(seed_delta, 1.0f);
+                near_ratio_count++;
+            }
+            if (delta >= sustain_floor) {
+                reach[di] = step;
+            } else {
+                if (step == 1 && delta <= near_floor) {
+                    cool_dirs++;
+                }
+                break;
+            }
+        }
+        if (!first_step_seen) {
+            cool_dirs++;
+        }
+        if (reach[di] >= 2) warm_dirs++;
+    }
+
+    int vertical = reach[0] + reach[4];
+    int horizontal = reach[2] + reach[6];
+    int diag_a = reach[1] + reach[5];
+    int diag_b = reach[3] + reach[7];
+    int major_axis = vertical;
+    if (horizontal > major_axis) major_axis = horizontal;
+    if (diag_a > major_axis) major_axis = diag_a;
+    if (diag_b > major_axis) major_axis = diag_b;
+    int minor_axis = vertical;
+    if (horizontal < minor_axis) minor_axis = horizontal;
+    if (diag_a < minor_axis) minor_axis = diag_a;
+    if (diag_b < minor_axis) minor_axis = diag_b;
+    float axis_anisotropy = (major_axis + minor_axis) > 0
+        ? (float)(major_axis - minor_axis) / (float)(major_axis + minor_axis)
+        : 0.0f;
+    float near_ratio = near_ratio_count > 0 ? (near_ratio_sum / (float)near_ratio_count) : 0.0f;
+    float near_drop_mean = near_drop_count > 0 ? (near_drop_sum / (float)near_drop_count) : seed_delta;
+    float representative_ratio = clampf(representative_delta_ratio, 0.0f, 1.0f);
+
+    float scale = 1.0f;
+    if (major_axis >= 5 && axis_anisotropy >= 0.55f) {
+        scale *= 0.50f;
+    } else if (major_axis >= 4 && axis_anisotropy >= 0.40f) {
+        scale *= 0.72f;
+    }
+    if (warm_dirs >= 4) {
+        scale *= 0.68f;
+    } else if (warm_dirs == 3) {
+        scale *= 0.82f;
+    }
+    if (near_ratio >= fmaxf(0.62f, representative_ratio + 0.04f)) {
+        scale *= 0.62f;
+    } else if (near_ratio >= fmaxf(0.48f, representative_ratio - 0.02f)) {
+        scale *= 0.82f;
+    }
+    if (near_drop_mean < frame_band) {
+        scale *= 0.42f;
+    } else if (near_drop_mean < frame_band * 1.4f) {
+        scale *= 0.68f;
+    } else if (near_drop_mean < frame_band * 1.9f) {
+        scale *= 0.86f;
+    }
+    if (flat_dirs >= 5) {
+        scale *= 0.32f;
+    } else if (flat_dirs >= 3) {
+        scale *= 0.58f;
+    }
+    if (near_drop_mean >= frame_band * 2.4f && flat_dirs <= 1 && major_axis <= 3) {
+        scale *= 1.30f;
+    } else if (near_drop_mean >= frame_band * 1.8f && flat_dirs <= 2 && major_axis <= 4) {
+        scale *= 1.16f;
+    }
+    if (cool_dirs >= 5 && warm_dirs <= 2 && major_axis <= 3) {
+        scale *= 1.24f;
+    } else if (cool_dirs >= 4 && major_axis <= 4) {
+        scale *= 1.12f;
+    }
+    return clampf(scale, 0.22f, 1.35f);
+}
+
+static float thermal_candidate_parent_mass_scale(
+        const float *bg_luma,
+        const double *sg_luma,
+        int          sg_w,
+        int          sg_h,
+        int          sx,
+        int          sy,
+        int          sample_step,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta,
+        float        frame_contrast_mean,
+        float        frame_contrast_std,
+        double       delta_norm) {
+    if (!bg_valid || bg_luma == NULL || sg_luma == NULL ||
+        sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
+        return 1.0f;
+    }
+
+    size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+    float seed_delta = black_hot
+        ? (bg_luma[seed_idx] - (float)sg_luma[seed_idx])
+        : ((float)sg_luma[seed_idx] - bg_luma[seed_idx]);
+    if (seed_delta < thermal_min_delta) return 0.50f;
+
+    int radius = ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS + 2;
+    if (sample_step > 0) {
+        int bounded = ((ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX * 2) + (sample_step - 1)) / sample_step;
+        if (bounded < 6) bounded = 6;
+        if (bounded < radius) radius = bounded;
+    }
+    float frame_band = frame_contrast_mean + 1.25f * frame_contrast_std;
+    if (frame_band < 1.0f) frame_band = 1.0f;
+    float max_band = fmaxf(1.8f, seed_delta * 0.34f);
+    if (frame_band > max_band) frame_band = max_band;
+    float parent_floor = fmaxf(thermal_min_delta, seed_delta - frame_band);
+
+    int area = 0;
+    int min_x = sx, max_x = sx, min_y = sy, max_y = sy;
+    int dir_hits[8] = {0};
+    static const int dirs[8][2] = {
+        { 0, -1}, { 1, -1}, { 1,  0}, { 1,  1},
+        { 0,  1}, {-1,  1}, {-1,  0}, {-1, -1},
+    };
+    for (int gy = clamp_i32(sy - radius, 0, sg_h - 1);
+         gy <= clamp_i32(sy + radius, 0, sg_h - 1);
+         gy++) {
+        for (int gx = clamp_i32(sx - radius, 0, sg_w - 1);
+             gx <= clamp_i32(sx + radius, 0, sg_w - 1);
+             gx++) {
+            int ring = abs(gx - sx);
+            int dy = abs(gy - sy);
+            if (dy > ring) ring = dy;
+            if (ring > radius) continue;
+            size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+            float delta = black_hot
+                ? (bg_luma[idx] - (float)sg_luma[idx])
+                : ((float)sg_luma[idx] - bg_luma[idx]);
+            if (delta < parent_floor) continue;
+            area++;
+            if (gx < min_x) min_x = gx;
+            if (gx > max_x) max_x = gx;
+            if (gy < min_y) min_y = gy;
+            if (gy > max_y) max_y = gy;
+            if (gx == sx && gy == sy) continue;
+            for (int di = 0; di < 8; di++) {
+                int dot = (gx - sx) * dirs[di][0] + (gy - sy) * dirs[di][1];
+                if (dot > 0) dir_hits[di]++;
+            }
+        }
+    }
+    if (area <= 0) return 1.0f;
+
+    float span = (float)(((max_x - min_x) > (max_y - min_y))
+        ? (max_x - min_x + 1) : (max_y - min_y + 1));
+    float span_px = span * (float)(sample_step > 0 ? sample_step : 1);
+    int active_dirs = 0;
+    for (int di = 0; di < 8; di++) {
+        if (dir_hits[di] > 0) active_dirs++;
+    }
+
+    float scale = 1.0f;
+    if (span_px >= 16.0f || area >= 24) {
+        scale *= 0.28f;
+    } else if (span_px >= 12.0f || area >= 16) {
+        scale *= 0.46f;
+    } else if (span_px >= 9.0f || area >= 10) {
+        scale *= 0.68f;
+    }
+    if (active_dirs >= 6) {
+        scale *= 0.55f;
+    } else if (active_dirs >= 4) {
+        scale *= 0.76f;
+    }
+    if (frame_band <= seed_delta * 0.14f && active_dirs <= 2 && span_px <= 6.0f) {
+        scale *= 1.10f;
+    }
+    return clampf(scale, 0.18f, 1.10f);
+}
+
+static float thermal_candidate_quality(
+        const float *score_map,
+        const float *bg_luma,
+        const double *sg_luma,
+        int          sg_w,
+        int          sg_h,
+        int          sx,
+        int          sy,
+        int          sample_step,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta,
+        double       delta_mean,
+        double       delta_norm,
+        float        representative_delta_ratio,
+        float        representative_delta_std,
+        float        frame_contrast_mean,
+        float        frame_contrast_std,
+        float        best_small_span_px,
+        int         *bbox_min_x_out,
+        int         *bbox_min_y_out,
+        int         *bbox_max_x_out,
+        int         *bbox_max_y_out,
+        float       *area_out,
+        float       *span_out,
+        float       *fill_out,
+        float       *center_share_out) {
+    if (bbox_min_x_out != NULL) *bbox_min_x_out = sx;
+    if (bbox_min_y_out != NULL) *bbox_min_y_out = sy;
+    if (bbox_max_x_out != NULL) *bbox_max_x_out = sx;
+    if (bbox_max_y_out != NULL) *bbox_max_y_out = sy;
+    if (area_out != NULL) *area_out = 0.0f;
+    if (span_out != NULL) *span_out = 0.0f;
+    if (fill_out != NULL) *fill_out = 0.0f;
+    if (center_share_out != NULL) *center_share_out = 0.0f;
+    if (score_map == NULL || sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
+        return 0.15f;
+    }
+
+    float center = score_map[sy * sg_w + sx];
+    if (center <= 0.0f) return 0.15f;
+
+    int growth_radius_cells = ANOMALY_THERMAL_GROWTH_MAX_RADIUS;
+    if (sample_step > 0) {
+        int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (2 * sample_step) - 1) / (2 * sample_step);
+        if (bounded < 2) bounded = 2;
+        if (bounded < growth_radius_cells) growth_radius_cells = bounded;
+    }
+
+    int rx0 = clamp_i32(sx - growth_radius_cells, 0, sg_w - 1);
+    int rx1 = clamp_i32(sx + growth_radius_cells, 0, sg_w - 1);
+    int ry0 = clamp_i32(sy - growth_radius_cells, 0, sg_h - 1);
+    int ry1 = clamp_i32(sy + growth_radius_cells, 0, sg_h - 1);
+    int local_w = rx1 - rx0 + 1;
+    int local_h = ry1 - ry0 + 1;
+    int local_count = local_w * local_h;
+    if (local_count <= 0) return 0.15f;
+
+    float threshold = center * 0.65f;
+    if (threshold < 0.8f) threshold = 0.8f;
+    if (threshold > center) threshold = center;
+
+    bool use_raw_delta = (bg_valid && bg_luma != NULL && sg_luma != NULL);
+    float seed_delta = 0.0f;
+    float delta_threshold = thermal_min_delta;
+    float frame_contrast_band = 0.0f;
+    float shell_delta_mean = 0.0f;
+    float shell_delta_std = 0.0f;
+    float shell_contrast_threshold = 0.0f;
+    float shell_peak_mean = 0.0f;
+    float shell_peak_ratio = 0.0f;
+    float local_delta_mean = 0.0f;
+    float local_delta_std = 0.0f;
+    float local_delta_ratio = 0.0f;
+    if (use_raw_delta) {
+        size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+        float bg = bg_luma[seed_idx];
+        float lum = (float)sg_luma[seed_idx];
+        seed_delta = black_hot ? (bg - lum) : (lum - bg);
+        if (seed_delta < thermal_min_delta) {
+            use_raw_delta = false;
+        } else {
+            int shell_outer_radius = growth_radius_cells < 5 ? growth_radius_cells : 5;
+            int shell_inner_radius = shell_outer_radius > 2 ? 2 : 1;
+            double shell_sum = 0.0;
+            double shell_sum2 = 0.0;
+            int shell_count_delta = 0;
+            float shell_top1 = 0.0f;
+            float shell_top2 = 0.0f;
+            float shell_top3 = 0.0f;
+            float shell_top4 = 0.0f;
+            for (int gy = clamp_i32(sy - shell_outer_radius, 0, sg_h - 1);
+                 gy <= clamp_i32(sy + shell_outer_radius, 0, sg_h - 1);
+                 gy++) {
+                for (int gx = clamp_i32(sx - shell_outer_radius, 0, sg_w - 1);
+                     gx <= clamp_i32(sx + shell_outer_radius, 0, sg_w - 1);
+                     gx++) {
+                    int ring = abs(gx - sx);
+                    int dy = abs(gy - sy);
+                    if (dy > ring) ring = dy;
+                    if (ring < shell_inner_radius || ring > shell_outer_radius) continue;
+                    size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                    float nbg = bg_luma[idx];
+                    float nlum = (float)sg_luma[idx];
+                    float ndelta = black_hot ? (nbg - nlum) : (nlum - nbg);
+                    if (ndelta <= 0.0f) continue;
+                    shell_sum += (double)ndelta;
+                    shell_sum2 += (double)ndelta * (double)ndelta;
+                    shell_count_delta++;
+                    if (ndelta > shell_top1) {
+                        shell_top4 = shell_top3;
+                        shell_top3 = shell_top2;
+                        shell_top2 = shell_top1;
+                        shell_top1 = ndelta;
+                    } else if (ndelta > shell_top2) {
+                        shell_top4 = shell_top3;
+                        shell_top3 = shell_top2;
+                        shell_top2 = ndelta;
+                    } else if (ndelta > shell_top3) {
+                        shell_top4 = shell_top3;
+                        shell_top3 = ndelta;
+                    } else if (ndelta > shell_top4) {
+                        shell_top4 = ndelta;
+                    }
+                }
+            }
+            if (shell_count_delta > 0) {
+                shell_delta_mean = (float)(shell_sum / (double)shell_count_delta);
+                float shell_var = shell_count_delta > 1
+                    ? (float)fmax(shell_sum2 / (double)shell_count_delta -
+                                  (double)shell_delta_mean * (double)shell_delta_mean, 0.0)
+                    : 0.0f;
+                shell_delta_std = sqrtf(shell_var);
+                float shell_peak_sum = shell_top1;
+                int shell_peak_count = shell_top1 > 0.0f ? 1 : 0;
+                if (shell_top2 > 0.0f) { shell_peak_sum += shell_top2; shell_peak_count++; }
+                if (shell_top3 > 0.0f) { shell_peak_sum += shell_top3; shell_peak_count++; }
+                if (shell_top4 > 0.0f) { shell_peak_sum += shell_top4; shell_peak_count++; }
+                if (shell_peak_count > 0) {
+                    shell_peak_mean = shell_peak_sum / (float)shell_peak_count;
+                    shell_peak_ratio = shell_peak_mean / fmaxf(seed_delta, 1.0f);
+                }
+            }
+            double local_sum = 0.0;
+            double local_sum2 = 0.0;
+            int local_count_delta = 0;
+            int local_delta_radius = 2;
+            for (int gy = clamp_i32(sy - local_delta_radius, 0, sg_h - 1);
+                 gy <= clamp_i32(sy + local_delta_radius, 0, sg_h - 1);
+                 gy++) {
+                for (int gx = clamp_i32(sx - local_delta_radius, 0, sg_w - 1);
+                     gx <= clamp_i32(sx + local_delta_radius, 0, sg_w - 1);
+                     gx++) {
+                    if (gx == sx && gy == sy) continue;
+                    int ring = abs(gx - sx);
+                    int dy = abs(gy - sy);
+                    if (dy > ring) ring = dy;
+                    if (ring > local_delta_radius) continue;
+                    size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                    float nbg = bg_luma[idx];
+                    float nlum = (float)sg_luma[idx];
+                    float ndelta = black_hot ? (nbg - nlum) : (nlum - nbg);
+                    if (ndelta <= 0.0f) continue;
+                    local_sum += (double)ndelta;
+                    local_sum2 += (double)ndelta * (double)ndelta;
+                    local_count_delta++;
+                }
+            }
+            if (local_count_delta > 0) {
+                local_delta_mean = (float)(local_sum / (double)local_count_delta);
+                float local_var = local_count_delta > 1
+                    ? (float)fmax(local_sum2 / (double)local_count_delta -
+                                  (double)local_delta_mean * (double)local_delta_mean, 0.0)
+                    : 0.0f;
+                local_delta_std = sqrtf(local_var);
+                local_delta_ratio = local_delta_mean / fmaxf(seed_delta, 1.0f);
+            }
+            float seed_margin = seed_delta - thermal_min_delta;
+            float local_noise = fmaxf(local_delta_std, (float)delta_norm * 0.35f);
+            float local_prominence = seed_delta - local_delta_mean;
+            float local_prominence_scale = local_prominence / fmaxf(local_noise, 1.0f);
+            float noise_ratio = (float)delta_norm / fmaxf(seed_delta, 1.0f);
+            float frame_mean_ratio = (float)delta_mean / fmaxf(seed_delta, 1.0f);
+            float representative_ratio = clampf(representative_delta_ratio, 0.0f, 1.0f);
+            float representative_noise = fmaxf(representative_delta_std, local_noise);
+            float shell_ratio = shell_delta_mean / fmaxf(seed_delta, 1.0f);
+            frame_contrast_band = frame_contrast_mean + 1.35f * frame_contrast_std;
+            float max_frame_band = fmaxf(1.5f, seed_delta * 0.28f);
+            if (frame_contrast_band > max_frame_band) frame_contrast_band = max_frame_band;
+            if (frame_contrast_band < 0.9f) frame_contrast_band = 0.9f;
+            float retain_fraction = 0.81f
+                + 0.08f * representative_ratio
+                + 0.05f * clampf(noise_ratio, 0.0f, 1.0f)
+                + 0.04f * clampf(frame_mean_ratio, 0.0f, 1.0f)
+                + 0.02f * clampf(local_delta_ratio, 0.0f, 1.0f)
+                + 0.03f * clampf(shell_ratio, 0.0f, 1.0f)
+                + 0.04f * clampf(shell_peak_ratio, 0.0f, 1.0f)
+                + 0.04f * clampf(1.0f - (local_prominence_scale / 3.0f), 0.0f, 1.0f);
+            retain_fraction = clampf(retain_fraction, 0.81f, 0.94f);
+            float frame_floor = fmaxf(
+                thermal_min_delta,
+                (float)delta_mean + 0.25f * (float)delta_norm);
+            if (local_delta_mean > 0.0f) {
+                float local_floor = local_delta_mean + 0.40f * representative_noise;
+                if (local_floor > frame_floor) frame_floor = local_floor;
+            }
+            if (representative_ratio > 0.0f) {
+                float representative_floor = seed_delta * fminf(representative_ratio + 0.06f, 0.94f);
+                if (representative_floor > frame_floor) frame_floor = representative_floor;
+            }
+            if (shell_delta_mean > 0.0f) {
+                float shell_floor = shell_delta_mean + 0.45f * fmaxf(shell_delta_std, representative_noise * 0.65f);
+                if (shell_floor > frame_floor) frame_floor = shell_floor;
+                if (shell_peak_mean > 0.0f) {
+                    float shell_peak_floor = shell_peak_mean + 0.20f * fmaxf(shell_delta_std, representative_noise * 0.55f);
+                    if (shell_peak_floor > frame_floor) frame_floor = shell_peak_floor;
+                }
+                float seed_shell_contrast = seed_delta - shell_delta_mean;
+                float contrast_fraction = 0.32f
+                    + 0.18f * clampf(shell_ratio, 0.0f, 1.0f)
+                    + 0.10f * clampf(representative_ratio, 0.0f, 1.0f);
+                contrast_fraction = clampf(contrast_fraction, 0.32f, 0.64f);
+                shell_contrast_threshold = fmaxf(
+                    thermal_min_delta * 0.20f,
+                    seed_shell_contrast * contrast_fraction);
+                if (shell_peak_mean > 0.0f) {
+                    float seed_peak_contrast = seed_delta - shell_peak_mean;
+                    float peak_contrast_fraction = 0.36f
+                        + 0.16f * clampf(shell_peak_ratio, 0.0f, 1.0f)
+                        + 0.08f * clampf(representative_ratio, 0.0f, 1.0f);
+                    peak_contrast_fraction = clampf(peak_contrast_fraction, 0.36f, 0.66f);
+                    float peak_contrast_threshold = fmaxf(
+                        thermal_min_delta * 0.22f,
+                        seed_peak_contrast * peak_contrast_fraction);
+                    if (peak_contrast_threshold > shell_contrast_threshold) {
+                        shell_contrast_threshold = peak_contrast_threshold;
+                    }
+                }
+            }
+            float fraction_threshold = seed_delta * retain_fraction;
+            delta_threshold = fmaxf(frame_floor, fraction_threshold);
+            float max_allowed = seed_delta - fmaxf(
+                1.25f,
+                fminf(seed_margin * 0.60f, fmaxf(representative_noise * 0.75f, 1.75f)));
+            if (delta_threshold > max_allowed) delta_threshold = max_allowed;
+            if (delta_threshold < thermal_min_delta) delta_threshold = thermal_min_delta;
+        }
+    }
+
+    uint8_t *seen = (uint8_t *)calloc((size_t)local_count, sizeof(uint8_t));
+    int *queue = (int *)malloc((size_t)local_count * sizeof(int));
+    if (seen == NULL || queue == NULL) {
+        free(seen);
+        free(queue);
+        return 0.15f;
+    }
+
+    int seed_local_x = sx - rx0;
+    int seed_local_y = sy - ry0;
+    int head = 0;
+    int tail = 0;
+    queue[tail++] = seed_local_y * local_w + seed_local_x;
+    seen[seed_local_y * local_w + seed_local_x] = 1u;
+
+    int area = 0;
+    int min_x = sx, max_x = sx, min_y = sy, max_y = sy;
+    float sum_score = 0.0f;
+    float center_mass = 0.0f;
+    int plateau_cells = 0;
+    float plateau_sum = 0.0f;
+    int ring_hits[ANOMALY_THERMAL_GROWTH_MAX_RADIUS + 1];
+    int ring_possible[ANOMALY_THERMAL_GROWTH_MAX_RADIUS + 1];
+    float ring_score[ANOMALY_THERMAL_GROWTH_MAX_RADIUS + 1];
+    memset(ring_hits, 0, sizeof(ring_hits));
+    memset(ring_possible, 0, sizeof(ring_possible));
+    memset(ring_score, 0, sizeof(ring_score));
+    for (int gy = ry0; gy <= ry1; gy++) {
+        for (int gx = rx0; gx <= rx1; gx++) {
+            int ring = abs(gx - sx);
+            int dy = abs(gy - sy);
+            if (dy > ring) ring = dy;
+            if (ring > growth_radius_cells) continue;
+            ring_possible[ring]++;
+        }
+    }
+    while (head < tail) {
+        int local_idx = queue[head++];
+        int lx = local_idx % local_w;
+        int ly = local_idx / local_w;
+        int gx = rx0 + lx;
+        int gy = ry0 + ly;
+        float value = score_map[gy * sg_w + gx];
+        if (value < threshold) continue;
+        if (use_raw_delta) {
+            size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+            float bg = bg_luma[idx];
+            float lum = (float)sg_luma[idx];
+            float delta = black_hot ? (bg - lum) : (lum - bg);
+            if (delta < delta_threshold) continue;
+            if (frame_contrast_band > 0.0f && fabsf(delta - seed_delta) > frame_contrast_band) continue;
+            if (shell_delta_mean > 0.0f) {
+                float delta_contrast = delta - shell_delta_mean;
+                if (delta_contrast < shell_contrast_threshold) continue;
+            }
+        }
+
+        area++;
+        sum_score += value;
+        int ring = abs(gx - sx);
+        int dy = abs(gy - sy);
+        if (dy > ring) ring = dy;
+        if (ring > growth_radius_cells) ring = growth_radius_cells;
+        ring_hits[ring]++;
+        ring_score[ring] += value;
+        if (value >= center * 0.82f) {
+            plateau_cells++;
+            plateau_sum += value;
+        }
+        if (gx < min_x) min_x = gx;
+        if (gx > max_x) max_x = gx;
+        if (gy < min_y) min_y = gy;
+        if (gy > max_y) max_y = gy;
+        if (abs(gx - sx) <= 1 && abs(gy - sy) <= 1) {
+            center_mass += value;
+        }
+
+        for (int oy = -1; oy <= 1; oy++) {
+            for (int ox = -1; ox <= 1; ox++) {
+                if (ox == 0 && oy == 0) continue;
+                int nlx = lx + ox;
+                int nly = ly + oy;
+                if (nlx < 0 || nlx >= local_w || nly < 0 || nly >= local_h) continue;
+                int nlocal_idx = nly * local_w + nlx;
+                if (seen[nlocal_idx]) continue;
+                seen[nlocal_idx] = 1u;
+                queue[tail++] = nlocal_idx;
+            }
+        }
+    }
+
+    free(seen);
+    free(queue);
+
+    if (area <= 0) return 0.15f;
+
+    int span_w = max_x - min_x + 1;
+    int span_h = max_y - min_y + 1;
+    int bbox_area = span_w * span_h;
+    float fill_ratio = bbox_area > 0 ? ((float)area / (float)bbox_area) : 0.0f;
+    float max_span = (float)(span_w > span_h ? span_w : span_h);
+    float center_share = sum_score > 0.0f ? (center_mass / sum_score) : 0.0f;
+    float plateau_ratio = area > 0 ? ((float)plateau_cells / (float)area) : 0.0f;
+    float plateau_mass_share = sum_score > 0.0f ? (plateau_sum / sum_score) : 0.0f;
+    int farthest_ring = 0;
+    int dense_outer_rings = 0;
+    float outer_hit_frac = 0.0f;
+    if (area > 0) {
+        int outer_hits = 0;
+        for (int ring = 1; ring <= growth_radius_cells; ring++) {
+            if (ring_hits[ring] > 0) farthest_ring = ring;
+            if (ring >= 3 && ring_possible[ring] > 0) {
+                float coverage = (float)ring_hits[ring] / (float)ring_possible[ring];
+                if (coverage >= 0.30f) dense_outer_rings++;
+                outer_hits += ring_hits[ring];
+            }
+        }
+        outer_hit_frac = (float)outer_hits / (float)area;
+    }
+
+    float shell_sum = 0.0f;
+    int shell_count = 0;
+    for (int gy = ry0; gy <= ry1; gy++) {
+        for (int gx = rx0; gx <= rx1; gx++) {
+            if (gx >= min_x && gx <= max_x && gy >= min_y && gy <= max_y) continue;
+            float value = score_map[gy * sg_w + gx];
+            if (value <= 0.0f) continue;
+            shell_sum += value;
+            shell_count++;
+        }
+    }
+    float shell_mean = shell_count > 0 ? (shell_sum / (float)shell_count) : 0.0f;
+    float local_contrast = center - shell_mean;
+    if (use_raw_delta && local_delta_mean > 0.0f) {
+        local_contrast = seed_delta - local_delta_mean;
+    }
+    float shell_peak_gap = use_raw_delta ? (seed_delta - shell_peak_mean) : 0.0f;
+
+    float broad_context_ratio = 0.0f;
+    float broad_context_coverage = 0.0f;
+    int broad_context_dirs = 0;
+    if (use_raw_delta && seed_delta > 0.0f) {
+        int broad_radius_cells = ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS;
+        if (sample_step > 0) {
+            int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (6 * sample_step) - 1) / sample_step;
+            if (bounded < 5) bounded = 5;
+            if (bounded < broad_radius_cells) broad_radius_cells = bounded;
+        }
+        if (broad_radius_cells > growth_radius_cells) {
+            double broad_sum = 0.0;
+            int broad_count = 0;
+            int broad_hot = 0;
+            int dir_possible[4] = {0, 0, 0, 0};
+            int dir_hot[4] = {0, 0, 0, 0};
+            float broad_floor = fmaxf(delta_threshold, seed_delta * 0.70f);
+            int bx0 = clamp_i32(sx - broad_radius_cells, 0, sg_w - 1);
+            int bx1 = clamp_i32(sx + broad_radius_cells, 0, sg_w - 1);
+            int by0 = clamp_i32(sy - broad_radius_cells, 0, sg_h - 1);
+            int by1 = clamp_i32(sy + broad_radius_cells, 0, sg_h - 1);
+            for (int gy = by0; gy <= by1; gy++) {
+                for (int gx = bx0; gx <= bx1; gx++) {
+                    int ring = abs(gx - sx);
+                    int dy = abs(gy - sy);
+                    if (dy > ring) ring = dy;
+                    if (ring <= growth_radius_cells || ring > broad_radius_cells) continue;
+                    int dir = 0;
+                    if (gx >= sx && gy < sy) dir = 0;
+                    else if (gx > sx && gy >= sy) dir = 1;
+                    else if (gx <= sx && gy > sy) dir = 2;
+                    else dir = 3;
+                    dir_possible[dir]++;
+                    size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                    float delta = black_hot
+                        ? (bg_luma[idx] - (float)sg_luma[idx])
+                        : ((float)sg_luma[idx] - bg_luma[idx]);
+                    if (delta <= 0.0f) continue;
+                    broad_sum += (double)delta;
+                    broad_count++;
+                    if (delta >= broad_floor) {
+                        broad_hot++;
+                        dir_hot[dir]++;
+                    }
+                }
+            }
+            if (broad_count > 0) {
+                broad_context_ratio = (float)(broad_sum / (double)broad_count) / fmaxf(seed_delta, 1.0f);
+            }
+            if (broad_hot > 0) {
+                broad_context_coverage = (float)broad_hot / (float)broad_count;
+            }
+            for (int di = 0; di < 4; di++) {
+                if (dir_possible[di] <= 0) continue;
+                float dir_cov = (float)dir_hot[di] / (float)dir_possible[di];
+                if (dir_cov >= 0.25f) broad_context_dirs++;
+            }
+        }
+    }
+
+    float area_scale;
+    if (area <= 1) {
+        area_scale = 0.70f;
+    } else if (area <= 6) {
+        area_scale = 1.15f;
+    } else if (area <= 10) {
+        area_scale = 0.90f;
+    } else {
+        area_scale = 0.40f;
+    }
+
+    float span_scale;
+    if (max_span <= 2.0f) {
+        span_scale = 1.10f;
+    } else if (max_span <= 4.0f) {
+        span_scale = 1.00f;
+    } else if (max_span <= 6.0f) {
+        span_scale = 0.75f;
+    } else {
+        span_scale = 0.45f;
+    }
+
+    float fill_scale = clampf(0.45f + 0.85f * fill_ratio, 0.35f, 1.15f);
+    float center_scale = clampf(0.55f + 1.10f * center_share, 0.45f, 1.20f);
+    float contrast_scale;
+    if (area <= 2) {
+        contrast_scale = 1.0f;
+    } else if (local_contrast >= 1.8f) {
+        contrast_scale = 1.05f;
+    } else if (local_contrast >= 1.1f) {
+        contrast_scale = 0.92f;
+    } else if (local_contrast >= 0.55f) {
+        contrast_scale = 0.62f;
+    } else {
+        contrast_scale = 0.30f;
+    }
+    if (use_raw_delta && broad_context_ratio > 0.0f) {
+        if (broad_context_ratio >= 0.78f) {
+            contrast_scale *= 0.30f;
+        } else if (broad_context_ratio >= 0.64f) {
+            contrast_scale *= 0.55f;
+        } else if (broad_context_ratio >= 0.50f) {
+            contrast_scale *= 0.78f;
+        }
+    }
+    if (use_raw_delta && shell_peak_mean > 0.0f) {
+        float peak_gap_ratio = shell_peak_gap / fmaxf(seed_delta, 1.0f);
+        if (peak_gap_ratio <= 0.10f) {
+            contrast_scale *= 0.24f;
+        } else if (peak_gap_ratio <= 0.18f) {
+            contrast_scale *= 0.46f;
+        } else if (peak_gap_ratio <= 0.28f) {
+            contrast_scale *= 0.72f;
+        }
+    }
+
+    float plateau_scale = 1.0f;
+    if (area > 2) {
+        if (plateau_ratio > 0.72f) {
+            plateau_scale *= 0.38f;
+        } else if (plateau_ratio > 0.55f) {
+            plateau_scale *= 0.58f;
+        } else if (plateau_ratio > 0.40f) {
+            plateau_scale *= 0.80f;
+        }
+        if (plateau_mass_share > 0.80f) {
+            plateau_scale *= 0.72f;
+        } else if (plateau_mass_share > 0.65f) {
+            plateau_scale *= 0.86f;
+        }
+        if (use_raw_delta && local_delta_ratio > 0.0f) {
+            if (local_delta_ratio > 0.82f) {
+                plateau_scale *= 0.35f;
+            } else if (local_delta_ratio > 0.68f) {
+                plateau_scale *= 0.58f;
+            } else if (local_delta_ratio > 0.55f) {
+                plateau_scale *= 0.78f;
+            }
+        }
+    }
+
+    bool broad_reject = false;
+    float span_px = max_span * (float)(sample_step > 0 ? sample_step : 1);
+    if (area >= 10 && span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX) {
+        if (outer_hit_frac >= 0.55f || dense_outer_rings >= 2 || plateau_ratio >= 0.60f) {
+            broad_reject = true;
+        }
+    }
+    if (use_raw_delta && representative_delta_ratio >= 0.70f &&
+        area >= ANOMALY_THERMAL_REPRESENTATIVE_MIN_AREA) {
+        if (local_delta_ratio >= representative_delta_ratio - 0.05f &&
+            (span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX ||
+             farthest_ring >= 4 || plateau_mass_share >= 0.72f)) {
+            broad_reject = true;
+        }
+    }
+    if (use_raw_delta && area <= 6) {
+        if (broad_context_ratio >= 0.72f &&
+            broad_context_coverage >= 0.18f &&
+            broad_context_dirs >= 3) {
+            broad_reject = true;
+        } else if (broad_context_ratio >= 0.62f &&
+                   broad_context_coverage >= 0.28f &&
+                   broad_context_dirs >= 3) {
+            broad_reject = true;
+        }
+    }
+    if (use_raw_delta && shell_peak_mean > 0.0f && area <= 6) {
+        float peak_gap_ratio = shell_peak_gap / fmaxf(seed_delta, 1.0f);
+        if (peak_gap_ratio <= 0.08f && broad_context_dirs >= 2) {
+            broad_reject = true;
+        } else if (peak_gap_ratio <= 0.14f &&
+                   (broad_context_dirs >= 3 || shell_peak_ratio >= 0.84f)) {
+            broad_reject = true;
+        }
+    }
+
+    float growth_scale;
+    if (farthest_ring <= 2) {
+        growth_scale = 1.05f;
+    } else if (farthest_ring == 3) {
+        growth_scale = 0.90f;
+    } else if (farthest_ring == 4) {
+        growth_scale = 0.62f;
+    } else {
+        growth_scale = 0.34f;
+    }
+    if (outer_hit_frac > 0.65f) {
+        growth_scale *= 0.55f;
+    } else if (outer_hit_frac > 0.45f) {
+        growth_scale *= 0.75f;
+    }
+    if (dense_outer_rings >= 2) {
+        growth_scale *= 0.50f;
+    } else if (dense_outer_rings == 1) {
+        growth_scale *= 0.72f;
+    }
+    if (span_px > (float)ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX) {
+        growth_scale *= 0.40f;
+    } else if (span_px > (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX) {
+        growth_scale *= 0.72f;
+    }
+    if (best_small_span_px > 0.0f &&
+        best_small_span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX &&
+        span_px >= best_small_span_px + 2.0f) {
+        growth_scale *= 0.55f;
+    }
+
+    float quality = area_scale * span_scale * fill_scale * center_scale *
+        contrast_scale * plateau_scale * growth_scale;
+    if (broad_reject) {
+        quality *= 0.08f;
+    }
+    quality = clampf(quality, broad_reject ? 0.0f : 0.15f, 1.35f);
+
+    if (area_out != NULL) *area_out = (float)area;
+    if (span_out != NULL) *span_out = max_span;
+    if (fill_out != NULL) *fill_out = fill_ratio;
+    if (center_share_out != NULL) *center_share_out = center_share;
+    if (bbox_min_x_out != NULL) *bbox_min_x_out = min_x;
+    if (bbox_min_y_out != NULL) *bbox_min_y_out = min_y;
+    if (bbox_max_x_out != NULL) *bbox_max_x_out = max_x;
+    if (bbox_max_y_out != NULL) *bbox_max_y_out = max_y;
+    return quality;
+}
+
+static float thermal_candidate_seed_strength(
+        float base_score,
+        float quality,
+        float area,
+        float span,
+        float fill,
+        float center_share) {
+    float base_scale = clampf((base_score - 0.75f) / 3.00f, 0.0f, 1.0f);
+    float quality_scale = clampf((quality - 0.30f) / 0.95f, 0.0f, 1.0f);
+
+    float area_scale;
+    if (area <= 1.0f) {
+        area_scale = 0.55f;
+    } else if (area <= 6.0f) {
+        area_scale = 1.00f;
+    } else if (area <= 10.0f) {
+        area_scale = 0.55f;
+    } else {
+        area_scale = 0.15f;
+    }
+
+    float span_scale;
+    if (span <= 2.0f) {
+        span_scale = 1.00f;
+    } else if (span <= 4.0f) {
+        span_scale = 0.90f;
+    } else if (span <= 6.0f) {
+        span_scale = 0.45f;
+    } else {
+        span_scale = 0.10f;
+    }
+
+    float fill_scale = clampf((fill - 0.28f) / 0.52f, 0.0f, 1.0f);
+    float center_scale = clampf((center_share - 0.18f) / 0.38f, 0.0f, 1.0f);
+    return clampf(
+        base_scale * quality_scale * area_scale * span_scale *
+        (0.45f + 0.55f * fill_scale) * (0.45f + 0.55f * center_scale),
+        0.0f,
+        1.0f);
+}
+
+static float thermal_candidate_history_scale(
+        const anomaly_state_t *state,
+        int                    sg_w,
+        int                    sg_h,
+        int                    sx,
+        int                    sy) {
+    if (state == NULL || state->thermal_target_persist == NULL ||
+        state->thermal_target_persist_w != sg_w || state->thermal_target_persist_h != sg_h ||
+        sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
+        return 1.0f;
+    }
+
+    float peak = 0.0f;
+    float sum = 0.0f;
+    int count = 0;
+    int rx0 = clamp_i32(sx - ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_w - 1);
+    int rx1 = clamp_i32(sx + ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_w - 1);
+    int ry0 = clamp_i32(sy - ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_h - 1);
+    int ry1 = clamp_i32(sy + ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_h - 1);
+    for (int y = ry0; y <= ry1; y++) {
+        for (int x = rx0; x <= rx1; x++) {
+            float value = state->thermal_target_persist[y * sg_w + x];
+            if (value > peak) peak = value;
+            sum += value;
+            count++;
+        }
+    }
+    float local_support = count > 0 ? fmaxf(peak, sum / (float)count) : peak;
+    return 1.0f + ANOMALY_THERMAL_TARGET_HISTORY_GAIN * clampf(local_support, 0.0f, 1.0f);
+}
+
+static void stamp_thermal_target_support(
+        float *persist_map,
+        int    sg_w,
+        int    sg_h,
+        int    sx,
+        int    sy,
+        float  strength) {
+    if (persist_map == NULL || sg_w <= 0 || sg_h <= 0 || strength <= 0.0f) return;
+    int rx0 = clamp_i32(sx - ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_w - 1);
+    int rx1 = clamp_i32(sx + ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_w - 1);
+    int ry0 = clamp_i32(sy - ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_h - 1);
+    int ry1 = clamp_i32(sy + ANOMALY_THERMAL_TARGET_HISTORY_RADIUS, 0, sg_h - 1);
+    for (int y = ry0; y <= ry1; y++) {
+        for (int x = rx0; x <= rx1; x++) {
+            int dx = abs(x - sx);
+            int dy = abs(y - sy);
+            float weight = (dx == 0 && dy == 0) ? 1.00f : ((dx + dy) == 1 ? 0.70f : 0.45f);
+            float candidate = strength * weight;
+            float *slot = &persist_map[y * sg_w + x];
+            if (candidate > *slot) *slot = candidate;
         }
     }
 }
@@ -1269,6 +2628,207 @@ static void detect_best_active_span(const uint8_t *rgba, int rgba_stride,
     if (end_out) *end_out = best_end;
 }
 
+static bool tile_has_active_content(const uint8_t *rgba, int rgba_stride,
+                                    int width, int height,
+                                    int x0, int y0, int x1, int y1) {
+    if (rgba == NULL || width <= 0 || height <= 0) return false;
+    x0 = clamp_i32(x0, 0, width - 1);
+    x1 = clamp_i32(x1, 0, width - 1);
+    y0 = clamp_i32(y0, 0, height - 1);
+    y1 = clamp_i32(y1, 0, height - 1);
+    if (x1 <= x0 || y1 <= y0) return false;
+
+    double min_luma = 0.0;
+    double max_luma = 0.0;
+    double sum_luma = 0.0;
+    int sample_count = 0;
+    int horiz_edges = 0;
+    int horiz_pairs = 0;
+    int vert_edges = 0;
+    int vert_pairs = 0;
+    bool first = true;
+    int span_w = x1 - x0 + 1;
+    int span_h = y1 - y0 + 1;
+    int step_x = span_w > 48 ? 2 : 1;
+    int step_y = span_h > 48 ? 2 : 1;
+
+    for (int y = y0; y <= y1; y += step_y) {
+        const uint8_t *row = rgba + (y * rgba_stride);
+        double prev_luma = 0.0;
+        bool prev_valid = false;
+        for (int x = x0; x <= x1; x += step_x) {
+            double luma = rgba_luma_at(row + (x * 4));
+            if (first) {
+                min_luma = max_luma = luma;
+                first = false;
+            } else {
+                if (luma < min_luma) min_luma = luma;
+                if (luma > max_luma) max_luma = luma;
+            }
+            sum_luma += luma;
+            sample_count++;
+            if (prev_valid) {
+                horiz_pairs++;
+                if (fabs(luma - prev_luma) >= 10.0) horiz_edges++;
+            }
+            prev_luma = luma;
+            prev_valid = true;
+        }
+    }
+    for (int x = x0; x <= x1; x += step_x) {
+        double prev_luma = 0.0;
+        bool prev_valid = false;
+        for (int y = y0; y <= y1; y += step_y) {
+            const uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
+            double luma = rgba_luma_at(px);
+            if (prev_valid) {
+                vert_pairs++;
+                if (fabs(luma - prev_luma) >= 10.0) vert_edges++;
+            }
+            prev_luma = luma;
+            prev_valid = true;
+        }
+    }
+
+    if (sample_count <= 0) return false;
+    double mean_luma = sum_luma / (double)sample_count;
+    double luma_range = max_luma - min_luma;
+    double horiz_fraction = (horiz_pairs > 0) ? ((double)horiz_edges / (double)horiz_pairs) : 0.0;
+    double vert_fraction = (vert_pairs > 0) ? ((double)vert_edges / (double)vert_pairs) : 0.0;
+
+    if (luma_range < 12.0) return false;
+    if (mean_luma < 28.0 || mean_luma > 245.0) return false;
+    return horiz_fraction >= 0.08 && vert_fraction >= 0.08;
+}
+
+static bool detect_active_content_bounds_tiles(const uint8_t *rgba, int rgba_stride,
+                                               int width, int height,
+                                               int *x0_out, int *y0_out,
+                                               int *x1_out, int *y1_out) {
+    if (rgba == NULL || width <= 0 || height <= 0) return false;
+    int tile_size = clamp_i32(((width < height) ? width : height) / 18, 16, 48);
+    int tiles_x = (width + tile_size - 1) / tile_size;
+    int tiles_y = (height + tile_size - 1) / tile_size;
+    if (tiles_x <= 0 || tiles_y <= 0) return false;
+
+    size_t tile_count = (size_t)tiles_x * (size_t)tiles_y;
+    uint8_t *active = (uint8_t *)calloc(tile_count, sizeof(uint8_t));
+    uint8_t *visited = (uint8_t *)calloc(tile_count, sizeof(uint8_t));
+    int *queue = (int *)malloc(tile_count * sizeof(int));
+    if (active == NULL || visited == NULL || queue == NULL) {
+        free(active);
+        free(visited);
+        free(queue);
+        return false;
+    }
+
+    for (int ty = 0; ty < tiles_y; ty++) {
+        int py0 = ty * tile_size;
+        int py1 = clamp_i32(((ty + 1) * tile_size) - 1, 0, height - 1);
+        for (int tx = 0; tx < tiles_x; tx++) {
+            int px0 = tx * tile_size;
+            int px1 = clamp_i32(((tx + 1) * tile_size) - 1, 0, width - 1);
+            if (tile_has_active_content(rgba, rgba_stride, width, height, px0, py0, px1, py1)) {
+                active[(ty * tiles_x) + tx] = 1u;
+            }
+        }
+    }
+
+    int best_tx0 = 0, best_ty0 = 0, best_tx1 = tiles_x - 1, best_ty1 = tiles_y - 1;
+    int best_area = -1;
+    bool best_contains_center = false;
+    double best_center_distance = (double)(tiles_x + tiles_y);
+
+    int center_tx = tiles_x / 2;
+    int center_ty = tiles_y / 2;
+    for (int ty = 0; ty < tiles_y; ty++) {
+        for (int tx = 0; tx < tiles_x; tx++) {
+            int start_index = (ty * tiles_x) + tx;
+            if (!active[start_index] || visited[start_index]) continue;
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = start_index;
+            visited[start_index] = 1u;
+            int comp_tx0 = tx, comp_ty0 = ty, comp_tx1 = tx, comp_ty1 = ty;
+            int comp_tiles = 0;
+
+            while (head < tail) {
+                int index = queue[head++];
+                int cx = index % tiles_x;
+                int cy = index / tiles_x;
+                comp_tiles++;
+                if (cx < comp_tx0) comp_tx0 = cx;
+                if (cx > comp_tx1) comp_tx1 = cx;
+                if (cy < comp_ty0) comp_ty0 = cy;
+                if (cy > comp_ty1) comp_ty1 = cy;
+
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) continue;
+                        int nx = cx + dx;
+                        int ny = cy + dy;
+                        if (nx < 0 || nx >= tiles_x || ny < 0 || ny >= tiles_y) continue;
+                        int next_index = (ny * tiles_x) + nx;
+                        if (!active[next_index] || visited[next_index]) continue;
+                        visited[next_index] = 1u;
+                        queue[tail++] = next_index;
+                    }
+                }
+            }
+
+            int span_tiles_x = comp_tx1 - comp_tx0 + 1;
+            int span_tiles_y = comp_ty1 - comp_ty0 + 1;
+            int comp_area = span_tiles_x * span_tiles_y;
+            bool contains_center =
+                (comp_tx0 <= center_tx && center_tx <= comp_tx1 &&
+                 comp_ty0 <= center_ty && center_ty <= comp_ty1);
+            double comp_center_x = 0.5 * (double)(comp_tx0 + comp_tx1);
+            double comp_center_y = 0.5 * (double)(comp_ty0 + comp_ty1);
+            double dx = comp_center_x - (double)center_tx;
+            double dy = comp_center_y - (double)center_ty;
+            double center_distance = sqrt((dx * dx) + (dy * dy));
+            bool better = false;
+            if (best_area < 0) {
+                better = true;
+            } else if (contains_center != best_contains_center) {
+                better = contains_center;
+            } else if (comp_area != best_area) {
+                better = comp_area > best_area;
+            } else if (center_distance != best_center_distance) {
+                better = center_distance < best_center_distance;
+            }
+            if (better) {
+                best_tx0 = comp_tx0;
+                best_ty0 = comp_ty0;
+                best_tx1 = comp_tx1;
+                best_ty1 = comp_ty1;
+                best_area = comp_area;
+                best_contains_center = contains_center;
+                best_center_distance = center_distance;
+            }
+        }
+    }
+
+    free(active);
+    free(visited);
+    free(queue);
+
+    if (best_area < 0) return false;
+
+    int x0 = best_tx0 * tile_size;
+    int y0 = best_ty0 * tile_size;
+    int x1 = clamp_i32(((best_tx1 + 1) * tile_size) - 1, 0, width - 1);
+    int y1 = clamp_i32(((best_ty1 + 1) * tile_size) - 1, 0, height - 1);
+    if ((x1 - x0 + 1) < width / 3 || (y1 - y0 + 1) < height / 3) {
+        return false;
+    }
+    if (x0_out) *x0_out = x0;
+    if (y0_out) *y0_out = y0;
+    if (x1_out) *x1_out = x1;
+    if (y1_out) *y1_out = y1;
+    return true;
+}
+
 static void detect_active_content_bounds(const uint8_t *rgba, int rgba_stride,
                                          int width, int height,
                                          int *x0_out, int *y0_out,
@@ -1277,18 +2837,21 @@ static void detect_active_content_bounds(const uint8_t *rgba, int rgba_stride,
     int y0 = 0;
     int x1 = width - 1;
     int y1 = height - 1;
-    detect_best_active_span(rgba, rgba_stride, width, height,
-                            height, 0, width - 1,
-                            row_has_active_content_range,
-                            &y0, &y1);
-    detect_best_active_span(rgba, rgba_stride, width, height,
-                            width, y0, y1,
-                            col_has_active_content_range,
-                            &x0, &x1);
-    detect_best_active_span(rgba, rgba_stride, width, height,
-                            height, x0, x1,
-                            row_has_active_content_range,
-                            &y0, &y1);
+    if (!detect_active_content_bounds_tiles(rgba, rgba_stride, width, height,
+                                            &x0, &y0, &x1, &y1)) {
+        detect_best_active_span(rgba, rgba_stride, width, height,
+                                height, 0, width - 1,
+                                row_has_active_content_range,
+                                &y0, &y1);
+        detect_best_active_span(rgba, rgba_stride, width, height,
+                                width, y0, y1,
+                                col_has_active_content_range,
+                                &x0, &x1);
+        detect_best_active_span(rgba, rgba_stride, width, height,
+                                height, x0, x1,
+                                row_has_active_content_range,
+                                &y0, &y1);
+    }
 
     if ((x1 - x0 + 1) < width / 3 || (y1 - y0 + 1) < height / 3) {
         x0 = 0;
@@ -1307,7 +2870,6 @@ static void draw_hot_overlay_rgba(uint8_t *rgba, int rgba_stride,
                                   int thermal_polarity) {
     if (rgba == NULL || width <= 0 || height <= 0) return;
     int content_x0 = 0, content_y0 = 0, content_x1 = width - 1, content_y1 = height - 1;
-    detect_active_content_bounds(rgba, rgba_stride, width, height, &content_x0, &content_y0, &content_x1, &content_y1);
     double sum_luma = 0.0;
     double hottest_luma = 0.0;
     int hottest_x = 0;
@@ -1396,6 +2958,31 @@ static void append_anomaly_box(anomaly_box_t *boxes, int *box_count,
     slot->right_norm  = right;
     slot->bottom_norm = bottom;
     slot->r = r; slot->g = g; slot->b = b;
+    slot->draw_crosshair = 1u;
+    slot->weight = weight < 0.0f ? 0.0f : (weight > 1.0f ? 1.0f : weight);
+    *box_count += 1;
+}
+
+static void append_anomaly_rect(anomaly_box_t *boxes, int *box_count,
+                                float left_norm, float top_norm,
+                                float right_norm, float bottom_norm,
+                                uint8_t r, uint8_t g, uint8_t b,
+                                float weight,
+                                bool draw_crosshair) {
+    if (boxes == NULL || box_count == NULL) return;
+    if (*box_count >= ANOMALY_MAX_OVERLAY_BOXES) return;
+    float left = clamp01f(left_norm);
+    float top = clamp01f(top_norm);
+    float right = clamp01f(right_norm);
+    float bottom = clamp01f(bottom_norm);
+    if (right <= left || bottom <= top) return;
+    anomaly_box_t *slot = &boxes[*box_count];
+    slot->left_norm = left;
+    slot->top_norm = top;
+    slot->right_norm = right;
+    slot->bottom_norm = bottom;
+    slot->r = r; slot->g = g; slot->b = b;
+    slot->draw_crosshair = draw_crosshair ? 1u : 0u;
     slot->weight = weight < 0.0f ? 0.0f : (weight > 1.0f ? 1.0f : weight);
     *box_count += 1;
 }
@@ -1418,23 +3005,26 @@ static int assemble_anomaly_boxes(const anomaly_state_t *state,
     };
     static const float algo_box_scale[4] = {1.0f, 1.0f, 1.3f, 0.9f};
     int algo_bits[4] = {ANOMALY_ALGO_COLOR, ANOMALY_ALGO_THERMAL, motion_box_algorithm, ANOMALY_ALGO_PERSIST};
+    bool saliency_primary =
+        (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0;
 
     int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
     int box_count = 0;
     for (int ai = 0; ai < 4 && box_count < max_boxes; ai++) {
+        if (saliency_primary && ai != 3) continue;
         if (!state->acc_active[ai]) continue;
         if (state->acc_hits[ai] < min_hits) continue;
-        if (ai == 2) {
-            uint8_t recent_mask =
-                    state->acc_presence_mask[ai] &
-                    (uint8_t)((1u << ANOMALY_MOTION_PRESENCE_WINDOW) - 1u);
-            if (popcount_u8(recent_mask) < ANOMALY_MOTION_PRESENCE_MIN_HITS) {
-                continue;
-            }
-        }
         float weight = 0.35f + 0.13f * (float)(state->acc_hits[ai] - min_hits);
         if (weight > 1.0f) weight = 1.0f;
         float bw = box_side * algo_box_scale[ai];
+        int cue_algorithm = ai == 3 ? state->saliency_display_algorithm : algo_bits[ai];
+        int rgb_idx = ai;
+        if (ai == 3) {
+            if (cue_algorithm == ANOMALY_ALGO_COLOR) rgb_idx = 0;
+            else if (cue_algorithm == ANOMALY_ALGO_THERMAL) rgb_idx = 1;
+            else if (cue_algorithm == motion_box_algorithm || cue_algorithm == ANOMALY_ALGO_MOTION) rgb_idx = 2;
+            else rgb_idx = 3;
+        }
         append_anomaly_box(
                 boxes,
                 &box_count,
@@ -1442,15 +3032,210 @@ static int assemble_anomaly_boxes(const anomaly_state_t *state,
                 state->acc_cy[ai],
                 bw,
                 bw,
-                algo_rgb[ai][0],
-                algo_rgb[ai][1],
-                algo_rgb[ai][2],
+                algo_rgb[rgb_idx][0],
+                algo_rgb[rgb_idx][1],
+                algo_rgb[rgb_idx][2],
                 weight);
         if (box_count > 0) {
             boxes[box_count - 1].algorithm = algo_bits[ai];
         }
     }
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0 && !saliency_primary) {
+        for (int ti = 0; ti < ANOMALY_SALIENCY_EXTRA_TRACKS && box_count < max_boxes; ti++) {
+            if (!state->saliency_aux_active[ti]) continue;
+            if (state->saliency_aux_hits[ti] < min_hits) continue;
+            float weight = 0.30f + 0.11f * (float)(state->saliency_aux_hits[ti] - min_hits);
+            if (weight > 0.92f) weight = 0.92f;
+            float bw = box_side * 0.82f;
+            int cue_algorithm = state->saliency_aux_display_algorithm[ti];
+            int rgb_idx = 3;
+            if (cue_algorithm == ANOMALY_ALGO_COLOR) rgb_idx = 0;
+            else if (cue_algorithm == ANOMALY_ALGO_THERMAL) rgb_idx = 1;
+            else if (cue_algorithm == motion_box_algorithm || cue_algorithm == ANOMALY_ALGO_MOTION) rgb_idx = 2;
+            append_anomaly_box(
+                    boxes,
+                    &box_count,
+                    state->saliency_aux_cx[ti],
+                    state->saliency_aux_cy[ti],
+                    bw,
+                    bw,
+                    algo_rgb[rgb_idx][0],
+                    algo_rgb[rgb_idx][1],
+                    algo_rgb[rgb_idx][2],
+                    weight);
+            if (box_count > 0) {
+                boxes[box_count - 1].algorithm = ANOMALY_ALGO_PERSIST;
+            }
+        }
+    }
     return box_count;
+}
+
+static void update_saliency_aux_track(
+        anomaly_state_t *state,
+        int              track_idx,
+        float            raw_cx,
+        float            raw_cy,
+        float            gate,
+        float            alpha) {
+    if (state == NULL || track_idx < 0 || track_idx >= ANOMALY_SALIENCY_EXTRA_TRACKS) return;
+    int base_hold_frames = ANOMALY_ACC_HOLD_FRAMES;
+    if (state->saliency_aux_hits[track_idx] >= 3) {
+        base_hold_frames += ANOMALY_SALIENCY_SECONDARY_HOLD_BONUS;
+    }
+    if (raw_cx >= 0.0f && raw_cy >= 0.0f) {
+        if (!state->saliency_aux_active[track_idx]) {
+            state->saliency_aux_cx[track_idx] = raw_cx;
+            state->saliency_aux_cy[track_idx] = raw_cy;
+            state->saliency_aux_hits[track_idx] = 1;
+            state->saliency_aux_hold[track_idx] = base_hold_frames;
+            state->saliency_aux_active[track_idx] = true;
+            return;
+        }
+
+        float ddx = raw_cx - state->saliency_aux_cx[track_idx];
+        float ddy = raw_cy - state->saliency_aux_cy[track_idx];
+        float dist = sqrtf(ddx * ddx + ddy * ddy);
+        if (dist <= gate) {
+            state->saliency_aux_cx[track_idx] += alpha * ddx;
+            state->saliency_aux_cy[track_idx] += alpha * ddy;
+            int h = state->saliency_aux_hits[track_idx] + 1;
+            state->saliency_aux_hits[track_idx] = h > ANOMALY_ACC_MAX_HITS ? ANOMALY_ACC_MAX_HITS : h;
+        } else {
+            state->saliency_aux_cx[track_idx] = raw_cx;
+            state->saliency_aux_cy[track_idx] = raw_cy;
+            state->saliency_aux_hits[track_idx] = 1;
+        }
+        state->saliency_aux_hold[track_idx] = base_hold_frames;
+        return;
+    }
+
+    if (!state->saliency_aux_active[track_idx]) return;
+    int hold = state->saliency_aux_hold[track_idx] - 1;
+    if (hold <= 0) {
+        state->saliency_aux_active[track_idx] = false;
+        state->saliency_aux_hits[track_idx] = 0;
+        state->saliency_aux_hold[track_idx] = 0;
+    } else {
+        state->saliency_aux_hold[track_idx] = hold;
+    }
+}
+
+static bool find_saliency_local_support(
+        const anomaly_state_t *state,
+        int                    track_idx,
+        const float           *patch_selection_map,
+        int                    sg_w,
+        int                    sg_h,
+        int                    roi_x0,
+        int                    roi_y0,
+        int                    sample_step,
+        int                    width,
+        int                    height,
+        float                 *x_norm_out,
+        float                 *y_norm_out,
+        float                 *score_out) {
+    if (x_norm_out != NULL) *x_norm_out = -1.0f;
+    if (y_norm_out != NULL) *y_norm_out = -1.0f;
+    if (score_out != NULL) *score_out = -1.0f;
+    if (state == NULL || track_idx < 0 || track_idx >= ANOMALY_SALIENCY_EXTRA_TRACKS ||
+        !state->saliency_aux_active[track_idx] || patch_selection_map == NULL ||
+        sg_w <= 0 || sg_h <= 0 || sample_step <= 0) {
+        return false;
+    }
+
+    float fw = (float)(width > 1 ? width - 1 : 1);
+    float fh = (float)(height > 1 ? height - 1 : 1);
+    int track_x = clamp_i32((int)lroundf(state->saliency_aux_cx[track_idx] * fw), roi_x0, roi_x0 + (sg_w - 1) * sample_step);
+    int track_y = clamp_i32((int)lroundf(state->saliency_aux_cy[track_idx] * fh), roi_y0, roi_y0 + (sg_h - 1) * sample_step);
+    int track_sx = clamp_i32((track_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+    int track_sy = clamp_i32((track_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+
+    float best_score = -1.0f;
+    int best_sx = track_sx;
+    int best_sy = track_sy;
+    for (int sy = track_sy - ANOMALY_SALIENCY_SECONDARY_LOCAL_RADIUS_CELLS;
+         sy <= track_sy + ANOMALY_SALIENCY_SECONDARY_LOCAL_RADIUS_CELLS; sy++) {
+        if (sy < 0 || sy >= sg_h) continue;
+        for (int sx = track_sx - ANOMALY_SALIENCY_SECONDARY_LOCAL_RADIUS_CELLS;
+             sx <= track_sx + ANOMALY_SALIENCY_SECONDARY_LOCAL_RADIUS_CELLS; sx++) {
+            if (sx < 0 || sx >= sg_w) continue;
+            float score = patch_selection_map[sy * sg_w + sx];
+            if (score > best_score) {
+                best_score = score;
+                best_sx = sx;
+                best_sy = sy;
+            }
+        }
+    }
+    if (best_score <= 0.0f) return false;
+
+    int best_x = roi_x0 + best_sx * sample_step;
+    int best_y = roi_y0 + best_sy * sample_step;
+    if (x_norm_out != NULL) *x_norm_out = (float)best_x / fw;
+    if (y_norm_out != NULL) *y_norm_out = (float)best_y / fh;
+    if (score_out != NULL) *score_out = best_score;
+    return true;
+}
+
+static int classify_saliency_display_algorithm(
+        const float *saliency_spatial_map,
+        const float *saliency_color_map,
+        const float *saliency_motion_map,
+        const float *saliency_registration_map,
+        const float *bg_luma,
+        const double *sg_luma,
+        int          sg_w,
+        int          sg_h,
+        int          sx,
+        int          sy,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta,
+        double       delta_mean,
+        double       delta_norm) {
+    if (sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) return ANOMALY_ALGO_PERSIST;
+    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+    float registration = saliency_registration_map != NULL ? saliency_registration_map[idx] : 1.0f;
+    float thermal_spatial = saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
+    float color_support = saliency_color_map != NULL ? saliency_color_map[idx] : 0.0f;
+    float motion_support = saliency_motion_map != NULL ? saliency_motion_map[idx] : 0.0f;
+    float thermal_temporal = 0.0f;
+    if (bg_valid && bg_luma != NULL && sg_luma != NULL) {
+        float bg = bg_luma[idx];
+        float lum = (float)sg_luma[idx];
+        float delta = black_hot ? (bg - lum) : (lum - bg);
+        if (delta >= thermal_min_delta) {
+            thermal_temporal = (float)((delta - delta_mean) / delta_norm);
+        }
+    }
+
+    float thermal_evidence = fmaxf(thermal_spatial > 0.0f ? thermal_spatial : 0.0f,
+                                   thermal_temporal > 0.0f ? thermal_temporal : 0.0f);
+    float color_evidence = color_support > 0.0f ? (0.60f * color_support) : 0.0f;
+    float motion_evidence = motion_support > 0.0f
+        ? ((bg_valid ? 0.60f : 0.45f) * motion_support)
+        : 0.0f;
+    thermal_evidence *= registration;
+    color_evidence *= registration;
+    motion_evidence *= registration;
+
+    float best = thermal_evidence;
+    float second = color_evidence > motion_evidence ? color_evidence : motion_evidence;
+    int algorithm = ANOMALY_ALGO_THERMAL;
+    if (color_evidence > best) {
+        second = thermal_evidence > motion_evidence ? thermal_evidence : motion_evidence;
+        best = color_evidence;
+        algorithm = ANOMALY_ALGO_COLOR;
+    }
+    if (motion_evidence > best) {
+        second = thermal_evidence > color_evidence ? thermal_evidence : color_evidence;
+        best = motion_evidence;
+        algorithm = ANOMALY_ALGO_MOTION;
+    }
+    if (best <= 0.0f) return ANOMALY_ALGO_PERSIST;
+    if (second > 0.0f && best < second * 1.12f) return ANOMALY_ALGO_PERSIST;
+    return algorithm;
 }
 
 static void draw_anomaly_boxes_rgba(uint8_t *rgba, int rgba_stride,
@@ -1487,17 +3272,19 @@ static void draw_anomaly_boxes_rgba(uint8_t *rgba, int rgba_stride,
             }
         }
 
-        int cx = (left + right) / 2;
-        int cy = (top  + bottom) / 2;
-        int cross_start_x = cx - cross_half;
-        int cross_end_x   = cx + cross_half;
-        int cross_start_y = cy - cross_half;
-        int cross_end_y   = cy + cross_half;
-        for (int t = 0; t < stroke; t++) {
-            int horiz_y = cy - (stroke / 2) + t;
-            int vert_x  = cx - (stroke / 2) + t;
-            draw_rgba_hline(rgba, rgba_stride, width, height, cross_start_x, cross_end_x, horiz_y, box->r, box->g, box->b);
-            draw_rgba_vline(rgba, rgba_stride, width, height, cross_start_y, cross_end_y, vert_x,  box->r, box->g, box->b);
+        if (box->draw_crosshair != 0u) {
+            int cx = (left + right) / 2;
+            int cy = (top  + bottom) / 2;
+            int cross_start_x = cx - cross_half;
+            int cross_end_x   = cx + cross_half;
+            int cross_start_y = cy - cross_half;
+            int cross_end_y   = cy + cross_half;
+            for (int t = 0; t < stroke; t++) {
+                int horiz_y = cy - (stroke / 2) + t;
+                int vert_x  = cx - (stroke / 2) + t;
+                draw_rgba_hline(rgba, rgba_stride, width, height, cross_start_x, cross_end_x, horiz_y, box->r, box->g, box->b);
+                draw_rgba_vline(rgba, rgba_stride, width, height, cross_start_y, cross_end_y, vert_x,  box->r, box->g, box->b);
+            }
         }
     }
 }
@@ -1726,6 +3513,7 @@ void anomaly_state_reset(anomaly_state_t *state) {
     }
     state->prev_luma_width  = 0;
     state->prev_luma_height = 0;
+    state->prev_luma_capacity = 0;
     if (state->motion_persist != NULL) {
         free(state->motion_persist);
         state->motion_persist = NULL;
@@ -1739,6 +3527,45 @@ void anomaly_state_reset(anomaly_state_t *state) {
     state->bg_sg_w  = 0;
     state->bg_sg_h  = 0;
     state->bg_warmup = 0;
+    if (state->thermal_target_persist != NULL) {
+        free(state->thermal_target_persist);
+        state->thermal_target_persist = NULL;
+    }
+    state->thermal_target_persist_w = 0;
+    state->thermal_target_persist_h = 0;
+    memset(state->saliency_aux_cx, 0, sizeof(state->saliency_aux_cx));
+    memset(state->saliency_aux_cy, 0, sizeof(state->saliency_aux_cy));
+    memset(state->saliency_aux_hits, 0, sizeof(state->saliency_aux_hits));
+    memset(state->saliency_aux_hold, 0, sizeof(state->saliency_aux_hold));
+    memset(state->saliency_aux_active, 0, sizeof(state->saliency_aux_active));
+    state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
+    for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
+        state->saliency_aux_display_algorithm[i] = ANOMALY_ALGO_PERSIST;
+    }
+    free(state->scratch_luma);
+    state->scratch_luma = NULL;
+    state->scratch_luma_capacity = 0;
+    free(state->scratch_sg_luma);
+    state->scratch_sg_luma = NULL;
+    free(state->scratch_ii_sum);
+    state->scratch_ii_sum = NULL;
+    free(state->scratch_ii_sum2);
+    state->scratch_ii_sum2 = NULL;
+    state->scratch_sampled_grid_capacity = 0;
+    free(state->scratch_saliency_spatial);
+    state->scratch_saliency_spatial = NULL;
+    free(state->scratch_saliency_color);
+    state->scratch_saliency_color = NULL;
+    free(state->scratch_saliency_motion);
+    state->scratch_saliency_motion = NULL;
+    free(state->scratch_saliency_registration);
+    state->scratch_saliency_registration = NULL;
+    state->scratch_saliency_capacity = 0;
+    free(state->scratch_patch_score);
+    state->scratch_patch_score = NULL;
+    free(state->scratch_patch_selection);
+    state->scratch_patch_selection = NULL;
+    state->scratch_patch_capacity = 0;
 }
 
 void anomaly_state_cleanup(anomaly_state_t *state) {
@@ -1824,7 +3651,11 @@ int anomaly_process_frame(
     size_t motion_count = (size_t)motion_w * (size_t)motion_h;
     uint8_t *curr_luma  = NULL;
     if (motion_count > 0) {
-        curr_luma = (uint8_t *)malloc(motion_count);
+        if (!ensure_u8_capacity(&state->scratch_luma, &state->scratch_luma_capacity, motion_count)) {
+            curr_luma = NULL;
+        } else {
+            curr_luma = state->scratch_luma;
+        }
         if (curr_luma != NULL) {
             int idx = 0;
             for (int y = 0; y < height && idx < (int)motion_count; y += motion_step) {
@@ -2082,29 +3913,54 @@ int anomaly_process_frame(
 
     // Heap-allocate integral image arrays (freed at end of this function).
     // Two channels: luma sum and luma sum-of-squares for variance.
-    double *sg_luma  = (double *)malloc((size_t)sg_w * sg_h * sizeof(double));
-    double *ii_sum   = (double *)malloc((size_t)sg_w * sg_h * sizeof(double));
-    double *ii_sum2  = (double *)malloc((size_t)sg_w * sg_h * sizeof(double));
-    if (!sg_luma || !ii_sum || !ii_sum2) {
-        free(sg_luma); free(ii_sum); free(ii_sum2);
-        if (curr_luma) { free(state->prev_luma); state->prev_luma = curr_luma;
-                         state->prev_luma_width = motion_w; state->prev_luma_height = motion_h; }
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    if (!ensure_double_capacity(&state->scratch_sg_luma, &state->scratch_sampled_grid_capacity, sg_count) ||
+        !ensure_double_capacity(&state->scratch_ii_sum, &state->scratch_sampled_grid_capacity, sg_count) ||
+        !ensure_double_capacity(&state->scratch_ii_sum2, &state->scratch_sampled_grid_capacity, sg_count)) {
+        if (curr_luma) {
+            if (ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
+                memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
+                state->prev_luma_width = motion_w;
+                state->prev_luma_height = motion_h;
+            } else {
+                if (state->prev_luma != NULL) {
+                    free(state->prev_luma);
+                    state->prev_luma = NULL;
+                }
+                state->prev_luma_capacity = 0;
+                state->prev_luma_width = 0;
+                state->prev_luma_height = 0;
+            }
+        }
         return 0;
     }
+    double *sg_luma  = state->scratch_sg_luma;
+    double *ii_sum   = state->scratch_ii_sum;
+    double *ii_sum2  = state->scratch_ii_sum2;
+
+    bool need_color_support =
+        anomaly_detection_active &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
+    bool need_thermal_support_map =
+        anomaly_detection_active &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
+    bool need_color_support_map =
+        anomaly_detection_active &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
 
     // Colour tile accumulators (kept for ANOMALY_ALGO_COLOR).
 #define T ANOMALY_LOCAL_TILE_SIZE
-    double tile_sum_l[T][T], tile_sum_l2[T][T];
     double tile_sum_u[T][T], tile_sum_u2[T][T];
     double tile_sum_v[T][T], tile_sum_v2[T][T];
     int    tile_n[T][T];
-    for (int tr = 0; tr < T; tr++)
-        for (int tc = 0; tc < T; tc++) {
-            tile_sum_l[tr][tc] = tile_sum_l2[tr][tc] = 0.0;
-            tile_sum_u[tr][tc] = tile_sum_u2[tr][tc] = 0.0;
-            tile_sum_v[tr][tc] = tile_sum_v2[tr][tc] = 0.0;
-            tile_n[tr][tc] = 0;
-        }
+    if (need_color_support) {
+        for (int tr = 0; tr < T; tr++)
+            for (int tc = 0; tc < T; tc++) {
+                tile_sum_u[tr][tc] = tile_sum_u2[tr][tc] = 0.0;
+                tile_sum_v[tr][tc] = tile_sum_v2[tr][tc] = 0.0;
+                tile_n[tr][tc] = 0;
+            }
+    }
 
     // Global sums (used for color-tile fallback and early-exit check).
     double sum_l = 0.0, sum_l2 = 0.0;
@@ -2127,27 +3983,34 @@ int anomaly_process_frame(
             const uint8_t *px = row + (x * 4);
             double r = (double)px[0], g = (double)px[1], b = (double)px[2];
             double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
-            double u   = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
-            double v   = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
             sg_luma[sy * sg_w + sx] = lum;
             sum_l  += lum; sum_l2 += lum * lum;
-            sum_u  += u;  sum_u2  += u * u;
-            sum_v  += v;  sum_v2  += v * v;
-            tile_sum_l[tr][tc]  += lum; tile_sum_l2[tr][tc]  += lum * lum;
-            tile_sum_u[tr][tc]  += u;  tile_sum_u2[tr][tc]  += u * u;
-            tile_sum_v[tr][tc]  += v;  tile_sum_v2[tr][tc]  += v * v;
-            tile_n[tr][tc]++;
+            if (need_color_support) {
+                double u   = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
+                double v   = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
+                sum_u  += u;  sum_u2  += u * u;
+                sum_v  += v;  sum_v2  += v * v;
+                tile_sum_u[tr][tc]  += u;  tile_sum_u2[tr][tc]  += u * u;
+                tile_sum_v[tr][tc]  += v;  tile_sum_v2[tr][tc]  += v * v;
+                tile_n[tr][tc]++;
+            }
             sample_count++;
         }
     }
 
     if (sample_count <= 1) {
-        free(sg_luma); free(ii_sum); free(ii_sum2);
         if (curr_luma != NULL) {
-            if (state->prev_luma != NULL) free(state->prev_luma);
-            state->prev_luma        = curr_luma;
-            state->prev_luma_width  = motion_w;
-            state->prev_luma_height = motion_h;
+            if (ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
+                memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
+                state->prev_luma_width  = motion_w;
+                state->prev_luma_height = motion_h;
+            } else {
+                free(state->prev_luma);
+                state->prev_luma = NULL;
+                state->prev_luma_capacity = 0;
+                state->prev_luma_width = 0;
+                state->prev_luma_height = 0;
+            }
         }
         return 0;
     }
@@ -2171,29 +4034,31 @@ int anomaly_process_frame(
     // Colour tile mean/std (fall back to global if tile too sparse).
     double g_mean_l = sum_l / (double)sample_count;
     double g_std_l  = sqrt(fmax((sum_l2/(double)sample_count) - g_mean_l*g_mean_l, 1.0));
-    double g_mean_u = sum_u / (double)sample_count;
-    double g_std_u  = sqrt(fmax((sum_u2/(double)sample_count) - g_mean_u*g_mean_u, 1.0));
-    double g_mean_v = sum_v / (double)sample_count;
-    double g_std_v  = sqrt(fmax((sum_v2/(double)sample_count) - g_mean_v*g_mean_v, 1.0));
-
-    double tile_mean_l[T][T], tile_std_l[T][T];
+    double g_mean_u = 0.0;
+    double g_std_u  = 1.0;
+    double g_mean_v = 0.0;
+    double g_std_v  = 1.0;
     double tile_mean_u[T][T], tile_std_u[T][T];
     double tile_mean_v[T][T], tile_std_v[T][T];
-    for (int tr = 0; tr < T; tr++) {
-        for (int tc = 0; tc < T; tc++) {
-            int n = tile_n[tr][tc];
-            if (n >= ANOMALY_LOCAL_TILE_MIN_N) {
-                double fn = (double)n;
-                tile_mean_l[tr][tc] = tile_sum_l[tr][tc] / fn;
-                tile_std_l[tr][tc]  = sqrt(fmax(tile_sum_l2[tr][tc]/fn - tile_mean_l[tr][tc]*tile_mean_l[tr][tc], 1.0));
-                tile_mean_u[tr][tc] = tile_sum_u[tr][tc] / fn;
-                tile_std_u[tr][tc]  = sqrt(fmax(tile_sum_u2[tr][tc]/fn - tile_mean_u[tr][tc]*tile_mean_u[tr][tc], 1.0));
-                tile_mean_v[tr][tc] = tile_sum_v[tr][tc] / fn;
-                tile_std_v[tr][tc]  = sqrt(fmax(tile_sum_v2[tr][tc]/fn - tile_mean_v[tr][tc]*tile_mean_v[tr][tc], 1.0));
-            } else {
-                tile_mean_l[tr][tc] = g_mean_l; tile_std_l[tr][tc] = g_std_l;
-                tile_mean_u[tr][tc] = g_mean_u; tile_std_u[tr][tc] = g_std_u;
-                tile_mean_v[tr][tc] = g_mean_v; tile_std_v[tr][tc] = g_std_v;
+    if (need_color_support) {
+        g_mean_u = sum_u / (double)sample_count;
+        g_std_u  = sqrt(fmax((sum_u2/(double)sample_count) - g_mean_u*g_mean_u, 1.0));
+        g_mean_v = sum_v / (double)sample_count;
+        g_std_v  = sqrt(fmax((sum_v2/(double)sample_count) - g_mean_v*g_mean_v, 1.0));
+
+        for (int tr = 0; tr < T; tr++) {
+            for (int tc = 0; tc < T; tc++) {
+                int n = tile_n[tr][tc];
+                if (n >= ANOMALY_LOCAL_TILE_MIN_N) {
+                    double fn = (double)n;
+                    tile_mean_u[tr][tc] = tile_sum_u[tr][tc] / fn;
+                    tile_std_u[tr][tc]  = sqrt(fmax(tile_sum_u2[tr][tc]/fn - tile_mean_u[tr][tc]*tile_mean_u[tr][tc], 1.0));
+                    tile_mean_v[tr][tc] = tile_sum_v[tr][tc] / fn;
+                    tile_std_v[tr][tc]  = sqrt(fmax(tile_sum_v2[tr][tc]/fn - tile_mean_v[tr][tc]*tile_mean_v[tr][tc], 1.0));
+                } else {
+                    tile_mean_u[tr][tc] = g_mean_u; tile_std_u[tr][tc] = g_std_u;
+                    tile_mean_v[tr][tc] = g_mean_v; tile_std_v[tr][tc] = g_std_v;
+                }
             }
         }
     }
@@ -2210,16 +4075,28 @@ int anomaly_process_frame(
     // Color: 8×8 tile grid (unchanged).
 
     // Inline integral-image rectangle query.
-    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    bool need_motion_candidates =
+        anomaly_detection_active &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
     float *saliency_spatial_map = NULL;
     float *saliency_color_map = NULL;
     float *saliency_motion_map = NULL;
     float *saliency_registration_map = NULL;
-    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
-        saliency_spatial_map = (float *)malloc(sg_count * sizeof(float));
-        saliency_color_map   = (float *)malloc(sg_count * sizeof(float));
-        saliency_motion_map  = (float *)malloc(sg_count * sizeof(float));
-        saliency_registration_map = (float *)malloc(sg_count * sizeof(float));
+    if (need_thermal_support_map || need_color_support_map || need_motion_candidates) {
+        if ((!need_thermal_support_map ||
+             ensure_float_capacity(&state->scratch_saliency_spatial, &state->scratch_saliency_capacity, sg_count)) &&
+            (!need_color_support_map ||
+             ensure_float_capacity(&state->scratch_saliency_color, &state->scratch_saliency_capacity, sg_count)) &&
+            (!((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) ||
+             (ensure_float_capacity(&state->scratch_saliency_motion, &state->scratch_saliency_capacity, sg_count) &&
+              ensure_float_capacity(&state->scratch_saliency_registration, &state->scratch_saliency_capacity, sg_count)))) {
+            if (need_thermal_support_map) saliency_spatial_map = state->scratch_saliency_spatial;
+            if (need_color_support_map) saliency_color_map = state->scratch_saliency_color;
+            if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+                saliency_motion_map  = state->scratch_saliency_motion;
+                saliency_registration_map = state->scratch_saliency_registration;
+            }
+        }
         if (saliency_spatial_map != NULL) {
             for (size_t i = 0; i < sg_count; i++) saliency_spatial_map[i] = -1.0f;
         }
@@ -2260,7 +4137,7 @@ int anomaly_process_frame(
 
             double lum = sg_luma[sy * sg_w + sx];
 
-            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
+            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0) {
                 // Integral-image window query.
                 int wx0 = sx - R; if (wx0 < 0) wx0 = 0;
                 int wx1 = sx + R; if (wx1 >= sg_w) wx1 = sg_w - 1;
@@ -2291,7 +4168,7 @@ int anomaly_process_frame(
                 }
             }
 
-            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_PERSIST)) != 0) {
+            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0) {
                 const uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
                 double r = (double)px[0], g = (double)px[1], b = (double)px[2];
                 double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
@@ -2311,6 +4188,48 @@ int anomaly_process_frame(
             }
         }
     }
+
+    anomaly_motion_candidate_t motion_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
+    memset(motion_candidates, 0, sizeof(motion_candidates));
+    anomaly_motion_candidate_t thermal_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
+    memset(thermal_candidates, 0, sizeof(thermal_candidates));
+    int motion_candidate_count = 0;
+    int thermal_candidate_count = 0;
+    float thermal_candidate_area[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_span[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_fill[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_center_share[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_base_score[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_quality_score[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_context_scale[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_parent_scale[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_isolation_rank[ANOMALY_MAX_MOTION_CANDIDATES];
+    int thermal_candidate_min_x[ANOMALY_MAX_MOTION_CANDIDATES];
+    int thermal_candidate_min_y[ANOMALY_MAX_MOTION_CANDIDATES];
+    int thermal_candidate_max_x[ANOMALY_MAX_MOTION_CANDIDATES];
+    int thermal_candidate_max_y[ANOMALY_MAX_MOTION_CANDIDATES];
+    float motion_candidate_support[ANOMALY_MAX_MOTION_CANDIDATES];
+    int motion_candidate_support_x[ANOMALY_MAX_MOTION_CANDIDATES];
+    int motion_candidate_support_y[ANOMALY_MAX_MOTION_CANDIDATES];
+    for (int i = 0; i < ANOMALY_MAX_MOTION_CANDIDATES; i++) {
+        thermal_candidate_area[i] = 0.0f;
+        thermal_candidate_span[i] = 0.0f;
+        thermal_candidate_fill[i] = 0.0f;
+        thermal_candidate_center_share[i] = 0.0f;
+        thermal_candidate_base_score[i] = -1.0f;
+        thermal_candidate_quality_score[i] = 0.0f;
+        thermal_candidate_context_scale[i] = 1.0f;
+        thermal_candidate_parent_scale[i] = 1.0f;
+        thermal_candidate_isolation_rank[i] = 0.0f;
+        thermal_candidate_min_x[i] = 0;
+        thermal_candidate_min_y[i] = 0;
+        thermal_candidate_max_x[i] = 0;
+        thermal_candidate_max_y[i] = 0;
+        motion_candidate_support[i] = -1.0f;
+        motion_candidate_support_x[i] = 0;
+        motion_candidate_support_y[i] = 0;
+    }
+
     // ── One-sided EMA thermal background: score + update ────────────────
     // The background model tracks each pixel's "cold" (background) state.
     // Fast adaptation toward brighter/colder (α=ALPHA_COOL per analyzed frame)
@@ -2332,6 +4251,8 @@ int anomaly_process_frame(
                      && !scene_discontinuity);
     double delta_mean = 0.0;
     double delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
+    float frame_blob_contrast_mean = 0.0f;
+    float frame_blob_contrast_std = 0.0f;
     if (result_out != NULL) {
         result_out->saliency_debug.bg_ready = bg_valid;
     }
@@ -2351,6 +4272,16 @@ int anomaly_process_frame(
         delta_norm = sqrt(delta_var);
         if (delta_norm < (double)ANOMALY_THERMAL_BG_NORM)
             delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
+        estimate_framewide_blob_contrast_stats(
+                state->bg_luma,
+                sg_luma,
+                sg_w,
+                sg_h,
+                bg_valid,
+                black_hot != 0,
+                thermal_min_delta,
+                &frame_blob_contrast_mean,
+                &frame_blob_contrast_std);
     }
 
     if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && bg_valid) {
@@ -2381,9 +4312,17 @@ int anomaly_process_frame(
                 float  bg  = state->bg_luma[sy * sg_w + sx];
                 // Positive delta: pixel is warmer than its stored background.
                 float delta = black_hot ? (bg - (float)lum) : ((float)lum - bg);
-                if (delta < thermal_min_delta) continue;
+                if (delta < thermal_min_delta) {
+                    if (saliency_spatial_map != NULL) {
+                        saliency_spatial_map[sy * sg_w + sx] = -1.0f;
+                    }
+                    continue;
+                }
                 // Relative score: std-devs above the frame's temporal mean.
                 float ts = (float)((delta - delta_mean) / delta_norm);
+                if (saliency_spatial_map != NULL) {
+                    saliency_spatial_map[sy * sg_w + sx] = ts;
+                }
                 if (ts > best_thermal) {
                     best_thermal   = ts;
                     best_thermal_x = roi_x0 + sx * sample_step;
@@ -2392,6 +4331,394 @@ int anomaly_process_frame(
             }
         }
     }
+
+    if (anomaly_detection_active &&
+        (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 &&
+        saliency_spatial_map != NULL) {
+        if (scene_discontinuity || state->thermal_target_persist == NULL ||
+            state->thermal_target_persist_w != sg_w || state->thermal_target_persist_h != sg_h) {
+            free(state->thermal_target_persist);
+            state->thermal_target_persist =
+                (float *)calloc((size_t)sg_w * (size_t)sg_h, sizeof(float));
+            state->thermal_target_persist_w =
+                state->thermal_target_persist != NULL ? sg_w : 0;
+            state->thermal_target_persist_h =
+                state->thermal_target_persist != NULL ? sg_h : 0;
+        } else if (state->thermal_target_persist != NULL) {
+            for (size_t i = 0; i < sg_count; i++) {
+                state->thermal_target_persist[i] *= ANOMALY_THERMAL_TARGET_HISTORY_DECAY;
+            }
+        }
+
+        float *thermal_patch_map = NULL;
+        float *thermal_patch_selection = NULL;
+        if (ensure_float_capacity(&state->scratch_patch_score, &state->scratch_patch_capacity, sg_count) &&
+            ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, sg_count)) {
+            thermal_patch_map = state->scratch_patch_score;
+            thermal_patch_selection = state->scratch_patch_selection;
+        }
+        if (thermal_patch_map != NULL && thermal_patch_selection != NULL) {
+            for (size_t i = 0; i < sg_count; i++) {
+                float score = saliency_spatial_map[i];
+                thermal_patch_map[i] = score > 0.0f ? score : -1.0f;
+            }
+            build_patch_selection_map(thermal_patch_map, sg_w, sg_h, thermal_patch_selection);
+            collect_motion_candidates(
+                    thermal_patch_selection,
+                    NULL,
+                    sg_w,
+                    sg_h,
+                    roi_x0,
+                    roi_y0,
+                    sample_step,
+                    thermal_candidates,
+                    &thermal_candidate_count);
+            float representative_delta_ratio = 0.0f;
+            float representative_delta_std = 0.0f;
+            estimate_representative_blob_delta_stats(
+                    thermal_patch_selection,
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    sample_step,
+                    thermal_candidates,
+                    thermal_candidate_count,
+                    bg_valid,
+                    black_hot != 0,
+                    thermal_min_delta,
+                    delta_norm,
+                    &representative_delta_ratio,
+                    &representative_delta_std);
+            int isolated_sx = -1;
+            int isolated_sy = -1;
+            float isolated_proposal = -1.0f;
+            float isolated_context = 0.0f;
+            for (int sy = 0; sy < sg_h; sy++) {
+                for (int sx = 0; sx < sg_w; sx++) {
+                    float raw_base = saliency_spatial_map[sy * sg_w + sx];
+                    if (raw_base <= 0.0f) continue;
+                    float base = raw_base;
+                    if (base <= 0.0f) continue;
+                    bool is_peak = true;
+                    for (int ny = sy - 1; ny <= sy + 1 && is_peak; ny++) {
+                        if (ny < 0 || ny >= sg_h) continue;
+                        for (int nx = sx - 1; nx <= sx + 1; nx++) {
+                            if (nx < 0 || nx >= sg_w || (nx == sx && ny == sy)) continue;
+                            if (saliency_spatial_map[ny * sg_w + nx] > base) {
+                                is_peak = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!is_peak) continue;
+                    float context_scale = thermal_candidate_seed_context_scale(
+                        state->bg_luma,
+                        sg_luma,
+                        sg_w,
+                        sg_h,
+                        sx,
+                        sy,
+                        sample_step,
+                        bg_valid,
+                        black_hot != 0,
+                        thermal_min_delta,
+                        representative_delta_ratio,
+                        frame_blob_contrast_mean,
+                        frame_blob_contrast_std,
+                        delta_norm);
+                    float parent_scale = thermal_candidate_parent_mass_scale(
+                        state->bg_luma,
+                        sg_luma,
+                        sg_w,
+                        sg_h,
+                        sx,
+                        sy,
+                        sample_step,
+                        bg_valid,
+                        black_hot != 0,
+                        thermal_min_delta,
+                        frame_blob_contrast_mean,
+                        frame_blob_contrast_std,
+                        delta_norm);
+                    float proposal = base * context_scale * context_scale;
+                    proposal *= parent_scale;
+                    if (proposal > isolated_proposal) {
+                        isolated_proposal = proposal;
+                        isolated_sx = sx;
+                        isolated_sy = sy;
+                        isolated_context = context_scale * parent_scale;
+                    }
+                }
+            }
+            if (isolated_sx >= 0 && isolated_sy >= 0) {
+                bool already_present = false;
+                for (int ci = 0; ci < thermal_candidate_count; ci++) {
+                    int ddx = abs(thermal_candidates[ci].sg_x - isolated_sx);
+                    int ddy = abs(thermal_candidates[ci].sg_y - isolated_sy);
+                    if (ddx <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS &&
+                        ddy <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS) {
+                        already_present = true;
+                        break;
+                    }
+                }
+                if (!already_present && isolated_context >= 0.95f && isolated_proposal > 0.0f) {
+                    int insert_idx = thermal_candidate_count;
+                    if (thermal_candidate_count < ANOMALY_MAX_MOTION_CANDIDATES) {
+                        thermal_candidate_count++;
+                    } else {
+                        float weakest_score = thermal_candidates[0].proposal_score;
+                        insert_idx = 0;
+                        for (int ci = 1; ci < thermal_candidate_count; ci++) {
+                            if (thermal_candidates[ci].proposal_score < weakest_score) {
+                                weakest_score = thermal_candidates[ci].proposal_score;
+                                insert_idx = ci;
+                            }
+                        }
+                        if (isolated_proposal < weakest_score * 0.80f) {
+                            insert_idx = -1;
+                        }
+                    }
+                    if (insert_idx >= 0) {
+                        thermal_candidates[insert_idx].sg_x = isolated_sx;
+                        thermal_candidates[insert_idx].sg_y = isolated_sy;
+                        thermal_candidates[insert_idx].pixel_x = roi_x0 + isolated_sx * sample_step;
+                        thermal_candidates[insert_idx].pixel_y = roi_y0 + isolated_sy * sample_step;
+                        thermal_candidates[insert_idx].proposal_score = isolated_proposal;
+                        thermal_candidates[insert_idx].thermal_score =
+                            saliency_spatial_map[isolated_sy * sg_w + isolated_sx];
+                        thermal_candidates[insert_idx].color_score = 0.0f;
+                        estimate_representative_blob_delta_stats(
+                                thermal_patch_selection,
+                                state->bg_luma,
+                                sg_luma,
+                                sg_w,
+                                sg_h,
+                                sample_step,
+                                thermal_candidates,
+                                thermal_candidate_count,
+                                bg_valid,
+                                black_hot != 0,
+                                thermal_min_delta,
+                                delta_norm,
+                                &representative_delta_ratio,
+                                &representative_delta_std);
+                    }
+                }
+            }
+            best_thermal = -1.0f;
+            best_thermal_x = 0;
+            best_thermal_y = 0;
+            float best_small_span_px = -1.0f;
+            for (int ci = 0; ci < thermal_candidate_count; ci++) {
+                int sx = thermal_candidates[ci].sg_x;
+                int sy = thermal_candidates[ci].sg_y;
+                float area = 0.0f;
+                float span = 0.0f;
+                float fill = 0.0f;
+                float center_share = 0.0f;
+                int bbox_min_x = sx;
+                int bbox_min_y = sy;
+                int bbox_max_x = sx;
+                int bbox_max_y = sy;
+                float quality = thermal_candidate_quality(
+                    thermal_patch_selection,
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    sx,
+                    sy,
+                    sample_step,
+                    bg_valid,
+                    black_hot != 0,
+                    thermal_min_delta,
+                    delta_mean,
+                    delta_norm,
+                    representative_delta_ratio,
+                    representative_delta_std,
+                    frame_blob_contrast_mean,
+                    frame_blob_contrast_std,
+                    best_small_span_px,
+                    &bbox_min_x,
+                    &bbox_min_y,
+                    &bbox_max_x,
+                    &bbox_max_y,
+                    &area,
+                    &span,
+                    &fill,
+                    &center_share);
+                float base_score = thermal_patch_selection[sy * sg_w + sx];
+                float context_scale = thermal_candidate_seed_context_scale(
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    sx,
+                    sy,
+                    sample_step,
+                    bg_valid,
+                    black_hot != 0,
+                    thermal_min_delta,
+                    representative_delta_ratio,
+                    frame_blob_contrast_mean,
+                    frame_blob_contrast_std,
+                    delta_norm);
+                float parent_scale = thermal_candidate_parent_mass_scale(
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    sx,
+                    sy,
+                    sample_step,
+                    bg_valid,
+                    black_hot != 0,
+                    thermal_min_delta,
+                    frame_blob_contrast_mean,
+                    frame_blob_contrast_std,
+                    delta_norm);
+                float history_scale = thermal_candidate_history_scale(state, sg_w, sg_h, sx, sy);
+                float isolated_peak_bonus = 1.0f;
+                if (area > 0.0f && area <= 4.0f &&
+                    span > 0.0f && span <= 3.0f &&
+                    center_share >= 0.52f &&
+                    quality >= 0.70f &&
+                    context_scale >= 0.95f) {
+                    isolated_peak_bonus = 1.18f;
+                    if (center_share >= 0.62f && quality >= 0.85f) {
+                        isolated_peak_bonus = 1.28f;
+                    }
+                }
+                float final_score = base_score * quality * context_scale * parent_scale *
+                    history_scale * isolated_peak_bonus;
+                if (bg_valid) {
+                    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                    float bg = state->bg_luma[idx];
+                    float lum = (float)sg_luma[idx];
+                    float delta = black_hot ? (bg - lum) : (lum - bg);
+                    if (delta >= thermal_min_delta) {
+                        float temporal_score = (float)((delta - delta_mean) / delta_norm);
+                        if (temporal_score > final_score) {
+                            final_score = temporal_score * quality * context_scale * parent_scale *
+                                history_scale * isolated_peak_bonus;
+                        }
+                    }
+                }
+                thermal_candidate_area[ci] = area;
+                thermal_candidate_span[ci] = span;
+                thermal_candidate_fill[ci] = fill;
+                thermal_candidate_center_share[ci] = center_share;
+                thermal_candidate_base_score[ci] = base_score;
+                thermal_candidate_quality_score[ci] = quality;
+                thermal_candidate_context_scale[ci] = context_scale;
+                thermal_candidate_parent_scale[ci] = parent_scale;
+                thermal_candidate_min_x[ci] = bbox_min_x;
+                thermal_candidate_min_y[ci] = bbox_min_y;
+                thermal_candidate_max_x[ci] = bbox_max_x;
+                thermal_candidate_max_y[ci] = bbox_max_y;
+                float span_px = span * (float)sample_step;
+                float area_rank = area <= 0.0f ? 0.0f
+                    : (area <= 2.0f ? 1.0f
+                    : (area <= 4.0f ? 0.92f
+                    : (area <= 6.0f ? 0.68f : 0.30f)));
+                float span_rank = span_px <= 0.0f ? 0.0f
+                    : (span_px <= 4.0f ? 1.0f
+                    : (span_px <= 7.0f ? 0.85f
+                    : (span_px <= 10.0f ? 0.58f : 0.22f)));
+                float center_rank = clampf((center_share - 0.40f) / 0.30f, 0.0f, 1.0f);
+                float quality_rank = clampf((quality - 0.45f) / 0.55f, 0.0f, 1.0f);
+                float context_rank = clampf((context_scale - 0.55f) / 0.55f, 0.0f, 1.0f);
+                float parent_rank = clampf((parent_scale - 0.30f) / 0.70f, 0.0f, 1.0f);
+                thermal_candidate_isolation_rank[ci] =
+                    0.22f * area_rank +
+                    0.20f * span_rank +
+                    0.18f * center_rank +
+                    0.16f * quality_rank +
+                    0.12f * context_rank +
+                    0.12f * parent_rank;
+                thermal_candidates[ci].thermal_score = final_score;
+                if (final_score > best_thermal) {
+                    best_thermal = final_score;
+                    best_thermal_x = thermal_candidates[ci].pixel_x;
+                    best_thermal_y = thermal_candidates[ci].pixel_y;
+                }
+                if (final_score > cfg->score_threshold &&
+                    span_px > 0.0f &&
+                    span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX &&
+                    (best_small_span_px < 0.0f || span_px < best_small_span_px)) {
+                    best_small_span_px = span_px;
+                }
+            }
+            float best_isolation_rank = 0.0f;
+            for (int ci = 0; ci < thermal_candidate_count; ci++) {
+                if (thermal_candidate_isolation_rank[ci] > best_isolation_rank) {
+                    best_isolation_rank = thermal_candidate_isolation_rank[ci];
+                }
+            }
+            if (best_isolation_rank >= 0.72f) {
+                best_thermal = -1.0f;
+                best_thermal_x = 0;
+                best_thermal_y = 0;
+                for (int ci = 0; ci < thermal_candidate_count; ci++) {
+                    float rerank = 1.0f;
+                    float isolation_gap = best_isolation_rank - thermal_candidate_isolation_rank[ci];
+                    if (thermal_candidate_isolation_rank[ci] >= 0.78f) {
+                        rerank *= 1.28f;
+                    } else if (thermal_candidate_isolation_rank[ci] >= 0.68f) {
+                        rerank *= 1.14f;
+                    }
+                    if (isolation_gap >= 0.28f) {
+                        rerank *= 0.58f;
+                    } else if (isolation_gap >= 0.16f) {
+                        rerank *= 0.76f;
+                    }
+                    if (thermal_candidate_span[ci] * (float)sample_step > 8.0f &&
+                        thermal_candidate_isolation_rank[ci] < 0.55f) {
+                        rerank *= 0.78f;
+                    }
+                    thermal_candidates[ci].thermal_score *= rerank;
+                    if (thermal_candidates[ci].thermal_score > best_thermal) {
+                        best_thermal = thermal_candidates[ci].thermal_score;
+                        best_thermal_x = thermal_candidates[ci].pixel_x;
+                        best_thermal_y = thermal_candidates[ci].pixel_y;
+                    }
+                }
+            }
+            if (state->thermal_target_persist != NULL) {
+                for (int ci = 0; ci < thermal_candidate_count; ci++) {
+                    float seed_strength = thermal_candidate_seed_strength(
+                        thermal_candidate_base_score[ci],
+                        thermal_candidate_quality_score[ci],
+                        thermal_candidate_area[ci],
+                        thermal_candidate_span[ci],
+                        thermal_candidate_fill[ci],
+                        thermal_candidate_center_share[ci]);
+                    stamp_thermal_target_support(
+                        state->thermal_target_persist,
+                        sg_w,
+                        sg_h,
+                        thermal_candidates[ci].sg_x,
+                        thermal_candidates[ci].sg_y,
+                        seed_strength);
+                }
+            }
+        }
+    }
+
+    if (need_motion_candidates) {
+        collect_motion_candidates(
+                thermal_candidate_count > 0 ? state->scratch_patch_selection : saliency_spatial_map,
+                saliency_color_map,
+                sg_w,
+                sg_h,
+                roi_x0,
+                roi_y0,
+                sample_step,
+                motion_candidates,
+                &motion_candidate_count);
+    }
+
     // Update (or initialise) the background EMA.
     if (scene_discontinuity || state->bg_luma == NULL
             || state->bg_sg_w != sg_w || state->bg_sg_h != sg_h) {
@@ -2449,17 +4776,16 @@ int anomaly_process_frame(
         state->prev_luma_width  == motion_w &&
         state->prev_luma_height == motion_h &&
         !scene_discontinuity) {
-
         int roi_mgx0 = roi_x0 / motion_step;
         int roi_mgx1 = (roi_x1 + motion_step - 1) / motion_step;
         int roi_mgy0 = roi_y0 / motion_step;
         int roi_mgy1 = (roi_y1 + motion_step - 1) / motion_step;
-        roi_mgx0 = roi_mgx0 < 0        ? 0        : roi_mgx0;
+        roi_mgx0 = roi_mgx0 < 0 ? 0 : roi_mgx0;
         roi_mgx1 = roi_mgx1 > motion_w ? motion_w : roi_mgx1;
-        roi_mgy0 = roi_mgy0 < 0        ? 0        : roi_mgy0;
+        roi_mgy0 = roi_mgy0 < 0 ? 0 : roi_mgy0;
         roi_mgy1 = roi_mgy1 > motion_h ? motion_h : roi_mgy1;
 
-        float fw_m = (float)(width  > 1 ? width  - 1 : 1);
+        float fw_m = (float)(width > 1 ? width - 1 : 1);
         float fh_m = (float)(height > 1 ? height - 1 : 1);
         float gmv_scale = sqrtf(sim.a * sim.a + sim.b * sim.b);
         float zoom_delta = fabsf(gmv_scale - 1.0f);
@@ -2469,64 +4795,33 @@ int anomaly_process_frame(
             if (zoom_motion_scale < 0.0f) zoom_motion_scale = 0.0f;
         }
 
-        if (scene_discontinuity ||
-                state->motion_persist == NULL ||
-                state->motion_persist_w != motion_w ||
-                state->motion_persist_h != motion_h) {
+        if (state->motion_persist == NULL ||
+            state->motion_persist_w != motion_w ||
+            state->motion_persist_h != motion_h) {
             free(state->motion_persist);
             state->motion_persist = (float *)calloc(motion_count, sizeof(float));
             state->motion_persist_w = state->motion_persist != NULL ? motion_w : 0;
             state->motion_persist_h = state->motion_persist != NULL ? motion_h : 0;
         }
 
-        double metric_sum = 0.0, metric_sum2 = 0.0;
-        int    metric_count = 0;
-        const float motion_tolerance_px = 6.0f - (4.5f * (cfg != NULL ? cfg->motion_evidence_scale : 1.0f) / 2.0f);
         const int disp_patch_half = 1;
         const int disp_search_radius = 2;
-        float *motion_dx_map = NULL;
-        float *motion_dy_map = NULL;
-        float *motion_mag_map = NULL;
-        uint8_t *motion_valid_map = NULL;
-        float *region_dx_field = NULL;
-        float *region_dy_field = NULL;
-        float *region_jitter_field = NULL;
-        uint8_t *region_valid_field = NULL;
-        int region_field_w = 0;
-        int region_field_h = 0;
-        const int region_stride_cells = ANOMALY_LOCAL_MOTION_REGION_STRIDE_CELLS;
-        if (use_motion_tolerance) {
-            motion_dx_map = (float *)malloc(motion_count * sizeof(float));
-            motion_dy_map = (float *)malloc(motion_count * sizeof(float));
-            motion_mag_map = (float *)malloc(motion_count * sizeof(float));
-            motion_valid_map = (uint8_t *)malloc(motion_count * sizeof(uint8_t));
-            if (motion_dx_map == NULL || motion_dy_map == NULL ||
-                    motion_mag_map == NULL || motion_valid_map == NULL) {
-                free(motion_dx_map);
-                free(motion_dy_map);
-                free(motion_mag_map);
-                free(motion_valid_map);
-                motion_dx_map = NULL;
-                motion_dy_map = NULL;
-                motion_mag_map = NULL;
-                motion_valid_map = NULL;
-                use_motion_tolerance = false;
-                use_stable_motion = (cfg->algorithm_mask & ANOMALY_ALGO_MOTION) != 0;
-            } else {
-                memset(motion_valid_map, 0, motion_count * sizeof(uint8_t));
-            }
-        }
-        for (int my = roi_mgy0; my < roi_mgy1; my++) {
-            float cy_n = (float)(my * motion_step) / fh_m;
-            for (int mx = roi_mgx0; mx < roi_mgx1; mx++) {
-                float cx_n  = (float)(mx * motion_step) / fw_m;
-                float px_n  = sim.a * cx_n - sim.b * cy_n + sim.tx;
-                float py_n  = sim.b * cx_n + sim.a * cy_n + sim.ty;
-                int   px_idx = (int)(px_n * fw_m / (float)motion_step + 0.5f);
-                int   py_idx = (int)(py_n * fh_m / (float)motion_step + 0.5f);
-                if (px_idx < 0 || px_idx >= motion_w || py_idx < 0 || py_idx >= motion_h) continue;
+        const int global_stride = ANOMALY_MOTION_GLOBAL_STRIDE_CELLS;
+        double global_sum = 0.0;
+        double global_sum2 = 0.0;
+        int global_count = 0;
+        for (int my = roi_mgy0 + 1; my < roi_mgy1 - 1; my += global_stride) {
+            for (int mx = roi_mgx0 + 1; mx < roi_mgx1 - 1; mx += global_stride) {
+                int px_idx = 0;
+                int py_idx = 0;
+                if (!project_motion_cell(sim, width, height, motion_step, motion_w, motion_h,
+                                         mx, my, &px_idx, &py_idx)) {
+                    continue;
+                }
+                float metric_value = 0.0f;
                 if (use_motion_tolerance) {
-                    int best_dx = 0, best_dy = 0;
+                    int best_dx = 0;
+                    int best_dy = 0;
                     if (!find_residual_motion_displacement(
                             curr_luma, state->prev_luma, motion_w, motion_h,
                             mx, my, px_idx, py_idx,
@@ -2534,334 +4829,164 @@ int anomaly_process_frame(
                             &best_dx, &best_dy, NULL)) {
                         continue;
                     }
-                    float residual_disp_px = sqrtf((float)(best_dx * best_dx + best_dy * best_dy)) * (float)motion_step;
-                    size_t map_idx = (size_t)my * (size_t)motion_w + (size_t)mx;
-                    motion_dx_map[map_idx] = (float)best_dx;
-                    motion_dy_map[map_idx] = (float)best_dy;
-                    motion_mag_map[map_idx] = residual_disp_px;
-                    motion_valid_map[map_idx] = 1;
-                    metric_sum  += (double)residual_disp_px;
-                    metric_sum2 += (double)residual_disp_px * (double)residual_disp_px;
-                    metric_count++;
+                    metric_value =
+                        sqrtf((float)(best_dx * best_dx + best_dy * best_dy)) * (float)motion_step;
                 } else {
-                    int d = abs((int)curr_luma[my * motion_w + mx] -
-                                (int)state->prev_luma[py_idx * motion_w + px_idx]);
-                    metric_sum  += (double)d;
-                    metric_sum2 += (double)d * (double)d;
-                    metric_count++;
+                    metric_value = (float)abs(
+                        (int)curr_luma[my * motion_w + mx] -
+                        (int)state->prev_luma[py_idx * motion_w + px_idx]);
                 }
-            }
-        }
-        if (use_motion_tolerance && motion_valid_map != NULL) {
-            region_field_w = (motion_w + region_stride_cells - 1) / region_stride_cells;
-            region_field_h = (motion_h + region_stride_cells - 1) / region_stride_cells;
-            size_t region_count = (size_t)region_field_w * (size_t)region_field_h;
-            region_dx_field = (float *)calloc(region_count, sizeof(float));
-            region_dy_field = (float *)calloc(region_count, sizeof(float));
-            region_jitter_field = (float *)calloc(region_count, sizeof(float));
-            region_valid_field = (uint8_t *)calloc(region_count, sizeof(uint8_t));
-            if (region_dx_field == NULL || region_dy_field == NULL ||
-                region_jitter_field == NULL || region_valid_field == NULL) {
-                free(region_dx_field);
-                free(region_dy_field);
-                free(region_jitter_field);
-                free(region_valid_field);
-                region_dx_field = NULL;
-                region_dy_field = NULL;
-                region_jitter_field = NULL;
-                region_valid_field = NULL;
-                region_field_w = 0;
-                region_field_h = 0;
-            } else {
-                for (int ry = 0; ry < region_field_h; ry++) {
-                    for (int rx = 0; rx < region_field_w; rx++) {
-                        int region_cx = clamp_i32(rx * region_stride_cells + (region_stride_cells / 2), 0, motion_w - 1);
-                        int region_cy = clamp_i32(ry * region_stride_cells + (region_stride_cells / 2), 0, motion_h - 1);
-                        float local_dx = 0.0f;
-                        float local_dy = 0.0f;
-                        float local_jitter = 0.0f;
-                        if (estimate_local_motion_region(
-                                motion_dx_map,
-                                motion_dy_map,
-                                motion_valid_map,
-                                motion_w,
-                                motion_h,
-                                region_cx,
-                                region_cy,
-                                ANOMALY_LOCAL_MOTION_REGION_RADIUS_CELLS,
-                                &local_dx,
-                                &local_dy,
-                                &local_jitter)) {
-                            size_t ridx = (size_t)ry * (size_t)region_field_w + (size_t)rx;
-                            region_dx_field[ridx] = local_dx;
-                            region_dy_field[ridx] = local_dy;
-                            region_jitter_field[ridx] = local_jitter;
-                            region_valid_field[ridx] = 1;
-                        }
-                    }
-                }
+                global_sum += (double)metric_value;
+                global_sum2 += (double)metric_value * (double)metric_value;
+                global_count++;
             }
         }
 
-        if (metric_count > 1) {
-            double metric_mean = metric_sum / (double)metric_count;
-            double metric_std  = use_motion_tolerance
-                ? sqrt(fmax((metric_sum2 / (double)metric_count) - metric_mean * metric_mean, 0.01))
-                : sqrt(fmax((metric_sum2 / (double)metric_count) - metric_mean * metric_mean, 1.0));
-            if (result_out != NULL) {
-                result_out->motion_debug.valid = true;
-                result_out->motion_debug.scene_discontinuity = scene_discontinuity;
-                result_out->motion_debug.sample_step = motion_sample_step;
-                result_out->motion_debug.motion_step = motion_step;
-                result_out->motion_debug.sample_count = metric_count;
-                result_out->motion_debug.residual_mean = (float)metric_mean;
-                result_out->motion_debug.residual_std = (float)metric_std;
-                result_out->motion_debug.zoom_motion_scale = zoom_motion_scale;
-                result_out->motion_debug.broad_motion_scale = 1.0f;
-                result_out->motion_debug.global_motion_load = 0.0f;
+        float global_motion_mean = 0.0f;
+        float global_motion_std = (float)motion_step * 0.5f;
+        float motion_floor_px = (float)motion_step;
+        if (global_count > 0) {
+            global_motion_mean = (float)(global_sum / (double)global_count);
+            double variance = (global_sum2 / (double)global_count) -
+                ((double)global_motion_mean * (double)global_motion_mean);
+            global_motion_std = sqrtf((float)fmax(variance, 0.04));
+            if (global_motion_std < (float)motion_step * 0.35f) {
+                global_motion_std = (float)motion_step * 0.35f;
             }
-            float *motion_z_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_selection_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_presence_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_texture_scale_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_structure_scale_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_support_scale_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_persistence_scale_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_component_area_frac_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_component_span_frac_map = (float *)malloc(motion_count * sizeof(float));
-            float *motion_component_fill_ratio_map = (float *)malloc(motion_count * sizeof(float));
-            float *registration_residual_scale_map = (float *)malloc(motion_count * sizeof(float));
-            if (motion_z_map != NULL && motion_selection_map != NULL) {
-                for (size_t i = 0; i < motion_count; i++) {
-                    motion_z_map[i] = -1.0f;
-                    motion_selection_map[i] = -1.0f;
-                }
+            motion_floor_px = global_motion_mean + (0.75f * global_motion_std);
+            if (motion_floor_px < (float)motion_step * 0.85f) {
+                motion_floor_px = (float)motion_step * 0.85f;
             }
-            if (motion_presence_map != NULL) {
-                memset(motion_presence_map, 0, motion_count * sizeof(float));
-            }
-            if (motion_texture_scale_map != NULL) memset(motion_texture_scale_map, 0, motion_count * sizeof(float));
-            if (motion_structure_scale_map != NULL) memset(motion_structure_scale_map, 0, motion_count * sizeof(float));
-            if (motion_support_scale_map != NULL) memset(motion_support_scale_map, 0, motion_count * sizeof(float));
-            if (motion_persistence_scale_map != NULL) {
-                for (size_t i = 0; i < motion_count; i++) motion_persistence_scale_map[i] = 1.0f;
-            }
-            if (motion_component_area_frac_map != NULL) memset(motion_component_area_frac_map, 0, motion_count * sizeof(float));
-            if (motion_component_span_frac_map != NULL) memset(motion_component_span_frac_map, 0, motion_count * sizeof(float));
-            if (motion_component_fill_ratio_map != NULL) memset(motion_component_fill_ratio_map, 0, motion_count * sizeof(float));
-            if (registration_residual_scale_map != NULL) {
-                for (size_t i = 0; i < motion_count; i++) registration_residual_scale_map[i] = 1.0f;
-            }
-            int strong_motion_cells = 0;
-            int scored_motion_cells = 0;
-            for (int my = roi_mgy0; my < roi_mgy1; my++) {
-                float cy_n = (float)(my * motion_step) / fh_m;
-                for (int mx = roi_mgx0; mx < roi_mgx1; mx++) {
-                    float cx_n  = (float)(mx * motion_step) / fw_m;
-                    float px_n  = sim.a * cx_n - sim.b * cy_n + sim.tx;
-                    float py_n  = sim.b * cx_n + sim.a * cy_n + sim.ty;
-                    int   px_idx = (int)(px_n * fw_m / (float)motion_step + 0.5f);
-                    int   py_idx = (int)(py_n * fh_m / (float)motion_step + 0.5f);
-                    if (px_idx < 0 || px_idx >= motion_w || py_idx < 0 || py_idx >= motion_h) continue;
-                    size_t map_idx = (size_t)my * (size_t)motion_w + (size_t)mx;
-                    float ms_raw;
+        }
+
+        int strong_global_samples = 0;
+        if (global_count > 0) {
+            for (int my = roi_mgy0 + 1; my < roi_mgy1 - 1; my += global_stride) {
+                for (int mx = roi_mgx0 + 1; mx < roi_mgx1 - 1; mx += global_stride) {
+                    int px_idx = 0;
+                    int py_idx = 0;
+                    if (!project_motion_cell(sim, width, height, motion_step, motion_w, motion_h,
+                                             mx, my, &px_idx, &py_idx)) {
+                        continue;
+                    }
+                    float metric_value = 0.0f;
                     if (use_motion_tolerance) {
-                        if (mx <= roi_mgx0 + 1 || mx >= roi_mgx1 - 2 ||
-                                my <= roi_mgy0 + 1 || my >= roi_mgy1 - 2) {
-                            if (motion_z_map != NULL) {
-                                motion_z_map[my * motion_w + mx] = 0.0f;
-                            }
+                        int best_dx = 0;
+                        int best_dy = 0;
+                        if (!find_residual_motion_displacement(
+                                curr_luma, state->prev_luma, motion_w, motion_h,
+                                mx, my, px_idx, py_idx,
+                                disp_patch_half, disp_search_radius,
+                                &best_dx, &best_dy, NULL)) {
                             continue;
                         }
-                        if (motion_valid_map == NULL || motion_valid_map[map_idx] == 0) {
-                            continue;
-                        }
-                        float center_dx = motion_dx_map[map_idx];
-                        float center_dy = motion_dy_map[map_idx];
-                        float residual_disp_px = motion_mag_map[map_idx];
-                        float region_model_dx = 0.0f;
-                        float region_model_dy = 0.0f;
-                        float region_model_jitter = 0.0f;
-                        float region_model_conf = 0.0f;
-                        sample_local_motion_field(
-                                region_dx_field,
-                                region_dy_field,
-                                region_jitter_field,
-                                region_valid_field,
-                                region_field_w,
-                                region_field_h,
-                                region_stride_cells,
-                                (float)mx,
-                                (float)my,
-                                &region_model_dx,
-                                &region_model_dy,
-                                &region_model_jitter,
-                                &region_model_conf);
-                        float neighborhood_residual_sum_px = 0.0f;
-                        int neighborhood_residual_count = 0;
-                        for (int ny = my - 2; ny <= my + 2; ny++) {
-                            if (ny < roi_mgy0 || ny >= roi_mgy1) continue;
-                            for (int nx = mx - 2; nx <= mx + 2; nx++) {
-                                if (nx < roi_mgx0 || nx >= roi_mgx1) continue;
-                                if (nx == mx && ny == my) continue;
-                                size_t nidx = (size_t)ny * (size_t)motion_w + (size_t)nx;
-                                if (motion_valid_map[nidx] == 0) continue;
-                                neighborhood_residual_sum_px += motion_mag_map[nidx];
-                                neighborhood_residual_count++;
-                            }
-                        }
-                        float neighborhood_residual_mean_px =
-                            neighborhood_residual_count > 0
-                                ? (neighborhood_residual_sum_px / (float)neighborhood_residual_count)
-                                : residual_disp_px;
-
-                        float fit_m[3][3] = {{0}};
-                        float fit_bx[3] = {0};
-                        float fit_by[3] = {0};
-                        int ring_count = 0;
-                        for (int ny = my - 2; ny <= my + 2; ny++) {
-                            if (ny < roi_mgy0 || ny >= roi_mgy1) continue;
-                            for (int nx = mx - 2; nx <= mx + 2; nx++) {
-                                if (nx < roi_mgx0 || nx >= roi_mgx1) continue;
-                                int adx = nx - mx;
-                                int ady = ny - my;
-                                int cheb = abs(adx) > abs(ady) ? abs(adx) : abs(ady);
-                                if (cheb != 2) continue;
-                                size_t nidx = (size_t)ny * (size_t)motion_w + (size_t)nx;
-                                if (motion_valid_map[nidx] == 0) continue;
-                                float fx = (float)adx;
-                                float fy = (float)ady;
-                                float basis[3] = {fx, fy, 1.0f};
-                                for (int r = 0; r < 3; r++) {
-                                    for (int c = 0; c < 3; c++) {
-                                        fit_m[r][c] += basis[r] * basis[c];
-                                    }
-                                    fit_bx[r] += basis[r] * motion_dx_map[nidx];
-                                    fit_by[r] += basis[r] * motion_dy_map[nidx];
-                                }
-                                ring_count++;
-                            }
-                        }
-
-                        float local_noise_px = fmaxf((float)metric_std, (float)motion_step * 0.75f);
-                        float local_contrast_px = residual_disp_px;
-                        float neighbor_isolation_scale = 1.0f;
-                        if (ring_count >= 5) {
-                            float coeff_x[3];
-                            float coeff_y[3];
-                            if (solve_3x3(fit_m, fit_bx, coeff_x) &&
-                                    solve_3x3(fit_m, fit_by, coeff_y)) {
-                                float pred_dx = coeff_x[2];
-                                float pred_dy = coeff_y[2];
-                                float ring_dev_sum = 0.0f;
-                                for (int ny = my - 2; ny <= my + 2; ny++) {
-                                    if (ny < roi_mgy0 || ny >= roi_mgy1) continue;
-                                    for (int nx = mx - 2; nx <= mx + 2; nx++) {
-                                        if (nx < roi_mgx0 || nx >= roi_mgx1) continue;
-                                        int adx = nx - mx;
-                                        int ady = ny - my;
-                                        int cheb = abs(adx) > abs(ady) ? abs(adx) : abs(ady);
-                                        if (cheb != 2) continue;
-                                        size_t nidx = (size_t)ny * (size_t)motion_w + (size_t)nx;
-                                        if (motion_valid_map[nidx] == 0) continue;
-                                        float fit_dx = coeff_x[0] * (float)adx + coeff_x[1] * (float)ady + coeff_x[2];
-                                        float fit_dy = coeff_y[0] * (float)adx + coeff_y[1] * (float)ady + coeff_y[2];
-                                        float ddx = motion_dx_map[nidx] - fit_dx;
-                                        float ddy = motion_dy_map[nidx] - fit_dy;
-                                        ring_dev_sum += sqrtf(ddx * ddx + ddy * ddy) * (float)motion_step;
-                                    }
-                                }
-                                float ring_jitter_px = ring_dev_sum / (float)ring_count;
-                                float diff_dx = center_dx - pred_dx;
-                                float diff_dy = center_dy - pred_dy;
-                                local_contrast_px = sqrtf(diff_dx * diff_dx + diff_dy * diff_dy) * (float)motion_step;
-                                local_noise_px = fmaxf(local_noise_px, ring_jitter_px + (float)motion_step * 0.25f);
-
-                                float isolation_margin_px =
-                                    ANOMALY_MOTION_NEIGHBOR_MARGIN_PX +
-                                    (ANOMALY_MOTION_NEIGHBOR_MARGIN_SCALE * ring_jitter_px);
-                                float residual_isolation_px =
-                                    residual_disp_px - neighborhood_residual_mean_px - isolation_margin_px;
-                                if (residual_isolation_px <= 0.0f) {
-                                    if (ring_jitter_px <= ANOMALY_MOTION_NEIGHBOR_COHERENCE_PX) {
-                                        neighbor_isolation_scale = ANOMALY_MOTION_NEIGHBOR_MIN_SCALE;
-                                    } else {
-                                        neighbor_isolation_scale = 0.35f;
-                                    }
-                                } else {
-                                    float bonus = 1.0f + (residual_isolation_px / fmaxf(local_noise_px, 1.0f));
-                                    if (bonus > ANOMALY_MOTION_NEIGHBOR_MAX_BONUS) {
-                                        bonus = ANOMALY_MOTION_NEIGHBOR_MAX_BONUS;
-                                    }
-                                    neighbor_isolation_scale = bonus;
-                                }
-                            }
-                        }
-
-                        float excess_px = local_contrast_px - motion_tolerance_px;
-                        if (region_model_conf > 0.0f) {
-                            float region_ddx = center_dx - region_model_dx;
-                            float region_ddy = center_dy - region_model_dy;
-                            float region_contrast_px =
-                                sqrtf(region_ddx * region_ddx + region_ddy * region_ddy) * (float)motion_step;
-                            float region_noise_px =
-                                fmaxf((float)motion_step * 0.50f,
-                                      (region_model_jitter * (float)motion_step) + ((float)motion_step * 0.35f));
-                            float region_margin_px =
-                                (float)motion_step * 0.75f + (region_model_jitter * (float)motion_step * 0.65f);
-                            float region_excess_px = region_contrast_px - region_margin_px;
-                            if (region_excess_px <= 0.0f) {
-                                excess_px = -1.0f;
-                            } else {
-                                if (region_contrast_px < local_contrast_px) {
-                                    local_contrast_px = region_contrast_px;
-                                }
-                                local_noise_px = fmaxf(local_noise_px, region_noise_px);
-                                if (region_excess_px < excess_px) {
-                                    excess_px = region_excess_px;
-                                }
-                                if (region_model_jitter <= 0.75f) {
-                                    neighbor_isolation_scale *= 0.75f;
-                                    if (neighbor_isolation_scale < ANOMALY_LOCAL_MOTION_MIN_SCALE) {
-                                        neighbor_isolation_scale = ANOMALY_LOCAL_MOTION_MIN_SCALE;
-                                    }
-                                }
-                            }
-                        }
-                        if (excess_px <= 0.0f) {
-                            ms_raw = 0.0f;
-                        } else {
-                            ms_raw = 1.0f + (excess_px / fmaxf(local_noise_px, 1.0f));
-                            float residual_bonus = (residual_disp_px - motion_tolerance_px) / fmaxf(motion_tolerance_px, 1.0f);
-                            if (residual_bonus > 0.0f) {
-                                if (residual_bonus > 1.5f) residual_bonus = 1.5f;
-                                ms_raw += 0.25f * residual_bonus;
-                            }
-                            ms_raw = 1.0f + ((ms_raw - 1.0f) * neighbor_isolation_scale);
-                        }
+                        metric_value =
+                            sqrtf((float)(best_dx * best_dx + best_dy * best_dy)) * (float)motion_step;
                     } else {
-                        int d = abs((int)curr_luma[my * motion_w + mx] -
-                                    (int)state->prev_luma[py_idx * motion_w + px_idx]);
-                        ms_raw = (float)(((double)d - metric_mean) / metric_std);
+                        metric_value = (float)abs(
+                            (int)curr_luma[my * motion_w + mx] -
+                            (int)state->prev_luma[py_idx * motion_w + px_idx]);
                     }
+                    if (metric_value >= motion_floor_px + global_motion_std) {
+                        strong_global_samples++;
+                    }
+                }
+            }
+        }
+        debug_global_motion_load = global_count > 0
+            ? ((float)strong_global_samples / (float)global_count)
+            : 0.0f;
+        float broad_motion_scale = 1.0f;
+        if (debug_global_motion_load > 0.12f) {
+            broad_motion_scale = 1.0f - ((debug_global_motion_load - 0.12f) / 0.18f);
+            if (broad_motion_scale < 0.20f) broad_motion_scale = 0.20f;
+        }
+        best_motion_zoom_scale = zoom_motion_scale;
+        best_motion_broad_scale = broad_motion_scale;
 
-                    // Motion in near-flat regions is often just codec shimmer,
-                    // stabilization residue, or parallax leftovers with no
-                    // trustworthy local structure behind it. Require at least
-                    // some local luma texture before we trust the motion score.
+        if (result_out != NULL) {
+            result_out->motion_debug.valid = global_count > 0 || motion_candidate_count > 0;
+            result_out->motion_debug.scene_discontinuity = scene_discontinuity;
+            result_out->motion_debug.sample_step = motion_sample_step;
+            result_out->motion_debug.motion_step = motion_step;
+            result_out->motion_debug.sample_count = global_count;
+            result_out->motion_debug.residual_mean = global_motion_mean;
+            result_out->motion_debug.residual_std = global_motion_std;
+            result_out->motion_debug.zoom_motion_scale = zoom_motion_scale;
+            result_out->motion_debug.broad_motion_scale = broad_motion_scale;
+            result_out->motion_debug.global_motion_load = debug_global_motion_load;
+        }
+
+        if (state->motion_persist != NULL) {
+            for (size_t i = 0; i < motion_count; i++) {
+                state->motion_persist[i] *= 0.72f;
+            }
+        }
+
+        for (int ci = 0; ci < motion_candidate_count; ci++) {
+            int cand_mx = clamp_i32(motion_candidates[ci].pixel_x / motion_step, roi_mgx0, roi_mgx1 - 1);
+            int cand_my = clamp_i32(motion_candidates[ci].pixel_y / motion_step, roi_mgy0, roi_mgy1 - 1);
+            float dx_samples[(ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1) * (ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1)];
+            float dy_samples[(ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1) * (ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1)];
+            float mag_samples[(ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1) * (ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1)];
+            int mx_samples[(ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1) * (ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1)];
+            int my_samples[(ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1) * (ANOMALY_MOTION_LOCAL_RADIUS_CELLS * 2 + 1)];
+            int sample_count_local = 0;
+            float local_best_score = -1.0f;
+            int local_best_mx = cand_mx;
+            int local_best_my = cand_my;
+            float local_best_texture_scale = 0.0f;
+            float local_best_structure_scale = 0.0f;
+            float local_best_support_scale = 0.0f;
+            float local_best_registration_scale = 1.0f;
+
+            for (int my = cand_my - ANOMALY_MOTION_LOCAL_RADIUS_CELLS;
+                 my <= cand_my + ANOMALY_MOTION_LOCAL_RADIUS_CELLS; my++) {
+                if (my <= roi_mgy0 || my >= roi_mgy1 - 1) continue;
+                for (int mx = cand_mx - ANOMALY_MOTION_LOCAL_RADIUS_CELLS;
+                     mx <= cand_mx + ANOMALY_MOTION_LOCAL_RADIUS_CELLS; mx++) {
+                    if (mx <= roi_mgx0 || mx >= roi_mgx1 - 1) continue;
+                    int px_idx = 0;
+                    int py_idx = 0;
+                    if (!project_motion_cell(sim, width, height, motion_step, motion_w, motion_h,
+                                             mx, my, &px_idx, &py_idx)) {
+                        continue;
+                    }
+                    float residual_metric = 0.0f;
+                    float sample_dx = 0.0f;
+                    float sample_dy = 0.0f;
+                    if (use_motion_tolerance) {
+                        int best_dx = 0;
+                        int best_dy = 0;
+                        if (!find_residual_motion_displacement(
+                                curr_luma, state->prev_luma, motion_w, motion_h,
+                                mx, my, px_idx, py_idx,
+                                disp_patch_half, disp_search_radius,
+                                &best_dx, &best_dy, NULL)) {
+                            continue;
+                        }
+                        sample_dx = (float)best_dx;
+                        sample_dy = (float)best_dy;
+                        residual_metric =
+                            sqrtf((float)(best_dx * best_dx + best_dy * best_dy)) * (float)motion_step;
+                    } else {
+                        residual_metric = (float)abs(
+                            (int)curr_luma[my * motion_w + mx] -
+                            (int)state->prev_luma[py_idx * motion_w + px_idx]);
+                    }
+                    dx_samples[sample_count_local] = sample_dx;
+                    dy_samples[sample_count_local] = sample_dy;
+                    mag_samples[sample_count_local] = residual_metric;
+                    mx_samples[sample_count_local] = mx;
+                    my_samples[sample_count_local] = my;
+                    sample_count_local++;
+
                     int texture_score = gmv_feature_score(curr_luma, motion_w, motion_h, mx, my);
                     float texture_scale = motion_texture_scale(texture_score);
                     float structure_scale = motion_structure_scale(curr_luma, motion_w, motion_h, mx, my);
-                    float support_scale = texture_scale;
-                    if (structure_scale < support_scale) support_scale = structure_scale;
-                    if (motion_texture_scale_map != NULL) motion_texture_scale_map[map_idx] = texture_scale;
-                    if (motion_structure_scale_map != NULL) motion_structure_scale_map[map_idx] = structure_scale;
-                    if (motion_support_scale_map != NULL) motion_support_scale_map[map_idx] = support_scale;
-                    if (support_scale <= 0.0f) {
-                        ms_raw = 0.0f;
-                    } else if (ms_raw > 1.0f) {
-                        ms_raw = 1.0f + (ms_raw - 1.0f) * support_scale;
-                    }
+                    float support_scale = texture_scale < structure_scale ? texture_scale : structure_scale;
+                    if (support_scale <= 0.0f) continue;
+
                     float registration_scale = 1.0f;
                     float registration_score = registration_residual_standout_score(
                         curr_luma,
@@ -2883,167 +5008,125 @@ int anomaly_process_frame(
                             registration_scale = ANOMALY_REG_RESIDUAL_MIN_SCALE;
                         }
                     }
-                    if (registration_residual_scale_map != NULL) {
-                        registration_residual_scale_map[map_idx] = registration_scale;
-                    }
-                    if (ms_raw > 1.0f) {
-                        ms_raw = 1.0f + (ms_raw - 1.0f) * registration_scale;
-                    } else {
-                        ms_raw *= registration_scale;
-                    }
-                    scored_motion_cells++;
-                    if (ms_raw > 1.5f) {
-                        strong_motion_cells++;
-                    }
 
-                    float ms = ms_raw;
-                    float current_excess = ms_raw > 1.0f ? (ms_raw - 1.0f) : 0.0f;
-                    if (current_excess > 0.0f && state->motion_persist != NULL) {
-                        float prior_support = 0.0f;
-                        for (int ny = my - 1; ny <= my + 1; ny++) {
-                            if (ny < roi_mgy0 || ny >= roi_mgy1) continue;
-                            for (int nx = mx - 1; nx <= mx + 1; nx++) {
-                                if (nx < roi_mgx0 || nx >= roi_mgx1) continue;
-                                float prior = state->motion_persist[ny * motion_w + nx];
-                                if (prior > prior_support) prior_support = prior;
-                            }
-                        }
-                        float persistence_scale;
-                        if (prior_support < 0.08f) {
-                            persistence_scale = 0.45f;
-                        } else if (prior_support < 0.25f) {
-                            persistence_scale = 0.70f;
-                        } else {
-                            persistence_scale = 0.90f + 0.30f * fminf(prior_support, 1.0f);
-                        }
-                        if (motion_persistence_scale_map != NULL) {
-                            motion_persistence_scale_map[map_idx] = persistence_scale;
-                        }
-                        ms = 1.0f + current_excess * persistence_scale;
-                        if (motion_presence_map != NULL) {
-                            float presence = current_excess / 2.5f;
-                            if (presence > 1.0f) presence = 1.0f;
-                            motion_presence_map[map_idx] = presence;
-                        }
-                    }
-                    if (motion_z_map != NULL) {
-                        motion_z_map[map_idx] = ms;
+                    float local_score = residual_metric - motion_floor_px;
+                    if (local_score <= 0.0f) continue;
+                    local_score = 1.0f + (local_score / fmaxf(global_motion_std, 1.0f));
+                    local_score = 1.0f + ((local_score - 1.0f) * support_scale);
+                    local_score = 1.0f + ((local_score - 1.0f) * registration_scale);
+                    if (local_score > local_best_score) {
+                        local_best_score = local_score;
+                        local_best_mx = mx;
+                        local_best_my = my;
+                        local_best_texture_scale = texture_scale;
+                        local_best_structure_scale = structure_scale;
+                        local_best_support_scale = support_scale;
+                        local_best_registration_scale = registration_scale;
                     }
                 }
             }
-            float global_motion_load = scored_motion_cells > 0
-                ? ((float)strong_motion_cells / (float)scored_motion_cells)
-                : 0.0f;
-            debug_global_motion_load = global_motion_load;
-            float broad_motion_scale = 1.0f;
-            if (global_motion_load > 0.12f) {
-                broad_motion_scale = 1.0f - ((global_motion_load - 0.12f) / 0.18f);
-                if (broad_motion_scale < 0.20f) broad_motion_scale = 0.20f;
-            }
-            if (state->motion_persist != NULL) {
-                for (size_t i = 0; i < motion_count; i++) {
-                    float prior = state->motion_persist[i] * 0.72f;
-                    float current = motion_presence_map != NULL ? motion_presence_map[i] : 0.0f;
-                    state->motion_persist[i] = current > prior ? current : prior;
+
+            float candidate_motion_score = -1.0f;
+            if (sample_count_local >= ANOMALY_MOTION_LOCAL_MIN_SAMPLES && local_best_score > 0.0f) {
+                qsort(dx_samples, (size_t)sample_count_local, sizeof(float), compare_float_qsort);
+                qsort(dy_samples, (size_t)sample_count_local, sizeof(float), compare_float_qsort);
+                float median_dx = dx_samples[sample_count_local / 2];
+                float median_dy = dy_samples[sample_count_local / 2];
+                float dev_sum = 0.0f;
+                int strong_local_samples = 0;
+                for (int i = 0; i < sample_count_local; i++) {
+                    float ddx = dx_samples[i] - median_dx;
+                    float ddy = dy_samples[i] - median_dy;
+                    dev_sum += sqrtf(ddx * ddx + ddy * ddy) * (float)motion_step;
+                    if (mag_samples[i] >= motion_floor_px) strong_local_samples++;
                 }
-            }
-            if (motion_z_map != NULL && motion_selection_map != NULL) {
-                build_motion_selection_map(
-                    motion_z_map,
-                    curr_luma,
-                    motion_w,
-                    motion_h,
-                    motion_selection_map,
-                    motion_component_area_frac_map,
-                    motion_component_span_frac_map,
-                    motion_component_fill_ratio_map);
-            }
-            for (int my = roi_mgy0; my < roi_mgy1; my++) {
-                for (int mx = roi_mgx0; mx < roi_mgx1; mx++) {
-                    float ms = (motion_selection_map != NULL)
-                        ? motion_selection_map[my * motion_w + mx]
-                        : -1.0f;
-                    if (ms > 0.0f) {
-                        ms *= broad_motion_scale;
-                        ms *= zoom_motion_scale;
-                        ms *= motion_evidence_scale;
+                float mean_dev = dev_sum / (float)sample_count_local;
+                float coherence_scale = 1.0f - (mean_dev / fmaxf((float)motion_step * 2.5f, 1.0f));
+                coherence_scale = clampf(coherence_scale, 0.20f, 1.0f);
+                float density_scale = clampf((float)strong_local_samples / 6.0f, 0.35f, 1.0f);
+                float proposal_scale = 0.70f +
+                    0.30f * clampf(motion_candidates[ci].proposal_score / 4.0f, 0.0f, 1.0f);
+                candidate_motion_score = local_best_score;
+                candidate_motion_score =
+                    1.0f + ((candidate_motion_score - 1.0f) * coherence_scale * density_scale);
+                candidate_motion_score *= broad_motion_scale;
+                candidate_motion_score *= zoom_motion_scale;
+                candidate_motion_score *= motion_evidence_scale;
+                candidate_motion_score *= proposal_scale;
+                motion_candidate_support[ci] = candidate_motion_score;
+
+                size_t persist_idx = (size_t)local_best_my * (size_t)motion_w + (size_t)local_best_mx;
+                float persistence_scale = 1.0f;
+                if (state->motion_persist != NULL) {
+                    float prior_support = state->motion_persist[persist_idx];
+                    if (prior_support < 0.08f) {
+                        persistence_scale = 0.55f;
+                    } else if (prior_support < 0.25f) {
+                        persistence_scale = 0.80f;
+                    } else {
+                        persistence_scale = 0.95f + (0.25f * fminf(prior_support, 1.0f));
                     }
-                    int pixel_x = mx * motion_step + motion_step / 2;
-                    int pixel_y = my * motion_step + motion_step / 2;
-                    maybe_insert_top_candidate(
-                        motion_top,
-                        &motion_top_count,
-                        ANOMALY_DEBUG_TOP_CANDIDATES,
-                        pixel_x,
-                        pixel_y,
-                        (float)pixel_x / fw_m,
-                        (float)pixel_y / fh_m,
-                        motion_z_map != NULL ? motion_z_map[my * motion_w + mx] : -1.0f,
-                        0.0f,
-                        ms);
-                    if (saliency_motion_map != NULL) {
-                        float motion_support = ms;
-                        if (motion_support > 0.0f) {
-                            if (registration_residual_scale_map != NULL) {
-                                motion_support *= registration_residual_scale_map[my * motion_w + mx];
-                            }
-                            if (motion_support > 4.0f) motion_support = 4.0f;
-                            int sample_x = pixel_x;
-                            int sample_y = pixel_y;
-                            int sal_sx = clamp_i32((sample_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
-                            int sal_sy = clamp_i32((sample_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
-                            float *slot = &saliency_motion_map[sal_sy * sg_w + sal_sx];
-                            if (motion_support > *slot) *slot = motion_support;
-                            if (saliency_registration_map != NULL) {
-                                float *reg_slot = &saliency_registration_map[sal_sy * sg_w + sal_sx];
-                                float reg_scale = registration_residual_scale_map[my * motion_w + mx];
-                                if (reg_scale < *reg_slot) *reg_slot = reg_scale;
-                            }
-                        }
-                    }
-                    if ((use_stable_motion || use_motion_tolerance) &&
-                        ms > best_motion) {
-                        best_motion   = ms;
-                        best_motion_x = pixel_x;
-                        best_motion_y = pixel_y;
-                        best_motion_texture_scale = motion_texture_scale_map != NULL ? motion_texture_scale_map[my * motion_w + mx] : 0.0f;
-                        best_motion_structure_scale = motion_structure_scale_map != NULL ? motion_structure_scale_map[my * motion_w + mx] : 0.0f;
-                        best_motion_support_scale = motion_support_scale_map != NULL ? motion_support_scale_map[my * motion_w + mx] : 0.0f;
-                        best_motion_persistence_scale = motion_persistence_scale_map != NULL ? motion_persistence_scale_map[my * motion_w + mx] : 1.0f;
-                        best_motion_component_area_frac = motion_component_area_frac_map != NULL ? motion_component_area_frac_map[my * motion_w + mx] : 0.0f;
-                        best_motion_component_span_frac = motion_component_span_frac_map != NULL ? motion_component_span_frac_map[my * motion_w + mx] : 0.0f;
-                        best_motion_component_fill_ratio = motion_component_fill_ratio_map != NULL ? motion_component_fill_ratio_map[my * motion_w + mx] : 0.0f;
-                        best_motion_zoom_scale = zoom_motion_scale;
-                        best_motion_broad_scale = broad_motion_scale;
+                    candidate_motion_score =
+                        1.0f + ((candidate_motion_score - 1.0f) * persistence_scale);
+                    float current_presence =
+                        clampf((candidate_motion_score - 1.0f) / 2.5f, 0.0f, 1.0f);
+                    if (current_presence > state->motion_persist[persist_idx]) {
+                        state->motion_persist[persist_idx] = current_presence;
                     }
                 }
+
+                int pixel_x = local_best_mx * motion_step + motion_step / 2;
+                int pixel_y = local_best_my * motion_step + motion_step / 2;
+                motion_candidate_support_x[ci] = pixel_x;
+                motion_candidate_support_y[ci] = pixel_y;
+                maybe_insert_top_candidate(
+                    motion_top,
+                    &motion_top_count,
+                    ANOMALY_DEBUG_TOP_CANDIDATES,
+                    pixel_x,
+                    pixel_y,
+                    (float)pixel_x / fw_m,
+                    (float)pixel_y / fh_m,
+                    motion_candidates[ci].proposal_score,
+                    0.0f,
+                    candidate_motion_score);
+                if (saliency_motion_map != NULL) {
+                    int sal_sx = clamp_i32((pixel_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                    int sal_sy = clamp_i32((pixel_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                    float motion_support = candidate_motion_score;
+                    if (motion_support > 4.0f) motion_support = 4.0f;
+                    stamp_motion_support(
+                        saliency_motion_map,
+                        saliency_registration_map,
+                        sg_w,
+                        sg_h,
+                        sal_sx,
+                        sal_sy,
+                        motion_support,
+                        local_best_registration_scale);
+                }
+                if ((use_stable_motion || use_motion_tolerance) && candidate_motion_score > best_motion) {
+                    best_motion = candidate_motion_score;
+                    best_motion_x = pixel_x;
+                    best_motion_y = pixel_y;
+                    best_motion_texture_scale = local_best_texture_scale;
+                    best_motion_structure_scale = local_best_structure_scale;
+                    best_motion_support_scale = local_best_support_scale;
+                    best_motion_persistence_scale = persistence_scale;
+                }
             }
-            free(motion_z_map);
-            free(motion_selection_map);
-            free(motion_presence_map);
-            free(motion_texture_scale_map);
-            free(motion_structure_scale_map);
-            free(motion_support_scale_map);
-            free(motion_persistence_scale_map);
-            free(motion_component_area_frac_map);
-            free(motion_component_span_frac_map);
-            free(motion_component_fill_ratio_map);
-            free(registration_residual_scale_map);
         }
-        free(motion_dx_map);
-        free(motion_dy_map);
-        free(motion_mag_map);
-        free(motion_valid_map);
-        free(region_dx_field);
-        free(region_dy_field);
-        free(region_jitter_field);
-        free(region_valid_field);
     }
 
     if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
         size_t score_count = (size_t)sg_w * (size_t)sg_h;
-        float *patch_score_map = (float *)malloc(score_count * sizeof(float));
-        float *patch_selection_map = (float *)malloc(score_count * sizeof(float));
+        float *patch_score_map = NULL;
+        float *patch_selection_map = NULL;
+        if (ensure_float_capacity(&state->scratch_patch_score, &state->scratch_patch_capacity, score_count) &&
+            ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, score_count)) {
+            patch_score_map = state->scratch_patch_score;
+            patch_selection_map = state->scratch_patch_selection;
+        }
         if (patch_score_map != NULL && patch_selection_map != NULL) {
             memset(saliency_top, 0, sizeof(saliency_top));
             saliency_top_count = 0;
@@ -3158,20 +5241,24 @@ int anomaly_process_frame(
                     sg_w, sg_h,
                     roi_x0, roi_y0, sample_step,
                     &best_persist, &best_persist_x, &best_persist_y);
-            free(patch_selection_map);
-            free(patch_score_map);
-        } else {
-            free(patch_selection_map);
-            free(patch_score_map);
         }
     }
 
     // ── Update prev_luma ────────────────────��────────────────────────────
     if (curr_luma != NULL) {
-        if (state->prev_luma != NULL) free(state->prev_luma);
-        state->prev_luma        = curr_luma;
-        state->prev_luma_width  = motion_w;
-        state->prev_luma_height = motion_h;
+        if (ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
+            memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
+            state->prev_luma_width  = motion_w;
+            state->prev_luma_height = motion_h;
+        } else {
+            if (state->prev_luma != NULL) {
+                free(state->prev_luma);
+                state->prev_luma = NULL;
+            }
+            state->prev_luma_capacity = 0;
+            state->prev_luma_width  = 0;
+            state->prev_luma_height = 0;
+        }
     }
 
     // ── Update per-algorithm accumulators ────────────────────────────────
@@ -3180,6 +5267,19 @@ int anomaly_process_frame(
 
     float raw_cx[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
     float raw_cy[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+    int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
+    float saliency_aux_raw_cx[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    float saliency_aux_raw_cy[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    float saliency_aux_local_cx[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    float saliency_aux_local_cy[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    float saliency_aux_local_score[ANOMALY_SALIENCY_EXTRA_TRACKS];
+    for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
+        saliency_aux_raw_cx[i] = -1.0f;
+        saliency_aux_raw_cy[i] = -1.0f;
+        saliency_aux_local_cx[i] = -1.0f;
+        saliency_aux_local_cy[i] = -1.0f;
+        saliency_aux_local_score[i] = -1.0f;
+    }
     if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_COLOR)   && best_color   >= cfg->score_threshold) {
         raw_cx[0] = (float)best_color_x   / fw;
         raw_cy[0] = (float)best_color_y   / fh;
@@ -3199,13 +5299,210 @@ int anomaly_process_frame(
         best_persist >= cfg->score_threshold) {
         raw_cx[3] = (float)best_persist_x / fw;
         raw_cy[3] = (float)best_persist_y / fh;
+        int best_persist_sx = clamp_i32((best_persist_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+        int best_persist_sy = clamp_i32((best_persist_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+        state->saliency_display_algorithm = classify_saliency_display_algorithm(
+                saliency_spatial_map,
+                saliency_color_map,
+                saliency_motion_map,
+                saliency_registration_map,
+                state->bg_luma,
+                sg_luma,
+                sg_w,
+                sg_h,
+                best_persist_sx,
+                best_persist_sy,
+                bg_valid,
+                black_hot,
+                thermal_min_delta,
+                delta_mean,
+                delta_norm);
+        if (state->scratch_patch_selection != NULL) {
+            for (int ti = 0; ti < ANOMALY_SALIENCY_EXTRA_TRACKS; ti++) {
+                find_saliency_local_support(
+                        state,
+                        ti,
+                        state->scratch_patch_selection,
+                        sg_w,
+                        sg_h,
+                        roi_x0,
+                        roi_y0,
+                        sample_step,
+                        width,
+                        height,
+                        &saliency_aux_local_cx[ti],
+                        &saliency_aux_local_cy[ti],
+                        &saliency_aux_local_score[ti]);
+            }
+        }
+        int aux_count = 0;
+        for (int ci = 0; ci < saliency_top_count && aux_count < ANOMALY_SALIENCY_EXTRA_TRACKS; ci++) {
+            const anomaly_debug_candidate_t *candidate = &saliency_top[ci];
+            if (!candidate->valid || candidate->combined_score < cfg->score_threshold) continue;
+            float dx_primary = candidate->x_norm - raw_cx[3];
+            float dy_primary = candidate->y_norm - raw_cy[3];
+            float primary_dist = sqrtf(dx_primary * dx_primary + dy_primary * dy_primary);
+            if (primary_dist < ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION) continue;
+
+            bool supports_existing_track = false;
+            for (int ti = 0; ti < ANOMALY_SALIENCY_EXTRA_TRACKS; ti++) {
+                if (!state->saliency_aux_active[ti] || state->saliency_aux_hits[ti] < min_hits) continue;
+                float dx_track = candidate->x_norm - state->saliency_aux_cx[ti];
+                float dy_track = candidate->y_norm - state->saliency_aux_cy[ti];
+                float track_dist = sqrtf(dx_track * dx_track + dy_track * dy_track);
+                if (track_dist <= ANOMALY_SALIENCY_SECONDARY_TRACK_REACQUIRE_GATE) {
+                    supports_existing_track = true;
+                    break;
+                }
+            }
+            if (!supports_existing_track &&
+                candidate->combined_score + ANOMALY_SALIENCY_SECONDARY_SCORE_MARGIN < best_persist) {
+                continue;
+            }
+            if (supports_existing_track &&
+                candidate->combined_score + ANOMALY_SALIENCY_SECONDARY_TRACKED_SCORE_MARGIN < best_persist) {
+                continue;
+            }
+
+            bool too_close_to_aux = false;
+            for (int aj = 0; aj < aux_count; aj++) {
+                float dx_aux = candidate->x_norm - saliency_aux_raw_cx[aj];
+                float dy_aux = candidate->y_norm - saliency_aux_raw_cy[aj];
+                float aux_dist = sqrtf(dx_aux * dx_aux + dy_aux * dy_aux);
+                if (aux_dist < ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION) {
+                    too_close_to_aux = true;
+                    break;
+                }
+            }
+            if (too_close_to_aux) continue;
+            saliency_aux_raw_cx[aux_count] = candidate->x_norm;
+            saliency_aux_raw_cy[aux_count] = candidate->y_norm;
+            int aux_px = clamp_i32((int)lroundf(candidate->x_norm * fw), roi_x0, roi_x0 + (sg_w - 1) * sample_step);
+            int aux_py = clamp_i32((int)lroundf(candidate->y_norm * fh), roi_y0, roi_y0 + (sg_h - 1) * sample_step);
+            int aux_sx = clamp_i32((aux_px - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+            int aux_sy = clamp_i32((aux_py - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+            state->saliency_aux_display_algorithm[aux_count] = classify_saliency_display_algorithm(
+                    saliency_spatial_map,
+                    saliency_color_map,
+                    saliency_motion_map,
+                    saliency_registration_map,
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    aux_sx,
+                    aux_sy,
+                    bg_valid,
+                    black_hot,
+                    thermal_min_delta,
+                    delta_mean,
+                    delta_norm);
+            aux_count++;
+        }
+        for (int ti = 0; ti < ANOMALY_SALIENCY_EXTRA_TRACKS && aux_count < ANOMALY_SALIENCY_EXTRA_TRACKS; ti++) {
+            if (!state->saliency_aux_active[ti] || state->saliency_aux_hits[ti] < min_hits) continue;
+            if (saliency_aux_local_score[ti] < cfg->score_threshold - ANOMALY_SALIENCY_SECONDARY_LOCAL_THRESHOLD_SLACK) {
+                continue;
+            }
+            float x_norm = saliency_aux_local_cx[ti];
+            float y_norm = saliency_aux_local_cy[ti];
+            if (x_norm < 0.0f || y_norm < 0.0f) continue;
+            float dx_primary = x_norm - raw_cx[3];
+            float dy_primary = y_norm - raw_cy[3];
+            float primary_dist = sqrtf(dx_primary * dx_primary + dy_primary * dy_primary);
+            if (primary_dist < ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION) continue;
+
+            bool too_close_to_aux = false;
+            for (int aj = 0; aj < aux_count; aj++) {
+                float dx_aux = x_norm - saliency_aux_raw_cx[aj];
+                float dy_aux = y_norm - saliency_aux_raw_cy[aj];
+                if (sqrtf(dx_aux * dx_aux + dy_aux * dy_aux) < ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION) {
+                    too_close_to_aux = true;
+                    break;
+                }
+            }
+            if (too_close_to_aux) continue;
+            saliency_aux_raw_cx[aux_count] = x_norm;
+            saliency_aux_raw_cy[aux_count] = y_norm;
+            int aux_px = clamp_i32((int)lroundf(x_norm * fw), roi_x0, roi_x0 + (sg_w - 1) * sample_step);
+            int aux_py = clamp_i32((int)lroundf(y_norm * fh), roi_y0, roi_y0 + (sg_h - 1) * sample_step);
+            int aux_sx = clamp_i32((aux_px - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+            int aux_sy = clamp_i32((aux_py - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+            state->saliency_aux_display_algorithm[aux_count] = classify_saliency_display_algorithm(
+                    saliency_spatial_map,
+                    saliency_color_map,
+                    saliency_motion_map,
+                    saliency_registration_map,
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    aux_sx,
+                    aux_sy,
+                    bg_valid,
+                    black_hot,
+                    thermal_min_delta,
+                    delta_mean,
+                    delta_norm);
+            aux_count++;
+        }
+    } else {
+        state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
+        for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
+            state->saliency_aux_display_algorithm[i] = ANOMALY_ALGO_PERSIST;
+        }
+    }
+
+    if (motion_candidate_count > 0) {
+        for (int ci = 0; ci < motion_candidate_count; ci++) {
+            float motion_support = motion_candidate_support[ci];
+            if (motion_support <= 1.0f) continue;
+            float motion_excess = motion_support - 1.0f;
+            int boosted_x = motion_candidate_support_x[ci] != 0 || motion_candidate_support_y[ci] != 0
+                ? motion_candidate_support_x[ci]
+                : motion_candidates[ci].pixel_x;
+            int boosted_y = motion_candidate_support_x[ci] != 0 || motion_candidate_support_y[ci] != 0
+                ? motion_candidate_support_y[ci]
+                : motion_candidates[ci].pixel_y;
+
+            if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && motion_candidates[ci].thermal_score > 0.0f) {
+                int sx = clamp_i32(motion_candidates[ci].sg_x, 0, sg_w - 1);
+                int sy = clamp_i32(motion_candidates[ci].sg_y, 0, sg_h - 1);
+                float thermal_base = motion_candidates[ci].thermal_score;
+                if (bg_valid) {
+                    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                    float bg = state->bg_luma[idx];
+                    float lum = (float)sg_luma[idx];
+                    float delta = black_hot ? (bg - lum) : (lum - bg);
+                    if (delta >= thermal_min_delta) {
+                        float temporal_score = (float)((delta - delta_mean) / delta_norm);
+                        if (temporal_score > thermal_base) thermal_base = temporal_score;
+                    }
+                }
+                float boosted_thermal = thermal_base + (ANOMALY_THERMAL_MOTION_BOOST * motion_excess);
+                if (boosted_thermal > best_thermal) {
+                    best_thermal = boosted_thermal;
+                    best_thermal_x = boosted_x;
+                    best_thermal_y = boosted_y;
+                }
+            }
+
+            if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 && motion_candidates[ci].color_score > 0.0f) {
+                float color_base = motion_candidates[ci].color_score + 2.0f;
+                float boosted_color = color_base + (ANOMALY_COLOR_MOTION_BOOST * motion_excess);
+                if (boosted_color > best_color) {
+                    best_color = boosted_color;
+                    best_color_x = boosted_x;
+                    best_color_y = boosted_y;
+                }
+            }
+        }
     }
 
     bool saliency_acc_pre_active = state->acc_active[3];
     int saliency_acc_pre_hits = state->acc_hits[3];
     float saliency_acc_pre_x = state->acc_cx[3];
     float saliency_acc_pre_y = state->acc_cy[3];
-    int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
 
     float gate  = ANOMALY_ACC_GATE_RADIUS;
     float alpha = ANOMALY_ACC_EMA_ALPHA;
@@ -3283,6 +5580,15 @@ int anomaly_process_frame(
             state->acc_presence_mask[ai] = prior_presence;
         }
     }
+    for (int ti = 0; ti < ANOMALY_SALIENCY_EXTRA_TRACKS; ti++) {
+        update_saliency_aux_track(
+                state,
+                ti,
+                saliency_aux_raw_cx[ti],
+                saliency_aux_raw_cy[ti],
+                gate * 0.90f,
+                alpha);
+    }
 
     // ── Assemble and draw boxes ─────────────────────��─────────────────��──
     anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
@@ -3295,6 +5601,39 @@ int anomaly_process_frame(
                 motion_box_algorithm,
                 boxes,
                 ANOMALY_MAX_BOXES_PER_FRAME);
+    }
+    anomaly_box_t overlay_boxes[ANOMALY_MAX_OVERLAY_BOXES];
+    int overlay_box_count = 0;
+    for (int i = 0; i < box_count && i < ANOMALY_MAX_OVERLAY_BOXES; i++) {
+        overlay_boxes[overlay_box_count++] = boxes[i];
+    }
+    if (cfg->show_candidate_blobs && anomaly_detection_active) {
+        for (int ci = 0; ci < thermal_candidate_count && overlay_box_count < ANOMALY_MAX_OVERLAY_BOXES; ci++) {
+            if (thermal_candidate_quality_score[ci] <= 0.0f) continue;
+            int min_x = thermal_candidate_min_x[ci];
+            int min_y = thermal_candidate_min_y[ci];
+            int max_x = thermal_candidate_max_x[ci];
+            int max_y = thermal_candidate_max_y[ci];
+            if (max_x < min_x || max_y < min_y) continue;
+            int expand_px = sample_step > 1 ? (sample_step / 2) : 1;
+            float left = ((float)(roi_x0 + min_x * sample_step - expand_px)) / (float)fw;
+            float top = ((float)(roi_y0 + min_y * sample_step - expand_px)) / (float)fh;
+            float right = ((float)(roi_x0 + (max_x + 1) * sample_step + expand_px)) / (float)fw;
+            float bottom = ((float)(roi_y0 + (max_y + 1) * sample_step + expand_px)) / (float)fh;
+            append_anomaly_rect(
+                    overlay_boxes,
+                    &overlay_box_count,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    0xFF, 0xB0, 0x40,
+                    0.35f + 0.20f * clampf(thermal_candidate_quality_score[ci], 0.0f, 1.0f),
+                    false);
+            if (overlay_box_count > 0) {
+                overlay_boxes[overlay_box_count - 1].algorithm = ANOMALY_ALGO_THERMAL;
+            }
+        }
     }
 
     if (result_out != NULL) {
@@ -3347,18 +5686,10 @@ int anomaly_process_frame(
         if (show_hot_overlay) {
             draw_hot_overlay_rgba(rgba, rgba_stride, width, height, cfg->thermal_polarity);
         }
-        if (box_count > 0) {
-            draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, boxes, box_count);
+        if (overlay_box_count > 0) {
+            draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, overlay_boxes, overlay_box_count);
         }
     }
-
-    free(saliency_motion_map);
-    free(saliency_color_map);
-    free(saliency_registration_map);
-    free(saliency_spatial_map);
-    free(sg_luma);
-    free(ii_sum);
-    free(ii_sum2);
 
     return box_count;
 }

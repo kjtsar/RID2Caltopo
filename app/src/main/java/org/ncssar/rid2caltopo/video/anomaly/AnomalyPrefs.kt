@@ -6,6 +6,7 @@ object AnomalyPrefs {
     private const val PREFS_NAME = "anomaly_prefs"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_SHOW_HOT_OVERLAY = "show_hot_overlay"
+    private const val KEY_SHOW_CANDIDATE_BLOBS = "show_candidate_blobs"
     private const val KEY_ALGORITHMS = "algorithms"
     private const val KEY_APPEARANCE_SELECTION = "appearance_selection"
     private const val KEY_FRAME_STRIDE = "frame_stride"
@@ -35,6 +36,7 @@ object AnomalyPrefs {
         return AnomalyConfig(
             enabled = prefs.getBoolean(KEY_ENABLED, defaults.enabled),
             showHotOverlay = prefs.getBoolean(KEY_SHOW_HOT_OVERLAY, defaults.showHotOverlay),
+            showCandidateBlobs = prefs.getBoolean(KEY_SHOW_CANDIDATE_BLOBS, defaults.showCandidateBlobs),
             algorithms = algorithms,
             appearanceSelection = appearanceSelection,
             frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 8),
@@ -58,6 +60,7 @@ object AnomalyPrefs {
             .edit()
             .putBoolean(KEY_ENABLED, normalized.enabled)
             .putBoolean(KEY_SHOW_HOT_OVERLAY, normalized.showHotOverlay)
+            .putBoolean(KEY_SHOW_CANDIDATE_BLOBS, normalized.showCandidateBlobs)
             .putStringSet(KEY_ALGORITHMS, normalized.algorithms.map { it.name }.toSet())
             .putString(KEY_APPEARANCE_SELECTION, normalized.appearanceSelection.name)
             .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 8))

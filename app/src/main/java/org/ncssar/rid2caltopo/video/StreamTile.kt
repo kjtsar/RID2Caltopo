@@ -91,6 +91,7 @@ fun StreamTile(
     var showAnomalySettingsDialog by remember { mutableStateOf(false) }
     var showSensitivityDialog by remember { mutableStateOf(false) }
     var showScanZoneDialog by remember { mutableStateOf(false) }
+    var showAdHelpDialog by remember { mutableStateOf(false) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
 
     // Keep the altitude coordinator active while this tile is on screen.
@@ -128,6 +129,15 @@ fun StreamTile(
     val currentFrameAnnotations = viewModel.localPlaybackFrameAnnotations(streamDesignator, currentFrameTimestampUs)
     val currentFrameAnnotationSummary = viewModel.localPlaybackFrameAnnotationSummary(streamDesignator, currentFrameTimestampUs)
     val currentFrameCounterText = if (isLocalPlayback) viewModel.localPlaybackFrameCounterText(streamDesignator) else null
+    val showLocalPlaybackLegendControls = isLocalPlayback && anomalyConfig.enabled
+    val showAnomalyReviewLegendControls = isLocalPlayback && anomalyConfig.enabled
+    val showAnomalyLegendControls = anomalyConfig.enabled
+
+    LaunchedEffect(anomalyConfig.enabled) {
+        if (!anomalyConfig.enabled) {
+            pendingAnnotationPoint = null
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -187,7 +197,7 @@ fun StreamTile(
                     }
                 }
             }
-            if (isLocalPlaybackPaused && currentFrameTimestampUs != null) {
+            if (anomalyConfig.enabled && isLocalPlaybackPaused && currentFrameTimestampUs != null) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -312,6 +322,51 @@ fun StreamTile(
                     expanded = anomalyMenuExpanded,
                     onDismissRequest = { anomalyMenuExpanded = false }
                 ) {
+                    if (isLocalPlayback) {
+                        DropdownMenuItem(
+                            text = { Text("Clear Review Annotations") },
+                            onClick = {
+                                anomalyMenuExpanded = false
+                                viewModel.clearLocalPlaybackReviewAnnotations(streamDesignator)
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("Anomaly Detector Settings") },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            showAnomalySettingsDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Reset AD Controls to Realtime Defaults") },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            viewModel.resetAnomalyRealtimeDefaults(streamDesignator)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("AD Help") },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            showAdHelpDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (anomalyConfig.enabled) {
+                                    "Anomaly Detection: On (tap to turn Off)"
+                                } else {
+                                    "Anomaly Detection: Off (tap to turn On)"
+                                }
+                            )
+                        },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            viewModel.toggleAnomalyEnabled(streamDesignator)
+                        }
+                    )
                     DropdownMenuItem(
                         text = { Text("Close Stream") },
                         onClick = {
@@ -330,161 +385,202 @@ fun StreamTile(
                     }
                 }
             }
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(6.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (isLocalPlayback) {
-                    currentFrameCounterText?.let { frameText ->
+            if (showAnomalyLegendControls) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(6.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (showLocalPlaybackLegendControls) {
+                        currentFrameCounterText?.let { frameText ->
+                            Text(
+                                text = frameText,
+                                color = Color.White,
+                                fontSize = 11.sp,
+                            )
+                        }
                         Text(
-                            text = frameText,
+                            text = "Back",
                             color = Color.White,
                             fontSize = 11.sp,
-                        )
-                    }
-                    Text(
-                        text = "Back",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        modifier = Modifier.pointerInput(streamDesignator) {
-                            detectTapGestures(onTap = { viewModel.stepLocalPlaybackBack(streamDesignator) })
-                        }
-                    )
-                    Text(
-                        text = if (isLocalPlaybackPaused) "Run" else "Pause",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        modifier = Modifier.pointerInput(streamDesignator, isLocalPlaybackPaused) {
-                            detectTapGestures(onTap = { viewModel.toggleLocalPlaybackPaused(streamDesignator) })
-                        }
-                    )
-                    Text(
-                        text = "Step",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        modifier = Modifier.pointerInput(streamDesignator) {
-                            detectTapGestures(onTap = { viewModel.stepLocalPlaybackFrame(streamDesignator) })
-                        }
-                    )
-                    if (isLocalPlaybackPaused) {
-                        Text(
-                            text = "Dialog",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                        )
-                    }
-                    Text(
-                        text = currentFrameAnnotationSummary ?: "0 notes",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                    )
-                }
-                Text(
-                    text = if (anomalyConfig.enabled) "AD On" else "AD Off",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.enabled) {
-                        detectTapGestures(onTap = { viewModel.toggleAnomalyEnabled(streamDesignator) })
-                    }
-                )
-                Text(
-                    text = "Sens ${anomalyConfig.sensitivityLabel}",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.sensitivity) {
-                        detectTapGestures(onTap = { showSensitivityDialog = true })
-                    }
-                )
-                Text(
-                    text = "Zone ${anomalyConfig.scanZoneLabel}",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.scanZone) {
-                        detectTapGestures(onTap = { showScanZoneDialog = true })
-                    }
-                )
-                Text(
-                    text = "Hits ${anomalyConfig.minHits}",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.minHits) {
-                        detectTapGestures(onTap = { viewModel.cycleMinHits(streamDesignator) })
-                    }
-                )
-                Text(
-                    text = "Stride ${anomalyConfig.frameStride}x",
-                    color = Color.White,
-                    fontSize = 11.sp
-                )
-                Text(
-                    text = "Detail ${anomalyConfig.pixelStepLabel}",
-                    color = Color.White,
-                    fontSize = 11.sp
-                )
-                Text(
-                    text = if (anomalyConfig.showHotOverlay) "ShowHot On" else "ShowHot Off",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.showHotOverlay) {
-                        detectTapGestures(onTap = { viewModel.toggleShowHotOverlay(streamDesignator) })
-                    }
-                )
-                if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) {
-                    Text(
-                        text = "Mot ${anomalyConfig.motionEvidenceSensitivityLabel}",
-                        color = Color.White,
-                        fontSize = 11.sp
-                    )
-                }
-                when (resolvedAppearanceMode) {
-                    AppearanceAnomalyMode.Thermal -> {
-                        val thermalShortLabel = when (anomalyConfig.thermalPolarity) {
-                            org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.WhiteHot -> "WH"
-                            org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.BlackHot -> "BH"
-                        }
-                        OutlinedLegendText(
-                            text = "Thermal ($thermalShortLabel)",
-                            fillColor = Color.Red,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
-                                detectTapGestures(onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) })
+                            modifier = Modifier.pointerInput(streamDesignator) {
+                                detectTapGestures(onTap = { viewModel.stepLocalPlaybackBack(streamDesignator) })
                             }
                         )
-                    }
-                    AppearanceAnomalyMode.Color -> {
-                        OutlinedLegendText(
-                            text = "Color Outlier",
-                            fillColor = Color.Blue,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-                if (anomalyConfig.resolvedAlgorithms(viewModel.resolvedAppearanceModeFor(streamDesignator)).contains(AnomalyAlgorithm.Motion)) {
-                    if (anomalyConfig.enabled) {
-                        OutlinedLegendText(
-                            text = "Motion",
-                            fillColor = Color.Green,
-                            fontSize = 11.sp
-                        )
-                    } else {
                         Text(
-                            text = "Motion Off",
+                            text = if (isLocalPlaybackPaused) "Run" else "Pause",
                             color = Color.White,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, isLocalPlaybackPaused) {
+                                detectTapGestures(onTap = { viewModel.toggleLocalPlaybackPaused(streamDesignator) })
+                            }
                         )
+                        Text(
+                            text = "Step",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator) {
+                                detectTapGestures(onTap = { viewModel.stepLocalPlaybackFrame(streamDesignator) })
+                            }
+                        )
+                        if (showAnomalyReviewLegendControls) {
+                            Text(
+                                text = currentFrameAnnotationSummary ?: "0 notes",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                            )
+                        }
                     }
-                } else {
-                    Text(
-                        text = "Motion Off",
-                        color = Color.White,
-                        fontSize = 11.sp
-                    )
+                    if (showAnomalyLegendControls) {
+                        Text(
+                            text = "Sens ${anomalyConfig.sensitivityLabel}",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.sensitivity) {
+                                detectTapGestures(onTap = { showSensitivityDialog = true })
+                            }
+                        )
+                        Text(
+                            text = "Zone ${anomalyConfig.scanZoneLabel}",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.scanZone) {
+                                detectTapGestures(onTap = { showScanZoneDialog = true })
+                            }
+                        )
+                        Text(
+                            text = "Hits ${anomalyConfig.minHits}",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.minHits) {
+                                detectTapGestures(onTap = { viewModel.cycleMinHits(streamDesignator) })
+                            }
+                        )
+                        Text(
+                            text = "Stride ${anomalyConfig.frameStride}x",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.frameStride) {
+                                detectTapGestures(onTap = { viewModel.cycleAnomalyFrameStride(streamDesignator) })
+                            }
+                        )
+                        Text(
+                            text = "Detail ${anomalyConfig.pixelStepLabel}",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.pixelStep) {
+                                detectTapGestures(onTap = { viewModel.cycleAnomalyPixelStep(streamDesignator) })
+                            }
+                        )
+                        Text(
+                            text = if (anomalyConfig.showHotOverlay) "ShowHot On" else "ShowHot Off",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.showHotOverlay) {
+                                detectTapGestures(onTap = { viewModel.toggleShowHotOverlay(streamDesignator) })
+                            }
+                        )
+                        Text(
+                            text = if (anomalyConfig.showCandidateBlobs) "Blobs On" else "Blobs Off",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.showCandidateBlobs) {
+                                detectTapGestures(onTap = { viewModel.toggleShowCandidateBlobs(streamDesignator) })
+                            }
+                        )
+                        if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) {
+                            Text(
+                                text = "Motion ${anomalyConfig.motionEvidenceSensitivityLabel}",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.motionEvidenceSensitivity) {
+                                    detectTapGestures(onTap = { viewModel.cycleMotionEvidenceSensitivity(streamDesignator) })
+                                }
+                            )
+                        }
+                        when (resolvedAppearanceMode) {
+                            AppearanceAnomalyMode.Thermal -> {
+                                val thermalShortLabel = when (anomalyConfig.thermalPolarity) {
+                                    org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.WhiteHot -> "WH"
+                                    org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.BlackHot -> "BH"
+                                }
+                                OutlinedLegendText(
+                                    text = "Thermal",
+                                    fillColor = Color.Red,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.pointerInput(streamDesignator) {
+                                        detectTapGestures(
+                                            onTap = {
+                                                viewModel.setAppearanceAnomalySelection(
+                                                    streamDesignator,
+                                                    AppearanceAnomalySelection.Color
+                                                )
+                                            }
+                                        )
+                                    }
+                                )
+                                Text(
+                                    text = thermalShortLabel,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
+                                        detectTapGestures(
+                                            onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }
+                                        )
+                                    }
+                                )
+                            }
+                            AppearanceAnomalyMode.Color -> {
+                                OutlinedLegendText(
+                                    text = "Color Outlier",
+                                    fillColor = Color.Blue,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.pointerInput(streamDesignator) {
+                                        detectTapGestures(
+                                            onTap = {
+                                                viewModel.setAppearanceAnomalySelection(
+                                                    streamDesignator,
+                                                    AppearanceAnomalySelection.Thermal
+                                                )
+                                            }
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                        if (anomalyConfig.resolvedAlgorithms(viewModel.resolvedAppearanceModeFor(streamDesignator)).contains(AnomalyAlgorithm.Motion)) {
+                            OutlinedLegendText(
+                                text = "Motion",
+                                fillColor = Color.Green,
+                                fontSize = 11.sp,
+                                modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.algorithms) {
+                                    detectTapGestures(
+                                        onTap = {
+                                            viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
+                                        }
+                                    )
+                                }
+                            )
+                        } else {
+                            Text(
+                                text = "Motion Off",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.algorithms) {
+                                    detectTapGestures(
+                                        onTap = {
+                                            viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
                 }
             }
             if (showSensitivityDialog) {
@@ -682,6 +778,16 @@ fun StreamTile(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Text("Show Candidate Blobs")
+                                TextButton(onClick = { viewModel.toggleShowCandidateBlobs(streamDesignator) }) {
+                                    Text(if (anomalyConfig.showCandidateBlobs) "On" else "Off")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text("Thermal Palette")
                                 TextButton(onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }) {
                                     Text(anomalyConfig.thermalPolarity.label)
@@ -760,6 +866,46 @@ fun StreamTile(
                     }
                 )
             }
+            if (showAdHelpDialog) {
+                val helpScroll = rememberScrollState()
+                AlertDialog(
+                    onDismissRequest = { showAdHelpDialog = false },
+                    title = { Text("Anomaly Detection Help") },
+                    text = {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(helpScroll),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Legend controls")
+                            Text("Sens: Detection sensitivity. Lower values are stricter and require a stronger outlier before drawing a box.")
+                            Text("Zone: Centered portion of the frame scanned for anomalies. Lower values ignore more of the outer frame.")
+                            Text("Hits: Consecutive analyzed-frame hits required in roughly the same motion-stabilized region before a detection is promoted.")
+                            Text("Stride: Analyze every Nth frame. Higher stride reduces CPU load but may miss brief motion.")
+                            Text("Detail: Pixel sampling step for appearance analysis. Auto chooses a default from frame size; smaller steps inspect more detail at higher cost.")
+                            Text("ShowHot: Draws a red ring around the hottest region in the frame as a thermal debug aid.")
+                            Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
+                            Text("Thermal (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
+                            Text("Motion badge: Indicates whether the motion detector is currently part of the active anomaly stack.")
+                            if (isLocalPlayback) {
+                                Text("Playback review controls")
+                                Text("Back: Step backward through the recent paused-frame history.")
+                                Text("Run/Pause: Resume or freeze captured-video playback.")
+                                Text("Step: Advance forward one frame while paused.")
+                                Text("Notes: Number of annotations saved for the held frame.")
+                                Text("Tap on a paused frame while AD is on to open an annotation dialog for that frame point.")
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showAdHelpDialog = false }) {
+                            Text("Close")
+                        }
+                    }
+                )
+            }
         }
         DesignatorIndicator(
             streamDesignator = streamDesignator,
@@ -818,7 +964,7 @@ fun StreamTile(
                 onDismiss = {showPicker = false}
             )
         }
-        if (isLocalPlayback && isLocalPlaybackPaused && pendingAnnotationPoint != null && currentFrameTimestampUs != null) {
+        if (anomalyConfig.enabled && isLocalPlayback && isLocalPlaybackPaused && pendingAnnotationPoint != null && currentFrameTimestampUs != null) {
             LocalPlaybackAnnotationDialog(
                 initialPoint = pendingAnnotationPoint!!,
                 onDismiss = { pendingAnnotationPoint = null },

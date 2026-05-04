@@ -197,6 +197,7 @@ internal const val MAP_CACHE_PREFS_NAME = "map_cache"
 internal const val MAP_CACHE_PREWARM_SIG_KEY = "prewarm_signature_v1"
 internal const val OSM_TILE_DOWNLOAD_THREADS: Short = 1
 internal const val OSM_TILE_DOWNLOAD_MAX_QUEUE: Short = 1000
+internal const val OSM_OFFLINE_PREP_REQUEST_DELAY_MS = 1_250L
 internal const val TILE_FS_THREADS: Short = 4
 internal const val TILE_FS_MAX_QUEUE: Short = 2000
 internal const val TILE_IO_ACTIVE_GRACE_MS = 2_000L
@@ -444,6 +445,18 @@ internal object OsmStandardTileSource : OnlineTileSourceBase(
 
 internal fun osmUserAgent(): String =
     "RID2Caltopo v${BuildConfig.VERSION_NAME} (contact: kjtsar@kjt.us)"
+
+internal fun buildOfflineTileRequest(
+    tileSource: OnlineTileSourceBase,
+    url: String
+): Request {
+    val builder = Request.Builder().url(url)
+    if (tileSource.name() == OsmStandardTileSource.name()) {
+        val cfg = Configuration.getInstance()
+        builder.header(cfg.userAgentHttpHeader, cfg.userAgentValue)
+    }
+    return builder.build()
+}
 
 internal fun configureOsmdroid(context: Context) {
     val cfg = Configuration.getInstance()
@@ -1202,7 +1215,7 @@ internal fun SplitMapPane(
                             var failureDetail = ""
                             val ok = try {
                                 val url = onlineTileSource.getTileURLString(tileIndex)
-                                val req = Request.Builder().url(url).build()
+                                val req = buildOfflineTileRequest(onlineTileSource, url)
                                 val call = offlineHttpClient.newCall(req)
                                 offlinePrepActiveCalls += call
                                 try {
@@ -1234,6 +1247,9 @@ internal fun SplitMapPane(
                             } catch (e: Exception) {
                                 failureDetail = "ex=${e.javaClass.simpleName} z=$z x=$x y=$y source=${tileSource.name()}"
                                 false
+                            }
+                            if (isOsmDownload) {
+                                delay(OSM_OFFLINE_PREP_REQUEST_DELAY_MS)
                             }
                             if (ok) {
                                 fetched.incrementAndGet()
@@ -3160,19 +3176,20 @@ internal fun SplitMapPane(
                             )
                             Text("Include DEM tiles (USGS 1° GeoTIFF, ~25–54 MB/tile)")
                         }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(
-                                checked = offlinePrepMaxThroughput,
-                                onCheckedChange = { if (!offlinePrepInFlight) offlinePrepMaxThroughput = it },
-                                enabled = !offlinePrepInFlight && !maximizeThroughputBlockedForOsm
-                            )
-                            Text(if (maximizeThroughputBlockedForOsm) "Maximize throughput (Imagery only)" else "Maximize throughput")
-                        }
                         if (maximizeThroughputBlockedForOsm) {
                             Text(
-                                "OpenStreetMap downloads are allowed, but Maximize throughput is disabled to comply with OSM tile server usage policy.",
+                                "OpenStreetMap offline prep uses a conservative single-request mode with the app's OSM user agent.",
                                 fontSize = 11.sp
                             )
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = offlinePrepMaxThroughput,
+                                    onCheckedChange = { if (!offlinePrepInFlight) offlinePrepMaxThroughput = it },
+                                    enabled = !offlinePrepInFlight
+                                )
+                                Text("Maximize throughput")
+                            }
                         }
                         Text(
                             if (offlinePrepEstimateRunning || !offlinePrepEstimate.ready) {

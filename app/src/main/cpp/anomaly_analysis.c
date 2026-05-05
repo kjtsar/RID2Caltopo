@@ -44,6 +44,10 @@
 #define ANOMALY_THERMAL_MAX_BLOB_AREA_SAMPLES 24
 #define ANOMALY_THERMAL_BLOB_OVERLAY_SCORE_MARGIN 0.28f
 #define ANOMALY_PUBLISH_BG_SETTLE_FRAMES 24
+#define ANOMALY_PUBLISH_STABLE_RELEASE_FRAMES 4
+#define ANOMALY_PUBLISH_STABLE_GMV_RESIDUAL 0.0035f
+#define ANOMALY_PUBLISH_STABLE_MOTION_LOAD 0.025f
+#define ANOMALY_PUBLISH_STABLE_ZOOM_SCALE 0.92f
 #define ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES 6
 #define ANOMALY_PUBLISH_UNSTABLE_HOLDOFF_FRAMES 3
 #define ANOMALY_PUBLISH_GMV_RESIDUAL_GATE 0.010f
@@ -3778,6 +3782,7 @@ void anomaly_state_reset(anomaly_state_t *state) {
     state->bg_sg_h  = 0;
     state->bg_warmup = 0;
     state->publish_hold_frames = 0;
+    state->publish_stable_frames = 0;
     if (state->thermal_target_persist != NULL) {
         free(state->thermal_target_persist);
         state->thermal_target_persist = NULL;
@@ -3854,9 +3859,12 @@ int anomaly_process_frame(
     int frame_stride = cfg->frame_stride < 1 ? 1 : cfg->frame_stride;
     float thermal_min_delta = effective_thermal_min_delta(cfg);
     state->frame_counter += 1;
-    bool bg_publish_ready = (state->bg_luma != NULL &&
-                             state->bg_warmup >= (ANOMALY_THERMAL_BG_WARMUP + ANOMALY_PUBLISH_BG_SETTLE_FRAMES) &&
-                             state->bg_sg_w > 0 && state->bg_sg_h > 0);
+    bool bg_temporal_ready = (state->bg_luma != NULL &&
+                              state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP &&
+                              state->bg_sg_w > 0 && state->bg_sg_h > 0);
+    bool bg_publish_ready = bg_temporal_ready &&
+                            (state->bg_warmup >= (ANOMALY_THERMAL_BG_WARMUP + ANOMALY_PUBLISH_BG_SETTLE_FRAMES) ||
+                             state->publish_stable_frames >= ANOMALY_PUBLISH_STABLE_RELEASE_FRAMES);
     bool transition_warmup_block =
         (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0 &&
         cfg->min_hits > 1 &&
@@ -4823,6 +4831,7 @@ int anomaly_process_frame(
         state->bg_sg_w  = sg_w;
         state->bg_sg_h  = sg_h;
         state->bg_warmup = 0;
+        state->publish_stable_frames = 0;
         if (state->bg_luma) {
             for (int i = 0; i < sg_w * sg_h; i++)
                 state->bg_luma[i] = (float)sg_luma[i];
@@ -5872,6 +5881,24 @@ int anomaly_process_frame(
         sim.valid &&
         (sim.mean_residual > ANOMALY_PUBLISH_GMV_RESIDUAL_GATE ||
          best_motion_zoom_scale < ANOMALY_PUBLISH_ZOOM_SCALE_GATE);
+    bool publish_scene_stable =
+        !scene_discontinuity &&
+        bg_temporal_ready &&
+        (!sim.valid || sim.mean_residual <= ANOMALY_PUBLISH_STABLE_GMV_RESIDUAL) &&
+        best_motion_zoom_scale >= ANOMALY_PUBLISH_STABLE_ZOOM_SCALE &&
+        debug_global_motion_load <= ANOMALY_PUBLISH_STABLE_MOTION_LOAD;
+    if (scene_discontinuity) {
+        state->publish_stable_frames = 0;
+    } else if (publish_scene_stable) {
+        if (state->publish_stable_frames < ANOMALY_PUBLISH_STABLE_RELEASE_FRAMES) {
+            state->publish_stable_frames++;
+        }
+    } else if (state->publish_stable_frames > 0 &&
+               (publish_motion_unstable ||
+                !bg_temporal_ready ||
+                debug_global_motion_load > ANOMALY_PUBLISH_STABLE_MOTION_LOAD * 2.0f)) {
+        state->publish_stable_frames = 0;
+    }
     if (scene_discontinuity) {
         if (state->publish_hold_frames < ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES) {
             state->publish_hold_frames = ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES;

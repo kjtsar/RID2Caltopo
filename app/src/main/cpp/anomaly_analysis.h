@@ -199,6 +199,7 @@ typedef struct {
     int      thermal_target_persist_w;
     int      thermal_target_persist_h;
     int      publish_hold_frames;
+    int      publish_stable_frames;
     float    saliency_aux_cx[ANOMALY_SALIENCY_EXTRA_TRACKS];
     float    saliency_aux_cy[ANOMALY_SALIENCY_EXTRA_TRACKS];
     int      saliency_aux_hits[ANOMALY_SALIENCY_EXTRA_TRACKS];

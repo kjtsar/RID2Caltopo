@@ -220,6 +220,8 @@ typedef struct {
     float   *scratch_patch_score;
     float   *scratch_patch_selection;
     size_t   scratch_patch_capacity;
+    int     *scratch_i32;
+    size_t   scratch_i32_capacity;
 } anomaly_state_t;
 
 typedef struct {

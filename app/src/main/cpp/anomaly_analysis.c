@@ -23,7 +23,7 @@
 #define ANOMALY_SALIENCY_RING_SOFT_SCALE 1.35f
 #define ANOMALY_SALIENCY_RING_HARD_SCALE 0.18f
 #define ANOMALY_SALIENCY_PLATEAU_SUPPORT 6
-#define ANOMALY_MAX_MOTION_CANDIDATES 3
+#define ANOMALY_MAX_MOTION_CANDIDATES 4
 #define ANOMALY_MAX_OVERLAY_BOXES 8
 #define ANOMALY_MOTION_CANDIDATE_NMS_RADIUS 2
 #define ANOMALY_MOTION_LOCAL_RADIUS_CELLS 2
@@ -38,9 +38,11 @@
 #define ANOMALY_THERMAL_REPRESENTATIVE_RADIUS 5
 #define ANOMALY_THERMAL_REPRESENTATIVE_MIN_AREA 6
 #define ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS 8
-#define ANOMALY_THERMAL_TARGET_HISTORY_RADIUS 1
-#define ANOMALY_THERMAL_TARGET_HISTORY_DECAY 0.84f
-#define ANOMALY_THERMAL_TARGET_HISTORY_GAIN 0.34f
+#define ANOMALY_THERMAL_TARGET_HISTORY_RADIUS 2
+#define ANOMALY_THERMAL_TARGET_HISTORY_DECAY 0.90f
+#define ANOMALY_THERMAL_TARGET_HISTORY_GAIN 0.60f
+#define ANOMALY_THERMAL_MAX_BLOB_AREA_SAMPLES 24
+#define ANOMALY_THERMAL_BLOB_OVERLAY_SCORE_MARGIN 0.28f
 #define ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION 0.070f
 #define ANOMALY_SALIENCY_SECONDARY_SCORE_MARGIN 1.20f
 #define ANOMALY_SALIENCY_SECONDARY_TRACKED_SCORE_MARGIN 2.10f
@@ -94,6 +96,17 @@ static bool ensure_double_capacity(double **buffer, size_t *capacity, size_t cou
     if (count == 0) return true;
     if (*buffer != NULL && *capacity >= count) return true;
     double *grown = (double *)realloc(*buffer, count * sizeof(double));
+    if (grown == NULL) return false;
+    *buffer = grown;
+    *capacity = count;
+    return true;
+}
+
+static bool ensure_int_capacity(int **buffer, size_t *capacity, size_t count) {
+    if (buffer == NULL || capacity == NULL) return false;
+    if (count == 0) return true;
+    if (*buffer != NULL && *capacity >= count) return true;
+    int *grown = (int *)realloc(*buffer, count * sizeof(int));
     if (grown == NULL) return false;
     *buffer = grown;
     *capacity = count;
@@ -247,6 +260,376 @@ typedef struct {
     float thermal_score;
     float color_score;
 } anomaly_motion_candidate_t;
+
+typedef struct {
+    anomaly_motion_candidate_t candidate;
+    float area;
+    float span;
+    float fill;
+    float center_share;
+    float quality;
+    float peak_delta;
+    float mean_delta;
+    int min_x;
+    int min_y;
+    int max_x;
+    int max_y;
+} anomaly_thermal_blob_candidate_t;
+
+static int compare_thermal_blob_rank(
+        const anomaly_thermal_blob_candidate_t *lhs,
+        const anomaly_thermal_blob_candidate_t *rhs) {
+    if (lhs == NULL && rhs == NULL) return 0;
+    if (lhs == NULL) return 1;
+    if (rhs == NULL) return -1;
+
+    if (lhs->area < rhs->area) return -1;
+    if (lhs->area > rhs->area) return 1;
+
+    if (lhs->span < rhs->span) return -1;
+    if (lhs->span > rhs->span) return 1;
+
+    if (lhs->candidate.thermal_score > rhs->candidate.thermal_score) return -1;
+    if (lhs->candidate.thermal_score < rhs->candidate.thermal_score) return 1;
+
+    if (lhs->peak_delta > rhs->peak_delta) return -1;
+    if (lhs->peak_delta < rhs->peak_delta) return 1;
+
+    if (lhs->quality > rhs->quality) return -1;
+    if (lhs->quality < rhs->quality) return 1;
+
+    return 0;
+}
+
+static void insert_thermal_blob_candidate(
+        anomaly_thermal_blob_candidate_t *top,
+        int *top_count,
+        const anomaly_thermal_blob_candidate_t *candidate) {
+    if (top == NULL || top_count == NULL || candidate == NULL) return;
+    int insert_at = *top_count;
+    for (int i = 0; i < *top_count; i++) {
+        int ddx = abs(top[i].candidate.sg_x - candidate->candidate.sg_x);
+        int ddy = abs(top[i].candidate.sg_y - candidate->candidate.sg_y);
+        if (ddx <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS &&
+            ddy <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS) {
+            if (compare_thermal_blob_rank(candidate, &top[i]) < 0) {
+                top[i] = *candidate;
+            }
+            return;
+        }
+        if (compare_thermal_blob_rank(candidate, &top[i]) < 0) {
+            insert_at = i;
+            break;
+        }
+    }
+    if (insert_at >= ANOMALY_MAX_MOTION_CANDIDATES) return;
+
+    int move_limit = *top_count < ANOMALY_MAX_MOTION_CANDIDATES
+        ? *top_count
+        : (ANOMALY_MAX_MOTION_CANDIDATES - 1);
+    for (int i = move_limit; i > insert_at; i--) {
+        top[i] = top[i - 1];
+    }
+    if (*top_count < ANOMALY_MAX_MOTION_CANDIDATES) (*top_count)++;
+    top[insert_at] = *candidate;
+}
+
+static void extract_thermal_blob_candidates(
+        const float *thermal_score_map,
+        const float *bg_luma,
+        const double *sg_luma,
+        int          sg_w,
+        int          sg_h,
+        int          roi_x0,
+        int          roi_y0,
+        int          sample_step,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta,
+        float        frame_contrast_mean,
+        float        frame_contrast_std,
+        uint8_t     *visited,
+        int         *queue,
+        float       *thermal_value_map,
+        float       *candidate_seed_map,
+        anomaly_thermal_blob_candidate_t *out_candidates,
+        int         *out_count) {
+    if (out_count != NULL) *out_count = 0;
+    if (thermal_score_map == NULL || thermal_value_map == NULL || candidate_seed_map == NULL ||
+        visited == NULL || queue == NULL || out_candidates == NULL || out_count == NULL ||
+        sg_w <= 0 || sg_h <= 0) {
+        return;
+    }
+
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    memset(visited, 0, sg_count * sizeof(uint8_t));
+    for (size_t i = 0; i < sg_count; i++) {
+        candidate_seed_map[i] = -1.0f;
+        float score = thermal_score_map[i];
+        if (score <= 0.0f) {
+            thermal_value_map[i] = -1.0f;
+            continue;
+        }
+        if (bg_valid && bg_luma != NULL && sg_luma != NULL) {
+            float delta = black_hot
+                ? (bg_luma[i] - (float)sg_luma[i])
+                : ((float)sg_luma[i] - bg_luma[i]);
+            thermal_value_map[i] = delta >= thermal_min_delta ? delta : -1.0f;
+        } else {
+            thermal_value_map[i] = score;
+        }
+    }
+
+    float contrast_band = frame_contrast_mean + 1.25f * frame_contrast_std;
+    if (contrast_band < 0.8f) contrast_band = 0.8f;
+
+    for (int sy = 0; sy < sg_h; sy++) {
+        for (int sx = 0; sx < sg_w; sx++) {
+            size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (visited[seed_idx] != 0u) continue;
+            float seed_delta = thermal_value_map[seed_idx];
+            if (seed_delta <= 0.0f) continue;
+
+            float local_band = contrast_band;
+            float max_band = fmaxf(2.0f, seed_delta * 0.34f);
+            if (local_band > max_band) local_band = max_band;
+
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = (int)seed_idx;
+            visited[seed_idx] = 1u;
+
+            int area = 0;
+            int min_x = sx, max_x = sx, min_y = sy, max_y = sy;
+            double sum_delta = 0.0;
+            double sum_score = 0.0;
+            float peak_delta = seed_delta;
+            float peak_score = thermal_score_map[seed_idx];
+            int peak_x = sx;
+            int peak_y = sy;
+
+            while (head < tail) {
+                int cur = queue[head++];
+                int cx = cur % sg_w;
+                int cy = cur / sg_w;
+                float cur_delta = thermal_value_map[cur];
+                float cur_score = thermal_score_map[cur];
+                if (cur_delta <= 0.0f) continue;
+
+                area++;
+                sum_delta += (double)cur_delta;
+                sum_score += (double)cur_score;
+                if (cx < min_x) min_x = cx;
+                if (cx > max_x) max_x = cx;
+                if (cy < min_y) min_y = cy;
+                if (cy > max_y) max_y = cy;
+                if (cur_score > peak_score || (cur_score == peak_score && cur_delta > peak_delta)) {
+                    peak_score = cur_score;
+                    peak_delta = cur_delta;
+                    peak_x = cx;
+                    peak_y = cy;
+                }
+
+                for (int oy = -1; oy <= 1; oy++) {
+                    for (int ox = -1; ox <= 1; ox++) {
+                        if (ox == 0 && oy == 0) continue;
+                        int nx = cx + ox;
+                        int ny = cy + oy;
+                        if (nx < 0 || nx >= sg_w || ny < 0 || ny >= sg_h) continue;
+                        size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+                        if (visited[nidx] != 0u) continue;
+                        float ndelta = thermal_value_map[nidx];
+                        if (ndelta <= 0.0f) continue;
+                        float blob_mean = area > 0 ? (float)(sum_delta / (double)area) : seed_delta;
+                        float blob_band = fmaxf(local_band * 1.10f, seed_delta * 0.28f);
+                        if (fabsf(ndelta - cur_delta) > local_band &&
+                            fabsf(ndelta - blob_mean) > blob_band) {
+                            continue;
+                        }
+                        visited[nidx] = 1u;
+                        queue[tail++] = (int)nidx;
+                    }
+                }
+            }
+
+            if (area <= 0) continue;
+
+            int span_w = max_x - min_x + 1;
+            int span_h = max_y - min_y + 1;
+            int bbox_area = span_w * span_h;
+            float fill = bbox_area > 0 ? ((float)area / (float)bbox_area) : 0.0f;
+            float span = (float)(span_w > span_h ? span_w : span_h);
+            float span_px = span * (float)(sample_step > 0 ? sample_step : 1);
+            float mean_delta = (float)(sum_delta / (double)area);
+            float center_share = sum_delta > 0.0 ? (peak_delta / (float)sum_delta) : 0.0f;
+            float peakiness = (peak_delta - mean_delta) / fmaxf(local_band, 1.0f);
+
+            float ring_threshold = fmaxf(thermal_min_delta, mean_delta * 0.55f);
+            int ring_total = 0;
+            int ring_hot = 0;
+            int side_total[4] = {0, 0, 0, 0};
+            int side_hot[4] = {0, 0, 0, 0};
+            for (int gy = min_y - 1; gy <= max_y + 1; gy++) {
+                if (gy < 0 || gy >= sg_h) continue;
+                for (int gx = min_x - 1; gx <= max_x + 1; gx++) {
+                    if (gx < 0 || gx >= sg_w) continue;
+                    bool inside_bbox =
+                        gx >= min_x && gx <= max_x &&
+                        gy >= min_y && gy <= max_y;
+                    if (inside_bbox) continue;
+                    bool touches_ring =
+                        gx >= min_x - 1 && gx <= max_x + 1 &&
+                        gy >= min_y - 1 && gy <= max_y + 1;
+                    if (!touches_ring) continue;
+                    ring_total++;
+                    size_t ridx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                    float ring_delta = thermal_value_map[ridx];
+                    bool ring_is_hot = ring_delta >= ring_threshold;
+                    if (ring_is_hot) ring_hot++;
+
+                    if (gx == min_x - 1) {
+                        side_total[0]++;
+                        if (ring_is_hot) side_hot[0]++;
+                    }
+                    if (gx == max_x + 1) {
+                        side_total[1]++;
+                        if (ring_is_hot) side_hot[1]++;
+                    }
+                    if (gy == min_y - 1) {
+                        side_total[2]++;
+                        if (ring_is_hot) side_hot[2]++;
+                    }
+                    if (gy == max_y + 1) {
+                        side_total[3]++;
+                        if (ring_is_hot) side_hot[3]++;
+                    }
+                }
+            }
+
+            float ring_hot_fraction = ring_total > 0 ? ((float)ring_hot / (float)ring_total) : 0.0f;
+            float max_side_hot_fraction = 0.0f;
+            for (int si = 0; si < 4; si++) {
+                if (side_total[si] <= 0) continue;
+                float side_fraction = (float)side_hot[si] / (float)side_total[si];
+                if (side_fraction > max_side_hot_fraction) max_side_hot_fraction = side_fraction;
+            }
+
+            int support_radius = span <= 2.0f ? 2 : (span <= 4.0f ? 3 : 4);
+            float support_threshold = fmaxf(thermal_min_delta, mean_delta * 0.42f);
+            int support_total = 0;
+            int support_hot = 0;
+            int support_near_total = 0;
+            int support_near_hot = 0;
+            for (int gy = min_y - support_radius; gy <= max_y + support_radius; gy++) {
+                if (gy < 0 || gy >= sg_h) continue;
+                for (int gx = min_x - support_radius; gx <= max_x + support_radius; gx++) {
+                    if (gx < 0 || gx >= sg_w) continue;
+                    bool inside_bbox =
+                        gx >= min_x && gx <= max_x &&
+                        gy >= min_y && gy <= max_y;
+                    if (inside_bbox) continue;
+
+                    int dx_to_blob = 0;
+                    if (gx < min_x) dx_to_blob = min_x - gx;
+                    else if (gx > max_x) dx_to_blob = gx - max_x;
+                    int dy_to_blob = 0;
+                    if (gy < min_y) dy_to_blob = min_y - gy;
+                    else if (gy > max_y) dy_to_blob = gy - max_y;
+                    int chebyshev = dx_to_blob > dy_to_blob ? dx_to_blob : dy_to_blob;
+                    if (chebyshev <= 0 || chebyshev > support_radius) continue;
+
+                    support_total++;
+                    size_t sidx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                    float support_delta = thermal_value_map[sidx];
+                    bool support_is_hot = support_delta >= support_threshold;
+                    if (support_is_hot) support_hot++;
+                    if (chebyshev <= 2) {
+                        support_near_total++;
+                        if (support_is_hot) support_near_hot++;
+                    }
+                }
+            }
+
+            float support_hot_fraction = support_total > 0 ? ((float)support_hot / (float)support_total) : 0.0f;
+            float support_mass_ratio = area > 0 ? ((float)support_hot / (float)area) : 0.0f;
+            float support_near_fraction = support_near_total > 0
+                ? ((float)support_near_hot / (float)support_near_total)
+                : 0.0f;
+
+            if (bg_valid && area > ANOMALY_THERMAL_MAX_BLOB_AREA_SAMPLES) continue;
+            if (bg_valid && ring_hot_fraction >= 0.22f) continue;
+            if (bg_valid && max_side_hot_fraction >= 0.60f) continue;
+            if (bg_valid &&
+                support_mass_ratio >= 1.85f &&
+                support_hot_fraction >= 0.14f &&
+                support_near_fraction >= 0.18f) {
+                continue;
+            }
+            if (bg_valid &&
+                support_mass_ratio >= 2.40f &&
+                support_near_fraction >= 0.12f) {
+                continue;
+            }
+
+            float area_scale;
+            if (area <= 1) area_scale = 1.05f;
+            else if (area <= 4) area_scale = 1.18f;
+            else if (area <= 8) area_scale = 0.92f;
+            else if (area <= 12) area_scale = 0.48f;
+            else area_scale = 0.14f;
+
+            float span_scale;
+            if (span_px <= 3.0f) span_scale = 1.18f;
+            else if (span_px <= 6.0f) span_scale = 1.00f;
+            else if (span_px <= 9.0f) span_scale = 0.60f;
+            else if (span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX) span_scale = 0.28f;
+            else span_scale = 0.10f;
+
+            float fill_scale = clampf(0.55f + 0.70f * fill, 0.45f, 1.15f);
+            float center_scale = clampf(0.72f + 0.62f * center_share, 0.55f, 1.18f);
+            float peak_scale = clampf(0.85f + 0.18f * peakiness, 0.70f, 1.18f);
+            float context_scale = 1.0f;
+            if (bg_valid) {
+                float context_penalty =
+                    0.55f * clampf((support_mass_ratio - 0.55f) / 1.35f, 0.0f, 1.0f) +
+                    0.25f * clampf((support_hot_fraction - 0.05f) / 0.20f, 0.0f, 1.0f) +
+                    0.20f * clampf((support_near_fraction - 0.05f) / 0.25f, 0.0f, 1.0f);
+                context_scale = 1.0f - 0.72f * clampf(context_penalty, 0.0f, 1.0f);
+            }
+            float quality = area_scale * span_scale * fill_scale * center_scale * peak_scale * context_scale;
+            if (span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX && area >= 8) {
+                quality *= 0.18f;
+            }
+            quality = clampf(quality, 0.0f, 1.35f);
+            if (quality <= 0.0f) continue;
+
+            anomaly_thermal_blob_candidate_t candidate;
+            memset(&candidate, 0, sizeof(candidate));
+            candidate.candidate.sg_x = peak_x;
+            candidate.candidate.sg_y = peak_y;
+            candidate.candidate.pixel_x = roi_x0 + peak_x * sample_step;
+            candidate.candidate.pixel_y = roi_y0 + peak_y * sample_step;
+            candidate.candidate.proposal_score = peak_score;
+            candidate.candidate.thermal_score = peak_score;
+            candidate.candidate.color_score = 0.0f;
+            candidate.area = (float)area;
+            candidate.span = span;
+            candidate.fill = fill;
+            candidate.center_share = center_share;
+            candidate.quality = quality;
+            candidate.peak_delta = peak_delta;
+            candidate.mean_delta = mean_delta;
+            candidate.min_x = min_x;
+            candidate.min_y = min_y;
+            candidate.max_x = max_x;
+            candidate.max_y = max_y;
+
+            candidate_seed_map[(size_t)peak_y * (size_t)sg_w + (size_t)peak_x] =
+                candidate.candidate.proposal_score;
+            insert_thermal_blob_candidate(out_candidates, out_count, &candidate);
+        }
+    }
+}
 
 static void collect_motion_candidates(
         const float *thermal_map,
@@ -1315,6 +1698,11 @@ static float thermal_candidate_quality(
         float       *span_out,
         float       *fill_out,
         float       *center_share_out) {
+    (void)delta_mean;
+    (void)delta_norm;
+    (void)representative_delta_ratio;
+    (void)representative_delta_std;
+
     if (bbox_min_x_out != NULL) *bbox_min_x_out = sx;
     if (bbox_min_y_out != NULL) *bbox_min_y_out = sy;
     if (bbox_max_x_out != NULL) *bbox_max_x_out = sx;
@@ -1346,201 +1734,82 @@ static float thermal_candidate_quality(
     int local_count = local_w * local_h;
     if (local_count <= 0) return 0.15f;
 
-    float threshold = center * 0.65f;
-    if (threshold < 0.8f) threshold = 0.8f;
-    if (threshold > center) threshold = center;
-
     bool use_raw_delta = (bg_valid && bg_luma != NULL && sg_luma != NULL);
     float seed_delta = 0.0f;
-    float delta_threshold = thermal_min_delta;
+    float min_delta = thermal_min_delta;
     float frame_contrast_band = 0.0f;
-    float shell_delta_mean = 0.0f;
-    float shell_delta_std = 0.0f;
-    float shell_contrast_threshold = 0.0f;
-    float shell_peak_mean = 0.0f;
-    float shell_peak_ratio = 0.0f;
-    float local_delta_mean = 0.0f;
-    float local_delta_std = 0.0f;
-    float local_delta_ratio = 0.0f;
+    float score_threshold = center * 0.28f;
+    float seed_neighbor_peak = 0.0f;
+    float seed_prominence = center;
+    float required_prominence = 0.0f;
+    float peakiness_scale = 1.0f;
+    if (score_threshold < 0.25f) score_threshold = 0.25f;
+    if (score_threshold > center) score_threshold = center;
     if (use_raw_delta) {
         size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
         float bg = bg_luma[seed_idx];
         float lum = (float)sg_luma[seed_idx];
         seed_delta = black_hot ? (bg - lum) : (lum - bg);
-        if (seed_delta < thermal_min_delta) {
+        if (seed_delta < thermal_min_delta || center <= 0.0f) {
             use_raw_delta = false;
         } else {
-            int shell_outer_radius = growth_radius_cells < 5 ? growth_radius_cells : 5;
-            int shell_inner_radius = shell_outer_radius > 2 ? 2 : 1;
-            double shell_sum = 0.0;
-            double shell_sum2 = 0.0;
-            int shell_count_delta = 0;
-            float shell_top1 = 0.0f;
-            float shell_top2 = 0.0f;
-            float shell_top3 = 0.0f;
-            float shell_top4 = 0.0f;
-            for (int gy = clamp_i32(sy - shell_outer_radius, 0, sg_h - 1);
-                 gy <= clamp_i32(sy + shell_outer_radius, 0, sg_h - 1);
-                 gy++) {
-                for (int gx = clamp_i32(sx - shell_outer_radius, 0, sg_w - 1);
-                     gx <= clamp_i32(sx + shell_outer_radius, 0, sg_w - 1);
-                     gx++) {
-                    int ring = abs(gx - sx);
-                    int dy = abs(gy - sy);
-                    if (dy > ring) ring = dy;
-                    if (ring < shell_inner_radius || ring > shell_outer_radius) continue;
-                    size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-                    float nbg = bg_luma[idx];
-                    float nlum = (float)sg_luma[idx];
-                    float ndelta = black_hot ? (nbg - nlum) : (nlum - nbg);
-                    if (ndelta <= 0.0f) continue;
-                    shell_sum += (double)ndelta;
-                    shell_sum2 += (double)ndelta * (double)ndelta;
-                    shell_count_delta++;
-                    if (ndelta > shell_top1) {
-                        shell_top4 = shell_top3;
-                        shell_top3 = shell_top2;
-                        shell_top2 = shell_top1;
-                        shell_top1 = ndelta;
-                    } else if (ndelta > shell_top2) {
-                        shell_top4 = shell_top3;
-                        shell_top3 = shell_top2;
-                        shell_top2 = ndelta;
-                    } else if (ndelta > shell_top3) {
-                        shell_top4 = shell_top3;
-                        shell_top3 = ndelta;
-                    } else if (ndelta > shell_top4) {
-                        shell_top4 = ndelta;
-                    }
-                }
+            frame_contrast_band = frame_contrast_mean + 1.25f * frame_contrast_std;
+            if (frame_contrast_band < 0.8f) frame_contrast_band = 0.8f;
+            {
+                float max_frame_band = fmaxf(1.4f, seed_delta * 0.18f);
+                if (frame_contrast_band > max_frame_band) frame_contrast_band = max_frame_band;
             }
-            if (shell_count_delta > 0) {
-                shell_delta_mean = (float)(shell_sum / (double)shell_count_delta);
-                float shell_var = shell_count_delta > 1
-                    ? (float)fmax(shell_sum2 / (double)shell_count_delta -
-                                  (double)shell_delta_mean * (double)shell_delta_mean, 0.0)
-                    : 0.0f;
-                shell_delta_std = sqrtf(shell_var);
-                float shell_peak_sum = shell_top1;
-                int shell_peak_count = shell_top1 > 0.0f ? 1 : 0;
-                if (shell_top2 > 0.0f) { shell_peak_sum += shell_top2; shell_peak_count++; }
-                if (shell_top3 > 0.0f) { shell_peak_sum += shell_top3; shell_peak_count++; }
-                if (shell_top4 > 0.0f) { shell_peak_sum += shell_top4; shell_peak_count++; }
-                if (shell_peak_count > 0) {
-                    shell_peak_mean = shell_peak_sum / (float)shell_peak_count;
-                    shell_peak_ratio = shell_peak_mean / fmaxf(seed_delta, 1.0f);
-                }
-            }
-            double local_sum = 0.0;
-            double local_sum2 = 0.0;
-            int local_count_delta = 0;
-            int local_delta_radius = 2;
-            for (int gy = clamp_i32(sy - local_delta_radius, 0, sg_h - 1);
-                 gy <= clamp_i32(sy + local_delta_radius, 0, sg_h - 1);
-                 gy++) {
-                for (int gx = clamp_i32(sx - local_delta_radius, 0, sg_w - 1);
-                     gx <= clamp_i32(sx + local_delta_radius, 0, sg_w - 1);
-                     gx++) {
-                    if (gx == sx && gy == sy) continue;
-                    int ring = abs(gx - sx);
-                    int dy = abs(gy - sy);
-                    if (dy > ring) ring = dy;
-                    if (ring > local_delta_radius) continue;
-                    size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-                    float nbg = bg_luma[idx];
-                    float nlum = (float)sg_luma[idx];
-                    float ndelta = black_hot ? (nbg - nlum) : (nlum - nbg);
-                    if (ndelta <= 0.0f) continue;
-                    local_sum += (double)ndelta;
-                    local_sum2 += (double)ndelta * (double)ndelta;
-                    local_count_delta++;
-                }
-            }
-            if (local_count_delta > 0) {
-                local_delta_mean = (float)(local_sum / (double)local_count_delta);
-                float local_var = local_count_delta > 1
-                    ? (float)fmax(local_sum2 / (double)local_count_delta -
-                                  (double)local_delta_mean * (double)local_delta_mean, 0.0)
-                    : 0.0f;
-                local_delta_std = sqrtf(local_var);
-                local_delta_ratio = local_delta_mean / fmaxf(seed_delta, 1.0f);
-            }
-            float seed_margin = seed_delta - thermal_min_delta;
-            float local_noise = fmaxf(local_delta_std, (float)delta_norm * 0.35f);
-            float local_prominence = seed_delta - local_delta_mean;
-            float local_prominence_scale = local_prominence / fmaxf(local_noise, 1.0f);
-            float noise_ratio = (float)delta_norm / fmaxf(seed_delta, 1.0f);
-            float frame_mean_ratio = (float)delta_mean / fmaxf(seed_delta, 1.0f);
-            float representative_ratio = clampf(representative_delta_ratio, 0.0f, 1.0f);
-            float representative_noise = fmaxf(representative_delta_std, local_noise);
-            float shell_ratio = shell_delta_mean / fmaxf(seed_delta, 1.0f);
-            frame_contrast_band = frame_contrast_mean + 1.35f * frame_contrast_std;
-            float max_frame_band = fmaxf(1.5f, seed_delta * 0.28f);
-            if (frame_contrast_band > max_frame_band) frame_contrast_band = max_frame_band;
-            if (frame_contrast_band < 0.9f) frame_contrast_band = 0.9f;
-            float retain_fraction = 0.81f
-                + 0.08f * representative_ratio
-                + 0.05f * clampf(noise_ratio, 0.0f, 1.0f)
-                + 0.04f * clampf(frame_mean_ratio, 0.0f, 1.0f)
-                + 0.02f * clampf(local_delta_ratio, 0.0f, 1.0f)
-                + 0.03f * clampf(shell_ratio, 0.0f, 1.0f)
-                + 0.04f * clampf(shell_peak_ratio, 0.0f, 1.0f)
-                + 0.04f * clampf(1.0f - (local_prominence_scale / 3.0f), 0.0f, 1.0f);
-            retain_fraction = clampf(retain_fraction, 0.81f, 0.94f);
-            float frame_floor = fmaxf(
-                thermal_min_delta,
-                (float)delta_mean + 0.25f * (float)delta_norm);
-            if (local_delta_mean > 0.0f) {
-                float local_floor = local_delta_mean + 0.40f * representative_noise;
-                if (local_floor > frame_floor) frame_floor = local_floor;
-            }
-            if (representative_ratio > 0.0f) {
-                float representative_floor = seed_delta * fminf(representative_ratio + 0.06f, 0.94f);
-                if (representative_floor > frame_floor) frame_floor = representative_floor;
-            }
-            if (shell_delta_mean > 0.0f) {
-                float shell_floor = shell_delta_mean + 0.45f * fmaxf(shell_delta_std, representative_noise * 0.65f);
-                if (shell_floor > frame_floor) frame_floor = shell_floor;
-                if (shell_peak_mean > 0.0f) {
-                    float shell_peak_floor = shell_peak_mean + 0.20f * fmaxf(shell_delta_std, representative_noise * 0.55f);
-                    if (shell_peak_floor > frame_floor) frame_floor = shell_peak_floor;
-                }
-                float seed_shell_contrast = seed_delta - shell_delta_mean;
-                float contrast_fraction = 0.32f
-                    + 0.18f * clampf(shell_ratio, 0.0f, 1.0f)
-                    + 0.10f * clampf(representative_ratio, 0.0f, 1.0f);
-                contrast_fraction = clampf(contrast_fraction, 0.32f, 0.64f);
-                shell_contrast_threshold = fmaxf(
-                    thermal_min_delta * 0.20f,
-                    seed_shell_contrast * contrast_fraction);
-                if (shell_peak_mean > 0.0f) {
-                    float seed_peak_contrast = seed_delta - shell_peak_mean;
-                    float peak_contrast_fraction = 0.36f
-                        + 0.16f * clampf(shell_peak_ratio, 0.0f, 1.0f)
-                        + 0.08f * clampf(representative_ratio, 0.0f, 1.0f);
-                    peak_contrast_fraction = clampf(peak_contrast_fraction, 0.36f, 0.66f);
-                    float peak_contrast_threshold = fmaxf(
-                        thermal_min_delta * 0.22f,
-                        seed_peak_contrast * peak_contrast_fraction);
-                    if (peak_contrast_threshold > shell_contrast_threshold) {
-                        shell_contrast_threshold = peak_contrast_threshold;
-                    }
-                }
-            }
-            float fraction_threshold = seed_delta * retain_fraction;
-            delta_threshold = fmaxf(frame_floor, fraction_threshold);
-            float max_allowed = seed_delta - fmaxf(
-                1.25f,
-                fminf(seed_margin * 0.60f, fmaxf(representative_noise * 0.75f, 1.75f)));
-            if (delta_threshold > max_allowed) delta_threshold = max_allowed;
-            if (delta_threshold < thermal_min_delta) delta_threshold = thermal_min_delta;
+            min_delta = seed_delta - frame_contrast_band;
+            if (min_delta < thermal_min_delta) min_delta = thermal_min_delta;
         }
     }
 
+    for (int ny = sy - 1; ny <= sy + 1; ny++) {
+        if (ny < 0 || ny >= sg_h) continue;
+        for (int nx = sx - 1; nx <= sx + 1; nx++) {
+            if (nx < 0 || nx >= sg_w || (nx == sx && ny == sy)) continue;
+            float neighbor_value = score_map[ny * sg_w + nx];
+            if (use_raw_delta) {
+                size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+                float nbg = bg_luma[nidx];
+                float nlum = (float)sg_luma[nidx];
+                float ndelta = black_hot ? (nbg - nlum) : (nlum - nbg);
+                if (ndelta > seed_neighbor_peak) seed_neighbor_peak = ndelta;
+            } else if (neighbor_value > seed_neighbor_peak) {
+                seed_neighbor_peak = neighbor_value;
+            }
+        }
+    }
+
+    if (use_raw_delta) {
+        seed_prominence = seed_delta - seed_neighbor_peak;
+        required_prominence = frame_contrast_band * 0.70f;
+        if (required_prominence < 0.60f) required_prominence = 0.60f;
+        if (required_prominence > seed_delta * 0.12f) {
+            float cap = fmaxf(0.60f, seed_delta * 0.12f);
+            required_prominence = cap;
+        }
+    } else {
+        seed_prominence = center - seed_neighbor_peak;
+        required_prominence = fmaxf(0.12f, center * 0.08f);
+    }
+
+    if (seed_prominence <= 0.0f) {
+        return 0.0f;
+    }
+    if (seed_prominence < required_prominence) {
+        peakiness_scale = clampf(seed_prominence / fmaxf(required_prominence, 0.001f), 0.0f, 1.0f);
+        peakiness_scale *= peakiness_scale;
+    } else if (seed_prominence >= required_prominence * 1.6f) {
+        peakiness_scale = 1.10f;
+    }
+
     uint8_t *seen = (uint8_t *)calloc((size_t)local_count, sizeof(uint8_t));
+    uint8_t *blob_mask = (uint8_t *)calloc((size_t)local_count, sizeof(uint8_t));
     int *queue = (int *)malloc((size_t)local_count * sizeof(int));
-    if (seen == NULL || queue == NULL) {
+    if (seen == NULL || blob_mask == NULL || queue == NULL) {
         free(seen);
+        free(blob_mask);
         free(queue);
         return 0.15f;
     }
@@ -1580,21 +1849,20 @@ static float thermal_candidate_quality(
         int gx = rx0 + lx;
         int gy = ry0 + ly;
         float value = score_map[gy * sg_w + gx];
-        if (value < threshold) continue;
+        if (value <= 0.0f) continue;
         if (use_raw_delta) {
             size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
             float bg = bg_luma[idx];
             float lum = (float)sg_luma[idx];
             float delta = black_hot ? (bg - lum) : (lum - bg);
-            if (delta < delta_threshold) continue;
+            if (delta < min_delta) continue;
             if (frame_contrast_band > 0.0f && fabsf(delta - seed_delta) > frame_contrast_band) continue;
-            if (shell_delta_mean > 0.0f) {
-                float delta_contrast = delta - shell_delta_mean;
-                if (delta_contrast < shell_contrast_threshold) continue;
-            }
+        } else if (value < score_threshold) {
+            continue;
         }
 
         area++;
+        blob_mask[local_idx] = 1u;
         sum_score += value;
         int ring = abs(gx - sx);
         int dy = abs(gy - sy);
@@ -1628,10 +1896,12 @@ static float thermal_candidate_quality(
         }
     }
 
-    free(seen);
-    free(queue);
-
-    if (area <= 0) return 0.15f;
+    if (area <= 0) {
+        free(seen);
+        free(blob_mask);
+        free(queue);
+        return 0.15f;
+    }
 
     int span_w = max_x - min_x + 1;
     int span_h = max_y - min_y + 1;
@@ -1641,254 +1911,216 @@ static float thermal_candidate_quality(
     float center_share = sum_score > 0.0f ? (center_mass / sum_score) : 0.0f;
     float plateau_ratio = area > 0 ? ((float)plateau_cells / (float)area) : 0.0f;
     float plateau_mass_share = sum_score > 0.0f ? (plateau_sum / sum_score) : 0.0f;
-    int farthest_ring = 0;
-    int dense_outer_rings = 0;
-    float outer_hit_frac = 0.0f;
-    if (area > 0) {
-        int outer_hits = 0;
-        for (int ring = 1; ring <= growth_radius_cells; ring++) {
-            if (ring_hits[ring] > 0) farthest_ring = ring;
-            if (ring >= 3 && ring_possible[ring] > 0) {
-                float coverage = (float)ring_hits[ring] / (float)ring_possible[ring];
-                if (coverage >= 0.30f) dense_outer_rings++;
-                outer_hits += ring_hits[ring];
-            }
-        }
-        outer_hit_frac = (float)outer_hits / (float)area;
-    }
+    float span_px = max_span * (float)(sample_step > 0 ? sample_step : 1);
+    float border_mean = 0.0f;
+    float border_peak = 0.0f;
+    float border_hot_fraction = 0.0f;
+    bool border_isolated = true;
 
-    float shell_sum = 0.0f;
-    int shell_count = 0;
-    for (int gy = ry0; gy <= ry1; gy++) {
-        for (int gx = rx0; gx <= rx1; gx++) {
-            if (gx >= min_x && gx <= max_x && gy >= min_y && gy <= max_y) continue;
-            float value = score_map[gy * sg_w + gx];
-            if (value <= 0.0f) continue;
-            shell_sum += value;
-            shell_count++;
-        }
-    }
-    float shell_mean = shell_count > 0 ? (shell_sum / (float)shell_count) : 0.0f;
-    float local_contrast = center - shell_mean;
-    if (use_raw_delta && local_delta_mean > 0.0f) {
-        local_contrast = seed_delta - local_delta_mean;
-    }
-    float shell_peak_gap = use_raw_delta ? (seed_delta - shell_peak_mean) : 0.0f;
-
-    float broad_context_ratio = 0.0f;
-    float broad_context_coverage = 0.0f;
-    int broad_context_dirs = 0;
-    if (use_raw_delta && seed_delta > 0.0f) {
-        int broad_radius_cells = ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS;
-        if (sample_step > 0) {
-            int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (6 * sample_step) - 1) / sample_step;
-            if (bounded < 5) bounded = 5;
-            if (bounded < broad_radius_cells) broad_radius_cells = bounded;
-        }
-        if (broad_radius_cells > growth_radius_cells) {
-            double broad_sum = 0.0;
-            int broad_count = 0;
-            int broad_hot = 0;
-            int dir_possible[4] = {0, 0, 0, 0};
-            int dir_hot[4] = {0, 0, 0, 0};
-            float broad_floor = fmaxf(delta_threshold, seed_delta * 0.70f);
-            int bx0 = clamp_i32(sx - broad_radius_cells, 0, sg_w - 1);
-            int bx1 = clamp_i32(sx + broad_radius_cells, 0, sg_w - 1);
-            int by0 = clamp_i32(sy - broad_radius_cells, 0, sg_h - 1);
-            int by1 = clamp_i32(sy + broad_radius_cells, 0, sg_h - 1);
-            for (int gy = by0; gy <= by1; gy++) {
-                for (int gx = bx0; gx <= bx1; gx++) {
-                    int ring = abs(gx - sx);
-                    int dy = abs(gy - sy);
-                    if (dy > ring) ring = dy;
-                    if (ring <= growth_radius_cells || ring > broad_radius_cells) continue;
-                    int dir = 0;
-                    if (gx >= sx && gy < sy) dir = 0;
-                    else if (gx > sx && gy >= sy) dir = 1;
-                    else if (gx <= sx && gy > sy) dir = 2;
-                    else dir = 3;
-                    dir_possible[dir]++;
-                    size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-                    float delta = black_hot
-                        ? (bg_luma[idx] - (float)sg_luma[idx])
-                        : ((float)sg_luma[idx] - bg_luma[idx]);
-                    if (delta <= 0.0f) continue;
-                    broad_sum += (double)delta;
-                    broad_count++;
-                    if (delta >= broad_floor) {
-                        broad_hot++;
-                        dir_hot[dir]++;
+    {
+        memset(seen, 0, (size_t)local_count * sizeof(uint8_t));
+        for (int ly = 0; ly < local_h; ly++) {
+            for (int lx = 0; lx < local_w; lx++) {
+                int local_idx = ly * local_w + lx;
+                if (blob_mask[local_idx] == 0u) continue;
+                for (int oy = -1; oy <= 1; oy++) {
+                    for (int ox = -1; ox <= 1; ox++) {
+                        if (ox == 0 && oy == 0) continue;
+                        int nlx = lx + ox;
+                        int nly = ly + oy;
+                        if (nlx < 0 || nlx >= local_w || nly < 0 || nly >= local_h) continue;
+                        int nlocal_idx = nly * local_w + nlx;
+                        if (blob_mask[nlocal_idx] != 0u) continue;
+                        seen[nlocal_idx] = 1u;
                     }
                 }
             }
-            if (broad_count > 0) {
-                broad_context_ratio = (float)(broad_sum / (double)broad_count) / fmaxf(seed_delta, 1.0f);
-            }
-            if (broad_hot > 0) {
-                broad_context_coverage = (float)broad_hot / (float)broad_count;
-            }
-            for (int di = 0; di < 4; di++) {
-                if (dir_possible[di] <= 0) continue;
-                float dir_cov = (float)dir_hot[di] / (float)dir_possible[di];
-                if (dir_cov >= 0.25f) broad_context_dirs++;
+        }
+
+        double border_sum = 0.0;
+        int border_count = 0;
+        int border_hot = 0;
+        for (int ly = 0; ly < local_h; ly++) {
+            for (int lx = 0; lx < local_w; lx++) {
+                int local_idx = ly * local_w + lx;
+                if (seen[local_idx] == 0u) continue;
+                int gx = rx0 + lx;
+                int gy = ry0 + ly;
+                float border_value = 0.0f;
+                if (use_raw_delta) {
+                    size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                    float bg = bg_luma[idx];
+                    float lum = (float)sg_luma[idx];
+                    border_value = black_hot ? (bg - lum) : (lum - bg);
+                } else {
+                    border_value = score_map[gy * sg_w + gx];
+                }
+                if (border_value <= 0.0f) continue;
+                border_sum += (double)border_value;
+                border_count++;
+                if (border_value > border_peak) border_peak = border_value;
+                if (use_raw_delta) {
+                    if (border_value >= min_delta) border_hot++;
+                } else if (border_value >= score_threshold) {
+                    border_hot++;
+                }
             }
         }
+        if (border_count > 0) {
+            border_mean = (float)(border_sum / (double)border_count);
+            border_hot_fraction = (float)border_hot / (float)border_count;
+        }
     }
+
+    int farthest_ring = 0;
+    int outer_ring_hits = 0;
+    int outer_ring_possible = 0;
+    for (int ring = 1; ring <= growth_radius_cells; ring++) {
+        if (ring_hits[ring] > 0) farthest_ring = ring;
+        if (ring >= 3) {
+            outer_ring_hits += ring_hits[ring];
+            outer_ring_possible += ring_possible[ring];
+        }
+    }
+    float outer_fill = outer_ring_possible > 0
+        ? ((float)outer_ring_hits / (float)outer_ring_possible)
+        : 0.0f;
+    bool touches_growth_limit =
+        (min_x == rx0 || max_x == rx1 || min_y == ry0 || max_y == ry1);
 
     float area_scale;
     if (area <= 1) {
-        area_scale = 0.70f;
-    } else if (area <= 6) {
-        area_scale = 1.15f;
+        area_scale = 0.68f;
+    } else if (area <= 4) {
+        area_scale = 1.18f;
+    } else if (area <= 7) {
+        area_scale = 1.00f;
     } else if (area <= 10) {
-        area_scale = 0.90f;
+        area_scale = 0.62f;
     } else {
-        area_scale = 0.40f;
+        area_scale = 0.20f;
     }
 
     float span_scale;
-    if (max_span <= 2.0f) {
-        span_scale = 1.10f;
-    } else if (max_span <= 4.0f) {
+    if (span_px <= 3.0f) {
+        span_scale = 1.18f;
+    } else if (span_px <= 6.0f) {
         span_scale = 1.00f;
-    } else if (max_span <= 6.0f) {
-        span_scale = 0.75f;
+    } else if (span_px <= 9.0f) {
+        span_scale = 0.58f;
+    } else if (span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX) {
+        span_scale = 0.30f;
     } else {
-        span_scale = 0.45f;
+        span_scale = 0.10f;
     }
 
-    float fill_scale = clampf(0.45f + 0.85f * fill_ratio, 0.35f, 1.15f);
-    float center_scale = clampf(0.55f + 1.10f * center_share, 0.45f, 1.20f);
-    float contrast_scale;
-    if (area <= 2) {
-        contrast_scale = 1.0f;
-    } else if (local_contrast >= 1.8f) {
-        contrast_scale = 1.05f;
-    } else if (local_contrast >= 1.1f) {
-        contrast_scale = 0.92f;
-    } else if (local_contrast >= 0.55f) {
-        contrast_scale = 0.62f;
-    } else {
-        contrast_scale = 0.30f;
-    }
-    if (use_raw_delta && broad_context_ratio > 0.0f) {
-        if (broad_context_ratio >= 0.78f) {
-            contrast_scale *= 0.30f;
-        } else if (broad_context_ratio >= 0.64f) {
-            contrast_scale *= 0.55f;
-        } else if (broad_context_ratio >= 0.50f) {
-            contrast_scale *= 0.78f;
-        }
-    }
-    if (use_raw_delta && shell_peak_mean > 0.0f) {
-        float peak_gap_ratio = shell_peak_gap / fmaxf(seed_delta, 1.0f);
-        if (peak_gap_ratio <= 0.10f) {
-            contrast_scale *= 0.24f;
-        } else if (peak_gap_ratio <= 0.18f) {
-            contrast_scale *= 0.46f;
-        } else if (peak_gap_ratio <= 0.28f) {
-            contrast_scale *= 0.72f;
-        }
-    }
-
+    float fill_scale = clampf(0.35f + 1.05f * fill_ratio, 0.30f, 1.18f);
+    float center_scale = clampf(0.48f + 1.15f * center_share, 0.30f, 1.18f);
     float plateau_scale = 1.0f;
+    float border_scale = 1.0f;
+    float required_border_gap = required_prominence;
+    float seed_border_gap = 0.0f;
+    float seed_border_mean_gap = 0.0f;
+    if (use_raw_delta && frame_contrast_band > required_border_gap) {
+        required_border_gap = frame_contrast_band;
+    }
+    if (required_border_gap < 0.70f) required_border_gap = 0.70f;
+    if (border_peak > 0.0f) {
+        seed_border_gap = use_raw_delta ? (seed_delta - border_peak) : (center - border_peak);
+        if (seed_border_gap <= 0.0f) {
+            border_scale *= 0.10f;
+        } else if (seed_border_gap < required_border_gap * 0.60f) {
+            border_scale *= 0.28f;
+        } else if (seed_border_gap < required_border_gap) {
+            border_scale *= 0.55f;
+        } else if (seed_border_gap < required_border_gap * 1.35f) {
+            border_scale *= 0.82f;
+        }
+    }
+    if (border_hot_fraction >= 0.42f) {
+        border_scale *= 0.28f;
+    } else if (border_hot_fraction >= 0.26f) {
+        border_scale *= 0.54f;
+    } else if (border_hot_fraction >= 0.14f) {
+        border_scale *= 0.78f;
+    }
+    if (border_mean > 0.0f) {
+        seed_border_mean_gap = use_raw_delta ? (seed_delta - border_mean) : (center - border_mean);
+        if (seed_border_mean_gap <= required_prominence * 0.50f) {
+            border_scale *= 0.52f;
+        } else if (seed_border_mean_gap <= required_prominence * 0.85f) {
+            border_scale *= 0.76f;
+        }
+    }
+    if (border_peak > 0.0f) {
+        if (seed_border_gap < required_border_gap * 0.85f) {
+            border_isolated = false;
+        }
+    }
+    if (border_mean > 0.0f) {
+        if (seed_border_mean_gap < required_border_gap * 0.65f) {
+            border_isolated = false;
+        }
+    }
+    if (border_hot_fraction >= 0.18f) {
+        border_isolated = false;
+    }
+    if (!border_isolated) {
+        free(blob_mask);
+        free(queue);
+        return 0.0f;
+    }
     if (area > 2) {
-        if (plateau_ratio > 0.72f) {
-            plateau_scale *= 0.38f;
-        } else if (plateau_ratio > 0.55f) {
-            plateau_scale *= 0.58f;
-        } else if (plateau_ratio > 0.40f) {
-            plateau_scale *= 0.80f;
+        if (plateau_ratio >= 0.78f) {
+            plateau_scale *= 0.32f;
+        } else if (plateau_ratio >= 0.60f) {
+            plateau_scale *= 0.56f;
+        } else if (plateau_ratio >= 0.45f) {
+            plateau_scale *= 0.78f;
         }
-        if (plateau_mass_share > 0.80f) {
-            plateau_scale *= 0.72f;
-        } else if (plateau_mass_share > 0.65f) {
-            plateau_scale *= 0.86f;
-        }
-        if (use_raw_delta && local_delta_ratio > 0.0f) {
-            if (local_delta_ratio > 0.82f) {
-                plateau_scale *= 0.35f;
-            } else if (local_delta_ratio > 0.68f) {
-                plateau_scale *= 0.58f;
-            } else if (local_delta_ratio > 0.55f) {
-                plateau_scale *= 0.78f;
-            }
+        if (plateau_mass_share >= 0.82f) {
+            plateau_scale *= 0.68f;
+        } else if (plateau_mass_share >= 0.68f) {
+            plateau_scale *= 0.84f;
         }
     }
-
-    bool broad_reject = false;
-    float span_px = max_span * (float)(sample_step > 0 ? sample_step : 1);
-    if (area >= 10 && span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX) {
-        if (outer_hit_frac >= 0.55f || dense_outer_rings >= 2 || plateau_ratio >= 0.60f) {
-            broad_reject = true;
-        }
-    }
-    if (use_raw_delta && representative_delta_ratio >= 0.70f &&
-        area >= ANOMALY_THERMAL_REPRESENTATIVE_MIN_AREA) {
-        if (local_delta_ratio >= representative_delta_ratio - 0.05f &&
-            (span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX ||
-             farthest_ring >= 4 || plateau_mass_share >= 0.72f)) {
-            broad_reject = true;
-        }
-    }
-    if (use_raw_delta && area <= 6) {
-        if (broad_context_ratio >= 0.72f &&
-            broad_context_coverage >= 0.18f &&
-            broad_context_dirs >= 3) {
-            broad_reject = true;
-        } else if (broad_context_ratio >= 0.62f &&
-                   broad_context_coverage >= 0.28f &&
-                   broad_context_dirs >= 3) {
-            broad_reject = true;
-        }
-    }
-    if (use_raw_delta && shell_peak_mean > 0.0f && area <= 6) {
-        float peak_gap_ratio = shell_peak_gap / fmaxf(seed_delta, 1.0f);
-        if (peak_gap_ratio <= 0.08f && broad_context_dirs >= 2) {
-            broad_reject = true;
-        } else if (peak_gap_ratio <= 0.14f &&
-                   (broad_context_dirs >= 3 || shell_peak_ratio >= 0.84f)) {
-            broad_reject = true;
-        }
-    }
-
     float growth_scale;
     if (farthest_ring <= 2) {
-        growth_scale = 1.05f;
+        growth_scale = 1.08f;
     } else if (farthest_ring == 3) {
-        growth_scale = 0.90f;
+        growth_scale = 0.84f;
     } else if (farthest_ring == 4) {
-        growth_scale = 0.62f;
+        growth_scale = 0.48f;
     } else {
-        growth_scale = 0.34f;
+        growth_scale = 0.20f;
     }
-    if (outer_hit_frac > 0.65f) {
-        growth_scale *= 0.55f;
-    } else if (outer_hit_frac > 0.45f) {
-        growth_scale *= 0.75f;
-    }
-    if (dense_outer_rings >= 2) {
-        growth_scale *= 0.50f;
-    } else if (dense_outer_rings == 1) {
-        growth_scale *= 0.72f;
-    }
-    if (span_px > (float)ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX) {
+    if (outer_fill >= 0.35f) {
         growth_scale *= 0.40f;
-    } else if (span_px > (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX) {
-        growth_scale *= 0.72f;
+    } else if (outer_fill >= 0.20f) {
+        growth_scale *= 0.68f;
+    }
+    if (touches_growth_limit) {
+        growth_scale *= 0.36f;
     }
     if (best_small_span_px > 0.0f &&
         best_small_span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX &&
         span_px >= best_small_span_px + 2.0f) {
-        growth_scale *= 0.55f;
+        growth_scale *= 0.60f;
     }
 
     float quality = area_scale * span_scale * fill_scale * center_scale *
-        contrast_scale * plateau_scale * growth_scale;
-    if (broad_reject) {
-        quality *= 0.08f;
+        plateau_scale * growth_scale * border_scale;
+    quality *= peakiness_scale;
+    if (span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX && area >= 8) {
+        quality *= 0.18f;
     }
-    quality = clampf(quality, broad_reject ? 0.0f : 0.15f, 1.35f);
+    if (use_raw_delta && seed_delta > 0.0f && frame_contrast_band > 0.0f) {
+        float contrast_fraction = frame_contrast_band / fmaxf(seed_delta, 1.0f);
+        if (contrast_fraction >= 0.22f) {
+            quality *= 0.78f;
+        }
+    }
+    quality = clampf(quality, 0.0f, 1.35f);
 
     if (area_out != NULL) *area_out = (float)area;
     if (span_out != NULL) *span_out = max_span;
@@ -1898,6 +2130,9 @@ static float thermal_candidate_quality(
     if (bbox_min_y_out != NULL) *bbox_min_y_out = min_y;
     if (bbox_max_x_out != NULL) *bbox_max_x_out = max_x;
     if (bbox_max_y_out != NULL) *bbox_max_y_out = max_y;
+    free(seen);
+    free(blob_mask);
+    free(queue);
     return quality;
 }
 
@@ -1907,7 +2142,8 @@ static float thermal_candidate_seed_strength(
         float area,
         float span,
         float fill,
-        float center_share) {
+        float center_share,
+        float isolation_rank) {
     float base_scale = clampf((base_score - 0.75f) / 3.00f, 0.0f, 1.0f);
     float quality_scale = clampf((quality - 0.30f) / 0.95f, 0.0f, 1.0f);
 
@@ -1935,9 +2171,11 @@ static float thermal_candidate_seed_strength(
 
     float fill_scale = clampf((fill - 0.28f) / 0.52f, 0.0f, 1.0f);
     float center_scale = clampf((center_share - 0.18f) / 0.38f, 0.0f, 1.0f);
+    float isolation_scale = clampf((isolation_rank - 0.38f) / 0.42f, 0.0f, 1.0f);
     return clampf(
         base_scale * quality_scale * area_scale * span_scale *
-        (0.45f + 0.55f * fill_scale) * (0.45f + 0.55f * center_scale),
+        (0.35f + 0.65f * fill_scale) * (0.35f + 0.65f * center_scale) *
+        (0.20f + 0.80f * isolation_scale),
         0.0f,
         1.0f);
 }
@@ -1970,7 +2208,9 @@ static float thermal_candidate_history_scale(
         }
     }
     float local_support = count > 0 ? fmaxf(peak, sum / (float)count) : peak;
-    return 1.0f + ANOMALY_THERMAL_TARGET_HISTORY_GAIN * clampf(local_support, 0.0f, 1.0f);
+    local_support = clampf(local_support, 0.0f, 1.0f);
+    float shaped_support = clampf((local_support - 0.15f) / 0.70f, 0.0f, 1.0f);
+    return 1.0f + ANOMALY_THERMAL_TARGET_HISTORY_GAIN * shaped_support;
 }
 
 static void stamp_thermal_target_support(
@@ -1989,7 +2229,12 @@ static void stamp_thermal_target_support(
         for (int x = rx0; x <= rx1; x++) {
             int dx = abs(x - sx);
             int dy = abs(y - sy);
-            float weight = (dx == 0 && dy == 0) ? 1.00f : ((dx + dy) == 1 ? 0.70f : 0.45f);
+            float weight;
+            if (dx == 0 && dy == 0) weight = 1.00f;
+            else if ((dx + dy) == 1) weight = 0.82f;
+            else if (dx <= 1 && dy <= 1) weight = 0.62f;
+            else if ((dx + dy) == 2) weight = 0.42f;
+            else weight = 0.24f;
             float candidate = strength * weight;
             float *slot = &persist_map[y * sg_w + x];
             if (candidate > *slot) *slot = candidate;
@@ -3566,6 +3811,9 @@ void anomaly_state_reset(anomaly_state_t *state) {
     free(state->scratch_patch_selection);
     state->scratch_patch_selection = NULL;
     state->scratch_patch_capacity = 0;
+    free(state->scratch_i32);
+    state->scratch_i32 = NULL;
+    state->scratch_i32_capacity = 0;
 }
 
 void anomaly_state_cleanup(anomaly_state_t *state) {
@@ -4115,6 +4363,8 @@ int anomaly_process_frame(
     int   best_color_x = 0, best_color_y = 0;
     int   best_thermal_x = 0, best_thermal_y = 0;
     int   best_persist_x = 0, best_persist_y = 0;
+    int   best_thermal_candidate_idx = -1;
+    float best_thermal_candidate_score = -1.0f;
     anomaly_debug_candidate_t saliency_top[ANOMALY_DEBUG_TOP_CANDIDATES];
     memset(saliency_top, 0, sizeof(saliency_top));
     int saliency_top_count = 0;
@@ -4349,249 +4599,72 @@ int anomaly_process_frame(
                 state->thermal_target_persist[i] *= ANOMALY_THERMAL_TARGET_HISTORY_DECAY;
             }
         }
-
         float *thermal_patch_map = NULL;
         float *thermal_patch_selection = NULL;
+        uint8_t *thermal_visited = NULL;
+        int *thermal_queue = NULL;
         if (ensure_float_capacity(&state->scratch_patch_score, &state->scratch_patch_capacity, sg_count) &&
-            ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, sg_count)) {
+            ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, sg_count) &&
+            ensure_u8_capacity(&state->scratch_luma, &state->scratch_luma_capacity, sg_count) &&
+            ensure_int_capacity(&state->scratch_i32, &state->scratch_i32_capacity, sg_count)) {
             thermal_patch_map = state->scratch_patch_score;
             thermal_patch_selection = state->scratch_patch_selection;
+            thermal_visited = state->scratch_luma;
+            thermal_queue = state->scratch_i32;
         }
-        if (thermal_patch_map != NULL && thermal_patch_selection != NULL) {
-            for (size_t i = 0; i < sg_count; i++) {
-                float score = saliency_spatial_map[i];
-                thermal_patch_map[i] = score > 0.0f ? score : -1.0f;
-            }
-            build_patch_selection_map(thermal_patch_map, sg_w, sg_h, thermal_patch_selection);
-            collect_motion_candidates(
-                    thermal_patch_selection,
-                    NULL,
+        if (thermal_patch_map != NULL && thermal_patch_selection != NULL &&
+            thermal_visited != NULL && thermal_queue != NULL) {
+            anomaly_thermal_blob_candidate_t thermal_blob_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
+            memset(thermal_blob_candidates, 0, sizeof(thermal_blob_candidates));
+            extract_thermal_blob_candidates(
+                    saliency_spatial_map,
+                    state->bg_luma,
+                    sg_luma,
                     sg_w,
                     sg_h,
                     roi_x0,
                     roi_y0,
                     sample_step,
-                    thermal_candidates,
-                    &thermal_candidate_count);
-            float representative_delta_ratio = 0.0f;
-            float representative_delta_std = 0.0f;
-            estimate_representative_blob_delta_stats(
-                    thermal_patch_selection,
-                    state->bg_luma,
-                    sg_luma,
-                    sg_w,
-                    sg_h,
-                    sample_step,
-                    thermal_candidates,
-                    thermal_candidate_count,
                     bg_valid,
                     black_hot != 0,
                     thermal_min_delta,
-                    delta_norm,
-                    &representative_delta_ratio,
-                    &representative_delta_std);
-            int isolated_sx = -1;
-            int isolated_sy = -1;
-            float isolated_proposal = -1.0f;
-            float isolated_context = 0.0f;
-            for (int sy = 0; sy < sg_h; sy++) {
-                for (int sx = 0; sx < sg_w; sx++) {
-                    float raw_base = saliency_spatial_map[sy * sg_w + sx];
-                    if (raw_base <= 0.0f) continue;
-                    float base = raw_base;
-                    if (base <= 0.0f) continue;
-                    bool is_peak = true;
-                    for (int ny = sy - 1; ny <= sy + 1 && is_peak; ny++) {
-                        if (ny < 0 || ny >= sg_h) continue;
-                        for (int nx = sx - 1; nx <= sx + 1; nx++) {
-                            if (nx < 0 || nx >= sg_w || (nx == sx && ny == sy)) continue;
-                            if (saliency_spatial_map[ny * sg_w + nx] > base) {
-                                is_peak = false;
-                                break;
-                            }
-                        }
-                    }
-                    if (!is_peak) continue;
-                    float context_scale = thermal_candidate_seed_context_scale(
-                        state->bg_luma,
-                        sg_luma,
-                        sg_w,
-                        sg_h,
-                        sx,
-                        sy,
-                        sample_step,
-                        bg_valid,
-                        black_hot != 0,
-                        thermal_min_delta,
-                        representative_delta_ratio,
-                        frame_blob_contrast_mean,
-                        frame_blob_contrast_std,
-                        delta_norm);
-                    float parent_scale = thermal_candidate_parent_mass_scale(
-                        state->bg_luma,
-                        sg_luma,
-                        sg_w,
-                        sg_h,
-                        sx,
-                        sy,
-                        sample_step,
-                        bg_valid,
-                        black_hot != 0,
-                        thermal_min_delta,
-                        frame_blob_contrast_mean,
-                        frame_blob_contrast_std,
-                        delta_norm);
-                    float proposal = base * context_scale * context_scale;
-                    proposal *= parent_scale;
-                    if (proposal > isolated_proposal) {
-                        isolated_proposal = proposal;
-                        isolated_sx = sx;
-                        isolated_sy = sy;
-                        isolated_context = context_scale * parent_scale;
-                    }
-                }
-            }
-            if (isolated_sx >= 0 && isolated_sy >= 0) {
-                bool already_present = false;
-                for (int ci = 0; ci < thermal_candidate_count; ci++) {
-                    int ddx = abs(thermal_candidates[ci].sg_x - isolated_sx);
-                    int ddy = abs(thermal_candidates[ci].sg_y - isolated_sy);
-                    if (ddx <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS &&
-                        ddy <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS) {
-                        already_present = true;
-                        break;
-                    }
-                }
-                if (!already_present && isolated_context >= 0.95f && isolated_proposal > 0.0f) {
-                    int insert_idx = thermal_candidate_count;
-                    if (thermal_candidate_count < ANOMALY_MAX_MOTION_CANDIDATES) {
-                        thermal_candidate_count++;
-                    } else {
-                        float weakest_score = thermal_candidates[0].proposal_score;
-                        insert_idx = 0;
-                        for (int ci = 1; ci < thermal_candidate_count; ci++) {
-                            if (thermal_candidates[ci].proposal_score < weakest_score) {
-                                weakest_score = thermal_candidates[ci].proposal_score;
-                                insert_idx = ci;
-                            }
-                        }
-                        if (isolated_proposal < weakest_score * 0.80f) {
-                            insert_idx = -1;
-                        }
-                    }
-                    if (insert_idx >= 0) {
-                        thermal_candidates[insert_idx].sg_x = isolated_sx;
-                        thermal_candidates[insert_idx].sg_y = isolated_sy;
-                        thermal_candidates[insert_idx].pixel_x = roi_x0 + isolated_sx * sample_step;
-                        thermal_candidates[insert_idx].pixel_y = roi_y0 + isolated_sy * sample_step;
-                        thermal_candidates[insert_idx].proposal_score = isolated_proposal;
-                        thermal_candidates[insert_idx].thermal_score =
-                            saliency_spatial_map[isolated_sy * sg_w + isolated_sx];
-                        thermal_candidates[insert_idx].color_score = 0.0f;
-                        estimate_representative_blob_delta_stats(
-                                thermal_patch_selection,
-                                state->bg_luma,
-                                sg_luma,
-                                sg_w,
-                                sg_h,
-                                sample_step,
-                                thermal_candidates,
-                                thermal_candidate_count,
-                                bg_valid,
-                                black_hot != 0,
-                                thermal_min_delta,
-                                delta_norm,
-                                &representative_delta_ratio,
-                                &representative_delta_std);
-                    }
-                }
-            }
+                    frame_blob_contrast_mean,
+                    frame_blob_contrast_std,
+                    thermal_visited,
+                    thermal_queue,
+                    thermal_patch_map,
+                    thermal_patch_selection,
+                    thermal_blob_candidates,
+                    &thermal_candidate_count);
+            float fallback_thermal = bg_valid ? -1.0f : best_thermal;
+            int fallback_thermal_x = bg_valid ? 0 : best_thermal_x;
+            int fallback_thermal_y = bg_valid ? 0 : best_thermal_y;
             best_thermal = -1.0f;
             best_thermal_x = 0;
             best_thermal_y = 0;
+            best_thermal_candidate_idx = -1;
+            best_thermal_candidate_score = -1.0f;
             float best_small_span_px = -1.0f;
             for (int ci = 0; ci < thermal_candidate_count; ci++) {
+                thermal_candidates[ci] = thermal_blob_candidates[ci].candidate;
                 int sx = thermal_candidates[ci].sg_x;
                 int sy = thermal_candidates[ci].sg_y;
-                float area = 0.0f;
-                float span = 0.0f;
-                float fill = 0.0f;
-                float center_share = 0.0f;
-                int bbox_min_x = sx;
-                int bbox_min_y = sy;
-                int bbox_max_x = sx;
-                int bbox_max_y = sy;
-                float quality = thermal_candidate_quality(
-                    thermal_patch_selection,
-                    state->bg_luma,
-                    sg_luma,
-                    sg_w,
-                    sg_h,
-                    sx,
-                    sy,
-                    sample_step,
-                    bg_valid,
-                    black_hot != 0,
-                    thermal_min_delta,
-                    delta_mean,
-                    delta_norm,
-                    representative_delta_ratio,
-                    representative_delta_std,
-                    frame_blob_contrast_mean,
-                    frame_blob_contrast_std,
-                    best_small_span_px,
-                    &bbox_min_x,
-                    &bbox_min_y,
-                    &bbox_max_x,
-                    &bbox_max_y,
-                    &area,
-                    &span,
-                    &fill,
-                    &center_share);
-                float base_score = thermal_patch_selection[sy * sg_w + sx];
-                float context_scale = thermal_candidate_seed_context_scale(
-                    state->bg_luma,
-                    sg_luma,
-                    sg_w,
-                    sg_h,
-                    sx,
-                    sy,
-                    sample_step,
-                    bg_valid,
-                    black_hot != 0,
-                    thermal_min_delta,
-                    representative_delta_ratio,
-                    frame_blob_contrast_mean,
-                    frame_blob_contrast_std,
-                    delta_norm);
-                float parent_scale = thermal_candidate_parent_mass_scale(
-                    state->bg_luma,
-                    sg_luma,
-                    sg_w,
-                    sg_h,
-                    sx,
-                    sy,
-                    sample_step,
-                    bg_valid,
-                    black_hot != 0,
-                    thermal_min_delta,
-                    frame_blob_contrast_mean,
-                    frame_blob_contrast_std,
-                    delta_norm);
+                float area = thermal_blob_candidates[ci].area;
+                float span = thermal_blob_candidates[ci].span;
+                float fill = thermal_blob_candidates[ci].fill;
+                float center_share = thermal_blob_candidates[ci].center_share;
+                int bbox_min_x = thermal_blob_candidates[ci].min_x;
+                int bbox_min_y = thermal_blob_candidates[ci].min_y;
+                int bbox_max_x = thermal_blob_candidates[ci].max_x;
+                int bbox_max_y = thermal_blob_candidates[ci].max_y;
+                float quality = thermal_blob_candidates[ci].quality;
+                float base_score = thermal_blob_candidates[ci].candidate.thermal_score;
                 float history_scale = thermal_candidate_history_scale(state, sg_w, sg_h, sx, sy);
-                float isolated_peak_bonus = 1.0f;
-                if (area > 0.0f && area <= 4.0f &&
-                    span > 0.0f && span <= 3.0f &&
-                    center_share >= 0.52f &&
-                    quality >= 0.70f &&
-                    context_scale >= 0.95f) {
-                    isolated_peak_bonus = 1.18f;
-                    if (center_share >= 0.62f && quality >= 0.85f) {
-                        isolated_peak_bonus = 1.28f;
-                    }
-                }
-                float final_score = base_score * quality * context_scale * parent_scale *
-                    history_scale * isolated_peak_bonus;
+                // Blob size is the primary rank signal; heat anomaly is the
+                // secondary tie-breaker used among similarly small blobs.
+                float score_scale = bg_valid ? (0.92f + 0.18f * quality)
+                                             : (0.96f + 0.12f * quality);
+                float final_score = base_score * score_scale * history_scale;
                 if (bg_valid) {
                     size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
                     float bg = state->bg_luma[idx];
@@ -4599,9 +4672,8 @@ int anomaly_process_frame(
                     float delta = black_hot ? (bg - lum) : (lum - bg);
                     if (delta >= thermal_min_delta) {
                         float temporal_score = (float)((delta - delta_mean) / delta_norm);
-                        if (temporal_score > final_score) {
-                            final_score = temporal_score * quality * context_scale * parent_scale *
-                                history_scale * isolated_peak_bonus;
+                        if (temporal_score > base_score) {
+                            final_score = temporal_score * (0.55f + 0.55f * quality) * history_scale;
                         }
                     }
                 }
@@ -4611,8 +4683,8 @@ int anomaly_process_frame(
                 thermal_candidate_center_share[ci] = center_share;
                 thermal_candidate_base_score[ci] = base_score;
                 thermal_candidate_quality_score[ci] = quality;
-                thermal_candidate_context_scale[ci] = context_scale;
-                thermal_candidate_parent_scale[ci] = parent_scale;
+                thermal_candidate_context_scale[ci] = 1.0f;
+                thermal_candidate_parent_scale[ci] = 1.0f;
                 thermal_candidate_min_x[ci] = bbox_min_x;
                 thermal_candidate_min_y[ci] = bbox_min_y;
                 thermal_candidate_max_x[ci] = bbox_max_x;
@@ -4628,17 +4700,26 @@ int anomaly_process_frame(
                     : (span_px <= 10.0f ? 0.58f : 0.22f)));
                 float center_rank = clampf((center_share - 0.40f) / 0.30f, 0.0f, 1.0f);
                 float quality_rank = clampf((quality - 0.45f) / 0.55f, 0.0f, 1.0f);
-                float context_rank = clampf((context_scale - 0.55f) / 0.55f, 0.0f, 1.0f);
-                float parent_rank = clampf((parent_scale - 0.30f) / 0.70f, 0.0f, 1.0f);
                 thermal_candidate_isolation_rank[ci] =
-                    0.22f * area_rank +
-                    0.20f * span_rank +
-                    0.18f * center_rank +
-                    0.16f * quality_rank +
-                    0.12f * context_rank +
-                    0.12f * parent_rank;
+                    0.28f * area_rank +
+                    0.26f * span_rank +
+                    0.22f * center_rank +
+                    0.24f * quality_rank;
+                float history_bonus = clampf((history_scale - 1.0f) / ANOMALY_THERMAL_TARGET_HISTORY_GAIN, 0.0f, 1.0f);
+                float isolation_track_scale =
+                    1.0f + 0.34f * history_bonus * clampf((thermal_candidate_isolation_rank[ci] - 0.42f) / 0.40f, 0.0f, 1.0f);
+                final_score *= isolation_track_scale;
                 thermal_candidates[ci].thermal_score = final_score;
-                if (final_score > best_thermal) {
+                thermal_blob_candidates[ci].candidate.thermal_score = final_score;
+                bool candidate_plausible = final_score >= cfg->score_threshold;
+                if (candidate_plausible) {
+                    if (best_thermal_candidate_idx < 0 ||
+                        compare_thermal_blob_rank(&thermal_blob_candidates[ci],
+                                                  &thermal_blob_candidates[best_thermal_candidate_idx]) < 0) {
+                        best_thermal_candidate_idx = ci;
+                        best_thermal_candidate_score = final_score;
+                    }
+                } else if (final_score > best_thermal) {
                     best_thermal = final_score;
                     best_thermal_x = thermal_candidates[ci].pixel_x;
                     best_thermal_y = thermal_candidates[ci].pixel_y;
@@ -4650,40 +4731,15 @@ int anomaly_process_frame(
                     best_small_span_px = span_px;
                 }
             }
-            float best_isolation_rank = 0.0f;
-            for (int ci = 0; ci < thermal_candidate_count; ci++) {
-                if (thermal_candidate_isolation_rank[ci] > best_isolation_rank) {
-                    best_isolation_rank = thermal_candidate_isolation_rank[ci];
-                }
+            if (best_thermal_candidate_idx >= 0) {
+                best_thermal = best_thermal_candidate_score;
+                best_thermal_x = thermal_candidates[best_thermal_candidate_idx].pixel_x;
+                best_thermal_y = thermal_candidates[best_thermal_candidate_idx].pixel_y;
             }
-            if (best_isolation_rank >= 0.72f) {
-                best_thermal = -1.0f;
-                best_thermal_x = 0;
-                best_thermal_y = 0;
-                for (int ci = 0; ci < thermal_candidate_count; ci++) {
-                    float rerank = 1.0f;
-                    float isolation_gap = best_isolation_rank - thermal_candidate_isolation_rank[ci];
-                    if (thermal_candidate_isolation_rank[ci] >= 0.78f) {
-                        rerank *= 1.28f;
-                    } else if (thermal_candidate_isolation_rank[ci] >= 0.68f) {
-                        rerank *= 1.14f;
-                    }
-                    if (isolation_gap >= 0.28f) {
-                        rerank *= 0.58f;
-                    } else if (isolation_gap >= 0.16f) {
-                        rerank *= 0.76f;
-                    }
-                    if (thermal_candidate_span[ci] * (float)sample_step > 8.0f &&
-                        thermal_candidate_isolation_rank[ci] < 0.55f) {
-                        rerank *= 0.78f;
-                    }
-                    thermal_candidates[ci].thermal_score *= rerank;
-                    if (thermal_candidates[ci].thermal_score > best_thermal) {
-                        best_thermal = thermal_candidates[ci].thermal_score;
-                        best_thermal_x = thermal_candidates[ci].pixel_x;
-                        best_thermal_y = thermal_candidates[ci].pixel_y;
-                    }
-                }
+            if (fallback_thermal > best_thermal) {
+                best_thermal = fallback_thermal;
+                best_thermal_x = fallback_thermal_x;
+                best_thermal_y = fallback_thermal_y;
             }
             if (state->thermal_target_persist != NULL) {
                 for (int ci = 0; ci < thermal_candidate_count; ci++) {
@@ -4693,7 +4749,15 @@ int anomaly_process_frame(
                         thermal_candidate_area[ci],
                         thermal_candidate_span[ci],
                         thermal_candidate_fill[ci],
-                        thermal_candidate_center_share[ci]);
+                        thermal_candidate_center_share[ci],
+                        thermal_candidate_isolation_rank[ci]);
+                    if (thermal_candidate_area[ci] > 8.0f ||
+                        thermal_candidate_isolation_rank[ci] < 0.40f) {
+                        seed_strength *= 0.35f;
+                    } else if (thermal_candidate_isolation_rank[ci] >= 0.62f &&
+                               thermal_candidate_area[ci] <= 6.0f) {
+                        seed_strength *= 1.20f;
+                    }
                     stamp_thermal_target_support(
                         state->thermal_target_persist,
                         sg_w,
@@ -5241,6 +5305,47 @@ int anomaly_process_frame(
                     sg_w, sg_h,
                     roi_x0, roi_y0, sample_step,
                     &best_persist, &best_persist_x, &best_persist_y);
+            if (best_thermal >= cfg->score_threshold && bg_valid &&
+                (best_persist < cfg->score_threshold || (best_persist_x > 0 || best_persist_y > 0))) {
+                int persist_sx = clamp_i32((best_persist_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                int persist_sy = clamp_i32((best_persist_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                int thermal_sx = clamp_i32((best_thermal_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                int thermal_sy = clamp_i32((best_thermal_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                float persist_x_norm = (float)best_persist_x / (float)(width > 1 ? width - 1 : 1);
+                float persist_y_norm = (float)best_persist_y / (float)(height > 1 ? height - 1 : 1);
+                float thermal_x_norm = (float)best_thermal_x / (float)(width > 1 ? width - 1 : 1);
+                float thermal_y_norm = (float)best_thermal_y / (float)(height > 1 ? height - 1 : 1);
+                float dx = persist_x_norm - thermal_x_norm;
+                float dy = persist_y_norm - thermal_y_norm;
+                float separation = sqrtf(dx * dx + dy * dy);
+                int persist_cue = classify_saliency_display_algorithm(
+                        saliency_spatial_map,
+                        saliency_color_map,
+                        saliency_motion_map,
+                        saliency_registration_map,
+                        state->bg_luma,
+                        sg_luma,
+                        sg_w,
+                        sg_h,
+                        persist_sx,
+                        persist_sy,
+                        bg_valid,
+                        black_hot,
+                        thermal_min_delta,
+                        delta_mean,
+                        delta_norm);
+                bool thermal_override =
+                    separation >= 0.085f &&
+                    persist_cue != ANOMALY_ALGO_MOTION &&
+                    persist_cue != ANOMALY_ALGO_COLOR;
+                if (thermal_override) {
+                    float thermal_patch_score =
+                        patch_selection_map[(size_t)thermal_sy * (size_t)sg_w + (size_t)thermal_sx];
+                    best_persist = thermal_patch_score > best_thermal ? thermal_patch_score : best_thermal;
+                    best_persist_x = best_thermal_x;
+                    best_persist_y = best_thermal_y;
+                }
+            }
         }
     }
 
@@ -5454,49 +5559,157 @@ int anomaly_process_frame(
     }
 
     if (motion_candidate_count > 0) {
+        float fw_norm = (float)(width > 1 ? width - 1 : 1);
+        float fh_norm = (float)(height > 1 ? height - 1 : 1);
         for (int ci = 0; ci < motion_candidate_count; ci++) {
             float motion_support = motion_candidate_support[ci];
             if (motion_support <= 1.0f) continue;
-            float motion_excess = motion_support - 1.0f;
-            int boosted_x = motion_candidate_support_x[ci] != 0 || motion_candidate_support_y[ci] != 0
+
+            int cand_x = motion_candidate_support_x[ci] != 0 || motion_candidate_support_y[ci] != 0
                 ? motion_candidate_support_x[ci]
                 : motion_candidates[ci].pixel_x;
-            int boosted_y = motion_candidate_support_x[ci] != 0 || motion_candidate_support_y[ci] != 0
+            int cand_y = motion_candidate_support_x[ci] != 0 || motion_candidate_support_y[ci] != 0
                 ? motion_candidate_support_y[ci]
                 : motion_candidates[ci].pixel_y;
+            int cand_sx = clamp_i32((cand_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+            int cand_sy = clamp_i32((cand_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+            size_t cand_idx = (size_t)cand_sy * (size_t)sg_w + (size_t)cand_sx;
+            float registration_support =
+                saliency_registration_map != NULL ? saliency_registration_map[cand_idx] : 1.0f;
+            float motion_excess = motion_support - 1.0f;
+            float reliability =
+                clampf((motion_support - 1.15f) / 1.35f, 0.0f, 1.0f) *
+                clampf((registration_support - 0.55f) / 0.35f, 0.0f, 1.0f) *
+                clampf((best_motion_support_scale - 0.30f) / 0.45f, 0.0f, 1.0f) *
+                clampf((best_motion_zoom_scale - 0.45f) / 0.45f, 0.0f, 1.0f) *
+                clampf((best_motion_broad_scale - 0.25f) / 0.50f, 0.0f, 1.0f);
+            bool strong_motion_override =
+                reliability >= 0.42f &&
+                motion_support >= 1.55f &&
+                registration_support >= 0.72f;
 
-            if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 && motion_candidates[ci].thermal_score > 0.0f) {
-                int sx = clamp_i32(motion_candidates[ci].sg_x, 0, sg_w - 1);
-                int sy = clamp_i32(motion_candidates[ci].sg_y, 0, sg_h - 1);
+            if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 &&
+                motion_candidates[ci].thermal_score > 0.0f) {
                 float thermal_base = motion_candidates[ci].thermal_score;
                 if (bg_valid) {
-                    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-                    float bg = state->bg_luma[idx];
-                    float lum = (float)sg_luma[idx];
+                    float bg = state->bg_luma[cand_idx];
+                    float lum = (float)sg_luma[cand_idx];
                     float delta = black_hot ? (bg - lum) : (lum - bg);
                     if (delta >= thermal_min_delta) {
                         float temporal_score = (float)((delta - delta_mean) / delta_norm);
                         if (temporal_score > thermal_base) thermal_base = temporal_score;
                     }
                 }
-                float boosted_thermal = thermal_base + (ANOMALY_THERMAL_MOTION_BOOST * motion_excess);
-                if (boosted_thermal > best_thermal) {
+                float boosted_thermal = thermal_base + (ANOMALY_THERMAL_MOTION_BOOST * motion_excess * reliability);
+                if (best_thermal >= cfg->score_threshold) {
+                    int cur_sx = clamp_i32((best_thermal_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                    int cur_sy = clamp_i32((best_thermal_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                    float dx = ((float)cand_x - (float)best_thermal_x) / fw_norm;
+                    float dy = ((float)cand_y - (float)best_thermal_y) / fh_norm;
+                    float separation = sqrtf(dx * dx + dy * dy);
+                    if (cand_sx == cur_sx && cand_sy == cur_sy && motion_excess > 0.0f) {
+                        if (boosted_thermal > best_thermal) best_thermal = boosted_thermal;
+                    } else if (strong_motion_override &&
+                               separation >= 0.020f &&
+                               boosted_thermal > best_thermal + 0.22f) {
+                        best_thermal = boosted_thermal;
+                        best_thermal_x = cand_x;
+                        best_thermal_y = cand_y;
+                    }
+                } else if (strong_motion_override && boosted_thermal > best_thermal) {
                     best_thermal = boosted_thermal;
-                    best_thermal_x = boosted_x;
-                    best_thermal_y = boosted_y;
+                    best_thermal_x = cand_x;
+                    best_thermal_y = cand_y;
                 }
             }
 
-            if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 && motion_candidates[ci].color_score > 0.0f) {
+            if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
+                motion_candidates[ci].color_score > 0.0f) {
                 float color_base = motion_candidates[ci].color_score + 2.0f;
-                float boosted_color = color_base + (ANOMALY_COLOR_MOTION_BOOST * motion_excess);
-                if (boosted_color > best_color) {
+                float boosted_color = color_base + (ANOMALY_COLOR_MOTION_BOOST * motion_excess * reliability);
+                if (best_color >= cfg->score_threshold) {
+                    int cur_sx = clamp_i32((best_color_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                    int cur_sy = clamp_i32((best_color_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                    float dx = ((float)cand_x - (float)best_color_x) / fw_norm;
+                    float dy = ((float)cand_y - (float)best_color_y) / fh_norm;
+                    float separation = sqrtf(dx * dx + dy * dy);
+                    if (cand_sx == cur_sx && cand_sy == cur_sy && motion_excess > 0.0f) {
+                        if (boosted_color > best_color) best_color = boosted_color;
+                    } else if (strong_motion_override &&
+                               separation >= 0.020f &&
+                               boosted_color > best_color + 0.18f) {
+                        best_color = boosted_color;
+                        best_color_x = cand_x;
+                        best_color_y = cand_y;
+                    }
+                } else if (strong_motion_override && boosted_color > best_color) {
                     best_color = boosted_color;
-                    best_color_x = boosted_x;
-                    best_color_y = boosted_y;
+                    best_color_x = cand_x;
+                    best_color_y = cand_y;
                 }
             }
         }
+    }
+
+    if (anomaly_detection_active &&
+        (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0 &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_COLOR)) != 0) {
+        float derived_persist = -1.0f;
+        int derived_persist_x = 0;
+        int derived_persist_y = 0;
+
+        if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 &&
+            best_thermal >= cfg->score_threshold) {
+            float support = 0.0f;
+            float motion_support = 0.0f;
+            if (state->scratch_patch_selection != NULL) {
+                int sx = clamp_i32((best_thermal_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                int sy = clamp_i32((best_thermal_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                float patch_support = state->scratch_patch_selection[idx];
+                support = patch_support > 0.0f ? patch_support : 0.0f;
+                if (saliency_motion_map != NULL) {
+                    float local_motion = saliency_motion_map[idx];
+                    motion_support = local_motion > 0.0f ? local_motion : 0.0f;
+                }
+            }
+            derived_persist =
+                best_thermal +
+                (0.55f * support) +
+                (0.25f * motion_support);
+            derived_persist_x = best_thermal_x;
+            derived_persist_y = best_thermal_y;
+        }
+
+        if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
+            best_color >= cfg->score_threshold) {
+            float support = 0.0f;
+            float motion_support = 0.0f;
+            if (state->scratch_patch_selection != NULL) {
+                int sx = clamp_i32((best_color_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+                int sy = clamp_i32((best_color_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                float patch_support = state->scratch_patch_selection[idx];
+                support = patch_support > 0.0f ? patch_support : 0.0f;
+                if (saliency_motion_map != NULL) {
+                    float local_motion = saliency_motion_map[idx];
+                    motion_support = local_motion > 0.0f ? local_motion : 0.0f;
+                }
+            }
+            float color_derived =
+                best_color +
+                (0.50f * support) +
+                (0.20f * motion_support);
+            if (color_derived > derived_persist) {
+                derived_persist = color_derived;
+                derived_persist_x = best_color_x;
+                derived_persist_y = best_color_y;
+            }
+        }
+
+        best_persist = derived_persist;
+        best_persist_x = derived_persist_x;
+        best_persist_y = derived_persist_y;
     }
 
     bool saliency_acc_pre_active = state->acc_active[3];
@@ -5607,31 +5820,51 @@ int anomaly_process_frame(
     for (int i = 0; i < box_count && i < ANOMALY_MAX_OVERLAY_BOXES; i++) {
         overlay_boxes[overlay_box_count++] = boxes[i];
     }
-    if (cfg->show_candidate_blobs && anomaly_detection_active) {
-        for (int ci = 0; ci < thermal_candidate_count && overlay_box_count < ANOMALY_MAX_OVERLAY_BOXES; ci++) {
-            if (thermal_candidate_quality_score[ci] <= 0.0f) continue;
+    if (cfg->show_candidate_blobs && anomaly_detection_active &&
+        best_thermal_candidate_idx >= 0 &&
+        best_thermal_candidate_idx < thermal_candidate_count &&
+        overlay_box_count < ANOMALY_MAX_OVERLAY_BOXES) {
+        float best_blob_overlay_score = -1.0f;
+        for (int ci = 0; ci < thermal_candidate_count; ci++) {
+            if (thermal_candidates[ci].thermal_score > best_blob_overlay_score) {
+                best_blob_overlay_score = thermal_candidates[ci].thermal_score;
+            }
+        }
+        float overlay_score_floor = cfg->score_threshold;
+        if (best_blob_overlay_score > overlay_score_floor) {
+            float stronger_floor = best_blob_overlay_score - ANOMALY_THERMAL_BLOB_OVERLAY_SCORE_MARGIN;
+            if (stronger_floor > overlay_score_floor) overlay_score_floor = stronger_floor;
+        }
+        int ci = best_thermal_candidate_idx;
+        bool blob_plausible =
+            thermal_candidate_quality_score[ci] > 0.0f &&
+            thermal_candidates[ci].thermal_score >= overlay_score_floor &&
+            thermal_candidate_area[ci] <= 10.0f &&
+            thermal_candidate_isolation_rank[ci] >= 0.42f;
+        if (blob_plausible) {
             int min_x = thermal_candidate_min_x[ci];
             int min_y = thermal_candidate_min_y[ci];
             int max_x = thermal_candidate_max_x[ci];
             int max_y = thermal_candidate_max_y[ci];
-            if (max_x < min_x || max_y < min_y) continue;
-            int expand_px = sample_step > 1 ? (sample_step / 2) : 1;
-            float left = ((float)(roi_x0 + min_x * sample_step - expand_px)) / (float)fw;
-            float top = ((float)(roi_y0 + min_y * sample_step - expand_px)) / (float)fh;
-            float right = ((float)(roi_x0 + (max_x + 1) * sample_step + expand_px)) / (float)fw;
-            float bottom = ((float)(roi_y0 + (max_y + 1) * sample_step + expand_px)) / (float)fh;
-            append_anomaly_rect(
-                    overlay_boxes,
-                    &overlay_box_count,
-                    left,
-                    top,
-                    right,
-                    bottom,
-                    0xFF, 0xB0, 0x40,
-                    0.35f + 0.20f * clampf(thermal_candidate_quality_score[ci], 0.0f, 1.0f),
-                    false);
-            if (overlay_box_count > 0) {
-                overlay_boxes[overlay_box_count - 1].algorithm = ANOMALY_ALGO_THERMAL;
+            if (max_x >= min_x && max_y >= min_y) {
+                int expand_px = sample_step > 1 ? (sample_step / 2) : 1;
+                float left = ((float)(roi_x0 + min_x * sample_step - expand_px)) / (float)fw;
+                float top = ((float)(roi_y0 + min_y * sample_step - expand_px)) / (float)fh;
+                float right = ((float)(roi_x0 + (max_x + 1) * sample_step + expand_px)) / (float)fw;
+                float bottom = ((float)(roi_y0 + (max_y + 1) * sample_step + expand_px)) / (float)fh;
+                append_anomaly_rect(
+                        overlay_boxes,
+                        &overlay_box_count,
+                        left,
+                        top,
+                        right,
+                        bottom,
+                        0xFF, 0xB0, 0x40,
+                        0.35f + 0.20f * clampf(thermal_candidate_quality_score[ci], 0.0f, 1.0f),
+                        false);
+                if (overlay_box_count > 0) {
+                    overlay_boxes[overlay_box_count - 1].algorithm = ANOMALY_ALGO_THERMAL;
+                }
             }
         }
     }

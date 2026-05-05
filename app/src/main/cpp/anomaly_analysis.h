@@ -198,6 +198,7 @@ typedef struct {
     float   *thermal_target_persist;
     int      thermal_target_persist_w;
     int      thermal_target_persist_h;
+    int      publish_hold_frames;
     float    saliency_aux_cx[ANOMALY_SALIENCY_EXTRA_TRACKS];
     float    saliency_aux_cy[ANOMALY_SALIENCY_EXTRA_TRACKS];
     int      saliency_aux_hits[ANOMALY_SALIENCY_EXTRA_TRACKS];
@@ -236,6 +237,22 @@ typedef struct {
 } anomaly_debug_candidate_t;
 
 typedef struct {
+    bool  valid;
+    int   pixel_x;
+    int   pixel_y;
+    float x_norm;
+    float y_norm;
+    float base_score;
+    float final_score;
+    float area;
+    float span;
+    float fill;
+    float center_share;
+    float quality;
+    float isolation_rank;
+} anomaly_debug_thermal_candidate_t;
+
+typedef struct {
     bool  bg_ready;
     bool  raw_candidate_valid;
     float raw_score;
@@ -254,6 +271,17 @@ typedef struct {
     int   top_candidate_count;
     anomaly_debug_candidate_t top_candidates[ANOMALY_DEBUG_TOP_CANDIDATES];
 } anomaly_debug_saliency_t;
+
+typedef struct {
+    bool  bg_ready;
+    bool  raw_candidate_valid;
+    float raw_score;
+    float raw_x_norm;
+    float raw_y_norm;
+    int   winning_candidate_index;
+    int   candidate_count;
+    anomaly_debug_thermal_candidate_t candidates[ANOMALY_DEBUG_TOP_CANDIDATES];
+} anomaly_debug_thermal_t;
 
 typedef struct {
     bool  valid;
@@ -319,6 +347,7 @@ typedef struct {
     bool          had_discontinuity;  // true when a scene cut was detected
     anomaly_debug_gmv_t gmv_debug;
     anomaly_debug_motion_t motion_debug;
+    anomaly_debug_thermal_t thermal_debug;
     anomaly_debug_saliency_t saliency_debug;
 } anomaly_result_t;
 

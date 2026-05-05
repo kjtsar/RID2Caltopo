@@ -583,6 +583,40 @@ static void dump_motion_debug(FILE *out, int frame_num, double time_s,
     }
 }
 
+static void dump_thermal_debug(FILE *out, int frame_num, double time_s,
+                               const anomaly_result_t *result) {
+    if (out == NULL || result == NULL) return;
+    const anomaly_debug_thermal_t *dbg = &result->thermal_debug;
+    fprintf(out, "\nThermal debug for frame %d (%.3fs)\n", frame_num, time_s);
+    fprintf(out, "  bg_ready=%d raw_valid=%d raw_score=%.3f raw_xy=(%.4f, %.4f) winner_idx=%d\n",
+            dbg->bg_ready ? 1 : 0,
+            dbg->raw_candidate_valid ? 1 : 0,
+            (double)dbg->raw_score,
+            (double)dbg->raw_x_norm,
+            (double)dbg->raw_y_norm,
+            dbg->winning_candidate_index);
+    fprintf(out, "  thermal candidates (%d):\n", dbg->candidate_count);
+    for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+        const anomaly_debug_thermal_candidate_t *c = &dbg->candidates[i];
+        fprintf(out,
+                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f%s\n",
+                i + 1,
+                c->pixel_x,
+                c->pixel_y,
+                (double)c->x_norm,
+                (double)c->y_norm,
+                (double)c->base_score,
+                (double)c->final_score,
+                (double)c->area,
+                (double)c->span,
+                (double)c->fill,
+                (double)c->center_share,
+                (double)c->quality,
+                (double)c->isolation_rank,
+                (i == dbg->winning_candidate_index) ? "  <winner>" : "");
+    }
+}
+
 static void dump_gmv_debug(FILE *out, int frame_num, double time_s,
                            const anomaly_result_t *result) {
     if (out == NULL || result == NULL) return;
@@ -650,6 +684,8 @@ static void usage(const char *prog) {
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
         "  --debug-frame N  Dump saliency candidate details for frame N\n"
+        "  --debug-time-start S  Dump debug details beginning at time S seconds\n"
+        "  --debug-time-end S    Dump debug details ending at time S seconds\n"
         "  --debug-overlay  Burn saliency candidate ranks / latch marker into video\n"
         "\n"
         "Diagnostic:\n"
@@ -697,6 +733,8 @@ int main(int argc, char **argv) {
     float  probe_cx      = 0.0f, probe_cy = 0.0f;
     char   probe_csv_path[1024] = "";
     int    debug_frame = -1;
+    double debug_time_start = -1.0;
+    double debug_time_end = -1.0;
     int    debug_overlay = 0;
     // min-delta override (0 = use compiled-in constant).
     float  min_delta_override = 0.0f;
@@ -724,6 +762,12 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--debug-frame") && i+1 < argc) {
             debug_frame = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--debug-time-start") && i+1 < argc) {
+            debug_time_start = atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--debug-time-end") && i+1 < argc) {
+            debug_time_end = atof(argv[++i]);
         }
         else if (!strcmp(argv[i], "--debug-overlay")) {
             debug_overlay = 1;
@@ -814,9 +858,14 @@ int main(int argc, char **argv) {
     // ── Allocate frame buffer ────────────────────────────────────────────
     size_t frame_bytes = (size_t)W * H * 4;
     uint8_t *rgba = malloc(frame_bytes);
-    uint8_t *raw_rgba = debug_overlay ? malloc(frame_bytes) : NULL;
+    int debug_window_active = (debug_time_start >= 0.0 || debug_time_end >= 0.0);
+    uint8_t *raw_rgba = (debug_overlay || debug_frame > 0 || debug_window_active) ? malloc(frame_bytes) : NULL;
     if (!rgba) { fprintf(stderr, "Out of memory\n"); return 1; }
-    if (debug_overlay && !raw_rgba) { fprintf(stderr, "Out of memory\n"); free(rgba); return 1; }
+    if ((debug_overlay || debug_frame > 0 || debug_window_active) && !raw_rgba) {
+        fprintf(stderr, "Out of memory\n");
+        free(rgba);
+        return 1;
+    }
 
     // ── Open CSV ─────────────────────────────────────────────────────────
     FILE *csv = fopen(output_csv, "w");
@@ -923,8 +972,15 @@ int main(int argc, char **argv) {
 
         anomaly_result_t result;
         anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, 0, &result);
-        if (debug_frame > 0 && frame_num == debug_frame) {
+        int debug_this_frame = (debug_frame > 0 && frame_num == debug_frame);
+        if (debug_window_active) {
+            int at_or_after_start = (debug_time_start < 0.0) || (time_s >= debug_time_start);
+            int at_or_before_end = (debug_time_end < 0.0) || (time_s <= debug_time_end);
+            if (at_or_after_start && at_or_before_end) debug_this_frame = 1;
+        }
+        if (debug_this_frame) {
             dump_gmv_debug(stderr, frame_num, time_s, &result);
+            dump_thermal_debug(stderr, frame_num, time_s, &result);
             dump_saliency_debug(stderr, frame_num, time_s, raw_rgba, W, H, &cfg, &result);
             dump_motion_debug(stderr, frame_num, time_s, &result);
         }

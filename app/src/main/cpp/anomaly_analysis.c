@@ -43,6 +43,11 @@
 #define ANOMALY_THERMAL_TARGET_HISTORY_GAIN 0.60f
 #define ANOMALY_THERMAL_MAX_BLOB_AREA_SAMPLES 24
 #define ANOMALY_THERMAL_BLOB_OVERLAY_SCORE_MARGIN 0.28f
+#define ANOMALY_PUBLISH_BG_SETTLE_FRAMES 24
+#define ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES 6
+#define ANOMALY_PUBLISH_UNSTABLE_HOLDOFF_FRAMES 3
+#define ANOMALY_PUBLISH_GMV_RESIDUAL_GATE 0.010f
+#define ANOMALY_PUBLISH_ZOOM_SCALE_GATE 0.60f
 #define ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION 0.070f
 #define ANOMALY_SALIENCY_SECONDARY_SCORE_MARGIN 1.20f
 #define ANOMALY_SALIENCY_SECONDARY_TRACKED_SCORE_MARGIN 2.10f
@@ -3772,6 +3777,7 @@ void anomaly_state_reset(anomaly_state_t *state) {
     state->bg_sg_w  = 0;
     state->bg_sg_h  = 0;
     state->bg_warmup = 0;
+    state->publish_hold_frames = 0;
     if (state->thermal_target_persist != NULL) {
         free(state->thermal_target_persist);
         state->thermal_target_persist = NULL;
@@ -3848,10 +3854,20 @@ int anomaly_process_frame(
     int frame_stride = cfg->frame_stride < 1 ? 1 : cfg->frame_stride;
     float thermal_min_delta = effective_thermal_min_delta(cfg);
     state->frame_counter += 1;
+    bool bg_publish_ready = (state->bg_luma != NULL &&
+                             state->bg_warmup >= (ANOMALY_THERMAL_BG_WARMUP + ANOMALY_PUBLISH_BG_SETTLE_FRAMES) &&
+                             state->bg_sg_w > 0 && state->bg_sg_h > 0);
+    bool transition_warmup_block =
+        (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0 &&
+        cfg->min_hits > 1 &&
+        state->prev_luma != NULL &&
+        !bg_publish_ready;
+    bool publish_hold_active = state->publish_hold_frames > 0;
     if ((state->frame_counter % frame_stride) != 0) {
         int skipped_box_count = 0;
         anomaly_box_t skipped_boxes[ANOMALY_MAX_BOXES_PER_FRAME];
-        if (anomaly_detection_active) {
+        bool publish_allowed = !transition_warmup_block && !publish_hold_active;
+        if (anomaly_detection_active && publish_allowed) {
             const int skipped_motion_box_algorithm =
                     (cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0
                     ? ANOMALY_ALGO_MOTION_TOLERANCE
@@ -3888,6 +3904,10 @@ int anomaly_process_frame(
     int roi_y1 = height - roi_y0;
     if (roi_x1 <= roi_x0) { roi_x0 = 0; roi_x1 = width;  }
     if (roi_y1 <= roi_y0) { roi_y0 = 0; roi_y1 = height; }
+
+    if (publish_hold_active) {
+        state->publish_hold_frames -= 1;
+    }
 
     int sample_step = effective_sample_step(cfg, width, height);
     int motion_sample_step = effective_motion_sample_step(cfg, width, height);
@@ -4585,6 +4605,9 @@ int anomaly_process_frame(
     if (anomaly_detection_active &&
         (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 &&
         saliency_spatial_map != NULL) {
+        bool thermal_publish_settled =
+            cfg->min_hits <= 1 ||
+            state->bg_warmup >= (ANOMALY_THERMAL_BG_WARMUP + ANOMALY_PUBLISH_BG_SETTLE_FRAMES);
         if (scene_discontinuity || state->thermal_target_persist == NULL ||
             state->thermal_target_persist_w != sg_w || state->thermal_target_persist_h != sg_h) {
             free(state->thermal_target_persist);
@@ -4709,6 +4732,10 @@ int anomaly_process_frame(
                 float isolation_track_scale =
                     1.0f + 0.34f * history_bonus * clampf((thermal_candidate_isolation_rank[ci] - 0.42f) / 0.40f, 0.0f, 1.0f);
                 final_score *= isolation_track_scale;
+                bool singleton_blob = area <= 1.0f && span <= 1.0f;
+                if (singleton_blob && !thermal_publish_settled) {
+                    final_score *= 0.42f;
+                }
                 thermal_candidates[ci].thermal_score = final_score;
                 thermal_blob_candidates[ci].candidate.thermal_score = final_score;
                 bool candidate_plausible = final_score >= cfg->score_threshold;
@@ -4743,6 +4770,10 @@ int anomaly_process_frame(
             }
             if (state->thermal_target_persist != NULL) {
                 for (int ci = 0; ci < thermal_candidate_count; ci++) {
+                    bool singleton_blob =
+                        thermal_candidate_area[ci] <= 1.0f &&
+                        thermal_candidate_span[ci] <= 1.0f;
+                    if (singleton_blob && !thermal_publish_settled) continue;
                     float seed_strength = thermal_candidate_seed_strength(
                         thermal_candidate_base_score[ci],
                         thermal_candidate_quality_score[ci],
@@ -5385,6 +5416,24 @@ int anomaly_process_frame(
         saliency_aux_local_cy[i] = -1.0f;
         saliency_aux_local_score[i] = -1.0f;
     }
+    if (transition_warmup_block &&
+        (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+        state->acc_active[3] = false;
+        state->acc_hits[3] = 0;
+        state->acc_hold[3] = 0;
+        state->acc_presence_mask[3] = 0u;
+        state->acc_cx[3] = 0.0f;
+        state->acc_cy[3] = 0.0f;
+        state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
+        for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
+            state->saliency_aux_active[i] = false;
+            state->saliency_aux_hits[i] = 0;
+            state->saliency_aux_hold[i] = 0;
+            state->saliency_aux_cx[i] = 0.0f;
+            state->saliency_aux_cy[i] = 0.0f;
+            state->saliency_aux_display_algorithm[i] = ANOMALY_ALGO_PERSIST;
+        }
+    }
     if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_COLOR)   && best_color   >= cfg->score_threshold) {
         raw_cx[0] = (float)best_color_x   / fw;
         raw_cy[0] = (float)best_color_y   / fh;
@@ -5401,6 +5450,7 @@ int anomaly_process_frame(
     }
     if (anomaly_detection_active &&
         (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) &&
+        !transition_warmup_block &&
         best_persist >= cfg->score_threshold) {
         raw_cx[3] = (float)best_persist_x / fw;
         raw_cy[3] = (float)best_persist_y / fh;
@@ -5654,6 +5704,9 @@ int anomaly_process_frame(
     if (anomaly_detection_active &&
         (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0 &&
         (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_COLOR)) != 0) {
+        bool thermal_publish_settled =
+            cfg->min_hits <= 1 ||
+            state->bg_warmup >= (ANOMALY_THERMAL_BG_WARMUP + ANOMALY_PUBLISH_BG_SETTLE_FRAMES);
         float derived_persist = -1.0f;
         int derived_persist_x = 0;
         int derived_persist_y = 0;
@@ -5673,12 +5726,23 @@ int anomaly_process_frame(
                     motion_support = local_motion > 0.0f ? local_motion : 0.0f;
                 }
             }
-            derived_persist =
-                best_thermal +
-                (0.55f * support) +
-                (0.25f * motion_support);
-            derived_persist_x = best_thermal_x;
-            derived_persist_y = best_thermal_y;
+            bool singleton_blob =
+                best_thermal_candidate_idx >= 0 &&
+                best_thermal_candidate_idx < thermal_candidate_count &&
+                thermal_candidate_area[best_thermal_candidate_idx] <= 1.0f &&
+                thermal_candidate_span[best_thermal_candidate_idx] <= 1.0f;
+            bool weak_singleton =
+                singleton_blob &&
+                motion_support < 0.20f &&
+                (!thermal_publish_settled || best_thermal < cfg->score_threshold + 0.65f);
+            if (!weak_singleton) {
+                derived_persist =
+                    best_thermal +
+                    (0.55f * support) +
+                    (0.25f * motion_support);
+                derived_persist_x = best_thermal_x;
+                derived_persist_y = best_thermal_y;
+            }
         }
 
         if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
@@ -5803,10 +5867,30 @@ int anomaly_process_frame(
                 alpha);
     }
 
+    bool publish_motion_unstable =
+        !scene_discontinuity &&
+        sim.valid &&
+        (sim.mean_residual > ANOMALY_PUBLISH_GMV_RESIDUAL_GATE ||
+         best_motion_zoom_scale < ANOMALY_PUBLISH_ZOOM_SCALE_GATE);
+    if (scene_discontinuity) {
+        if (state->publish_hold_frames < ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES) {
+            state->publish_hold_frames = ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES;
+        }
+    } else if (publish_motion_unstable) {
+        if (state->publish_hold_frames < ANOMALY_PUBLISH_UNSTABLE_HOLDOFF_FRAMES) {
+            state->publish_hold_frames = ANOMALY_PUBLISH_UNSTABLE_HOLDOFF_FRAMES;
+        }
+    }
+    bool publish_allowed =
+        !transition_warmup_block &&
+        !publish_hold_active &&
+        !scene_discontinuity &&
+        !publish_motion_unstable;
+
     // ── Assemble and draw boxes ─────────────────────��─────────────────��──
     anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
     int box_count = 0;
-    if (anomaly_detection_active) {
+    if (anomaly_detection_active && publish_allowed) {
         const int motion_box_algorithm = use_motion_tolerance ? ANOMALY_ALGO_MOTION_TOLERANCE : ANOMALY_ALGO_MOTION;
         box_count = assemble_anomaly_boxes(
                 state,
@@ -5892,6 +5976,31 @@ int anomaly_process_frame(
         result_out->motion_debug.top_candidate_count = motion_top_count;
         for (int i = 0; i < motion_top_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
             result_out->motion_debug.top_candidates[i] = motion_top[i];
+        }
+        result_out->thermal_debug.bg_ready = bg_valid;
+        result_out->thermal_debug.raw_candidate_valid = (best_thermal >= 0.0f);
+        result_out->thermal_debug.raw_score = best_thermal;
+        result_out->thermal_debug.raw_x_norm = (best_thermal_x > 0 || best_thermal_y > 0)
+            ? ((float)best_thermal_x / fw) : 0.0f;
+        result_out->thermal_debug.raw_y_norm = (best_thermal_x > 0 || best_thermal_y > 0)
+            ? ((float)best_thermal_y / fh) : 0.0f;
+        result_out->thermal_debug.winning_candidate_index = best_thermal_candidate_idx;
+        result_out->thermal_debug.candidate_count = thermal_candidate_count;
+        for (int i = 0; i < thermal_candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+            anomaly_debug_thermal_candidate_t *dbg = &result_out->thermal_debug.candidates[i];
+            dbg->valid = true;
+            dbg->pixel_x = thermal_candidates[i].pixel_x;
+            dbg->pixel_y = thermal_candidates[i].pixel_y;
+            dbg->x_norm = (float)thermal_candidates[i].pixel_x / fw;
+            dbg->y_norm = (float)thermal_candidates[i].pixel_y / fh;
+            dbg->base_score = thermal_candidate_base_score[i];
+            dbg->final_score = thermal_candidates[i].thermal_score;
+            dbg->area = thermal_candidate_area[i];
+            dbg->span = thermal_candidate_span[i];
+            dbg->fill = thermal_candidate_fill[i];
+            dbg->center_share = thermal_candidate_center_share[i];
+            dbg->quality = thermal_candidate_quality_score[i];
+            dbg->isolation_rank = thermal_candidate_isolation_rank[i];
         }
         result_out->saliency_debug.raw_candidate_valid = (best_persist >= 0.0f);
         result_out->saliency_debug.raw_score = best_persist;

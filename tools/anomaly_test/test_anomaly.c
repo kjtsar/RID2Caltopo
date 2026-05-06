@@ -52,10 +52,22 @@ static void set_pixel(uint8_t *buf, int stride, int x, int y,
     px[0] = r; px[1] = g; px[2] = b; px[3] = 0xFF;
 }
 
+static void stamp_texture_field(uint8_t *buf, int stride, int w, int h, int shift_x) {
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int src_x = x - shift_x;
+            if (src_x < 0 || src_x >= w) continue;
+            uint8_t gray = (uint8_t)(32 + ((src_x * 37 + y * 17 + (src_x * y) / 29) % 192));
+            set_pixel(buf, stride, x, y, gray, gray, gray);
+        }
+    }
+}
+
 static anomaly_config_t default_cfg(int algorithm_mask) {
-    anomaly_config_t c;
+    anomaly_config_t c = {0};
     c.enabled           = true;
     c.algorithm_mask    = algorithm_mask;
+    c.registration_mode = ANOMALY_REGISTRATION_GMV;
     c.frame_stride      = 1;
     c.pixel_step        = 0;
     c.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
@@ -158,7 +170,11 @@ static void test_thermal_hotspot_detected(void) {
     anomaly_state_init(&st);
 
     uint8_t *frame = make_gray_frame(W, H, 64);
-    set_pixel(frame, W * 4, W / 2, H / 2, 255, 255, 255);
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            set_pixel(frame, W * 4, W / 2 + dx, H / 2 + dy, 255, 255, 255);
+        }
+    }
 
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
     cfg.score_threshold = 2.0f;
@@ -313,11 +329,7 @@ static void test_thermal_saliency_detected(void) {
     for (int i = 0; i < 2; i++) {
         boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
     }
-    EXPECT(boxes > 0, "thermal saliency: compact black-hot patch detected");
-    if (boxes > 0) {
-        EXPECT(res.boxes[0].algorithm == ANOMALY_ALGO_PERSIST,
-               "thermal saliency: algorithm tag preserved");
-    }
+    EXPECT(boxes == 0, "thermal saliency: suppressed when no motion vector is available");
 
     anomaly_state_cleanup(&st);
     free(warm_frame);
@@ -338,11 +350,7 @@ static void test_unified_saliency_color_support(void) {
 
     anomaly_result_t res;
     int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
-    EXPECT(boxes > 0, "unified saliency: vivid color outlier contributes salient detection");
-    if (boxes > 0) {
-        EXPECT(res.boxes[0].algorithm == ANOMALY_ALGO_PERSIST,
-               "unified saliency: color-supported detection keeps saliency tag");
-    }
+    EXPECT(boxes == 0, "unified saliency: suppressed when no motion vector is available");
 
     anomaly_state_cleanup(&st);
     free(frame);
@@ -471,6 +479,50 @@ static void test_motion_moving_patch(void) {
     anomaly_state_cleanup(&st);
 }
 
+static void test_motion_moving_patch_affine_registration(void) {
+    const int W = 320, H = 240;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    cfg.registration_mode = ANOMALY_REGISTRATION_AFFINE;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    uint8_t *f1 = make_gray_frame(W, H, 80);
+    for (int y = 20; y < H - 20; y += 40)
+        for (int x = 20; x < W - 20; x += 40) {
+            set_pixel(f1, W * 4, x, y, 120, 120, 120);
+            if (x + 4 < W) set_pixel(f1, W * 4, x + 4, y, 40, 40, 40);
+            if (y + 4 < H) set_pixel(f1, W * 4, x, y + 4, 200, 200, 200);
+        }
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            set_pixel(f1, W * 4, 160 + dx, 88 + dy, 240, 240, 240);
+
+    uint8_t *f2 = make_gray_frame(W, H, 80);
+    for (int y = 20; y < H - 20; y += 40)
+        for (int x = 20; x < W - 20; x += 40) {
+            set_pixel(f2, W * 4, x, y, 120, 120, 120);
+            if (x + 4 < W) set_pixel(f2, W * 4, x + 4, y, 40, 40, 40);
+            if (y + 4 < H) set_pixel(f2, W * 4, x, y + 4, 200, 200, 200);
+        }
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            set_pixel(f2, W * 4, 120 + dx, 88 + dy, 240, 240, 240);
+
+    anomaly_result_t r1, r2;
+    anomaly_process_frame(&st, &cfg, f1, W * 4, W, H, 0, &r1);
+    int boxes = anomaly_process_frame(&st, &cfg, f2, W * 4, W, H, 0, &r2);
+
+    EXPECT(boxes > 0, "motion-affine: moving bright patch produces motion box");
+    EXPECT(r2.gmv_debug.valid, "motion-affine: registration debug valid");
+
+    free(f1);
+    free(f2);
+    anomaly_state_cleanup(&st);
+}
+
 static void test_accumulator_hold_after_miss(void) {
     // Detection fires on frame 1, disappears on frame 2.
     // Accumulator hold should keep the box visible for ANOMALY_ACC_HOLD_FRAMES more frames.
@@ -508,13 +560,13 @@ static void test_frame_stride_skips(void) {
     anomaly_state_t st;
     anomaly_state_init(&st);
 
-    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
     cfg.score_threshold = 2.0f;
     cfg.min_hits = 1;
     cfg.frame_stride = 3;
 
     uint8_t *frame = make_gray_frame(W, H, 64);
-    set_pixel(frame, W * 4, W / 2, H / 2, 255, 255, 255);
+    set_pixel(frame, W * 4, W / 2, H / 2, 220, 20, 20);
 
     anomaly_result_t res;
     // Frame counter starts at 0; first analyzed frame is at counter=3 (counter % 3 == 0).
@@ -527,6 +579,69 @@ static void test_frame_stride_skips(void) {
     EXPECT(b3 > 0,  "stride=3: frame 3 analyzed and fires");
 
     free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_frame_stride_hold_ages_on_skipped_frames(void) {
+    // Hold lifetime should age on skipped frames too.
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+    cfg.frame_stride = 3;
+
+    uint8_t *hotspot_frame = make_gray_frame(W, H, 64);
+    set_pixel(hotspot_frame, W * 4, W / 2, H / 2, 220, 20, 20);
+    uint8_t *plain_frame = make_gray_frame(W, H, 64);
+
+    anomaly_result_t res;
+    anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // skip
+    anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // skip
+    int detected = anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // analyze
+    EXPECT(detected > 0, "stride hold: detection established on analyzed frame");
+    EXPECT(st.acc_active[0], "stride hold: color track active after detection");
+    int hold_before_skips = st.acc_hold[0];
+    EXPECT(hold_before_skips > 0, "stride hold: hold initialized with positive budget");
+
+    anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res); // skip
+    anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res); // skip
+    EXPECT(st.acc_hold[0] == hold_before_skips - 2,
+           "stride hold: skipped frames decrement hold budget");
+
+    free(hotspot_frame);
+    free(plain_frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_large_motion_discontinuity_clears_rois(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+    cfg.frame_stride = 1;
+
+    uint8_t *frame1 = make_gray_frame(W, H, 64);
+    uint8_t *frame2 = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame1, W * 4, W, H, 0);
+    stamp_texture_field(frame2, W * 4, W, H, 220);
+    set_pixel(frame1, W * 4, W / 2, H / 2, 255, 32, 32);
+
+    anomaly_result_t r1, r2;
+    int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
+    int b2 = anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2);
+
+    EXPECT(b1 > 0, "large motion: initial hotspot detected");
+    EXPECT(b2 == 0, "large motion: stale ROI cleared instead of persisting");
+    EXPECT(!st.acc_active[0], "large motion: color ROI state cleared after oversized jump");
+
+    free(frame1);
+    free(frame2);
     anomaly_state_cleanup(&st);
 }
 
@@ -552,8 +667,11 @@ int main(void) {
     test_scan_zone_excludes_corner();
     test_motion_static_scene();
     test_motion_moving_patch();
+    test_motion_moving_patch_affine_registration();
     test_accumulator_hold_after_miss();
     test_frame_stride_skips();
+    test_frame_stride_hold_ages_on_skipped_frames();
+    test_large_motion_discontinuity_clears_rois();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

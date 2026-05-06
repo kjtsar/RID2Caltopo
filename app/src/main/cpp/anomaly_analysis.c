@@ -23,6 +23,7 @@
 #define ANOMALY_SALIENCY_RING_SOFT_SCALE 1.35f
 #define ANOMALY_SALIENCY_RING_HARD_SCALE 0.18f
 #define ANOMALY_SALIENCY_PLATEAU_SUPPORT 6
+#define ANOMALY_SALIENCY_SELECTION_SUPPORT_RADIUS 2
 #define ANOMALY_MAX_MOTION_CANDIDATES 4
 #define ANOMALY_MAX_OVERLAY_BOXES 8
 #define ANOMALY_MOTION_CANDIDATE_NMS_RADIUS 2
@@ -52,13 +53,15 @@
 #define ANOMALY_PUBLISH_UNSTABLE_HOLDOFF_FRAMES 3
 #define ANOMALY_PUBLISH_GMV_RESIDUAL_GATE 0.010f
 #define ANOMALY_PUBLISH_ZOOM_SCALE_GATE 0.60f
+#define ANOMALY_PUBLISH_GLOBAL_MOTION_GATE 0.085f
 #define ANOMALY_SALIENCY_SECONDARY_MIN_SEPARATION 0.070f
 #define ANOMALY_SALIENCY_SECONDARY_SCORE_MARGIN 1.20f
 #define ANOMALY_SALIENCY_SECONDARY_TRACKED_SCORE_MARGIN 2.10f
 #define ANOMALY_SALIENCY_SECONDARY_TRACK_REACQUIRE_GATE 0.090f
 #define ANOMALY_SALIENCY_SECONDARY_HOLD_BONUS 6
 #define ANOMALY_SALIENCY_SECONDARY_LOCAL_RADIUS_CELLS 2
-#define ANOMALY_SALIENCY_SECONDARY_LOCAL_THRESHOLD_SLACK 0.70f
+#define ANOMALY_SALIENCY_SECONDARY_LOCAL_THRESHOLD_SLACK 0.40f
+#define ANOMALY_SALIENCY_BOUNDARY_RADIUS_CELLS 6
 
 static inline float clamp01f(float v) {
     if (v < 0.0f) return 0.0f;
@@ -252,6 +255,50 @@ static bool solve_3x3(
     return true;
 }
 
+static bool solve_6x6(
+        const float a_in[6][6],
+        const float b_in[6],
+        float out[6]) {
+    float a[6][7];
+    for (int r = 0; r < 6; r++) {
+        for (int c = 0; c < 6; c++) a[r][c] = a_in[r][c];
+        a[r][6] = b_in[r];
+    }
+
+    for (int pivot = 0; pivot < 6; pivot++) {
+        int best_row = pivot;
+        float best_abs = fabsf(a[pivot][pivot]);
+        for (int r = pivot + 1; r < 6; r++) {
+            float cand = fabsf(a[r][pivot]);
+            if (cand > best_abs) {
+                best_abs = cand;
+                best_row = r;
+            }
+        }
+        if (best_abs < 1e-6f) return false;
+        if (best_row != pivot) {
+            for (int c = pivot; c < 7; c++) {
+                float tmp = a[pivot][c];
+                a[pivot][c] = a[best_row][c];
+                a[best_row][c] = tmp;
+            }
+        }
+        float inv = 1.0f / a[pivot][pivot];
+        for (int c = pivot; c < 7; c++) a[pivot][c] *= inv;
+        for (int r = 0; r < 6; r++) {
+            if (r == pivot) continue;
+            float factor = a[r][pivot];
+            if (fabsf(factor) < 1e-8f) continue;
+            for (int c = pivot; c < 7; c++) {
+                a[r][c] -= factor * a[pivot][c];
+            }
+        }
+    }
+
+    for (int i = 0; i < 6; i++) out[i] = a[i][6];
+    return true;
+}
+
 static int compare_float_qsort(const void *a, const void *b) {
     float fa = *(const float *)a;
     float fb = *(const float *)b;
@@ -284,6 +331,18 @@ typedef struct {
     int max_x;
     int max_y;
 } anomaly_thermal_blob_candidate_t;
+
+typedef struct {
+    int mode;
+    float affine[6];  // prev = A(curr): [m00 m01 m02; m10 m11 m12]
+    similarity_2d_t similarity;
+    bool scene_discontinuity;
+    bool debug_valid;
+    int sample_step;
+    int motion_step;
+    int anchor_count;
+    anomaly_debug_gmv_anchor_t anchors[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+} anomaly_registration_model_t;
 
 static int compare_thermal_blob_rank(
         const anomaly_thermal_blob_candidate_t *lhs,
@@ -736,8 +795,112 @@ static void collect_motion_candidates(
     }
 }
 
+static int normalize_registration_mode(const anomaly_config_t *cfg) {
+    if (cfg != NULL && cfg->registration_mode == ANOMALY_REGISTRATION_AFFINE) {
+        return ANOMALY_REGISTRATION_AFFINE;
+    }
+    return ANOMALY_REGISTRATION_GMV;
+}
+
+static anomaly_registration_model_t make_registration_model(
+        int mode,
+        int sample_step,
+        int motion_step) {
+    anomaly_registration_model_t model;
+    memset(&model, 0, sizeof(model));
+    model.mode = mode;
+    model.sample_step = sample_step;
+    model.motion_step = motion_step;
+    model.affine[0] = 1.0f;
+    model.affine[4] = 1.0f;
+    model.similarity.a = 1.0f;
+    model.similarity.valid = false;
+    return model;
+}
+
+static inline bool registration_model_valid(const anomaly_registration_model_t *model) {
+    return model != NULL && model->similarity.valid;
+}
+
+static inline float registration_model_scale(const anomaly_registration_model_t *model) {
+    if (model == NULL) return 1.0f;
+    return sqrtf(model->similarity.a * model->similarity.a +
+                 model->similarity.b * model->similarity.b);
+}
+
+static inline void registration_apply_point(
+        const anomaly_registration_model_t *model,
+        float x,
+        float y,
+        float *out_x,
+        float *out_y) {
+    if (out_x == NULL || out_y == NULL) return;
+    if (model == NULL) {
+        *out_x = x;
+        *out_y = y;
+        return;
+    }
+    *out_x = model->affine[0] * x + model->affine[1] * y + model->affine[2];
+    *out_y = model->affine[3] * x + model->affine[4] * y + model->affine[5];
+}
+
+static float registration_max_corner_displacement(
+        const anomaly_registration_model_t *model,
+        int                                 width,
+        int                                 height) {
+    if (model == NULL || width <= 1 || height <= 1) return 0.0f;
+    static const float points[5][2] = {
+        {0.0f, 0.0f},
+        {1.0f, 0.0f},
+        {0.0f, 1.0f},
+        {1.0f, 1.0f},
+        {0.5f, 0.5f},
+    };
+    float max_disp = 0.0f;
+    for (int i = 0; i < 5; i++) {
+        float x1 = 0.0f;
+        float y1 = 0.0f;
+        registration_apply_point(model, points[i][0], points[i][1], &x1, &y1);
+        float dx = x1 - points[i][0];
+        float dy = y1 - points[i][1];
+        float disp = sqrtf(dx * dx + dy * dy);
+        if (disp > max_disp) max_disp = disp;
+    }
+    return max_disp;
+}
+
+static bool registration_motion_exceeds_search(
+        const anomaly_registration_model_t *model,
+        int                                 width,
+        int                                 height,
+        float                               fraction) {
+    if (model == NULL || width <= 1 || height <= 1 || model->motion_step <= 0) return false;
+    float fw = (float)(width - 1);
+    float fh = (float)(height - 1);
+    float search_dx = ((float)(ANOMALY_GMV_SEARCH_RADIUS * model->motion_step)) / fw;
+    float search_dy = ((float)(ANOMALY_GMV_SEARCH_RADIUS * model->motion_step)) / fh;
+    float search_limit = sqrtf(search_dx * search_dx + search_dy * search_dy) * fraction;
+    return registration_max_corner_displacement(model, width, height) > search_limit;
+}
+
+static inline bool registration_invert_point(
+        const anomaly_registration_model_t *model,
+        float x,
+        float y,
+        float *out_x,
+        float *out_y) {
+    if (model == NULL || out_x == NULL || out_y == NULL) return false;
+    float det = model->affine[0] * model->affine[4] - model->affine[1] * model->affine[3];
+    if (fabsf(det) < 1e-6f) return false;
+    float dx = x - model->affine[2];
+    float dy = y - model->affine[5];
+    *out_x = ( model->affine[4] * dx - model->affine[1] * dy) / det;
+    *out_y = (-model->affine[3] * dx + model->affine[0] * dy) / det;
+    return true;
+}
+
 static bool project_motion_cell(
-        similarity_2d_t sim,
+        const anomaly_registration_model_t *model,
         int             width,
         int             height,
         int             motion_step,
@@ -747,15 +910,17 @@ static bool project_motion_cell(
         int             my,
         int            *px_idx_out,
         int            *py_idx_out) {
-    if (width <= 1 || height <= 1 || motion_step <= 0 || motion_w <= 0 || motion_h <= 0) {
+    if (model == NULL || width <= 1 || height <= 1 || motion_step <= 0 ||
+        motion_w <= 0 || motion_h <= 0) {
         return false;
     }
     float fw = (float)(width - 1);
     float fh = (float)(height - 1);
     float cx_n = (float)(mx * motion_step) / fw;
     float cy_n = (float)(my * motion_step) / fh;
-    float px_n = sim.a * cx_n - sim.b * cy_n + sim.tx;
-    float py_n = sim.b * cx_n + sim.a * cy_n + sim.ty;
+    float px_n = 0.0f;
+    float py_n = 0.0f;
+    registration_apply_point(model, cx_n, cy_n, &px_n, &py_n);
     int px_idx = (int)(px_n * fw / (float)motion_step + 0.5f);
     int py_idx = (int)(py_n * fh / (float)motion_step + 0.5f);
     if (px_idx < 0 || px_idx >= motion_w || py_idx < 0 || py_idx >= motion_h) return false;
@@ -1043,11 +1208,11 @@ static float registration_residual_standout_score(
         int                 motion_step,
         int                 width,
         int                 height,
-        similarity_2d_t     sim,
+        const anomaly_registration_model_t *model,
         int                 mx,
         int                 my) {
     if (curr_luma == NULL || prev_luma == NULL || motion_w <= 1 || motion_h <= 1 ||
-        width <= 1 || height <= 1 || !sim.valid) {
+        width <= 1 || height <= 1 || !registration_model_valid(model)) {
         return 0.0f;
     }
 
@@ -1069,8 +1234,9 @@ static float registration_residual_standout_score(
 
             float x_norm = ((float)(sx * motion_step)) / fw;
             float y_norm = ((float)(sy * motion_step)) / fh;
-            float prev_x_norm = sim.a * x_norm - sim.b * y_norm + sim.tx;
-            float prev_y_norm = sim.b * x_norm + sim.a * y_norm + sim.ty;
+            float prev_x_norm = 0.0f;
+            float prev_y_norm = 0.0f;
+            registration_apply_point(model, x_norm, y_norm, &prev_x_norm, &prev_y_norm);
             float prev_x = (prev_x_norm * fw) / (float)motion_step;
             float prev_y = (prev_y_norm * fh) / (float)motion_step;
             float prev_sample = 0.0f;
@@ -1114,12 +1280,467 @@ static int gmv_feature_score(const uint8_t *luma, int w, int h, int x, int y) {
     return score;
 }
 
+typedef struct {
+    float x0;
+    float y0;
+    float x1;
+    float y1;
+    float err;
+} affine_match_t;
+
+static bool fit_affine_least_squares(
+        const affine_match_t *matches,
+        int                   count,
+        float                 out_affine[6]) {
+    if (matches == NULL || out_affine == NULL || count < 3) return false;
+    float ata[6][6];
+    float atb[6];
+    memset(ata, 0, sizeof(ata));
+    memset(atb, 0, sizeof(atb));
+    for (int i = 0; i < count; i++) {
+        const affine_match_t *m = &matches[i];
+        float row0[6] = {m->x0, m->y0, 1.0f, 0.0f, 0.0f, 0.0f};
+        float row1[6] = {0.0f, 0.0f, 0.0f, m->x0, m->y0, 1.0f};
+        for (int r = 0; r < 6; r++) {
+            atb[r] += row0[r] * m->x1 + row1[r] * m->y1;
+            for (int c = 0; c < 6; c++) {
+                ata[r][c] += row0[r] * row0[c] + row1[r] * row1[c];
+            }
+        }
+    }
+    return solve_6x6(ata, atb, out_affine);
+}
+
+static inline void affine_apply(
+        const float affine[6],
+        float x,
+        float y,
+        float *out_x,
+        float *out_y) {
+    if (out_x == NULL || out_y == NULL) return;
+    *out_x = affine[0] * x + affine[1] * y + affine[2];
+    *out_y = affine[3] * x + affine[4] * y + affine[5];
+}
+
+static bool estimate_translation_seed(
+        const uint8_t *prev_luma,
+        const uint8_t *curr_luma,
+        int            w,
+        int            h,
+        int            roi_x0,
+        int            roi_x1,
+        int            roi_y0,
+        int            roi_y1,
+        int            search_radius,
+        int           *best_dx_out,
+        int           *best_dy_out) {
+    if (prev_luma == NULL || curr_luma == NULL || w <= 0 || h <= 0) return false;
+    long best_sad = 0x7FFFFFFFFFFFFFFFL;
+    int best_dx = 0;
+    int best_dy = 0;
+    bool found = false;
+    int sample_stride = 2;
+    for (int dy = -search_radius; dy <= search_radius; dy++) {
+        for (int dx = -search_radius; dx <= search_radius; dx++) {
+            long sad = 0;
+            int count = 0;
+            for (int y = roi_y0; y <= roi_y1; y += sample_stride) {
+                int py = y + dy;
+                if (py < 0 || py >= h) continue;
+                for (int x = roi_x0; x <= roi_x1; x += sample_stride) {
+                    int px = x + dx;
+                    if (px < 0 || px >= w) continue;
+                    int d = (int)curr_luma[y * w + x] - (int)prev_luma[py * w + px];
+                    sad += d < 0 ? -d : d;
+                    count++;
+                }
+            }
+            if (count < 24) continue;
+            if (!found || sad < best_sad) {
+                best_sad = sad;
+                best_dx = dx;
+                best_dy = dy;
+                found = true;
+            }
+        }
+    }
+    if (!found) return false;
+    if (best_dx_out != NULL) *best_dx_out = best_dx;
+    if (best_dy_out != NULL) *best_dy_out = best_dy;
+    return true;
+}
+
+static int detect_affine_corners(
+        const uint8_t *luma,
+        int            w,
+        int            h,
+        int            roi_x0,
+        int            roi_x1,
+        int            roi_y0,
+        int            roi_y1,
+        int            min_distance,
+        int            max_corners,
+        int           *out_x,
+        int           *out_y,
+        int           *out_score) {
+    if (luma == NULL || out_x == NULL || out_y == NULL || out_score == NULL ||
+        w <= 2 || h <= 2 || max_corners <= 0) {
+        return 0;
+    }
+    int count = 0;
+    for (int y = roi_y0; y <= roi_y1; y++) {
+        if (y <= 1 || y >= h - 2) continue;
+        for (int x = roi_x0; x <= roi_x1; x++) {
+            if (x <= 1 || x >= w - 2) continue;
+            int score = gmv_feature_score(luma, w, h, x, y);
+            if (score < ANOMALY_GMV_MIN_TEXTURE_SCORE) continue;
+            bool too_close = false;
+            for (int i = 0; i < count; i++) {
+                int dx = x - out_x[i];
+                int dy = y - out_y[i];
+                if (dx * dx + dy * dy < min_distance * min_distance) {
+                    too_close = true;
+                    if (score > out_score[i]) {
+                        out_x[i] = x;
+                        out_y[i] = y;
+                        out_score[i] = score;
+                    }
+                    break;
+                }
+            }
+            if (too_close) continue;
+            int insert_at = count;
+            for (int i = 0; i < count; i++) {
+                if (score > out_score[i]) {
+                    insert_at = i;
+                    break;
+                }
+            }
+            if (insert_at >= max_corners) continue;
+            int move_limit = count < max_corners ? count : (max_corners - 1);
+            for (int i = move_limit; i > insert_at; i--) {
+                out_x[i] = out_x[i - 1];
+                out_y[i] = out_y[i - 1];
+                out_score[i] = out_score[i - 1];
+            }
+            out_x[insert_at] = x;
+            out_y[insert_at] = y;
+            out_score[insert_at] = score;
+            if (count < max_corners) count++;
+        }
+    }
+    return count;
+}
+
+static bool patch_mse_at(
+        const uint8_t *prev_luma,
+        const uint8_t *curr_luma,
+        int            w,
+        int            h,
+        int            prev_x,
+        int            prev_y,
+        int            curr_x,
+        int            curr_y,
+        int            patch_half,
+        float         *out_mse) {
+    if (prev_luma == NULL || curr_luma == NULL || out_mse == NULL) return false;
+    if (prev_x - patch_half < 0 || prev_y - patch_half < 0 ||
+        prev_x + patch_half >= w || prev_y + patch_half >= h ||
+        curr_x - patch_half < 0 || curr_y - patch_half < 0 ||
+        curr_x + patch_half >= w || curr_y + patch_half >= h) {
+        return false;
+    }
+    float err = 0.0f;
+    int count = 0;
+    for (int oy = -patch_half; oy <= patch_half; oy++) {
+        for (int ox = -patch_half; ox <= patch_half; ox++) {
+            float d = (float)prev_luma[(prev_y + oy) * w + (prev_x + ox)] -
+                      (float)curr_luma[(curr_y + oy) * w + (curr_x + ox)];
+            err += d * d;
+            count++;
+        }
+    }
+    if (count <= 0) return false;
+    *out_mse = err / (float)count;
+    return true;
+}
+
+static int track_affine_features(
+        const uint8_t *prev_luma,
+        const uint8_t *curr_luma,
+        int            w,
+        int            h,
+        const int     *corner_x,
+        const int     *corner_y,
+        int            corner_count,
+        int            base_dx,
+        int            base_dy,
+        int            patch_half,
+        int            search_radius,
+        affine_match_t *out_matches,
+        int            max_matches) {
+    if (prev_luma == NULL || curr_luma == NULL || corner_x == NULL || corner_y == NULL ||
+        out_matches == NULL || max_matches <= 0) {
+        return 0;
+    }
+    int match_count = 0;
+    for (int i = 0; i < corner_count && match_count < max_matches; i++) {
+        int x = corner_x[i];
+        int y = corner_y[i];
+        int pred_x = x - base_dx;
+        int pred_y = y - base_dy;
+        float best_err = 0.0f;
+        float second_err = 0.0f;
+        int best_x = 0;
+        int best_y = 0;
+        bool have_best = false;
+        bool have_second = false;
+        for (int dy = -search_radius; dy <= search_radius; dy++) {
+            for (int dx = -search_radius; dx <= search_radius; dx++) {
+                int cx = pred_x + dx;
+                int cy = pred_y + dy;
+                float mse = 0.0f;
+                if (!patch_mse_at(prev_luma, curr_luma, w, h, x, y, cx, cy, patch_half, &mse)) continue;
+                if (!have_best || mse < best_err) {
+                    second_err = best_err;
+                    have_second = have_best;
+                    best_err = mse;
+                    best_x = cx;
+                    best_y = cy;
+                    have_best = true;
+                } else if (!have_second || mse < second_err) {
+                    second_err = mse;
+                    have_second = true;
+                }
+            }
+        }
+        if (!have_best) continue;
+        if (have_second && second_err <= best_err * 1.05f) continue;
+        out_matches[match_count].x0 = (float)x;
+        out_matches[match_count].y0 = (float)y;
+        out_matches[match_count].x1 = (float)best_x;
+        out_matches[match_count].y1 = (float)best_y;
+        out_matches[match_count].err = best_err;
+        match_count++;
+    }
+    return match_count;
+}
+
+static bool summarize_affine_as_similarity(
+        const float affine[6],
+        float mean_residual,
+        similarity_2d_t *out_similarity) {
+    if (affine == NULL || out_similarity == NULL) return false;
+    float a = 0.5f * (affine[0] + affine[4]);
+    float b = 0.5f * (affine[3] - affine[1]);
+    out_similarity->a = a;
+    out_similarity->b = b;
+    out_similarity->tx = affine[2];
+    out_similarity->ty = affine[5];
+    out_similarity->mean_residual = mean_residual;
+    out_similarity->valid = true;
+    return true;
+}
+
+static bool fit_affine_ransac(
+        const affine_match_t *matches,
+        int                   match_count,
+        float                 out_affine[6],
+        float                *out_mean_residual) {
+    if (matches == NULL || out_affine == NULL || out_mean_residual == NULL || match_count < 3) {
+        return false;
+    }
+    float best_affine[6];
+    int best_inliers[64];
+    int best_inlier_count = 0;
+    float best_mean = 1e9f;
+    const int max_iters = 120;
+    const float inlier_thresh = 1.5f;
+    for (int iter = 0; iter < max_iters; iter++) {
+        int i0 = (iter * 17 + 1) % match_count;
+        int i1 = (iter * 29 + 7) % match_count;
+        int i2 = (iter * 43 + 11) % match_count;
+        if (i0 == i1 || i0 == i2 || i1 == i2) continue;
+        affine_match_t sample[3] = {matches[i0], matches[i1], matches[i2]};
+        float affine[6];
+        if (!fit_affine_least_squares(sample, 3, affine)) continue;
+        int inliers[64];
+        int inlier_count = 0;
+        float residual_sum = 0.0f;
+        for (int mi = 0; mi < match_count; mi++) {
+            float px = 0.0f;
+            float py = 0.0f;
+            affine_apply(affine, matches[mi].x0, matches[mi].y0, &px, &py);
+            float resid = sqrtf((px - matches[mi].x1) * (px - matches[mi].x1) +
+                                (py - matches[mi].y1) * (py - matches[mi].y1));
+            if (resid <= inlier_thresh && inlier_count < (int)(sizeof(inliers) / sizeof(inliers[0]))) {
+                inliers[inlier_count++] = mi;
+                residual_sum += resid;
+            }
+        }
+        if (inlier_count < 3) continue;
+        float mean = residual_sum / (float)inlier_count;
+        if (inlier_count > best_inlier_count || (inlier_count == best_inlier_count && mean < best_mean)) {
+            memcpy(best_affine, affine, sizeof(best_affine));
+            memcpy(best_inliers, inliers, (size_t)inlier_count * sizeof(int));
+            best_inlier_count = inlier_count;
+            best_mean = mean;
+        }
+    }
+    if (best_inlier_count < 3) return false;
+
+    affine_match_t refined[64];
+    for (int i = 0; i < best_inlier_count; i++) refined[i] = matches[best_inliers[i]];
+    if (!fit_affine_least_squares(refined, best_inlier_count, out_affine)) {
+        memcpy(out_affine, best_affine, sizeof(best_affine));
+        *out_mean_residual = best_mean;
+        return true;
+    }
+    float residual_sum = 0.0f;
+    int residual_count = 0;
+    for (int mi = 0; mi < match_count; mi++) {
+        float px = 0.0f;
+        float py = 0.0f;
+        affine_apply(out_affine, matches[mi].x0, matches[mi].y0, &px, &py);
+        float resid = sqrtf((px - matches[mi].x1) * (px - matches[mi].x1) +
+                            (py - matches[mi].y1) * (py - matches[mi].y1));
+        if (resid <= inlier_thresh) {
+            residual_sum += resid;
+            residual_count++;
+        }
+    }
+    *out_mean_residual = residual_count > 0 ? (residual_sum / (float)residual_count) : best_mean;
+    return true;
+}
+
 static inline double ii_query(const double *ii, int stride,
                               int sx0, int sy0, int sx1, int sy1) {
     return ii[sy1 * stride + sx1]
            - (sx0 > 0 ? ii[sy1 * stride + (sx0 - 1)] : 0.0)
            - (sy0 > 0 ? ii[(sy0 - 1) * stride + sx1] : 0.0)
            + (sx0 > 0 && sy0 > 0 ? ii[(sy0 - 1) * stride + (sx0 - 1)] : 0.0);
+}
+
+static float saliency_boundary_structure_scale(
+        const float  *patch_score_map,
+        const float  *bg_luma,
+        const double *sg_luma,
+        int           sg_w,
+        int           sg_h,
+        int           sx,
+        int           sy,
+        bool          bg_valid,
+        bool          black_hot,
+        float         thermal_min_delta,
+        double        delta_norm) {
+    if (!bg_valid || patch_score_map == NULL || bg_luma == NULL || sg_luma == NULL ||
+        sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
+        return 1.0f;
+    }
+
+    size_t center_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+    float seed_delta = black_hot
+        ? (bg_luma[center_idx] - (float)sg_luma[center_idx])
+        : ((float)sg_luma[center_idx] - bg_luma[center_idx]);
+    if (seed_delta < thermal_min_delta || patch_score_map[center_idx] <= 0.0f) {
+        return 1.0f;
+    }
+
+    static const int dirs[8][2] = {
+        { 0, -1}, { 1, -1}, { 1,  0}, { 1,  1},
+        { 0,  1}, {-1,  1}, {-1,  0}, {-1, -1},
+    };
+    static const int opposite_dir[8] = {4, 5, 6, 7, 0, 1, 2, 3};
+    static const int orth_axis[4] = {2, 3, 0, 1};
+
+    float frame_band = fmaxf(1.5f, (float)delta_norm * 0.90f);
+    float max_band = fmaxf(2.0f, seed_delta * 0.22f);
+    if (frame_band > max_band) frame_band = max_band;
+    float sustain_floor = fmaxf(
+        thermal_min_delta,
+        fmaxf(seed_delta * 0.60f, seed_delta - fmaxf(frame_band * 1.75f, 2.2f)));
+
+    int reach[8] = {0};
+    float near_ratio[8] = {0.0f};
+    float axis_support[4] = {0.0f};
+    float axis_balance[4] = {0.0f};
+    float axis_near_ratio[4] = {0.0f};
+
+    for (int di = 0; di < 8; di++) {
+        float ratio_sum = 0.0f;
+        int ratio_count = 0;
+        for (int step = 1; step <= ANOMALY_SALIENCY_BOUNDARY_RADIUS_CELLS; step++) {
+            int gx = sx + dirs[di][0] * step;
+            int gy = sy + dirs[di][1] * step;
+            if (gx < 0 || gx >= sg_w || gy < 0 || gy >= sg_h) break;
+            size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+            float delta = black_hot
+                ? (bg_luma[idx] - (float)sg_luma[idx])
+                : ((float)sg_luma[idx] - bg_luma[idx]);
+            if (step <= 2 && delta > 0.0f) {
+                ratio_sum += delta / fmaxf(seed_delta, 1.0f);
+                ratio_count++;
+            }
+            if (delta < sustain_floor) break;
+            if (fabsf(delta - seed_delta) > frame_band) break;
+            reach[di] = step;
+        }
+        if (ratio_count > 0) {
+            near_ratio[di] = ratio_sum / (float)ratio_count;
+        }
+    }
+
+    for (int axis = 0; axis < 4; axis++) {
+        int a = axis;
+        int b = opposite_dir[axis];
+        int major = reach[a] > reach[b] ? reach[a] : reach[b];
+        int minor = reach[a] > reach[b] ? reach[b] : reach[a];
+        axis_support[axis] = (float)(reach[a] + reach[b]);
+        axis_balance[axis] = major > 0 ? ((float)minor / (float)major) : 0.0f;
+        axis_near_ratio[axis] = 0.5f * (near_ratio[a] + near_ratio[b]);
+    }
+
+    int best_axis = 0;
+    for (int axis = 1; axis < 4; axis++) {
+        if (axis_support[axis] > axis_support[best_axis]) best_axis = axis;
+    }
+    int normal_axis = orth_axis[best_axis];
+    float major_support = axis_support[best_axis];
+    float normal_support = axis_support[normal_axis];
+    float diagonal_support = 0.0f;
+    for (int axis = 0; axis < 4; axis++) {
+        if (axis == best_axis || axis == normal_axis) continue;
+        if (axis_support[axis] > diagonal_support) diagonal_support = axis_support[axis];
+    }
+    float competing_support = normal_support > diagonal_support ? normal_support : diagonal_support;
+    float linearity = major_support > 0.0f
+        ? (major_support - competing_support) / major_support
+        : 0.0f;
+    float major_balance = axis_balance[best_axis];
+    float major_near_ratio = axis_near_ratio[best_axis];
+    float normal_near_ratio = axis_near_ratio[normal_axis];
+
+    float penalty = 0.0f;
+    if (major_support >= 5.0f &&
+        linearity >= 0.30f &&
+        major_balance >= 0.22f &&
+        major_near_ratio >= 0.58f &&
+        normal_near_ratio <= 0.72f) {
+        penalty =
+            0.36f * clampf((major_support - 4.5f) / 4.0f, 0.0f, 1.0f) +
+            0.28f * clampf((linearity - 0.30f) / 0.45f, 0.0f, 1.0f) +
+            0.20f * clampf((major_balance - 0.22f) / 0.45f, 0.0f, 1.0f) +
+            0.16f * clampf((0.72f - normal_near_ratio) / 0.45f, 0.0f, 1.0f);
+    }
+    if (major_support >= 7.0f &&
+        linearity >= 0.45f &&
+        major_balance >= 0.35f &&
+        major_near_ratio >= 0.70f &&
+        normal_near_ratio <= 0.50f) {
+        penalty += 0.20f;
+    }
+
+    return clampf(1.0f - 0.72f * clampf(penalty, 0.0f, 1.0f), 0.28f, 1.0f);
 }
 
 static void build_patch_selection_map(
@@ -1156,9 +1777,13 @@ static void build_patch_selection_map(
             float sum_dx2 = 0.0f, sum_dy2 = 0.0f, sum_dxdy = 0.0f;
             float ring_sum = 0.0f;
             int ring_count = 0;
-            for (int ny = sy - 1; ny <= sy + 1; ny++) {
+            float outer_sum = 0.0f;
+            int outer_count = 0;
+            for (int ny = sy - ANOMALY_SALIENCY_SELECTION_SUPPORT_RADIUS;
+                 ny <= sy + ANOMALY_SALIENCY_SELECTION_SUPPORT_RADIUS; ny++) {
                 if (ny < 0 || ny >= sg_h) continue;
-                for (int nx = sx - 1; nx <= sx + 1; nx++) {
+                for (int nx = sx - ANOMALY_SALIENCY_SELECTION_SUPPORT_RADIUS;
+                     nx <= sx + ANOMALY_SALIENCY_SELECTION_SUPPORT_RADIUS; nx++) {
                     if (nx < 0 || nx >= sg_w) continue;
                     float v = score_map[ny * sg_w + nx];
                     if (v <= 0.0f) continue;
@@ -1174,6 +1799,10 @@ static void build_patch_selection_map(
                     if (!(nx == sx && ny == sy)) {
                         ring_sum += v;
                         ring_count++;
+                        if (abs(nx - sx) > 1 || abs(ny - sy) > 1) {
+                            outer_sum += v;
+                            outer_count++;
+                        }
                     }
                     if (v > top1) {
                         top3 = top2;
@@ -1221,15 +1850,27 @@ static void build_patch_selection_map(
                     : 0.0f;
                 float center_share = center / sum_w;
                 float offset_mag = sqrtf(mean_dx * mean_dx + mean_dy * mean_dy);
+                float outer_share = outer_sum / sum_w;
 
                 float elongation_penalty = 0.55f * anisotropy;
                 float offset_penalty = 0.35f * offset_mag;
                 float center_penalty = 0.0f;
-                if (center_share < 0.34f) {
-                    center_penalty = (0.34f - center_share) * 2.0f;
+                if (center_share < 0.26f) {
+                    center_penalty = (0.26f - center_share) * 2.5f;
                 }
-                float compact_penalty = elongation_penalty + offset_penalty + center_penalty;
-                if (compact_penalty > 1.10f) compact_penalty = 1.10f;
+                float outer_penalty = 0.0f;
+                if (outer_count >= 3 &&
+                    outer_share >= 0.34f &&
+                    anisotropy >= 0.38f &&
+                    offset_mag >= 0.16f) {
+                    outer_penalty =
+                        0.40f * clampf((outer_share - 0.34f) / 0.36f, 0.0f, 1.0f) +
+                        0.35f * clampf((anisotropy - 0.38f) / 0.45f, 0.0f, 1.0f) +
+                        0.25f * clampf((offset_mag - 0.16f) / 0.55f, 0.0f, 1.0f);
+                }
+                float compact_penalty =
+                    elongation_penalty + offset_penalty + center_penalty + outer_penalty;
+                if (compact_penalty > 1.35f) compact_penalty = 1.35f;
                 score -= compact_penalty;
             }
             if (ring_margin < ANOMALY_SALIENCY_RING_MARGIN) {
@@ -3375,6 +4016,72 @@ static void update_saliency_aux_track(
     }
 }
 
+static void clear_primary_track(
+        anomaly_state_t *state,
+        int              track_idx) {
+    if (state == NULL || track_idx < 0 || track_idx >= 4) return;
+    state->acc_active[track_idx] = false;
+    state->acc_hits[track_idx] = 0;
+    state->acc_hold[track_idx] = 0;
+    state->acc_presence_mask[track_idx] = 0u;
+    state->acc_cx[track_idx] = 0.0f;
+    state->acc_cy[track_idx] = 0.0f;
+}
+
+static void clear_saliency_aux_track_state(
+        anomaly_state_t *state,
+        int              track_idx) {
+    if (state == NULL || track_idx < 0 || track_idx >= ANOMALY_SALIENCY_EXTRA_TRACKS) return;
+    state->saliency_aux_active[track_idx] = false;
+    state->saliency_aux_hits[track_idx] = 0;
+    state->saliency_aux_hold[track_idx] = 0;
+    state->saliency_aux_cx[track_idx] = 0.0f;
+    state->saliency_aux_cy[track_idx] = 0.0f;
+    state->saliency_aux_display_algorithm[track_idx] = ANOMALY_ALGO_PERSIST;
+}
+
+static void clear_saliency_tracks(anomaly_state_t *state) {
+    if (state == NULL) return;
+    clear_primary_track(state, 3);
+    state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
+    for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
+        clear_saliency_aux_track_state(state, i);
+    }
+}
+
+static void clear_all_roi_tracks(anomaly_state_t *state) {
+    if (state == NULL) return;
+    for (int ai = 0; ai < 4; ai++) {
+        clear_primary_track(state, ai);
+    }
+    state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
+    for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
+        clear_saliency_aux_track_state(state, i);
+    }
+}
+
+static void age_roi_tracks_one_frame(anomaly_state_t *state) {
+    if (state == NULL) return;
+    for (int ai = 0; ai < 4; ai++) {
+        if (!state->acc_active[ai]) continue;
+        int hold = state->acc_hold[ai] - 1;
+        if (hold <= 0) {
+            clear_primary_track(state, ai);
+        } else {
+            state->acc_hold[ai] = hold;
+        }
+    }
+    for (int ti = 0; ti < ANOMALY_SALIENCY_EXTRA_TRACKS; ti++) {
+        if (!state->saliency_aux_active[ti]) continue;
+        int hold = state->saliency_aux_hold[ti] - 1;
+        if (hold <= 0) {
+            clear_saliency_aux_track_state(state, ti);
+        } else {
+            state->saliency_aux_hold[ti] = hold;
+        }
+    }
+}
+
 static bool find_saliency_local_support(
         const anomaly_state_t *state,
         int                    track_idx,
@@ -3587,6 +4294,419 @@ similarity_2d_t fit_similarity_2d(
     r.mean_residual = (float)(res / (double)n);
     r.valid = true;
     return r;
+}
+
+static anomaly_registration_model_t estimate_gmv_registration_model(
+        const uint8_t        *curr_luma,
+        const anomaly_state_t *state,
+        int                   width,
+        int                   height,
+        int                   roi_x0,
+        int                   roi_x1,
+        int                   roi_y0,
+        int                   roi_y1,
+        int                   motion_sample_step,
+        int                   motion_step,
+        int                   motion_w,
+        int                   motion_h) {
+    anomaly_registration_model_t model = make_registration_model(
+        ANOMALY_REGISTRATION_GMV,
+        motion_sample_step,
+        motion_step);
+    model.debug_valid = (curr_luma != NULL &&
+        state != NULL &&
+        state->prev_luma != NULL &&
+        state->prev_luma_width == motion_w &&
+        state->prev_luma_height == motion_h);
+
+    if (!model.debug_valid) {
+        return model;
+    }
+
+    int ph = ANOMALY_GMV_PATCH_HALF;
+    int sr = ANOMALY_GMV_SEARCH_RADIUS;
+
+    int roi_mgx0 = roi_x0 / motion_step;
+    int roi_mgx1 = (roi_x1 - 1) / motion_step;
+    int roi_mgy0 = roi_y0 / motion_step;
+    int roi_mgy1 = (roi_y1 - 1) / motion_step;
+    roi_mgx0 = roi_mgx0 < 0 ? 0 : roi_mgx0;
+    roi_mgx1 = roi_mgx1 >= motion_w ? motion_w - 1 : roi_mgx1;
+    roi_mgy0 = roi_mgy0 < 0 ? 0 : roi_mgy0;
+    roi_mgy1 = roi_mgy1 >= motion_h ? motion_h - 1 : roi_mgy1;
+
+    float fw = (float)(width > 1 ? width - 1 : 1);
+    float fh = (float)(height > 1 ? height - 1 : 1);
+
+    int anchor_dx[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    int anchor_dy[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    int anchor_ax[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    int anchor_ay[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    int anchor_count = 0;
+
+    for (int gy = 0; gy < ANOMALY_GMV_ZONE_GRID; gy++) {
+        for (int gx = 0; gx < ANOMALY_GMV_ZONE_GRID; gx++) {
+            int zx0 = roi_mgx0 + (roi_mgx1 - roi_mgx0) * gx / ANOMALY_GMV_ZONE_GRID;
+            int zx1 = roi_mgx0 + (roi_mgx1 - roi_mgx0) * (gx + 1) / ANOMALY_GMV_ZONE_GRID;
+            int zy0 = roi_mgy0 + (roi_mgy1 - roi_mgy0) * gy / ANOMALY_GMV_ZONE_GRID;
+            int zy1 = roi_mgy0 + (roi_mgy1 - roi_mgy0) * (gy + 1) / ANOMALY_GMV_ZONE_GRID;
+            zx0 = clamp_i32(zx0, ph + sr, motion_w - 1 - ph - sr);
+            zx1 = clamp_i32(zx1, ph + sr, motion_w - 1 - ph - sr);
+            zy0 = clamp_i32(zy0, ph + sr, motion_h - 1 - ph - sr);
+            zy1 = clamp_i32(zy1, ph + sr, motion_h - 1 - ph - sr);
+            if (zx1 < zx0 || zy1 < zy0) continue;
+
+            int ax = -1, ay = -1;
+            int best_feature = -1;
+            for (int cy = zy0; cy <= zy1; cy++) {
+                for (int cx = zx0; cx <= zx1; cx++) {
+                    int feature = gmv_feature_score(curr_luma, motion_w, motion_h, cx, cy);
+                    if (feature > best_feature) {
+                        best_feature = feature;
+                        ax = cx;
+                        ay = cy;
+                    }
+                }
+            }
+            if (ax < 0 || ay < 0 || best_feature < ANOMALY_GMV_MIN_TEXTURE_SCORE) continue;
+
+            int  best_dx = 0, best_dy = 0;
+            long best_sad = 0x7FFFFFFFL;
+            long second_best_sad = 0x7FFFFFFFL;
+            for (int dy = -sr; dy <= sr; dy++) {
+                for (int dx = -sr; dx <= sr; dx++) {
+                    long sad = 0;
+                    bool valid_patch = true;
+                    for (int ky = -ph; ky <= ph; ky++) {
+                        for (int kx = -ph; kx <= ph; kx++) {
+                            int cx = ax + kx;
+                            int cy = ay + ky;
+                            int px = ax + dx + kx;
+                            int py = ay + dy + ky;
+                            if (cx < 0 || cx >= motion_w || cy < 0 || cy >= motion_h ||
+                                px < 0 || px >= motion_w || py < 0 || py >= motion_h) {
+                                valid_patch = false;
+                                break;
+                            }
+                            int cv = curr_luma[cy * motion_w + cx];
+                            int pv = state->prev_luma[py * motion_w + px];
+                            int d = cv - pv;
+                            sad += d < 0 ? -d : d;
+                        }
+                        if (!valid_patch) break;
+                    }
+                    if (!valid_patch) continue;
+                    if (sad < best_sad) {
+                        second_best_sad = best_sad;
+                        best_sad = sad;
+                        best_dx = dx;
+                        best_dy = dy;
+                    } else if (sad < second_best_sad) {
+                        second_best_sad = sad;
+                    }
+                }
+            }
+            if (second_best_sad < 0x7FFFFFFFL &&
+                (second_best_sad - best_sad) < ANOMALY_GMV_MIN_MATCH_MARGIN) {
+                continue;
+            }
+            if (model.anchor_count < ANOMALY_GMV_MAX_DEBUG_ANCHORS) {
+                anomaly_debug_gmv_anchor_t *dbg = &model.anchors[model.anchor_count++];
+                dbg->valid = true;
+                dbg->zone_gx = gx;
+                dbg->zone_gy = gy;
+                dbg->pixel_x = ax * motion_step;
+                dbg->pixel_y = ay * motion_step;
+                dbg->x_norm = (float)dbg->pixel_x / fw;
+                dbg->y_norm = (float)dbg->pixel_y / fh;
+                dbg->texture_score = best_feature;
+                dbg->match_dx = best_dx;
+                dbg->match_dy = best_dy;
+                dbg->best_sad = best_sad >= 0x7FFFFFFFL ? -1 : (int)best_sad;
+                dbg->second_best_sad = second_best_sad >= 0x7FFFFFFFL ? -1 : (int)second_best_sad;
+            }
+            anchor_ax[anchor_count] = ax;
+            anchor_ay[anchor_count] = ay;
+            anchor_dx[anchor_count] = best_dx;
+            anchor_dy[anchor_count] = best_dy;
+            anchor_count++;
+        }
+    }
+
+    if (anchor_count < ANOMALY_GMV_MIN_ANCHORS) {
+        return model;
+    }
+
+    float src_x[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    float src_y[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    float dst_x[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    float dst_y[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+    for (int i = 0; i < anchor_count; i++) {
+        src_x[i] = (float)(anchor_ax[i] * motion_step) / fw;
+        src_y[i] = (float)(anchor_ay[i] * motion_step) / fh;
+        dst_x[i] = (float)((anchor_ax[i] + anchor_dx[i]) * motion_step) / fw;
+        dst_y[i] = (float)((anchor_ay[i] + anchor_dy[i]) * motion_step) / fh;
+    }
+    model.similarity = fit_similarity_2d(src_x, src_y, dst_x, dst_y, anchor_count);
+
+    if (model.similarity.valid && anchor_count >= 3) {
+        float worst_residual = -1.0f;
+        int worst_idx = -1;
+        for (int i = 0; i < anchor_count; i++) {
+            float ex = model.similarity.a * src_x[i] - model.similarity.b * src_y[i] +
+                model.similarity.tx - dst_x[i];
+            float ey = model.similarity.b * src_x[i] + model.similarity.a * src_y[i] +
+                model.similarity.ty - dst_y[i];
+            float residual = sqrtf(ex * ex + ey * ey);
+            if (residual > worst_residual) {
+                worst_residual = residual;
+                worst_idx = i;
+            }
+        }
+        if (worst_idx >= 0 && worst_residual > (ANOMALY_GMV_RESIDUAL_THRESH * 1.5f)) {
+            float src_x2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+            float src_y2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+            float dst_x2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+            float dst_y2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
+            int kept = 0;
+            for (int i = 0; i < anchor_count; i++) {
+                if (i == worst_idx) continue;
+                src_x2[kept] = src_x[i];
+                src_y2[kept] = src_y[i];
+                dst_x2[kept] = dst_x[i];
+                dst_y2[kept] = dst_y[i];
+                kept++;
+            }
+            similarity_2d_t refit = fit_similarity_2d(src_x2, src_y2, dst_x2, dst_y2, kept);
+            if (refit.valid && refit.mean_residual < model.similarity.mean_residual) {
+                model.similarity = refit;
+            }
+        }
+    }
+
+    float scale = registration_model_scale(&model);
+    bool motion_too_large = registration_motion_exceeds_search(&model, width, height, 0.85f);
+    if (!model.similarity.valid ||
+        model.similarity.mean_residual > ANOMALY_GMV_RESIDUAL_THRESH ||
+        motion_too_large ||
+        scale < ANOMALY_GMV_MIN_SCALE ||
+        scale > ANOMALY_GMV_MAX_SCALE) {
+        model.scene_discontinuity = true;
+    }
+    model.affine[0] = model.similarity.a;
+    model.affine[1] = -model.similarity.b;
+    model.affine[2] = model.similarity.tx;
+    model.affine[3] = model.similarity.b;
+    model.affine[4] = model.similarity.a;
+    model.affine[5] = model.similarity.ty;
+    return model;
+}
+
+static anomaly_registration_model_t estimate_affine_registration_model(
+        const uint8_t         *curr_luma,
+        const anomaly_state_t *state,
+        int                    width,
+        int                    height,
+        int                    roi_x0,
+        int                    roi_x1,
+        int                    roi_y0,
+        int                    roi_y1,
+        int                    motion_sample_step,
+        int                    motion_step,
+        int                    motion_w,
+        int                    motion_h) {
+    anomaly_registration_model_t model = make_registration_model(
+        ANOMALY_REGISTRATION_AFFINE,
+        motion_sample_step,
+        motion_step);
+    model.debug_valid = (curr_luma != NULL &&
+        state != NULL &&
+        state->prev_luma != NULL &&
+        state->prev_luma_width == motion_w &&
+        state->prev_luma_height == motion_h);
+    if (!model.debug_valid) return model;
+
+    int roi_mgx0 = clamp_i32(roi_x0 / motion_step, 2, motion_w - 3);
+    int roi_mgx1 = clamp_i32((roi_x1 - 1) / motion_step, 2, motion_w - 3);
+    int roi_mgy0 = clamp_i32(roi_y0 / motion_step, 2, motion_h - 3);
+    int roi_mgy1 = clamp_i32((roi_y1 - 1) / motion_step, 2, motion_h - 3);
+    if (roi_mgx1 <= roi_mgx0 || roi_mgy1 <= roi_mgy0) return model;
+
+    int corner_x[64];
+    int corner_y[64];
+    int corner_score[64];
+    int corner_count = detect_affine_corners(
+        state->prev_luma,
+        motion_w,
+        motion_h,
+        roi_mgx0,
+        roi_mgx1,
+        roi_mgy0,
+        roi_mgy1,
+        3,
+        64,
+        corner_x,
+        corner_y,
+        corner_score);
+    if (corner_count < 3) return model;
+
+    int base_dx = 0;
+    int base_dy = 0;
+    estimate_translation_seed(
+        state->prev_luma,
+        curr_luma,
+        motion_w,
+        motion_h,
+        roi_mgx0,
+        roi_mgx1,
+        roi_mgy0,
+        roi_mgy1,
+        8,
+        &base_dx,
+        &base_dy);
+
+    affine_match_t matches[64];
+    int match_count = track_affine_features(
+        state->prev_luma,
+        curr_luma,
+        motion_w,
+        motion_h,
+        corner_x,
+        corner_y,
+        corner_count,
+        base_dx,
+        base_dy,
+        2,
+        6,
+        matches,
+        64);
+    if (match_count < 3) return model;
+
+    float affine_grid[6];
+    float mean_residual_grid = 0.0f;
+    if (!fit_affine_ransac(matches, match_count, affine_grid, &mean_residual_grid)) {
+        return model;
+    }
+
+    float fw = (float)(width > 1 ? width - 1 : 1);
+    float fh = (float)(height > 1 ? height - 1 : 1);
+    float motion_fw = (float)(motion_w > 1 ? motion_w - 1 : 1);
+    float motion_fh = (float)(motion_h > 1 ? motion_h - 1 : 1);
+    // Convert motion-grid affine fit to normalized-frame coordinates.
+    model.affine[0] = affine_grid[0];
+    model.affine[1] = affine_grid[1] * (fw / fh) * (motion_fh / motion_fw);
+    model.affine[2] = (affine_grid[2] * (float)motion_step) / fw;
+    model.affine[3] = affine_grid[3] * (fh / fw) * (motion_fw / motion_fh);
+    model.affine[4] = affine_grid[4];
+    model.affine[5] = (affine_grid[5] * (float)motion_step) / fh;
+    summarize_affine_as_similarity(model.affine, mean_residual_grid * ((float)motion_step / fmaxf(fw, fh)),
+                                   &model.similarity);
+
+    float linear00 = model.affine[0];
+    float linear01 = model.affine[1];
+    float linear10 = model.affine[3];
+    float linear11 = model.affine[4];
+    float det = linear00 * linear11 - linear01 * linear10;
+    float frob0 = sqrtf(linear00 * linear00 + linear10 * linear10);
+    float frob1 = sqrtf(linear01 * linear01 + linear11 * linear11);
+    float max_scale = frob0 > frob1 ? frob0 : frob1;
+    float min_scale = frob0 < frob1 ? frob0 : frob1;
+    bool motion_too_large = registration_motion_exceeds_search(&model, width, height, 0.85f);
+    model.anchor_count = corner_count < ANOMALY_GMV_MAX_DEBUG_ANCHORS ? corner_count : ANOMALY_GMV_MAX_DEBUG_ANCHORS;
+    for (int i = 0; i < model.anchor_count; i++) {
+        anomaly_debug_gmv_anchor_t *dbg = &model.anchors[i];
+        dbg->valid = true;
+        dbg->zone_gx = 0;
+        dbg->zone_gy = 0;
+        dbg->pixel_x = corner_x[i] * motion_step;
+        dbg->pixel_y = corner_y[i] * motion_step;
+        dbg->x_norm = (float)dbg->pixel_x / fw;
+        dbg->y_norm = (float)dbg->pixel_y / fh;
+        dbg->texture_score = corner_score[i];
+        dbg->match_dx = 0;
+        dbg->match_dy = 0;
+        dbg->best_sad = 0;
+        dbg->second_best_sad = 0;
+    }
+    if (!model.similarity.valid ||
+        model.similarity.mean_residual > (ANOMALY_GMV_RESIDUAL_THRESH * 1.2f) ||
+        motion_too_large ||
+        max_scale > ANOMALY_GMV_MAX_SCALE * 1.15f ||
+        min_scale < ANOMALY_GMV_MIN_SCALE * 0.85f ||
+        det <= 0.0f) {
+        model.scene_discontinuity = true;
+    }
+    return model;
+}
+
+static anomaly_registration_model_t estimate_registration_model(
+        const anomaly_config_t *cfg,
+        const uint8_t          *curr_luma,
+        const anomaly_state_t  *state,
+        int                     width,
+        int                     height,
+        int                     roi_x0,
+        int                     roi_x1,
+        int                     roi_y0,
+        int                     roi_y1,
+        int                     motion_sample_step,
+        int                     motion_step,
+        int                     motion_w,
+        int                     motion_h) {
+    int mode = normalize_registration_mode(cfg);
+    switch (mode) {
+        case ANOMALY_REGISTRATION_AFFINE:
+            return estimate_affine_registration_model(
+                curr_luma,
+                state,
+                width,
+                height,
+                roi_x0,
+                roi_x1,
+                roi_y0,
+                roi_y1,
+                motion_sample_step,
+                motion_step,
+                motion_w,
+                motion_h);
+        case ANOMALY_REGISTRATION_GMV:
+        default:
+            return estimate_gmv_registration_model(
+                curr_luma,
+                state,
+                width,
+                height,
+                roi_x0,
+                roi_x1,
+                roi_y0,
+                roi_y1,
+                motion_sample_step,
+                motion_step,
+                motion_w,
+                motion_h);
+    }
+}
+
+static void populate_registration_debug(
+        const anomaly_registration_model_t *model,
+        anomaly_result_t                   *result_out) {
+    if (model == NULL || result_out == NULL) return;
+    result_out->gmv_debug.valid = model->debug_valid;
+    result_out->gmv_debug.scene_discontinuity = model->scene_discontinuity;
+    result_out->gmv_debug.sample_step = model->sample_step;
+    result_out->gmv_debug.motion_step = model->motion_step;
+    result_out->gmv_debug.anchor_count = model->anchor_count;
+    result_out->gmv_debug.fit_a = model->similarity.a;
+    result_out->gmv_debug.fit_b = model->similarity.b;
+    result_out->gmv_debug.fit_tx = model->similarity.tx;
+    result_out->gmv_debug.fit_ty = model->similarity.ty;
+    result_out->gmv_debug.fit_scale = registration_model_scale(model);
+    result_out->gmv_debug.fit_theta_deg =
+        atan2f(model->similarity.b, model->similarity.a) * (180.0f / 3.14159265f);
+    result_out->gmv_debug.fit_mean_residual = model->similarity.mean_residual;
+    for (int i = 0; i < model->anchor_count && i < ANOMALY_GMV_MAX_DEBUG_ANCHORS; i++) {
+        result_out->gmv_debug.anchors[i] = model->anchors[i];
+    }
 }
 
 bool anomaly_probe_thermal_point(
@@ -3858,20 +4978,26 @@ int anomaly_process_frame(
 
     int frame_stride = cfg->frame_stride < 1 ? 1 : cfg->frame_stride;
     float thermal_min_delta = effective_thermal_min_delta(cfg);
+    bool use_publish_transition_gating = cfg->min_hits > 1;
     state->frame_counter += 1;
     bool bg_temporal_ready = (state->bg_luma != NULL &&
                               state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP &&
                               state->bg_sg_w > 0 && state->bg_sg_h > 0);
     bool bg_publish_ready = bg_temporal_ready &&
-                            (state->bg_warmup >= (ANOMALY_THERMAL_BG_WARMUP + ANOMALY_PUBLISH_BG_SETTLE_FRAMES) ||
+                            (!use_publish_transition_gating ||
+                             state->bg_warmup >= (ANOMALY_THERMAL_BG_WARMUP + ANOMALY_PUBLISH_BG_SETTLE_FRAMES) ||
                              state->publish_stable_frames >= ANOMALY_PUBLISH_STABLE_RELEASE_FRAMES);
+    if (state->publish_hold_frames > 0) {
+        state->publish_hold_frames -= 1;
+    }
     bool transition_warmup_block =
         (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0 &&
-        cfg->min_hits > 1 &&
+        use_publish_transition_gating &&
         state->prev_luma != NULL &&
         !bg_publish_ready;
-    bool publish_hold_active = state->publish_hold_frames > 0;
+    bool publish_hold_active = use_publish_transition_gating && state->publish_hold_frames > 0;
     if ((state->frame_counter % frame_stride) != 0) {
+        age_roi_tracks_one_frame(state);
         int skipped_box_count = 0;
         anomaly_box_t skipped_boxes[ANOMALY_MAX_BOXES_PER_FRAME];
         bool publish_allowed = !transition_warmup_block && !publish_hold_active;
@@ -3913,10 +5039,6 @@ int anomaly_process_frame(
     if (roi_x1 <= roi_x0) { roi_x0 = 0; roi_x1 = width;  }
     if (roi_y1 <= roi_y0) { roi_y0 = 0; roi_y1 = height; }
 
-    if (publish_hold_active) {
-        state->publish_hold_frames -= 1;
-    }
-
     int sample_step = effective_sample_step(cfg, width, height);
     int motion_sample_step = effective_motion_sample_step(cfg, width, height);
 
@@ -3944,222 +5066,42 @@ int anomaly_process_frame(
         }
     }
 
-    // ── Camera motion estimation (similarity transform) ──────────────────
-    // Sparse block-matching on a 3×3 anchor grid within the ROI produces
-    // correspondences; closed-form least-squares fit yields the 4-parameter
-    // similarity transform T that maps current-frame positions to their
-    // matching positions in the previous frame:
-    //   prev = T(curr):  prev_x = a*curr_x - b*curr_y + tx
-    //                    prev_y = b*curr_x + a*curr_y + ty
-    // Handles pan (tx/ty), yaw rotation (a=cosθ, b=sinθ), and zoom (s=√(a²+b²)).
-    similarity_2d_t sim = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
-    bool scene_discontinuity = false;
-    anomaly_debug_gmv_anchor_t gmv_debug_anchors[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
-    int gmv_debug_anchor_count = 0;
-    memset(gmv_debug_anchors, 0, sizeof(gmv_debug_anchors));
+    anomaly_registration_model_t registration = estimate_registration_model(
+        cfg,
+        curr_luma,
+        state,
+        width,
+        height,
+        roi_x0,
+        roi_x1,
+        roi_y0,
+        roi_y1,
+        motion_sample_step,
+        motion_step,
+        motion_w,
+        motion_h);
+    similarity_2d_t sim = registration.similarity;
+    bool scene_discontinuity = registration.scene_discontinuity;
 
-    if (curr_luma != NULL &&
-        state->prev_luma != NULL &&
-        state->prev_luma_width  == motion_w &&
-        state->prev_luma_height == motion_h) {
-
-        int ph = ANOMALY_GMV_PATCH_HALF;
-        int sr = ANOMALY_GMV_SEARCH_RADIUS;
-
-        int roi_mgx0 = roi_x0 / motion_step;
-        int roi_mgx1 = (roi_x1 - 1) / motion_step;
-        int roi_mgy0 = roi_y0 / motion_step;
-        int roi_mgy1 = (roi_y1 - 1) / motion_step;
-        roi_mgx0 = roi_mgx0 < 0         ? 0         : roi_mgx0;
-        roi_mgx1 = roi_mgx1 >= motion_w ? motion_w-1 : roi_mgx1;
-        roi_mgy0 = roi_mgy0 < 0         ? 0         : roi_mgy0;
-        roi_mgy1 = roi_mgy1 >= motion_h ? motion_h-1 : roi_mgy1;
-
-        float fw = (float)(width  > 1 ? width  - 1 : 1);
-        float fh = (float)(height > 1 ? height - 1 : 1);
-
-        int anchor_dx[ANOMALY_GMV_MAX_DEBUG_ANCHORS], anchor_dy[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
-        int anchor_ax[ANOMALY_GMV_MAX_DEBUG_ANCHORS], anchor_ay[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
-        int anchor_count = 0;
-
-        for (int gy = 0; gy < ANOMALY_GMV_ZONE_GRID; gy++) {
-            for (int gx = 0; gx < ANOMALY_GMV_ZONE_GRID; gx++) {
-                int zx0 = roi_mgx0 + (roi_mgx1 - roi_mgx0) * gx / ANOMALY_GMV_ZONE_GRID;
-                int zx1 = roi_mgx0 + (roi_mgx1 - roi_mgx0) * (gx + 1) / ANOMALY_GMV_ZONE_GRID;
-                int zy0 = roi_mgy0 + (roi_mgy1 - roi_mgy0) * gy / ANOMALY_GMV_ZONE_GRID;
-                int zy1 = roi_mgy0 + (roi_mgy1 - roi_mgy0) * (gy + 1) / ANOMALY_GMV_ZONE_GRID;
-                zx0 = clamp_i32(zx0, ph + sr, motion_w - 1 - ph - sr);
-                zx1 = clamp_i32(zx1, ph + sr, motion_w - 1 - ph - sr);
-                zy0 = clamp_i32(zy0, ph + sr, motion_h - 1 - ph - sr);
-                zy1 = clamp_i32(zy1, ph + sr, motion_h - 1 - ph - sr);
-                if (zx1 < zx0 || zy1 < zy0) continue;
-
-                int ax = -1, ay = -1;
-                int best_feature = -1;
-                for (int cy = zy0; cy <= zy1; cy++) {
-                    for (int cx = zx0; cx <= zx1; cx++) {
-                        int feature = gmv_feature_score(curr_luma, motion_w, motion_h, cx, cy);
-                        if (feature > best_feature) {
-                            best_feature = feature;
-                            ax = cx;
-                            ay = cy;
-                        }
-                    }
-                }
-                if (ax < 0 || ay < 0 || best_feature < ANOMALY_GMV_MIN_TEXTURE_SCORE) continue;
-
-                int  best_dx = 0, best_dy = 0;
-                long best_sad = 0x7FFFFFFFL;
-                long second_best_sad = 0x7FFFFFFFL;
-                for (int dy = -sr; dy <= sr; dy++) {
-                    for (int dx = -sr; dx <= sr; dx++) {
-                        long sad = 0;
-                        bool valid_patch = true;
-                        for (int ky = -ph; ky <= ph; ky++) {
-                            for (int kx = -ph; kx <= ph; kx++) {
-                                int cx = ax + kx;
-                                int cy = ay + ky;
-                                int px = ax + dx + kx;
-                                int py = ay + dy + ky;
-                                if (cx < 0 || cx >= motion_w || cy < 0 || cy >= motion_h ||
-                                    px < 0 || px >= motion_w || py < 0 || py >= motion_h) {
-                                    valid_patch = false;
-                                    break;
-                                }
-                                int cv = curr_luma[cy * motion_w + cx];
-                                int pv = state->prev_luma[py * motion_w + px];
-                                int d = cv - pv; sad += d < 0 ? -d : d;
-                            }
-                            if (!valid_patch) break;
-                        }
-                        if (!valid_patch) continue;
-                        if (sad < best_sad) {
-                            second_best_sad = best_sad;
-                            best_sad = sad;
-                            best_dx = dx;
-                            best_dy = dy;
-                        } else if (sad < second_best_sad) {
-                            second_best_sad = sad;
-                        }
-                    }
-                }
-                if (second_best_sad < 0x7FFFFFFFL &&
-                    (second_best_sad - best_sad) < ANOMALY_GMV_MIN_MATCH_MARGIN) {
-                    continue;
-                }
-                if (gmv_debug_anchor_count < ANOMALY_GMV_MAX_DEBUG_ANCHORS) {
-                    anomaly_debug_gmv_anchor_t *dbg = &gmv_debug_anchors[gmv_debug_anchor_count++];
-                    dbg->valid = true;
-                    dbg->zone_gx = gx;
-                    dbg->zone_gy = gy;
-                    dbg->pixel_x = ax * motion_step;
-                    dbg->pixel_y = ay * motion_step;
-                    dbg->x_norm = (float)dbg->pixel_x / fw;
-                    dbg->y_norm = (float)dbg->pixel_y / fh;
-                    dbg->texture_score = best_feature;
-                    dbg->match_dx = best_dx;
-                    dbg->match_dy = best_dy;
-                    dbg->best_sad = best_sad >= 0x7FFFFFFFL ? -1 : (int)best_sad;
-                    dbg->second_best_sad = second_best_sad >= 0x7FFFFFFFL ? -1 : (int)second_best_sad;
-                }
-                anchor_ax[anchor_count] = ax;
-                anchor_ay[anchor_count] = ay;
-                anchor_dx[anchor_count] = best_dx;
-                anchor_dy[anchor_count] = best_dy;
-                anchor_count++;
-            }
-        }
-
-        if (anchor_count >= ANOMALY_GMV_MIN_ANCHORS) {
-            float src_x[ANOMALY_GMV_MAX_DEBUG_ANCHORS], src_y[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
-            float dst_x[ANOMALY_GMV_MAX_DEBUG_ANCHORS], dst_y[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
-            for (int i = 0; i < anchor_count; i++) {
-                src_x[i] = (float)(anchor_ax[i] * motion_step) / fw;
-                src_y[i] = (float)(anchor_ay[i] * motion_step) / fh;
-                dst_x[i] = (float)((anchor_ax[i] + anchor_dx[i]) * motion_step) / fw;
-                dst_y[i] = (float)((anchor_ay[i] + anchor_dy[i]) * motion_step) / fh;
-            }
-            sim = fit_similarity_2d(src_x, src_y, dst_x, dst_y, anchor_count);
-
-            if (sim.valid && anchor_count >= 3) {
-                float worst_residual = -1.0f;
-                int worst_idx = -1;
-                for (int i = 0; i < anchor_count; i++) {
-                    float ex = sim.a * src_x[i] - sim.b * src_y[i] + sim.tx - dst_x[i];
-                    float ey = sim.b * src_x[i] + sim.a * src_y[i] + sim.ty - dst_y[i];
-                    float residual = sqrtf(ex * ex + ey * ey);
-                    if (residual > worst_residual) {
-                        worst_residual = residual;
-                        worst_idx = i;
-                    }
-                }
-                if (worst_idx >= 0 && worst_residual > (ANOMALY_GMV_RESIDUAL_THRESH * 1.5f)) {
-                    float src_x2[ANOMALY_GMV_MAX_DEBUG_ANCHORS], src_y2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
-                    float dst_x2[ANOMALY_GMV_MAX_DEBUG_ANCHORS], dst_y2[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
-                    int kept = 0;
-                    for (int i = 0; i < anchor_count; i++) {
-                        if (i == worst_idx) continue;
-                        src_x2[kept] = src_x[i];
-                        src_y2[kept] = src_y[i];
-                        dst_x2[kept] = dst_x[i];
-                        dst_y2[kept] = dst_y[i];
-                        kept++;
-                    }
-                    similarity_2d_t refit = fit_similarity_2d(src_x2, src_y2, dst_x2, dst_y2, kept);
-                    if (refit.valid && refit.mean_residual < sim.mean_residual) {
-                        sim = refit;
-                    }
-                }
-            }
-
-            float scale = sqrtf(sim.a * sim.a + sim.b * sim.b);
-            if (!sim.valid ||
-                sim.mean_residual > ANOMALY_GMV_RESIDUAL_THRESH ||
-                scale < ANOMALY_GMV_MIN_SCALE ||
-                scale > ANOMALY_GMV_MAX_SCALE) {
-                scene_discontinuity = true;
-            }
-        }
-    }
-
-    if (result_out != NULL) result_out->had_discontinuity = scene_discontinuity;
     if (result_out != NULL) {
-        result_out->gmv_debug.valid = (curr_luma != NULL &&
-            state->prev_luma != NULL &&
-            state->prev_luma_width == motion_w &&
-            state->prev_luma_height == motion_h);
-        result_out->gmv_debug.scene_discontinuity = scene_discontinuity;
-        result_out->gmv_debug.sample_step = motion_sample_step;
-        result_out->gmv_debug.motion_step = motion_step;
-        result_out->gmv_debug.anchor_count = gmv_debug_anchor_count;
-        result_out->gmv_debug.fit_a = sim.a;
-        result_out->gmv_debug.fit_b = sim.b;
-        result_out->gmv_debug.fit_tx = sim.tx;
-        result_out->gmv_debug.fit_ty = sim.ty;
-        result_out->gmv_debug.fit_scale = sqrtf(sim.a * sim.a + sim.b * sim.b);
-        result_out->gmv_debug.fit_theta_deg = atan2f(sim.b, sim.a) * (180.0f / 3.14159265f);
-        result_out->gmv_debug.fit_mean_residual = sim.mean_residual;
-        for (int i = 0; i < gmv_debug_anchor_count && i < ANOMALY_GMV_MAX_DEBUG_ANCHORS; i++) {
-            result_out->gmv_debug.anchors[i] = gmv_debug_anchors[i];
-        }
+        result_out->had_discontinuity = scene_discontinuity;
+        populate_registration_debug(&registration, result_out);
     }
 
     // ── Compensate accumulators for camera motion (or wipe on discontinuity)
     // T⁻¹(p) = Aᵀ * (p - t) / (a²+b²)  where Aᵀ = [[a,b],[-b,a]]
-    for (int ai = 0; ai < 4; ai++) {
-        if (scene_discontinuity) {
-            state->acc_active[ai] = false;
-            state->acc_hits[ai]   = 0;
-            state->acc_hold[ai]   = 0;
-        } else if (state->acc_active[ai] && sim.valid) {
-            float scale2 = sim.a * sim.a + sim.b * sim.b;
-            if (scale2 < 1e-6f) scale2 = 1e-6f;
-            float dx = state->acc_cx[ai] - sim.tx;
-            float dy = state->acc_cy[ai] - sim.ty;
-            float nx = ( sim.a * dx + sim.b * dy) / scale2;
-            float ny = (-sim.b * dx + sim.a * dy) / scale2;
-            state->acc_cx[ai] = nx < 0.0f ? 0.0f : (nx > 1.0f ? 1.0f : nx);
-            state->acc_cy[ai] = ny < 0.0f ? 0.0f : (ny > 1.0f ? 1.0f : ny);
+    if (scene_discontinuity) {
+        clear_all_roi_tracks(state);
+    } else {
+        for (int ai = 0; ai < 4; ai++) {
+            if (state->acc_active[ai] && registration_model_valid(&registration)) {
+            float nx = 0.0f;
+            float ny = 0.0f;
+            if (registration_invert_point(&registration, state->acc_cx[ai], state->acc_cy[ai], &nx, &ny)) {
+                state->acc_cx[ai] = nx < 0.0f ? 0.0f : (nx > 1.0f ? 1.0f : nx);
+                state->acc_cy[ai] = ny < 0.0f ? 0.0f : (ny > 1.0f ? 1.0f : ny);
+            }
+        }
         }
     }
 
@@ -4891,7 +5833,7 @@ int anomaly_process_frame(
 
         float fw_m = (float)(width > 1 ? width - 1 : 1);
         float fh_m = (float)(height > 1 ? height - 1 : 1);
-        float gmv_scale = sqrtf(sim.a * sim.a + sim.b * sim.b);
+        float gmv_scale = registration_model_scale(&registration);
         float zoom_delta = fabsf(gmv_scale - 1.0f);
         float zoom_motion_scale = 1.0f;
         if (zoom_delta > 0.004f) {
@@ -4918,7 +5860,7 @@ int anomaly_process_frame(
             for (int mx = roi_mgx0 + 1; mx < roi_mgx1 - 1; mx += global_stride) {
                 int px_idx = 0;
                 int py_idx = 0;
-                if (!project_motion_cell(sim, width, height, motion_step, motion_w, motion_h,
+                if (!project_motion_cell(&registration, width, height, motion_step, motion_w, motion_h,
                                          mx, my, &px_idx, &py_idx)) {
                     continue;
                 }
@@ -4969,7 +5911,7 @@ int anomaly_process_frame(
                 for (int mx = roi_mgx0 + 1; mx < roi_mgx1 - 1; mx += global_stride) {
                     int px_idx = 0;
                     int py_idx = 0;
-                    if (!project_motion_cell(sim, width, height, motion_step, motion_w, motion_h,
+                    if (!project_motion_cell(&registration, width, height, motion_step, motion_w, motion_h,
                                              mx, my, &px_idx, &py_idx)) {
                         continue;
                     }
@@ -5052,7 +5994,7 @@ int anomaly_process_frame(
                     if (mx <= roi_mgx0 || mx >= roi_mgx1 - 1) continue;
                     int px_idx = 0;
                     int py_idx = 0;
-                    if (!project_motion_cell(sim, width, height, motion_step, motion_w, motion_h,
+                    if (!project_motion_cell(&registration, width, height, motion_step, motion_w, motion_h,
                                              mx, my, &px_idx, &py_idx)) {
                         continue;
                     }
@@ -5100,7 +6042,7 @@ int anomaly_process_frame(
                         motion_step,
                         width,
                         height,
-                        sim,
+                        &registration,
                         mx,
                         my);
                     if (registration_score < ANOMALY_REG_RESIDUAL_SOFT_THRESH) {
@@ -5223,6 +6165,11 @@ int anomaly_process_frame(
     }
 
     if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+        bool saliency_motion_vector_ready =
+            registration_model_valid(&registration) &&
+            !scene_discontinuity &&
+            saliency_motion_map != NULL &&
+            saliency_registration_map != NULL;
         size_t score_count = (size_t)sg_w * (size_t)sg_h;
         float *patch_score_map = NULL;
         float *patch_selection_map = NULL;
@@ -5234,30 +6181,36 @@ int anomaly_process_frame(
         if (patch_score_map != NULL && patch_selection_map != NULL) {
             memset(saliency_top, 0, sizeof(saliency_top));
             saliency_top_count = 0;
-            for (int sy = 0; sy < sg_h; sy++) {
-                for (int sx = 0; sx < sg_w; sx++) {
-                    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-                    float thermal_spatial = saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
-                    float color_support = saliency_color_map != NULL ? saliency_color_map[idx] : 0.0f;
-                    float motion_support = saliency_motion_map != NULL ? saliency_motion_map[idx] : 0.0f;
-                    float registration_support = saliency_registration_map != NULL ? saliency_registration_map[idx] : 1.0f;
-                    float thermal_temporal = 0.0f;
-                    if (bg_valid) {
-                        float bg = state->bg_luma[idx];
-                        float lum = (float)sg_luma[idx];
-                        float delta = black_hot ? (bg - lum) : (lum - bg);
-                        if (delta >= thermal_min_delta) {
-                            thermal_temporal = (float)((delta - delta_mean) / delta_norm);
+                for (int sy = 0; sy < sg_h; sy++) {
+                    for (int sx = 0; sx < sg_w; sx++) {
+                        size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                        float thermal_spatial = saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
+                        float color_support = saliency_color_map != NULL ? saliency_color_map[idx] : 0.0f;
+                        float motion_support = saliency_motion_map != NULL ? saliency_motion_map[idx] : 0.0f;
+                        float registration_support = saliency_registration_map != NULL ? saliency_registration_map[idx] : 1.0f;
+                        if (!saliency_motion_vector_ready ||
+                            motion_support <= 0.0f ||
+                            registration_support <= 0.0f) {
+                            patch_score_map[idx] = -1.0f;
+                            continue;
                         }
-                    }
+                        float thermal_temporal = 0.0f;
+                        if (bg_valid) {
+                            float bg = state->bg_luma[idx];
+                            float lum = (float)sg_luma[idx];
+                            float delta = black_hot ? (bg - lum) : (lum - bg);
+                            if (delta >= thermal_min_delta) {
+                                thermal_temporal = (float)((delta - delta_mean) / delta_norm);
+                            }
+                        }
 
-                    float spatial_evidence = thermal_spatial > 0.0f ? thermal_spatial : 0.0f;
-                    if (color_support > 0.0f) spatial_evidence += 0.60f * color_support;
+                        float spatial_evidence = thermal_spatial > 0.0f ? thermal_spatial : 0.0f;
+                        if (color_support > 0.0f) spatial_evidence += 0.60f * color_support;
 
-                    float temporal_evidence = thermal_temporal > 0.0f ? thermal_temporal : 0.0f;
-                    if (motion_support > 0.0f) {
-                        temporal_evidence += bg_valid ? (0.60f * motion_support)
-                                                      : (0.45f * motion_support);
+                        float temporal_evidence = thermal_temporal > 0.0f ? thermal_temporal : 0.0f;
+                        if (motion_support > 0.0f) {
+                            temporal_evidence += bg_valid ? (0.60f * motion_support)
+                                                          : (0.45f * motion_support);
                     }
 
                     float saliency = bg_valid
@@ -5283,6 +6236,28 @@ int anomaly_process_frame(
             }
 
             build_patch_selection_map(patch_score_map, sg_w, sg_h, patch_selection_map);
+            if (bg_valid) {
+                for (int sy = 0; sy < sg_h; sy++) {
+                    for (int sx = 0; sx < sg_w; sx++) {
+                        size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                        float final_score = patch_selection_map[idx];
+                        if (final_score <= 0.0f) continue;
+                        float boundary_scale = saliency_boundary_structure_scale(
+                            patch_score_map,
+                            state->bg_luma,
+                            sg_luma,
+                            sg_w,
+                            sg_h,
+                            sx,
+                            sy,
+                            bg_valid,
+                            black_hot,
+                            thermal_min_delta,
+                            delta_norm);
+                        patch_selection_map[idx] = final_score * boundary_scale;
+                    }
+                }
+            }
             memset(saliency_top, 0, sizeof(saliency_top));
             saliency_top_count = 0;
             for (int sy = 0; sy < sg_h; sy++) {
@@ -5298,7 +6273,6 @@ int anomaly_process_frame(
                     float registration_support = saliency_registration_map != NULL ? saliency_registration_map[idx] : 1.0f;
                     float spatial_evidence = thermal_spatial > 0.0f ? thermal_spatial : 0.0f;
                     if (color_support > 0.0f) spatial_evidence += 0.60f * color_support;
-                    spatial_evidence *= registration_support;
                     float temporal_evidence = 0.0f;
                     if (bg_valid) {
                         float bg = state->bg_luma[idx];
@@ -5308,6 +6282,7 @@ int anomaly_process_frame(
                             temporal_evidence = (float)((delta - delta_mean) / delta_norm);
                         }
                     }
+                    spatial_evidence *= registration_support;
                     if (motion_support > 0.0f) {
                         temporal_evidence += bg_valid ? (0.60f * motion_support)
                                                       : (0.45f * motion_support);
@@ -5427,21 +6402,7 @@ int anomaly_process_frame(
     }
     if (transition_warmup_block &&
         (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
-        state->acc_active[3] = false;
-        state->acc_hits[3] = 0;
-        state->acc_hold[3] = 0;
-        state->acc_presence_mask[3] = 0u;
-        state->acc_cx[3] = 0.0f;
-        state->acc_cy[3] = 0.0f;
-        state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
-        for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
-            state->saliency_aux_active[i] = false;
-            state->saliency_aux_hits[i] = 0;
-            state->saliency_aux_hold[i] = 0;
-            state->saliency_aux_cx[i] = 0.0f;
-            state->saliency_aux_cy[i] = 0.0f;
-            state->saliency_aux_display_algorithm[i] = ANOMALY_ALGO_PERSIST;
-        }
+        clear_saliency_tracks(state);
     }
     if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_COLOR)   && best_color   >= cfg->score_threshold) {
         raw_cx[0] = (float)best_color_x   / fw;
@@ -5611,9 +6572,13 @@ int anomaly_process_frame(
             aux_count++;
         }
     } else {
-        state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
-        for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
-            state->saliency_aux_display_algorithm[i] = ANOMALY_ALGO_PERSIST;
+        if ((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+            clear_saliency_tracks(state);
+        } else {
+            state->saliency_display_algorithm = ANOMALY_ALGO_PERSIST;
+            for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
+                state->saliency_aux_display_algorithm[i] = ANOMALY_ALGO_PERSIST;
+            }
         }
     }
 
@@ -5741,6 +6706,7 @@ int anomaly_process_frame(
                 thermal_candidate_area[best_thermal_candidate_idx] <= 1.0f &&
                 thermal_candidate_span[best_thermal_candidate_idx] <= 1.0f;
             bool weak_singleton =
+                use_publish_transition_gating &&
                 singleton_blob &&
                 motion_support < 0.20f &&
                 (!thermal_publish_settled || best_thermal < cfg->score_threshold + 0.65f);
@@ -5810,9 +6776,14 @@ int anomaly_process_frame(
                 bool suppress_switch = false;
                 float blend_alpha = alpha;
                 if (ai == 3 && saliency_acc_pre_active && saliency_acc_pre_hits >= min_hits) {
-                    float switch_margin = 1.10f;
+                    float switch_margin = 0.70f;
                     float inner_gate = gate * 0.45f;
+                    bool stronger_new_winner =
+                        saliency_tracked_score_pre > 0.0f &&
+                        best_persist > saliency_tracked_score_pre + 0.55f &&
+                        dist > gate * 0.16f;
                     if (saliency_tracked_score_pre > 0.0f &&
+                        !stronger_new_winner &&
                         dist > inner_gate &&
                         best_persist < saliency_tracked_score_pre + switch_margin) {
                         suppress_switch = true;
@@ -5821,6 +6792,9 @@ int anomaly_process_frame(
                     // winner is clearly stronger, pull the latch back quickly instead
                     // of letting the EMA trail behind the true winner for dozens of frames.
                     if (!suppress_switch &&
+                        stronger_new_winner) {
+                        blend_alpha = 0.88f;
+                    } else if (!suppress_switch &&
                         saliency_tracked_score_pre > 0.0f &&
                         best_persist > saliency_tracked_score_pre + 2.0f &&
                         dist > gate * 0.08f) {
@@ -5878,16 +6852,19 @@ int anomaly_process_frame(
 
     bool publish_motion_unstable =
         !scene_discontinuity &&
-        sim.valid &&
+        registration_model_valid(&registration) &&
         (sim.mean_residual > ANOMALY_PUBLISH_GMV_RESIDUAL_GATE ||
-         best_motion_zoom_scale < ANOMALY_PUBLISH_ZOOM_SCALE_GATE);
+         best_motion_zoom_scale < ANOMALY_PUBLISH_ZOOM_SCALE_GATE ||
+         debug_global_motion_load > ANOMALY_PUBLISH_GLOBAL_MOTION_GATE);
     bool publish_scene_stable =
         !scene_discontinuity &&
         bg_temporal_ready &&
-        (!sim.valid || sim.mean_residual <= ANOMALY_PUBLISH_STABLE_GMV_RESIDUAL) &&
+        (!registration_model_valid(&registration) || sim.mean_residual <= ANOMALY_PUBLISH_STABLE_GMV_RESIDUAL) &&
         best_motion_zoom_scale >= ANOMALY_PUBLISH_STABLE_ZOOM_SCALE &&
         debug_global_motion_load <= ANOMALY_PUBLISH_STABLE_MOTION_LOAD;
-    if (scene_discontinuity) {
+    if (!use_publish_transition_gating) {
+        state->publish_stable_frames = 0;
+    } else if (scene_discontinuity) {
         state->publish_stable_frames = 0;
     } else if (publish_scene_stable) {
         if (state->publish_stable_frames < ANOMALY_PUBLISH_STABLE_RELEASE_FRAMES) {
@@ -5899,7 +6876,9 @@ int anomaly_process_frame(
                 debug_global_motion_load > ANOMALY_PUBLISH_STABLE_MOTION_LOAD * 2.0f)) {
         state->publish_stable_frames = 0;
     }
-    if (scene_discontinuity) {
+    if (!use_publish_transition_gating) {
+        state->publish_hold_frames = 0;
+    } else if (scene_discontinuity) {
         if (state->publish_hold_frames < ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES) {
             state->publish_hold_frames = ANOMALY_PUBLISH_DISCONTINUITY_HOLDOFF_FRAMES;
         }
@@ -5907,6 +6886,9 @@ int anomaly_process_frame(
         if (state->publish_hold_frames < ANOMALY_PUBLISH_UNSTABLE_HOLDOFF_FRAMES) {
             state->publish_hold_frames = ANOMALY_PUBLISH_UNSTABLE_HOLDOFF_FRAMES;
         }
+    }
+    if (scene_discontinuity || publish_motion_unstable) {
+        clear_all_roi_tracks(state);
     }
     bool publish_allowed =
         !transition_warmup_block &&

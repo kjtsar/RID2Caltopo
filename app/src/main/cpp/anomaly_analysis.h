@@ -20,6 +20,10 @@
 #define ANOMALY_THERMAL_WHITE_HOT 1
 #define ANOMALY_THERMAL_BLACK_HOT 2
 
+// ── Registration backend selector ──────────────────────────────────────────
+#define ANOMALY_REGISTRATION_GMV    1
+#define ANOMALY_REGISTRATION_AFFINE 2
+
 // ── Default tuning knobs ───────────────────────────────────────────────────
 #define ANOMALY_DEFAULT_FRAME_STRIDE      3
 #define ANOMALY_DEFAULT_SCORE_THRESHOLD   1.8f
@@ -155,6 +159,7 @@ typedef struct {
     bool  show_hot_overlay;
     bool  show_candidate_blobs;
     int   algorithm_mask;
+    int   registration_mode;
     int   frame_stride;
     int   pixel_step;
     float score_threshold;

@@ -64,11 +64,20 @@ enum class ThermalPolarity(
     }
 }
 
+enum class MotionRegistrationMode(
+    val nativeValue: Int,
+    val label: String,
+) {
+    Gmv(nativeValue = 1, label = "GMV"),
+    Affine(nativeValue = 2, label = "Affine");
+}
+
 data class NativeAnomalyConfig(
     val enabled: Boolean,
     val showHotOverlay: Boolean,
     val showCandidateBlobs: Boolean,
     val algorithmMask: Int,
+    val registrationMode: Int,
     val frameStride: Int,
     val pixelStep: Int,
     val scoreThreshold: Float,
@@ -85,15 +94,18 @@ data class AnomalyConfig(
     val showHotOverlay: Boolean = false,
     val showCandidateBlobs: Boolean = false,
     val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.ThermalHotspot),
+    val saliencyEnabled: Boolean = true,
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
     val frameStride: Int = 3,
     val pixelStep: Int = 0,
     val sensitivity: Float = 0.60f,
     val motionEvidenceSensitivity: Float = 0.60f,
     val minAreaFraction: Float = 0.0015f,
-    val thermalPolarity: ThermalPolarity = ThermalPolarity.WhiteHot,
+    val thermalPolarity: ThermalPolarity = ThermalPolarity.BlackHot,
+    val registrationMode: MotionRegistrationMode = MotionRegistrationMode.Affine,
     val scanZone: Float = 0.60f,
     val minHits: Int = 2,
+    val thermalMinDelta: Float = 10.0f,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {
@@ -121,7 +133,9 @@ data class AnomalyConfig(
     ): Set<AnomalyAlgorithm> {
         val resolved = nonAppearanceAlgorithms.toMutableSet()
         resolved += resolvedAppearanceMode(detectedMode).algorithm
-        resolved += AnomalyAlgorithm.PersistentDarkPatch
+        if (saliencyEnabled) {
+            resolved += AnomalyAlgorithm.PersistentDarkPatch
+        }
         return resolved
     }
 
@@ -158,6 +172,7 @@ data class AnomalyConfig(
             showHotOverlay = showHotOverlay,
             showCandidateBlobs = showCandidateBlobs,
             algorithmMask = mask,
+            registrationMode = registrationMode.nativeValue,
             frameStride = frameStride.coerceIn(1, 8),
             pixelStep = pixelStep.coerceIn(0, 8),
             scoreThreshold = scoreThreshold,
@@ -166,7 +181,7 @@ data class AnomalyConfig(
             thermalPolarity = thermalPolarity.nativeValue,
             scanZone = scanZone.coerceIn(0.5f, 1.0f),
             minHits = minHits.coerceIn(1, 10),
-            thermalMinDelta = 10.0f,
+            thermalMinDelta = thermalMinDelta.coerceIn(1.0f, 64.0f),
         )
     }
 }

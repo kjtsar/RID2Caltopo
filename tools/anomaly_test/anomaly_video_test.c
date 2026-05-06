@@ -681,6 +681,8 @@ static void usage(const char *prog) {
         "  -s <float>       Scan zone 0.5–1.0    (default: %.2f)\n"
         "  -a <int>         Algorithm mask 1=color 2=thermal 4=motion 8=saliency (default: 7)\n"
         "  -p <wh|bh>       Thermal polarity: wh=white-hot bh=black-hot (default: wh)\n"
+        "  --registration <gmv|affine>\n"
+        "                   Camera registration backend (default: gmv)\n"
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
         "  --debug-frame N  Dump saliency candidate details for frame N\n"
@@ -718,6 +720,7 @@ int main(int argc, char **argv) {
     anomaly_config_t cfg = {
         .enabled           = true,
         .algorithm_mask    = ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION,
+        .registration_mode = ANOMALY_REGISTRATION_GMV,
         .frame_stride      = 1,
         .score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD,
         .motion_evidence_scale = 1.0f,
@@ -746,6 +749,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-m")          && i+1 < argc) cfg.min_hits          = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s")          && i+1 < argc) cfg.scan_zone         = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-a")          && i+1 < argc) cfg.algorithm_mask    = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--registration") && i+1 < argc) {
+            const char *mode = argv[++i];
+            cfg.registration_mode = strcmp(mode, "affine") == 0
+                                   ? ANOMALY_REGISTRATION_AFFINE
+                                   : ANOMALY_REGISTRATION_GMV;
+        }
         else if (!strcmp(argv[i], "--stride")    && i+1 < argc) cfg.frame_stride      = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--min-delta") && i+1 < argc) min_delta_override    = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-p")          && i+1 < argc) {
@@ -850,6 +859,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "               %s\n", "saliency");
     fprintf(stderr, "  polarity   = %s\n",
         cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "black-hot" : "white-hot");
+    fprintf(stderr, "  register   = %s\n",
+        cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
     fprintf(stderr, "  stride     = %d\n",   cfg.frame_stride);
     fprintf(stderr, "  min_delta  = %.1f%s\n", effective_min_delta,
             min_delta_override > 0.0f ? " (override)" : "");
@@ -874,11 +885,12 @@ int main(int argc, char **argv) {
     // Header lines document the settings so the file is self-contained.
     fprintf(csv, "# input: %s\n", input);
     fprintf(csv, "# threshold: %.2f  min_hits: %d  scan_zone: %.2f  "
-                 "algo: %d  polarity: %s  stride: %d\n",
+                 "algo: %d  polarity: %s  stride: %d  registration: %s\n",
             (double)cfg.score_threshold, cfg.min_hits, (double)cfg.scan_zone,
             cfg.algorithm_mask,
             cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh",
-            cfg.frame_stride);
+            cfg.frame_stride,
+            cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
     fprintf(csv, "# label column: G=good/true-positive  "
                  "B=bad/false-positive  ?=unsure  (leave blank to skip)\n");
     fprintf(csv, "frame,time_s,algorithm,cx_norm,cy_norm,"

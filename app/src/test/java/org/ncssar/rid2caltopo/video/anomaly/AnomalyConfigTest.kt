@@ -18,9 +18,14 @@ class AnomalyConfigTest {
         )
 
         val native = config.toNativeConfig(enabledOverride = false)
+        val expectedMask =
+            AnomalyAlgorithm.Motion.nativeMask or
+            AnomalyAlgorithm.ThermalHotspot.nativeMask or
+            AnomalyAlgorithm.PersistentDarkPatch.nativeMask
 
         assertFalse(native.enabled)
-        assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask or AnomalyAlgorithm.Motion.nativeMask, native.algorithmMask)
+        assertEquals(expectedMask, native.algorithmMask)
+        assertEquals(MotionRegistrationMode.Affine.nativeValue, native.registrationMode)
         assertEquals(8, native.frameStride)
         assertTrue(native.scoreThreshold in 1.0f..15.0f)
         assertTrue(native.minAreaFraction in 0.00005f..0.03f)

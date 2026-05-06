@@ -113,11 +113,27 @@ cmake --build build
 -s <float>       Scan zone 0.5–1.0 (default: 0.60)
 -a <int>         Algorithm mask: 1=color 2=thermal 4=motion (default: 7=all)
 -p <wh|bh>       Thermal polarity: wh=white-hot bh=black-hot (default: wh)
+--registration <gmv|affine>
+                  Camera registration backend (default: gmv)
 --stride <int>   Analyze every Nth frame (default: 1)
 --min-delta <f>  Thermal minimum absolute luma delta (default: 10.0)
 ```
 
 Requires `ffmpeg` and `ffprobe` on PATH.
+
+### Side-by-side GMV vs affine
+
+```sh
+python3 tools/anomaly_test/compare_registration_backends.py \
+  path/to/clip.mp4 \
+  path/to/clip.review.json \
+  -p bh -a 6 -t 2.8 -m 2 -s 0.6
+```
+
+This helper runs `anomaly_video_test` twice, once with `--registration gmv`
+and once with `--registration affine`, writes two detection CSVs, and then
+feeds both into `review_eval.py` so you can compare the same reviewed clip
+without re-entering the detector settings.
 
 ### Reviewing detections and labelling
 

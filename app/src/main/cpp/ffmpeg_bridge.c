@@ -142,6 +142,7 @@
 #if HAVE_FFMPEG && HAVE_SWSCALE
 typedef struct {
     AVFrame *frame;
+    AVFrame *history_frame;
     int64_t source_ts_us;
     int64_t enqueued_at_ms;
 } render_queue_slot_t;
@@ -219,6 +220,7 @@ typedef struct ffmpeg_session_t {
     int64_t local_playback_display_pts_us;
     int64_t local_playback_nominal_interval_ms;
     bool local_playback_paused;
+    bool local_playback_history_replay_active;
     int64_t local_playback_step_budget;
     int64_t anomaly_process_frame_count;
     int64_t anomaly_annotated_frame_count;
@@ -828,6 +830,7 @@ static void analyze_decoded_frame(ffmpeg_session_t *session,
 
 static void render_frame_to_surface(ffmpeg_session_t *session,
                                     AVFrame *decoded,
+                                    AVFrame *history_frame,
                                     int64_t source_ts_us,
                                     int64_t render_latency_ms,
                                     bool record_local_history) {
@@ -884,8 +887,19 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
         }
         ANativeWindow_unlockAndPost(window);
         session->last_render_post_at_ms = monotonic_ms();
+        if (is_local_file_source(session) && source_ts_us > 0) {
+            // Keep the app-side playback timestamp aligned with whichever frame
+            // we actually pushed to the surface, including history renders from
+            // the Back button while paused.
+            session->local_playback_display_pts_us = source_ts_us;
+            session->local_playback_last_render_at_ms = session->last_render_post_at_ms;
+        }
         if (record_local_history && use_render_lock && is_local_file_source(session)) {
-            append_local_playback_history_locked(session, decoded, source_ts_us, session->last_render_post_at_ms);
+            append_local_playback_history_locked(
+                    session,
+                    history_frame != NULL ? history_frame : decoded,
+                    source_ts_us,
+                    session->last_render_post_at_ms);
         }
         dispatch_probe_event_with_latency(session->designator,
                                           "frame_rendered",
@@ -1614,6 +1628,7 @@ static void log_render_queue_state(ffmpeg_session_t *session, int queue_depth, b
 static void clear_render_queue_slot(render_queue_slot_t *slot) {
     if (slot == NULL) return;
     av_frame_free(&slot->frame);
+    av_frame_free(&slot->history_frame);
     slot->source_ts_us = 0;
     slot->enqueued_at_ms = 0;
 }
@@ -1626,6 +1641,7 @@ static void clear_local_playback_history(ffmpeg_session_t *session) {
     session->local_playback_history_count = 0;
     session->local_playback_history_next = 0;
     session->local_playback_history_offset = 0;
+    session->local_playback_history_replay_active = false;
 }
 
 static void clear_render_queue(ffmpeg_session_t *session) {
@@ -1674,6 +1690,7 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->local_playback_first_render_at_ms = 0;
         session->local_playback_display_pts_us = 0;
         session->local_playback_nominal_interval_ms = 0;
+        session->local_playback_history_replay_active = false;
         session->anomaly_process_frame_count = 0;
         session->anomaly_annotated_frame_count = 0;
         session->anomaly_process_total_us = 0;
@@ -1681,6 +1698,23 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->anomaly_process_last_us = 0;
         session->latest_anomaly_debug_summary[0] = '\0';
     }
+}
+
+static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
+    if (session == NULL) return;
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_lock(&session->anomaly_lock);
+        anomaly_state_reset(&session->anomaly_state);
+        pthread_mutex_unlock(&session->anomaly_lock);
+    } else {
+        anomaly_state_reset(&session->anomaly_state);
+    }
+    session->anomaly_process_frame_count = 0;
+    session->anomaly_annotated_frame_count = 0;
+    session->anomaly_process_total_us = 0;
+    session->anomaly_process_max_us = 0;
+    session->anomaly_process_last_us = 0;
+    session->latest_anomaly_debug_summary[0] = '\0';
 }
 
 static void pace_local_file_playback(ffmpeg_session_t *session, int64_t pts_us) {
@@ -1876,6 +1910,7 @@ static int render_queue_tail_index(const ffmpeg_session_t *session) {
 
 static bool enqueue_render_frame(ffmpeg_session_t *session,
                                  AVFrame *decoded,
+                                 AVFrame *history_frame,
                                  int64_t source_ts_us,
                                  int64_t enqueued_at_ms) {
     if (session == NULL || decoded == NULL) return false;
@@ -1883,9 +1918,18 @@ static bool enqueue_render_frame(ffmpeg_session_t *session,
 
     AVFrame *cloned = av_frame_clone(decoded);
     if (cloned == NULL) return false;
+    AVFrame *history_cloned = NULL;
+    if (history_frame != NULL) {
+        history_cloned = av_frame_clone(history_frame);
+        if (history_cloned == NULL) {
+            av_frame_free(&cloned);
+            return false;
+        }
+    }
 
     int tail_idx = render_queue_tail_index(session);
     session->render_queue[tail_idx].frame = cloned;
+    session->render_queue[tail_idx].history_frame = history_cloned;
     session->render_queue[tail_idx].source_ts_us = source_ts_us;
     session->render_queue[tail_idx].enqueued_at_ms = enqueued_at_ms;
     session->render_queue_depth += 1;
@@ -1948,10 +1992,12 @@ static AVFrame *clone_local_playback_history_frame_locked(ffmpeg_session_t *sess
 
 static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
                                             AVFrame **out_frame,
+                                            AVFrame **out_history_frame,
                                             int64_t *out_source_ts_us,
                                             int64_t *out_render_latency_ms) {
     if (session == NULL ||
         out_frame == NULL ||
+        out_history_frame == NULL ||
         out_source_ts_us == NULL ||
         out_render_latency_ms == NULL ||
         session->render_queue == NULL ||
@@ -2019,8 +2065,10 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
     }
 
     *out_frame = session->render_queue[oldest_index].frame;
+    *out_history_frame = session->render_queue[oldest_index].history_frame;
     *out_source_ts_us = session->render_queue[oldest_index].source_ts_us;
     session->render_queue[oldest_index].frame = NULL;
+    session->render_queue[oldest_index].history_frame = NULL;
     session->render_queue[oldest_index].source_ts_us = 0;
     session->render_queue[oldest_index].enqueued_at_ms = 0;
     session->render_queue_head = (session->render_queue_head + 1) % session->render_queue_capacity;
@@ -2065,6 +2113,7 @@ static void *render_thread_main(void *arg) {
 
     while (session_running(session)) {
         AVFrame *to_render = NULL;
+        AVFrame *history_frame = NULL;
         int64_t source_ts_us = 0;
         int64_t render_latency_ms = 0;
         int64_t wait_ms = 20;
@@ -2081,11 +2130,13 @@ static void *render_thread_main(void *arg) {
         if (session->render_queue_depth > 0 &&
             dequeue_due_render_frame_locked(session,
                                             &to_render,
+                                            &history_frame,
                                             &source_ts_us,
                                             &render_latency_ms)) {
             pthread_mutex_unlock(&session->render_lock);
-            render_frame_to_surface(session, to_render, source_ts_us, render_latency_ms, true);
+            render_frame_to_surface(session, to_render, history_frame, source_ts_us, render_latency_ms, true);
             av_frame_free(&to_render);
+            av_frame_free(&history_frame);
             continue;
         }
 
@@ -2999,6 +3050,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
 
             int64_t pts_us = pts_to_us(frame->best_effort_timestamp, session->video_time_base);
+            AVFrame *clean_history_frame = local_file_source ? av_frame_clone(frame) : NULL;
 #if FFMPEG_TELEMETRY_ENABLED
             log_dict_keys_once(
                     session,
@@ -3042,6 +3094,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     enqueued = enqueue_render_frame(
                             session,
                             frame,
+                            clean_history_frame,
                             pts_us,
                             decoded_at_ms);
                     if (enqueued) {
@@ -3060,9 +3113,10 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     if (is_local_file_source(session)) {
                         pace_local_file_playback(session, pts_us);
                     }
-                    render_frame_to_surface(session, frame, pts_us, 0, true);
+                    render_frame_to_surface(session, frame, clean_history_frame, pts_us, 0, true);
                     session->next_render_due_ms = monotonic_ms() + current_render_interval_ms(session);
                 }
+                av_frame_free(&clean_history_frame);
             }
 #endif
             av_frame_unref(frame);
@@ -3165,6 +3219,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.show_hot_overlay  = false;
     slot->anomaly_cfg.show_candidate_blobs = false;
     slot->anomaly_cfg.algorithm_mask    = ANOMALY_ALGO_THERMAL;
+    slot->anomaly_cfg.registration_mode = ANOMALY_REGISTRATION_AFFINE;
     slot->anomaly_cfg.frame_stride      = ANOMALY_DEFAULT_FRAME_STRIDE;
     slot->anomaly_cfg.pixel_step        = 0;
     slot->anomaly_cfg.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
@@ -3474,6 +3529,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jboolean show_hot_overlay,
         jboolean show_candidate_blobs,
         jint algorithm_mask,
+        jint registration_mode,
         jint frame_stride,
         jint pixel_step,
         jfloat score_threshold,
@@ -3495,6 +3551,9 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.show_hot_overlay  = (show_hot_overlay == JNI_TRUE);
         session->anomaly_cfg.show_candidate_blobs = (show_candidate_blobs == JNI_TRUE);
         session->anomaly_cfg.algorithm_mask    = (int) algorithm_mask;
+        session->anomaly_cfg.registration_mode = ((int) registration_mode == ANOMALY_REGISTRATION_AFFINE)
+                                                 ? ANOMALY_REGISTRATION_AFFINE
+                                                 : ANOMALY_REGISTRATION_GMV;
         session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (int) frame_stride;
         session->anomaly_cfg.pixel_step        = ((int) pixel_step < 0) ? 0 : (int) pixel_step;
         session->anomaly_cfg.score_threshold   = fmaxf(0.1f, score_threshold);
@@ -3507,13 +3566,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.thermal_min_delta = thermal_min_delta > 0.0f
                                                  ? thermal_min_delta : ANOMALY_THERMAL_MIN_DELTA;
         // Reset accumulators so stale boxes don't persist across config changes.
-        if (session->anomaly_lock_ready) {
-            pthread_mutex_lock(&session->anomaly_lock);
-            anomaly_state_reset(&session->anomaly_state);
-            pthread_mutex_unlock(&session->anomaly_lock);
-        } else {
-            anomaly_state_reset(&session->anomaly_state);
-        }
+        reset_anomaly_tracking_state(session);
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -3586,6 +3639,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetLocalPlaybackPaus
         session->local_playback_paused = pause_enabled;
         if (!pause_enabled) {
             session->local_playback_step_budget = 0;
+            session->local_playback_history_replay_active = false;
         }
         if (session->render_sync_ready) {
             pthread_mutex_lock(&session->render_lock);
@@ -3621,8 +3675,14 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStepLocalPlayback(
             session->local_playback_history_offset -= 1;
             history_offset = session->local_playback_history_offset;
             render_from_history = true;
+            session->local_playback_history_replay_active = true;
         } else {
+            bool replaying_history = session->local_playback_history_replay_active;
             session->local_playback_history_offset = 0;
+            session->local_playback_history_replay_active = false;
+            if (replaying_history) {
+                reset_anomaly_tracking_state(session);
+            }
             if (session->local_playback_step_budget > INT64_MAX - step_count) {
                 session->local_playback_step_budget = INT64_MAX;
             } else {
@@ -3640,13 +3700,16 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStepLocalPlayback(
     pthread_mutex_unlock(&g_lock);
 
     if (render_from_history && session != NULL && session->render_sync_ready) {
+        // History playback shows older decoded frames without rewinding the decoder,
+        // so clear detector state before drawing them to avoid future-frame ROI latches.
+        reset_anomaly_tracking_state(session);
         pthread_mutex_lock(&session->render_lock);
         int64_t history_pts_us = 0;
         AVFrame *history_frame =
                 clone_local_playback_history_frame_locked(session, history_offset, &history_pts_us);
         pthread_mutex_unlock(&session->render_lock);
         if (history_frame != NULL) {
-            render_frame_to_surface(session, history_frame, history_pts_us, 0, false);
+            render_frame_to_surface(session, history_frame, NULL, history_pts_us, 0, false);
             av_frame_free(&history_frame);
         }
     }
@@ -3676,6 +3739,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStepLocalPlaybackBac
                 }
                 history_offset = session->local_playback_history_offset;
                 render_from_history = true;
+                session->local_playback_history_replay_active = true;
             }
             pthread_mutex_unlock(&session->render_lock);
         }
@@ -3683,13 +3747,16 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStepLocalPlaybackBac
     pthread_mutex_unlock(&g_lock);
 
     if (render_from_history && session != NULL && session->render_sync_ready) {
+        // History playback shows older decoded frames without rewinding the decoder,
+        // so clear detector state before drawing them to avoid future-frame ROI latches.
+        reset_anomaly_tracking_state(session);
         pthread_mutex_lock(&session->render_lock);
         int64_t history_pts_us = 0;
         AVFrame *history_frame =
                 clone_local_playback_history_frame_locked(session, history_offset, &history_pts_us);
         pthread_mutex_unlock(&session->render_lock);
         if (history_frame != NULL) {
-            render_frame_to_surface(session, history_frame, history_pts_us, 0, false);
+            render_frame_to_surface(session, history_frame, NULL, history_pts_us, 0, false);
             av_frame_free(&history_frame);
         }
     }

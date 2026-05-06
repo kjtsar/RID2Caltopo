@@ -60,6 +60,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyPrefs
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
+import org.ncssar.rid2caltopo.video.anomaly.MotionRegistrationMode
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
@@ -1501,7 +1502,11 @@ class StreamsViewModel(
 
     fun resetAnomalyRealtimeDefaults(designator: String) {
         updateAnomalyConfig(designator) { current ->
-            AnomalyConfig().copy(enabled = current.enabled)
+            AnomalyConfig().copy(
+                enabled = current.enabled,
+                appearanceSelection = current.appearanceSelection,
+                thermalPolarity = current.thermalPolarity,
+            )
         }
     }
 
@@ -1520,6 +1525,12 @@ class StreamsViewModel(
     fun toggleShowCandidateBlobs(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(showCandidateBlobs = !current.showCandidateBlobs)
+        }
+    }
+
+    fun toggleSaliencyEnabled(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(saliencyEnabled = !current.saliencyEnabled)
         }
     }
 
@@ -1601,6 +1612,22 @@ class StreamsViewModel(
     fun cycleAnomalyThermalPolarity(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(thermalPolarity = current.thermalPolarity.next())
+        }
+    }
+
+    fun cycleAnomalyRegistrationMode(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            val next = when (current.registrationMode) {
+                MotionRegistrationMode.Gmv -> MotionRegistrationMode.Affine
+                MotionRegistrationMode.Affine -> MotionRegistrationMode.Gmv
+            }
+            current.copy(registrationMode = next)
+        }
+    }
+
+    fun setAnomalyThermalMinDelta(designator: String, thermalMinDelta: Float) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(thermalMinDelta = thermalMinDelta.coerceIn(1.0f, 64.0f))
         }
     }
 

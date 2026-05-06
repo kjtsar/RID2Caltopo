@@ -132,6 +132,18 @@ fun StreamTile(
     val showLocalPlaybackLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyReviewLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyLegendControls = anomalyConfig.enabled
+    val togglePlaybackAnomalyEnabled = {
+        viewModel.toggleAnomalyEnabled(streamDesignator)
+        val nextEnabled = !anomalyConfig.enabled
+        CaltopoClient.ShowToast(
+            if (nextEnabled) {
+                "Anomaly detection enabled for $streamDesignator."
+            } else {
+                "Anomaly detection disabled for $streamDesignator."
+            }
+        )
+        pendingAnnotationPoint = null
+    }
 
     LaunchedEffect(anomalyConfig.enabled) {
         if (!anomalyConfig.enabled) {
@@ -211,6 +223,9 @@ fun StreamTile(
                                         x = (tapOffset.x / width).coerceIn(0f, 1f),
                                         y = (tapOffset.y / height).coerceIn(0f, 1f),
                                     )
+                                },
+                                onLongPress = {
+                                    togglePlaybackAnomalyEnabled()
                                 }
                             )
                         }
@@ -263,7 +278,10 @@ fun StreamTile(
                                     }
                                 },
                                 onLongPress = {
-                                    if (isLocalPlayback) return@detectTapGestures
+                                    if (isLocalPlayback) {
+                                        togglePlaybackAnomalyEnabled()
+                                        return@detectTapGestures
+                                    }
                                     CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
                                     when (designatorState) {
                                         is DesignatorState.Yellow -> showPicker = true
@@ -322,6 +340,21 @@ fun StreamTile(
                     expanded = anomalyMenuExpanded,
                     onDismissRequest = { anomalyMenuExpanded = false }
                 ) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (anomalyConfig.enabled) {
+                                    "Anomaly Detection: On (tap to turn Off)"
+                                } else {
+                                    "Anomaly Detection: Off (tap to turn On)"
+                                }
+                            )
+                        },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            viewModel.toggleAnomalyEnabled(streamDesignator)
+                        }
+                    )
                     if (isLocalPlayback) {
                         DropdownMenuItem(
                             text = { Text("Clear Review Annotations") },
@@ -350,21 +383,6 @@ fun StreamTile(
                         onClick = {
                             anomalyMenuExpanded = false
                             showAdHelpDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                if (anomalyConfig.enabled) {
-                                    "Anomaly Detection: On (tap to turn Off)"
-                                } else {
-                                    "Anomaly Detection: Off (tap to turn On)"
-                                }
-                            )
-                        },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            viewModel.toggleAnomalyEnabled(streamDesignator)
                         }
                     )
                     DropdownMenuItem(
@@ -694,6 +712,9 @@ fun StreamTile(
                 var pixelStepValue by remember(streamDesignator, anomalyConfig.pixelStep) {
                     mutableStateOf(anomalyConfig.pixelStep.coerceIn(0, 4))
                 }
+                var thermalMinDeltaValue by remember(streamDesignator, anomalyConfig.thermalMinDelta) {
+                    mutableStateOf(anomalyConfig.thermalMinDelta.coerceIn(1.0f, 64.0f))
+                }
                 AlertDialog(
                     onDismissRequest = { showAnomalySettingsDialog = false },
                     title = { Text("Anomaly Detector") },
@@ -768,6 +789,16 @@ fun StreamTile(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Text("Saliency")
+                                TextButton(onClick = { viewModel.toggleSaliencyEnabled(streamDesignator) }) {
+                                    Text(if (anomalyConfig.saliencyEnabled) "On" else "Off")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text("Show Hottest Region")
                                 TextButton(onClick = { viewModel.toggleShowHotOverlay(streamDesignator) }) {
                                     Text(if (anomalyConfig.showHotOverlay) "On" else "Off")
@@ -781,6 +812,16 @@ fun StreamTile(
                                 Text("Show Candidate Blobs")
                                 TextButton(onClick = { viewModel.toggleShowCandidateBlobs(streamDesignator) }) {
                                     Text(if (anomalyConfig.showCandidateBlobs) "On" else "Off")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Registration")
+                                TextButton(onClick = { viewModel.cycleAnomalyRegistrationMode(streamDesignator) }) {
+                                    Text(anomalyConfig.registrationMode.label)
                                 }
                             }
                             Row(
@@ -838,6 +879,12 @@ fun StreamTile(
                                 valueRange = 0f..4f,
                                 steps = 3
                             )
+                            Text("Thermal Min Delta ${"%.1f".format(thermalMinDeltaValue)}")
+                            Slider(
+                                value = thermalMinDeltaValue,
+                                onValueChange = { thermalMinDeltaValue = it },
+                                valueRange = 1f..64f
+                            )
                         }
                     },
                     confirmButton = {
@@ -853,6 +900,7 @@ fun StreamTile(
                                     viewModel.cycleAnomalyFrameStride(streamDesignator)
                                 }
                                 viewModel.setAnomalyPixelStep(streamDesignator, pixelStepValue)
+                                viewModel.setAnomalyThermalMinDelta(streamDesignator, thermalMinDeltaValue)
                                 showAnomalySettingsDialog = false
                             }
                         ) {
@@ -886,8 +934,11 @@ fun StreamTile(
                             Text("Stride: Analyze every Nth frame. Higher stride reduces CPU load but may miss brief motion.")
                             Text("Detail: Pixel sampling step for appearance analysis. Auto chooses a default from frame size; smaller steps inspect more detail at higher cost.")
                             Text("ShowHot: Draws a red ring around the hottest region in the frame as a thermal debug aid.")
+                            Text("Saliency: Enables the unified saliency detector. Turn it off to match harness runs that omit the saliency algorithm.")
                             Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
+                            Text("Registration: Chooses the motion-registration backend used to stabilize detections. Affine usually tracks camera motion more accurately; GMV is simpler and may be cheaper.")
                             Text("Thermal (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
+                            Text("Thermal Min Delta: Minimum thermal contrast before thermal/saliency evidence is considered. Raise it to ignore weaker temperature differences.")
                             Text("Motion badge: Indicates whether the motion detector is currently part of the active anomaly stack.")
                             if (isLocalPlayback) {
                                 Text("Playback review controls")

@@ -149,6 +149,55 @@ without re-entering the detector settings.
 The CSV header lines document the exact settings used, so the file is
 self-contained if you re-run with different parameters.
 
+### Reviewed regression suite
+
+The first-pass suite lives in
+`tools/anomaly_test/regression_suite_manifest.json`.
+
+- Full source clips stay in `app/src/test/resources/vidcap/`.
+- Derived regression entries are metadata-only: each excerpt points at a full
+  source clip plus a `[start_s, end_s]` review window, so we do not have to
+  check in extra clipped MP4s just to score them.
+- `review_status=reviewed` means the excerpt has a review JSON and should be
+  scored in CI / regression runs.
+- `review_status=pending_review` means the clip is preserved in the suite but
+  still needs human excerpt selection and labels before it can contribute to
+  quality metrics.
+
+Run the current suite with:
+
+```sh
+python3 tools/anomaly_test/run_regression_suite.py
+```
+
+That writes per-excerpt detector CSVs plus a suite JSON/Markdown report under
+`tools/anomaly_test/out/regression/`.
+
+### Reviewed label format and scoring
+
+The scorer accepts the existing local-playback review sidecars
+(`*.review.json`) and uses `review_kind` as the semantic contract:
+
+- `correct_detection`: target present and detector should cover it
+- `missed_target`: target present but previously missed; still scored as a
+  required positive target for regressions
+- `false_positive`: detector should not cover this point
+
+Optional future-proof fields:
+
+- `track_id`: pins a point to a specific target track for latency scoring
+- `scenario`: scenario/category label for aggregation
+- `object_type`: e.g. `person`, `tree`, `artifact`
+- `note`: freeform operator context
+
+The scorer reports:
+
+- reviewed true positives
+- reviewed false positives
+- reviewed misses
+- latency to first containing box for each positive track
+- harness runtime / realtime factor via `--summary-json`
+
 ### Tuning the detector
 
 The CSV + annotated video loop is the primary tuning tool.  Common

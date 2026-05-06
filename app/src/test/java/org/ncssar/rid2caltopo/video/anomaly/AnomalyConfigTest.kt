@@ -11,7 +11,9 @@ class AnomalyConfigTest {
     fun toNativeConfig_respectsOverrideAndBounds() {
         val config = AnomalyConfig(
             enabled = true,
-            algorithms = setOf(AnomalyAlgorithm.ColorOutlier, AnomalyAlgorithm.Motion),
+            appearanceSelection = AppearanceAnomalySelection.Color,
+            algorithms = setOf(AnomalyAlgorithm.Motion),
+            saliencyEnabled = false,
             frameStride = 99,
             sensitivity = 1.2f,
             minAreaFraction = 0.0f,
@@ -19,9 +21,8 @@ class AnomalyConfigTest {
 
         val native = config.toNativeConfig(enabledOverride = false)
         val expectedMask =
-            AnomalyAlgorithm.Motion.nativeMask or
-            AnomalyAlgorithm.ThermalHotspot.nativeMask or
-            AnomalyAlgorithm.PersistentDarkPatch.nativeMask
+            AnomalyAlgorithm.ColorOutlier.nativeMask or
+            AnomalyAlgorithm.Motion.nativeMask
 
         assertFalse(native.enabled)
         assertEquals(expectedMask, native.algorithmMask)
@@ -29,7 +30,7 @@ class AnomalyConfigTest {
         assertEquals(8, native.frameStride)
         assertTrue(native.scoreThreshold in 1.0f..15.0f)
         assertTrue(native.minAreaFraction in 0.00005f..0.03f)
-        assertEquals(ThermalPolarity.WhiteHot.nativeValue, native.thermalPolarity)
+        assertEquals(ThermalPolarity.BlackHot.nativeValue, native.thermalPolarity)
     }
 
     @Test
@@ -41,6 +42,50 @@ class AnomalyConfigTest {
         val native = config.toNativeConfig()
 
         assertEquals(ThermalPolarity.BlackHot.nativeValue, native.thermalPolarity)
+    }
+
+    @Test
+    fun toNativeConfig_thermalOnlyExcludesColorInfluence() {
+        val config = AnomalyConfig(
+            appearanceSelection = AppearanceAnomalySelection.Thermal,
+            algorithms = emptySet(),
+            saliencyEnabled = false,
+        )
+
+        val native = config.toNativeConfig()
+
+        assertEquals(AnomalyAlgorithm.ThermalHotspot.nativeMask, native.algorithmMask)
+    }
+
+    @Test
+    fun toNativeConfig_thermalAppearanceWithMotionAndSaliencyStillExcludesColor() {
+        val config = AnomalyConfig(
+            appearanceSelection = AppearanceAnomalySelection.Thermal,
+            algorithms = setOf(AnomalyAlgorithm.Motion),
+            saliencyEnabled = true,
+        )
+
+        val native = config.toNativeConfig()
+        val expectedMask =
+            AnomalyAlgorithm.ThermalHotspot.nativeMask or
+            AnomalyAlgorithm.Motion.nativeMask or
+            AnomalyAlgorithm.PersistentDarkPatch.nativeMask
+
+        assertEquals(expectedMask, native.algorithmMask)
+        assertEquals(0, native.algorithmMask and AnomalyAlgorithm.ColorOutlier.nativeMask)
+    }
+
+    @Test
+    fun realtimeDefaults_matchDocumentedIrDefaults() {
+        val config = AnomalyConfig()
+
+        assertEquals(AppearanceAnomalySelection.Auto, config.appearanceSelection)
+        assertEquals(ThermalPolarity.BlackHot, config.thermalPolarity)
+        assertEquals(MotionRegistrationMode.Affine, config.registrationMode)
+        assertEquals(3, config.frameStride)
+        assertEquals(0.60f, config.scanZone)
+        assertEquals(2, config.minHits)
+        assertEquals(10.0f, config.thermalMinDelta)
     }
 
     @Test

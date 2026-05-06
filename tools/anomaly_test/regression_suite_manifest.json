@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "suite_name": "PowerHouse Black-Hot Regression Suite v1",
+  "default_detector_args": [
+    "-p",
+    "bh",
+    "-a",
+    "6",
+    "-t",
+    "2.8",
+    "-m",
+    "2",
+    "-s",
+    "0.6",
+    "--stride",
+    "3"
+  ],
+  "source_clips": [
+    {
+      "id": "powerhouse1",
+      "label": "PowerHouse1.mp4",
+      "source_path": "app/src/test/resources/vidcap/PowerHouse1.mp4",
+      "preserve_full_source": true,
+      "notes": "Full clip retained as source material; excerpt review still pending."
+    },
+    {
+      "id": "powerhouse2",
+      "label": "PowerHouse2.mp4",
+      "source_path": "app/src/test/resources/vidcap/PowerHouse2.mp4",
+      "preserve_full_source": true,
+      "notes": "Full clip retained as source material; excerpt review still pending."
+    },
+    {
+      "id": "powerhouse3",
+      "label": "PowerHouse3.mp4",
+      "source_path": "app/src/test/resources/vidcap/PowerHouse3.mp4",
+      "preserve_full_source": true,
+      "notes": "Full clip retained as source material; excerpt review still pending."
+    },
+    {
+      "id": "powerhouse-team",
+      "label": "PowerHouseTeam.mp4",
+      "source_path": "app/src/test/resources/vidcap/PowerHouseTeam.mp4",
+      "preserve_full_source": true,
+      "notes": "Seed reviewed clip with existing operator annotations."
+    }
+  ],
+  "excerpts": [
+    {
+      "id": "powerhouse-team-false-positive-sweep",
+      "label": "PowerHouseTeam false-positive sweep",
+      "source_clip_id": "powerhouse-team",
+      "start_s": 1.7,
+      "end_s": 8.4,
+      "review_status": "reviewed",
+      "review_path": "app/src/test/resources/vidcap/PowerHouseTeam.reviewFirst7Seconds.json",
+      "tags": [
+        "false_positive",
+        "camera_motion_shift",
+        "water_edge"
+      ],
+      "notes": "Scenario-focused early excerpt covering the reviewed false-positive run.",
+      "detector_args": [
+        "-p",
+        "bh",
+        "-a",
+        "6",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.6",
+        "--stride",
+        "3"
+      ]
+    },
+    {
+      "id": "powerhouse-team-targets-and-late-fps",
+      "label": "PowerHouseTeam targets and late false positives",
+      "source_clip_id": "powerhouse-team",
+      "start_s": 10.1,
+      "end_s": 30.2,
+      "review_status": "reviewed",
+      "review_path": "app/src/test/resources/vidcap/PowerHouseTeam.review.json",
+      "tags": [
+        "correct_detection",
+        "missed_target",
+        "under_canopy",
+        "late_false_positive"
+      ],
+      "notes": "Reviewed target windows and under-canopy misses, filtered from the full team review.",
+      "detector_args": [
+        "-p",
+        "bh",
+        "-a",
+        "6",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.6",
+        "--stride",
+        "3"
+      ]
+    },
+    {
+      "id": "powerhouse1-pending-review",
+      "label": "PowerHouse1 pending excerpt review",
+      "source_clip_id": "powerhouse1",
+      "start_s": 0.0,
+      "end_s": null,
+      "review_status": "pending_review",
+      "tags": [
+        "pending"
+      ],
+      "notes": "Keep the full clip as the source of truth, then carve out reviewed detections / misses into smaller excerpts."
+    },
+    {
+      "id": "powerhouse2-pending-review",
+      "label": "PowerHouse2 pending excerpt review",
+      "source_clip_id": "powerhouse2",
+      "start_s": 0.0,
+      "end_s": null,
+      "review_status": "pending_review",
+      "tags": [
+        "pending"
+      ],
+      "notes": "Keep the full clip as the source of truth, then carve out reviewed detections / misses into smaller excerpts."
+    },
+    {
+      "id": "powerhouse3-pending-review",
+      "label": "PowerHouse3 pending excerpt review",
+      "source_clip_id": "powerhouse3",
+      "start_s": 0.0,
+      "end_s": null,
+      "review_status": "pending_review",
+      "tags": [
+        "pending"
+      ],
+      "notes": "Keep the full clip as the source of truth, then carve out reviewed detections / misses into smaller excerpts."
+    }
+  ]
+}

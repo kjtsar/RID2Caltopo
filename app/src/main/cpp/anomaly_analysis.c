@@ -405,7 +405,7 @@ static void insert_thermal_blob_candidate(
 static void extract_thermal_blob_candidates(
         const float *thermal_score_map,
         const float *bg_luma,
-        const double *sg_luma,
+        const float *sg_luma,
         int          sg_w,
         int          sg_h,
         int          roi_x0,
@@ -1613,8 +1613,8 @@ static bool fit_affine_ransac(
     return true;
 }
 
-static inline double ii_query(const double *ii, int stride,
-                              int sx0, int sy0, int sx1, int sy1) {
+static inline float ii_query(const float *ii, int stride,
+                             int sx0, int sy0, int sx1, int sy1) {
     return ii[sy1 * stride + sx1]
            - (sx0 > 0 ? ii[sy1 * stride + (sx0 - 1)] : 0.0)
            - (sy0 > 0 ? ii[(sy0 - 1) * stride + sx1] : 0.0)
@@ -1624,7 +1624,7 @@ static inline double ii_query(const double *ii, int stride,
 static float saliency_boundary_structure_scale(
         const float  *patch_score_map,
         const float  *bg_luma,
-        const double *sg_luma,
+        const float  *sg_luma,
         int           sg_w,
         int           sg_h,
         int           sx,
@@ -1632,7 +1632,7 @@ static float saliency_boundary_structure_scale(
         bool          bg_valid,
         bool          black_hot,
         float         thermal_min_delta,
-        double        delta_norm) {
+        float         delta_norm) {
     if (!bg_valid || patch_score_map == NULL || bg_luma == NULL || sg_luma == NULL ||
         sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
         return 1.0f;
@@ -1893,7 +1893,7 @@ static void build_patch_selection_map(
 static void estimate_representative_blob_delta_stats(
         const float *score_map,
         const float *bg_luma,
-        const double *sg_luma,
+        const float *sg_luma,
         int          sg_w,
         int          sg_h,
         int          sample_step,
@@ -1902,7 +1902,7 @@ static void estimate_representative_blob_delta_stats(
         bool         bg_valid,
         bool         black_hot,
         float        thermal_min_delta,
-        double       delta_norm,
+        float        delta_norm,
         float       *ratio_out,
         float       *std_out) {
     if (ratio_out != NULL) *ratio_out = 0.0f;
@@ -1997,7 +1997,7 @@ static void estimate_representative_blob_delta_stats(
 
 static void estimate_framewide_blob_contrast_stats(
         const float *bg_luma,
-        const double *sg_luma,
+        const float *sg_luma,
         int          sg_w,
         int          sg_h,
         bool         bg_valid,
@@ -2067,7 +2067,7 @@ static void estimate_framewide_blob_contrast_stats(
 
 static float thermal_candidate_seed_context_scale(
         const float *bg_luma,
-        const double *sg_luma,
+        const float *sg_luma,
         int          sg_w,
         int          sg_h,
         int          sx,
@@ -2079,7 +2079,7 @@ static float thermal_candidate_seed_context_scale(
         float        representative_delta_ratio,
         float        frame_contrast_mean,
         float        frame_contrast_std,
-        double       delta_norm) {
+        float        delta_norm) {
     if (!bg_valid || bg_luma == NULL || sg_luma == NULL ||
         sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
         return 1.0f;
@@ -2223,7 +2223,7 @@ static float thermal_candidate_seed_context_scale(
 
 static float thermal_candidate_parent_mass_scale(
         const float *bg_luma,
-        const double *sg_luma,
+        const float *sg_luma,
         int          sg_w,
         int          sg_h,
         int          sx,
@@ -2234,7 +2234,7 @@ static float thermal_candidate_parent_mass_scale(
         float        thermal_min_delta,
         float        frame_contrast_mean,
         float        frame_contrast_std,
-        double       delta_norm) {
+        float        delta_norm) {
     if (!bg_valid || bg_luma == NULL || sg_luma == NULL ||
         sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
         return 1.0f;
@@ -2324,7 +2324,7 @@ static float thermal_candidate_parent_mass_scale(
 static float thermal_candidate_quality(
         const float *score_map,
         const float *bg_luma,
-        const double *sg_luma,
+        const float *sg_luma,
         int          sg_w,
         int          sg_h,
         int          sx,
@@ -2333,8 +2333,8 @@ static float thermal_candidate_quality(
         bool         bg_valid,
         bool         black_hot,
         float        thermal_min_delta,
-        double       delta_mean,
-        double       delta_norm,
+        float        delta_mean,
+        float        delta_norm,
         float        representative_delta_ratio,
         float        representative_delta_std,
         float        frame_contrast_mean,
@@ -4145,7 +4145,7 @@ static int classify_saliency_display_algorithm(
         const float *saliency_motion_map,
         const float *saliency_registration_map,
         const float *bg_luma,
-        const double *sg_luma,
+        const float *sg_luma,
         int          sg_w,
         int          sg_h,
         int          sx,
@@ -4153,8 +4153,8 @@ static int classify_saliency_display_algorithm(
         bool         bg_valid,
         bool         black_hot,
         float        thermal_min_delta,
-        double       delta_mean,
-        double       delta_norm) {
+        float        delta_mean,
+        float        delta_norm) {
     if (sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) return ANOMALY_ALGO_PERSIST;
     size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
     float registration = saliency_registration_map != NULL ? saliency_registration_map[idx] : 1.0f;
@@ -4756,9 +4756,9 @@ bool anomaly_probe_thermal_point(
     probe_out->sample_y = sy;
 
     size_t sg_count = (size_t)sg_w * (size_t)sg_h;
-    double *sg_luma = (double *)malloc(sg_count * sizeof(double));
-    double *ii_sum = (double *)malloc(sg_count * sizeof(double));
-    double *ii_sum2 = (double *)malloc(sg_count * sizeof(double));
+    float *sg_luma = (float *)malloc(sg_count * sizeof(float));
+    float *ii_sum = (float *)malloc(sg_count * sizeof(float));
+    float *ii_sum2 = (float *)malloc(sg_count * sizeof(float));
     if (sg_luma == NULL || ii_sum == NULL || ii_sum2 == NULL) {
         free(sg_luma);
         free(ii_sum);
@@ -4774,23 +4774,23 @@ bool anomaly_probe_thermal_point(
             int x = roi_x0 + gx * sample_step;
             if (x >= roi_x1) x = roi_x1 - 1;
             const uint8_t *p = row + (x * 4);
-            double r = (double)p[0], g = (double)p[1], b = (double)p[2];
-            sg_luma[gy * sg_w + gx] = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+            float r = (float)p[0], g = (float)p[1], b = (float)p[2];
+            sg_luma[gy * sg_w + gx] = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
         }
     }
 
     for (int gy = 0; gy < sg_h; gy++) {
         for (int gx = 0; gx < sg_w; gx++) {
-            double v = sg_luma[gy * sg_w + gx];
-            double v2 = v * v;
-            double a = (gy > 0) ? ii_sum[(gy - 1) * sg_w + gx] : 0.0;
-            double l = (gx > 0) ? ii_sum[gy * sg_w + (gx - 1)] : 0.0;
-            double al = (gy > 0 && gx > 0) ? ii_sum[(gy - 1) * sg_w + (gx - 1)] : 0.0;
+            float v = sg_luma[gy * sg_w + gx];
+            float v2 = v * v;
+            float a = (gy > 0) ? ii_sum[(gy - 1) * sg_w + gx] : 0.0f;
+            float l = (gx > 0) ? ii_sum[gy * sg_w + (gx - 1)] : 0.0f;
+            float al = (gy > 0 && gx > 0) ? ii_sum[(gy - 1) * sg_w + (gx - 1)] : 0.0f;
             ii_sum[gy * sg_w + gx] = v + a + l - al;
 
-            double a2 = (gy > 0) ? ii_sum2[(gy - 1) * sg_w + gx] : 0.0;
-            double l2 = (gx > 0) ? ii_sum2[gy * sg_w + (gx - 1)] : 0.0;
-            double al2 = (gy > 0 && gx > 0) ? ii_sum2[(gy - 1) * sg_w + (gx - 1)] : 0.0;
+            float a2 = (gy > 0) ? ii_sum2[(gy - 1) * sg_w + gx] : 0.0f;
+            float l2 = (gx > 0) ? ii_sum2[gy * sg_w + (gx - 1)] : 0.0f;
+            float al2 = (gy > 0 && gx > 0) ? ii_sum2[(gy - 1) * sg_w + (gx - 1)] : 0.0f;
             ii_sum2[gy * sg_w + gx] = v2 + a2 + l2 - al2;
         }
     }
@@ -4801,20 +4801,20 @@ bool anomaly_probe_thermal_point(
     int wy0 = sy - R; if (wy0 < 0) wy0 = 0;
     int wy1 = sy + R; if (wy1 >= sg_h) wy1 = sg_h - 1;
     int n = (wx1 - wx0 + 1) * (wy1 - wy0 + 1);
-    double lum = sg_luma[sy * sg_w + sx];
-    double mean = ii_query(ii_sum, sg_w, wx0, wy0, wx1, wy1) / (double)n;
-    double sum2 = ii_query(ii_sum2, sg_w, wx0, wy0, wx1, wy1);
-    double std = sqrt(fmax(sum2 / (double)n - mean * mean, 1.0));
+    float lum = sg_luma[sy * sg_w + sx];
+    float mean = ii_query(ii_sum, sg_w, wx0, wy0, wx1, wy1) / (float)n;
+    float sum2 = ii_query(ii_sum2, sg_w, wx0, wy0, wx1, wy1);
+    float std = sqrtf(fmaxf(sum2 / (float)n - mean * mean, 1.0f));
     int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
-    double abs_delta = black_hot ? (mean - lum) : (lum - mean);
+    float abs_delta = black_hot ? (mean - lum) : (lum - mean);
 
     probe_out->valid = true;
     probe_out->sample_luma = (float)lum;
     probe_out->spatial_mean = (float)mean;
     probe_out->spatial_std = (float)std;
     probe_out->spatial_abs_delta = (float)abs_delta;
-    probe_out->spatial_score = (abs_delta >= (double)probe_out->thermal_min_delta)
-                               ? (float)(abs_delta / std) : -1.0f;
+    probe_out->spatial_score = (abs_delta >= probe_out->thermal_min_delta)
+                               ? (abs_delta / std) : -1.0f;
 
     bool bg_ready = (state != NULL
                      && state->bg_luma != NULL
@@ -5132,9 +5132,9 @@ int anomaly_process_frame(
     // Heap-allocate integral image arrays (freed at end of this function).
     // Two channels: luma sum and luma sum-of-squares for variance.
     size_t sg_count = (size_t)sg_w * (size_t)sg_h;
-    if (!ensure_double_capacity(&state->scratch_sg_luma, &state->scratch_sampled_grid_capacity, sg_count) ||
-        !ensure_double_capacity(&state->scratch_ii_sum, &state->scratch_sampled_grid_capacity, sg_count) ||
-        !ensure_double_capacity(&state->scratch_ii_sum2, &state->scratch_sampled_grid_capacity, sg_count)) {
+    if (!ensure_float_capacity(&state->scratch_sg_luma, &state->scratch_sampled_grid_capacity, sg_count) ||
+        !ensure_float_capacity(&state->scratch_ii_sum, &state->scratch_sampled_grid_capacity, sg_count) ||
+        !ensure_float_capacity(&state->scratch_ii_sum2, &state->scratch_sampled_grid_capacity, sg_count)) {
         if (curr_luma) {
             if (ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
                 memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
@@ -5152,19 +5152,18 @@ int anomaly_process_frame(
         }
         return 0;
     }
-    double *sg_luma  = state->scratch_sg_luma;
-    double *ii_sum   = state->scratch_ii_sum;
-    double *ii_sum2  = state->scratch_ii_sum2;
+    float *sg_luma  = state->scratch_sg_luma;
+    float *ii_sum   = state->scratch_ii_sum;
+    float *ii_sum2  = state->scratch_ii_sum2;
 
-    bool need_color_support =
+    bool color_algorithm_enabled =
         anomaly_detection_active &&
-        (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
+        (cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0;
+    bool need_color_support = color_algorithm_enabled;
     bool need_thermal_support_map =
         anomaly_detection_active &&
         (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
-    bool need_color_support_map =
-        anomaly_detection_active &&
-        (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
+    bool need_color_support_map = color_algorithm_enabled;
 
     // Colour tile accumulators (kept for ANOMALY_ALGO_COLOR).
 #define T ANOMALY_LOCAL_TILE_SIZE
@@ -5199,13 +5198,13 @@ int anomaly_process_frame(
             int tc = sx * T / sg_w;
             if (tc >= T) tc = T - 1;
             const uint8_t *px = row + (x * 4);
-            double r = (double)px[0], g = (double)px[1], b = (double)px[2];
-            double lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+            float r = (float)px[0], g = (float)px[1], b = (float)px[2];
+            float lum = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
             sg_luma[sy * sg_w + sx] = lum;
             sum_l  += lum; sum_l2 += lum * lum;
             if (need_color_support) {
-                double u   = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
-                double v   = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
+                float u   = (-0.14713f * r) - (0.28886f * g) + (0.43600f * b);
+                float v   = ( 0.61500f * r) - (0.51499f * g) - (0.10001f * b);
                 sum_u  += u;  sum_u2  += u * u;
                 sum_v  += v;  sum_v2  += v * v;
                 tile_sum_u[tr][tc]  += u;  tile_sum_u2[tr][tc]  += u * u;
@@ -5236,15 +5235,15 @@ int anomaly_process_frame(
     // Build 2-D integral images from sg_luma (in-place row-then-column scan).
     for (int sy = 0; sy < sg_h; sy++) {
         for (int sx = 0; sx < sg_w; sx++) {
-            double v  = sg_luma[sy * sg_w + sx];
-            double v2 = v * v;
-            double a  = (sy > 0) ? ii_sum [(sy-1)*sg_w + sx]   : 0.0;
-            double l  = (sx > 0) ? ii_sum [sy*sg_w + (sx-1)]   : 0.0;
-            double al = (sy > 0 && sx > 0) ? ii_sum [(sy-1)*sg_w + (sx-1)] : 0.0;
+            float v  = sg_luma[sy * sg_w + sx];
+            float v2 = v * v;
+            float a  = (sy > 0) ? ii_sum [(sy-1)*sg_w + sx]   : 0.0f;
+            float l  = (sx > 0) ? ii_sum [sy*sg_w + (sx-1)]   : 0.0f;
+            float al = (sy > 0 && sx > 0) ? ii_sum [(sy-1)*sg_w + (sx-1)] : 0.0f;
             ii_sum [sy*sg_w + sx] = v  + a  + l  - al;
-            double a2  = (sy > 0) ? ii_sum2[(sy-1)*sg_w + sx]   : 0.0;
-            double l2  = (sx > 0) ? ii_sum2[sy*sg_w + (sx-1)]   : 0.0;
-            double al2 = (sy > 0 && sx > 0) ? ii_sum2[(sy-1)*sg_w + (sx-1)] : 0.0;
+            float a2  = (sy > 0) ? ii_sum2[(sy-1)*sg_w + sx]   : 0.0f;
+            float l2  = (sx > 0) ? ii_sum2[sy*sg_w + (sx-1)]   : 0.0f;
+            float al2 = (sy > 0 && sx > 0) ? ii_sum2[(sy-1)*sg_w + (sx-1)] : 0.0f;
             ii_sum2[sy*sg_w + sx] = v2 + a2 + l2 - al2;
         }
     }
@@ -5355,7 +5354,7 @@ int anomaly_process_frame(
             int tc = sx * ANOMALY_LOCAL_TILE_SIZE / sg_w;
             if (tc >= ANOMALY_LOCAL_TILE_SIZE) tc = ANOMALY_LOCAL_TILE_SIZE - 1;
 
-            double lum = sg_luma[sy * sg_w + sx];
+            float lum = sg_luma[sy * sg_w + sx];
 
             if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0) {
                 // Integral-image window query.
@@ -5364,14 +5363,14 @@ int anomaly_process_frame(
                 int wy0 = sy - R; if (wy0 < 0) wy0 = 0;
                 int wy1 = sy + R; if (wy1 >= sg_h) wy1 = sg_h - 1;
                 int    n    = (wx1-wx0+1) * (wy1-wy0+1);
-                double wsum  = ii_query(ii_sum,  sg_w, wx0, wy0, wx1, wy1);
-                double wsum2 = ii_query(ii_sum2, sg_w, wx0, wy0, wx1, wy1);
-                double mean  = wsum / (double)n;
-                double std   = sqrt(fmax(wsum2/(double)n - mean*mean, 1.0));
-                double abs_delta = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
+                float wsum  = ii_query(ii_sum,  sg_w, wx0, wy0, wx1, wy1);
+                float wsum2 = ii_query(ii_sum2, sg_w, wx0, wy0, wx1, wy1);
+                float mean  = wsum / (float)n;
+                float std   = sqrtf(fmaxf(wsum2/(float)n - mean*mean, 1.0f));
+                float abs_delta = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
                                    ? (mean - lum) : (lum - mean);
-                if (abs_delta >= (double)thermal_min_delta) {
-                    float ts = (float)(abs_delta / std);
+                if (abs_delta >= thermal_min_delta) {
+                    float ts = abs_delta / std;
                     float global_dark_score = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT)
                         ? (float)((g_mean_l - lum) / g_std_l)
                         : (float)((lum - g_mean_l) / g_std_l);
@@ -5388,15 +5387,14 @@ int anomaly_process_frame(
                 }
             }
 
-            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0) {
+            if (color_algorithm_enabled) {
                 const uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
                 double r = (double)px[0], g = (double)px[1], b = (double)px[2];
                 double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
                 double v = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
                 float cs = (float)(fabs((u - tile_mean_u[tr][tc]) / tile_std_u[tr][tc])
                                  + fabs((v - tile_mean_v[tr][tc]) / tile_std_v[tr][tc]));
-                if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
-                    cs > best_color) {
+                if (cs > best_color) {
                     best_color = cs; best_color_x = x; best_color_y = y;
                 }
                 if (saliency_color_map != NULL) {
@@ -5469,8 +5467,8 @@ int anomaly_process_frame(
                      && state->bg_sg_h == sg_h
                      && state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP
                      && !scene_discontinuity);
-    double delta_mean = 0.0;
-    double delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
+    float delta_mean = 0.0f;
+    float delta_norm = ANOMALY_THERMAL_BG_NORM;
     float frame_blob_contrast_mean = 0.0f;
     float frame_blob_contrast_std = 0.0f;
     if (result_out != NULL) {
@@ -5486,12 +5484,12 @@ int anomaly_process_frame(
                 : ((float)sg_luma[i] - state->bg_luma[i]);
             if (d > 0.0f) { sum_d += d; sum_d2 += (double)d * d; cnt_d++; }
         }
-        delta_mean = cnt_d > 0 ? sum_d / (double)cnt_d : 0.0;
+        delta_mean = cnt_d > 0 ? (float)(sum_d / (double)cnt_d) : 0.0f;
         double delta_var = cnt_d > 1
             ? fmax(sum_d2 / (double)cnt_d - delta_mean * delta_mean, 0.0) : 0.0;
-        delta_norm = sqrt(delta_var);
-        if (delta_norm < (double)ANOMALY_THERMAL_BG_NORM)
-            delta_norm = (double)ANOMALY_THERMAL_BG_NORM;
+        delta_norm = (float)sqrt(delta_var);
+        if (delta_norm < ANOMALY_THERMAL_BG_NORM)
+            delta_norm = ANOMALY_THERMAL_BG_NORM;
         estimate_framewide_blob_contrast_stats(
                 state->bg_luma,
                 sg_luma,
@@ -5528,7 +5526,7 @@ int anomaly_process_frame(
         best_thermal_y = 0;
         for (int sy = 0; sy < sg_h; sy++) {
             for (int sx = 0; sx < sg_w; sx++) {
-                double lum = sg_luma[sy * sg_w + sx];
+                float lum = sg_luma[sy * sg_w + sx];
                 float  bg  = state->bg_luma[sy * sg_w + sx];
                 // Positive delta: pixel is warmer than its stored background.
                 float delta = black_hot ? (bg - (float)lum) : ((float)lum - bg);
@@ -5539,7 +5537,7 @@ int anomaly_process_frame(
                     continue;
                 }
                 // Relative score: std-devs above the frame's temporal mean.
-                float ts = (float)((delta - delta_mean) / delta_norm);
+                float ts = (delta - delta_mean) / delta_norm;
                 if (saliency_spatial_map != NULL) {
                     saliency_spatial_map[sy * sg_w + sx] = ts;
                 }

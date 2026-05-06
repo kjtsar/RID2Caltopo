@@ -50,6 +50,12 @@ static const uint8_t kMinusFont[7]   = { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x0
 #define FONT_W 5
 #define FONT_H 7
 
+static double clamp_double(double value, double min_value, double max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
 // Draw a single scaled pixel at (px,py) with RGBA colour; clips to frame.
 static void put_pixel(uint8_t *rgba, int stride, int W, int H,
                       int px, int py, uint8_t r, uint8_t g, uint8_t b) {
@@ -490,6 +496,41 @@ static const char *algo_label(int algo) {
     }
 }
 
+static double monotonic_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
+}
+
+static const char *realtime_descriptor(double realtime_factor) {
+    if (realtime_factor > 1.02) return "faster than realtime";
+    if (realtime_factor < 0.98) return "slower than realtime";
+    return "equal to realtime";
+}
+
+static void json_write_string(FILE *out, const char *text) {
+    fputc('"', out);
+    if (text != NULL) {
+        for (const unsigned char *p = (const unsigned char *)text; *p != '\0'; p++) {
+            switch (*p) {
+                case '\\': fputs("\\\\", out); break;
+                case '"':  fputs("\\\"", out); break;
+                case '\n': fputs("\\n", out); break;
+                case '\r': fputs("\\r", out); break;
+                case '\t': fputs("\\t", out); break;
+                default:
+                    if (*p < 0x20) {
+                        fprintf(out, "\\u%04x", (unsigned int)*p);
+                    } else {
+                        fputc((int)*p, out);
+                    }
+                    break;
+            }
+        }
+    }
+    fputc('"', out);
+}
+
 static void dump_saliency_debug(FILE *out, int frame_num, double time_s,
                                 const uint8_t *raw_rgba, int W, int H,
                                 const anomaly_config_t *cfg,
@@ -689,6 +730,11 @@ static void usage(const char *prog) {
         "  --debug-time-start S  Dump debug details beginning at time S seconds\n"
         "  --debug-time-end S    Dump debug details ending at time S seconds\n"
         "  --debug-overlay  Burn saliency candidate ranks / latch marker into video\n"
+        "  --time-start S   Decode and score beginning at source time S seconds\n"
+        "  --time-end S     Stop scoring at source time S seconds\n"
+        "  --summary-json <file>\n"
+        "                   Write a machine-readable run summary for reviewed\n"
+        "                   clip scoring / regression reports\n"
         "\n"
         "Diagnostic:\n"
         "  --probe cx,cy    Sample the detector's scored point nearest the given\n"
@@ -715,6 +761,7 @@ int main(int argc, char **argv) {
     const char *input = argv[1];
     char output_video[1024] = "";
     char output_csv[1024]   = "";
+    char output_summary_json[1024] = "";
     int  write_video = 1;
 
     anomaly_config_t cfg = {
@@ -738,6 +785,8 @@ int main(int argc, char **argv) {
     int    debug_frame = -1;
     double debug_time_start = -1.0;
     double debug_time_end = -1.0;
+    double clip_time_start = 0.0;
+    double clip_time_end = -1.0;
     int    debug_overlay = 0;
     // min-delta override (0 = use compiled-in constant).
     float  min_delta_override = 0.0f;
@@ -778,6 +827,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--debug-time-end") && i+1 < argc) {
             debug_time_end = atof(argv[++i]);
         }
+        else if (!strcmp(argv[i], "--time-start") && i+1 < argc) {
+            clip_time_start = atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--time-end") && i+1 < argc) {
+            clip_time_end = atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--summary-json") && i+1 < argc) {
+            snprintf(output_summary_json, sizeof(output_summary_json), "%s", argv[++i]);
+        }
         else if (!strcmp(argv[i], "--debug-overlay")) {
             debug_overlay = 1;
         }
@@ -787,7 +845,7 @@ int main(int argc, char **argv) {
 
     // ── Auto-detect dimensions and fps with ffprobe ──────────────────────
     int    W = 0, H = 0;
-    double fps = 30.0, duration_s = 0.0;
+    double fps = 30.0, full_duration_s = 0.0;
     {
         char cmd[2048];
         snprintf(cmd, sizeof(cmd),
@@ -797,7 +855,7 @@ int main(int argc, char **argv) {
         FILE *p = popen(cmd, "r");
         if (!p) { fprintf(stderr, "Error: ffprobe failed — is ffprobe on PATH?\n"); return 1; }
         int fps_n = 30, fps_d = 1;
-        fscanf(p, "%d,%d,%d/%d,%lf", &W, &H, &fps_n, &fps_d, &duration_s);
+        fscanf(p, "%d,%d,%d/%d,%lf", &W, &H, &fps_n, &fps_d, &full_duration_s);
         pclose(p);
         if (fps_d > 0) fps = (double)fps_n / (double)fps_d;
     }
@@ -805,7 +863,27 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: could not read video info from \"%s\"\n", input);
         return 1;
     }
-    int total_frames = (duration_s > 0) ? (int)(duration_s * fps + 0.5) : 0;
+    if (clip_time_start < 0.0) clip_time_start = 0.0;
+    if (full_duration_s > 0.0) {
+        clip_time_start = clamp_double(clip_time_start, 0.0, full_duration_s);
+    }
+    if (clip_time_end >= 0.0 && clip_time_end < clip_time_start) {
+        fprintf(stderr, "Error: --time-end must be >= --time-start\n");
+        return 1;
+    }
+    double requested_media_end = clip_time_end;
+    if (requested_media_end < 0.0) {
+        requested_media_end = full_duration_s;
+    } else if (full_duration_s > 0.0 && requested_media_end > full_duration_s) {
+        requested_media_end = full_duration_s;
+    }
+    double clip_duration_s = 0.0;
+    if (requested_media_end > clip_time_start) {
+        clip_duration_s = requested_media_end - clip_time_start;
+    } else if (full_duration_s > 0.0 && clip_time_end < 0.0) {
+        clip_duration_s = full_duration_s - clip_time_start;
+    }
+    int total_frames = (clip_duration_s > 0.0) ? (int)(clip_duration_s * fps + 0.5) : 0;
 
     // ── Build default output paths in the same directory as the input ────
     char dir_prefix[512] = "";
@@ -838,12 +916,20 @@ int main(int argc, char **argv) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Input      : %s\n", input);
     fprintf(stderr, "Dimensions : %dx%d @ %.2f fps", W, H, fps);
-    if (total_frames > 0) fprintf(stderr, "  (~%d frames, %.0fs)", total_frames, duration_s);
+    if (total_frames > 0) fprintf(stderr, "  (~%d frames, %.1fs)", total_frames, clip_duration_s);
     fprintf(stderr, "\n");
     fprintf(stderr, "CSV        : %s\n", output_csv);
     if (write_video) fprintf(stderr, "Video      : %s\n", output_video);
+    if (output_summary_json[0]) fprintf(stderr, "Summary    : %s\n", output_summary_json);
     if (probe_active) fprintf(stderr, "Probe CSV  : %s  (cx=%.3f cy=%.3f)\n",
                               probe_csv_path, (double)probe_cx, (double)probe_cy);
+    if (clip_time_start > 0.0 || clip_time_end >= 0.0) {
+        if (clip_time_end >= 0.0) {
+            fprintf(stderr, "Clip range : %.3fs to %.3fs\n", clip_time_start, requested_media_end);
+        } else {
+            fprintf(stderr, "Clip range : %.3fs to end\n", clip_time_start);
+        }
+    }
     fprintf(stderr, "\n");
     fprintf(stderr, "Detector settings:\n");
     fprintf(stderr, "  threshold  = %.2f\n", (double)cfg.score_threshold);
@@ -891,6 +977,13 @@ int main(int argc, char **argv) {
             cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh",
             cfg.frame_stride,
             cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
+    if (clip_time_end >= 0.0 || clip_duration_s > 0.0) {
+        fprintf(csv, "# clip_start_s: %.3f  clip_end_s: %.3f\n",
+                clip_time_start,
+                clip_time_end >= 0.0 ? requested_media_end : (clip_time_start + clip_duration_s));
+    } else {
+        fprintf(csv, "# clip_start_s: %.3f  clip_end_s: end\n", clip_time_start);
+    }
     fprintf(csv, "# label column: G=good/true-positive  "
                  "B=bad/false-positive  ?=unsure  (leave blank to skip)\n");
     fprintf(csv, "frame,time_s,algorithm,cx_norm,cy_norm,"
@@ -898,8 +991,15 @@ int main(int argc, char **argv) {
 
     // ── Open FFmpeg input pipe ───────────────────────────────────────────
     char in_cmd[2048];
-    snprintf(in_cmd, sizeof(in_cmd),
-        "ffmpeg -i \"%s\" -pix_fmt rgba -f rawvideo pipe:1 2>/dev/null", input);
+    if (clip_duration_s > 0.0) {
+        snprintf(in_cmd, sizeof(in_cmd),
+            "ffmpeg -ss %.6f -i \"%s\" -t %.6f -pix_fmt rgba -f rawvideo pipe:1 2>/dev/null",
+            clip_time_start, input, clip_duration_s);
+    } else {
+        snprintf(in_cmd, sizeof(in_cmd),
+            "ffmpeg -ss %.6f -i \"%s\" -pix_fmt rgba -f rawvideo pipe:1 2>/dev/null",
+            clip_time_start, input);
+    }
     FILE *in_pipe = popen(in_cmd, "r");
     if (!in_pipe) { fprintf(stderr, "Error: ffmpeg decode pipe failed\n"); return 1; }
 
@@ -946,11 +1046,12 @@ int main(int argc, char **argv) {
     int    frame_num        = 0;
     int    detection_frames = 0;
     int    total_boxes      = 0;
-    time_t t_start          = time(NULL);
+    double wall_start_s     = monotonic_seconds();
 
     while (fread(rgba, 1, frame_bytes, in_pipe) == frame_bytes) {
         frame_num++;
-        double time_s = (double)(frame_num - 1) / fps;
+        double local_time_s = (double)(frame_num - 1) / fps;
+        double time_s = clip_time_start + local_time_s;
         if (raw_rgba) memcpy(raw_rgba, rgba, frame_bytes);
 
         // ── Per-frame probe ──────────────────────────────────────────────
@@ -1015,7 +1116,7 @@ int main(int argc, char **argv) {
 
         // Progress line: overwrite in place.
         if (frame_num % 30 == 0 || frame_num == 1) {
-            int elapsed = (int)(time(NULL) - t_start);
+            int elapsed = (int)(monotonic_seconds() - wall_start_s);
             if (total_frames > 0) {
                 int eta = (frame_num > 0 && elapsed > 0)
                           ? (int)((double)elapsed / frame_num * (total_frames - frame_num))
@@ -1053,8 +1154,22 @@ int main(int argc, char **argv) {
     free(raw_rgba);
 
     // ── Summary ──────────────────────────────────────────────────────────
-    int elapsed = (int)(time(NULL) - t_start);
-    fprintf(stderr, "Done in %ds.\n", elapsed);
+    double analysis_wall_s = monotonic_seconds() - wall_start_s;
+    if (analysis_wall_s < 0.0) analysis_wall_s = 0.0;
+    double media_span_s = (fps > 0.0 ? (double)frame_num / fps : 0.0);
+    if (clip_duration_s > 0.0) {
+        media_span_s = clip_duration_s;
+    }
+    double realtime_factor = (analysis_wall_s > 0.0 && media_span_s > 0.0)
+                             ? (media_span_s / analysis_wall_s)
+                             : 0.0;
+    fprintf(stderr, "Done in %.1fs.\n", analysis_wall_s);
+    if (media_span_s > 0.0 && analysis_wall_s > 0.0) {
+        fprintf(stderr, "  Input duration   : %.1f s\n", media_span_s);
+        fprintf(stderr, "  Analysis wall    : %.1f s\n", analysis_wall_s);
+        fprintf(stderr, "  Realtime factor  : %.2fx realtime (%s)\n",
+                realtime_factor, realtime_descriptor(realtime_factor));
+    }
     fprintf(stderr, "  Frames processed : %d\n", frame_num);
     fprintf(stderr, "  Frames with boxes: %d (%.1f%%)\n",
             detection_frames,
@@ -1066,6 +1181,54 @@ int main(int argc, char **argv) {
     if (probe_active)
         fprintf(stderr, "  Probe CSV        : %s\n", probe_csv_path);
     fprintf(stderr, "\n");
+    if (output_summary_json[0]) {
+        FILE *summary = fopen(output_summary_json, "w");
+        if (!summary) {
+            fprintf(stderr, "Warning: could not write summary JSON: %s\n", output_summary_json);
+        } else {
+            fprintf(summary, "{\n");
+            fprintf(summary, "  \"input\": ");
+            json_write_string(summary, input);
+            fprintf(summary, ",\n  \"csv\": ");
+            json_write_string(summary, output_csv);
+            fprintf(summary, ",\n  \"video\": ");
+            if (write_video) {
+                json_write_string(summary, output_video);
+            } else {
+                fprintf(summary, "null");
+            }
+            fprintf(summary, ",\n  \"clip_start_s\": %.6f,\n", clip_time_start);
+            if (clip_time_end >= 0.0) {
+                fprintf(summary, "  \"clip_end_s\": %.6f,\n", requested_media_end);
+            } else {
+                fprintf(summary, "  \"clip_end_s\": null,\n");
+            }
+            fprintf(summary, "  \"fps\": %.6f,\n", fps);
+            fprintf(summary, "  \"frame_count\": %d,\n", frame_num);
+            fprintf(summary, "  \"detection_frames\": %d,\n", detection_frames);
+            fprintf(summary, "  \"total_boxes\": %d,\n", total_boxes);
+            fprintf(summary, "  \"analysis_wall_s\": %.6f,\n", analysis_wall_s);
+            fprintf(summary, "  \"media_span_s\": %.6f,\n", media_span_s);
+            fprintf(summary, "  \"realtime_factor\": %.6f,\n", realtime_factor);
+            fprintf(summary, "  \"realtime_label\": ");
+            json_write_string(summary, realtime_descriptor(realtime_factor));
+            fprintf(summary, ",\n  \"config\": {\n");
+            fprintf(summary, "    \"threshold\": %.6f,\n", (double)cfg.score_threshold);
+            fprintf(summary, "    \"min_hits\": %d,\n", cfg.min_hits);
+            fprintf(summary, "    \"scan_zone\": %.6f,\n", (double)cfg.scan_zone);
+            fprintf(summary, "    \"algorithm_mask\": %d,\n", cfg.algorithm_mask);
+            fprintf(summary, "    \"polarity\": ");
+            json_write_string(summary,
+                              cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh");
+            fprintf(summary, ",\n    \"stride\": %d,\n", cfg.frame_stride);
+            fprintf(summary, "    \"registration\": ");
+            json_write_string(summary,
+                              cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
+            fprintf(summary, ",\n    \"thermal_min_delta\": %.6f\n", effective_min_delta);
+            fprintf(summary, "  }\n}\n");
+            fclose(summary);
+        }
+    }
     if (probe_active) {
         fprintf(stderr, "Probe interpretation:\n");
         fprintf(stderr, "  spatial_* rows describe the sampled-window score used during\n");

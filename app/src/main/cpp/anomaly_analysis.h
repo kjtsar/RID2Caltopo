@@ -215,9 +215,9 @@ typedef struct {
     // Reusable scratch buffers to avoid per-frame allocation churn.
     uint8_t *scratch_luma;
     size_t   scratch_luma_capacity;
-    double  *scratch_sg_luma;
-    double  *scratch_ii_sum;
-    double  *scratch_ii_sum2;
+    float   *scratch_sg_luma;
+    float   *scratch_ii_sum;
+    float   *scratch_ii_sum2;
     size_t   scratch_sampled_grid_capacity;
     float   *scratch_saliency_spatial;
     float   *scratch_saliency_color;

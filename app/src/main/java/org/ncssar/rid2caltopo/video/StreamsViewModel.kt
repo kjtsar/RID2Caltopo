@@ -155,6 +155,21 @@ private data class ProcessLoadSnapshot(
     val anomalyHeadroomLabel: String,
 )
 
+private data class RealtimeStatus(
+    val factor: Double,
+    val descriptor: String,
+)
+
+private fun realtimeStatus(factor: Double?): RealtimeStatus? {
+    val value = factor?.takeIf { it.isFinite() && it > 0.0 } ?: return null
+    val descriptor = when {
+        value > 1.02 -> "faster than realtime"
+        value < 0.98 -> "slower than realtime"
+        else -> "equal to realtime"
+    }
+    return RealtimeStatus(factor = value, descriptor = descriptor)
+}
+
 internal fun chooseResyncSnapshot(
     lastSyncedStreams: Map<String, StreamInfo>,
     latestFlowValue: Map<String, StreamInfo>,
@@ -2110,8 +2125,13 @@ class StreamsViewModel(
         val anomalyText = runtime.anomalyAvgProcessMs?.let {
             String.format(Locale.US, " ANO %.1fms", it)
         } ?: ""
-        val realtimeText = runtime.localPlaybackRealtimeFactor?.let {
-            String.format(Locale.US, " RT %.2fx", it)
+        val realtimeText = realtimeStatus(runtime.localPlaybackRealtimeFactor)?.let {
+            val shortDescriptor = when (it.descriptor) {
+                "faster than realtime" -> "fast"
+                "slower than realtime" -> "slow"
+                else -> "even"
+            }
+            String.format(Locale.US, " RT %.2fx %s", it.factor, shortDescriptor)
         } ?: ""
         return String.format(
             Locale.US,
@@ -2187,18 +2207,23 @@ class StreamsViewModel(
                         runtime.anomalyAnnotatedFrameCount,
                     )
                 }
-                runtime.localPlaybackRealtimeFactor?.let {
-                    lines += String.format(Locale.US, "  Local playback speed: %.2fx realtime", it)
-                    val mediaSpanMs = runtime.localPlaybackMediaSpanMs
-                    val wallSpanMs = runtime.localPlaybackWallSpanMs
-                    if (mediaSpanMs != null && wallSpanMs != null) {
-                        lines += String.format(
-                            Locale.US,
-                            "  Local playback sample: %.1f s media over %.1f s wall time",
-                            mediaSpanMs / 1000.0,
-                            wallSpanMs / 1000.0,
-                        )
-                    }
+                realtimeStatus(runtime.localPlaybackRealtimeFactor)?.let { status ->
+                    lines += String.format(
+                        Locale.US,
+                        "  Anomaly realtime: %.2fx realtime (%s)",
+                        status.factor,
+                        status.descriptor,
+                    )
+                }
+                val mediaSpanMs = runtime.localPlaybackMediaSpanMs
+                val wallSpanMs = runtime.localPlaybackWallSpanMs
+                if (mediaSpanMs != null && wallSpanMs != null) {
+                    lines += String.format(
+                        Locale.US,
+                        "  Analysis span: %.1f s media over %.1f s wall time",
+                        mediaSpanMs / 1000.0,
+                        wallSpanMs / 1000.0,
+                    )
                 }
                 runtime.anomalyDebugSummary?.takeIf { it.isNotBlank() }?.let {
                     lines += "  Anomaly debug: $it"

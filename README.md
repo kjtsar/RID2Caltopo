@@ -214,6 +214,11 @@ To build the application, use Android Studio.
 Import the project (File -> New -> Import Project, or just Open on newer versions of Android Studio) 
 and point to the root folder. Then Build -> Make Project.
 
+## Detector documentation
+
+For the IR anomaly detector operator summary and technical design notes, see
+[docs/IR_Anomaly_Detector.md](/Users/kjt/Projects/RID2Caltopo/docs/IR_Anomaly_Detector.md).
+
 ## MediaMtx
 The latest version of this app bundles a version of the MediaMtx 1.16.2 server that has been tailored
 to pamper to the sensitivities of the various DJI and Autel drone controllers and to support low latency

@@ -564,6 +564,8 @@ typedef struct {
 
 typedef struct {
     anomaly_motion_candidate_t candidate;
+    float retention_rank;
+    bool retention_rank_valid;
     float area;
     float span;
     float fill;
@@ -653,6 +655,11 @@ static int compare_thermal_blob_rank(
     if (lhs == NULL && rhs == NULL) return 0;
     if (lhs == NULL) return 1;
     if (rhs == NULL) return -1;
+
+    if (lhs->retention_rank_valid && rhs->retention_rank_valid) {
+        if (lhs->retention_rank > rhs->retention_rank) return -1;
+        if (lhs->retention_rank < rhs->retention_rank) return 1;
+    }
 
     if (lhs->area < rhs->area) return -1;
     if (lhs->area > rhs->area) return 1;
@@ -1163,6 +1170,8 @@ static void extract_thermal_blob_candidates(
             candidate.candidate.proposal_score = peak_score;
             candidate.candidate.thermal_score = peak_score;
             candidate.candidate.color_score = 0.0f;
+            candidate.retention_rank = 0.0f;
+            candidate.retention_rank_valid = false;
             candidate.area = (float)area;
             candidate.span = span;
             candidate.fill = fill;
@@ -1174,6 +1183,36 @@ static void extract_thermal_blob_candidates(
             candidate.min_y = min_y;
             candidate.max_x = max_x;
             candidate.max_y = max_y;
+            if (sample_step <= 1) {
+                float area_pref = area <= 0 ? 0.0f
+                    : (area <= 1 ? 1.00f
+                    : (area <= 2 ? 0.97f
+                    : (area <= 4 ? 0.90f
+                    : (area <= 6 ? 0.72f
+                    : (area <= 8 ? 0.50f : 0.18f)))));
+                float span_pref = span_px <= 0.0f ? 0.0f
+                    : (span_px <= 2.0f ? 1.00f
+                    : (span_px <= 4.0f ? 0.96f
+                    : (span_px <= 7.0f ? 0.84f
+                    : (span_px <= small_target_limit_px ? 0.64f : 0.18f))));
+                float quality_pref = clampf((quality - 0.30f) / 0.85f, 0.0f, 1.0f);
+                float peak_pref = clampf(peak_score / 6.0f, 0.0f, 1.0f);
+                float center_pref = clampf((center_share - 0.22f) / 0.42f, 0.0f, 1.0f);
+                float retention_rank =
+                    0.22f * area_pref +
+                    0.20f * span_pref +
+                    0.22f * quality_pref +
+                    0.22f * peak_pref +
+                    0.14f * center_pref;
+                if (area <= 4 && span_px <= small_target_limit_px) {
+                    retention_rank += 0.06f;
+                }
+                if (area >= 8 || span_px > small_target_limit_px * 1.15f) {
+                    retention_rank -= 0.08f;
+                }
+                candidate.retention_rank = retention_rank;
+                candidate.retention_rank_valid = true;
+            }
 
             candidate_seed_map[(size_t)peak_y * (size_t)sg_w + (size_t)peak_x] =
                 candidate.candidate.proposal_score;
@@ -6809,6 +6848,11 @@ int anomaly_process_frame(
     float thermal_candidate_history_scale_debug[ANOMALY_MAX_THERMAL_CANDIDATES];
     float thermal_candidate_apparent_size_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
     float thermal_candidate_isolation_track_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_patch_support[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_motion_support[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_singleton_score_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_retention_rank_debug[ANOMALY_MAX_THERMAL_CANDIDATES];
+    bool thermal_candidate_singleton_blob_debug[ANOMALY_MAX_THERMAL_CANDIDATES];
     float thermal_candidate_area_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
     float thermal_candidate_span_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
     float thermal_candidate_center_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
@@ -6848,6 +6892,11 @@ int anomaly_process_frame(
         thermal_candidate_history_scale_debug[i] = 1.0f;
         thermal_candidate_apparent_size_scale[i] = 1.0f;
         thermal_candidate_isolation_track_scale[i] = 1.0f;
+        thermal_candidate_patch_support[i] = 0.0f;
+        thermal_candidate_motion_support[i] = 0.0f;
+        thermal_candidate_singleton_score_scale[i] = 1.0f;
+        thermal_candidate_retention_rank_debug[i] = 0.0f;
+        thermal_candidate_singleton_blob_debug[i] = false;
         thermal_candidate_area_rank[i] = 0.0f;
         thermal_candidate_span_rank[i] = 0.0f;
         thermal_candidate_center_rank[i] = 0.0f;
@@ -7058,6 +7107,17 @@ int anomaly_process_frame(
                 float quality = thermal_blob_candidates[ci].quality;
                 float base_score = thermal_blob_candidates[ci].candidate.thermal_score;
                 float history_scale = thermal_candidate_history_scale(state, sg_w, sg_h, sx, sy);
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                float patch_support = 0.0f;
+                if (thermal_patch_selection != NULL) {
+                    float local_patch_support = thermal_patch_selection[idx];
+                    patch_support = local_patch_support > 0.0f ? local_patch_support : 0.0f;
+                }
+                float motion_support = 0.0f;
+                if (saliency_motion_map != NULL) {
+                    float local_motion_support = saliency_motion_map[idx];
+                    motion_support = local_motion_support > 0.0f ? local_motion_support : 0.0f;
+                }
                 float context_scale = thermal_candidate_seed_context_scale(
                     state->bg_luma,
                     sg_luma,
@@ -7094,7 +7154,6 @@ int anomaly_process_frame(
                 float final_score = base_score * score_scale * history_scale;
                 float temporal_score = -1.0f;
                 if (bg_valid) {
-                    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
                     float bg = state->bg_luma[idx];
                     float lum = (float)sg_luma[idx];
                     float delta = black_hot ? (bg - lum) : (lum - bg);
@@ -7151,11 +7210,73 @@ int anomaly_process_frame(
                 final_score *= isolation_track_scale;
                 final_score *= apparent_size_scale;
                 bool singleton_blob = area <= 1.0f && span <= 1.0f;
-                if (singleton_blob && !thermal_publish_settled) {
+                bool coarse_singleton_blob = sample_step > 1 && singleton_blob;
+                float singleton_score_scale = 1.0f;
+                if (coarse_singleton_blob) {
+                    int competing_singletons = 0;
+                    for (int sj = 0; sj < thermal_candidate_count; sj++) {
+                        if (sj == ci) continue;
+                        if (thermal_blob_candidates[sj].area > 1.0f ||
+                            thermal_blob_candidates[sj].span > 1.0f) {
+                            continue;
+                        }
+                        float other_base_score = thermal_blob_candidates[sj].candidate.thermal_score;
+                        if (other_base_score >= base_score - 1.25f) {
+                            competing_singletons++;
+                        }
+                    }
+                    if (competing_singletons >= 4) {
+                        singleton_score_scale = 0.38f;
+                    } else if (competing_singletons >= 2) {
+                        singleton_score_scale = 0.72f;
+                    } else if (competing_singletons >= 1) {
+                        singleton_score_scale = 0.88f;
+                    } else {
+                        singleton_score_scale = 0.98f;
+                    }
+                    if (!thermal_publish_settled) {
+                        singleton_score_scale *= 0.78f;
+                    } else if (history_scale < 1.08f) {
+                        singleton_score_scale *= 0.92f;
+                    }
+                    singleton_score_scale = clampf(singleton_score_scale, 0.20f, 1.18f);
+                    final_score *= singleton_score_scale;
+                } else if (singleton_blob && !thermal_publish_settled) {
                     final_score *= 0.42f;
+                }
+                float retention_rank = thermal_blob_candidates[ci].retention_rank;
+                if (sample_step > 1) {
+                    float score_rank =
+                        clampf((final_score - cfg->score_threshold + 0.25f) / 2.50f, 0.0f, 1.0f);
+                    float patch_rank = clampf((patch_support - 0.08f) / 0.40f, 0.0f, 1.0f);
+                    float motion_rank = clampf((motion_support - 0.06f) / 0.28f, 0.0f, 1.0f);
+                    float area_pref = area <= 1.0f ? 0.70f
+                        : (area <= 4.0f ? 1.00f
+                        : (area <= 6.0f ? 0.74f : 0.22f));
+                    float span_pref = span_px <= 2.0f ? 0.70f
+                        : (span_px <= 6.0f ? 1.00f
+                        : (span_px <= small_target_limit_px ? 0.66f : 0.18f));
+                    retention_rank =
+                        0.24f * score_rank +
+                        0.18f * quality_rank +
+                        0.18f * patch_rank +
+                        0.12f * motion_rank +
+                        0.14f * history_bonus +
+                        0.08f * area_pref +
+                        0.06f * span_pref;
+                    if (coarse_singleton_blob) {
+                        retention_rank *= singleton_score_scale;
+                    }
+                    thermal_blob_candidates[ci].retention_rank = retention_rank;
+                    thermal_blob_candidates[ci].retention_rank_valid = true;
                 }
                 thermal_candidates[ci].thermal_score = final_score;
                 thermal_blob_candidates[ci].candidate.thermal_score = final_score;
+                thermal_candidate_patch_support[ci] = patch_support;
+                thermal_candidate_motion_support[ci] = motion_support;
+                thermal_candidate_singleton_score_scale[ci] = singleton_score_scale;
+                thermal_candidate_retention_rank_debug[ci] = retention_rank;
+                thermal_candidate_singleton_blob_debug[ci] = coarse_singleton_blob;
                 bool candidate_plausible = final_score >= cfg->score_threshold;
                 thermal_candidate_above_threshold[ci] = candidate_plausible;
                 if (candidate_plausible) {
@@ -8641,6 +8762,11 @@ int anomaly_process_frame(
             dbg->span_rank = thermal_candidate_span_rank[i];
             dbg->center_rank = thermal_candidate_center_rank[i];
             dbg->quality_rank = thermal_candidate_quality_rank[i];
+            dbg->patch_support = thermal_candidate_patch_support[i];
+            dbg->motion_support = thermal_candidate_motion_support[i];
+            dbg->singleton_score_scale = thermal_candidate_singleton_score_scale[i];
+            dbg->retention_rank = thermal_candidate_retention_rank_debug[i];
+            dbg->singleton_blob = thermal_candidate_singleton_blob_debug[i];
             dbg->above_threshold = thermal_candidate_above_threshold[i];
         }
         result_out->saliency_debug.raw_candidate_valid = (best_persist >= 0.0f);

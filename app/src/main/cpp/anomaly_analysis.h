@@ -338,6 +338,11 @@ typedef struct {
     float span_rank;
     float center_rank;
     float quality_rank;
+    float patch_support;
+    float motion_support;
+    float singleton_score_scale;
+    float retention_rank;
+    bool  singleton_blob;
     bool  above_threshold;
 } anomaly_debug_thermal_candidate_t;
 

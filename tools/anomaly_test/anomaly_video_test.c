@@ -640,7 +640,7 @@ static void dump_thermal_debug(FILE *out, int frame_num, double time_s,
     for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES; i++) {
         const anomaly_debug_thermal_candidate_t *c = &dbg->candidates[i];
         fprintf(out,
-                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f%s\n",
+                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f patch=%.2f motion=%.2f sing_scale=%.2f rank=%.2f%s%s\n",
                 i + 1,
                 c->pixel_x,
                 c->pixel_y,
@@ -654,6 +654,11 @@ static void dump_thermal_debug(FILE *out, int frame_num, double time_s,
                 (double)c->center_share,
                 (double)c->quality,
                 (double)c->isolation_rank,
+                (double)c->patch_support,
+                (double)c->motion_support,
+                (double)c->singleton_score_scale,
+                (double)c->retention_rank,
+                c->singleton_blob ? " singleton" : "",
                 (i == dbg->winning_candidate_index) ? "  <winner>" : "");
     }
     if (dbg->target.enabled) {
@@ -738,7 +743,9 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
                 "\"apparent_size_scale\":%.6f,\"isolation_track_scale\":%.6f,"
                 "\"context_scale\":%.6f,\"parent_scale\":%.6f,"
                 "\"area_rank\":%.6f,\"span_rank\":%.6f,\"center_rank\":%.6f,"
-                "\"quality_rank\":%.6f,\"above_threshold\":%s}",
+                "\"quality_rank\":%.6f,\"patch_support\":%.6f,\"motion_support\":%.6f,"
+                "\"singleton_score_scale\":%.6f,\"retention_rank\":%.6f,"
+                "\"singleton_blob\":%s,\"above_threshold\":%s}",
                 (i == 0) ? "" : ",",
                 i,
                 c->valid ? "true" : "false",
@@ -771,6 +778,11 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
                 (double)c->span_rank,
                 (double)c->center_rank,
                 (double)c->quality_rank,
+                (double)c->patch_support,
+                (double)c->motion_support,
+                (double)c->singleton_score_scale,
+                (double)c->retention_rank,
+                c->singleton_blob ? "true" : "false",
                 c->above_threshold ? "true" : "false");
     }
     fprintf(out,

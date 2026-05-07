@@ -132,15 +132,18 @@
     },
     {
       "id": "powerhouse1-pending-review",
-      "label": "PowerHouse1 pending excerpt review",
+      "label": "PowerHouse1 reviewed opening target window",
       "source_clip_id": "powerhouse1",
       "start_s": 0.0,
-      "end_s": null,
-      "review_status": "pending_review",
+      "end_s": 4.8,
+      "review_status": "reviewed",
+      "review_path": "app/src/test/resources/vidcap/PowerHouse1.review.json",
       "tags": [
-        "pending"
+        "correct_detection",
+        "missed_target",
+        "easy_true_target"
       ],
-      "notes": "Keep the full clip as the source of truth, then carve out reviewed detections / misses into smaller excerpts."
+      "notes": "First 4.8s opening window with dense target annotations; useful for checking whether coarse singleton tuning is recovering early true targets."
     },
     {
       "id": "powerhouse2-pending-review",

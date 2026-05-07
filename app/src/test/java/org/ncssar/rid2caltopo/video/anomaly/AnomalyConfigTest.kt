@@ -82,7 +82,7 @@ class AnomalyConfigTest {
         assertEquals(AppearanceAnomalySelection.Auto, config.appearanceSelection)
         assertEquals(ThermalPolarity.BlackHot, config.thermalPolarity)
         assertEquals(MotionRegistrationMode.Affine, config.registrationMode)
-        assertEquals(3, config.frameStride)
+        assertEquals(1, config.frameStride)
         assertEquals(0.60f, config.scanZone)
         assertEquals(2, config.minHits)
         assertEquals(10.0f, config.thermalMinDelta)

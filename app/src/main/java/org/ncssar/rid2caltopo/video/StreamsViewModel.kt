@@ -1646,6 +1646,12 @@ class StreamsViewModel(
         }
     }
 
+    fun setAnomalySmallTargetScreenFraction(designator: String, fraction: Float) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(smallTargetScreenFraction = fraction.coerceIn(0.0015f, 0.03f))
+        }
+    }
+
     private fun buildTelemetrySummary(
         designator: String,
         droneSpec: CtDroneSpec,
@@ -2398,7 +2404,7 @@ class StreamsViewModel(
         } catch (t: Throwable) {
             CTDebug(tag, "Captured video appearance guess failed for $sourceUri: ${t.message}")
             CapturedVideoAppearanceGuess(
-                mode = AppearanceAnomalyMode.Color,
+                mode = AppearanceAnomalyMode.Thermal,
                 width = null,
                 height = null,
                 grayscaleFraction = null,
@@ -2420,9 +2426,14 @@ class StreamsViewModel(
         val smallThermalSize = width != null && height != null &&
             ((width <= 640 && height <= 512) || (width <= 704 && height <= 576))
         val likelyGrayscale = grayscaleFraction != null && grayscaleFraction >= 0.94f
+        val clearlyColor = grayscaleFraction != null && grayscaleFraction <= 0.82f
         val mode = if (smallThermalSize && likelyGrayscale) {
             AppearanceAnomalyMode.Thermal
         } else if (likelyGrayscale && width != null && height != null && max(width, height) <= 960) {
+            AppearanceAnomalyMode.Thermal
+        } else if (bitmap == null || grayscaleFraction == null) {
+            AppearanceAnomalyMode.Thermal
+        } else if (!clearlyColor) {
             AppearanceAnomalyMode.Thermal
         } else {
             AppearanceAnomalyMode.Color
@@ -2430,7 +2441,13 @@ class StreamsViewModel(
         val reason = buildString {
             append(if (smallThermalSize) "small-frame" else "full-frame")
             append("/")
-            append(if (likelyGrayscale) "grayscale" else "colorful")
+            append(
+                when {
+                    likelyGrayscale -> "grayscale"
+                    clearlyColor -> "colorful"
+                    else -> "ambiguous"
+                }
+            )
         }
         return CapturedVideoAppearanceGuess(
             mode = mode,

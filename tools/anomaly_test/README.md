@@ -46,7 +46,7 @@ Expected output:
 ```
 Running anomaly detection unit tests...
 
-Results: 30 passed, 0 failed
+Results: <all tests passed>, 0 failed
 ```
 
 CTest is also wired up:
@@ -95,7 +95,7 @@ input:
 ```sh
 cd tools/anomaly_test
 cmake --build build
-./build/anomaly_video_test path/to/clip.mp4 -p bh -a 6 -t 2.8
+./build/anomaly_video_test path/to/clip.mp4 --registration affine --stride 1 -p bh -a 6 -t 2.8
 ```
 
 `-p bh` = black-hot polarity  
@@ -116,6 +116,9 @@ cmake --build build
 --registration <gmv|affine>
                   Camera registration backend (default: gmv)
 --stride <int>   Analyze every Nth frame (default: 1)
+--pixel-step <n>
+                 Override appearance sampling step; `1` is the dense gold-mode
+                 setting and `0` keeps the detector's Auto detail policy
 --min-delta <f>  Thermal minimum absolute luma delta (default: 10.0)
 ```
 
@@ -164,14 +167,21 @@ The first-pass suite lives in
   still needs human excerpt selection and labels before it can contribute to
   quality metrics.
 
+The manifest now defines three comparison profiles so each reviewed excerpt can
+be scored against the plan's required baselines:
+
+- `current-detector-baseline`: legacy stride-heavy comparison point
+- `dense-full-scan-gold`: per-frame analysis with `--pixel-step 1`
+- `redesigned-incremental`: per-frame incremental mode with Auto detail
+
 Run the current suite with:
 
 ```sh
 python3 tools/anomaly_test/run_regression_suite.py
 ```
 
-That writes per-excerpt detector CSVs plus a suite JSON/Markdown report under
-`tools/anomaly_test/out/regression/`.
+That writes per-profile, per-excerpt detector CSVs plus a suite JSON/Markdown
+report under `tools/anomaly_test/out/regression/`.
 
 ### Reviewed label format and scoring
 

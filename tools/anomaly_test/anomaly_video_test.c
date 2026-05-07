@@ -637,7 +637,7 @@ static void dump_thermal_debug(FILE *out, int frame_num, double time_s,
             (double)dbg->raw_y_norm,
             dbg->winning_candidate_index);
     fprintf(out, "  thermal candidates (%d):\n", dbg->candidate_count);
-    for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+    for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES; i++) {
         const anomaly_debug_thermal_candidate_t *c = &dbg->candidates[i];
         fprintf(out,
                 "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f%s\n",
@@ -656,6 +656,179 @@ static void dump_thermal_debug(FILE *out, int frame_num, double time_s,
                 (double)c->isolation_rank,
                 (i == dbg->winning_candidate_index) ? "  <winner>" : "");
     }
+    if (dbg->target.enabled) {
+        fprintf(out,
+                "  target enabled=%d valid=%d inside=%d sample=(%d,%d) delta=%.3f score=%.3f local_max=%d started=%d stage=%d gate=%d extracted_rank=%d winner_rank=%d dropped_cap=%d dropped_nms=%d replaced_nms=%d nms_rank=%d nms_sample=(%d,%d)\n",
+                dbg->target.enabled ? 1 : 0,
+                dbg->target.valid ? 1 : 0,
+                dbg->target.inside_scan_zone ? 1 : 0,
+                dbg->target.sample_x,
+                dbg->target.sample_y,
+                (double)dbg->target.target_delta,
+                (double)dbg->target.target_score,
+                dbg->target.local_max ? 1 : 0,
+                dbg->target.started_component ? 1 : 0,
+                dbg->target.stage,
+                dbg->target.rejection_gate,
+                dbg->target.extracted_rank,
+                dbg->target.winning_rank,
+                dbg->target.dropped_by_cap ? 1 : 0,
+                dbg->target.dropped_by_nms ? 1 : 0,
+                dbg->target.replaced_by_nms ? 1 : 0,
+                dbg->target.nms_conflict_rank,
+                dbg->target.nms_conflict_sample_x,
+                dbg->target.nms_conflict_sample_y);
+    }
+}
+
+static const char *thermal_target_stage_name(anomaly_debug_thermal_target_stage_t stage) {
+    switch (stage) {
+        case ANOMALY_THERMAL_TARGET_STAGE_NOT_HOT: return "not_hot";
+        case ANOMALY_THERMAL_TARGET_STAGE_SUPPRESSED_BY_NEIGHBOR: return "suppressed_by_neighbor";
+        case ANOMALY_THERMAL_TARGET_STAGE_MERGED_INTO_COMPONENT: return "merged_into_component";
+        case ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE: return "rejected_by_gate";
+        case ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED: return "extracted";
+        case ANOMALY_THERMAL_TARGET_STAGE_NONE:
+        default: return "none";
+    }
+}
+
+static const char *thermal_target_gate_name(anomaly_debug_thermal_target_gate_t gate) {
+    switch (gate) {
+        case ANOMALY_THERMAL_TARGET_GATE_MAX_AREA: return "max_area";
+        case ANOMALY_THERMAL_TARGET_GATE_RING_HOT: return "ring_hot";
+        case ANOMALY_THERMAL_TARGET_GATE_SIDE_HOT: return "side_hot";
+        case ANOMALY_THERMAL_TARGET_GATE_SUPPORT_MASS: return "support_mass";
+        case ANOMALY_THERMAL_TARGET_GATE_SUPPORT_NEAR: return "support_near";
+        case ANOMALY_THERMAL_TARGET_GATE_ZERO_QUALITY: return "zero_quality";
+        case ANOMALY_THERMAL_TARGET_GATE_NONE:
+        default: return "none";
+    }
+}
+
+static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
+                                      const anomaly_result_t *result) {
+    if (out == NULL || result == NULL) return;
+    const anomaly_debug_thermal_t *dbg = &result->thermal_debug;
+    fprintf(out,
+            "{\"frame\":%d,\"time_s\":%.3f,\"bg_ready\":%s,\"raw_candidate_valid\":%s,"
+            "\"raw_score\":%.6f,\"raw_x_norm\":%.6f,\"raw_y_norm\":%.6f,"
+            "\"winning_candidate_index\":%d,\"candidate_count\":%d,\"candidates\":[",
+            frame_num,
+            time_s,
+            dbg->bg_ready ? "true" : "false",
+            dbg->raw_candidate_valid ? "true" : "false",
+            (double)dbg->raw_score,
+            (double)dbg->raw_x_norm,
+            (double)dbg->raw_y_norm,
+            dbg->winning_candidate_index,
+            dbg->candidate_count);
+    for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES; i++) {
+        const anomaly_debug_thermal_candidate_t *c = &dbg->candidates[i];
+        fprintf(out,
+                "%s{\"index\":%d,\"valid\":%s,\"pixel_x\":%d,\"pixel_y\":%d,"
+                "\"x_norm\":%.6f,\"y_norm\":%.6f,"
+                "\"bbox_left_norm\":%.6f,\"bbox_top_norm\":%.6f,"
+                "\"bbox_right_norm\":%.6f,\"bbox_bottom_norm\":%.6f,"
+                "\"base_score\":%.6f,\"final_score\":%.6f,\"temporal_score\":%.6f,"
+                "\"area\":%.6f,\"span\":%.6f,\"fill\":%.6f,\"center_share\":%.6f,"
+                "\"quality\":%.6f,\"isolation_rank\":%.6f,"
+                "\"peak_delta\":%.6f,\"mean_delta\":%.6f,"
+                "\"score_scale\":%.6f,\"history_scale\":%.6f,"
+                "\"apparent_size_scale\":%.6f,\"isolation_track_scale\":%.6f,"
+                "\"context_scale\":%.6f,\"parent_scale\":%.6f,"
+                "\"area_rank\":%.6f,\"span_rank\":%.6f,\"center_rank\":%.6f,"
+                "\"quality_rank\":%.6f,\"above_threshold\":%s}",
+                (i == 0) ? "" : ",",
+                i,
+                c->valid ? "true" : "false",
+                c->pixel_x,
+                c->pixel_y,
+                (double)c->x_norm,
+                (double)c->y_norm,
+                (double)c->bbox_left_norm,
+                (double)c->bbox_top_norm,
+                (double)c->bbox_right_norm,
+                (double)c->bbox_bottom_norm,
+                (double)c->base_score,
+                (double)c->final_score,
+                (double)c->temporal_score,
+                (double)c->area,
+                (double)c->span,
+                (double)c->fill,
+                (double)c->center_share,
+                (double)c->quality,
+                (double)c->isolation_rank,
+                (double)c->peak_delta,
+                (double)c->mean_delta,
+                (double)c->score_scale,
+                (double)c->history_scale,
+                (double)c->apparent_size_scale,
+                (double)c->isolation_track_scale,
+                (double)c->context_scale,
+                (double)c->parent_scale,
+                (double)c->area_rank,
+                (double)c->span_rank,
+                (double)c->center_rank,
+                (double)c->quality_rank,
+                c->above_threshold ? "true" : "false");
+    }
+    fprintf(out,
+            "],\"target\":{\"enabled\":%s,\"valid\":%s,\"inside_scan_zone\":%s,"
+            "\"pixel_x\":%d,\"pixel_y\":%d,\"sample_x\":%d,\"sample_y\":%d,"
+            "\"x_norm\":%.6f,\"y_norm\":%.6f,"
+            "\"target_delta\":%.6f,\"target_score\":%.6f,"
+            "\"hot_eligible\":%s,\"started_component\":%s,\"local_max\":%s,"
+            "\"suppressor_sample_x\":%d,\"suppressor_sample_y\":%d,"
+            "\"suppressor_delta\":%.6f,\"suppressor_score\":%.6f,"
+            "\"component_seed_x\":%d,\"component_seed_y\":%d,"
+            "\"component_peak_x\":%d,\"component_peak_y\":%d,"
+            "\"component_area\":%.6f,\"component_span\":%.6f,\"component_fill\":%.6f,"
+            "\"component_peak_delta\":%.6f,\"component_mean_delta\":%.6f,"
+            "\"component_quality\":%.6f,\"component_rejected\":%s,"
+            "\"rejection_gate\":\"%s\",\"stage\":\"%s\","
+            "\"dropped_by_cap\":%s,\"dropped_by_nms\":%s,\"replaced_by_nms\":%s,"
+            "\"nms_conflict_rank\":%d,\"nms_conflict_sample_x\":%d,\"nms_conflict_sample_y\":%d,"
+            "\"extracted_rank\":%d,\"winning_rank\":%d}}\n",
+            dbg->target.enabled ? "true" : "false",
+            dbg->target.valid ? "true" : "false",
+            dbg->target.inside_scan_zone ? "true" : "false",
+            dbg->target.pixel_x,
+            dbg->target.pixel_y,
+            dbg->target.sample_x,
+            dbg->target.sample_y,
+            (double)dbg->target.x_norm,
+            (double)dbg->target.y_norm,
+            (double)dbg->target.target_delta,
+            (double)dbg->target.target_score,
+            dbg->target.hot_eligible ? "true" : "false",
+            dbg->target.started_component ? "true" : "false",
+            dbg->target.local_max ? "true" : "false",
+            dbg->target.suppressor_sample_x,
+            dbg->target.suppressor_sample_y,
+            (double)dbg->target.suppressor_delta,
+            (double)dbg->target.suppressor_score,
+            dbg->target.component_seed_x,
+            dbg->target.component_seed_y,
+            dbg->target.component_peak_x,
+            dbg->target.component_peak_y,
+            (double)dbg->target.component_area,
+            (double)dbg->target.component_span,
+            (double)dbg->target.component_fill,
+            (double)dbg->target.component_peak_delta,
+            (double)dbg->target.component_mean_delta,
+            (double)dbg->target.component_quality,
+            dbg->target.component_rejected ? "true" : "false",
+            thermal_target_gate_name(dbg->target.rejection_gate),
+            thermal_target_stage_name(dbg->target.stage),
+            dbg->target.dropped_by_cap ? "true" : "false",
+            dbg->target.dropped_by_nms ? "true" : "false",
+            dbg->target.replaced_by_nms ? "true" : "false",
+            dbg->target.nms_conflict_rank,
+            dbg->target.nms_conflict_sample_x,
+            dbg->target.nms_conflict_sample_y,
+            dbg->target.extracted_rank,
+            dbg->target.winning_rank);
 }
 
 static void dump_gmv_debug(FILE *out, int frame_num, double time_s,
@@ -725,6 +898,7 @@ static void usage(const char *prog) {
         "  --registration <gmv|affine>\n"
         "                   Camera registration backend (default: gmv)\n"
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
+        "  --pixel-step <n> Override appearance sampling step (default: 0=Auto)\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
         "  --debug-frame N  Dump saliency candidate details for frame N\n"
         "  --debug-time-start S  Dump debug details beginning at time S seconds\n"
@@ -735,6 +909,12 @@ static void usage(const char *prog) {
         "  --summary-json <file>\n"
         "                   Write a machine-readable run summary for reviewed\n"
         "                   clip scoring / regression reports\n"
+        "  --thermal-debug-jsonl <file>\n"
+        "                   Write per-frame thermal candidate telemetry as JSONL\n"
+        "  --thermal-target cx,cy\n"
+        "                   Trace dense thermal extraction for one normalized target\n"
+        "                   point and include the stage-by-stage outcome in thermal\n"
+        "                   debug JSONL rows\n"
         "\n"
         "Diagnostic:\n"
         "  --probe cx,cy    Sample the detector's scored point nearest the given\n"
@@ -762,6 +942,7 @@ int main(int argc, char **argv) {
     char output_video[1024] = "";
     char output_csv[1024]   = "";
     char output_summary_json[1024] = "";
+    char thermal_debug_jsonl_path[1024] = "";
     int  write_video = 1;
 
     anomaly_config_t cfg = {
@@ -769,6 +950,7 @@ int main(int argc, char **argv) {
         .algorithm_mask    = ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION,
         .registration_mode = ANOMALY_REGISTRATION_GMV,
         .frame_stride      = 1,
+        .pixel_step        = 0,
         .score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD,
         .motion_evidence_scale = 1.0f,
         .min_area_fraction = ANOMALY_DEFAULT_MIN_AREA_FRACTION,
@@ -782,6 +964,8 @@ int main(int argc, char **argv) {
     int    probe_active  = 0;
     float  probe_cx      = 0.0f, probe_cy = 0.0f;
     char   probe_csv_path[1024] = "";
+    int    thermal_target_active = 0;
+    float  thermal_target_cx = 0.0f, thermal_target_cy = 0.0f;
     int    debug_frame = -1;
     double debug_time_start = -1.0;
     double debug_time_end = -1.0;
@@ -805,6 +989,7 @@ int main(int argc, char **argv) {
                                    : ANOMALY_REGISTRATION_GMV;
         }
         else if (!strcmp(argv[i], "--stride")    && i+1 < argc) cfg.frame_stride      = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pixel-step") && i+1 < argc) cfg.pixel_step       = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--min-delta") && i+1 < argc) min_delta_override    = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-p")          && i+1 < argc) {
             cfg.thermal_polarity = strcmp(argv[++i], "bh") == 0
@@ -815,6 +1000,14 @@ int main(int argc, char **argv) {
                 probe_active = 1;
             } else {
                 fprintf(stderr, "Error: --probe expects cx,cy (e.g. --probe 0.42,0.28)\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--thermal-target") && i+1 < argc) {
+            if (sscanf(argv[++i], "%f,%f", &thermal_target_cx, &thermal_target_cy) == 2) {
+                thermal_target_active = 1;
+            } else {
+                fprintf(stderr, "Error: --thermal-target expects cx,cy (e.g. --thermal-target 0.42,0.28)\n");
                 return 1;
             }
         }
@@ -835,6 +1028,9 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--summary-json") && i+1 < argc) {
             snprintf(output_summary_json, sizeof(output_summary_json), "%s", argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--thermal-debug-jsonl") && i+1 < argc) {
+            snprintf(thermal_debug_jsonl_path, sizeof(thermal_debug_jsonl_path), "%s", argv[++i]);
         }
         else if (!strcmp(argv[i], "--debug-overlay")) {
             debug_overlay = 1;
@@ -911,6 +1107,9 @@ int main(int argc, char **argv) {
                                  ? (double)min_delta_override
                                  : (double)ANOMALY_THERMAL_MIN_DELTA;
     cfg.thermal_min_delta = (float)effective_min_delta;
+    cfg.thermal_debug_target_enabled = thermal_target_active != 0;
+    cfg.thermal_debug_target_x_norm = thermal_target_cx;
+    cfg.thermal_debug_target_y_norm = thermal_target_cy;
 
     // ── Print run summary ────────────────────────────────────────────────
     fprintf(stderr, "\n");
@@ -923,6 +1122,8 @@ int main(int argc, char **argv) {
     if (output_summary_json[0]) fprintf(stderr, "Summary    : %s\n", output_summary_json);
     if (probe_active) fprintf(stderr, "Probe CSV  : %s  (cx=%.3f cy=%.3f)\n",
                               probe_csv_path, (double)probe_cx, (double)probe_cy);
+    if (thermal_target_active) fprintf(stderr, "Thermal target: cx=%.3f cy=%.3f\n",
+                                       (double)thermal_target_cx, (double)thermal_target_cy);
     if (clip_time_start > 0.0 || clip_time_end >= 0.0) {
         if (clip_time_end >= 0.0) {
             fprintf(stderr, "Clip range : %.3fs to %.3fs\n", clip_time_start, requested_media_end);
@@ -948,6 +1149,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "  register   = %s\n",
         cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
     fprintf(stderr, "  stride     = %d\n",   cfg.frame_stride);
+    fprintf(stderr, "  pixel_step = %d%s\n", cfg.pixel_step,
+            cfg.pixel_step <= 0 ? " (Auto)" : "");
     fprintf(stderr, "  min_delta  = %.1f%s\n", effective_min_delta,
             min_delta_override > 0.0f ? " (override)" : "");
     fprintf(stderr, "\n");
@@ -971,11 +1174,12 @@ int main(int argc, char **argv) {
     // Header lines document the settings so the file is self-contained.
     fprintf(csv, "# input: %s\n", input);
     fprintf(csv, "# threshold: %.2f  min_hits: %d  scan_zone: %.2f  "
-                 "algo: %d  polarity: %s  stride: %d  registration: %s\n",
+                 "algo: %d  polarity: %s  stride: %d  pixel_step: %d  registration: %s\n",
             (double)cfg.score_threshold, cfg.min_hits, (double)cfg.scan_zone,
             cfg.algorithm_mask,
             cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh",
             cfg.frame_stride,
+            cfg.pixel_step,
             cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
     if (clip_time_end >= 0.0 || clip_duration_s > 0.0) {
         fprintf(csv, "# clip_start_s: %.3f  clip_end_s: %.3f\n",
@@ -1018,6 +1222,7 @@ int main(int argc, char **argv) {
 
     // ── Open probe CSV (if requested) ────────────────────────────────────
     FILE *probe_csv = NULL;
+    FILE *thermal_debug_jsonl = NULL;
     if (probe_active) {
         probe_csv = fopen(probe_csv_path, "w");
         if (!probe_csv) {
@@ -1037,6 +1242,13 @@ int main(int argc, char **argv) {
                 "sample_luma,spatial_mean,spatial_std,spatial_abs_delta,spatial_score,"
                 "temporal_delta,temporal_mean,temporal_norm,temporal_score,"
                 "effective_score,passes_min_delta,passes_threshold\n");
+    }
+    if (thermal_debug_jsonl_path[0]) {
+        thermal_debug_jsonl = fopen(thermal_debug_jsonl_path, "w");
+        if (!thermal_debug_jsonl) {
+            fprintf(stderr, "Cannot write thermal debug JSONL: %s\n", thermal_debug_jsonl_path);
+            return 1;
+        }
     }
 
     // ── Process frames ───────────────────────────────────────────────────
@@ -1097,6 +1309,9 @@ int main(int argc, char **argv) {
             dump_saliency_debug(stderr, frame_num, time_s, raw_rgba, W, H, &cfg, &result);
             dump_motion_debug(stderr, frame_num, time_s, &result);
         }
+        if (thermal_debug_jsonl != NULL) {
+            write_thermal_debug_jsonl(thermal_debug_jsonl, frame_num, time_s, &result);
+        }
 
         if (result.box_count > 0) {
             detection_frames++;
@@ -1149,6 +1364,7 @@ int main(int argc, char **argv) {
     if (out_pipe) pclose(out_pipe);
     fclose(csv);
     if (probe_csv) fclose(probe_csv);
+    if (thermal_debug_jsonl) fclose(thermal_debug_jsonl);
     anomaly_state_cleanup(&state);
     free(rgba);
     free(raw_rgba);
@@ -1180,6 +1396,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  Video written    : %s\n", output_video);
     if (probe_active)
         fprintf(stderr, "  Probe CSV        : %s\n", probe_csv_path);
+    if (thermal_debug_jsonl_path[0])
+        fprintf(stderr, "  Thermal JSONL    : %s\n", thermal_debug_jsonl_path);
     fprintf(stderr, "\n");
     if (output_summary_json[0]) {
         FILE *summary = fopen(output_summary_json, "w");
@@ -1221,6 +1439,7 @@ int main(int argc, char **argv) {
             json_write_string(summary,
                               cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh");
             fprintf(summary, ",\n    \"stride\": %d,\n", cfg.frame_stride);
+            fprintf(summary, "    \"pixel_step\": %d,\n", cfg.pixel_step);
             fprintf(summary, "    \"registration\": ");
             json_write_string(summary,
                               cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");

@@ -99,6 +99,7 @@ object FfmpegBridge {
             scanZone = config.scanZone,
             minHits = config.minHits,
             thermalMinDelta = config.thermalMinDelta,
+            smallTargetScreenFraction = config.smallTargetScreenFraction,
         )
     }
 
@@ -221,6 +222,7 @@ object FfmpegBridge {
         scanZone: Float,
         minHits: Int,
         thermalMinDelta: Float,
+        smallTargetScreenFraction: Float,
     )
     private external fun nativeGetSessionPerfStats(sessionId: Long): LongArray?
     private external fun nativeGetSessionDebugSummary(sessionId: Long): String?

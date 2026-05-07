@@ -1,19 +1,72 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "suite_name": "PowerHouse Black-Hot Regression Suite v1",
-  "default_detector_args": [
-    "-p",
-    "bh",
-    "-a",
-    "6",
-    "-t",
-    "2.8",
-    "-m",
-    "2",
-    "-s",
-    "0.6",
-    "--stride",
-    "3"
+  "profiles": [
+    {
+      "id": "current-detector-baseline",
+      "label": "Current detector baseline",
+      "description": "Legacy stride-heavy comparison point that approximates the previous realtime posture before the redesign defaults moved to per-frame registration and refresh.",
+      "detector_args": [
+        "-p",
+        "bh",
+        "-a",
+        "6",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.6",
+        "--registration",
+        "affine",
+        "--stride",
+        "3"
+      ]
+    },
+    {
+      "id": "dense-full-scan-gold",
+      "label": "Dense full-scan gold mode",
+      "description": "Gold comparison mode for reviewed clips: per-frame analysis with an explicit 1px appearance step to maximize direct observation coverage.",
+      "detector_args": [
+        "-p",
+        "bh",
+        "-a",
+        "6",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.6",
+        "--registration",
+        "affine",
+        "--stride",
+        "1",
+        "--pixel-step",
+        "1"
+      ]
+    },
+    {
+      "id": "redesigned-incremental",
+      "label": "Redesigned incremental mode",
+      "description": "Recommended redesign posture: affine registration every frame, target/coverage carry-forward enabled in the detector, and Auto detail retained unless a clip-specific override is needed.",
+      "detector_args": [
+        "-p",
+        "bh",
+        "-a",
+        "6",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.6",
+        "--registration",
+        "affine",
+        "--stride",
+        "1"
+      ]
+    }
   ],
   "source_clips": [
     {
@@ -59,21 +112,7 @@
         "camera_motion_shift",
         "water_edge"
       ],
-      "notes": "Scenario-focused early excerpt covering the reviewed false-positive run.",
-      "detector_args": [
-        "-p",
-        "bh",
-        "-a",
-        "6",
-        "-t",
-        "2.8",
-        "-m",
-        "2",
-        "-s",
-        "0.6",
-        "--stride",
-        "3"
-      ]
+      "notes": "Scenario-focused early excerpt covering the reviewed false-positive run."
     },
     {
       "id": "powerhouse-team-targets-and-late-fps",
@@ -89,21 +128,7 @@
         "under_canopy",
         "late_false_positive"
       ],
-      "notes": "Reviewed target windows and under-canopy misses, filtered from the full team review.",
-      "detector_args": [
-        "-p",
-        "bh",
-        "-a",
-        "6",
-        "-t",
-        "2.8",
-        "-m",
-        "2",
-        "-s",
-        "0.6",
-        "--stride",
-        "3"
-      ]
+      "notes": "Reviewed target windows and under-canopy misses, filtered from the full team review."
     },
     {
       "id": "powerhouse1-pending-review",

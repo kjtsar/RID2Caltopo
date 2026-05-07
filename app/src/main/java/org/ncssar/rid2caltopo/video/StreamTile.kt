@@ -56,10 +56,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
@@ -70,6 +73,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.ui.StreamPlayerView
+import kotlin.math.roundToInt
 
 
 @Composable
@@ -132,6 +136,7 @@ fun StreamTile(
     val showLocalPlaybackLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyReviewLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyLegendControls = anomalyConfig.enabled
+    var streamTileSize by remember(streamDesignator) { mutableStateOf(IntSize.Zero) }
     val togglePlaybackAnomalyEnabled = {
         viewModel.toggleAnomalyEnabled(streamDesignator)
         val nextEnabled = !anomalyConfig.enabled
@@ -158,6 +163,7 @@ fun StreamTile(
                 color = if (isFocused) Color.Yellow else Color.Transparent
             )
             .aspectRatio(16f / 9f)
+            .onSizeChanged { streamTileSize = it }
         ) {
         StreamPlayer(
             state = streamState,
@@ -258,6 +264,28 @@ fun StreamTile(
                         fontFamily = FontFamily.Monospace,
                     )
                 }
+            }
+        }
+        if (anomalyConfig.enabled && streamTileSize.width > 0 && streamTileSize.height > 0) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+            ) {
+                val targetSpanPx = anomalyConfig.effectiveSmallTargetSpanPx(
+                    frameWidth = streamTileSize.width,
+                    frameHeight = streamTileSize.height,
+                ).coerceAtMost(size.minDimension * 0.35f)
+                val topLeft = Offset(
+                    x = (size.width - targetSpanPx) * 0.5f,
+                    y = (size.height - targetSpanPx) * 0.5f,
+                )
+                drawRect(
+                    color = Color(0xFF80CBC4).copy(alpha = 0.70f),
+                    topLeft = topLeft,
+                    size = Size(targetSpanPx, targetSpanPx),
+                    style = Stroke(width = 1.5.dp.toPx())
+                )
             }
         }
         Box(
@@ -496,6 +524,14 @@ fun StreamTile(
                             }
                         )
                         Text(
+                            text = "Small ${anomalyConfig.smallTargetScaleLabel}",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.smallTargetScreenFraction) {
+                                detectTapGestures(onTap = { showAnomalySettingsDialog = true })
+                            }
+                        )
+                        Text(
                             text = if (anomalyConfig.showHotOverlay) "ShowHot On" else "ShowHot Off",
                             color = Color.White,
                             fontSize = 11.sp,
@@ -528,7 +564,7 @@ fun StreamTile(
                                     org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.BlackHot -> "BH"
                                 }
                                 OutlinedLegendText(
-                                    text = "Thermal",
+                                    text = "Infrared",
                                     fillColor = Color.Red,
                                     fontSize = 11.sp,
                                     modifier = Modifier.pointerInput(streamDesignator) {
@@ -715,6 +751,9 @@ fun StreamTile(
                 var thermalMinDeltaValue by remember(streamDesignator, anomalyConfig.thermalMinDelta) {
                     mutableStateOf(anomalyConfig.thermalMinDelta.coerceIn(1.0f, 64.0f))
                 }
+                var smallTargetFractionValue by remember(streamDesignator, anomalyConfig.smallTargetScreenFraction) {
+                    mutableStateOf(anomalyConfig.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f))
+                }
                 AlertDialog(
                     onDismissRequest = { showAnomalySettingsDialog = false },
                     title = { Text("Anomaly Detector") },
@@ -742,8 +781,18 @@ fun StreamTile(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Appearance")
+                                Text("Appearance (${anomalyConfig.appearanceSelection.label})")
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = {
+                                            viewModel.setAppearanceAnomalySelection(
+                                                streamDesignator,
+                                                AppearanceAnomalySelection.Auto
+                                            )
+                                        }
+                                    ) {
+                                        Text("Auto")
+                                    }
                                     Button(
                                         onClick = {
                                             viewModel.setAppearanceAnomalySelection(
@@ -752,7 +801,7 @@ fun StreamTile(
                                             )
                                         }
                                     ) {
-                                        Text("Thermal")
+                                    Text("Infrared")
                                     }
                                     Button(
                                         onClick = {
@@ -829,7 +878,7 @@ fun StreamTile(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Thermal Palette")
+                                Text("Infrared Palette")
                                 TextButton(onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }) {
                                     Text(anomalyConfig.thermalPolarity.label)
                                 }
@@ -885,6 +934,39 @@ fun StreamTile(
                                 onValueChange = { thermalMinDeltaValue = it },
                                 valueRange = 1f..64f
                             )
+                            val smallTargetDenominator =
+                                (1.0f / smallTargetFractionValue.coerceIn(0.0015f, 0.03f)).roundToInt()
+                            Text("Small Target Scale 1/$smallTargetDenominator screen diagonal")
+                            Slider(
+                                value = smallTargetFractionValue,
+                                onValueChange = { smallTargetFractionValue = it },
+                                valueRange = 0.0015f..0.03f
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                                    .background(Color.Black.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
+                            ) {
+                                Canvas(modifier = Modifier.fillMaxSize()) {
+                                    val targetSpanPx = anomalyConfig.copy(
+                                        smallTargetScreenFraction = smallTargetFractionValue
+                                    ).effectiveSmallTargetSpanPx(
+                                        frameWidth = size.width.roundToInt(),
+                                        frameHeight = size.height.roundToInt(),
+                                    ).coerceAtMost(size.minDimension * 0.40f)
+                                    val topLeft = Offset(
+                                        x = (size.width - targetSpanPx) * 0.5f,
+                                        y = (size.height - targetSpanPx) * 0.5f,
+                                    )
+                                    drawRect(
+                                        color = Color(0xFF80CBC4).copy(alpha = 0.80f),
+                                        topLeft = topLeft,
+                                        size = Size(targetSpanPx, targetSpanPx),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
+                                }
+                            }
                         }
                     },
                     confirmButton = {
@@ -901,6 +983,7 @@ fun StreamTile(
                                 }
                                 viewModel.setAnomalyPixelStep(streamDesignator, pixelStepValue)
                                 viewModel.setAnomalyThermalMinDelta(streamDesignator, thermalMinDeltaValue)
+                                viewModel.setAnomalySmallTargetScreenFraction(streamDesignator, smallTargetFractionValue)
                                 showAnomalySettingsDialog = false
                             }
                         ) {
@@ -933,12 +1016,14 @@ fun StreamTile(
                             Text("Hits: Consecutive analyzed-frame hits required in roughly the same motion-stabilized region before a detection is promoted.")
                             Text("Stride: Analyze every Nth frame. Higher stride reduces CPU load but may miss brief motion.")
                             Text("Detail: Pixel sampling step for appearance analysis. Auto chooses a default from frame size; smaller steps inspect more detail at higher cost.")
+                            Text("Appearance: Infrared is the recommended default for SAR thermal video. Color Outlier is mainly for visible-light footage or special cases.")
                             Text("ShowHot: Draws a red ring around the hottest region in the frame as a thermal debug aid.")
                             Text("Saliency: Enables the unified saliency detector. Turn it off to match harness runs that omit the saliency algorithm.")
                             Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
                             Text("Registration: Chooses the motion-registration backend used to stabilize detections. Affine usually tracks camera motion more accurately; GMV is simpler and may be cheaper.")
-                            Text("Thermal (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
-                            Text("Thermal Min Delta: Minimum thermal contrast before thermal/saliency evidence is considered. Raise it to ignore weaker temperature differences.")
+                            Text("Infrared (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
+                            Text("Thermal Min Delta: Minimum infrared contrast before thermal/saliency evidence is considered. Raise it to ignore weaker temperature differences.")
+                            Text("Small: Maximum on-screen small-target box size. The cyan rectangle shows the largest blob the anomaly detector should treat as a 'small target' for the squinter. As the camera zooms in, targets larger than this are down-ranked and can disappear.")
                             Text("Motion badge: Indicates whether the motion detector is currently part of the active anomaly stack.")
                             if (isLocalPlayback) {
                                 Text("Playback review controls")

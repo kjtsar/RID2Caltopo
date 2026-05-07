@@ -22,10 +22,17 @@ For IR work, the default app posture is now:
 - `Thermal Palette`: `Black Hot`
 - `Appearance`: `Thermal`
 - `Registration`: `Affine`
-- `Frame Stride`: `3`
+- `Frame Stride`: `1`
 - `Scan Zone`: `60%`
 - `Min Hits`: `2`
 - `Thermal Min Delta`: `10.0`
+
+The redesign posture behind those defaults is:
+
+- registration and target-state propagation run every frame
+- carried coverage supports continuity, not brand-new strong detections
+- selective refresh should prefer smaller scan zones and planner-driven revisits
+  before falling back to stride-heavy sampling
 
 ### What the Main Controls Mean
 
@@ -67,8 +74,9 @@ For IR work, the default app posture is now:
   verify `Registration` is `Affine` and keep `Saliency` enabled only if the run
   has usable motion support.
 - If low-end hardware struggles:
-  raise `Frame Stride`, increase `Detail` step size, and keep only the cues you
-  need enabled.
+  lower `Scan Zone` first, keep `Frame Stride=1` if at all possible, and only
+  then consider increasing `Detail` step size or disabling cues you do not
+  need.
 
 ### Reset Behavior
 
@@ -198,12 +206,13 @@ Every major cue feeds a temporal accumulator:
 This is why `frame_stride` and `min_hits` interact directly with perceived
 latency.
 
-Approximate latency is:
+Approximate direct-observation latency is:
 
 `frame interval × frame_stride × min_hits`
 
-For example, 30 fps with `stride=3` and `min_hits=2` means the detector needs
-agreement across analyzed frames roughly 200 ms apart.
+For example, 30 fps with `stride=1` and `min_hits=2` means the detector needs
+agreement across analyzed frames roughly 67 ms apart. At `stride=3`, that
+widens to roughly 200 ms between analyzed-frame confirmations.
 
 ### Harness and App Parity
 
@@ -240,7 +249,7 @@ The app-side `AnomalyConfig` defaults currently resolve to:
 - `Thermal Palette`: `Black Hot`
 - `Saliency`: enabled
 - `Registration`: `Affine`
-- `Frame Stride`: `3`
+- `Frame Stride`: `1`
 - `Sensitivity`: `60%`
 - `Motion Evidence Sensitivity`: `60%`
 - `Min Area Fraction`: `0.0015`
@@ -254,7 +263,7 @@ IR-focused thermal + motion, without saliency:
 
 ```sh
 ./build/anomaly_video_test path/to/clip.mp4 \
-  --registration affine --stride 3 -p bh -a 6 -t 2.8 -m 2 -s 0.6 --min-delta 10
+  --registration affine --stride 1 -p bh -a 6 -t 2.8 -m 2 -s 0.6 --min-delta 10
 ```
 
 IR-focused thermal + motion + saliency, matching the app when saliency is on:

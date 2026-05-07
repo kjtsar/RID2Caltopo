@@ -63,6 +63,15 @@ static void stamp_texture_field(uint8_t *buf, int stride, int w, int h, int shif
     }
 }
 
+static int count_mask_set(const uint8_t *mask, int count) {
+    if (mask == NULL || count <= 0) return 0;
+    int set_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (mask[i] != 0u) set_count++;
+    }
+    return set_count;
+}
+
 static anomaly_config_t default_cfg(int algorithm_mask) {
     anomaly_config_t c = {0};
     c.enabled           = true;
@@ -239,17 +248,18 @@ static void test_black_hot_thermal(void) {
 }
 
 static void test_high_threshold_no_detection(void) {
-    // With local tile normalization an isolated outlier in N tile samples scores
-    // ≈ √N σ regardless of its absolute magnitude (both deviation and σ scale
-    // together).  For a 160×120 frame sampled every 2 px over an 8×8 tile grid
-    // each center tile holds roughly 48 samples → outlier score ≈ √48 ≈ 6.9 σ.
+    // With the normalized local thermal window, an isolated outlier in a
+    // uniform field can still score strongly because the neighborhood remains
+    // deliberately compact in real-pixel terms. Use a very high threshold here
+    // so the test continues to verify "same outlier suppressed" without
+    // depending on the exact calibration of that local window.
     //
     // The pixel must also pass ANOMALY_THERMAL_MIN_DELTA (currently 10 luma
     // units) before Z-scoring even begins — this blocks HEVC/noise artefacts
     // in near-uniform regions.  We therefore use a +20-unit outlier (well above
-    // the gate) and bracket the threshold around √48:
-    //   threshold = 3.0  → fires   (6.9 > 3.0)
-    //   threshold = 15.0 → silent  (6.9 < 15.0)
+    // the gate) and bracket the threshold broadly:
+    //   threshold = 3.0  → fires
+    //   threshold = 30.0 → silent
     //
     // Use separate frame copies: process_frame draws boxes in-place, so
     // reusing the same buffer across runs would corrupt the second test.
@@ -276,11 +286,11 @@ static void test_high_threshold_no_detection(void) {
         set_pixel(frame, W * 4, W / 2, H / 2, 84, 84, 84);  // same +20-unit outlier
         anomaly_state_t st; anomaly_state_init(&st);
         anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
-        cfg.score_threshold = 15.0f;
+        cfg.score_threshold = 30.0f;
         cfg.min_hits = 1;
         anomaly_result_t res;
         int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
-        EXPECT(boxes == 0, "threshold=15: same outlier suppressed");
+        EXPECT(boxes == 0, "threshold=30: same outlier suppressed");
         anomaly_state_cleanup(&st);
         free(frame);
     }
@@ -616,6 +626,46 @@ static void test_frame_stride_hold_ages_on_skipped_frames(void) {
     anomaly_state_cleanup(&st);
 }
 
+static void test_frame_stride_skip_still_runs_registration(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    cfg.registration_mode = ANOMALY_REGISTRATION_GMV;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+    cfg.frame_stride = 2;
+
+    uint8_t *frame1 = make_gray_frame(W, H, 64);
+    uint8_t *frame2 = make_gray_frame(W, H, 64);
+    uint8_t *frame3 = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame1, W * 4, W, H, 0);
+    stamp_texture_field(frame2, W * 4, W, H, 4);
+    stamp_texture_field(frame3, W * 4, W, H, 8);
+
+    anomaly_result_t r1, r2, r3;
+    anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1); // skip, seeds prev_luma
+    anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2); // analyze
+    anomaly_process_frame(&st, &cfg, frame3, W * 4, W, H, 0, &r3); // skip, should still register
+
+    EXPECT(r1.registration_ran_this_frame, "stride registration: initial skipped frame still reports registration pass");
+    EXPECT(!r1.appearance_refresh_ran_this_frame, "stride registration: initial skipped frame does not run appearance refresh");
+    EXPECT(r2.appearance_refresh_ran_this_frame, "stride registration: analyzed frame reports appearance refresh");
+    EXPECT(r3.registration_ran_this_frame, "stride registration: skipped frame still runs registration");
+    EXPECT(!r3.appearance_refresh_ran_this_frame, "stride registration: skipped frame reports no appearance refresh");
+    EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+           "stride registration: skipped frame uses appearance-stride-skip mode");
+    EXPECT(r3.gmv_debug.valid, "stride registration: skipped frame still produces registration debug");
+    EXPECT(r3.registration_health != ANOMALY_REG_HEALTH_UNKNOWN,
+           "stride registration: skipped frame exposes a non-unknown registration health");
+
+    free(frame1);
+    free(frame2);
+    free(frame3);
+    anomaly_state_cleanup(&st);
+}
+
 static void test_large_motion_discontinuity_clears_rois(void) {
     const int W = 640, H = 480;
     anomaly_state_t st;
@@ -639,6 +689,90 @@ static void test_large_motion_discontinuity_clears_rois(void) {
     EXPECT(b1 > 0, "large motion: initial hotspot detected");
     EXPECT(b2 == 0, "large motion: stale ROI cleared instead of persisting");
     EXPECT(!st.acc_active[0], "large motion: color ROI state cleared after oversized jump");
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
+           "large motion: planner falls back to full rescan on discontinuity");
+
+    free(frame1);
+    free(frame2);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_scan_planner_partial_mode_on_localized_exposure(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    cfg.score_threshold = 2.0f;
+
+    uint8_t *frame1 = make_gray_frame(W, H, 64);
+    uint8_t *frame2 = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame1, W * 4, W, H, 0);
+    stamp_texture_field(frame2, W * 4, W, H, 4);
+
+    anomaly_result_t r1, r2;
+    anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
+    anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2);
+
+    EXPECT(r2.scan_plan.valid, "partial mode: planner emits a valid scan plan");
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_PARTIAL,
+           "partial mode: localized exposure maps to partial rescan");
+    EXPECT(r2.scan_plan.warped_valid_fraction >= 0.80f,
+           "partial mode: carried coverage stays above the full-rescan floor");
+    EXPECT(r2.scan_plan.stale_fraction < 0.35f,
+           "partial mode: stale coverage stays below the full-rescan threshold");
+    int partial_total = st.roi_state.width * st.roi_state.height;
+    int partial_fresh = count_mask_set(st.roi_state.fresh_mask, partial_total);
+    int partial_carried = count_mask_set(st.roi_state.carried_mask, partial_total);
+    EXPECT(partial_total > 0, "partial mode: roi state populated");
+    EXPECT(partial_fresh > 0 && partial_fresh < partial_total,
+           "partial mode: analyzed refresh touches only a subset of ROI samples");
+    EXPECT(partial_carried > 0,
+           "partial mode: non-refreshed ROI samples are carried forward");
+
+    free(frame1);
+    free(frame2);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_scan_planner_target_only_mode_with_active_track(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    uint8_t *frame1 = make_gray_frame(W, H, 64);
+    uint8_t *frame2 = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame1, W * 4, W, H, 0);
+    stamp_texture_field(frame2, W * 4, W, H, 0);
+    set_pixel(frame1, W * 4, W / 2, H / 2, 255, 24, 24);
+    set_pixel(frame2, W * 4, W / 2, H / 2, 255, 24, 24);
+
+    anomaly_result_t r1, r2;
+    int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
+    int b2 = anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2);
+
+    EXPECT(b1 > 0, "target-only mode: first frame establishes an active track");
+    EXPECT(b2 >= 0, "target-only mode: follow-up frame processes successfully");
+    EXPECT(r2.scan_plan.target_revisit_track_count > 0,
+           "target-only mode: planner sees an active target revisit hint");
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "target-only mode: stable carry with active track maps to target-only");
+    EXPECT(st.target_tracks[0].active,
+           "target-only mode: explicit target track stays active");
+    EXPECT(st.target_tracks[0].hit_count > 0,
+           "target-only mode: explicit target track accumulates direct hits");
+    int target_total = st.roi_state.width * st.roi_state.height;
+    int target_fresh = count_mask_set(st.roi_state.fresh_mask, target_total);
+    int target_carried = count_mask_set(st.roi_state.carried_mask, target_total);
+    EXPECT(target_total > 0, "target-only mode: roi state populated");
+    EXPECT(target_fresh > 0 && target_fresh < target_total,
+           "target-only mode: analyzed refresh stays localized to revisit samples");
+    EXPECT(target_carried > 0,
+           "target-only mode: untouched ROI samples are carried forward");
 
     free(frame1);
     free(frame2);
@@ -671,7 +805,10 @@ int main(void) {
     test_accumulator_hold_after_miss();
     test_frame_stride_skips();
     test_frame_stride_hold_ages_on_skipped_frames();
+    test_frame_stride_skip_still_runs_registration();
     test_large_motion_discontinuity_clears_rois();
+    test_scan_planner_partial_mode_on_localized_exposure();
+    test_scan_planner_target_only_mode_with_active_track();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

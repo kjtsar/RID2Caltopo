@@ -25,12 +25,13 @@
 #define ANOMALY_REGISTRATION_AFFINE 2
 
 // ── Default tuning knobs ───────────────────────────────────────────────────
-#define ANOMALY_DEFAULT_FRAME_STRIDE      3
+#define ANOMALY_DEFAULT_FRAME_STRIDE      1
 #define ANOMALY_DEFAULT_SCORE_THRESHOLD   1.8f
 #define ANOMALY_DEFAULT_MIN_AREA_FRACTION 0.0015f
 #define ANOMALY_SCAN_ZONE_DEFAULT         0.60f
 #define ANOMALY_DEFAULT_MIN_HITS          2
 #define ANOMALY_SALIENCY_EXTRA_TRACKS     1
+#define ANOMALY_MAX_TARGET_TRACKS         6
 
 // ── Local tile normalization ───────────────────────────────────────────────
 // The ROI is divided into a LOCAL_TILE_SIZE × LOCAL_TILE_SIZE grid.  Mean and
@@ -43,12 +44,10 @@
 #define ANOMALY_LOCAL_TILE_SIZE    8
 #define ANOMALY_LOCAL_TILE_MIN_N   4
 
-// Thermal scoring window radius (in sampled-pixel units).
-// The integral-image window for thermal detection is (2R+1)×(2R+1) sampled
-// pixels.  At the HD/FHD decimation step of 4 px, R=3 → 7×7 samples covering
-// roughly 28×28 real pixels — small enough to stay within a single clearing
-// yet large enough for 49-sample statistics.
-// Increase R to smooth out noise; decrease it for more spatial precision.
+// Thermal scoring window calibration anchor.
+// The runtime converts this sampled-grid radius into an effective cell radius
+// derived from sample_step so HD/FHD dense mode keeps approximately the same
+// real-pixel neighborhood as the reviewed coarse path.
 #define ANOMALY_THERMAL_WIN_RADIUS  3
 
 // Minimum absolute luma difference (0–255 scale) required before computing a
@@ -140,6 +139,7 @@
 
 #define ANOMALY_MAX_BOXES_PER_FRAME 4
 #define ANOMALY_DEBUG_TOP_CANDIDATES 5
+#define ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES 8
 #define ANOMALY_GMV_MAX_DEBUG_ANCHORS (ANOMALY_GMV_ZONE_GRID * ANOMALY_GMV_ZONE_GRID)
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -169,7 +169,67 @@ typedef struct {
     float scan_zone;
     int   min_hits;
     float thermal_min_delta;
+    float small_target_screen_fraction;
+    bool  thermal_debug_target_enabled;
+    float thermal_debug_target_x_norm;
+    float thermal_debug_target_y_norm;
 } anomaly_config_t;
+
+typedef struct {
+    int   valid_count;
+    int   fresh_count;
+    int   carried_count;
+    int   newly_exposed_count;
+    int   stale_count;
+    float registration_quality;
+    uint32_t scan_flags;
+    float max_thermal_score;
+    float max_motion_support;
+} anomaly_roi_cell_summary_t;
+
+typedef struct {
+    bool  valid;
+    int   roi_x0;
+    int   roi_y0;
+    int   roi_x1;
+    int   roi_y1;
+    int   width;
+    int   height;
+    int   sample_step;
+    float *last_luma;
+    float *thermal_score;
+    float *temporal_score;
+    uint8_t *valid_mask;
+    uint8_t *fresh_mask;
+    uint8_t *carried_mask;
+    uint8_t *new_exposed_mask;
+    float   *reg_confidence;
+    uint8_t *coverage_age;
+    size_t   pixel_capacity;
+    int      cell_size_px;
+    int      cell_cols;
+    int      cell_rows;
+    anomaly_roi_cell_summary_t *cell_summaries;
+    size_t   cell_capacity;
+} anomaly_roi_state_t;
+
+typedef struct {
+    bool  active;
+    int   id;
+    float confidence;
+    int   hit_count;
+    int   miss_count;
+    int   hold_count;
+    float center_x_norm;
+    float center_y_norm;
+    float half_w_norm;
+    float half_h_norm;
+    float support_radius_norm;
+    float last_registration_quality;
+    bool  forced_revisit;
+    int   algorithm;
+    bool  fresh_observation;
+} anomaly_target_track_t;
 
 // Per-stream mutable state owned by the decode thread (no locking needed).
 typedef struct {
@@ -203,6 +263,9 @@ typedef struct {
     float   *thermal_target_persist;
     int      thermal_target_persist_w;
     int      thermal_target_persist_h;
+    anomaly_roi_state_t roi_state;
+    anomaly_target_track_t target_tracks[ANOMALY_MAX_TARGET_TRACKS];
+    int      next_target_track_id;
     int      publish_hold_frames;
     int      publish_stable_frames;
     float    saliency_aux_cx[ANOMALY_SALIENCY_EXTRA_TRACKS];
@@ -227,6 +290,8 @@ typedef struct {
     float   *scratch_patch_score;
     float   *scratch_patch_selection;
     size_t   scratch_patch_capacity;
+    uint8_t *scratch_refresh_mask;
+    size_t   scratch_refresh_mask_capacity;
     int     *scratch_i32;
     size_t   scratch_i32_capacity;
 } anomaly_state_t;
@@ -248,15 +313,94 @@ typedef struct {
     int   pixel_y;
     float x_norm;
     float y_norm;
+    float bbox_left_norm;
+    float bbox_top_norm;
+    float bbox_right_norm;
+    float bbox_bottom_norm;
     float base_score;
     float final_score;
+    float temporal_score;
     float area;
     float span;
     float fill;
     float center_share;
     float quality;
     float isolation_rank;
+    float peak_delta;
+    float mean_delta;
+    float score_scale;
+    float history_scale;
+    float apparent_size_scale;
+    float isolation_track_scale;
+    float context_scale;
+    float parent_scale;
+    float area_rank;
+    float span_rank;
+    float center_rank;
+    float quality_rank;
+    bool  above_threshold;
 } anomaly_debug_thermal_candidate_t;
+
+typedef enum {
+    ANOMALY_THERMAL_TARGET_STAGE_NONE = 0,
+    ANOMALY_THERMAL_TARGET_STAGE_NOT_HOT = 1,
+    ANOMALY_THERMAL_TARGET_STAGE_SUPPRESSED_BY_NEIGHBOR = 2,
+    ANOMALY_THERMAL_TARGET_STAGE_MERGED_INTO_COMPONENT = 3,
+    ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE = 4,
+    ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED = 5,
+} anomaly_debug_thermal_target_stage_t;
+
+typedef enum {
+    ANOMALY_THERMAL_TARGET_GATE_NONE = 0,
+    ANOMALY_THERMAL_TARGET_GATE_MAX_AREA = 1,
+    ANOMALY_THERMAL_TARGET_GATE_RING_HOT = 2,
+    ANOMALY_THERMAL_TARGET_GATE_SIDE_HOT = 3,
+    ANOMALY_THERMAL_TARGET_GATE_SUPPORT_MASS = 4,
+    ANOMALY_THERMAL_TARGET_GATE_SUPPORT_NEAR = 5,
+    ANOMALY_THERMAL_TARGET_GATE_ZERO_QUALITY = 6,
+} anomaly_debug_thermal_target_gate_t;
+
+typedef struct {
+    bool  enabled;
+    bool  valid;
+    bool  inside_scan_zone;
+    int   pixel_x;
+    int   pixel_y;
+    int   sample_x;
+    int   sample_y;
+    float x_norm;
+    float y_norm;
+    float target_delta;
+    float target_score;
+    bool  hot_eligible;
+    bool  started_component;
+    bool  local_max;
+    int   suppressor_sample_x;
+    int   suppressor_sample_y;
+    float suppressor_delta;
+    float suppressor_score;
+    int   component_seed_x;
+    int   component_seed_y;
+    int   component_peak_x;
+    int   component_peak_y;
+    float component_area;
+    float component_span;
+    float component_fill;
+    float component_peak_delta;
+    float component_mean_delta;
+    float component_quality;
+    bool  component_rejected;
+    anomaly_debug_thermal_target_gate_t rejection_gate;
+    bool  dropped_by_cap;
+    bool  dropped_by_nms;
+    bool  replaced_by_nms;
+    int   nms_conflict_rank;
+    int   nms_conflict_sample_x;
+    int   nms_conflict_sample_y;
+    int   extracted_rank;
+    int   winning_rank;
+    anomaly_debug_thermal_target_stage_t stage;
+} anomaly_debug_thermal_target_t;
 
 typedef struct {
     bool  bg_ready;
@@ -286,7 +430,8 @@ typedef struct {
     float raw_y_norm;
     int   winning_candidate_index;
     int   candidate_count;
-    anomaly_debug_thermal_candidate_t candidates[ANOMALY_DEBUG_TOP_CANDIDATES];
+    anomaly_debug_thermal_candidate_t candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES];
+    anomaly_debug_thermal_target_t target;
 } anomaly_debug_thermal_t;
 
 typedef struct {
@@ -346,11 +491,47 @@ typedef struct {
     anomaly_debug_gmv_anchor_t anchors[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
 } anomaly_debug_gmv_t;
 
+typedef enum {
+    ANOMALY_REG_HEALTH_UNKNOWN = 0,
+    ANOMALY_REG_HEALTH_INVALID = 1,
+    ANOMALY_REG_HEALTH_HARD_DEGRADED = 2,
+    ANOMALY_REG_HEALTH_SOFT_DEGRADED = 3,
+    ANOMALY_REG_HEALTH_HEALTHY = 4,
+} anomaly_registration_health_t;
+
+typedef enum {
+    ANOMALY_RESCAN_MODE_UNSET = 0,
+    ANOMALY_RESCAN_MODE_FULL = 1,
+    ANOMALY_RESCAN_MODE_PARTIAL = 2,
+    ANOMALY_RESCAN_MODE_TARGET_ONLY = 3,
+    ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP = 4,
+} anomaly_rescan_mode_t;
+
+typedef struct {
+    bool  valid;
+    anomaly_rescan_mode_t mode;
+    int   sampled_width;
+    int   sampled_height;
+    int   total_samples;
+    int   carried_samples;
+    int   newly_exposed_samples;
+    int   stale_samples;
+    int   target_revisit_track_count;
+    float warped_valid_fraction;
+    float newly_exposed_fraction;
+    float stale_fraction;
+} anomaly_scan_plan_t;
+
 // Returned from anomaly_process_frame(); caller may inspect detections.
 typedef struct {
     int           box_count;
     anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
     bool          had_discontinuity;  // true when a scene cut was detected
+    bool          registration_ran_this_frame;
+    bool          appearance_refresh_ran_this_frame;
+    anomaly_registration_health_t registration_health;
+    anomaly_rescan_mode_t rescan_mode;
+    anomaly_scan_plan_t scan_plan;
     anomaly_debug_gmv_t gmv_debug;
     anomaly_debug_motion_t motion_debug;
     anomaly_debug_thermal_t thermal_debug;

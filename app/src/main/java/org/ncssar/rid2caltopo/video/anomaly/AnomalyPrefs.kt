@@ -20,6 +20,7 @@ object AnomalyPrefs {
     private const val KEY_SCAN_ZONE = "scan_zone"
     private const val KEY_MIN_HITS = "min_hits"
     private const val KEY_THERMAL_MIN_DELTA = "thermal_min_delta"
+    private const val KEY_SMALL_TARGET_SCREEN_FRACTION = "small_target_screen_fraction"
 
     @JvmStatic
     fun load(context: Context): AnomalyConfig {
@@ -59,6 +60,9 @@ object AnomalyPrefs {
             scanZone = prefs.getFloat(KEY_SCAN_ZONE, defaults.scanZone).coerceIn(0.5f, 1.0f),
             minHits = prefs.getInt(KEY_MIN_HITS, defaults.minHits).coerceIn(1, 10),
             thermalMinDelta = prefs.getFloat(KEY_THERMAL_MIN_DELTA, defaults.thermalMinDelta).coerceIn(1.0f, 64.0f),
+            smallTargetScreenFraction = prefs
+                .getFloat(KEY_SMALL_TARGET_SCREEN_FRACTION, defaults.smallTargetScreenFraction)
+                .coerceIn(0.0015f, 0.03f),
         )
     }
 
@@ -86,6 +90,10 @@ object AnomalyPrefs {
             .putFloat(KEY_SCAN_ZONE, normalized.scanZone.coerceIn(0.5f, 1.0f))
             .putInt(KEY_MIN_HITS, normalized.minHits.coerceIn(1, 10))
             .putFloat(KEY_THERMAL_MIN_DELTA, normalized.thermalMinDelta.coerceIn(1.0f, 64.0f))
+            .putFloat(
+                KEY_SMALL_TARGET_SCREEN_FRACTION,
+                normalized.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)
+            )
             .apply()
     }
 }

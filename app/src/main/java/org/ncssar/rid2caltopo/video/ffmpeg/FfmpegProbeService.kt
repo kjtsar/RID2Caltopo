@@ -53,6 +53,16 @@ data class StreamRuntimeSnapshot(
     val localPlaybackRealtimeFactor: Double?,
     val localPlaybackMediaSpanMs: Long?,
     val localPlaybackWallSpanMs: Long?,
+    val registrationHealthyFrameCount: Long,
+    val registrationSoftDegradedFrameCount: Long,
+    val registrationHardDegradedFrameCount: Long,
+    val registrationInvalidFrameCount: Long,
+    val rescanFullFrameCount: Long,
+    val rescanPartialFrameCount: Long,
+    val rescanTargetOnlyFrameCount: Long,
+    val rescanAppearanceStrideSkipFrameCount: Long,
+    val currentRegistrationHealth: Int,
+    val currentRescanMode: Int,
     val currentSourceTimestampUs: Long?,
     val anomalyDebugSummary: String?,
 )
@@ -763,6 +773,16 @@ class FfmpegProbeService(
                 ((localPlaybackLastPtsUs - localPlaybackFirstPtsUs) / 1000L).takeIf { it > 0L }
             val localPlaybackWallSpanMs =
                 (localPlaybackLastRenderAtMs - localPlaybackFirstRenderAtMs).takeIf { it > 0L }
+            val registrationHealthyFrameCount = perfStats?.getOrNull(10) ?: 0L
+            val registrationSoftDegradedFrameCount = perfStats?.getOrNull(11) ?: 0L
+            val registrationHardDegradedFrameCount = perfStats?.getOrNull(12) ?: 0L
+            val registrationInvalidFrameCount = perfStats?.getOrNull(13) ?: 0L
+            val rescanFullFrameCount = perfStats?.getOrNull(14) ?: 0L
+            val rescanPartialFrameCount = perfStats?.getOrNull(15) ?: 0L
+            val rescanTargetOnlyFrameCount = perfStats?.getOrNull(16) ?: 0L
+            val rescanAppearanceStrideSkipFrameCount = perfStats?.getOrNull(17) ?: 0L
+            val currentRegistrationHealth = (perfStats?.getOrNull(18) ?: 0L).toInt()
+            val currentRescanMode = (perfStats?.getOrNull(19) ?: 0L).toInt()
             val currentSourceTimestampUs = perfStats?.getOrNull(9)?.takeIf { it > 0L }
             val localPlaybackRealtimeFactor =
                 if (localPlaybackMediaSpanMs != null && localPlaybackWallSpanMs != null && localPlaybackWallSpanMs > 0L) {
@@ -792,6 +812,16 @@ class FfmpegProbeService(
                 localPlaybackRealtimeFactor = localPlaybackRealtimeFactor,
                 localPlaybackMediaSpanMs = localPlaybackMediaSpanMs,
                 localPlaybackWallSpanMs = localPlaybackWallSpanMs,
+                registrationHealthyFrameCount = registrationHealthyFrameCount,
+                registrationSoftDegradedFrameCount = registrationSoftDegradedFrameCount,
+                registrationHardDegradedFrameCount = registrationHardDegradedFrameCount,
+                registrationInvalidFrameCount = registrationInvalidFrameCount,
+                rescanFullFrameCount = rescanFullFrameCount,
+                rescanPartialFrameCount = rescanPartialFrameCount,
+                rescanTargetOnlyFrameCount = rescanTargetOnlyFrameCount,
+                rescanAppearanceStrideSkipFrameCount = rescanAppearanceStrideSkipFrameCount,
+                currentRegistrationHealth = currentRegistrationHealth,
+                currentRescanMode = currentRescanMode,
                 currentSourceTimestampUs = currentSourceTimestampUs,
                 anomalyDebugSummary = anomalyDebugSummary,
             )

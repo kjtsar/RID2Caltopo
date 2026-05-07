@@ -25,6 +25,7 @@
 #define ANOMALY_SALIENCY_PLATEAU_SUPPORT 6
 #define ANOMALY_SALIENCY_SELECTION_SUPPORT_RADIUS 2
 #define ANOMALY_MAX_MOTION_CANDIDATES 4
+#define ANOMALY_MAX_THERMAL_CANDIDATES 8
 #define ANOMALY_MAX_OVERLAY_BOXES 8
 #define ANOMALY_MOTION_CANDIDATE_NMS_RADIUS 2
 #define ANOMALY_MOTION_LOCAL_RADIUS_CELLS 2
@@ -33,9 +34,11 @@
 #define ANOMALY_THERMAL_MOTION_BOOST 0.45f
 #define ANOMALY_COLOR_MOTION_BOOST 0.35f
 #define ANOMALY_THERMAL_FOOTPRINT_RADIUS 3
-#define ANOMALY_THERMAL_GROWTH_MAX_RADIUS 10
+#define ANOMALY_THERMAL_NORMALIZATION_REFERENCE_STEP 4
+#define ANOMALY_THERMAL_GROWTH_MAX_RADIUS 12
 #define ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX 20
 #define ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX 10
+#define ANOMALY_THERMAL_SMALL_TARGET_SCREEN_FRACTION (1.0f / 250.0f)
 #define ANOMALY_THERMAL_REPRESENTATIVE_RADIUS 5
 #define ANOMALY_THERMAL_REPRESENTATIVE_MIN_AREA 6
 #define ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS 8
@@ -62,6 +65,17 @@
 #define ANOMALY_SALIENCY_SECONDARY_LOCAL_RADIUS_CELLS 2
 #define ANOMALY_SALIENCY_SECONDARY_LOCAL_THRESHOLD_SLACK 0.40f
 #define ANOMALY_SALIENCY_BOUNDARY_RADIUS_CELLS 6
+#define ANOMALY_ROI_CELL_TARGET_SIZE_PX 16
+#define ANOMALY_ROI_REALTIME_CARRY_EXPIRY 3
+#define ANOMALY_SCAN_FLAG_NEW_EXPOSED 0x01u
+#define ANOMALY_SCAN_FLAG_STALE 0x02u
+#define ANOMALY_SCAN_FLAG_TARGET_REVISIT 0x04u
+#define ANOMALY_SCAN_FLAG_LOW_CONFIDENCE 0x08u
+#define ANOMALY_TARGET_MATCH_GATE 0.12f
+#define ANOMALY_TARGET_MAX_CARRIED_MISSES 2
+#define ANOMALY_TARGET_CONFIDENCE_HIT_GAIN 0.22f
+#define ANOMALY_TARGET_CONFIDENCE_MISS_DECAY 0.22f
+#define ANOMALY_TARGET_REVISIT_CONFIDENCE_MIN 0.20f
 
 static inline float clamp01f(float v) {
     if (v < 0.0f) return 0.0f;
@@ -123,6 +137,237 @@ static bool ensure_int_capacity(int **buffer, size_t *capacity, size_t count) {
     *buffer = grown;
     *capacity = count;
     return true;
+}
+
+static bool ensure_roi_state_capacity(anomaly_roi_state_t *roi_state, size_t pixel_count) {
+    if (roi_state == NULL) return false;
+    if (pixel_count == 0) return true;
+    if (roi_state->pixel_capacity >= pixel_count &&
+        roi_state->last_luma != NULL &&
+        roi_state->thermal_score != NULL &&
+        roi_state->temporal_score != NULL &&
+        roi_state->valid_mask != NULL &&
+        roi_state->fresh_mask != NULL &&
+        roi_state->carried_mask != NULL &&
+        roi_state->new_exposed_mask != NULL &&
+        roi_state->reg_confidence != NULL &&
+        roi_state->coverage_age != NULL) {
+        return true;
+    }
+    if (!ensure_float_capacity(&roi_state->last_luma, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->thermal_score, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->temporal_score, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->valid_mask, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->fresh_mask, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->carried_mask, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->new_exposed_mask, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->reg_confidence, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->coverage_age, &roi_state->pixel_capacity, pixel_count)) {
+        return false;
+    }
+    return true;
+}
+
+static bool ensure_roi_cell_capacity(anomaly_roi_state_t *roi_state, size_t cell_count) {
+    if (roi_state == NULL) return false;
+    if (cell_count == 0) return true;
+    if (roi_state->cell_capacity >= cell_count && roi_state->cell_summaries != NULL) {
+        return true;
+    }
+    anomaly_roi_cell_summary_t *grown = (anomaly_roi_cell_summary_t *)realloc(
+        roi_state->cell_summaries,
+        cell_count * sizeof(anomaly_roi_cell_summary_t));
+    if (grown == NULL) return false;
+    roi_state->cell_summaries = grown;
+    roi_state->cell_capacity = cell_count;
+    return true;
+}
+
+static void clear_roi_state(anomaly_roi_state_t *roi_state) {
+    if (roi_state == NULL) return;
+    roi_state->valid = false;
+    roi_state->roi_x0 = 0;
+    roi_state->roi_y0 = 0;
+    roi_state->roi_x1 = 0;
+    roi_state->roi_y1 = 0;
+    roi_state->width = 0;
+    roi_state->height = 0;
+    roi_state->sample_step = 0;
+    roi_state->cell_size_px = 0;
+    roi_state->cell_cols = 0;
+    roi_state->cell_rows = 0;
+    if (roi_state->pixel_capacity > 0) {
+        memset(roi_state->valid_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->fresh_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->carried_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->new_exposed_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->coverage_age, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        if (roi_state->reg_confidence != NULL) {
+            memset(roi_state->reg_confidence, 0, roi_state->pixel_capacity * sizeof(float));
+        }
+    }
+    if (roi_state->cell_capacity > 0 && roi_state->cell_summaries != NULL) {
+        memset(roi_state->cell_summaries, 0,
+               roi_state->cell_capacity * sizeof(anomaly_roi_cell_summary_t));
+    }
+}
+
+static void release_roi_state(anomaly_roi_state_t *roi_state) {
+    if (roi_state == NULL) return;
+    free(roi_state->last_luma);
+    free(roi_state->thermal_score);
+    free(roi_state->temporal_score);
+    free(roi_state->valid_mask);
+    free(roi_state->fresh_mask);
+    free(roi_state->carried_mask);
+    free(roi_state->new_exposed_mask);
+    free(roi_state->reg_confidence);
+    free(roi_state->coverage_age);
+    free(roi_state->cell_summaries);
+    memset(roi_state, 0, sizeof(*roi_state));
+}
+
+static inline float registration_health_confidence(anomaly_registration_health_t health) {
+    switch (health) {
+        case ANOMALY_REG_HEALTH_HEALTHY:
+            return 1.0f;
+        case ANOMALY_REG_HEALTH_SOFT_DEGRADED:
+            return 0.60f;
+        case ANOMALY_REG_HEALTH_HARD_DEGRADED:
+            return 0.25f;
+        case ANOMALY_REG_HEALTH_INVALID:
+            return 0.0f;
+        case ANOMALY_REG_HEALTH_UNKNOWN:
+        default:
+            return 0.10f;
+    }
+}
+
+static inline int roi_grid_cell_span(int sample_step) {
+    int step = sample_step > 0 ? sample_step : 1;
+    int span = (ANOMALY_ROI_CELL_TARGET_SIZE_PX + step - 1) / step;
+    return span > 0 ? span : 1;
+}
+
+static inline int thermal_radius_cells_for_real_px(
+        int target_radius_px,
+        int sample_step,
+        int min_cells,
+        int max_cells) {
+    int step = sample_step > 0 ? sample_step : 1;
+    int radius = (target_radius_px + step - 1) / step;
+    if (radius < min_cells) radius = min_cells;
+    if (max_cells > 0 && radius > max_cells) radius = max_cells;
+    return radius;
+}
+
+static inline int effective_thermal_window_radius_cells(int sample_step) {
+    int target_radius_px =
+        ANOMALY_THERMAL_WIN_RADIUS * ANOMALY_THERMAL_NORMALIZATION_REFERENCE_STEP;
+    return thermal_radius_cells_for_real_px(target_radius_px, sample_step, 1, 0);
+}
+
+static inline int effective_thermal_representative_radius_cells(int sample_step) {
+    int target_radius_px = 3 * ANOMALY_THERMAL_NORMALIZATION_REFERENCE_STEP;
+    return thermal_radius_cells_for_real_px(
+        target_radius_px,
+        sample_step,
+        3,
+        ANOMALY_THERMAL_GROWTH_MAX_RADIUS);
+}
+
+static inline int effective_thermal_growth_radius_cells(int sample_step) {
+    int target_radius_px = 3 * ANOMALY_THERMAL_NORMALIZATION_REFERENCE_STEP;
+    return thermal_radius_cells_for_real_px(
+        target_radius_px,
+        sample_step,
+        2,
+        ANOMALY_THERMAL_GROWTH_MAX_RADIUS);
+}
+
+static inline int effective_thermal_context_radius_cells(int sample_step) {
+    int target_radius_px =
+        ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS * ANOMALY_THERMAL_NORMALIZATION_REFERENCE_STEP;
+    return thermal_radius_cells_for_real_px(
+        target_radius_px,
+        sample_step,
+        6,
+        0);
+}
+
+static inline int effective_thermal_parent_mass_radius_cells(int sample_step) {
+    int target_radius_px =
+        (ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS + 2) * ANOMALY_THERMAL_NORMALIZATION_REFERENCE_STEP;
+    return thermal_radius_cells_for_real_px(
+        target_radius_px,
+        sample_step,
+        6,
+        0);
+}
+
+static inline float effective_thermal_small_target_span_px(
+        const anomaly_config_t *cfg,
+        int                     frame_w,
+        int                     frame_h) {
+    float fw = (float)(frame_w > 0 ? frame_w : 1);
+    float fh = (float)(frame_h > 0 ? frame_h : 1);
+    float diagonal_px = sqrtf(fw * fw + fh * fh);
+    float fraction = ANOMALY_THERMAL_SMALL_TARGET_SCREEN_FRACTION;
+    if (cfg != NULL &&
+        isfinite(cfg->small_target_screen_fraction) &&
+        cfg->small_target_screen_fraction > 0.0f) {
+        fraction = cfg->small_target_screen_fraction;
+    }
+    float span_px = diagonal_px * fraction;
+    if (span_px < 2.0f) span_px = 2.0f;
+    return span_px;
+}
+
+static inline float thermal_small_target_apparent_scale(
+        const anomaly_config_t *cfg,
+        float span_px,
+        int   frame_w,
+        int   frame_h) {
+    if (span_px <= 0.0f) return 1.0f;
+    float limit_px = effective_thermal_small_target_span_px(cfg, frame_w, frame_h);
+    if (span_px <= limit_px) return 1.0f;
+    if (span_px <= limit_px * 1.35f) {
+        float t = (span_px - limit_px) / fmaxf(limit_px * 0.35f, 0.001f);
+        return 1.0f - 0.28f * clampf(t, 0.0f, 1.0f);
+    }
+    if (span_px <= limit_px * 2.10f) {
+        float t = (span_px - limit_px * 1.35f) / fmaxf(limit_px * 0.75f, 0.001f);
+        return 0.72f - 0.54f * clampf(t, 0.0f, 1.0f);
+    }
+    return 0.18f;
+}
+
+static void clear_target_track(anomaly_target_track_t *track) {
+    if (track == NULL) return;
+    memset(track, 0, sizeof(*track));
+}
+
+static void clear_all_target_tracks(anomaly_state_t *state) {
+    if (state == NULL) return;
+    for (int i = 0; i < ANOMALY_MAX_TARGET_TRACKS; i++) {
+        clear_target_track(&state->target_tracks[i]);
+    }
+    state->next_target_track_id = 1;
+}
+
+static inline int target_revisit_track_count(const anomaly_state_t *state) {
+    if (state == NULL) return 0;
+    int count = 0;
+    for (int i = 0; i < ANOMALY_MAX_TARGET_TRACKS; i++) {
+        const anomaly_target_track_t *track = &state->target_tracks[i];
+        if (!track->active) continue;
+        if (track->forced_revisit ||
+            track->miss_count > 0 ||
+            track->confidence >= ANOMALY_TARGET_REVISIT_CONFIDENCE_MIN) {
+            count++;
+        }
+    }
+    return count;
 }
 
 static inline int popcount_u8(uint8_t value) {
@@ -333,6 +578,49 @@ typedef struct {
 } anomaly_thermal_blob_candidate_t;
 
 typedef struct {
+    bool enabled;
+    bool valid;
+    bool inside_scan_zone;
+    int target_idx;
+    int target_sx;
+    int target_sy;
+    int target_px;
+    int target_py;
+    float target_x_norm;
+    float target_y_norm;
+    float target_delta;
+    float target_score;
+    bool hot_eligible;
+    bool started_component;
+    bool local_max;
+    int suppressor_sx;
+    int suppressor_sy;
+    float suppressor_delta;
+    float suppressor_score;
+    int component_seed_x;
+    int component_seed_y;
+    int component_peak_x;
+    int component_peak_y;
+    float component_area;
+    float component_span;
+    float component_fill;
+    float component_peak_delta;
+    float component_mean_delta;
+    float component_quality;
+    bool component_rejected;
+    anomaly_debug_thermal_target_gate_t rejection_gate;
+    bool dropped_by_cap;
+    bool dropped_by_nms;
+    bool replaced_by_nms;
+    int nms_conflict_rank;
+    int nms_conflict_sample_x;
+    int nms_conflict_sample_y;
+    int extracted_rank;
+    int winning_rank;
+    anomaly_debug_thermal_target_stage_t stage;
+} anomaly_thermal_target_trace_t;
+
+typedef struct {
     int mode;
     float affine[6];  // prev = A(curr): [m00 m01 m02; m10 m11 m12]
     similarity_2d_t similarity;
@@ -343,6 +631,21 @@ typedef struct {
     int anchor_count;
     anomaly_debug_gmv_anchor_t anchors[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
 } anomaly_registration_model_t;
+
+static int find_target_blob_rank(
+        const anomaly_thermal_blob_candidate_t *top,
+        int top_count,
+        const anomaly_thermal_target_trace_t *target_trace) {
+    if (top == NULL || top_count <= 0 || target_trace == NULL) return -1;
+    if (target_trace->component_peak_x < 0 || target_trace->component_peak_y < 0) return -1;
+    for (int i = 0; i < top_count; i++) {
+        if (top[i].candidate.sg_x == target_trace->component_peak_x &&
+            top[i].candidate.sg_y == target_trace->component_peak_y) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 static int compare_thermal_blob_rank(
         const anomaly_thermal_blob_candidate_t *lhs,
@@ -372,8 +675,11 @@ static int compare_thermal_blob_rank(
 static void insert_thermal_blob_candidate(
         anomaly_thermal_blob_candidate_t *top,
         int *top_count,
-        const anomaly_thermal_blob_candidate_t *candidate) {
+        const anomaly_thermal_blob_candidate_t *candidate,
+        anomaly_thermal_target_trace_t *target_trace,
+        bool candidate_is_target) {
     if (top == NULL || top_count == NULL || candidate == NULL) return;
+    int target_rank_before = find_target_blob_rank(top, *top_count, target_trace);
     int insert_at = *top_count;
     for (int i = 0; i < *top_count; i++) {
         int ddx = abs(top[i].candidate.sg_x - candidate->candidate.sg_x);
@@ -381,7 +687,24 @@ static void insert_thermal_blob_candidate(
         if (ddx <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS &&
             ddy <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS) {
             if (compare_thermal_blob_rank(candidate, &top[i]) < 0) {
+                if (target_trace != NULL && target_rank_before == i && !candidate_is_target) {
+                    target_trace->dropped_by_nms = true;
+                    target_trace->replaced_by_nms = true;
+                    target_trace->nms_conflict_rank = i;
+                    target_trace->nms_conflict_sample_x = candidate->candidate.sg_x;
+                    target_trace->nms_conflict_sample_y = candidate->candidate.sg_y;
+                }
+                if (target_trace != NULL && candidate_is_target) {
+                    target_trace->nms_conflict_rank = i;
+                    target_trace->nms_conflict_sample_x = top[i].candidate.sg_x;
+                    target_trace->nms_conflict_sample_y = top[i].candidate.sg_y;
+                }
                 top[i] = *candidate;
+            } else if (target_trace != NULL && candidate_is_target) {
+                target_trace->dropped_by_nms = true;
+                target_trace->nms_conflict_rank = i;
+                target_trace->nms_conflict_sample_x = top[i].candidate.sg_x;
+                target_trace->nms_conflict_sample_y = top[i].candidate.sg_y;
             }
             return;
         }
@@ -390,24 +713,40 @@ static void insert_thermal_blob_candidate(
             break;
         }
     }
-    if (insert_at >= ANOMALY_MAX_MOTION_CANDIDATES) return;
+    if (insert_at >= ANOMALY_MAX_THERMAL_CANDIDATES) {
+        if (target_trace != NULL && candidate_is_target) {
+            target_trace->dropped_by_cap = true;
+        }
+        return;
+    }
 
-    int move_limit = *top_count < ANOMALY_MAX_MOTION_CANDIDATES
+    if (target_trace != NULL &&
+        target_rank_before == (ANOMALY_MAX_THERMAL_CANDIDATES - 1) &&
+        *top_count >= ANOMALY_MAX_THERMAL_CANDIDATES &&
+        insert_at <= target_rank_before &&
+        !candidate_is_target) {
+        target_trace->dropped_by_cap = true;
+    }
+
+    int move_limit = *top_count < ANOMALY_MAX_THERMAL_CANDIDATES
         ? *top_count
-        : (ANOMALY_MAX_MOTION_CANDIDATES - 1);
+        : (ANOMALY_MAX_THERMAL_CANDIDATES - 1);
     for (int i = move_limit; i > insert_at; i--) {
         top[i] = top[i - 1];
     }
-    if (*top_count < ANOMALY_MAX_MOTION_CANDIDATES) (*top_count)++;
+    if (*top_count < ANOMALY_MAX_THERMAL_CANDIDATES) (*top_count)++;
     top[insert_at] = *candidate;
 }
 
 static void extract_thermal_blob_candidates(
+        const anomaly_config_t *cfg,
         const float *thermal_score_map,
         const float *bg_luma,
         const float *sg_luma,
         int          sg_w,
         int          sg_h,
+        int          frame_w,
+        int          frame_h,
         int          roi_x0,
         int          roi_y0,
         int          sample_step,
@@ -421,7 +760,8 @@ static void extract_thermal_blob_candidates(
         float       *thermal_value_map,
         float       *candidate_seed_map,
         anomaly_thermal_blob_candidate_t *out_candidates,
-        int         *out_count) {
+        int         *out_count,
+        anomaly_thermal_target_trace_t *target_trace) {
     if (out_count != NULL) *out_count = 0;
     if (thermal_score_map == NULL || thermal_value_map == NULL || candidate_seed_map == NULL ||
         visited == NULL || queue == NULL || out_candidates == NULL || out_count == NULL ||
@@ -431,6 +771,42 @@ static void extract_thermal_blob_candidates(
 
     size_t sg_count = (size_t)sg_w * (size_t)sg_h;
     memset(visited, 0, sg_count * sizeof(uint8_t));
+    if (target_trace != NULL) {
+        memset(target_trace, 0, sizeof(*target_trace));
+        target_trace->enabled = cfg != NULL && cfg->thermal_debug_target_enabled;
+        target_trace->suppressor_sx = -1;
+        target_trace->suppressor_sy = -1;
+        target_trace->component_seed_x = -1;
+        target_trace->component_seed_y = -1;
+        target_trace->component_peak_x = -1;
+        target_trace->component_peak_y = -1;
+        target_trace->nms_conflict_rank = -1;
+        target_trace->nms_conflict_sample_x = -1;
+        target_trace->nms_conflict_sample_y = -1;
+        target_trace->extracted_rank = -1;
+        target_trace->winning_rank = -1;
+        if (target_trace->enabled) {
+            int px = clamp_i32((int)lroundf(cfg->thermal_debug_target_x_norm * (float)(frame_w - 1)), 0, frame_w - 1);
+            int py = clamp_i32((int)lroundf(cfg->thermal_debug_target_y_norm * (float)(frame_h - 1)), 0, frame_h - 1);
+            int local_x = px - roi_x0;
+            int local_y = py - roi_y0;
+            target_trace->target_px = px;
+            target_trace->target_py = py;
+            target_trace->target_x_norm = cfg->thermal_debug_target_x_norm;
+            target_trace->target_y_norm = cfg->thermal_debug_target_y_norm;
+            target_trace->inside_scan_zone =
+                local_x >= 0 && local_x < sg_w * sample_step &&
+                local_y >= 0 && local_y < sg_h * sample_step;
+            if (target_trace->inside_scan_zone) {
+                int sx = clamp_i32(local_x / sample_step, 0, sg_w - 1);
+                int sy = clamp_i32(local_y / sample_step, 0, sg_h - 1);
+                target_trace->valid = true;
+                target_trace->target_sx = sx;
+                target_trace->target_sy = sy;
+                target_trace->target_idx = sy * sg_w + sx;
+            }
+        }
+    }
     for (size_t i = 0; i < sg_count; i++) {
         candidate_seed_map[i] = -1.0f;
         float score = thermal_score_map[i];
@@ -447,6 +823,40 @@ static void extract_thermal_blob_candidates(
             thermal_value_map[i] = score;
         }
     }
+    if (target_trace != NULL && target_trace->enabled && target_trace->valid) {
+        size_t tidx = (size_t)target_trace->target_idx;
+        target_trace->target_delta = thermal_value_map[tidx];
+        target_trace->target_score = thermal_score_map[tidx];
+        target_trace->hot_eligible = thermal_value_map[tidx] > 0.0f;
+        target_trace->stage = target_trace->hot_eligible
+            ? ANOMALY_THERMAL_TARGET_STAGE_MERGED_INTO_COMPONENT
+            : ANOMALY_THERMAL_TARGET_STAGE_NOT_HOT;
+        target_trace->local_max = true;
+        for (int ny = target_trace->target_sy - 1; ny <= target_trace->target_sy + 1; ny++) {
+            if (ny < 0 || ny >= sg_h) continue;
+            for (int nx = target_trace->target_sx - 1; nx <= target_trace->target_sx + 1; nx++) {
+                if (nx < 0 || nx >= sg_w) continue;
+                if (nx == target_trace->target_sx && ny == target_trace->target_sy) continue;
+                size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+                float ndelta = thermal_value_map[nidx];
+                float nscore = thermal_score_map[nidx];
+                if (ndelta > target_trace->target_delta ||
+                    (ndelta == target_trace->target_delta && nscore > target_trace->target_score)) {
+                    target_trace->local_max = false;
+                    if (ndelta > target_trace->suppressor_delta ||
+                        (ndelta == target_trace->suppressor_delta && nscore > target_trace->suppressor_score)) {
+                        target_trace->suppressor_sx = nx;
+                        target_trace->suppressor_sy = ny;
+                        target_trace->suppressor_delta = ndelta;
+                        target_trace->suppressor_score = nscore;
+                    }
+                }
+            }
+        }
+        if (!target_trace->local_max && target_trace->hot_eligible) {
+            target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_SUPPRESSED_BY_NEIGHBOR;
+        }
+    }
 
     float contrast_band = frame_contrast_mean + 1.25f * frame_contrast_std;
     if (contrast_band < 0.8f) contrast_band = 0.8f;
@@ -457,6 +867,12 @@ static void extract_thermal_blob_candidates(
             if (visited[seed_idx] != 0u) continue;
             float seed_delta = thermal_value_map[seed_idx];
             if (seed_delta <= 0.0f) continue;
+            if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                (int)seed_idx == target_trace->target_idx) {
+                target_trace->started_component = true;
+                target_trace->component_seed_x = sx;
+                target_trace->component_seed_y = sy;
+            }
 
             float local_band = contrast_band;
             float max_band = fmaxf(2.0f, seed_delta * 0.34f);
@@ -483,6 +899,11 @@ static void extract_thermal_blob_candidates(
                 float cur_delta = thermal_value_map[cur];
                 float cur_score = thermal_score_map[cur];
                 if (cur_delta <= 0.0f) continue;
+                if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                    cur == target_trace->target_idx) {
+                    target_trace->component_seed_x = sx;
+                    target_trace->component_seed_y = sy;
+                }
 
                 area++;
                 sum_delta += (double)cur_delta;
@@ -528,6 +949,8 @@ static void extract_thermal_blob_candidates(
             float fill = bbox_area > 0 ? ((float)area / (float)bbox_area) : 0.0f;
             float span = (float)(span_w > span_h ? span_w : span_h);
             float span_px = span * (float)(sample_step > 0 ? sample_step : 1);
+            float small_target_limit_px = effective_thermal_small_target_span_px(cfg, frame_w, frame_h);
+            float apparent_size_scale = thermal_small_target_apparent_scale(cfg, span_px, frame_w, frame_h);
             float mean_delta = (float)(sum_delta / (double)area);
             float center_share = sum_delta > 0.0 ? (peak_delta / (float)sum_delta) : 0.0f;
             float peakiness = (peak_delta - mean_delta) / fmaxf(local_band, 1.0f);
@@ -624,18 +1047,65 @@ static void extract_thermal_blob_candidates(
                 ? ((float)support_near_hot / (float)support_near_total)
                 : 0.0f;
 
-            if (bg_valid && area > ANOMALY_THERMAL_MAX_BLOB_AREA_SAMPLES) continue;
-            if (bg_valid && ring_hot_fraction >= 0.22f) continue;
-            if (bg_valid && max_side_hot_fraction >= 0.60f) continue;
+            if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                target_trace->component_peak_x = peak_x;
+                target_trace->component_peak_y = peak_y;
+                target_trace->component_area = (float)area;
+                target_trace->component_span = span;
+                target_trace->component_fill = fill;
+                target_trace->component_peak_delta = peak_delta;
+                target_trace->component_mean_delta = mean_delta;
+            }
+
+            if (bg_valid && area > ANOMALY_THERMAL_MAX_BLOB_AREA_SAMPLES) {
+                if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                    target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                    target_trace->component_rejected = true;
+                    target_trace->rejection_gate = ANOMALY_THERMAL_TARGET_GATE_MAX_AREA;
+                    target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE;
+                }
+                continue;
+            }
+            if (bg_valid && ring_hot_fraction >= 0.22f) {
+                if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                    target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                    target_trace->component_rejected = true;
+                    target_trace->rejection_gate = ANOMALY_THERMAL_TARGET_GATE_RING_HOT;
+                    target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE;
+                }
+                continue;
+            }
+            if (bg_valid && max_side_hot_fraction >= 0.60f) {
+                if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                    target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                    target_trace->component_rejected = true;
+                    target_trace->rejection_gate = ANOMALY_THERMAL_TARGET_GATE_SIDE_HOT;
+                    target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE;
+                }
+                continue;
+            }
             if (bg_valid &&
                 support_mass_ratio >= 1.85f &&
                 support_hot_fraction >= 0.14f &&
                 support_near_fraction >= 0.18f) {
+                if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                    target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                    target_trace->component_rejected = true;
+                    target_trace->rejection_gate = ANOMALY_THERMAL_TARGET_GATE_SUPPORT_MASS;
+                    target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE;
+                }
                 continue;
             }
             if (bg_valid &&
                 support_mass_ratio >= 2.40f &&
                 support_near_fraction >= 0.12f) {
+                if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                    target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                    target_trace->component_rejected = true;
+                    target_trace->rejection_gate = ANOMALY_THERMAL_TARGET_GATE_SUPPORT_NEAR;
+                    target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE;
+                }
                 continue;
             }
 
@@ -650,7 +1120,7 @@ static void extract_thermal_blob_candidates(
             if (span_px <= 3.0f) span_scale = 1.18f;
             else if (span_px <= 6.0f) span_scale = 1.00f;
             else if (span_px <= 9.0f) span_scale = 0.60f;
-            else if (span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX) span_scale = 0.28f;
+            else if (span_px <= small_target_limit_px) span_scale = 0.28f;
             else span_scale = 0.10f;
 
             float fill_scale = clampf(0.55f + 0.70f * fill, 0.45f, 1.15f);
@@ -665,11 +1135,24 @@ static void extract_thermal_blob_candidates(
                 context_scale = 1.0f - 0.72f * clampf(context_penalty, 0.0f, 1.0f);
             }
             float quality = area_scale * span_scale * fill_scale * center_scale * peak_scale * context_scale;
-            if (span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX && area >= 8) {
+            quality *= apparent_size_scale;
+            if (span_px >= small_target_limit_px && area >= 8) {
                 quality *= 0.18f;
             }
             quality = clampf(quality, 0.0f, 1.35f);
-            if (quality <= 0.0f) continue;
+            if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                target_trace->component_quality = quality;
+            }
+            if (quality <= 0.0f) {
+                if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                    target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
+                    target_trace->component_rejected = true;
+                    target_trace->rejection_gate = ANOMALY_THERMAL_TARGET_GATE_ZERO_QUALITY;
+                    target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE;
+                }
+                continue;
+            }
 
             anomaly_thermal_blob_candidate_t candidate;
             memset(&candidate, 0, sizeof(candidate));
@@ -694,8 +1177,25 @@ static void extract_thermal_blob_candidates(
 
             candidate_seed_map[(size_t)peak_y * (size_t)sg_w + (size_t)peak_x] =
                 candidate.candidate.proposal_score;
-            insert_thermal_blob_candidate(out_candidates, out_count, &candidate);
+            bool candidate_is_target =
+                target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                target_trace->component_seed_x == sx && target_trace->component_seed_y == sy;
+            insert_thermal_blob_candidate(
+                    out_candidates,
+                    out_count,
+                    &candidate,
+                    target_trace,
+                    candidate_is_target);
+            if (candidate_is_target) {
+                target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+            }
         }
+    }
+    if (target_trace != NULL &&
+        target_trace->enabled &&
+        target_trace->valid &&
+        target_trace->stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED) {
+        target_trace->extracted_rank = find_target_blob_rank(out_candidates, *out_count, target_trace);
     }
 }
 
@@ -1916,12 +2416,7 @@ static void estimate_representative_blob_delta_stats(
     float weighted_ratio = 0.0f;
     float weighted_std = 0.0f;
     float total_weight = 0.0f;
-    int growth_radius_cells = ANOMALY_THERMAL_REPRESENTATIVE_RADIUS;
-    if (sample_step > 0) {
-        int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (2 * sample_step) - 1) / (2 * sample_step);
-        if (bounded < 3) bounded = 3;
-        if (bounded < growth_radius_cells) growth_radius_cells = bounded;
-    }
+    int growth_radius_cells = effective_thermal_representative_radius_cells(sample_step);
 
     for (int ci = 0; ci < candidate_count; ci++) {
         int sx = candidates[ci].sg_x;
@@ -2091,12 +2586,7 @@ static float thermal_candidate_seed_context_scale(
         : ((float)sg_luma[seed_idx] - bg_luma[seed_idx]);
     if (seed_delta < thermal_min_delta) return 0.45f;
 
-    int radius = ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS;
-    if (sample_step > 0) {
-        int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (8 * sample_step) - 1) / sample_step;
-        if (bounded < 6) bounded = 6;
-        if (bounded < radius) radius = bounded;
-    }
+    int radius = effective_thermal_context_radius_cells(sample_step);
     static const int dirs[8][2] = {
         { 0, -1}, { 1, -1}, { 1,  0}, { 1,  1},
         { 0,  1}, {-1,  1}, {-1,  0}, {-1, -1},
@@ -2246,12 +2736,7 @@ static float thermal_candidate_parent_mass_scale(
         : ((float)sg_luma[seed_idx] - bg_luma[seed_idx]);
     if (seed_delta < thermal_min_delta) return 0.50f;
 
-    int radius = ANOMALY_THERMAL_BROAD_CONTEXT_RADIUS + 2;
-    if (sample_step > 0) {
-        int bounded = ((ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX * 2) + (sample_step - 1)) / sample_step;
-        if (bounded < 6) bounded = 6;
-        if (bounded < radius) radius = bounded;
-    }
+    int radius = effective_thermal_parent_mass_radius_cells(sample_step);
     float frame_band = frame_contrast_mean + 1.25f * frame_contrast_std;
     if (frame_band < 1.0f) frame_band = 1.0f;
     float max_band = fmaxf(1.8f, seed_delta * 0.34f);
@@ -2368,12 +2853,7 @@ static float thermal_candidate_quality(
     float center = score_map[sy * sg_w + sx];
     if (center <= 0.0f) return 0.15f;
 
-    int growth_radius_cells = ANOMALY_THERMAL_GROWTH_MAX_RADIUS;
-    if (sample_step > 0) {
-        int bounded = (ANOMALY_THERMAL_GROWTH_MAX_DIAMETER_PX + (2 * sample_step) - 1) / (2 * sample_step);
-        if (bounded < 2) bounded = 2;
-        if (bounded < growth_radius_cells) growth_radius_cells = bounded;
-    }
+    int growth_radius_cells = effective_thermal_growth_radius_cells(sample_step);
 
     int rx0 = clamp_i32(sx - growth_radius_cells, 0, sg_w - 1);
     int rx1 = clamp_i32(sx + growth_radius_cells, 0, sg_w - 1);
@@ -2753,7 +3233,10 @@ static float thermal_candidate_quality(
         growth_scale *= 0.36f;
     }
     if (best_small_span_px > 0.0f &&
-        best_small_span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX &&
+        best_small_span_px <= effective_thermal_small_target_span_px(
+            NULL,
+            sample_step * sg_w,
+            sample_step * sg_h) &&
         span_px >= best_small_span_px + 2.0f) {
         growth_scale *= 0.60f;
     }
@@ -2761,7 +3244,10 @@ static float thermal_candidate_quality(
     float quality = area_scale * span_scale * fill_scale * center_scale *
         plateau_scale * growth_scale * border_scale;
     quality *= peakiness_scale;
-    if (span_px >= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX && area >= 8) {
+    if (span_px >= effective_thermal_small_target_span_px(
+            NULL,
+            sample_step * sg_w,
+            sample_step * sg_h) && area >= 8) {
         quality *= 0.18f;
     }
     if (use_raw_delta && seed_delta > 0.0f && frame_contrast_band > 0.0f) {
@@ -3905,6 +4391,30 @@ static int assemble_anomaly_boxes(const anomaly_state_t *state,
 
     int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
     int box_count = 0;
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS && box_count < max_boxes; ti++) {
+        const anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!track->active || track->hit_count < min_hits) continue;
+        int rgb_idx = 3;
+        if (track->algorithm == ANOMALY_ALGO_COLOR) rgb_idx = 0;
+        else if (track->algorithm == ANOMALY_ALGO_THERMAL) rgb_idx = 1;
+        else if (track->algorithm == motion_box_algorithm || track->algorithm == ANOMALY_ALGO_MOTION) rgb_idx = 2;
+        float weight = clampf(0.25f + track->confidence + 0.05f * (float)track->hit_count, 0.25f, 1.0f);
+        append_anomaly_box(
+                boxes,
+                &box_count,
+                track->center_x_norm,
+                track->center_y_norm,
+                fmaxf(track->half_w_norm * 2.0f, box_side * 0.85f),
+                fmaxf(track->half_h_norm * 2.0f, box_side * 0.85f),
+                algo_rgb[rgb_idx][0],
+                algo_rgb[rgb_idx][1],
+                algo_rgb[rgb_idx][2],
+                weight);
+        if (box_count > 0) {
+            boxes[box_count - 1].algorithm = track->algorithm;
+        }
+    }
+    if (box_count > 0) return box_count;
     for (int ai = 0; ai < 4 && box_count < max_boxes; ai++) {
         if (saliency_primary && ai != 3) continue;
         if (!state->acc_active[ai]) continue;
@@ -4058,6 +4568,7 @@ static void clear_all_roi_tracks(anomaly_state_t *state) {
     for (int i = 0; i < ANOMALY_SALIENCY_EXTRA_TRACKS; i++) {
         clear_saliency_aux_track_state(state, i);
     }
+    clear_all_target_tracks(state);
 }
 
 static void age_roi_tracks_one_frame(anomaly_state_t *state) {
@@ -4079,6 +4590,166 @@ static void age_roi_tracks_one_frame(anomaly_state_t *state) {
         } else {
             state->saliency_aux_hold[ti] = hold;
         }
+    }
+}
+
+typedef struct {
+    bool  valid;
+    int   algorithm;
+    float center_x_norm;
+    float center_y_norm;
+    float half_w_norm;
+    float half_h_norm;
+    float support_radius_norm;
+    float confidence;
+} anomaly_target_observation_t;
+
+static int find_best_target_track_match(
+        const anomaly_state_t              *state,
+        const anomaly_target_observation_t *obs,
+        const bool                         *matched_tracks) {
+    if (state == NULL || obs == NULL || !obs->valid) return -1;
+    float best_dist = ANOMALY_TARGET_MATCH_GATE;
+    int best_idx = -1;
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        const anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!track->active || (matched_tracks != NULL && matched_tracks[ti])) continue;
+        float dx = obs->center_x_norm - track->center_x_norm;
+        float dy = obs->center_y_norm - track->center_y_norm;
+        float dist = sqrtf(dx * dx + dy * dy);
+        float gate = ANOMALY_TARGET_MATCH_GATE + 0.25f * track->support_radius_norm;
+        if (dist > gate) continue;
+        if (obs->algorithm != track->algorithm && dist > best_dist * 0.65f) continue;
+        if (best_idx < 0 || dist < best_dist) {
+            best_idx = ti;
+            best_dist = dist;
+        }
+    }
+    return best_idx;
+}
+
+static int allocate_target_track_slot(
+        anomaly_state_t *state) {
+    if (state == NULL) return -1;
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        if (!state->target_tracks[ti].active) return ti;
+    }
+    int weakest_idx = 0;
+    float weakest_score = state->target_tracks[0].confidence;
+    for (int ti = 1; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        float score = state->target_tracks[ti].confidence - 0.10f * (float)state->target_tracks[ti].hit_count;
+        if (score < weakest_score) {
+            weakest_score = score;
+            weakest_idx = ti;
+        }
+    }
+    return weakest_idx;
+}
+
+static void predict_target_tracks_with_registration(
+        anomaly_state_t                   *state,
+        const anomaly_registration_model_t *registration,
+        anomaly_registration_health_t      registration_health,
+        bool                               scene_discontinuity) {
+    if (state == NULL) return;
+    if (scene_discontinuity ||
+        registration_health == ANOMALY_REG_HEALTH_INVALID ||
+        registration_health == ANOMALY_REG_HEALTH_HARD_DEGRADED) {
+        clear_all_target_tracks(state);
+        return;
+    }
+    if (!registration_model_valid(registration)) return;
+
+    float reg_quality = registration_health_confidence(registration_health);
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!track->active) continue;
+        float nx = 0.0f;
+        float ny = 0.0f;
+        if (!registration_invert_point(registration,
+                                       track->center_x_norm,
+                                       track->center_y_norm,
+                                       &nx,
+                                       &ny)) {
+            track->forced_revisit = true;
+            continue;
+        }
+        track->center_x_norm = clamp01f(nx);
+        track->center_y_norm = clamp01f(ny);
+        track->last_registration_quality = reg_quality;
+        if (!track->fresh_observation) {
+            track->forced_revisit = true;
+        }
+    }
+}
+
+static void update_target_tracks_from_observations(
+        anomaly_state_t                    *state,
+        const anomaly_target_observation_t *observations,
+        int                                 observation_count,
+        anomaly_registration_health_t       registration_health) {
+    if (state == NULL) return;
+
+    bool matched_tracks[ANOMALY_MAX_TARGET_TRACKS];
+    memset(matched_tracks, 0, sizeof(matched_tracks));
+    float reg_quality = registration_health_confidence(registration_health);
+    bool had_any_target_tracks = state->next_target_track_id > 1;
+
+    for (int oi = 0; oi < observation_count; oi++) {
+        const anomaly_target_observation_t *obs = &observations[oi];
+        if (!obs->valid) continue;
+        int track_idx = find_best_target_track_match(state, obs, matched_tracks);
+        if (track_idx < 0) {
+            track_idx = allocate_target_track_slot(state);
+            if (track_idx < 0) continue;
+            clear_target_track(&state->target_tracks[track_idx]);
+            state->target_tracks[track_idx].active = true;
+            state->target_tracks[track_idx].id = state->next_target_track_id++;
+            if (state->next_target_track_id <= 0) state->next_target_track_id = 1;
+        }
+
+        anomaly_target_track_t *track = &state->target_tracks[track_idx];
+        track->active = true;
+        track->algorithm = obs->algorithm;
+        track->center_x_norm = obs->center_x_norm;
+        track->center_y_norm = obs->center_y_norm;
+        track->half_w_norm = obs->half_w_norm;
+        track->half_h_norm = obs->half_h_norm;
+        track->support_radius_norm = obs->support_radius_norm;
+        track->confidence = clampf(fmaxf(track->confidence, obs->confidence) +
+                                   ANOMALY_TARGET_CONFIDENCE_HIT_GAIN,
+                                   0.0f,
+                                   1.0f);
+        track->hit_count++;
+        track->miss_count = 0;
+        track->hold_count = ANOMALY_ACC_HOLD_FRAMES;
+        track->last_registration_quality = reg_quality;
+        track->forced_revisit = true;
+        track->fresh_observation = true;
+        matched_tracks[track_idx] = true;
+    }
+
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!track->active || matched_tracks[ti]) continue;
+        track->fresh_observation = false;
+        track->miss_count++;
+        track->hold_count--;
+        track->confidence = clampf(track->confidence - ANOMALY_TARGET_CONFIDENCE_MISS_DECAY, 0.0f, 1.0f);
+        track->forced_revisit =
+            registration_health >= ANOMALY_REG_HEALTH_SOFT_DEGRADED &&
+            track->miss_count <= ANOMALY_TARGET_MAX_CARRIED_MISSES;
+        if (track->hold_count <= 0 ||
+            track->miss_count > ANOMALY_TARGET_MAX_CARRIED_MISSES ||
+            registration_health <= ANOMALY_REG_HEALTH_HARD_DEGRADED ||
+            track->confidence < 0.05f) {
+            clear_target_track(track);
+        }
+    }
+    if (had_any_target_tracks &&
+        observation_count == 0 &&
+        target_revisit_track_count(state) == 0) {
+        clear_all_roi_tracks(state);
     }
 }
 
@@ -4709,6 +5380,648 @@ static void populate_registration_debug(
     }
 }
 
+static anomaly_registration_health_t classify_registration_health(
+        const anomaly_registration_model_t *model,
+        int                                 width,
+        int                                 height) {
+    if (model == NULL || !model->debug_valid) {
+        return ANOMALY_REG_HEALTH_UNKNOWN;
+    }
+    if (!registration_model_valid(model) || model->scene_discontinuity) {
+        return ANOMALY_REG_HEALTH_INVALID;
+    }
+
+    float scale = registration_model_scale(model);
+    float residual = model->similarity.mean_residual;
+    bool motion_too_large = registration_motion_exceeds_search(model, width, height, 0.70f);
+    bool scale_far = scale < 0.80f || scale > 1.20f;
+    bool scale_soft = scale < 0.90f || scale > 1.10f;
+
+    if (motion_too_large ||
+        scale_far ||
+        residual > (ANOMALY_GMV_RESIDUAL_THRESH * 1.5f)) {
+        return ANOMALY_REG_HEALTH_HARD_DEGRADED;
+    }
+    if (scale_soft || residual > (ANOMALY_GMV_RESIDUAL_THRESH * 0.75f)) {
+        return ANOMALY_REG_HEALTH_SOFT_DEGRADED;
+    }
+    return ANOMALY_REG_HEALTH_HEALTHY;
+}
+
+static void summarize_roi_cells(
+        anomaly_roi_state_t          *roi_state,
+        const float                  *motion_support_map,
+        anomaly_registration_health_t registration_health) {
+    if (roi_state == NULL || !roi_state->valid) return;
+    int width = roi_state->width;
+    int height = roi_state->height;
+    if (width <= 0 || height <= 0 || roi_state->cell_cols <= 0 || roi_state->cell_rows <= 0) {
+        return;
+    }
+    size_t cell_count = (size_t)roi_state->cell_cols * (size_t)roi_state->cell_rows;
+    if (!ensure_roi_cell_capacity(roi_state, cell_count)) return;
+    memset(roi_state->cell_summaries, 0, cell_count * sizeof(anomaly_roi_cell_summary_t));
+    int cell_span = roi_grid_cell_span(roi_state->sample_step);
+    if (cell_span <= 0) cell_span = 1;
+    float reg_conf = registration_health_confidence(registration_health);
+    for (int sy = 0; sy < height; sy++) {
+        int cell_y = sy / cell_span;
+        if (cell_y >= roi_state->cell_rows) cell_y = roi_state->cell_rows - 1;
+        for (int sx = 0; sx < width; sx++) {
+            int cell_x = sx / cell_span;
+            if (cell_x >= roi_state->cell_cols) cell_x = roi_state->cell_cols - 1;
+            size_t idx = (size_t)sy * (size_t)width + (size_t)sx;
+            size_t cell_idx = (size_t)cell_y * (size_t)roi_state->cell_cols + (size_t)cell_x;
+            anomaly_roi_cell_summary_t *cell = &roi_state->cell_summaries[cell_idx];
+            if (roi_state->valid_mask[idx]) cell->valid_count++;
+            if (roi_state->fresh_mask[idx]) cell->fresh_count++;
+            if (roi_state->carried_mask[idx]) cell->carried_count++;
+            if (roi_state->new_exposed_mask[idx]) cell->newly_exposed_count++;
+            if (roi_state->valid_mask[idx] &&
+                roi_state->coverage_age[idx] > ANOMALY_ROI_REALTIME_CARRY_EXPIRY) {
+                cell->stale_count++;
+            }
+            if (roi_state->new_exposed_mask[idx]) cell->scan_flags |= ANOMALY_SCAN_FLAG_NEW_EXPOSED;
+            if (roi_state->valid_mask[idx] &&
+                roi_state->coverage_age[idx] > ANOMALY_ROI_REALTIME_CARRY_EXPIRY) {
+                cell->scan_flags |= ANOMALY_SCAN_FLAG_STALE;
+            }
+            if (roi_state->reg_confidence[idx] < 0.50f) {
+                cell->scan_flags |= ANOMALY_SCAN_FLAG_LOW_CONFIDENCE;
+            }
+            if (roi_state->thermal_score != NULL &&
+                roi_state->thermal_score[idx] > cell->max_thermal_score) {
+                cell->max_thermal_score = roi_state->thermal_score[idx];
+            }
+            float motion_support = motion_support_map != NULL ? motion_support_map[idx] : 0.0f;
+            if (motion_support > cell->max_motion_support) {
+                cell->max_motion_support = motion_support;
+            }
+            if (roi_state->reg_confidence[idx] > cell->registration_quality) {
+                cell->registration_quality = roi_state->reg_confidence[idx];
+            } else if (cell->registration_quality <= 0.0f) {
+                cell->registration_quality = reg_conf;
+            }
+        }
+    }
+}
+
+static void annotate_target_revisit_cells(
+        anomaly_roi_state_t      *roi_state,
+        const anomaly_state_t    *state) {
+    if (roi_state == NULL || state == NULL || !roi_state->valid ||
+        roi_state->cell_summaries == NULL ||
+        roi_state->cell_cols <= 0 || roi_state->cell_rows <= 0) {
+        return;
+    }
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        const anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!track->active || !track->forced_revisit) continue;
+        float revisit_radius = track->support_radius_norm;
+        if (revisit_radius < track->half_w_norm) revisit_radius = track->half_w_norm;
+        if (revisit_radius < track->half_h_norm) revisit_radius = track->half_h_norm;
+        if (revisit_radius < 0.01f) revisit_radius = 0.01f;
+        float x0_norm = clamp01f(track->center_x_norm - revisit_radius);
+        float x1_norm = clamp01f(track->center_x_norm + revisit_radius);
+        float y0_norm = clamp01f(track->center_y_norm - revisit_radius);
+        float y1_norm = clamp01f(track->center_y_norm + revisit_radius);
+        int cell_x0 = clamp_i32((int)floorf(x0_norm * (float)roi_state->cell_cols),
+                                0, roi_state->cell_cols - 1);
+        int cell_x1 = clamp_i32((int)floorf(x1_norm * (float)roi_state->cell_cols),
+                                0, roi_state->cell_cols - 1);
+        int cell_y0 = clamp_i32((int)floorf(y0_norm * (float)roi_state->cell_rows),
+                                0, roi_state->cell_rows - 1);
+        int cell_y1 = clamp_i32((int)floorf(y1_norm * (float)roi_state->cell_rows),
+                                0, roi_state->cell_rows - 1);
+        for (int cell_y = cell_y0; cell_y <= cell_y1; cell_y++) {
+            for (int cell_x = cell_x0; cell_x <= cell_x1; cell_x++) {
+                size_t cell_idx = (size_t)cell_y * (size_t)roi_state->cell_cols + (size_t)cell_x;
+                roi_state->cell_summaries[cell_idx].scan_flags |= ANOMALY_SCAN_FLAG_TARGET_REVISIT;
+            }
+        }
+    }
+}
+
+static bool build_selective_refresh_mask(
+        const anomaly_state_t               *state,
+        const anomaly_registration_model_t  *model,
+        anomaly_rescan_mode_t                mode,
+        int                                  frame_width,
+        int                                  frame_height,
+        int                                  roi_x0,
+        int                                  roi_y0,
+        int                                  roi_x1,
+        int                                  roi_y1,
+        int                                  sample_step,
+        int                                  sg_w,
+        int                                  sg_h,
+        uint8_t                             *refresh_mask,
+        int                                 *selected_count_out) {
+    if (selected_count_out != NULL) *selected_count_out = 0;
+    if (refresh_mask == NULL || state == NULL ||
+        (mode != ANOMALY_RESCAN_MODE_PARTIAL &&
+         mode != ANOMALY_RESCAN_MODE_TARGET_ONLY)) {
+        return false;
+    }
+
+    const anomaly_roi_state_t *prev = &state->roi_state;
+    if (!prev->valid ||
+        prev->sample_step != sample_step ||
+        prev->width <= 0 || prev->height <= 0 ||
+        prev->cell_cols <= 0 || prev->cell_rows <= 0 ||
+        prev->valid_mask == NULL ||
+        prev->cell_summaries == NULL ||
+        !registration_model_valid(model)) {
+        return false;
+    }
+
+    size_t total_samples = (size_t)sg_w * (size_t)sg_h;
+    memset(refresh_mask, 0, total_samples * sizeof(uint8_t));
+    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
+    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    int prev_cell_span = roi_grid_cell_span(prev->sample_step);
+    if (prev_cell_span <= 0) return false;
+
+    uint32_t required_flags = (mode == ANOMALY_RESCAN_MODE_TARGET_ONLY)
+        ? ANOMALY_SCAN_FLAG_TARGET_REVISIT
+        : (ANOMALY_SCAN_FLAG_NEW_EXPOSED |
+           ANOMALY_SCAN_FLAG_STALE |
+           ANOMALY_SCAN_FLAG_TARGET_REVISIT);
+    bool target_only = (mode == ANOMALY_RESCAN_MODE_TARGET_ONLY);
+    int selected_count = 0;
+    for (int sy = 0; sy < sg_h; sy++) {
+        int y = roi_y0 + sy * sample_step + sample_step / 2;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            int x = roi_x0 + sx * sample_step + sample_step / 2;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            bool select_sample = false;
+            float nx = clamp01f((float)x / fw);
+            float ny = clamp01f((float)y / fh);
+            float px = 0.0f;
+            float py = 0.0f;
+            if (!registration_invert_point(model, nx, ny, &px, &py)) {
+                select_sample = !target_only;
+            } else {
+                int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
+                int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
+                if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||
+                    prev_py < prev->roi_y0 || prev_py >= prev->roi_y1) {
+                    select_sample = !target_only;
+                } else {
+                    int prev_sx = (prev_px - prev->roi_x0) / prev->sample_step;
+                    int prev_sy = (prev_py - prev->roi_y0) / prev->sample_step;
+                    if (prev_sx < 0 || prev_sy < 0 ||
+                        prev_sx >= prev->width || prev_sy >= prev->height) {
+                        select_sample = !target_only;
+                    } else {
+                        size_t prev_idx = (size_t)prev_sy * (size_t)prev->width + (size_t)prev_sx;
+                        if (!prev->valid_mask[prev_idx]) {
+                            select_sample = !target_only;
+                        } else {
+                            int cell_x = clamp_i32(prev_sx / prev_cell_span, 0, prev->cell_cols - 1);
+                            int cell_y = clamp_i32(prev_sy / prev_cell_span, 0, prev->cell_rows - 1);
+                            size_t cell_idx = (size_t)cell_y * (size_t)prev->cell_cols + (size_t)cell_x;
+                            uint32_t scan_flags = prev->cell_summaries[cell_idx].scan_flags;
+                            select_sample = (scan_flags & required_flags) != 0u;
+                        }
+                    }
+                }
+            }
+            refresh_mask[idx] = select_sample ? 1u : 0u;
+            selected_count += select_sample ? 1 : 0;
+        }
+    }
+
+    if (!target_only && selected_count <= 0) {
+        for (int sy = 0; sy < sg_h; sy++) {
+            for (int sx = 0; sx < sg_w; sx++) {
+                if (((sx + sy) & 1) != 0) continue;
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                if (refresh_mask[idx] != 0u) continue;
+                refresh_mask[idx] = 1u;
+                selected_count++;
+            }
+        }
+    }
+
+    if (selected_count_out != NULL) *selected_count_out = selected_count;
+    if (selected_count <= 0) return false;
+    if (!target_only && selected_count >= (int)(total_samples * 0.95f)) return false;
+    return true;
+}
+
+static void update_roi_state_full_refresh(
+        anomaly_state_t                  *state,
+        int                               roi_x0,
+        int                               roi_y0,
+        int                               roi_x1,
+        int                               roi_y1,
+        int                               sample_step,
+        int                               sg_w,
+        int                               sg_h,
+        const float                      *sg_luma,
+        const float                      *saliency_spatial_map,
+        const float                      *saliency_motion_map,
+        bool                              bg_valid,
+        int                               black_hot,
+        float                             thermal_min_delta,
+        float                             delta_mean,
+        float                             delta_norm,
+        anomaly_registration_health_t     registration_health) {
+    anomaly_roi_state_t *roi_state = &state->roi_state;
+    if (!ensure_roi_state_capacity(roi_state, (size_t)sg_w * (size_t)sg_h)) {
+        clear_roi_state(roi_state);
+        return;
+    }
+
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    roi_state->valid = true;
+    roi_state->roi_x0 = roi_x0;
+    roi_state->roi_y0 = roi_y0;
+    roi_state->roi_x1 = roi_x1;
+    roi_state->roi_y1 = roi_y1;
+    roi_state->width = sg_w;
+    roi_state->height = sg_h;
+    roi_state->sample_step = sample_step;
+    roi_state->cell_size_px = ANOMALY_ROI_CELL_TARGET_SIZE_PX;
+    roi_state->cell_cols = (sg_w + roi_grid_cell_span(sample_step) - 1) / roi_grid_cell_span(sample_step);
+    roi_state->cell_rows = (sg_h + roi_grid_cell_span(sample_step) - 1) / roi_grid_cell_span(sample_step);
+    float reg_conf = registration_health_confidence(registration_health);
+    for (size_t i = 0; i < sg_count; i++) {
+        roi_state->last_luma[i] = sg_luma[i];
+        roi_state->thermal_score[i] = saliency_spatial_map != NULL ? saliency_spatial_map[i] : -1.0f;
+        float temporal_score = -1.0f;
+        if (bg_valid && state->bg_luma != NULL) {
+            float bg = state->bg_luma[i];
+            float lum = sg_luma[i];
+            float delta = black_hot ? (bg - lum) : (lum - bg);
+            if (delta >= thermal_min_delta) {
+                temporal_score = (delta - delta_mean) / delta_norm;
+            }
+        }
+        roi_state->temporal_score[i] = temporal_score;
+        roi_state->valid_mask[i] = 1u;
+        roi_state->fresh_mask[i] = 1u;
+        roi_state->carried_mask[i] = 0u;
+        roi_state->new_exposed_mask[i] = 0u;
+        roi_state->reg_confidence[i] = reg_conf;
+        roi_state->coverage_age[i] = 0u;
+    }
+    summarize_roi_cells(roi_state, saliency_motion_map, registration_health);
+    annotate_target_revisit_cells(roi_state, state);
+}
+
+static bool update_roi_state_selective_refresh(
+        anomaly_state_t                  *state,
+        const anomaly_registration_model_t *registration,
+        int                               frame_width,
+        int                               frame_height,
+        int                               roi_x0,
+        int                               roi_y0,
+        int                               roi_x1,
+        int                               roi_y1,
+        int                               sample_step,
+        int                               sg_w,
+        int                               sg_h,
+        const float                      *sg_luma,
+        const float                      *saliency_spatial_map,
+        const float                      *saliency_motion_map,
+        bool                              bg_valid,
+        int                               black_hot,
+        float                             thermal_min_delta,
+        float                             delta_mean,
+        float                             delta_norm,
+        anomaly_registration_health_t     registration_health,
+        const uint8_t                    *refresh_mask) {
+    if (state == NULL || registration == NULL || refresh_mask == NULL) return false;
+    anomaly_roi_state_t *roi_state = &state->roi_state;
+    if (!roi_state->valid ||
+        roi_state->sample_step != sample_step ||
+        roi_state->width != sg_w || roi_state->height != sg_h ||
+        roi_state->last_luma == NULL ||
+        roi_state->thermal_score == NULL ||
+        roi_state->temporal_score == NULL ||
+        roi_state->valid_mask == NULL ||
+        roi_state->coverage_age == NULL ||
+        !registration_model_valid(registration) ||
+        !ensure_roi_state_capacity(roi_state, (size_t)sg_w * (size_t)sg_h)) {
+        return false;
+    }
+
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    int prev_roi_x0 = roi_state->roi_x0;
+    int prev_roi_y0 = roi_state->roi_y0;
+    int prev_roi_x1 = roi_state->roi_x1;
+    int prev_roi_y1 = roi_state->roi_y1;
+    int prev_width = roi_state->width;
+    int prev_height = roi_state->height;
+    int prev_sample_step = roi_state->sample_step;
+    float *prev_last_luma = (float *)malloc(sg_count * sizeof(float));
+    float *prev_thermal_score = (float *)malloc(sg_count * sizeof(float));
+    float *prev_temporal_score = (float *)malloc(sg_count * sizeof(float));
+    uint8_t *prev_valid_mask = (uint8_t *)malloc(sg_count * sizeof(uint8_t));
+    uint8_t *prev_coverage_age = (uint8_t *)malloc(sg_count * sizeof(uint8_t));
+    if (prev_last_luma == NULL || prev_thermal_score == NULL || prev_temporal_score == NULL ||
+        prev_valid_mask == NULL || prev_coverage_age == NULL) {
+        free(prev_last_luma);
+        free(prev_thermal_score);
+        free(prev_temporal_score);
+        free(prev_valid_mask);
+        free(prev_coverage_age);
+        return false;
+    }
+
+    memcpy(prev_last_luma, roi_state->last_luma, sg_count * sizeof(float));
+    memcpy(prev_thermal_score, roi_state->thermal_score, sg_count * sizeof(float));
+    memcpy(prev_temporal_score, roi_state->temporal_score, sg_count * sizeof(float));
+    memcpy(prev_valid_mask, roi_state->valid_mask, sg_count * sizeof(uint8_t));
+    memcpy(prev_coverage_age, roi_state->coverage_age, sg_count * sizeof(uint8_t));
+
+    roi_state->valid = true;
+    roi_state->roi_x0 = roi_x0;
+    roi_state->roi_y0 = roi_y0;
+    roi_state->roi_x1 = roi_x1;
+    roi_state->roi_y1 = roi_y1;
+    roi_state->width = sg_w;
+    roi_state->height = sg_h;
+    roi_state->sample_step = sample_step;
+    roi_state->cell_size_px = ANOMALY_ROI_CELL_TARGET_SIZE_PX;
+    roi_state->cell_cols = (sg_w + roi_grid_cell_span(sample_step) - 1) / roi_grid_cell_span(sample_step);
+    roi_state->cell_rows = (sg_h + roi_grid_cell_span(sample_step) - 1) / roi_grid_cell_span(sample_step);
+
+    float reg_conf = registration_health_confidence(registration_health);
+    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
+    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    for (int sy = 0; sy < sg_h; sy++) {
+        int y = roi_y0 + sy * sample_step + sample_step / 2;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            int x = roi_x0 + sx * sample_step + sample_step / 2;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (refresh_mask[idx] != 0u) {
+                roi_state->last_luma[idx] = sg_luma[idx];
+                roi_state->thermal_score[idx] =
+                    saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
+                float temporal_score = -1.0f;
+                if (bg_valid && state->bg_luma != NULL) {
+                    float bg = state->bg_luma[idx];
+                    float lum = sg_luma[idx];
+                    float delta = black_hot ? (bg - lum) : (lum - bg);
+                    if (delta >= thermal_min_delta) {
+                        temporal_score = (delta - delta_mean) / delta_norm;
+                    }
+                }
+                roi_state->temporal_score[idx] = temporal_score;
+                roi_state->valid_mask[idx] = 1u;
+                roi_state->fresh_mask[idx] = 1u;
+                roi_state->carried_mask[idx] = 0u;
+                roi_state->new_exposed_mask[idx] = 0u;
+                roi_state->reg_confidence[idx] = reg_conf;
+                roi_state->coverage_age[idx] = 0u;
+                continue;
+            }
+
+            float nx = clamp01f((float)x / fw);
+            float ny = clamp01f((float)y / fh);
+            float px = 0.0f;
+            float py = 0.0f;
+            bool carried = false;
+            if (registration_invert_point(registration, nx, ny, &px, &py)) {
+                int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
+                int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
+                if (prev_px >= prev_roi_x0 && prev_px < prev_roi_x1 &&
+                    prev_py >= prev_roi_y0 && prev_py < prev_roi_y1) {
+                    int prev_sx = (prev_px - prev_roi_x0) / prev_sample_step;
+                    int prev_sy = (prev_py - prev_roi_y0) / prev_sample_step;
+                    if (prev_sx >= 0 && prev_sy >= 0 &&
+                        prev_sx < prev_width && prev_sy < prev_height) {
+                        size_t prev_idx = (size_t)prev_sy * (size_t)prev_width + (size_t)prev_sx;
+                        if (prev_valid_mask[prev_idx]) {
+                            roi_state->last_luma[idx] = prev_last_luma[prev_idx];
+                            roi_state->thermal_score[idx] = prev_thermal_score[prev_idx];
+                            roi_state->temporal_score[idx] = prev_temporal_score[prev_idx];
+                            roi_state->valid_mask[idx] = 1u;
+                            roi_state->fresh_mask[idx] = 0u;
+                            roi_state->carried_mask[idx] = 1u;
+                            roi_state->new_exposed_mask[idx] = 0u;
+                            roi_state->reg_confidence[idx] = reg_conf;
+                            roi_state->coverage_age[idx] =
+                                prev_coverage_age[prev_idx] < 255u ? (uint8_t)(prev_coverage_age[prev_idx] + 1u) : 255u;
+                            carried = true;
+                        }
+                    }
+                }
+            }
+            if (!carried) {
+                roi_state->last_luma[idx] = sg_luma[idx];
+                roi_state->thermal_score[idx] = -1.0f;
+                roi_state->temporal_score[idx] = -1.0f;
+                roi_state->valid_mask[idx] = 0u;
+                roi_state->fresh_mask[idx] = 0u;
+                roi_state->carried_mask[idx] = 0u;
+                roi_state->new_exposed_mask[idx] = 1u;
+                roi_state->reg_confidence[idx] = 0.0f;
+                roi_state->coverage_age[idx] = 0u;
+            }
+        }
+    }
+
+    summarize_roi_cells(roi_state, saliency_motion_map, registration_health);
+    annotate_target_revisit_cells(roi_state, state);
+    free(prev_last_luma);
+    free(prev_thermal_score);
+    free(prev_temporal_score);
+    free(prev_valid_mask);
+    free(prev_coverage_age);
+    return true;
+}
+
+static anomaly_scan_plan_t build_scan_plan(
+        const anomaly_state_t               *state,
+        const anomaly_registration_model_t  *model,
+        anomaly_registration_health_t        base_registration_health,
+        int                                  frame_width,
+        int                                  frame_height,
+        int                                  roi_x0,
+        int                                  roi_y0,
+        int                                  roi_x1,
+        int                                  roi_y1,
+        int                                  sample_step,
+        int                                  sg_w,
+        int                                  sg_h,
+        bool                                 appearance_refresh_ran,
+        bool                                 scene_discontinuity,
+        anomaly_registration_health_t       *registration_health_out) {
+    anomaly_scan_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    plan.mode = appearance_refresh_ran
+        ? ANOMALY_RESCAN_MODE_FULL
+        : ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP;
+    plan.sampled_width = sg_w;
+    plan.sampled_height = sg_h;
+    plan.total_samples = sg_w > 0 && sg_h > 0 ? sg_w * sg_h : 0;
+    plan.target_revisit_track_count = target_revisit_track_count(state);
+
+    anomaly_registration_health_t refined = base_registration_health;
+    if (!appearance_refresh_ran || plan.total_samples <= 0) {
+        if (registration_health_out != NULL) *registration_health_out = refined;
+        return plan;
+    }
+
+    plan.valid = true;
+    const anomaly_roi_state_t *prev = state != NULL ? &state->roi_state : NULL;
+    bool prev_valid =
+        prev != NULL &&
+        prev->valid &&
+        prev->width > 0 &&
+        prev->height > 0 &&
+        prev->sample_step > 0 &&
+        prev->valid_mask != NULL &&
+        registration_model_valid(model) &&
+        !scene_discontinuity;
+    if (!prev_valid) {
+        if (registration_health_out != NULL) *registration_health_out = refined;
+        return plan;
+    }
+
+    float reg_conf = registration_health_confidence(base_registration_health);
+    int stale_limit = ANOMALY_ROI_REALTIME_CARRY_EXPIRY;
+    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
+    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+
+    for (int sy = 0; sy < sg_h; sy++) {
+        int y = roi_y0 + sy * sample_step + sample_step / 2;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            int x = roi_x0 + sx * sample_step + sample_step / 2;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            float nx = clamp01f((float)x / fw);
+            float ny = clamp01f((float)y / fh);
+            float px = 0.0f;
+            float py = 0.0f;
+            if (!registration_invert_point(model, nx, ny, &px, &py)) {
+                plan.newly_exposed_samples++;
+                continue;
+            }
+            int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
+            int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
+            if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||
+                prev_py < prev->roi_y0 || prev_py >= prev->roi_y1) {
+                plan.newly_exposed_samples++;
+                continue;
+            }
+            int prev_sx = (prev_px - prev->roi_x0) / prev->sample_step;
+            int prev_sy = (prev_py - prev->roi_y0) / prev->sample_step;
+            if (prev_sx < 0 || prev_sy < 0 || prev_sx >= prev->width || prev_sy >= prev->height) {
+                plan.newly_exposed_samples++;
+                continue;
+            }
+            size_t prev_idx = (size_t)prev_sy * (size_t)prev->width + (size_t)prev_sx;
+            if (!prev->valid_mask[prev_idx]) {
+                plan.newly_exposed_samples++;
+                continue;
+            }
+            plan.carried_samples++;
+            int age = (int)prev->coverage_age[prev_idx] + 1;
+            if (age > stale_limit) {
+                plan.stale_samples++;
+            }
+        }
+    }
+
+    if (plan.total_samples > 0) {
+        float inv_total = 1.0f / (float)plan.total_samples;
+        plan.warped_valid_fraction = (float)plan.carried_samples * inv_total;
+        plan.newly_exposed_fraction = (float)plan.newly_exposed_samples * inv_total;
+        plan.stale_fraction = (float)plan.stale_samples * inv_total;
+    }
+
+    if (refined == ANOMALY_REG_HEALTH_HEALTHY) {
+        if (plan.warped_valid_fraction < 0.65f || plan.newly_exposed_fraction > 0.35f) {
+            refined = ANOMALY_REG_HEALTH_HARD_DEGRADED;
+        } else if (plan.warped_valid_fraction < 0.80f || plan.newly_exposed_fraction > 0.20f ||
+                   reg_conf < 0.90f) {
+            refined = ANOMALY_REG_HEALTH_SOFT_DEGRADED;
+        }
+    } else if (refined == ANOMALY_REG_HEALTH_SOFT_DEGRADED) {
+        if (plan.warped_valid_fraction < 0.65f || plan.newly_exposed_fraction > 0.35f) {
+            refined = ANOMALY_REG_HEALTH_HARD_DEGRADED;
+        }
+    }
+
+    if (scene_discontinuity ||
+        refined == ANOMALY_REG_HEALTH_INVALID ||
+        refined == ANOMALY_REG_HEALTH_HARD_DEGRADED ||
+        plan.warped_valid_fraction < 0.80f ||
+        plan.newly_exposed_fraction > 0.25f ||
+        plan.stale_fraction > 0.35f ||
+        prev->sample_step != sample_step) {
+        plan.mode = ANOMALY_RESCAN_MODE_FULL;
+    } else if (plan.target_revisit_track_count > 0 &&
+               plan.newly_exposed_fraction < 0.05f &&
+               plan.stale_fraction < 0.10f) {
+        plan.mode = ANOMALY_RESCAN_MODE_TARGET_ONLY;
+    } else {
+        plan.mode = ANOMALY_RESCAN_MODE_PARTIAL;
+    }
+
+    if (registration_health_out != NULL) *registration_health_out = refined;
+    return plan;
+}
+
+static void age_roi_state_one_frame(
+        anomaly_state_t                  *state,
+        bool                              scene_discontinuity,
+        anomaly_registration_health_t     registration_health) {
+    if (state == NULL) return;
+    anomaly_roi_state_t *roi_state = &state->roi_state;
+    if (!roi_state->valid || roi_state->width <= 0 || roi_state->height <= 0) return;
+    if (scene_discontinuity ||
+        registration_health == ANOMALY_REG_HEALTH_INVALID ||
+        registration_health == ANOMALY_REG_HEALTH_HARD_DEGRADED) {
+        clear_roi_state(roi_state);
+        return;
+    }
+    size_t pixel_count = (size_t)roi_state->width * (size_t)roi_state->height;
+    float reg_conf = registration_health_confidence(registration_health);
+    for (size_t i = 0; i < pixel_count; i++) {
+        roi_state->fresh_mask[i] = 0;
+        roi_state->carried_mask[i] = roi_state->valid_mask[i] ? 1u : 0u;
+        roi_state->new_exposed_mask[i] = 0;
+        if (roi_state->valid_mask[i] && roi_state->coverage_age[i] < 255u) {
+            roi_state->coverage_age[i] += 1u;
+        }
+        roi_state->reg_confidence[i] = reg_conf;
+    }
+    summarize_roi_cells(roi_state, NULL, registration_health);
+    annotate_target_revisit_cells(roi_state, state);
+}
+
+static void update_prev_luma_state(
+        anomaly_state_t *state,
+        const uint8_t   *curr_luma,
+        size_t           motion_count,
+        int              motion_w,
+        int              motion_h) {
+    if (state == NULL || curr_luma == NULL) return;
+    if (ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
+        memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
+        state->prev_luma_width = motion_w;
+        state->prev_luma_height = motion_h;
+    } else {
+        if (state->prev_luma != NULL) {
+            free(state->prev_luma);
+            state->prev_luma = NULL;
+        }
+        state->prev_luma_capacity = 0;
+        state->prev_luma_width = 0;
+        state->prev_luma_height = 0;
+    }
+}
+
 bool anomaly_probe_thermal_point(
         const anomaly_state_t  *state,
         const anomaly_config_t *cfg,
@@ -4795,7 +6108,7 @@ bool anomaly_probe_thermal_point(
         }
     }
 
-    const int R = ANOMALY_THERMAL_WIN_RADIUS;
+    const int R = effective_thermal_window_radius_cells(sample_step);
     int wx0 = sx - R; if (wx0 < 0) wx0 = 0;
     int wx1 = sx + R; if (wx1 >= sg_w) wx1 = sg_w - 1;
     int wy0 = sy - R; if (wy0 < 0) wy0 = 0;
@@ -4870,6 +6183,9 @@ bool anomaly_probe_thermal_point(
 
 void anomaly_state_init(anomaly_state_t *state) {
     memset(state, 0, sizeof(*state));
+    if (state != NULL) {
+        state->next_target_track_id = 1;
+    }
 }
 
 void anomaly_state_reset(anomaly_state_t *state) {
@@ -4909,6 +6225,8 @@ void anomaly_state_reset(anomaly_state_t *state) {
     }
     state->thermal_target_persist_w = 0;
     state->thermal_target_persist_h = 0;
+    release_roi_state(&state->roi_state);
+    clear_all_target_tracks(state);
     memset(state->saliency_aux_cx, 0, sizeof(state->saliency_aux_cx));
     memset(state->saliency_aux_cy, 0, sizeof(state->saliency_aux_cy));
     memset(state->saliency_aux_hits, 0, sizeof(state->saliency_aux_hits));
@@ -4942,6 +6260,9 @@ void anomaly_state_reset(anomaly_state_t *state) {
     free(state->scratch_patch_selection);
     state->scratch_patch_selection = NULL;
     state->scratch_patch_capacity = 0;
+    free(state->scratch_refresh_mask);
+    state->scratch_refresh_mask = NULL;
+    state->scratch_refresh_mask_capacity = 0;
     free(state->scratch_i32);
     state->scratch_i32 = NULL;
     state->scratch_i32_capacity = 0;
@@ -4968,6 +6289,9 @@ int anomaly_process_frame(
         memset(result_out, 0, sizeof(*result_out));
         result_out->box_count        = 0;
         result_out->had_discontinuity = false;
+        result_out->registration_health = ANOMALY_REG_HEALTH_UNKNOWN;
+        result_out->rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
+        result_out->scan_plan.mode = ANOMALY_RESCAN_MODE_UNSET;
     }
 
     if (cfg == NULL) return 0;
@@ -4996,38 +6320,9 @@ int anomaly_process_frame(
         state->prev_luma != NULL &&
         !bg_publish_ready;
     bool publish_hold_active = use_publish_transition_gating && state->publish_hold_frames > 0;
-    if ((state->frame_counter % frame_stride) != 0) {
+    bool should_refresh_appearance = ((state->frame_counter % frame_stride) == 0);
+    if (!should_refresh_appearance) {
         age_roi_tracks_one_frame(state);
-        int skipped_box_count = 0;
-        anomaly_box_t skipped_boxes[ANOMALY_MAX_BOXES_PER_FRAME];
-        bool publish_allowed = !transition_warmup_block && !publish_hold_active;
-        if (anomaly_detection_active && publish_allowed) {
-            const int skipped_motion_box_algorithm =
-                    (cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0
-                    ? ANOMALY_ALGO_MOTION_TOLERANCE
-                    : ANOMALY_ALGO_MOTION;
-            skipped_box_count = assemble_anomaly_boxes(
-                    state,
-                    cfg,
-                    skipped_motion_box_algorithm,
-                    skipped_boxes,
-                    ANOMALY_MAX_BOXES_PER_FRAME);
-        }
-        if (result_out != NULL) {
-            result_out->box_count = skipped_box_count;
-            for (int i = 0; i < skipped_box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++) {
-                result_out->boxes[i] = skipped_boxes[i];
-            }
-        }
-        if (rgba != NULL) {
-            if (show_hot_overlay) {
-                draw_hot_overlay_rgba(rgba, rgba_stride, width, height, cfg->thermal_polarity);
-            }
-            if (skipped_box_count > 0) {
-                draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, skipped_boxes, skipped_box_count);
-            }
-        }
-        return skipped_box_count;
     }
 
     // ── ROI bounds (centered scan zone) ─────────────────────────────────
@@ -5041,6 +6336,12 @@ int anomaly_process_frame(
 
     int sample_step = effective_sample_step(cfg, width, height);
     int motion_sample_step = effective_motion_sample_step(cfg, width, height);
+    int roi_w = roi_x1 - roi_x0;
+    int roi_h = roi_y1 - roi_y0;
+    if (roi_w <= 0) roi_w = 1;
+    if (roi_h <= 0) roi_h = 1;
+    int sg_w = (roi_w + sample_step - 1) / sample_step;
+    int sg_h = (roi_h + sample_step - 1) / sample_step;
 
     // ── Build full-frame luma grid (needed for GMV offset lookups) ───────
     int motion_step  = motion_sample_step * 2;
@@ -5082,9 +6383,68 @@ int anomaly_process_frame(
         motion_h);
     similarity_2d_t sim = registration.similarity;
     bool scene_discontinuity = registration.scene_discontinuity;
+    anomaly_registration_health_t registration_health_base =
+        classify_registration_health(&registration, width, height);
+    anomaly_registration_health_t registration_health = registration_health_base;
+    anomaly_scan_plan_t scan_plan = build_scan_plan(
+        state,
+        &registration,
+        registration_health_base,
+        width,
+        height,
+        roi_x0,
+        roi_y0,
+        roi_x1,
+        roi_y1,
+        sample_step,
+        sg_w,
+        sg_h,
+        should_refresh_appearance,
+        scene_discontinuity,
+        &registration_health);
+    anomaly_rescan_mode_t rescan_mode = scan_plan.mode;
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    uint8_t *appearance_refresh_mask = NULL;
+    bool selective_refresh_active = false;
+    if ((rescan_mode == ANOMALY_RESCAN_MODE_PARTIAL ||
+         rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY) &&
+        sg_count > 0) {
+        if (ensure_u8_capacity(
+                &state->scratch_refresh_mask,
+                &state->scratch_refresh_mask_capacity,
+                sg_count)) {
+            int selected_samples = 0;
+            appearance_refresh_mask = state->scratch_refresh_mask;
+            selective_refresh_active = build_selective_refresh_mask(
+                    state,
+                    &registration,
+                    rescan_mode,
+                    width,
+                    height,
+                    roi_x0,
+                    roi_y0,
+                    roi_x1,
+                    roi_y1,
+                    sample_step,
+                    sg_w,
+                    sg_h,
+                    appearance_refresh_mask,
+                    &selected_samples);
+        }
+        if (!selective_refresh_active) {
+            appearance_refresh_mask = NULL;
+            rescan_mode = ANOMALY_RESCAN_MODE_FULL;
+            scan_plan.mode = ANOMALY_RESCAN_MODE_FULL;
+        }
+    }
 
     if (result_out != NULL) {
         result_out->had_discontinuity = scene_discontinuity;
+        result_out->registration_ran_this_frame = true;
+        result_out->appearance_refresh_ran_this_frame = should_refresh_appearance;
+        result_out->registration_health = registration_health;
+        result_out->rescan_mode = rescan_mode;
+        result_out->scan_plan = scan_plan;
         populate_registration_debug(&registration, result_out);
     }
 
@@ -5101,8 +6461,48 @@ int anomaly_process_frame(
                 state->acc_cx[ai] = nx < 0.0f ? 0.0f : (nx > 1.0f ? 1.0f : nx);
                 state->acc_cy[ai] = ny < 0.0f ? 0.0f : (ny > 1.0f ? 1.0f : ny);
             }
+            }
         }
+    }
+    predict_target_tracks_with_registration(
+            state,
+            &registration,
+            registration_health,
+            scene_discontinuity);
+
+    if (!should_refresh_appearance) {
+        age_roi_state_one_frame(state, scene_discontinuity, registration_health);
+        update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
+        int skipped_box_count = 0;
+        anomaly_box_t skipped_boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+        bool publish_allowed = !transition_warmup_block && !publish_hold_active;
+        if (anomaly_detection_active && publish_allowed) {
+            const int skipped_motion_box_algorithm =
+                    (cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0
+                    ? ANOMALY_ALGO_MOTION_TOLERANCE
+                    : ANOMALY_ALGO_MOTION;
+            skipped_box_count = assemble_anomaly_boxes(
+                    state,
+                    cfg,
+                    skipped_motion_box_algorithm,
+                    skipped_boxes,
+                    ANOMALY_MAX_BOXES_PER_FRAME);
         }
+        if (result_out != NULL) {
+            result_out->box_count = skipped_box_count;
+            for (int i = 0; i < skipped_box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++) {
+                result_out->boxes[i] = skipped_boxes[i];
+            }
+        }
+        if (rgba != NULL) {
+            if (show_hot_overlay) {
+                draw_hot_overlay_rgba(rgba, rgba_stride, width, height, cfg->thermal_polarity);
+            }
+            if (skipped_box_count > 0) {
+                draw_anomaly_boxes_rgba(rgba, rgba_stride, width, height, skipped_boxes, skipped_box_count);
+            }
+        }
+        return skipped_box_count;
     }
 
     // ── Statistics pass ──────────────────────────────────────────────────
@@ -5120,36 +6520,12 @@ int anomaly_process_frame(
     // in IR footage all channels are near-greyscale so colour is less useful,
     // and the tile grid is cheap to keep for visible-light modes.
 
-    int roi_w = roi_x1 - roi_x0;
-    int roi_h = roi_y1 - roi_y0;
-    if (roi_w <= 0) roi_w = 1;
-    if (roi_h <= 0) roi_h = 1;
-
-    // Sampled-grid dimensions for integral images.
-    int sg_w = (roi_w + sample_step - 1) / sample_step;
-    int sg_h = (roi_h + sample_step - 1) / sample_step;
-
     // Heap-allocate integral image arrays (freed at end of this function).
     // Two channels: luma sum and luma sum-of-squares for variance.
-    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
     if (!ensure_float_capacity(&state->scratch_sg_luma, &state->scratch_sampled_grid_capacity, sg_count) ||
         !ensure_float_capacity(&state->scratch_ii_sum, &state->scratch_sampled_grid_capacity, sg_count) ||
         !ensure_float_capacity(&state->scratch_ii_sum2, &state->scratch_sampled_grid_capacity, sg_count)) {
-        if (curr_luma) {
-            if (ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
-                memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
-                state->prev_luma_width = motion_w;
-                state->prev_luma_height = motion_h;
-            } else {
-                if (state->prev_luma != NULL) {
-                    free(state->prev_luma);
-                    state->prev_luma = NULL;
-                }
-                state->prev_luma_capacity = 0;
-                state->prev_luma_width = 0;
-                state->prev_luma_height = 0;
-            }
-        }
+        update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
         return 0;
     }
     float *sg_luma  = state->scratch_sg_luma;
@@ -5340,7 +6716,7 @@ int anomaly_process_frame(
     float saliency_tracked_score_pre = -1.0f;
     bool saliency_switch_suppressed = false;
 
-    const int R = ANOMALY_THERMAL_WIN_RADIUS;
+    const int R = effective_thermal_window_radius_cells(sample_step);
 
     for (int sy = 0; sy < sg_h; sy++) {
         int y  = roi_y0 + sy * sample_step;
@@ -5353,8 +6729,12 @@ int anomaly_process_frame(
             if (x >= roi_x1) x = roi_x1 - 1;
             int tc = sx * ANOMALY_LOCAL_TILE_SIZE / sg_w;
             if (tc >= ANOMALY_LOCAL_TILE_SIZE) tc = ANOMALY_LOCAL_TILE_SIZE - 1;
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (selective_refresh_active && appearance_refresh_mask[idx] == 0u) {
+                continue;
+            }
 
-            float lum = sg_luma[sy * sg_w + sx];
+            float lum = sg_luma[idx];
 
             if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0) {
                 // Integral-image window query.
@@ -5382,7 +6762,7 @@ int anomaly_process_frame(
                         best_thermal = ts; best_thermal_x = x; best_thermal_y = y;
                     }
                     if (saliency_spatial_map != NULL) {
-                        saliency_spatial_map[sy * sg_w + sx] = saliency_spatial;
+                        saliency_spatial_map[idx] = saliency_spatial;
                     }
                 }
             }
@@ -5401,7 +6781,7 @@ int anomaly_process_frame(
                     float color_support = cs - 2.0f;
                     if (color_support < 0.0f) color_support = 0.0f;
                     if (color_support > 4.0f) color_support = 4.0f;
-                    saliency_color_map[sy * sg_w + sx] = color_support;
+                    saliency_color_map[idx] = color_support;
                 }
             }
         }
@@ -5409,40 +6789,76 @@ int anomaly_process_frame(
 
     anomaly_motion_candidate_t motion_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
     memset(motion_candidates, 0, sizeof(motion_candidates));
-    anomaly_motion_candidate_t thermal_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
+    anomaly_motion_candidate_t thermal_candidates[ANOMALY_MAX_THERMAL_CANDIDATES];
     memset(thermal_candidates, 0, sizeof(thermal_candidates));
     int motion_candidate_count = 0;
     int thermal_candidate_count = 0;
-    float thermal_candidate_area[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_span[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_fill[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_center_share[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_base_score[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_quality_score[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_context_scale[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_parent_scale[ANOMALY_MAX_MOTION_CANDIDATES];
-    float thermal_candidate_isolation_rank[ANOMALY_MAX_MOTION_CANDIDATES];
-    int thermal_candidate_min_x[ANOMALY_MAX_MOTION_CANDIDATES];
-    int thermal_candidate_min_y[ANOMALY_MAX_MOTION_CANDIDATES];
-    int thermal_candidate_max_x[ANOMALY_MAX_MOTION_CANDIDATES];
-    int thermal_candidate_max_y[ANOMALY_MAX_MOTION_CANDIDATES];
+    float thermal_candidate_area[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_span[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_fill[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_center_share[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_base_score[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_temporal_score[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_quality_score[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_context_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_parent_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_isolation_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_peak_delta[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_mean_delta[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_score_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_history_scale_debug[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_apparent_size_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_isolation_track_scale[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_area_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_span_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_center_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
+    float thermal_candidate_quality_rank[ANOMALY_MAX_THERMAL_CANDIDATES];
+    bool thermal_candidate_above_threshold[ANOMALY_MAX_THERMAL_CANDIDATES];
+    int thermal_candidate_min_x[ANOMALY_MAX_THERMAL_CANDIDATES];
+    int thermal_candidate_min_y[ANOMALY_MAX_THERMAL_CANDIDATES];
+    int thermal_candidate_max_x[ANOMALY_MAX_THERMAL_CANDIDATES];
+    int thermal_candidate_max_y[ANOMALY_MAX_THERMAL_CANDIDATES];
     float motion_candidate_support[ANOMALY_MAX_MOTION_CANDIDATES];
     int motion_candidate_support_x[ANOMALY_MAX_MOTION_CANDIDATES];
     int motion_candidate_support_y[ANOMALY_MAX_MOTION_CANDIDATES];
-    for (int i = 0; i < ANOMALY_MAX_MOTION_CANDIDATES; i++) {
+    anomaly_thermal_target_trace_t thermal_target_trace;
+    memset(&thermal_target_trace, 0, sizeof(thermal_target_trace));
+    thermal_target_trace.suppressor_sx = -1;
+    thermal_target_trace.suppressor_sy = -1;
+    thermal_target_trace.component_seed_x = -1;
+    thermal_target_trace.component_seed_y = -1;
+    thermal_target_trace.component_peak_x = -1;
+    thermal_target_trace.component_peak_y = -1;
+    thermal_target_trace.extracted_rank = -1;
+    thermal_target_trace.winning_rank = -1;
+    for (int i = 0; i < ANOMALY_MAX_THERMAL_CANDIDATES; i++) {
         thermal_candidate_area[i] = 0.0f;
         thermal_candidate_span[i] = 0.0f;
         thermal_candidate_fill[i] = 0.0f;
         thermal_candidate_center_share[i] = 0.0f;
         thermal_candidate_base_score[i] = -1.0f;
+        thermal_candidate_temporal_score[i] = -1.0f;
         thermal_candidate_quality_score[i] = 0.0f;
         thermal_candidate_context_scale[i] = 1.0f;
         thermal_candidate_parent_scale[i] = 1.0f;
         thermal_candidate_isolation_rank[i] = 0.0f;
+        thermal_candidate_peak_delta[i] = 0.0f;
+        thermal_candidate_mean_delta[i] = 0.0f;
+        thermal_candidate_score_scale[i] = 1.0f;
+        thermal_candidate_history_scale_debug[i] = 1.0f;
+        thermal_candidate_apparent_size_scale[i] = 1.0f;
+        thermal_candidate_isolation_track_scale[i] = 1.0f;
+        thermal_candidate_area_rank[i] = 0.0f;
+        thermal_candidate_span_rank[i] = 0.0f;
+        thermal_candidate_center_rank[i] = 0.0f;
+        thermal_candidate_quality_rank[i] = 0.0f;
+        thermal_candidate_above_threshold[i] = false;
         thermal_candidate_min_x[i] = 0;
         thermal_candidate_min_y[i] = 0;
         thermal_candidate_max_x[i] = 0;
         thermal_candidate_max_y[i] = 0;
+    }
+    for (int i = 0; i < ANOMALY_MAX_MOTION_CANDIDATES; i++) {
         motion_candidate_support[i] = -1.0f;
         motion_candidate_support_x[i] = 0;
         motion_candidate_support_y[i] = 0;
@@ -5526,20 +6942,24 @@ int anomaly_process_frame(
         best_thermal_y = 0;
         for (int sy = 0; sy < sg_h; sy++) {
             for (int sx = 0; sx < sg_w; sx++) {
-                float lum = sg_luma[sy * sg_w + sx];
-                float  bg  = state->bg_luma[sy * sg_w + sx];
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                if (selective_refresh_active && appearance_refresh_mask[idx] == 0u) {
+                    continue;
+                }
+                float lum = sg_luma[idx];
+                float  bg  = state->bg_luma[idx];
                 // Positive delta: pixel is warmer than its stored background.
                 float delta = black_hot ? (bg - (float)lum) : ((float)lum - bg);
                 if (delta < thermal_min_delta) {
                     if (saliency_spatial_map != NULL) {
-                        saliency_spatial_map[sy * sg_w + sx] = -1.0f;
+                        saliency_spatial_map[idx] = -1.0f;
                     }
                     continue;
                 }
                 // Relative score: std-devs above the frame's temporal mean.
                 float ts = (delta - delta_mean) / delta_norm;
                 if (saliency_spatial_map != NULL) {
-                    saliency_spatial_map[sy * sg_w + sx] = ts;
+                    saliency_spatial_map[idx] = ts;
                 }
                 if (ts > best_thermal) {
                     best_thermal   = ts;
@@ -5585,14 +7005,17 @@ int anomaly_process_frame(
         }
         if (thermal_patch_map != NULL && thermal_patch_selection != NULL &&
             thermal_visited != NULL && thermal_queue != NULL) {
-            anomaly_thermal_blob_candidate_t thermal_blob_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
+            anomaly_thermal_blob_candidate_t thermal_blob_candidates[ANOMALY_MAX_THERMAL_CANDIDATES];
             memset(thermal_blob_candidates, 0, sizeof(thermal_blob_candidates));
             extract_thermal_blob_candidates(
+                    cfg,
                     saliency_spatial_map,
                     state->bg_luma,
                     sg_luma,
                     sg_w,
                     sg_h,
+                    width,
+                    height,
                     roi_x0,
                     roi_y0,
                     sample_step,
@@ -5606,7 +7029,8 @@ int anomaly_process_frame(
                     thermal_patch_map,
                     thermal_patch_selection,
                     thermal_blob_candidates,
-                    &thermal_candidate_count);
+                    &thermal_candidate_count,
+                    &thermal_target_trace);
             float fallback_thermal = bg_valid ? -1.0f : best_thermal;
             int fallback_thermal_x = bg_valid ? 0 : best_thermal_x;
             int fallback_thermal_y = bg_valid ? 0 : best_thermal_y;
@@ -5616,6 +7040,7 @@ int anomaly_process_frame(
             best_thermal_candidate_idx = -1;
             best_thermal_candidate_score = -1.0f;
             float best_small_span_px = -1.0f;
+            float small_target_limit_px = effective_thermal_small_target_span_px(cfg, width, height);
             for (int ci = 0; ci < thermal_candidate_count; ci++) {
                 thermal_candidates[ci] = thermal_blob_candidates[ci].candidate;
                 int sx = thermal_candidates[ci].sg_x;
@@ -5624,6 +7049,8 @@ int anomaly_process_frame(
                 float span = thermal_blob_candidates[ci].span;
                 float fill = thermal_blob_candidates[ci].fill;
                 float center_share = thermal_blob_candidates[ci].center_share;
+                float peak_delta = thermal_blob_candidates[ci].peak_delta;
+                float mean_delta = thermal_blob_candidates[ci].mean_delta;
                 int bbox_min_x = thermal_blob_candidates[ci].min_x;
                 int bbox_min_y = thermal_blob_candidates[ci].min_y;
                 int bbox_max_x = thermal_blob_candidates[ci].max_x;
@@ -5631,18 +7058,48 @@ int anomaly_process_frame(
                 float quality = thermal_blob_candidates[ci].quality;
                 float base_score = thermal_blob_candidates[ci].candidate.thermal_score;
                 float history_scale = thermal_candidate_history_scale(state, sg_w, sg_h, sx, sy);
+                float context_scale = thermal_candidate_seed_context_scale(
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    sx,
+                    sy,
+                    sample_step,
+                    bg_valid,
+                    black_hot != 0,
+                    thermal_min_delta,
+                    0.0f,
+                    frame_blob_contrast_mean,
+                    frame_blob_contrast_std,
+                    delta_norm);
+                float parent_scale = thermal_candidate_parent_mass_scale(
+                    state->bg_luma,
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    sx,
+                    sy,
+                    sample_step,
+                    bg_valid,
+                    black_hot != 0,
+                    thermal_min_delta,
+                    frame_blob_contrast_mean,
+                    frame_blob_contrast_std,
+                    delta_norm);
                 // Blob size is the primary rank signal; heat anomaly is the
                 // secondary tie-breaker used among similarly small blobs.
                 float score_scale = bg_valid ? (0.92f + 0.18f * quality)
                                              : (0.96f + 0.12f * quality);
                 float final_score = base_score * score_scale * history_scale;
+                float temporal_score = -1.0f;
                 if (bg_valid) {
                     size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
                     float bg = state->bg_luma[idx];
                     float lum = (float)sg_luma[idx];
                     float delta = black_hot ? (bg - lum) : (lum - bg);
                     if (delta >= thermal_min_delta) {
-                        float temporal_score = (float)((delta - delta_mean) / delta_norm);
+                        temporal_score = (float)((delta - delta_mean) / delta_norm);
                         if (temporal_score > base_score) {
                             final_score = temporal_score * (0.55f + 0.55f * quality) * history_scale;
                         }
@@ -5653,14 +7110,21 @@ int anomaly_process_frame(
                 thermal_candidate_fill[ci] = fill;
                 thermal_candidate_center_share[ci] = center_share;
                 thermal_candidate_base_score[ci] = base_score;
+                thermal_candidate_temporal_score[ci] = temporal_score;
                 thermal_candidate_quality_score[ci] = quality;
-                thermal_candidate_context_scale[ci] = 1.0f;
-                thermal_candidate_parent_scale[ci] = 1.0f;
+                thermal_candidate_context_scale[ci] = context_scale;
+                thermal_candidate_parent_scale[ci] = parent_scale;
+                thermal_candidate_peak_delta[ci] = peak_delta;
+                thermal_candidate_mean_delta[ci] = mean_delta;
+                thermal_candidate_score_scale[ci] = score_scale;
+                thermal_candidate_history_scale_debug[ci] = history_scale;
                 thermal_candidate_min_x[ci] = bbox_min_x;
                 thermal_candidate_min_y[ci] = bbox_min_y;
                 thermal_candidate_max_x[ci] = bbox_max_x;
                 thermal_candidate_max_y[ci] = bbox_max_y;
                 float span_px = span * (float)sample_step;
+                float apparent_size_scale = thermal_small_target_apparent_scale(cfg, span_px, width, height);
+                thermal_candidate_apparent_size_scale[ci] = apparent_size_scale;
                 float area_rank = area <= 0.0f ? 0.0f
                     : (area <= 2.0f ? 1.0f
                     : (area <= 4.0f ? 0.92f
@@ -5668,9 +7132,13 @@ int anomaly_process_frame(
                 float span_rank = span_px <= 0.0f ? 0.0f
                     : (span_px <= 4.0f ? 1.0f
                     : (span_px <= 7.0f ? 0.85f
-                    : (span_px <= 10.0f ? 0.58f : 0.22f)));
+                    : (span_px <= small_target_limit_px ? 0.58f : 0.22f)));
                 float center_rank = clampf((center_share - 0.40f) / 0.30f, 0.0f, 1.0f);
                 float quality_rank = clampf((quality - 0.45f) / 0.55f, 0.0f, 1.0f);
+                thermal_candidate_area_rank[ci] = area_rank;
+                thermal_candidate_span_rank[ci] = span_rank;
+                thermal_candidate_center_rank[ci] = center_rank;
+                thermal_candidate_quality_rank[ci] = quality_rank;
                 thermal_candidate_isolation_rank[ci] =
                     0.28f * area_rank +
                     0.26f * span_rank +
@@ -5679,7 +7147,9 @@ int anomaly_process_frame(
                 float history_bonus = clampf((history_scale - 1.0f) / ANOMALY_THERMAL_TARGET_HISTORY_GAIN, 0.0f, 1.0f);
                 float isolation_track_scale =
                     1.0f + 0.34f * history_bonus * clampf((thermal_candidate_isolation_rank[ci] - 0.42f) / 0.40f, 0.0f, 1.0f);
+                thermal_candidate_isolation_track_scale[ci] = isolation_track_scale;
                 final_score *= isolation_track_scale;
+                final_score *= apparent_size_scale;
                 bool singleton_blob = area <= 1.0f && span <= 1.0f;
                 if (singleton_blob && !thermal_publish_settled) {
                     final_score *= 0.42f;
@@ -5687,6 +7157,7 @@ int anomaly_process_frame(
                 thermal_candidates[ci].thermal_score = final_score;
                 thermal_blob_candidates[ci].candidate.thermal_score = final_score;
                 bool candidate_plausible = final_score >= cfg->score_threshold;
+                thermal_candidate_above_threshold[ci] = candidate_plausible;
                 if (candidate_plausible) {
                     if (best_thermal_candidate_idx < 0 ||
                         compare_thermal_blob_rank(&thermal_blob_candidates[ci],
@@ -5701,7 +7172,7 @@ int anomaly_process_frame(
                 }
                 if (final_score > cfg->score_threshold &&
                     span_px > 0.0f &&
-                    span_px <= (float)ANOMALY_THERMAL_SMALL_TARGET_DIAMETER_PX &&
+                    span_px <= small_target_limit_px &&
                     (best_small_span_px < 0.0f || span_px < best_small_span_px)) {
                     best_small_span_px = span_px;
                 }
@@ -5710,6 +7181,14 @@ int anomaly_process_frame(
                 best_thermal = best_thermal_candidate_score;
                 best_thermal_x = thermal_candidates[best_thermal_candidate_idx].pixel_x;
                 best_thermal_y = thermal_candidates[best_thermal_candidate_idx].pixel_y;
+            }
+            if (thermal_target_trace.enabled && thermal_target_trace.extracted_rank >= 0 &&
+                best_thermal_candidate_idx >= 0 &&
+                thermal_blob_candidates[thermal_target_trace.extracted_rank].candidate.sg_x ==
+                    thermal_blob_candidates[best_thermal_candidate_idx].candidate.sg_x &&
+                thermal_blob_candidates[thermal_target_trace.extracted_rank].candidate.sg_y ==
+                    thermal_blob_candidates[best_thermal_candidate_idx].candidate.sg_y) {
+                thermal_target_trace.winning_rank = thermal_target_trace.extracted_rank;
             }
             if (fallback_thermal > best_thermal) {
                 best_thermal = fallback_thermal;
@@ -5780,6 +7259,9 @@ int anomaly_process_frame(
         // EMA update: fast toward colder/brighter, slow toward warmer/darker.
         // black_hot is already declared in the temporal scoring section above.
         for (int i = 0; i < sg_w * sg_h; i++) {
+            if (selective_refresh_active && appearance_refresh_mask[i] == 0u) {
+                continue;
+            }
             float cur = (float)sg_luma[i];
             float bg  = state->bg_luma[i];
             float delta = cur - bg;   // positive = pixel got brighter (colder in BH)
@@ -6182,6 +7664,10 @@ int anomaly_process_frame(
                 for (int sy = 0; sy < sg_h; sy++) {
                     for (int sx = 0; sx < sg_w; sx++) {
                         size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                        if (selective_refresh_active && appearance_refresh_mask[idx] == 0u) {
+                            patch_score_map[idx] = -1.0f;
+                            continue;
+                        }
                         float thermal_spatial = saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
                         float color_support = saliency_color_map != NULL ? saliency_color_map[idx] : 0.0f;
                         float motion_support = saliency_motion_map != NULL ? saliency_motion_map[idx] : 0.0f;
@@ -6238,6 +7724,9 @@ int anomaly_process_frame(
                 for (int sy = 0; sy < sg_h; sy++) {
                     for (int sx = 0; sx < sg_w; sx++) {
                         size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                        if (selective_refresh_active && appearance_refresh_mask[idx] == 0u) {
+                            continue;
+                        }
                         float final_score = patch_selection_map[idx];
                         if (final_score <= 0.0f) continue;
                         float boundary_scale = saliency_boundary_structure_scale(
@@ -6261,6 +7750,9 @@ int anomaly_process_frame(
             for (int sy = 0; sy < sg_h; sy++) {
                 for (int sx = 0; sx < sg_w; sx++) {
                     size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                    if (selective_refresh_active && appearance_refresh_mask[idx] == 0u) {
+                        continue;
+                    }
                     float final_score = patch_selection_map[idx];
                     if (final_score <= 0.0f) continue;
                     int px = roi_x0 + sx * sample_step;
@@ -6362,22 +7854,62 @@ int anomaly_process_frame(
         }
     }
 
-    // ── Update prev_luma ────────────────────��────────────────────────────
-    if (curr_luma != NULL) {
-        if (ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
-            memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
-            state->prev_luma_width  = motion_w;
-            state->prev_luma_height = motion_h;
-        } else {
-            if (state->prev_luma != NULL) {
-                free(state->prev_luma);
-                state->prev_luma = NULL;
+    bool roi_state_updated = false;
+    if (selective_refresh_active) {
+        roi_state_updated = update_roi_state_selective_refresh(
+                state,
+                &registration,
+                width,
+                height,
+                roi_x0,
+                roi_y0,
+                roi_x1,
+                roi_y1,
+                sample_step,
+                sg_w,
+                sg_h,
+                sg_luma,
+                saliency_spatial_map,
+                saliency_motion_map,
+                bg_valid,
+                black_hot,
+                thermal_min_delta,
+                delta_mean,
+                delta_norm,
+                registration_health,
+                appearance_refresh_mask);
+        if (!roi_state_updated) {
+            rescan_mode = ANOMALY_RESCAN_MODE_FULL;
+            scan_plan.mode = ANOMALY_RESCAN_MODE_FULL;
+            if (result_out != NULL) {
+                result_out->rescan_mode = rescan_mode;
+                result_out->scan_plan = scan_plan;
             }
-            state->prev_luma_capacity = 0;
-            state->prev_luma_width  = 0;
-            state->prev_luma_height = 0;
         }
     }
+    if (!roi_state_updated) {
+        update_roi_state_full_refresh(
+                state,
+                roi_x0,
+                roi_y0,
+                roi_x1,
+                roi_y1,
+                sample_step,
+                sg_w,
+                sg_h,
+                sg_luma,
+                saliency_spatial_map,
+                saliency_motion_map,
+                bg_valid,
+                black_hot,
+                thermal_min_delta,
+                delta_mean,
+                delta_norm,
+                registration_health);
+    }
+
+    // ── Update prev_luma ────────────────────────────────────────────────
+    update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
 
     // ── Update per-algorithm accumulators ────────────────────────────────
     float fw = (float)(width  > 1 ? width  - 1 : 1);
@@ -6848,6 +8380,50 @@ int anomaly_process_frame(
                 alpha);
     }
 
+    anomaly_target_observation_t target_observations[4 + ANOMALY_SALIENCY_EXTRA_TRACKS];
+    int target_observation_count = 0;
+    float target_half_side = clampf(sqrtf(fmaxf(cfg->min_area_fraction, 0.0001f)) * 0.5f, 0.01f, 0.10f);
+    for (int ai = 0; ai < 4 && target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0])); ai++) {
+        if (raw_cx[ai] < 0.0f || raw_cy[ai] < 0.0f) continue;
+        anomaly_target_observation_t *obs = &target_observations[target_observation_count++];
+        memset(obs, 0, sizeof(*obs));
+        obs->valid = true;
+        obs->algorithm = (ai == 0) ? ANOMALY_ALGO_COLOR :
+                         (ai == 1) ? ANOMALY_ALGO_THERMAL :
+                         (ai == 2) ? ((cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0
+                                     ? ANOMALY_ALGO_MOTION_TOLERANCE
+                                     : ANOMALY_ALGO_MOTION) :
+                                     ANOMALY_ALGO_PERSIST;
+        obs->center_x_norm = state->acc_cx[ai];
+        obs->center_y_norm = state->acc_cy[ai];
+        obs->half_w_norm = target_half_side;
+        obs->half_h_norm = target_half_side;
+        obs->support_radius_norm = target_half_side * 1.8f;
+        obs->confidence = clampf(0.35f + 0.08f * (float)state->acc_hits[ai], 0.35f, 0.95f);
+    }
+    for (int ti = 0; ti < ANOMALY_SALIENCY_EXTRA_TRACKS &&
+                     target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0])); ti++) {
+        if (saliency_aux_raw_cx[ti] < 0.0f || saliency_aux_raw_cy[ti] < 0.0f) continue;
+        anomaly_target_observation_t *obs = &target_observations[target_observation_count++];
+        memset(obs, 0, sizeof(*obs));
+        obs->valid = true;
+        obs->algorithm = ANOMALY_ALGO_PERSIST;
+        obs->center_x_norm = state->saliency_aux_cx[ti];
+        obs->center_y_norm = state->saliency_aux_cy[ti];
+        obs->half_w_norm = target_half_side * 0.90f;
+        obs->half_h_norm = target_half_side * 0.90f;
+        obs->support_radius_norm = target_half_side * 1.6f;
+        obs->confidence = clampf(0.30f + 0.08f * (float)state->saliency_aux_hits[ti], 0.30f, 0.88f);
+    }
+    update_target_tracks_from_observations(
+            state,
+            target_observations,
+            target_observation_count,
+            registration_health);
+    if (state->roi_state.valid) {
+        annotate_target_revisit_cells(&state->roi_state, state);
+    }
+
     bool publish_motion_unstable =
         !scene_discontinuity &&
         registration_model_valid(&registration) &&
@@ -6993,21 +8569,79 @@ int anomaly_process_frame(
             ? ((float)best_thermal_y / fh) : 0.0f;
         result_out->thermal_debug.winning_candidate_index = best_thermal_candidate_idx;
         result_out->thermal_debug.candidate_count = thermal_candidate_count;
-        for (int i = 0; i < thermal_candidate_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
+        memset(&result_out->thermal_debug.target, 0, sizeof(result_out->thermal_debug.target));
+        result_out->thermal_debug.target.enabled = thermal_target_trace.enabled;
+        result_out->thermal_debug.target.valid = thermal_target_trace.valid;
+        result_out->thermal_debug.target.inside_scan_zone = thermal_target_trace.inside_scan_zone;
+        result_out->thermal_debug.target.pixel_x = thermal_target_trace.target_px;
+        result_out->thermal_debug.target.pixel_y = thermal_target_trace.target_py;
+        result_out->thermal_debug.target.sample_x = thermal_target_trace.target_sx;
+        result_out->thermal_debug.target.sample_y = thermal_target_trace.target_sy;
+        result_out->thermal_debug.target.x_norm = thermal_target_trace.target_x_norm;
+        result_out->thermal_debug.target.y_norm = thermal_target_trace.target_y_norm;
+        result_out->thermal_debug.target.target_delta = thermal_target_trace.target_delta;
+        result_out->thermal_debug.target.target_score = thermal_target_trace.target_score;
+        result_out->thermal_debug.target.hot_eligible = thermal_target_trace.hot_eligible;
+        result_out->thermal_debug.target.started_component = thermal_target_trace.started_component;
+        result_out->thermal_debug.target.local_max = thermal_target_trace.local_max;
+        result_out->thermal_debug.target.suppressor_sample_x = thermal_target_trace.suppressor_sx;
+        result_out->thermal_debug.target.suppressor_sample_y = thermal_target_trace.suppressor_sy;
+        result_out->thermal_debug.target.suppressor_delta = thermal_target_trace.suppressor_delta;
+        result_out->thermal_debug.target.suppressor_score = thermal_target_trace.suppressor_score;
+        result_out->thermal_debug.target.component_seed_x = thermal_target_trace.component_seed_x;
+        result_out->thermal_debug.target.component_seed_y = thermal_target_trace.component_seed_y;
+        result_out->thermal_debug.target.component_peak_x = thermal_target_trace.component_peak_x;
+        result_out->thermal_debug.target.component_peak_y = thermal_target_trace.component_peak_y;
+        result_out->thermal_debug.target.component_area = thermal_target_trace.component_area;
+        result_out->thermal_debug.target.component_span = thermal_target_trace.component_span;
+        result_out->thermal_debug.target.component_fill = thermal_target_trace.component_fill;
+        result_out->thermal_debug.target.component_peak_delta = thermal_target_trace.component_peak_delta;
+        result_out->thermal_debug.target.component_mean_delta = thermal_target_trace.component_mean_delta;
+        result_out->thermal_debug.target.component_quality = thermal_target_trace.component_quality;
+        result_out->thermal_debug.target.component_rejected = thermal_target_trace.component_rejected;
+        result_out->thermal_debug.target.rejection_gate = thermal_target_trace.rejection_gate;
+        result_out->thermal_debug.target.dropped_by_cap = thermal_target_trace.dropped_by_cap;
+        result_out->thermal_debug.target.dropped_by_nms = thermal_target_trace.dropped_by_nms;
+        result_out->thermal_debug.target.replaced_by_nms = thermal_target_trace.replaced_by_nms;
+        result_out->thermal_debug.target.nms_conflict_rank = thermal_target_trace.nms_conflict_rank;
+        result_out->thermal_debug.target.nms_conflict_sample_x = thermal_target_trace.nms_conflict_sample_x;
+        result_out->thermal_debug.target.nms_conflict_sample_y = thermal_target_trace.nms_conflict_sample_y;
+        result_out->thermal_debug.target.extracted_rank = thermal_target_trace.extracted_rank;
+        result_out->thermal_debug.target.winning_rank = thermal_target_trace.winning_rank;
+        result_out->thermal_debug.target.stage = thermal_target_trace.stage;
+        for (int i = 0; i < thermal_candidate_count && i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES; i++) {
             anomaly_debug_thermal_candidate_t *dbg = &result_out->thermal_debug.candidates[i];
             dbg->valid = true;
             dbg->pixel_x = thermal_candidates[i].pixel_x;
             dbg->pixel_y = thermal_candidates[i].pixel_y;
             dbg->x_norm = (float)thermal_candidates[i].pixel_x / fw;
             dbg->y_norm = (float)thermal_candidates[i].pixel_y / fh;
+            dbg->bbox_left_norm = (float)(roi_x0 + thermal_candidate_min_x[i] * sample_step) / fw;
+            dbg->bbox_top_norm = (float)(roi_y0 + thermal_candidate_min_y[i] * sample_step) / fh;
+            dbg->bbox_right_norm = (float)(roi_x0 + thermal_candidate_max_x[i] * sample_step) / fw;
+            dbg->bbox_bottom_norm = (float)(roi_y0 + thermal_candidate_max_y[i] * sample_step) / fh;
             dbg->base_score = thermal_candidate_base_score[i];
             dbg->final_score = thermal_candidates[i].thermal_score;
+            dbg->temporal_score = thermal_candidate_temporal_score[i];
             dbg->area = thermal_candidate_area[i];
             dbg->span = thermal_candidate_span[i];
             dbg->fill = thermal_candidate_fill[i];
             dbg->center_share = thermal_candidate_center_share[i];
             dbg->quality = thermal_candidate_quality_score[i];
             dbg->isolation_rank = thermal_candidate_isolation_rank[i];
+            dbg->peak_delta = thermal_candidate_peak_delta[i];
+            dbg->mean_delta = thermal_candidate_mean_delta[i];
+            dbg->score_scale = thermal_candidate_score_scale[i];
+            dbg->history_scale = thermal_candidate_history_scale_debug[i];
+            dbg->apparent_size_scale = thermal_candidate_apparent_size_scale[i];
+            dbg->isolation_track_scale = thermal_candidate_isolation_track_scale[i];
+            dbg->context_scale = thermal_candidate_context_scale[i];
+            dbg->parent_scale = thermal_candidate_parent_scale[i];
+            dbg->area_rank = thermal_candidate_area_rank[i];
+            dbg->span_rank = thermal_candidate_span_rank[i];
+            dbg->center_rank = thermal_candidate_center_rank[i];
+            dbg->quality_rank = thermal_candidate_quality_rank[i];
+            dbg->above_threshold = thermal_candidate_above_threshold[i];
         }
         result_out->saliency_debug.raw_candidate_valid = (best_persist >= 0.0f);
         result_out->saliency_debug.raw_score = best_persist;

@@ -227,6 +227,16 @@ typedef struct ffmpeg_session_t {
     int64_t anomaly_process_total_us;
     int64_t anomaly_process_max_us;
     int64_t anomaly_process_last_us;
+    int64_t anomaly_reg_health_healthy_count;
+    int64_t anomaly_reg_health_soft_count;
+    int64_t anomaly_reg_health_hard_count;
+    int64_t anomaly_reg_health_invalid_count;
+    int64_t anomaly_rescan_full_count;
+    int64_t anomaly_rescan_partial_count;
+    int64_t anomaly_rescan_target_only_count;
+    int64_t anomaly_rescan_stride_skip_count;
+    int anomaly_last_registration_health;
+    int anomaly_last_rescan_mode;
     char latest_anomaly_debug_summary[512];
     int64_t reader_stall_started_at_ms;
     int64_t last_reader_stall_log_at_ms;
@@ -699,6 +709,38 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
     }
 }
 
+static const char *registration_health_name(int value) {
+    switch (value) {
+        case ANOMALY_REG_HEALTH_INVALID:
+            return "invalid";
+        case ANOMALY_REG_HEALTH_HARD_DEGRADED:
+            return "hard-degraded";
+        case ANOMALY_REG_HEALTH_SOFT_DEGRADED:
+            return "soft-degraded";
+        case ANOMALY_REG_HEALTH_HEALTHY:
+            return "healthy";
+        case ANOMALY_REG_HEALTH_UNKNOWN:
+        default:
+            return "unknown";
+    }
+}
+
+static const char *rescan_mode_name(int value) {
+    switch (value) {
+        case ANOMALY_RESCAN_MODE_FULL:
+            return "full";
+        case ANOMALY_RESCAN_MODE_PARTIAL:
+            return "partial";
+        case ANOMALY_RESCAN_MODE_TARGET_ONLY:
+            return "target-only";
+        case ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP:
+            return "appearance-stride-skip";
+        case ANOMALY_RESCAN_MODE_UNSET:
+        default:
+            return "unset";
+    }
+}
+
 static bool analyze_rgba_frame(ffmpeg_session_t *session,
                                int width,
                                int height,
@@ -728,11 +770,47 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
     if (annotated) {
         session->anomaly_annotated_frame_count += 1;
     }
+    session->anomaly_last_registration_health = result.registration_health;
+    session->anomaly_last_rescan_mode = result.rescan_mode;
+    switch (result.registration_health) {
+        case ANOMALY_REG_HEALTH_HEALTHY:
+            session->anomaly_reg_health_healthy_count += 1;
+            break;
+        case ANOMALY_REG_HEALTH_SOFT_DEGRADED:
+            session->anomaly_reg_health_soft_count += 1;
+            break;
+        case ANOMALY_REG_HEALTH_HARD_DEGRADED:
+            session->anomaly_reg_health_hard_count += 1;
+            break;
+        case ANOMALY_REG_HEALTH_INVALID:
+            session->anomaly_reg_health_invalid_count += 1;
+            break;
+        default:
+            break;
+    }
+    switch (result.rescan_mode) {
+        case ANOMALY_RESCAN_MODE_FULL:
+            session->anomaly_rescan_full_count += 1;
+            break;
+        case ANOMALY_RESCAN_MODE_PARTIAL:
+            session->anomaly_rescan_partial_count += 1;
+            break;
+        case ANOMALY_RESCAN_MODE_TARGET_ONLY:
+            session->anomaly_rescan_target_only_count += 1;
+            break;
+        case ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP:
+            session->anomaly_rescan_stride_skip_count += 1;
+            break;
+        default:
+            break;
+    }
     if (result.motion_debug.valid) {
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "motion raw=%.2f load=%.2f broad=%.2f zoom=%.2f area=%.3f span=%.3f fill=%.2f support=%.2f tex=%.2f struct=%.2f persist=%.2f cand=(%.2f,%.2f)",
+                "reg=%s mode=%s motion raw=%.2f load=%.2f broad=%.2f zoom=%.2f area=%.3f span=%.3f fill=%.2f support=%.2f tex=%.2f struct=%.2f persist=%.2f cand=(%.2f,%.2f)",
+                registration_health_name(result.registration_health),
+                rescan_mode_name(result.rescan_mode),
                 result.motion_debug.raw_score,
                 result.motion_debug.global_motion_load,
                 result.motion_debug.broad_motion_scale,
@@ -750,7 +828,9 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "saliency raw=%.2f bg=%d tracked=%.2f hits=%d switch=%d cand=(%.2f,%.2f)",
+                "reg=%s mode=%s saliency raw=%.2f bg=%d tracked=%.2f hits=%d switch=%d cand=(%.2f,%.2f)",
+                registration_health_name(result.registration_health),
+                rescan_mode_name(result.rescan_mode),
                 result.saliency_debug.raw_score,
                 result.saliency_debug.bg_ready ? 1 : 0,
                 result.saliency_debug.tracked_score_pre,
@@ -762,12 +842,15 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "gmv scale=%.3f theta=%.1f resid=%.3f anchors=%d discontinuity=%d",
+                "reg=%s mode=%s gmv scale=%.3f theta=%.1f resid=%.3f anchors=%d discontinuity=%d refresh=%d",
+                registration_health_name(result.registration_health),
+                rescan_mode_name(result.rescan_mode),
                 result.gmv_debug.fit_scale,
                 result.gmv_debug.fit_theta_deg,
                 result.gmv_debug.fit_mean_residual,
                 result.gmv_debug.anchor_count,
-                result.gmv_debug.scene_discontinuity ? 1 : 0);
+                result.gmv_debug.scene_discontinuity ? 1 : 0,
+                result.appearance_refresh_ran_this_frame ? 1 : 0);
     } else if (session->latest_anomaly_debug_summary[0] == '\0') {
         snprintf(session->latest_anomaly_debug_summary, sizeof(session->latest_anomaly_debug_summary), "debug unavailable");
     }
@@ -1696,6 +1779,16 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->anomaly_process_total_us = 0;
         session->anomaly_process_max_us = 0;
         session->anomaly_process_last_us = 0;
+        session->anomaly_reg_health_healthy_count = 0;
+        session->anomaly_reg_health_soft_count = 0;
+        session->anomaly_reg_health_hard_count = 0;
+        session->anomaly_reg_health_invalid_count = 0;
+        session->anomaly_rescan_full_count = 0;
+        session->anomaly_rescan_partial_count = 0;
+        session->anomaly_rescan_target_only_count = 0;
+        session->anomaly_rescan_stride_skip_count = 0;
+        session->anomaly_last_registration_health = ANOMALY_REG_HEALTH_UNKNOWN;
+        session->anomaly_last_rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
         session->latest_anomaly_debug_summary[0] = '\0';
     }
 }
@@ -1714,6 +1807,16 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     session->anomaly_process_total_us = 0;
     session->anomaly_process_max_us = 0;
     session->anomaly_process_last_us = 0;
+    session->anomaly_reg_health_healthy_count = 0;
+    session->anomaly_reg_health_soft_count = 0;
+    session->anomaly_reg_health_hard_count = 0;
+    session->anomaly_reg_health_invalid_count = 0;
+    session->anomaly_rescan_full_count = 0;
+    session->anomaly_rescan_partial_count = 0;
+    session->anomaly_rescan_target_only_count = 0;
+    session->anomaly_rescan_stride_skip_count = 0;
+    session->anomaly_last_registration_health = ANOMALY_REG_HEALTH_UNKNOWN;
+    session->anomaly_last_rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
     session->latest_anomaly_debug_summary[0] = '\0';
 }
 
@@ -3538,7 +3641,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jint thermal_polarity,
         jfloat scan_zone,
         jint min_hits,
-        jfloat thermal_min_delta
+        jfloat thermal_min_delta,
+        jfloat small_target_screen_fraction
 ) {
     (void) env;
     (void) thiz;
@@ -3565,6 +3669,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.min_hits          = mh < 1 ? 1 : (mh > 10 ? 10 : mh);
         session->anomaly_cfg.thermal_min_delta = thermal_min_delta > 0.0f
                                                  ? thermal_min_delta : ANOMALY_THERMAL_MIN_DELTA;
+        session->anomaly_cfg.small_target_screen_fraction =
+                small_target_screen_fraction > 0.0f ? small_target_screen_fraction : (1.0f / 250.0f);
         // Reset accumulators so stale boxes don't persist across config changes.
         reset_anomaly_tracking_state(session);
     }
@@ -3578,7 +3684,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
         jlong session_id
 ) {
     (void) thiz;
-    jlong values[10];
+    jlong values[20];
     memset(values, 0, sizeof(values));
 
     pthread_mutex_lock(&g_lock);
@@ -3597,11 +3703,21 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
     values[7] = (jlong) session->local_playback_first_render_at_ms;
     values[8] = (jlong) session->local_playback_last_render_at_ms;
     values[9] = (jlong) session->local_playback_display_pts_us;
+    values[10] = (jlong) session->anomaly_reg_health_healthy_count;
+    values[11] = (jlong) session->anomaly_reg_health_soft_count;
+    values[12] = (jlong) session->anomaly_reg_health_hard_count;
+    values[13] = (jlong) session->anomaly_reg_health_invalid_count;
+    values[14] = (jlong) session->anomaly_rescan_full_count;
+    values[15] = (jlong) session->anomaly_rescan_partial_count;
+    values[16] = (jlong) session->anomaly_rescan_target_only_count;
+    values[17] = (jlong) session->anomaly_rescan_stride_skip_count;
+    values[18] = (jlong) session->anomaly_last_registration_health;
+    values[19] = (jlong) session->anomaly_last_rescan_mode;
     pthread_mutex_unlock(&g_lock);
 
-    jlongArray array = (*env)->NewLongArray(env, 10);
+    jlongArray array = (*env)->NewLongArray(env, 20);
     if (array == NULL) return NULL;
-    (*env)->SetLongArrayRegion(env, array, 0, 10, values);
+    (*env)->SetLongArrayRegion(env, array, 0, 20, values);
     return array;
 }
 

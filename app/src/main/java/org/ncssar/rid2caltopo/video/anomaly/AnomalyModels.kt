@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video.anomaly
 
 import java.util.Locale
+import kotlin.math.sqrt
 import kotlin.math.pow
 
 enum class AnomalyAlgorithm(
@@ -32,7 +33,7 @@ enum class AppearanceAnomalyMode(
     val algorithm: AnomalyAlgorithm,
     val label: String,
 ) {
-    Thermal(algorithm = AnomalyAlgorithm.ThermalHotspot, label = "Thermal"),
+    Thermal(algorithm = AnomalyAlgorithm.ThermalHotspot, label = "Infrared"),
     Color(algorithm = AnomalyAlgorithm.ColorOutlier, label = "Color Outlier");
 }
 
@@ -40,7 +41,7 @@ enum class AppearanceAnomalySelection(
     val label: String,
 ) {
     Auto(label = "Auto"),
-    Thermal(label = "Thermal"),
+    Thermal(label = "Infrared"),
     Color(label = "Color");
 
     fun resolved(fallback: AppearanceAnomalyMode = AppearanceAnomalyMode.Thermal): AppearanceAnomalyMode =
@@ -87,6 +88,7 @@ data class NativeAnomalyConfig(
     val scanZone: Float,
     val minHits: Int,
     val thermalMinDelta: Float,
+    val smallTargetScreenFraction: Float,
 )
 
 data class AnomalyConfig(
@@ -96,7 +98,7 @@ data class AnomalyConfig(
     val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.ThermalHotspot),
     val saliencyEnabled: Boolean = true,
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
-    val frameStride: Int = 3,
+    val frameStride: Int = 1,
     val pixelStep: Int = 0,
     val sensitivity: Float = 0.60f,
     val motionEvidenceSensitivity: Float = 0.60f,
@@ -106,6 +108,7 @@ data class AnomalyConfig(
     val scanZone: Float = 0.60f,
     val minHits: Int = 2,
     val thermalMinDelta: Float = 10.0f,
+    val smallTargetScreenFraction: Float = 1.0f / 250.0f,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {
@@ -123,6 +126,19 @@ data class AnomalyConfig(
 
     val motionEvidenceSensitivityLabel: String
         get() = String.format(Locale.US, "%d%%", (motionEvidenceSensitivity.coerceIn(0f, 1f) * 100f).toInt())
+
+    val smallTargetScaleLabel: String
+        get() {
+            val denom = (1.0f / smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)).toInt()
+            return "1/$denom"
+        }
+
+    fun effectiveSmallTargetSpanPx(frameWidth: Int, frameHeight: Int): Float {
+        val fw = frameWidth.coerceAtLeast(1).toFloat()
+        val fh = frameHeight.coerceAtLeast(1).toFloat()
+        val diagonal = sqrt((fw * fw) + (fh * fh))
+        return (diagonal * smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)).coerceAtLeast(2.0f)
+    }
 
     fun resolvedAppearanceMode(
         detectedMode: AppearanceAnomalyMode? = null,
@@ -182,6 +198,7 @@ data class AnomalyConfig(
             scanZone = scanZone.coerceIn(0.5f, 1.0f),
             minHits = minHits.coerceIn(1, 10),
             thermalMinDelta = thermalMinDelta.coerceIn(1.0f, 64.0f),
+            smallTargetScreenFraction = smallTargetScreenFraction.coerceIn(0.0015f, 0.03f),
         )
     }
 }

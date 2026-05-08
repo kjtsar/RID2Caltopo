@@ -15,6 +15,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -26,11 +28,13 @@ import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
@@ -329,6 +333,21 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     .pendingDroneConfirmation
                     .collectAsState()
                 val maPackageImportState by MutualAidPackageTransferManager.importState.collectAsState()
+                val confirmationToneGenerator = remember {
+                    try {
+                        ToneGenerator(AudioManager.STREAM_ALARM, 100)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                DisposableEffect(Unit) {
+                    onDispose { confirmationToneGenerator?.release() }
+                }
+                LaunchedEffect(pendingDroneConfirmation?.remoteId) {
+                    if (pendingDroneConfirmation != null) {
+                        confirmationToneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 300)
+                    }
+                }
                 when (activeScreen) {
                     ActiveScreen.MAIN -> {
                         MainScreen(

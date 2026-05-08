@@ -851,6 +851,7 @@ class StreamsViewModel(
     }
 
     fun runtimeSnapshotFor(designator: String): StreamRuntimeSnapshot? {
+        if (renderRouteByDesignator[designator] != true) return null
         return ffmpegProbeService?.runtimeSnapshot(designator)
     }
 
@@ -1734,9 +1735,7 @@ class StreamsViewModel(
     private fun shouldUseFfmpegRender(designator: String): Boolean {
         val info = streamInfoByDesignator[designator]
         if (info?.isLocalPlayback == true) {
-            val config = _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
             return ffmpegProbeService != null &&
-                config.enabled &&
                 _focusedPath.value == designator &&
                 displayedTileCountForCurrentLayout() == 1 &&
                 info.state == StreamState.LIVE
@@ -2133,7 +2132,7 @@ class StreamsViewModel(
     }
 
     fun streamPerformanceOverlayText(designator: String): String? {
-        val runtime = ffmpegProbeService?.runtimeSnapshot(designator) ?: return null
+        val runtime = runtimeSnapshotFor(designator) ?: return null
         val anomalyText = runtime.anomalyAvgProcessMs?.let {
             String.format(Locale.US, " ANO %.1fms", it)
         } ?: ""
@@ -2147,7 +2146,7 @@ class StreamsViewModel(
         } ?: ""
         return String.format(
             Locale.US,
-            "FPS d/r %.1f/%.1f FR %d/%d AGE %dms%s%s%s",
+                "FPS d/r %.1f/%.1f FR %d/%d AGE %dms%s%s%s",
             runtime.avgDecodedFps,
             runtime.avgRenderedFps,
             runtime.decodedFrameCount,
@@ -2158,6 +2157,9 @@ class StreamsViewModel(
             realtimeText,
         )
     }
+
+    private fun currentRendererLabel(designator: String): String =
+        if (renderRouteByDesignator[designator] == true) "FFmpeg" else "ExoPlayer"
 
     fun performancePanelText(focusedDesignator: String?): String {
         val lines = mutableListOf<String>()
@@ -2192,9 +2194,9 @@ class StreamsViewModel(
         if (!focusedDesignator.isNullOrBlank()) {
             lines += ""
             lines += "Focused stream: $focusedDesignator"
-            val runtime = ffmpegProbeService?.runtimeSnapshot(focusedDesignator)
+            val runtime = runtimeSnapshotFor(focusedDesignator)
             if (runtime == null) {
-                lines += "  Stream runtime stats: not available for current renderer."
+                lines += "  Stream runtime stats: not available for current renderer (${currentRendererLabel(focusedDesignator)})."
             } else {
                 lines += String.format(Locale.US, "  Average decoded FPS: %.1f", runtime.avgDecodedFps)
                 lines += String.format(Locale.US, "  Average rendered FPS: %.1f", runtime.avgRenderedFps)
@@ -2222,7 +2224,7 @@ class StreamsViewModel(
                 realtimeStatus(runtime.localPlaybackRealtimeFactor)?.let { status ->
                     lines += String.format(
                         Locale.US,
-                        "  Anomaly realtime: %.2fx realtime recent (%s)",
+                        "  Playback realtime: %.2fx realtime recent (%s)",
                         status.factor,
                         status.descriptor,
                     )
@@ -2234,7 +2236,7 @@ class StreamsViewModel(
                     lines += if (sessionRealtimeStatus != null) {
                         String.format(
                             Locale.US,
-                            "  Analysis span: %.1f s media over %.1f s wall time (session avg %.2fx)",
+                            "  Playback span: %.1f s media over %.1f s wall time (session avg %.2fx)",
                             mediaSpanMs / 1000.0,
                             wallSpanMs / 1000.0,
                             sessionRealtimeStatus.factor,
@@ -2242,7 +2244,7 @@ class StreamsViewModel(
                     } else {
                         String.format(
                             Locale.US,
-                            "  Analysis span: %.1f s media over %.1f s wall time",
+                            "  Playback span: %.1f s media over %.1f s wall time",
                             mediaSpanMs / 1000.0,
                             wallSpanMs / 1000.0,
                         )

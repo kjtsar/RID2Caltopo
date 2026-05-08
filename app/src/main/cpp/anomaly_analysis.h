@@ -314,6 +314,8 @@ typedef struct {
     uint8_t *scratch_registration_luma;
     uint8_t *scratch_registration_tmp;
     size_t   scratch_registration_luma_capacity;
+    uint8_t *scratch_u8;
+    size_t   scratch_u8_capacity;
     float   *scratch_sg_luma;
     float   *scratch_ii_sum;
     float   *scratch_ii_sum2;
@@ -322,10 +324,17 @@ typedef struct {
     float   *scratch_saliency_color;
     float   *scratch_saliency_motion;
     float   *scratch_saliency_registration;
+    float   *scratch_thermal_delta;
     size_t   scratch_saliency_capacity;
     float   *scratch_patch_score;
     float   *scratch_patch_selection;
     size_t   scratch_patch_capacity;
+    float   *scratch_prev_roi_last_luma;
+    float   *scratch_prev_roi_thermal_score;
+    float   *scratch_prev_roi_temporal_score;
+    uint8_t *scratch_prev_roi_valid_mask;
+    uint8_t *scratch_prev_roi_coverage_age;
+    size_t   scratch_prev_roi_capacity;
     uint8_t *scratch_refresh_mask;
     size_t   scratch_refresh_mask_capacity;
     int     *scratch_i32;

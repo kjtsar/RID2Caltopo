@@ -258,6 +258,61 @@ static bool ensure_int_capacity(int **buffer, size_t *capacity, size_t count) {
     return true;
 }
 
+static bool ensure_prev_roi_snapshot_capacity(anomaly_state_t *state, size_t sample_count) {
+    if (state == NULL) return false;
+    if (sample_count == 0) return true;
+    return
+        ensure_float_capacity(&state->scratch_prev_roi_last_luma,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_float_capacity(&state->scratch_prev_roi_thermal_score,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_float_capacity(&state->scratch_prev_roi_temporal_score,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_u8_capacity(&state->scratch_prev_roi_valid_mask,
+                           &state->scratch_prev_roi_capacity,
+                           sample_count) &&
+        ensure_u8_capacity(&state->scratch_prev_roi_coverage_age,
+                           &state->scratch_prev_roi_capacity,
+                           sample_count);
+}
+
+static inline float thermal_delta_from_maps(
+        const float *delta_map,
+        const float *bg_luma,
+        const float *sg_luma,
+        size_t       idx,
+        bool         black_hot) {
+    if (delta_map != NULL) return delta_map[idx];
+    if (bg_luma == NULL || sg_luma == NULL) return 0.0f;
+    float bg = bg_luma[idx];
+    float lum = sg_luma[idx];
+    return black_hot ? (bg - lum) : (lum - bg);
+}
+
+static inline float thermal_blob_value_at(
+        const float *thermal_score_map,
+        const float *thermal_delta_map,
+        const float *bg_luma,
+        const float *sg_luma,
+        size_t       idx,
+        bool         bg_valid,
+        bool         black_hot,
+        float        thermal_min_delta) {
+    if (bg_valid) {
+        float delta = thermal_delta_from_maps(
+            thermal_delta_map,
+            bg_luma,
+            sg_luma,
+            idx,
+            black_hot);
+        return delta >= thermal_min_delta ? delta : -1.0f;
+    }
+    return thermal_score_map != NULL ? thermal_score_map[idx] : -1.0f;
+}
+
 static bool ensure_roi_state_capacity(anomaly_roi_state_t *roi_state, size_t pixel_count) {
     if (roi_state == NULL) return false;
     if (pixel_count == 0) return true;
@@ -997,6 +1052,7 @@ static void insert_thermal_blob_candidate(
 static void extract_thermal_blob_candidates(
         const anomaly_config_t *cfg,
         const float *thermal_score_map,
+        const float *thermal_delta_map,
         const float *bg_luma,
         const float *sg_luma,
         int          sg_w,
@@ -1013,20 +1069,21 @@ static void extract_thermal_blob_candidates(
         float        frame_contrast_std,
         uint8_t     *visited,
         int         *queue,
-        float       *thermal_value_map,
         float       *candidate_seed_map,
         anomaly_thermal_blob_candidate_t *out_candidates,
         int         *out_count,
         anomaly_thermal_target_trace_t *target_trace) {
     if (out_count != NULL) *out_count = 0;
-    if (thermal_score_map == NULL || thermal_value_map == NULL || candidate_seed_map == NULL ||
+    if (thermal_score_map == NULL || candidate_seed_map == NULL ||
         visited == NULL || queue == NULL || out_candidates == NULL || out_count == NULL ||
+        (bg_valid && thermal_delta_map == NULL && (bg_luma == NULL || sg_luma == NULL)) ||
         sg_w <= 0 || sg_h <= 0) {
         return;
     }
 
     size_t sg_count = (size_t)sg_w * (size_t)sg_h;
     memset(visited, 0, sg_count * sizeof(uint8_t));
+    memset(candidate_seed_map, 0, sg_count * sizeof(float));
     if (target_trace != NULL) {
         memset(target_trace, 0, sizeof(*target_trace));
         target_trace->enabled = cfg != NULL && cfg->thermal_debug_target_enabled;
@@ -1063,27 +1120,19 @@ static void extract_thermal_blob_candidates(
             }
         }
     }
-    for (size_t i = 0; i < sg_count; i++) {
-        candidate_seed_map[i] = -1.0f;
-        float score = thermal_score_map[i];
-        if (score <= 0.0f) {
-            thermal_value_map[i] = -1.0f;
-            continue;
-        }
-        if (bg_valid && bg_luma != NULL && sg_luma != NULL) {
-            float delta = black_hot
-                ? (bg_luma[i] - (float)sg_luma[i])
-                : ((float)sg_luma[i] - bg_luma[i]);
-            thermal_value_map[i] = delta >= thermal_min_delta ? delta : -1.0f;
-        } else {
-            thermal_value_map[i] = score;
-        }
-    }
     if (target_trace != NULL && target_trace->enabled && target_trace->valid) {
         size_t tidx = (size_t)target_trace->target_idx;
-        target_trace->target_delta = thermal_value_map[tidx];
+        target_trace->target_delta = thermal_blob_value_at(
+            thermal_score_map,
+            thermal_delta_map,
+            bg_luma,
+            sg_luma,
+            tidx,
+            bg_valid,
+            black_hot,
+            thermal_min_delta);
         target_trace->target_score = thermal_score_map[tidx];
-        target_trace->hot_eligible = thermal_value_map[tidx] > 0.0f;
+        target_trace->hot_eligible = target_trace->target_delta > 0.0f;
         target_trace->stage = target_trace->hot_eligible
             ? ANOMALY_THERMAL_TARGET_STAGE_MERGED_INTO_COMPONENT
             : ANOMALY_THERMAL_TARGET_STAGE_NOT_HOT;
@@ -1094,7 +1143,15 @@ static void extract_thermal_blob_candidates(
                 if (nx < 0 || nx >= sg_w) continue;
                 if (nx == target_trace->target_sx && ny == target_trace->target_sy) continue;
                 size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
-                float ndelta = thermal_value_map[nidx];
+                float ndelta = thermal_blob_value_at(
+                    thermal_score_map,
+                    thermal_delta_map,
+                    bg_luma,
+                    sg_luma,
+                    nidx,
+                    bg_valid,
+                    black_hot,
+                    thermal_min_delta);
                 float nscore = thermal_score_map[nidx];
                 if (ndelta > target_trace->target_delta ||
                     (ndelta == target_trace->target_delta && nscore > target_trace->target_score)) {
@@ -1121,7 +1178,15 @@ static void extract_thermal_blob_candidates(
         for (int sx = 0; sx < sg_w; sx++) {
             size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
             if (visited[seed_idx] != 0u) continue;
-            float seed_delta = thermal_value_map[seed_idx];
+            float seed_delta = thermal_blob_value_at(
+                thermal_score_map,
+                thermal_delta_map,
+                bg_luma,
+                sg_luma,
+                seed_idx,
+                bg_valid,
+                black_hot,
+                thermal_min_delta);
             if (seed_delta <= 0.0f) continue;
             if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                 (int)seed_idx == target_trace->target_idx) {
@@ -1152,7 +1217,15 @@ static void extract_thermal_blob_candidates(
                 int cur = queue[head++];
                 int cx = cur % sg_w;
                 int cy = cur / sg_w;
-                float cur_delta = thermal_value_map[cur];
+                float cur_delta = thermal_blob_value_at(
+                    thermal_score_map,
+                    thermal_delta_map,
+                    bg_luma,
+                    sg_luma,
+                    (size_t)cur,
+                    bg_valid,
+                    black_hot,
+                    thermal_min_delta);
                 float cur_score = thermal_score_map[cur];
                 if (cur_delta <= 0.0f) continue;
                 if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
@@ -1183,7 +1256,15 @@ static void extract_thermal_blob_candidates(
                         if (nx < 0 || nx >= sg_w || ny < 0 || ny >= sg_h) continue;
                         size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
                         if (visited[nidx] != 0u) continue;
-                        float ndelta = thermal_value_map[nidx];
+                        float ndelta = thermal_blob_value_at(
+                            thermal_score_map,
+                            thermal_delta_map,
+                            bg_luma,
+                            sg_luma,
+                            nidx,
+                            bg_valid,
+                            black_hot,
+                            thermal_min_delta);
                         if (ndelta <= 0.0f) continue;
                         float blob_mean = area > 0 ? (float)(sum_delta / (double)area) : seed_delta;
                         float blob_band = fmaxf(local_band * 1.10f, seed_delta * 0.28f);
@@ -1230,7 +1311,15 @@ static void extract_thermal_blob_candidates(
                     if (!touches_ring) continue;
                     ring_total++;
                     size_t ridx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-                    float ring_delta = thermal_value_map[ridx];
+                    float ring_delta = thermal_blob_value_at(
+                        thermal_score_map,
+                        thermal_delta_map,
+                        bg_luma,
+                        sg_luma,
+                        ridx,
+                        bg_valid,
+                        black_hot,
+                        thermal_min_delta);
                     bool ring_is_hot = ring_delta >= ring_threshold;
                     if (ring_is_hot) ring_hot++;
 
@@ -1287,7 +1376,15 @@ static void extract_thermal_blob_candidates(
 
                     support_total++;
                     size_t sidx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-                    float support_delta = thermal_value_map[sidx];
+                    float support_delta = thermal_blob_value_at(
+                        thermal_score_map,
+                        thermal_delta_map,
+                        bg_luma,
+                        sg_luma,
+                        sidx,
+                        bg_valid,
+                        black_hot,
+                        thermal_min_delta);
                     bool support_is_hot = support_delta >= support_threshold;
                     if (support_is_hot) support_hot++;
                     if (chebyshev <= 2) {
@@ -2509,6 +2606,7 @@ static bool patch_mse_at(
         int            curr_x,
         int            curr_y,
         int            patch_half,
+        float          abort_mse_over,
         float         *out_mse) {
     if (prev_luma == NULL || curr_luma == NULL || out_mse == NULL) return false;
     if (prev_x - patch_half < 0 || prev_y - patch_half < 0 ||
@@ -2518,13 +2616,17 @@ static bool patch_mse_at(
         return false;
     }
     float err = 0.0f;
-    int count = 0;
+    int patch_span = patch_half * 2 + 1;
+    int count = patch_span * patch_span;
+    float abort_err = abort_mse_over > 0.0f ? (abort_mse_over * (float)count) : -1.0f;
     for (int oy = -patch_half; oy <= patch_half; oy++) {
         for (int ox = -patch_half; ox <= patch_half; ox++) {
             float d = (float)prev_luma[(prev_y + oy) * w + (prev_x + ox)] -
                       (float)curr_luma[(curr_y + oy) * w + (curr_x + ox)];
             err += d * d;
-            count++;
+            if (abort_err > 0.0f && err > abort_err) {
+                return false;
+            }
         }
     }
     if (count <= 0) return false;
@@ -2567,7 +2669,19 @@ static int track_affine_features(
                 int cx = pred_x + dx;
                 int cy = pred_y + dy;
                 float mse = 0.0f;
-                if (!patch_mse_at(prev_luma, curr_luma, w, h, x, y, cx, cy, patch_half, &mse)) continue;
+                float abort_mse_over = have_best ? (best_err * 1.05f) : -1.0f;
+                if (!patch_mse_at(
+                        prev_luma,
+                        curr_luma,
+                        w,
+                        h,
+                        x,
+                        y,
+                        cx,
+                        cy,
+                        patch_half,
+                        abort_mse_over,
+                        &mse)) continue;
                 if (!have_best || mse < best_err) {
                     second_err = best_err;
                     have_second = have_best;
@@ -2690,6 +2804,7 @@ static inline float ii_query(const float *ii, int stride,
 
 static float saliency_boundary_structure_scale(
         const float  *patch_score_map,
+        const float  *thermal_delta_map,
         const float  *bg_luma,
         const float  *sg_luma,
         int           sg_w,
@@ -2700,15 +2815,19 @@ static float saliency_boundary_structure_scale(
         bool          black_hot,
         float         thermal_min_delta,
         float         delta_norm) {
-    if (!bg_valid || patch_score_map == NULL || bg_luma == NULL || sg_luma == NULL ||
+    if (!bg_valid || patch_score_map == NULL ||
+        (thermal_delta_map == NULL && (bg_luma == NULL || sg_luma == NULL)) ||
         sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
         return 1.0f;
     }
 
     size_t center_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-    float seed_delta = black_hot
-        ? (bg_luma[center_idx] - (float)sg_luma[center_idx])
-        : ((float)sg_luma[center_idx] - bg_luma[center_idx]);
+    float seed_delta = thermal_delta_from_maps(
+        thermal_delta_map,
+        bg_luma,
+        sg_luma,
+        center_idx,
+        black_hot);
     if (seed_delta < thermal_min_delta || patch_score_map[center_idx] <= 0.0f) {
         return 1.0f;
     }
@@ -2741,9 +2860,12 @@ static float saliency_boundary_structure_scale(
             int gy = sy + dirs[di][1] * step;
             if (gx < 0 || gx >= sg_w || gy < 0 || gy >= sg_h) break;
             size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-            float delta = black_hot
-                ? (bg_luma[idx] - (float)sg_luma[idx])
-                : ((float)sg_luma[idx] - bg_luma[idx]);
+            float delta = thermal_delta_from_maps(
+                thermal_delta_map,
+                bg_luma,
+                sg_luma,
+                idx,
+                black_hot);
             if (step <= 2 && delta > 0.0f) {
                 ratio_sum += delta / fmaxf(seed_delta, 1.0f);
                 ratio_count++;
@@ -3058,6 +3180,7 @@ static void estimate_representative_blob_delta_stats(
 }
 
 static void estimate_framewide_blob_contrast_stats(
+        const float *thermal_delta_map,
         const float *bg_luma,
         const float *sg_luma,
         int          sg_w,
@@ -3069,7 +3192,8 @@ static void estimate_framewide_blob_contrast_stats(
         float       *contrast_std_out) {
     if (contrast_mean_out != NULL) *contrast_mean_out = 0.0f;
     if (contrast_std_out != NULL) *contrast_std_out = 0.0f;
-    if (!bg_valid || bg_luma == NULL || sg_luma == NULL || sg_w <= 0 || sg_h <= 0) return;
+    if (!bg_valid || (thermal_delta_map == NULL && (bg_luma == NULL || sg_luma == NULL)) ||
+        sg_w <= 0 || sg_h <= 0) return;
 
     double sum = 0.0;
     double sum2 = 0.0;
@@ -3077,15 +3201,21 @@ static void estimate_framewide_blob_contrast_stats(
     for (int sy = 0; sy < sg_h; sy++) {
         for (int sx = 0; sx < sg_w; sx++) {
             size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-            float delta0 = black_hot
-                ? (bg_luma[idx] - (float)sg_luma[idx])
-                : ((float)sg_luma[idx] - bg_luma[idx]);
+            float delta0 = thermal_delta_from_maps(
+                thermal_delta_map,
+                bg_luma,
+                sg_luma,
+                idx,
+                black_hot);
             if (delta0 < thermal_min_delta) continue;
             if (sx + 1 < sg_w) {
                 size_t nidx = idx + 1u;
-                float delta1 = black_hot
-                    ? (bg_luma[nidx] - (float)sg_luma[nidx])
-                    : ((float)sg_luma[nidx] - bg_luma[nidx]);
+                float delta1 = thermal_delta_from_maps(
+                    thermal_delta_map,
+                    bg_luma,
+                    sg_luma,
+                    nidx,
+                    black_hot);
                 if (delta1 >= thermal_min_delta) {
                     float hi = delta0 > delta1 ? delta0 : delta1;
                     float lo = delta0 > delta1 ? delta1 : delta0;
@@ -3100,9 +3230,12 @@ static void estimate_framewide_blob_contrast_stats(
             }
             if (sy + 1 < sg_h) {
                 size_t nidx = idx + (size_t)sg_w;
-                float delta1 = black_hot
-                    ? (bg_luma[nidx] - (float)sg_luma[nidx])
-                    : ((float)sg_luma[nidx] - bg_luma[nidx]);
+                float delta1 = thermal_delta_from_maps(
+                    thermal_delta_map,
+                    bg_luma,
+                    sg_luma,
+                    nidx,
+                    black_hot);
                 if (delta1 >= thermal_min_delta) {
                     float hi = delta0 > delta1 ? delta0 : delta1;
                     float lo = delta0 > delta1 ? delta1 : delta0;
@@ -3128,6 +3261,7 @@ static void estimate_framewide_blob_contrast_stats(
 }
 
 static float thermal_candidate_seed_context_scale(
+        const float *thermal_delta_map,
         const float *bg_luma,
         const float *sg_luma,
         int          sg_w,
@@ -3142,15 +3276,18 @@ static float thermal_candidate_seed_context_scale(
         float        frame_contrast_mean,
         float        frame_contrast_std,
         float        delta_norm) {
-    if (!bg_valid || bg_luma == NULL || sg_luma == NULL ||
+    if (!bg_valid || (thermal_delta_map == NULL && (bg_luma == NULL || sg_luma == NULL)) ||
         sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
         return 1.0f;
     }
 
     size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-    float seed_delta = black_hot
-        ? (bg_luma[seed_idx] - (float)sg_luma[seed_idx])
-        : ((float)sg_luma[seed_idx] - bg_luma[seed_idx]);
+    float seed_delta = thermal_delta_from_maps(
+        thermal_delta_map,
+        bg_luma,
+        sg_luma,
+        seed_idx,
+        black_hot);
     if (seed_delta < thermal_min_delta) return 0.45f;
 
     int radius = effective_thermal_context_radius_cells(sample_step);
@@ -3184,9 +3321,12 @@ static float thermal_candidate_seed_context_scale(
             int gy = sy + dirs[di][1] * step;
             if (gx < 0 || gx >= sg_w || gy < 0 || gy >= sg_h) break;
             size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-            float delta = black_hot
-                ? (bg_luma[idx] - (float)sg_luma[idx])
-                : ((float)sg_luma[idx] - bg_luma[idx]);
+            float delta = thermal_delta_from_maps(
+                thermal_delta_map,
+                bg_luma,
+                sg_luma,
+                idx,
+                black_hot);
             if (step == 1) {
                 first_step_seen = true;
                 if (delta > 0.0f) {
@@ -3279,6 +3419,7 @@ static float thermal_candidate_seed_context_scale(
 }
 
 static float thermal_candidate_parent_mass_scale(
+        const float *thermal_delta_map,
         const float *bg_luma,
         const float *sg_luma,
         int          sg_w,
@@ -3292,15 +3433,18 @@ static float thermal_candidate_parent_mass_scale(
         float        frame_contrast_mean,
         float        frame_contrast_std,
         float        delta_norm) {
-    if (!bg_valid || bg_luma == NULL || sg_luma == NULL ||
+    if (!bg_valid || (thermal_delta_map == NULL && (bg_luma == NULL || sg_luma == NULL)) ||
         sg_w <= 0 || sg_h <= 0 || sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
         return 1.0f;
     }
 
     size_t seed_idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-    float seed_delta = black_hot
-        ? (bg_luma[seed_idx] - (float)sg_luma[seed_idx])
-        : ((float)sg_luma[seed_idx] - bg_luma[seed_idx]);
+    float seed_delta = thermal_delta_from_maps(
+        thermal_delta_map,
+        bg_luma,
+        sg_luma,
+        seed_idx,
+        black_hot);
     if (seed_delta < thermal_min_delta) return 0.50f;
 
     int radius = effective_thermal_parent_mass_radius_cells(sample_step);
@@ -3328,9 +3472,12 @@ static float thermal_candidate_parent_mass_scale(
             if (dy > ring) ring = dy;
             if (ring > radius) continue;
             size_t idx = (size_t)gy * (size_t)sg_w + (size_t)gx;
-            float delta = black_hot
-                ? (bg_luma[idx] - (float)sg_luma[idx])
-                : ((float)sg_luma[idx] - bg_luma[idx]);
+            float delta = thermal_delta_from_maps(
+                thermal_delta_map,
+                bg_luma,
+                sg_luma,
+                idx,
+                black_hot);
             if (delta < parent_floor) continue;
             area++;
             if (gx < min_x) min_x = gx;
@@ -6323,6 +6470,7 @@ static void update_roi_state_full_refresh(
         const float                      *sg_luma,
         const float                      *saliency_spatial_map,
         const float                      *saliency_motion_map,
+        const float                      *thermal_delta_map,
         bool                              bg_valid,
         int                               black_hot,
         float                             thermal_min_delta,
@@ -6353,9 +6501,12 @@ static void update_roi_state_full_refresh(
         roi_state->thermal_score[i] = saliency_spatial_map != NULL ? saliency_spatial_map[i] : -1.0f;
         float temporal_score = -1.0f;
         if (bg_valid && state->bg_luma != NULL) {
-            float bg = state->bg_luma[i];
-            float lum = sg_luma[i];
-            float delta = black_hot ? (bg - lum) : (lum - bg);
+            float delta = thermal_delta_from_maps(
+                thermal_delta_map,
+                state->bg_luma,
+                sg_luma,
+                i,
+                black_hot != 0);
             if (delta >= thermal_min_delta) {
                 temporal_score = (delta - delta_mean) / delta_norm;
             }
@@ -6387,6 +6538,7 @@ static bool update_roi_state_selective_refresh(
         const float                      *sg_luma,
         const float                      *saliency_spatial_map,
         const float                      *saliency_motion_map,
+        const float                      *thermal_delta_map,
         bool                              bg_valid,
         int                               black_hot,
         float                             thermal_min_delta,
@@ -6417,20 +6569,15 @@ static bool update_roi_state_selective_refresh(
     int prev_width = roi_state->width;
     int prev_height = roi_state->height;
     int prev_sample_step = roi_state->sample_step;
-    float *prev_last_luma = (float *)malloc(sg_count * sizeof(float));
-    float *prev_thermal_score = (float *)malloc(sg_count * sizeof(float));
-    float *prev_temporal_score = (float *)malloc(sg_count * sizeof(float));
-    uint8_t *prev_valid_mask = (uint8_t *)malloc(sg_count * sizeof(uint8_t));
-    uint8_t *prev_coverage_age = (uint8_t *)malloc(sg_count * sizeof(uint8_t));
-    if (prev_last_luma == NULL || prev_thermal_score == NULL || prev_temporal_score == NULL ||
-        prev_valid_mask == NULL || prev_coverage_age == NULL) {
-        free(prev_last_luma);
-        free(prev_thermal_score);
-        free(prev_temporal_score);
-        free(prev_valid_mask);
-        free(prev_coverage_age);
+    if (!ensure_prev_roi_snapshot_capacity(state, sg_count)) {
         return false;
     }
+
+    float *prev_last_luma = state->scratch_prev_roi_last_luma;
+    float *prev_thermal_score = state->scratch_prev_roi_thermal_score;
+    float *prev_temporal_score = state->scratch_prev_roi_temporal_score;
+    uint8_t *prev_valid_mask = state->scratch_prev_roi_valid_mask;
+    uint8_t *prev_coverage_age = state->scratch_prev_roi_coverage_age;
 
     memcpy(prev_last_luma, roi_state->last_luma, sg_count * sizeof(float));
     memcpy(prev_thermal_score, roi_state->thermal_score, sg_count * sizeof(float));
@@ -6466,9 +6613,12 @@ static bool update_roi_state_selective_refresh(
                     saliency_spatial_map != NULL ? saliency_spatial_map[idx] : -1.0f;
                 float temporal_score = -1.0f;
                 if (bg_valid && state->bg_luma != NULL) {
-                    float bg = state->bg_luma[idx];
-                    float lum = sg_luma[idx];
-                    float delta = black_hot ? (bg - lum) : (lum - bg);
+                    float delta = thermal_delta_from_maps(
+                        thermal_delta_map,
+                        state->bg_luma,
+                        sg_luma,
+                        idx,
+                        black_hot != 0);
                     if (delta >= thermal_min_delta) {
                         temporal_score = (delta - delta_mean) / delta_norm;
                     }
@@ -6530,11 +6680,6 @@ static bool update_roi_state_selective_refresh(
 
     summarize_roi_cells(roi_state, saliency_motion_map, registration_health);
     annotate_target_revisit_cells(roi_state, state);
-    free(prev_last_luma);
-    free(prev_thermal_score);
-    free(prev_temporal_score);
-    free(prev_valid_mask);
-    free(prev_coverage_age);
     return true;
 }
 
@@ -6855,28 +7000,26 @@ bool anomaly_probe_thermal_point(
         int y = roi_y0 + gy * sample_step;
         if (y >= roi_y1) y = roi_y1 - 1;
         const uint8_t *row = rgba + (y * rgba_stride);
+        int row_offset = gy * sg_w;
+        int prev_row_offset = row_offset - sg_w;
         for (int gx = 0; gx < sg_w; gx++) {
             int x = roi_x0 + gx * sample_step;
             if (x >= roi_x1) x = roi_x1 - 1;
             const uint8_t *p = row + (x * 4);
             float r = (float)p[0], g = (float)p[1], b = (float)p[2];
-            sg_luma[gy * sg_w + gx] = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
-        }
-    }
-
-    for (int gy = 0; gy < sg_h; gy++) {
-        for (int gx = 0; gx < sg_w; gx++) {
-            float v = sg_luma[gy * sg_w + gx];
+            float v = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
             float v2 = v * v;
-            float a = (gy > 0) ? ii_sum[(gy - 1) * sg_w + gx] : 0.0f;
-            float l = (gx > 0) ? ii_sum[gy * sg_w + (gx - 1)] : 0.0f;
-            float al = (gy > 0 && gx > 0) ? ii_sum[(gy - 1) * sg_w + (gx - 1)] : 0.0f;
-            ii_sum[gy * sg_w + gx] = v + a + l - al;
+            int idx = row_offset + gx;
+            sg_luma[idx] = v;
+            float a = (gy > 0) ? ii_sum[prev_row_offset + gx] : 0.0f;
+            float l = (gx > 0) ? ii_sum[idx - 1] : 0.0f;
+            float al = (gy > 0 && gx > 0) ? ii_sum[prev_row_offset + (gx - 1)] : 0.0f;
+            ii_sum[idx] = v + a + l - al;
 
-            float a2 = (gy > 0) ? ii_sum2[(gy - 1) * sg_w + gx] : 0.0f;
-            float l2 = (gx > 0) ? ii_sum2[gy * sg_w + (gx - 1)] : 0.0f;
-            float al2 = (gy > 0 && gx > 0) ? ii_sum2[(gy - 1) * sg_w + (gx - 1)] : 0.0f;
-            ii_sum2[gy * sg_w + gx] = v2 + a2 + l2 - al2;
+            float a2 = (gy > 0) ? ii_sum2[prev_row_offset + gx] : 0.0f;
+            float l2 = (gx > 0) ? ii_sum2[idx - 1] : 0.0f;
+            float al2 = (gy > 0 && gx > 0) ? ii_sum2[prev_row_offset + (gx - 1)] : 0.0f;
+            ii_sum2[idx] = v2 + a2 + l2 - al2;
         }
     }
 
@@ -7025,6 +7168,9 @@ void anomaly_state_reset(anomaly_state_t *state) {
     free(state->scratch_registration_tmp);
     state->scratch_registration_tmp = NULL;
     state->scratch_registration_luma_capacity = 0;
+    free(state->scratch_u8);
+    state->scratch_u8 = NULL;
+    state->scratch_u8_capacity = 0;
     free(state->scratch_sg_luma);
     state->scratch_sg_luma = NULL;
     free(state->scratch_ii_sum);
@@ -7040,12 +7186,25 @@ void anomaly_state_reset(anomaly_state_t *state) {
     state->scratch_saliency_motion = NULL;
     free(state->scratch_saliency_registration);
     state->scratch_saliency_registration = NULL;
+    free(state->scratch_thermal_delta);
+    state->scratch_thermal_delta = NULL;
     state->scratch_saliency_capacity = 0;
     free(state->scratch_patch_score);
     state->scratch_patch_score = NULL;
     free(state->scratch_patch_selection);
     state->scratch_patch_selection = NULL;
     state->scratch_patch_capacity = 0;
+    free(state->scratch_prev_roi_last_luma);
+    state->scratch_prev_roi_last_luma = NULL;
+    free(state->scratch_prev_roi_thermal_score);
+    state->scratch_prev_roi_thermal_score = NULL;
+    free(state->scratch_prev_roi_temporal_score);
+    state->scratch_prev_roi_temporal_score = NULL;
+    free(state->scratch_prev_roi_valid_mask);
+    state->scratch_prev_roi_valid_mask = NULL;
+    free(state->scratch_prev_roi_coverage_age);
+    state->scratch_prev_roi_coverage_age = NULL;
+    state->scratch_prev_roi_capacity = 0;
     free(state->scratch_refresh_mask);
     state->scratch_refresh_mask = NULL;
     state->scratch_refresh_mask_capacity = 0;
@@ -7445,13 +7604,15 @@ int anomaly_process_frame(
     double sum_v = 0.0, sum_v2 = 0.0;
     int sample_count = 0;
 
-    // Fill sampled-luma grid + colour tile accumulators in one pass.
+    // Fill sampled-luma grid, integral images, and colour tile accumulators in one pass.
     for (int sy = 0; sy < sg_h; sy++) {
         int y  = roi_y0 + sy * sample_step;
         if (y >= roi_y1) y = roi_y1 - 1;
         int tr = sy * T / sg_h;
         if (tr >= T) tr = T - 1;
         const uint8_t *row = rgba + (y * rgba_stride);
+        int row_offset = sy * sg_w;
+        int prev_row_offset = row_offset - sg_w;
         for (int sx = 0; sx < sg_w; sx++) {
             int x  = roi_x0 + sx * sample_step;
             if (x >= roi_x1) x = roi_x1 - 1;
@@ -7460,8 +7621,18 @@ int anomaly_process_frame(
             const uint8_t *px = row + (x * 4);
             float r = (float)px[0], g = (float)px[1], b = (float)px[2];
             float lum = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
-            sg_luma[sy * sg_w + sx] = lum;
-            sum_l  += lum; sum_l2 += lum * lum;
+            float lum2 = lum * lum;
+            int idx = row_offset + sx;
+            sg_luma[idx] = lum;
+            float a = (sy > 0) ? ii_sum[prev_row_offset + sx] : 0.0f;
+            float l = (sx > 0) ? ii_sum[idx - 1] : 0.0f;
+            float al = (sy > 0 && sx > 0) ? ii_sum[prev_row_offset + (sx - 1)] : 0.0f;
+            ii_sum[idx] = lum + a + l - al;
+            float a2 = (sy > 0) ? ii_sum2[prev_row_offset + sx] : 0.0f;
+            float l2 = (sx > 0) ? ii_sum2[idx - 1] : 0.0f;
+            float al2 = (sy > 0 && sx > 0) ? ii_sum2[prev_row_offset + (sx - 1)] : 0.0f;
+            ii_sum2[idx] = lum2 + a2 + l2 - al2;
+            sum_l  += lum; sum_l2 += lum2;
             if (need_color_support) {
                 float u   = (-0.14713f * r) - (0.28886f * g) + (0.43600f * b);
                 float v   = ( 0.61500f * r) - (0.51499f * g) - (0.10001f * b);
@@ -7492,22 +7663,6 @@ int anomaly_process_frame(
         anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP, stage_started_us);
         finalize_result_timing(result_out, &timing, frame_started_us);
         return 0;
-    }
-
-    // Build 2-D integral images from sg_luma (in-place row-then-column scan).
-    for (int sy = 0; sy < sg_h; sy++) {
-        for (int sx = 0; sx < sg_w; sx++) {
-            float v  = sg_luma[sy * sg_w + sx];
-            float v2 = v * v;
-            float a  = (sy > 0) ? ii_sum [(sy-1)*sg_w + sx]   : 0.0f;
-            float l  = (sx > 0) ? ii_sum [sy*sg_w + (sx-1)]   : 0.0f;
-            float al = (sy > 0 && sx > 0) ? ii_sum [(sy-1)*sg_w + (sx-1)] : 0.0f;
-            ii_sum [sy*sg_w + sx] = v  + a  + l  - al;
-            float a2  = (sy > 0) ? ii_sum2[(sy-1)*sg_w + sx]   : 0.0f;
-            float l2  = (sx > 0) ? ii_sum2[sy*sg_w + (sx-1)]   : 0.0f;
-            float al2 = (sy > 0 && sx > 0) ? ii_sum2[(sy-1)*sg_w + (sx-1)] : 0.0f;
-            ii_sum2[sy*sg_w + sx] = v2 + a2 + l2 - al2;
-        }
     }
 
     // Colour tile mean/std (fall back to global if tile too sparse).
@@ -7543,6 +7698,18 @@ int anomaly_process_frame(
     }
 #undef T
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP, stage_started_us);
+
+    int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
+    bool bg_valid = (state->bg_luma != NULL
+                     && state->bg_sg_w == sg_w
+                     && state->bg_sg_h == sg_h
+                     && state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP
+                     && !scene_discontinuity);
+    bool compute_spatial_thermal_scores =
+        anomaly_detection_active &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION |
+                                ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0 &&
+        !(bg_valid && (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0);
 
     // ── Per-pixel scoring ────────────────────────────────────────────────
     // Thermal: integral-image local window of radius ANOMALY_THERMAL_WIN_RADIUS
@@ -7623,7 +7790,7 @@ int anomaly_process_frame(
 
             float lum = sg_luma[idx];
 
-            if (anomaly_detection_active && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0) {
+            if (compute_spatial_thermal_scores) {
 #if ANOMALY_DEBUG_TIMING
                 int64_t branch_started_us = anomaly_timing_now_us();
 #endif
@@ -7786,13 +7953,7 @@ int anomaly_process_frame(
     // once the background model has warmed up.  During the first
     // ANOMALY_THERMAL_BG_WARMUP analyzed frames after init or scene cut, the
     // spatial integral-image score above provides uninterrupted coverage.
-    int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
-
-    bool bg_valid = (state->bg_luma != NULL
-                     && state->bg_sg_w == sg_w
-                     && state->bg_sg_h == sg_h
-                     && state->bg_warmup >= ANOMALY_THERMAL_BG_WARMUP
-                     && !scene_discontinuity);
+    float *thermal_delta_map = NULL;
     float delta_mean = 0.0f;
     float delta_norm = ANOMALY_THERMAL_BG_NORM;
     float frame_blob_contrast_mean = 0.0f;
@@ -7802,12 +7963,16 @@ int anomaly_process_frame(
     }
 
     if (anomaly_detection_active && bg_valid && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
+        if (ensure_float_capacity(&state->scratch_thermal_delta, &state->scratch_saliency_capacity, sg_count)) {
+            thermal_delta_map = state->scratch_thermal_delta;
+        }
         double sum_d = 0.0, sum_d2 = 0.0;
         int cnt_d = 0;
         for (int i = 0; i < sg_w * sg_h; i++) {
             float d = black_hot
                 ? (state->bg_luma[i] - (float)sg_luma[i])
                 : ((float)sg_luma[i] - state->bg_luma[i]);
+            if (thermal_delta_map != NULL) thermal_delta_map[i] = d;
             if (d > 0.0f) { sum_d += d; sum_d2 += (double)d * d; cnt_d++; }
         }
         delta_mean = cnt_d > 0 ? (float)(sum_d / (double)cnt_d) : 0.0f;
@@ -7817,6 +7982,7 @@ int anomaly_process_frame(
         if (delta_norm < ANOMALY_THERMAL_BG_NORM)
             delta_norm = ANOMALY_THERMAL_BG_NORM;
         estimate_framewide_blob_contrast_stats(
+                thermal_delta_map,
                 state->bg_luma,
                 sg_luma,
                 sg_w,
@@ -7857,9 +8023,13 @@ int anomaly_process_frame(
                     continue;
                 }
                 float lum = sg_luma[idx];
-                float  bg  = state->bg_luma[idx];
                 // Positive delta: pixel is warmer than its stored background.
-                float delta = black_hot ? (bg - (float)lum) : ((float)lum - bg);
+                float delta = thermal_delta_from_maps(
+                    thermal_delta_map,
+                    state->bg_luma,
+                    sg_luma,
+                    idx,
+                    black_hot != 0);
                 if (delta < thermal_min_delta) {
                     if (saliency_spatial_map != NULL) {
                         saliency_spatial_map[idx] = -1.0f;
@@ -7900,26 +8070,23 @@ int anomaly_process_frame(
                 state->thermal_target_persist[i] *= ANOMALY_THERMAL_TARGET_HISTORY_DECAY;
             }
         }
-        float *thermal_patch_map = NULL;
         float *thermal_patch_selection = NULL;
         uint8_t *thermal_visited = NULL;
         int *thermal_queue = NULL;
-        if (ensure_float_capacity(&state->scratch_patch_score, &state->scratch_patch_capacity, sg_count) &&
-            ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, sg_count) &&
-            ensure_u8_capacity(&state->scratch_luma, &state->scratch_luma_capacity, sg_count) &&
+        if (ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, sg_count) &&
+            ensure_u8_capacity(&state->scratch_u8, &state->scratch_u8_capacity, sg_count) &&
             ensure_int_capacity(&state->scratch_i32, &state->scratch_i32_capacity, sg_count)) {
-            thermal_patch_map = state->scratch_patch_score;
             thermal_patch_selection = state->scratch_patch_selection;
-            thermal_visited = state->scratch_luma;
+            thermal_visited = state->scratch_u8;
             thermal_queue = state->scratch_i32;
         }
-        if (thermal_patch_map != NULL && thermal_patch_selection != NULL &&
-            thermal_visited != NULL && thermal_queue != NULL) {
+        if (thermal_patch_selection != NULL && thermal_visited != NULL && thermal_queue != NULL) {
             anomaly_thermal_blob_candidate_t thermal_blob_candidates[ANOMALY_MAX_THERMAL_CANDIDATES];
             memset(thermal_blob_candidates, 0, sizeof(thermal_blob_candidates));
             extract_thermal_blob_candidates(
                     cfg,
                     saliency_spatial_map,
+                    thermal_delta_map,
                     state->bg_luma,
                     sg_luma,
                     sg_w,
@@ -7936,7 +8103,6 @@ int anomaly_process_frame(
                     frame_blob_contrast_std,
                     thermal_visited,
                     thermal_queue,
-                    thermal_patch_map,
                     thermal_patch_selection,
                     thermal_blob_candidates,
                     &thermal_candidate_count,
@@ -7980,6 +8146,7 @@ int anomaly_process_frame(
                     motion_support = local_motion_support > 0.0f ? local_motion_support : 0.0f;
                 }
                 float context_scale = thermal_candidate_seed_context_scale(
+                    thermal_delta_map,
                     state->bg_luma,
                     sg_luma,
                     sg_w,
@@ -7995,6 +8162,7 @@ int anomaly_process_frame(
                     frame_blob_contrast_std,
                     delta_norm);
                 float parent_scale = thermal_candidate_parent_mass_scale(
+                    thermal_delta_map,
                     state->bg_luma,
                     sg_luma,
                     sg_w,
@@ -8015,9 +8183,12 @@ int anomaly_process_frame(
                 float final_score = base_score * score_scale * history_scale;
                 float temporal_score = -1.0f;
                 if (bg_valid) {
-                    float bg = state->bg_luma[idx];
-                    float lum = (float)sg_luma[idx];
-                    float delta = black_hot ? (bg - lum) : (lum - bg);
+                    float delta = thermal_delta_from_maps(
+                        thermal_delta_map,
+                        state->bg_luma,
+                        sg_luma,
+                        idx,
+                        black_hot != 0);
                     if (delta >= thermal_min_delta) {
                         temporal_score = (float)((delta - delta_mean) / delta_norm);
                         if (temporal_score > base_score) {
@@ -8667,9 +8838,12 @@ int anomaly_process_frame(
                         }
                         float thermal_temporal = 0.0f;
                         if (bg_valid) {
-                            float bg = state->bg_luma[idx];
-                            float lum = (float)sg_luma[idx];
-                            float delta = black_hot ? (bg - lum) : (lum - bg);
+                            float delta = thermal_delta_from_maps(
+                                thermal_delta_map,
+                                state->bg_luma,
+                                sg_luma,
+                                idx,
+                                black_hot != 0);
                             if (delta >= thermal_min_delta) {
                                 thermal_temporal = (float)((delta - delta_mean) / delta_norm);
                             }
@@ -8718,6 +8892,7 @@ int anomaly_process_frame(
                         if (final_score <= 0.0f) continue;
                         float boundary_scale = saliency_boundary_structure_scale(
                             patch_score_map,
+                            thermal_delta_map,
                             state->bg_luma,
                             sg_luma,
                             sg_w,
@@ -8752,9 +8927,12 @@ int anomaly_process_frame(
                     if (color_support > 0.0f) spatial_evidence += 0.60f * color_support;
                     float temporal_evidence = 0.0f;
                     if (bg_valid) {
-                        float bg = state->bg_luma[idx];
-                        float lum = (float)sg_luma[idx];
-                        float delta = black_hot ? (bg - lum) : (lum - bg);
+                        float delta = thermal_delta_from_maps(
+                            thermal_delta_map,
+                            state->bg_luma,
+                            sg_luma,
+                            idx,
+                            black_hot != 0);
                         if (delta >= thermal_min_delta) {
                             temporal_evidence = (float)((delta - delta_mean) / delta_norm);
                         }
@@ -8859,6 +9037,7 @@ int anomaly_process_frame(
                 sg_luma,
                 saliency_spatial_map,
                 saliency_motion_map,
+                thermal_delta_map,
                 bg_valid,
                 black_hot,
                 thermal_min_delta,
@@ -8888,6 +9067,7 @@ int anomaly_process_frame(
                 sg_luma,
                 saliency_spatial_map,
                 saliency_motion_map,
+                thermal_delta_map,
                 bg_valid,
                 black_hot,
                 thermal_min_delta,

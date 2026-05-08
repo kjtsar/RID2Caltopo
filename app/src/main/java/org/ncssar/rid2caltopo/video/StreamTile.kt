@@ -266,12 +266,32 @@ fun StreamTile(
                 }
             }
         }
-        if (anomalyConfig.enabled && streamTileSize.width > 0 && streamTileSize.height > 0) {
+        if (
+            anomalyConfig.enabled &&
+            anomalyConfig.showGuideBoxes &&
+            streamTileSize.width > 0 &&
+            streamTileSize.height > 0
+        ) {
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
             ) {
+                val guideColor = Color(0xFF80CBC4).copy(alpha = 0.70f)
+                val (scanZoneWidth, scanZoneHeight) = anomalyConfig.scanZoneSize(
+                    frameWidth = size.width,
+                    frameHeight = size.height,
+                )
+                val scanZoneTopLeft = Offset(
+                    x = (size.width - scanZoneWidth) * 0.5f,
+                    y = (size.height - scanZoneHeight) * 0.5f,
+                )
+                drawRect(
+                    color = guideColor,
+                    topLeft = scanZoneTopLeft,
+                    size = Size(scanZoneWidth, scanZoneHeight),
+                    style = Stroke(width = 1.5.dp.toPx())
+                )
                 val targetSpanPx = anomalyConfig.effectiveSmallTargetSpanPx(
                     frameWidth = streamTileSize.width,
                     frameHeight = streamTileSize.height,
@@ -281,7 +301,7 @@ fun StreamTile(
                     y = (size.height - targetSpanPx) * 0.5f,
                 )
                 drawRect(
-                    color = Color(0xFF80CBC4).copy(alpha = 0.70f),
+                    color = guideColor,
                     topLeft = topLeft,
                     size = Size(targetSpanPx, targetSpanPx),
                     style = Stroke(width = 1.5.dp.toPx())
@@ -383,27 +403,11 @@ fun StreamTile(
                             viewModel.toggleAnomalyEnabled(streamDesignator)
                         }
                     )
-                    if (isLocalPlayback) {
-                        DropdownMenuItem(
-                            text = { Text("Clear Review Annotations") },
-                            onClick = {
-                                anomalyMenuExpanded = false
-                                viewModel.clearLocalPlaybackReviewAnnotations(streamDesignator)
-                            }
-                        )
-                    }
                     DropdownMenuItem(
                         text = { Text("Anomaly Detector Settings") },
                         onClick = {
                             anomalyMenuExpanded = false
                             showAnomalySettingsDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Reset AD Controls to Realtime Defaults") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            viewModel.resetAnomalyRealtimeDefaults(streamDesignator)
                         }
                     )
                     DropdownMenuItem(
@@ -781,6 +785,16 @@ fun StreamTile(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Text("Reset to Realtime Defaults")
+                                TextButton(onClick = { viewModel.resetAnomalyRealtimeDefaults(streamDesignator) }) {
+                                    Text("Reset")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text("Appearance (${anomalyConfig.appearanceSelection.label})")
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Button(
@@ -841,6 +855,16 @@ fun StreamTile(
                                 Text("Saliency")
                                 TextButton(onClick = { viewModel.toggleSaliencyEnabled(streamDesignator) }) {
                                     Text(if (anomalyConfig.saliencyEnabled) "On" else "Off")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Show Guide Boxes")
+                                TextButton(onClick = { viewModel.toggleShowGuideBoxes(streamDesignator) }) {
+                                    Text(if (anomalyConfig.showGuideBoxes) "On" else "Off")
                                 }
                             }
                             Row(
@@ -949,6 +973,25 @@ fun StreamTile(
                                     .background(Color.Black.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
                             ) {
                                 Canvas(modifier = Modifier.fillMaxSize()) {
+                                    val guideColor = Color(0xFF80CBC4).copy(alpha = 0.80f)
+                                    val previewConfig = anomalyConfig.copy(
+                                        scanZone = scanZoneValue,
+                                        smallTargetScreenFraction = smallTargetFractionValue,
+                                    )
+                                    val (scanZoneWidth, scanZoneHeight) = previewConfig.scanZoneSize(
+                                        frameWidth = size.width,
+                                        frameHeight = size.height,
+                                    )
+                                    val scanZoneTopLeft = Offset(
+                                        x = (size.width - scanZoneWidth) * 0.5f,
+                                        y = (size.height - scanZoneHeight) * 0.5f,
+                                    )
+                                    drawRect(
+                                        color = guideColor,
+                                        topLeft = scanZoneTopLeft,
+                                        size = Size(scanZoneWidth, scanZoneHeight),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
                                     val targetSpanPx = anomalyConfig.copy(
                                         smallTargetScreenFraction = smallTargetFractionValue
                                     ).effectiveSmallTargetSpanPx(
@@ -960,11 +1003,27 @@ fun StreamTile(
                                         y = (size.height - targetSpanPx) * 0.5f,
                                     )
                                     drawRect(
-                                        color = Color(0xFF80CBC4).copy(alpha = 0.80f),
+                                        color = guideColor,
                                         topLeft = topLeft,
                                         size = Size(targetSpanPx, targetSpanPx),
                                         style = Stroke(width = 2.dp.toPx())
                                     )
+                                }
+                            }
+                            if (isLocalPlayback) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Clear Review Annotations")
+                                    TextButton(
+                                        onClick = {
+                                            viewModel.clearLocalPlaybackReviewAnnotations(streamDesignator)
+                                        }
+                                    ) {
+                                        Text("Clear")
+                                    }
                                 }
                             }
                         }
@@ -1018,6 +1077,7 @@ fun StreamTile(
                             Text("Detail: Pixel sampling step for appearance analysis. Auto chooses a default from frame size; smaller steps inspect more detail at higher cost.")
                             Text("Appearance: Infrared is the recommended default for SAR thermal video. Color Outlier is mainly for visible-light footage or special cases.")
                             Text("ShowHot: Draws a red ring around the hottest region in the frame as a thermal debug aid.")
+                            Text("Guide Boxes: Shows cyan outlines for the centered scan zone and the maximum small-target size.")
                             Text("Saliency: Enables the unified saliency detector. Turn it off to match harness runs that omit the saliency algorithm.")
                             Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
                             Text("Registration: Chooses the motion-registration backend used to stabilize detections. Affine usually tracks camera motion more accurately; GMV is simpler and may be cheaper.")

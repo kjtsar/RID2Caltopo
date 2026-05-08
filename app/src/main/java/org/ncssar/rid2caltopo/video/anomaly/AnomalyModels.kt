@@ -93,10 +93,11 @@ data class NativeAnomalyConfig(
 
 data class AnomalyConfig(
     val enabled: Boolean = false,
+    val showGuideBoxes: Boolean = true,
     val showHotOverlay: Boolean = false,
     val showCandidateBlobs: Boolean = false,
     val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.ThermalHotspot),
-    val saliencyEnabled: Boolean = true,
+    val saliencyEnabled: Boolean = false,
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
     val frameStride: Int = 1,
     val pixelStep: Int = 0,
@@ -105,7 +106,7 @@ data class AnomalyConfig(
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.BlackHot,
     val registrationMode: MotionRegistrationMode = MotionRegistrationMode.Affine,
-    val scanZone: Float = 0.80f,
+    val scanZone: Float = 0.50f,
     val minHits: Int = 2,
     val thermalMinDelta: Float = 10.0f,
     val smallTargetScreenFraction: Float = 1.0f / 200.0f,
@@ -132,6 +133,14 @@ data class AnomalyConfig(
             val denom = (1.0f / smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)).toInt()
             return "1/$denom"
         }
+
+    fun scanZoneSize(frameWidth: Float, frameHeight: Float): Pair<Float, Float> {
+        val normalizedZone = scanZone.coerceIn(0.5f, 1f)
+        return Pair(
+            frameWidth.coerceAtLeast(1f) * normalizedZone,
+            frameHeight.coerceAtLeast(1f) * normalizedZone,
+        )
+    }
 
     fun effectiveSmallTargetSpanPx(frameWidth: Int, frameHeight: Int): Float {
         val fw = frameWidth.coerceAtLeast(1).toFloat()

@@ -1537,6 +1537,12 @@ class StreamsViewModel(
         }
     }
 
+    fun toggleShowGuideBoxes(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(showGuideBoxes = !current.showGuideBoxes)
+        }
+    }
+
     fun toggleShowCandidateBlobs(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(showCandidateBlobs = !current.showCandidateBlobs)

@@ -5443,7 +5443,6 @@ static void draw_anomaly_boxes_rgba(uint8_t *rgba, int rgba_stride,
     if (rgba == NULL || boxes == NULL || width <= 0 || height <= 0 || box_count <= 0) return;
     int min_dim    = (width < height) ? width : height;
     int stroke_max = clamp_i32((int)lroundf((double)min_dim * 0.006), 2, 8);
-    int cross_half = clamp_i32((int)lroundf((double)min_dim * 0.018), 6, 16);
 
     for (int i = 0; i < box_count; i++) {
         const anomaly_box_t *box = &boxes[i];
@@ -5454,35 +5453,45 @@ static void draw_anomaly_boxes_rgba(uint8_t *rgba, int rgba_stride,
         int bottom = clamp_i32((int)lroundf(box->bottom_norm * (float)(height - 1)), 0, height - 1);
         if (right <= left || bottom <= top) continue;
 
-        for (int t = 0; t < stroke; t++) {
-            int top_y   = top    + t;
-            int bottom_y = bottom - t;
-            int left_x  = left   + t;
-            int right_x = right  - t;
-            if (top_y <= bottom_y) {
-                draw_rgba_hline(rgba, rgba_stride, width, height, left, right, top_y,    box->r, box->g, box->b);
-                if (bottom_y != top_y)
-                    draw_rgba_hline(rgba, rgba_stride, width, height, left, right, bottom_y, box->r, box->g, box->b);
-            }
-            if (left_x <= right_x) {
-                draw_rgba_vline(rgba, rgba_stride, width, height, top, bottom, left_x,  box->r, box->g, box->b);
-                if (right_x != left_x)
-                    draw_rgba_vline(rgba, rgba_stride, width, height, top, bottom, right_x, box->r, box->g, box->b);
-            }
-        }
-
         if (box->draw_crosshair != 0u) {
             int cx = (left + right) / 2;
             int cy = (top  + bottom) / 2;
-            int cross_start_x = cx - cross_half;
-            int cross_end_x   = cx + cross_half;
-            int cross_start_y = cy - cross_half;
-            int cross_end_y   = cy + cross_half;
+            int box_half_w = (right - left) / 2;
+            int box_half_h = (bottom - top) / 2;
+            int max_gap_half_x = box_half_w - stroke;
+            int max_gap_half_y = box_half_h - stroke;
+            int gap_half_x = (max_gap_half_x <= stroke * 2)
+                    ? stroke
+                    : clamp_i32(box_half_w / 3, stroke * 2, max_gap_half_x);
+            int gap_half_y = (max_gap_half_y <= stroke * 2)
+                    ? stroke
+                    : clamp_i32(box_half_h / 3, stroke * 2, max_gap_half_y);
             for (int t = 0; t < stroke; t++) {
                 int horiz_y = cy - (stroke / 2) + t;
                 int vert_x  = cx - (stroke / 2) + t;
-                draw_rgba_hline(rgba, rgba_stride, width, height, cross_start_x, cross_end_x, horiz_y, box->r, box->g, box->b);
-                draw_rgba_vline(rgba, rgba_stride, width, height, cross_start_y, cross_end_y, vert_x,  box->r, box->g, box->b);
+                draw_rgba_hline(rgba, rgba_stride, width, height, left, cx - gap_half_x, horiz_y, box->r, box->g, box->b);
+                draw_rgba_hline(rgba, rgba_stride, width, height, cx + gap_half_x, right, horiz_y, box->r, box->g, box->b);
+                draw_rgba_vline(rgba, rgba_stride, width, height, top, cy - gap_half_y, vert_x, box->r, box->g, box->b);
+                draw_rgba_vline(rgba, rgba_stride, width, height, cy + gap_half_y, bottom, vert_x, box->r, box->g, box->b);
+            }
+        } else {
+            for (int t = 0; t < stroke; t++) {
+                int top_y   = top    + t;
+                int bottom_y = bottom - t;
+                int left_x  = left   + t;
+                int right_x = right  - t;
+                if (top_y <= bottom_y) {
+                    draw_rgba_hline(rgba, rgba_stride, width, height, left, right, top_y, box->r, box->g, box->b);
+                    if (bottom_y != top_y) {
+                        draw_rgba_hline(rgba, rgba_stride, width, height, left, right, bottom_y, box->r, box->g, box->b);
+                    }
+                }
+                if (left_x <= right_x) {
+                    draw_rgba_vline(rgba, rgba_stride, width, height, top, bottom, left_x, box->r, box->g, box->b);
+                    if (right_x != left_x) {
+                        draw_rgba_vline(rgba, rgba_stride, width, height, top, bottom, right_x, box->r, box->g, box->b);
+                    }
+                }
             }
         }
     }

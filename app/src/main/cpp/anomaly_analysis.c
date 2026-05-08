@@ -1875,6 +1875,46 @@ static inline bool registration_invert_point(
     return true;
 }
 
+typedef struct {
+    float m00;
+    float m01;
+    float m02;
+    float m10;
+    float m11;
+    float m12;
+    bool valid;
+} anomaly_inverse_affine_t;
+
+static inline anomaly_inverse_affine_t registration_inverse_affine(
+        const anomaly_registration_model_t *model) {
+    anomaly_inverse_affine_t inv;
+    memset(&inv, 0, sizeof(inv));
+    if (model == NULL) return inv;
+    float det = model->affine[0] * model->affine[4] - model->affine[1] * model->affine[3];
+    if (fabsf(det) < 1e-6f) return inv;
+    float inv_det = 1.0f / det;
+    inv.m00 =  model->affine[4] * inv_det;
+    inv.m01 = -model->affine[1] * inv_det;
+    inv.m02 = (model->affine[1] * model->affine[5] - model->affine[4] * model->affine[2]) * inv_det;
+    inv.m10 = -model->affine[3] * inv_det;
+    inv.m11 =  model->affine[0] * inv_det;
+    inv.m12 = (model->affine[3] * model->affine[2] - model->affine[0] * model->affine[5]) * inv_det;
+    inv.valid = true;
+    return inv;
+}
+
+static inline bool registration_invert_point_fast(
+        const anomaly_inverse_affine_t *inv,
+        float                           x,
+        float                           y,
+        float                          *out_x,
+        float                          *out_y) {
+    if (inv == NULL || !inv->valid || out_x == NULL || out_y == NULL) return false;
+    *out_x = inv->m00 * x + inv->m01 * y + inv->m02;
+    *out_y = inv->m10 * x + inv->m11 * y + inv->m12;
+    return true;
+}
+
 static bool project_motion_cell(
         const anomaly_registration_model_t *model,
         int             width,
@@ -6362,6 +6402,11 @@ static bool build_selective_refresh_mask(
     memset(refresh_mask, 0, total_samples * sizeof(uint8_t));
     float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
     float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    anomaly_inverse_affine_t inv = registration_inverse_affine(model);
+    if (!inv.valid) {
+        if (reason_flags_out != NULL) *reason_flags_out |= ANOMALY_SCAN_REASON_MASK_BUILD_FAILED;
+        return false;
+    }
     int prev_cell_span = roi_grid_cell_span(prev->sample_step);
     if (prev_cell_span <= 0) return false;
 
@@ -6384,7 +6429,7 @@ static bool build_selective_refresh_mask(
             float ny = clamp01f((float)y / fh);
             float px = 0.0f;
             float py = 0.0f;
-            if (!registration_invert_point(model, nx, ny, &px, &py)) {
+            if (!registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
                 select_sample = !target_only;
             } else {
                 int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
@@ -6583,6 +6628,8 @@ static bool update_roi_state_selective_refresh(
     float reg_conf = registration_health_confidence(registration_health);
     float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
     float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    anomaly_inverse_affine_t inv = registration_inverse_affine(registration);
+    if (!inv.valid) return false;
     for (int sy = 0; sy < sg_h; sy++) {
         int y = roi_y0 + sy * sample_step + sample_step / 2;
         if (y >= roi_y1) y = roi_y1 - 1;
@@ -6621,7 +6668,7 @@ static bool update_roi_state_selective_refresh(
             float px = 0.0f;
             float py = 0.0f;
             bool carried = false;
-            if (registration_invert_point(registration, nx, ny, &px, &py)) {
+            if (registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
                 int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
                 int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
                 if (prev_px >= prev_roi_x0 && prev_px < prev_roi_x1 &&
@@ -6741,6 +6788,12 @@ static anomaly_scan_plan_t build_scan_plan(
     int stale_limit = ANOMALY_ROI_REALTIME_CARRY_EXPIRY;
     float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
     float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    anomaly_inverse_affine_t inv = registration_inverse_affine(model);
+    if (!inv.valid) {
+        plan.reason_flags |= ANOMALY_SCAN_REASON_REG_INVALID;
+        if (registration_health_out != NULL) *registration_health_out = refined;
+        return plan;
+    }
 
     for (int sy = 0; sy < sg_h; sy++) {
         int y = roi_y0 + sy * sample_step + sample_step / 2;
@@ -6752,7 +6805,7 @@ static anomaly_scan_plan_t build_scan_plan(
             float ny = clamp01f((float)y / fh);
             float px = 0.0f;
             float py = 0.0f;
-            if (!registration_invert_point(model, nx, ny, &px, &py)) {
+            if (!registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
                 plan.newly_exposed_samples++;
                 continue;
             }

@@ -105,10 +105,10 @@ data class AnomalyConfig(
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.BlackHot,
     val registrationMode: MotionRegistrationMode = MotionRegistrationMode.Affine,
-    val scanZone: Float = 0.60f,
+    val scanZone: Float = 0.80f,
     val minHits: Int = 2,
     val thermalMinDelta: Float = 10.0f,
-    val smallTargetScreenFraction: Float = 1.0f / 250.0f,
+    val smallTargetScreenFraction: Float = 1.0f / 200.0f,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {

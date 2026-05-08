@@ -82,9 +82,19 @@ android {
             shrinkResources = true
             proguardFiles(getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
             signingConfig = signingConfigs.getByName("release")
+            externalNativeBuild {
+                cmake {
+                    arguments "-DANOMALY_DEBUG_TIMING=OFF"
+                }
+            }
         }
         debug {
             testCoverageEnabled true
+            externalNativeBuild {
+                cmake {
+                    arguments "-DANOMALY_DEBUG_TIMING=OFF"
+                }
+            }
         }
     }
 

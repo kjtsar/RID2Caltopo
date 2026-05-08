@@ -51,6 +51,7 @@ data class StreamRuntimeSnapshot(
     val anomalyMaxProcessMs: Double?,
     val anomalyLastProcessMs: Double?,
     val localPlaybackRealtimeFactor: Double?,
+    val localPlaybackSessionRealtimeFactor: Double?,
     val localPlaybackMediaSpanMs: Long?,
     val localPlaybackWallSpanMs: Long?,
     val registrationHealthyFrameCount: Long,
@@ -773,6 +774,14 @@ class FfmpegProbeService(
                 ((localPlaybackLastPtsUs - localPlaybackFirstPtsUs) / 1000L).takeIf { it > 0L }
             val localPlaybackWallSpanMs =
                 (localPlaybackLastRenderAtMs - localPlaybackFirstRenderAtMs).takeIf { it > 0L }
+            val recentPlaybackFirstPtsUs = perfStats?.getOrNull(20) ?: 0L
+            val recentPlaybackLastPtsUs = perfStats?.getOrNull(21) ?: 0L
+            val recentPlaybackFirstRenderAtMs = perfStats?.getOrNull(22) ?: 0L
+            val recentPlaybackLastRenderAtMs = perfStats?.getOrNull(23) ?: 0L
+            val recentPlaybackMediaSpanMs =
+                ((recentPlaybackLastPtsUs - recentPlaybackFirstPtsUs) / 1000L).takeIf { it > 0L }
+            val recentPlaybackWallSpanMs =
+                (recentPlaybackLastRenderAtMs - recentPlaybackFirstRenderAtMs).takeIf { it > 0L }
             val registrationHealthyFrameCount = perfStats?.getOrNull(10) ?: 0L
             val registrationSoftDegradedFrameCount = perfStats?.getOrNull(11) ?: 0L
             val registrationHardDegradedFrameCount = perfStats?.getOrNull(12) ?: 0L
@@ -785,6 +794,12 @@ class FfmpegProbeService(
             val currentRescanMode = (perfStats?.getOrNull(19) ?: 0L).toInt()
             val currentSourceTimestampUs = perfStats?.getOrNull(9)?.takeIf { it > 0L }
             val localPlaybackRealtimeFactor =
+                if (recentPlaybackMediaSpanMs != null && recentPlaybackWallSpanMs != null && recentPlaybackWallSpanMs > 0L) {
+                    recentPlaybackMediaSpanMs.toDouble() / recentPlaybackWallSpanMs.toDouble()
+                } else {
+                    null
+                }
+            val localPlaybackSessionRealtimeFactor =
                 if (localPlaybackMediaSpanMs != null && localPlaybackWallSpanMs != null && localPlaybackWallSpanMs > 0L) {
                     localPlaybackMediaSpanMs.toDouble() / localPlaybackWallSpanMs.toDouble()
                 } else {
@@ -810,6 +825,7 @@ class FfmpegProbeService(
                 anomalyMaxProcessMs = anomalyMaxProcessUs.takeIf { it > 0L }?.toDouble()?.div(1000.0),
                 anomalyLastProcessMs = anomalyLastProcessUs.takeIf { it > 0L }?.toDouble()?.div(1000.0),
                 localPlaybackRealtimeFactor = localPlaybackRealtimeFactor,
+                localPlaybackSessionRealtimeFactor = localPlaybackSessionRealtimeFactor,
                 localPlaybackMediaSpanMs = localPlaybackMediaSpanMs,
                 localPlaybackWallSpanMs = localPlaybackWallSpanMs,
                 registrationHealthyFrameCount = registrationHealthyFrameCount,

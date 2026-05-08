@@ -28,7 +28,8 @@
 #define ANOMALY_DEFAULT_FRAME_STRIDE      1
 #define ANOMALY_DEFAULT_SCORE_THRESHOLD   1.8f
 #define ANOMALY_DEFAULT_MIN_AREA_FRACTION 0.0015f
-#define ANOMALY_SCAN_ZONE_DEFAULT         0.60f
+#define ANOMALY_SCAN_ZONE_DEFAULT         0.80f
+#define ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT (1.0f / 200.0f)
 #define ANOMALY_DEFAULT_MIN_HITS          2
 #define ANOMALY_SALIENCY_EXTRA_TRACKS     1
 #define ANOMALY_MAX_TARGET_TRACKS         6
@@ -63,7 +64,7 @@
 
 // ── GMV / similarity-transform tuning ─────────────────────────────────────
 #define ANOMALY_GMV_SEARCH_RADIUS   20
-#define ANOMALY_GMV_PATCH_HALF       3
+#define ANOMALY_GMV_PATCH_HALF       4
 #define ANOMALY_GMV_RESIDUAL_THRESH  0.05f
 #define ANOMALY_GMV_MIN_SCALE        0.70f
 #define ANOMALY_GMV_MAX_SCALE        1.43f
@@ -141,6 +142,10 @@
 #define ANOMALY_DEBUG_TOP_CANDIDATES 5
 #define ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES 8
 #define ANOMALY_GMV_MAX_DEBUG_ANCHORS (ANOMALY_GMV_ZONE_GRID * ANOMALY_GMV_ZONE_GRID)
+
+#ifndef ANOMALY_DEBUG_TIMING
+#define ANOMALY_DEBUG_TIMING 0
+#endif
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -247,6 +252,10 @@ typedef struct {
     int      prev_luma_width;
     int      prev_luma_height;
     size_t   prev_luma_capacity;
+    uint8_t *prev_registration_luma;
+    int      prev_registration_luma_width;
+    int      prev_registration_luma_height;
+    size_t   prev_registration_luma_capacity;
     // Decaying motion persistence map at motion-grid resolution.
     float   *motion_persist;
     int      motion_persist_w;
@@ -266,6 +275,30 @@ typedef struct {
     anomaly_roi_state_t roi_state;
     anomaly_target_track_t target_tracks[ANOMALY_MAX_TARGET_TRACKS];
     int      next_target_track_id;
+    bool     cached_registration_valid;
+    int      cached_registration_mode;
+    int      cached_registration_sample_step;
+    int      cached_registration_motion_step;
+    int      cached_registration_anchor_count;
+    int      cached_registration_tracked_match_count;
+    int      cached_registration_invalid_reason;
+    int      cached_registration_health;
+    int      cached_registration_last_rescan_mode;
+    int      cached_registration_reuse_budget;
+    float    cached_registration_affine[6];
+    float    cached_registration_similarity_a;
+    float    cached_registration_similarity_b;
+    float    cached_registration_similarity_tx;
+    float    cached_registration_similarity_ty;
+    float    cached_registration_similarity_mean_residual;
+    float    cached_registration_fit_det;
+    float    cached_registration_fit_min_scale;
+    float    cached_registration_fit_max_scale;
+    float    cached_registration_fit_anchor_residual_std;
+    float    cached_registration_fit_anchor_residual_max;
+    float    cached_registration_fit_motion_dx_std;
+    float    cached_registration_fit_motion_dy_std;
+    float    cached_registration_fit_quadrant_residual_spread;
     int      publish_hold_frames;
     int      publish_stable_frames;
     float    saliency_aux_cx[ANOMALY_SALIENCY_EXTRA_TRACKS];
@@ -278,6 +311,9 @@ typedef struct {
     // Reusable scratch buffers to avoid per-frame allocation churn.
     uint8_t *scratch_luma;
     size_t   scratch_luma_capacity;
+    uint8_t *scratch_registration_luma;
+    uint8_t *scratch_registration_tmp;
+    size_t   scratch_registration_luma_capacity;
     float   *scratch_sg_luma;
     float   *scratch_ii_sum;
     float   *scratch_ii_sum2;
@@ -486,6 +522,8 @@ typedef struct {
     int   sample_step;
     int   motion_step;
     int   anchor_count;
+    int   invalid_reason;
+    int   tracked_match_count;
     float fit_a;
     float fit_b;
     float fit_tx;
@@ -493,8 +531,34 @@ typedef struct {
     float fit_scale;
     float fit_theta_deg;
     float fit_mean_residual;
+    float fit_det;
+    float fit_min_scale;
+    float fit_max_scale;
+    float fit_anchor_residual_std;
+    float fit_anchor_residual_max;
+    float fit_motion_dx_std;
+    float fit_motion_dy_std;
+    float fit_quadrant_residual_spread;
     anomaly_debug_gmv_anchor_t anchors[ANOMALY_GMV_MAX_DEBUG_ANCHORS];
 } anomaly_debug_gmv_t;
+
+typedef enum {
+    ANOMALY_REG_INVALID_REASON_NONE = 0,
+    ANOMALY_REG_INVALID_REASON_DEBUG_INPUT_UNAVAILABLE = 1,
+    ANOMALY_REG_INVALID_REASON_GMV_TOO_FEW_ANCHORS = 2,
+    ANOMALY_REG_INVALID_REASON_GMV_FIT_INVALID = 3,
+    ANOMALY_REG_INVALID_REASON_GMV_RESIDUAL_TOO_HIGH = 4,
+    ANOMALY_REG_INVALID_REASON_GMV_MOTION_TOO_LARGE = 5,
+    ANOMALY_REG_INVALID_REASON_GMV_SCALE_OUT_OF_RANGE = 6,
+    ANOMALY_REG_INVALID_REASON_AFFINE_ROI_DEGENERATE = 7,
+    ANOMALY_REG_INVALID_REASON_AFFINE_TOO_FEW_CORNERS = 8,
+    ANOMALY_REG_INVALID_REASON_AFFINE_TOO_FEW_MATCHES = 9,
+    ANOMALY_REG_INVALID_REASON_AFFINE_FIT_FAILED = 10,
+    ANOMALY_REG_INVALID_REASON_AFFINE_RESIDUAL_TOO_HIGH = 11,
+    ANOMALY_REG_INVALID_REASON_AFFINE_MOTION_TOO_LARGE = 12,
+    ANOMALY_REG_INVALID_REASON_AFFINE_SCALE_OUT_OF_RANGE = 13,
+    ANOMALY_REG_INVALID_REASON_AFFINE_NEGATIVE_DET = 14,
+} anomaly_registration_invalid_reason_t;
 
 typedef enum {
     ANOMALY_REG_HEALTH_UNKNOWN = 0,
@@ -512,6 +576,22 @@ typedef enum {
     ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP = 4,
 } anomaly_rescan_mode_t;
 
+#define ANOMALY_SCAN_REASON_NO_APPEARANCE_REFRESH  0x0001u
+#define ANOMALY_SCAN_REASON_NO_SAMPLES             0x0002u
+#define ANOMALY_SCAN_REASON_PREV_STATE_INVALID     0x0004u
+#define ANOMALY_SCAN_REASON_SCENE_DISCONTINUITY    0x0008u
+#define ANOMALY_SCAN_REASON_REG_INVALID            0x0010u
+#define ANOMALY_SCAN_REASON_REG_HARD_DEGRADED      0x0020u
+#define ANOMALY_SCAN_REASON_WARP_LOW               0x0040u
+#define ANOMALY_SCAN_REASON_NEW_EXPOSED_HIGH       0x0080u
+#define ANOMALY_SCAN_REASON_STALE_HIGH             0x0100u
+#define ANOMALY_SCAN_REASON_SAMPLE_STEP_MISMATCH   0x0200u
+#define ANOMALY_SCAN_REASON_TARGET_ONLY_ELIGIBLE   0x0400u
+#define ANOMALY_SCAN_REASON_PARTIAL_ELIGIBLE       0x0800u
+#define ANOMALY_SCAN_REASON_MASK_BUILD_FAILED      0x1000u
+#define ANOMALY_SCAN_REASON_MASK_EMPTY             0x2000u
+#define ANOMALY_SCAN_REASON_MASK_TOO_BROAD         0x4000u
+
 typedef struct {
     bool  valid;
     anomaly_rescan_mode_t mode;
@@ -525,7 +605,31 @@ typedef struct {
     float warped_valid_fraction;
     float newly_exposed_fraction;
     float stale_fraction;
+    uint32_t reason_flags;
+    int   refresh_mask_selected_samples;
+    float refresh_mask_selected_fraction;
 } anomaly_scan_plan_t;
+
+typedef enum {
+    ANOMALY_TIMING_STAGE_REGISTRATION_PREP = 0,
+    ANOMALY_TIMING_STAGE_REGISTRATION_SOLVE = 1,
+    ANOMALY_TIMING_STAGE_SCAN_PLANNING = 2,
+    ANOMALY_TIMING_STAGE_REFRESH_MASK_BUILD = 3,
+    ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP = 4,
+    ANOMALY_TIMING_STAGE_THERMAL_SCORING = 5,
+    ANOMALY_TIMING_STAGE_COLOR_SCORING = 6,
+    ANOMALY_TIMING_STAGE_MOTION_SCORING = 7,
+    ANOMALY_TIMING_STAGE_SALIENCY_SCORING = 8,
+    ANOMALY_TIMING_STAGE_TARGET_TRACKING = 9,
+    ANOMALY_TIMING_STAGE_OVERLAY_DRAW = 10,
+    ANOMALY_TIMING_STAGE_COUNT = 11,
+} anomaly_timing_stage_t;
+
+typedef struct {
+    bool compiled;
+    int64_t total_us;
+    int64_t stage_us[ANOMALY_TIMING_STAGE_COUNT];
+} anomaly_debug_timing_t;
 
 // Returned from anomaly_process_frame(); caller may inspect detections.
 typedef struct {
@@ -541,6 +645,7 @@ typedef struct {
     anomaly_debug_motion_t motion_debug;
     anomaly_debug_thermal_t thermal_debug;
     anomaly_debug_saliency_t saliency_debug;
+    anomaly_debug_timing_t timing;
 } anomaly_result_t;
 
 // 2-D similarity transform: curr→prev mapping.

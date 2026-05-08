@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <android/log.h>
+#include <android/trace.h>
 #include <android/native_window_jni.h>
 #include <math.h>
 #include <pthread.h>
@@ -219,6 +220,10 @@ typedef struct ffmpeg_session_t {
     int64_t local_playback_first_render_at_ms;
     int64_t local_playback_display_pts_us;
     int64_t local_playback_nominal_interval_ms;
+    int64_t local_playback_timing_pts_us[LOCAL_PLAYBACK_HISTORY_CAPACITY];
+    int64_t local_playback_timing_render_at_ms[LOCAL_PLAYBACK_HISTORY_CAPACITY];
+    int local_playback_timing_count;
+    int local_playback_timing_next;
     bool local_playback_paused;
     bool local_playback_history_replay_active;
     int64_t local_playback_step_budget;
@@ -298,6 +303,14 @@ static AVFrame *clone_local_playback_history_frame_locked(ffmpeg_session_t *sess
                                                           int history_offset,
                                                           int64_t *out_source_ts_us);
 #endif
+static void record_local_playback_timing_sample(ffmpeg_session_t *session,
+                                                int64_t pts_us,
+                                                int64_t rendered_at_ms);
+static bool recent_local_playback_timing_span(const ffmpeg_session_t *session,
+                                              int64_t *out_first_pts_us,
+                                              int64_t *out_last_pts_us,
+                                              int64_t *out_first_render_at_ms,
+                                              int64_t *out_last_render_at_ms);
 
 static JavaVM *g_vm = NULL;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -310,6 +323,20 @@ static jmethodID g_ctdebug_mid = NULL;
 static jmethodID g_ctwarn_mid = NULL;
 static jmethodID g_cterror_mid = NULL;
 static jmethodID g_register_debug_tag_mid = NULL;
+
+static inline void trace_begin_section(const char *name) {
+    if (name == NULL || name[0] == '\0') return;
+    ATrace_beginSection(name);
+}
+
+static inline void trace_end_section(void) {
+    ATrace_endSection();
+}
+
+static inline void trace_set_counter(const char *name, int64_t value) {
+    if (name == NULL || name[0] == '\0') return;
+    ATrace_setCounter(name, value);
+}
 
 static JNIEnv *get_env(bool *did_attach) {
     *did_attach = false;
@@ -725,6 +752,53 @@ static const char *registration_health_name(int value) {
     }
 }
 
+static const char *timing_stage_short_name(anomaly_timing_stage_t stage) {
+    switch (stage) {
+        case ANOMALY_TIMING_STAGE_REGISTRATION_PREP: return "prep";
+        case ANOMALY_TIMING_STAGE_REGISTRATION_SOLVE: return "solve";
+        case ANOMALY_TIMING_STAGE_SCAN_PLANNING: return "plan";
+        case ANOMALY_TIMING_STAGE_REFRESH_MASK_BUILD: return "mask";
+        case ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP: return "sample";
+        case ANOMALY_TIMING_STAGE_THERMAL_SCORING: return "thermal";
+        case ANOMALY_TIMING_STAGE_COLOR_SCORING: return "color";
+        case ANOMALY_TIMING_STAGE_MOTION_SCORING: return "motion";
+        case ANOMALY_TIMING_STAGE_SALIENCY_SCORING: return "persist";
+        case ANOMALY_TIMING_STAGE_TARGET_TRACKING: return "track";
+        case ANOMALY_TIMING_STAGE_OVERLAY_DRAW: return "draw";
+        case ANOMALY_TIMING_STAGE_COUNT:
+        default:
+            return "unknown";
+    }
+}
+
+static void append_timing_summary(
+        char                         *buffer,
+        size_t                        buffer_size,
+        const anomaly_debug_timing_t *timing) {
+    if (buffer == NULL || buffer_size == 0 || timing == NULL || !timing->compiled) return;
+    size_t used = strlen(buffer);
+    if (used >= buffer_size) return;
+    int written = snprintf(buffer + used,
+                           buffer_size - used,
+                           " timing[total=%.2fms",
+                           (double)timing->total_us / 1000.0);
+    if (written < 0 || (size_t)written >= buffer_size - used) return;
+    used += (size_t)written;
+    for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT && used < buffer_size; stage++) {
+        written = snprintf(buffer + used,
+                           buffer_size - used,
+                           " %s=%.2f",
+                           timing_stage_short_name((anomaly_timing_stage_t)stage),
+                           (double)timing->stage_us[stage] / 1000.0);
+        if (written < 0 || (size_t)written >= buffer_size - used) return;
+        used += (size_t)written;
+    }
+    if (used + 1 < buffer_size) {
+        buffer[used++] = ']';
+        buffer[used] = '\0';
+    }
+}
+
 static const char *rescan_mode_name(int value) {
     switch (value) {
         case ANOMALY_RESCAN_MODE_FULL:
@@ -738,6 +812,87 @@ static const char *rescan_mode_name(int value) {
         case ANOMALY_RESCAN_MODE_UNSET:
         default:
             return "unset";
+    }
+}
+
+static void format_scan_reason_flags(uint32_t flags, char *buffer, size_t buffer_size) {
+    if (buffer == NULL || buffer_size == 0) return;
+    buffer[0] = '\0';
+    if (flags == 0u) {
+        snprintf(buffer, buffer_size, "none");
+        return;
+    }
+    const struct {
+        uint32_t flag;
+        const char *name;
+    } entries[] = {
+        { ANOMALY_SCAN_REASON_NO_APPEARANCE_REFRESH, "no-appearance-refresh" },
+        { ANOMALY_SCAN_REASON_NO_SAMPLES, "no-samples" },
+        { ANOMALY_SCAN_REASON_PREV_STATE_INVALID, "prev-state-invalid" },
+        { ANOMALY_SCAN_REASON_SCENE_DISCONTINUITY, "scene-discontinuity" },
+        { ANOMALY_SCAN_REASON_REG_INVALID, "reg-invalid" },
+        { ANOMALY_SCAN_REASON_REG_HARD_DEGRADED, "reg-hard-degraded" },
+        { ANOMALY_SCAN_REASON_WARP_LOW, "warp-low" },
+        { ANOMALY_SCAN_REASON_NEW_EXPOSED_HIGH, "new-exposed-high" },
+        { ANOMALY_SCAN_REASON_STALE_HIGH, "stale-high" },
+        { ANOMALY_SCAN_REASON_SAMPLE_STEP_MISMATCH, "sample-step-mismatch" },
+        { ANOMALY_SCAN_REASON_TARGET_ONLY_ELIGIBLE, "target-only-eligible" },
+        { ANOMALY_SCAN_REASON_PARTIAL_ELIGIBLE, "partial-eligible" },
+        { ANOMALY_SCAN_REASON_MASK_BUILD_FAILED, "mask-build-failed" },
+        { ANOMALY_SCAN_REASON_MASK_EMPTY, "mask-empty" },
+        { ANOMALY_SCAN_REASON_MASK_TOO_BROAD, "mask-too-broad" },
+    };
+    size_t offset = 0;
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        if ((flags & entries[i].flag) == 0u) continue;
+        int written = snprintf(buffer + offset,
+                               buffer_size - offset,
+                               "%s%s",
+                               offset > 0 ? "|" : "",
+                               entries[i].name);
+        if (written < 0) break;
+        if ((size_t)written >= buffer_size - offset) {
+            offset = buffer_size - 1;
+            break;
+        }
+        offset += (size_t)written;
+    }
+}
+
+static const char *registration_invalid_reason_name(int value) {
+    switch (value) {
+        case ANOMALY_REG_INVALID_REASON_NONE:
+            return "none";
+        case ANOMALY_REG_INVALID_REASON_DEBUG_INPUT_UNAVAILABLE:
+            return "debug-input-unavailable";
+        case ANOMALY_REG_INVALID_REASON_GMV_TOO_FEW_ANCHORS:
+            return "gmv-too-few-anchors";
+        case ANOMALY_REG_INVALID_REASON_GMV_FIT_INVALID:
+            return "gmv-fit-invalid";
+        case ANOMALY_REG_INVALID_REASON_GMV_RESIDUAL_TOO_HIGH:
+            return "gmv-residual-too-high";
+        case ANOMALY_REG_INVALID_REASON_GMV_MOTION_TOO_LARGE:
+            return "gmv-motion-too-large";
+        case ANOMALY_REG_INVALID_REASON_GMV_SCALE_OUT_OF_RANGE:
+            return "gmv-scale-out-of-range";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_ROI_DEGENERATE:
+            return "affine-roi-degenerate";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_TOO_FEW_CORNERS:
+            return "affine-too-few-corners";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_TOO_FEW_MATCHES:
+            return "affine-too-few-matches";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_FIT_FAILED:
+            return "affine-fit-failed";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_RESIDUAL_TOO_HIGH:
+            return "affine-residual-too-high";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_MOTION_TOO_LARGE:
+            return "affine-motion-too-large";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_SCALE_OUT_OF_RANGE:
+            return "affine-scale-out-of-range";
+        case ANOMALY_REG_INVALID_REASON_AFFINE_NEGATIVE_DET:
+            return "affine-negative-det";
+        default:
+            return "unknown";
     }
 }
 
@@ -757,9 +912,11 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         pthread_mutex_lock(&session->anomaly_lock);
     }
     int64_t started_at_us = monotonic_us();
+    trace_begin_section("RID2C anomaly_process_frame");
     bool annotated = anomaly_process_frame(&session->anomaly_state, &cfg,
                                            rgba, rgba_stride, width, height,
                                            source_ts_us, &result) > 0;
+    trace_end_section();
     int64_t elapsed_us = monotonic_us() - started_at_us;
     session->anomaly_process_frame_count += 1;
     session->anomaly_process_total_us += elapsed_us;
@@ -804,13 +961,37 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         default:
             break;
     }
+    trace_set_counter("RID2C anomaly_us", elapsed_us);
+    trace_set_counter("RID2C reg_health", result.registration_health);
+    trace_set_counter("RID2C rescan_mode", result.rescan_mode);
+    char scan_reason_summary[192];
+    format_scan_reason_flags(result.scan_plan.reason_flags,
+                             scan_reason_summary,
+                             sizeof(scan_reason_summary));
     if (result.motion_debug.valid) {
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "reg=%s mode=%s motion raw=%.2f load=%.2f broad=%.2f zoom=%.2f area=%.3f span=%.3f fill=%.2f support=%.2f tex=%.2f struct=%.2f persist=%.2f cand=(%.2f,%.2f)",
+                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] regdbg[why=%s anchors=%d matches=%d resid=%.4f rstd=%.4f rmax=%.4f dxstd=%.4f dystd=%.4f qspread=%.4f det=%.3f scale=%.3f..%.3f] motion raw=%.2f load=%.2f broad=%.2f zoom=%.2f area=%.3f span=%.3f fill=%.2f support=%.2f tex=%.2f struct=%.2f persist=%.2f cand=(%.2f,%.2f)",
                 registration_health_name(result.registration_health),
                 rescan_mode_name(result.rescan_mode),
+                result.scan_plan.warped_valid_fraction,
+                result.scan_plan.newly_exposed_fraction,
+                result.scan_plan.stale_fraction,
+                result.scan_plan.refresh_mask_selected_fraction,
+                scan_reason_summary,
+                registration_invalid_reason_name(result.gmv_debug.invalid_reason),
+                result.gmv_debug.anchor_count,
+                result.gmv_debug.tracked_match_count,
+                result.gmv_debug.fit_mean_residual,
+                result.gmv_debug.fit_anchor_residual_std,
+                result.gmv_debug.fit_anchor_residual_max,
+                result.gmv_debug.fit_motion_dx_std,
+                result.gmv_debug.fit_motion_dy_std,
+                result.gmv_debug.fit_quadrant_residual_spread,
+                result.gmv_debug.fit_det,
+                result.gmv_debug.fit_min_scale,
+                result.gmv_debug.fit_max_scale,
                 result.motion_debug.raw_score,
                 result.motion_debug.global_motion_load,
                 result.motion_debug.broad_motion_scale,
@@ -828,9 +1009,26 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "reg=%s mode=%s saliency raw=%.2f bg=%d tracked=%.2f hits=%d switch=%d cand=(%.2f,%.2f)",
+                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] regdbg[why=%s anchors=%d matches=%d resid=%.4f rstd=%.4f rmax=%.4f dxstd=%.4f dystd=%.4f qspread=%.4f det=%.3f scale=%.3f..%.3f] saliency raw=%.2f bg=%d tracked=%.2f hits=%d switch=%d cand=(%.2f,%.2f)",
                 registration_health_name(result.registration_health),
                 rescan_mode_name(result.rescan_mode),
+                result.scan_plan.warped_valid_fraction,
+                result.scan_plan.newly_exposed_fraction,
+                result.scan_plan.stale_fraction,
+                result.scan_plan.refresh_mask_selected_fraction,
+                scan_reason_summary,
+                registration_invalid_reason_name(result.gmv_debug.invalid_reason),
+                result.gmv_debug.anchor_count,
+                result.gmv_debug.tracked_match_count,
+                result.gmv_debug.fit_mean_residual,
+                result.gmv_debug.fit_anchor_residual_std,
+                result.gmv_debug.fit_anchor_residual_max,
+                result.gmv_debug.fit_motion_dx_std,
+                result.gmv_debug.fit_motion_dy_std,
+                result.gmv_debug.fit_quadrant_residual_spread,
+                result.gmv_debug.fit_det,
+                result.gmv_debug.fit_min_scale,
+                result.gmv_debug.fit_max_scale,
                 result.saliency_debug.raw_score,
                 result.saliency_debug.bg_ready ? 1 : 0,
                 result.saliency_debug.tracked_score_pre,
@@ -842,9 +1040,26 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "reg=%s mode=%s gmv scale=%.3f theta=%.1f resid=%.3f anchors=%d discontinuity=%d refresh=%d",
+                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] regdbg[why=%s anchors=%d matches=%d resid=%.4f rstd=%.4f rmax=%.4f dxstd=%.4f dystd=%.4f qspread=%.4f det=%.3f scale=%.3f..%.3f] gmv scale=%.3f theta=%.1f resid=%.3f anchors=%d discontinuity=%d refresh=%d",
                 registration_health_name(result.registration_health),
                 rescan_mode_name(result.rescan_mode),
+                result.scan_plan.warped_valid_fraction,
+                result.scan_plan.newly_exposed_fraction,
+                result.scan_plan.stale_fraction,
+                result.scan_plan.refresh_mask_selected_fraction,
+                scan_reason_summary,
+                registration_invalid_reason_name(result.gmv_debug.invalid_reason),
+                result.gmv_debug.anchor_count,
+                result.gmv_debug.tracked_match_count,
+                result.gmv_debug.fit_mean_residual,
+                result.gmv_debug.fit_anchor_residual_std,
+                result.gmv_debug.fit_anchor_residual_max,
+                result.gmv_debug.fit_motion_dx_std,
+                result.gmv_debug.fit_motion_dy_std,
+                result.gmv_debug.fit_quadrant_residual_spread,
+                result.gmv_debug.fit_det,
+                result.gmv_debug.fit_min_scale,
+                result.gmv_debug.fit_max_scale,
                 result.gmv_debug.fit_scale,
                 result.gmv_debug.fit_theta_deg,
                 result.gmv_debug.fit_mean_residual,
@@ -854,6 +1069,21 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
     } else if (session->latest_anomaly_debug_summary[0] == '\0') {
         snprintf(session->latest_anomaly_debug_summary, sizeof(session->latest_anomaly_debug_summary), "debug unavailable");
     }
+#if ANOMALY_DEBUG_TIMING
+    append_timing_summary(
+            session->latest_anomaly_debug_summary,
+            sizeof(session->latest_anomaly_debug_summary),
+            &result.timing);
+    if (session->anomaly_process_frame_count > 0 &&
+        (session->anomaly_process_frame_count % 30) == 0) {
+        ct_debug(TAG,
+                 "anomaly timing id=%lld designator=%s frame=%lld %s",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) session->anomaly_process_frame_count,
+                 session->latest_anomaly_debug_summary);
+    }
+#endif
     if (session->anomaly_lock_ready) {
         pthread_mutex_unlock(&session->anomaly_lock);
     }
@@ -881,6 +1111,7 @@ static void analyze_decoded_frame(ffmpeg_session_t *session,
         return;
     }
 
+    trace_begin_section("RID2C anomaly_rgba_convert");
     sws_scale(
             session->anomaly_sws,
             (const uint8_t *const *) decoded->data,
@@ -889,6 +1120,7 @@ static void analyze_decoded_frame(ffmpeg_session_t *session,
             decoded->height,
             session->anomaly_rgba_frame->data,
             session->anomaly_rgba_frame->linesize);
+    trace_end_section();
 
     bool frame_annotated = analyze_rgba_frame(
             session,
@@ -901,6 +1133,7 @@ static void analyze_decoded_frame(ffmpeg_session_t *session,
     if (session->anomaly_back_sws == NULL) return;
     if (av_frame_make_writable(decoded) < 0) return;
 
+    trace_begin_section("RID2C anomaly_overlay_convert");
     sws_scale(
             session->anomaly_back_sws,
             (const uint8_t *const *) session->anomaly_rgba_frame->data,
@@ -909,6 +1142,7 @@ static void analyze_decoded_frame(ffmpeg_session_t *session,
             decoded->height,
             decoded->data,
             decoded->linesize);
+    trace_end_section();
 }
 
 static void render_frame_to_surface(ffmpeg_session_t *session,
@@ -931,6 +1165,7 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
         return;
     }
 
+    trace_begin_section("RID2C render_rgba_convert");
     sws_scale(
             session->sws,
             (const uint8_t *const *) decoded->data,
@@ -939,6 +1174,7 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
             decoded->height,
             session->rgba_frame->data,
             session->rgba_frame->linesize);
+    trace_end_section();
 
     ANativeWindow *window = acquire_window(session);
     if (window == NULL) {
@@ -958,6 +1194,7 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
     ANativeWindow_setBuffersGeometry(window, decoded->width, decoded->height, WINDOW_FORMAT_RGBA_8888);
 
     ANativeWindow_Buffer buffer;
+    trace_begin_section("RID2C render_surface_post");
     int lock_rc = ANativeWindow_lock(window, &buffer, NULL);
     if (lock_rc == 0) {
         uint8_t *dst = (uint8_t *) buffer.bits;
@@ -971,11 +1208,13 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
         ANativeWindow_unlockAndPost(window);
         session->last_render_post_at_ms = monotonic_ms();
         if (is_local_file_source(session) && source_ts_us > 0) {
-            // Keep the app-side playback timestamp aligned with whichever frame
-            // we actually pushed to the surface, including history renders from
-            // the Back button while paused.
-            session->local_playback_display_pts_us = source_ts_us;
-            session->local_playback_last_render_at_ms = session->last_render_post_at_ms;
+            // Track both the full-session and recent playback spans from actual
+            // surface posts so the UI can distinguish steady-state speed from a
+            // startup-dragged cumulative average.
+            record_local_playback_timing_sample(
+                    session,
+                    source_ts_us,
+                    session->last_render_post_at_ms);
         }
         if (record_local_history && use_render_lock && is_local_file_source(session)) {
             append_local_playback_history_locked(
@@ -1015,6 +1254,7 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
                                           NAN,
                                           NAN);
     }
+    trace_end_section();
 
     ANativeWindow_release(window);
     if (use_render_lock) {
@@ -1773,6 +2013,10 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->local_playback_first_render_at_ms = 0;
         session->local_playback_display_pts_us = 0;
         session->local_playback_nominal_interval_ms = 0;
+        memset(session->local_playback_timing_pts_us, 0, sizeof(session->local_playback_timing_pts_us));
+        memset(session->local_playback_timing_render_at_ms, 0, sizeof(session->local_playback_timing_render_at_ms));
+        session->local_playback_timing_count = 0;
+        session->local_playback_timing_next = 0;
         session->local_playback_history_replay_active = false;
         session->anomaly_process_frame_count = 0;
         session->anomaly_annotated_frame_count = 0;
@@ -1826,12 +2070,6 @@ static void pace_local_file_playback(ffmpeg_session_t *session, int64_t pts_us) 
     if (nominal_interval_ms <= 0) {
         nominal_interval_ms = current_render_interval_ms(session);
     }
-    if (session->local_playback_first_pts_us <= 0) {
-        session->local_playback_first_pts_us = pts_us;
-    }
-    if (session->local_playback_first_render_at_ms <= 0) {
-        session->local_playback_first_render_at_ms = monotonic_ms();
-    }
     if (session->local_playback_last_render_at_ms > 0) {
         int64_t target_interval_ms = nominal_interval_ms;
         if (session->local_playback_last_pts_us > 0 &&
@@ -1872,7 +2110,67 @@ static void pace_local_file_playback(ffmpeg_session_t *session, int64_t pts_us) 
         session->local_playback_last_pts_us = pts_us;
         session->local_playback_display_pts_us = pts_us;
     }
-    session->local_playback_last_render_at_ms = monotonic_ms();
+}
+
+static void record_local_playback_timing_sample(ffmpeg_session_t *session,
+                                                int64_t pts_us,
+                                                int64_t rendered_at_ms) {
+    if (session == NULL || pts_us <= 0 || rendered_at_ms <= 0) return;
+    if (session->local_playback_first_pts_us <= 0) {
+        session->local_playback_first_pts_us = pts_us;
+    }
+    if (session->local_playback_first_render_at_ms <= 0) {
+        session->local_playback_first_render_at_ms = rendered_at_ms;
+    }
+    session->local_playback_last_pts_us = pts_us;
+    session->local_playback_last_render_at_ms = rendered_at_ms;
+    session->local_playback_display_pts_us = pts_us;
+
+    int slot = session->local_playback_timing_next;
+    session->local_playback_timing_pts_us[slot] = pts_us;
+    session->local_playback_timing_render_at_ms[slot] = rendered_at_ms;
+    session->local_playback_timing_next = (slot + 1) % LOCAL_PLAYBACK_HISTORY_CAPACITY;
+    if (session->local_playback_timing_count < LOCAL_PLAYBACK_HISTORY_CAPACITY) {
+        session->local_playback_timing_count += 1;
+    }
+}
+
+static bool recent_local_playback_timing_span(const ffmpeg_session_t *session,
+                                              int64_t *out_first_pts_us,
+                                              int64_t *out_last_pts_us,
+                                              int64_t *out_first_render_at_ms,
+                                              int64_t *out_last_render_at_ms) {
+    if (session == NULL ||
+        session->local_playback_timing_count < 2 ||
+        out_first_pts_us == NULL ||
+        out_last_pts_us == NULL ||
+        out_first_render_at_ms == NULL ||
+        out_last_render_at_ms == NULL) {
+        return false;
+    }
+
+    int oldest_index =
+            (session->local_playback_timing_next - session->local_playback_timing_count +
+             LOCAL_PLAYBACK_HISTORY_CAPACITY) % LOCAL_PLAYBACK_HISTORY_CAPACITY;
+    int newest_index =
+            (session->local_playback_timing_next - 1 + LOCAL_PLAYBACK_HISTORY_CAPACITY) %
+            LOCAL_PLAYBACK_HISTORY_CAPACITY;
+    int64_t first_pts_us = session->local_playback_timing_pts_us[oldest_index];
+    int64_t last_pts_us = session->local_playback_timing_pts_us[newest_index];
+    int64_t first_render_at_ms = session->local_playback_timing_render_at_ms[oldest_index];
+    int64_t last_render_at_ms = session->local_playback_timing_render_at_ms[newest_index];
+    if (first_pts_us <= 0 ||
+        last_pts_us <= first_pts_us ||
+        first_render_at_ms <= 0 ||
+        last_render_at_ms <= first_render_at_ms) {
+        return false;
+    }
+
+    *out_first_pts_us = first_pts_us;
+    *out_last_pts_us = last_pts_us;
+    *out_first_render_at_ms = first_render_at_ms;
+    *out_last_render_at_ms = last_render_at_ms;
+    return true;
 }
 
 static bool wait_for_local_playback_advance(ffmpeg_session_t *session) {
@@ -2036,6 +2334,7 @@ static bool enqueue_render_frame(ffmpeg_session_t *session,
     session->render_queue[tail_idx].source_ts_us = source_ts_us;
     session->render_queue[tail_idx].enqueued_at_ms = enqueued_at_ms;
     session->render_queue_depth += 1;
+    trace_set_counter("RID2C render_queue_depth", session->render_queue_depth);
     int keep_latest = compute_trim_keep_latest_locked(
             session,
             session->source_render_interval_ms,
@@ -2178,11 +2477,15 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
     session->render_queue_depth -= 1;
     int64_t remaining_buffered_span_ms = buffered_span_ms_locked(session);
     *out_render_latency_ms = remaining_buffered_span_ms;
+    trace_set_counter("RID2C render_queue_depth", session->render_queue_depth);
+    trace_set_counter("RID2C render_latency_ms", remaining_buffered_span_ms);
     if (session->render_queue_depth <= 0) {
         session->render_queue_depth = 0;
         session->render_queue_head = 0;
         *out_render_latency_ms = 0;
         session->next_render_due_ms = 0;
+        trace_set_counter("RID2C render_queue_depth", 0);
+        trace_set_counter("RID2C render_latency_ms", 0);
     }
     log_render_queue_state(session, session->render_queue_depth, false);
 
@@ -3137,21 +3440,24 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
         }
 
+        trace_begin_section("RID2C avcodec_send_packet");
         rc = avcodec_send_packet(session->codec, pkt);
+        trace_end_section();
         av_packet_unref(pkt);
         if (rc < 0) {
             continue;
         }
 
         while (session_running(session)) {
+            trace_begin_section("RID2C avcodec_receive_frame");
             rc = avcodec_receive_frame(session->codec, frame);
+            trace_end_section();
             if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
                 break;
             }
             if (rc < 0) {
                 break;
             }
-
             int64_t pts_us = pts_to_us(frame->best_effort_timestamp, session->video_time_base);
             AVFrame *clean_history_frame = local_file_source ? av_frame_clone(frame) : NULL;
 #if FFMPEG_TELEMETRY_ENABLED
@@ -3684,7 +3990,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
         jlong session_id
 ) {
     (void) thiz;
-    jlong values[20];
+    jlong values[24];
     memset(values, 0, sizeof(values));
 
     pthread_mutex_lock(&g_lock);
@@ -3713,11 +4019,17 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
     values[17] = (jlong) session->anomaly_rescan_stride_skip_count;
     values[18] = (jlong) session->anomaly_last_registration_health;
     values[19] = (jlong) session->anomaly_last_rescan_mode;
+    recent_local_playback_timing_span(
+            session,
+            &values[20],
+            &values[21],
+            &values[22],
+            &values[23]);
     pthread_mutex_unlock(&g_lock);
 
-    jlongArray array = (*env)->NewLongArray(env, 20);
+    jlongArray array = (*env)->NewLongArray(env, 24);
     if (array == NULL) return NULL;
-    (*env)->SetLongArrayRegion(env, array, 0, 20, values);
+    (*env)->SetLongArrayRegion(env, array, 0, 24, values);
     return array;
 }
 

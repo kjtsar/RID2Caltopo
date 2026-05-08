@@ -54,6 +54,26 @@ CTest is also wired up:
 cd tools/anomaly_test/build && ctest
 ```
 
+## Optional stage timing build
+
+For performance investigation, the harness can compile in coarse per-stage
+timing with a shipping-safe CMake flag. It is off by default.
+
+```sh
+cd tools/anomaly_test
+cmake -B build_timing -DANOMALY_DEBUG_TIMING=ON
+cmake --build build_timing
+./build_timing/anomaly_test
+```
+
+This enables timing inside `anomaly_process_frame()` and surfaces it through:
+
+- `anomaly_video_test` stderr
+- `--summary-json` as a `stage_timing` object
+
+Release/default harness builds remain timing-off unless you pass
+`-DANOMALY_DEBUG_TIMING=ON`.
+
 ## What the synthetic tests cover
 
 | Test | What it verifies |
@@ -102,6 +122,28 @@ cmake --build build
 `-a 6`  = thermal + motion only (skip color outlier, which is less useful in IR)  
 `-t 2.8` = app-like threshold for the default 60% sensitivity setting (higher = fewer detections)
 
+**Quick start with stage timing enabled:**
+```sh
+cd tools/anomaly_test
+cmake -B build_timing -DANOMALY_DEBUG_TIMING=ON
+cmake --build build_timing
+./build_timing/anomaly_video_test path/to/clip.mp4 --registration affine --stride 1 -p bh -a 6 -t 2.8 --summary-json /tmp/clip_summary.json --no-video
+```
+
+When timing is compiled in, the end-of-run stderr summary includes:
+
+- `avg-total` / `max-total`: whole analyzed-frame detector time
+- per-stage `avg` / `max` timings in milliseconds
+
+The matching summary JSON includes:
+
+- `stage_timing.compiled`
+- `stage_timing.frame_count`
+- `stage_timing.avg_total_ms`
+- `stage_timing.max_total_ms`
+- `stage_timing.stages.<stage>.avg_ms`
+- `stage_timing.stages.<stage>.max_ms`
+
 **All options:**
 ```
 -o <file.mp4>    Annotated video  (default: <input>_annotated.mp4)
@@ -110,7 +152,7 @@ cmake --build build
 
 -t <float>       Score threshold  (default: 1.8 in the native struct; app default at 60% sensitivity is ~2.8)
 -m <int>         Min consecutive hits before showing box (default: 2)
--s <float>       Scan zone 0.5–1.0 (default: 0.60)
+-s <float>       Scan zone 0.5–1.0 (default: 0.80)
 -a <int>         Algorithm mask: 1=color 2=thermal 4=motion (default: 7=all)
 -p <wh|bh>       Thermal polarity: wh=white-hot bh=black-hot (default: wh)
 --registration <gmv|affine>
@@ -137,6 +179,103 @@ This helper runs `anomaly_video_test` twice, once with `--registration gmv`
 and once with `--registration affine`, writes two detection CSVs, and then
 feeds both into `review_eval.py` so you can compare the same reviewed clip
 without re-entering the detector settings.
+
+### Focused registration-starvation replay
+
+```sh
+python3 tools/anomaly_test/run_focused_registration_experiments.py \
+  --output-dir tools/anomaly_test/out/focused_registration \
+  --stride 1 -p bh -a 6 -t 2.8 -m 2 -s 0.8
+```
+
+This runner executes the current four-way focused matrix used for selective
+refresh debugging:
+
+- `PowerHouseTeam` `0.0s–10.0s` with `affine`
+- `PowerHouseTeam` `0.0s–10.0s` with `gmv`
+- `PowerHouse1` `0.0s–4.8s` with `affine`
+- `PowerHouse1` `0.0s–4.8s` with `gmv`
+
+It prints a compact summary of:
+
+- `rescan_modes.full/partial/target_only`
+- `scan_reason_counts.reg-invalid`
+- dominant `registration_reason_counts`
+- top-level `realtime_factor`
+
+To run the same matrix with timing enabled:
+
+```sh
+python3 tools/anomaly_test/run_focused_registration_experiments.py \
+  --binary tools/anomaly_test/build_timing/anomaly_video_test \
+  --output-dir /tmp/focused_registration_timing \
+  --stride 1 -p bh -a 6 -t 2.8 -m 2 -s 0.8
+```
+
+Open any generated `*_summary.json` and inspect the `stage_timing` block to
+compare where runtime is going across the four focused replays.
+
+### Registration-first benchmark driver
+
+For the current optimization pass, there is also a fixed sequential benchmark
+driver that runs the agreed harness cases and prints the key comparison fields
+in one place:
+
+```sh
+python3 tools/anomaly_test/run_registration_perf_benchmarks.py \
+  --binary tools/anomaly_test/build_timing/anomaly_video_test \
+  --output-dir /tmp/registration_perf_bench
+```
+
+The current built-in cases are:
+
+- `PowerHouseTeam` affine at `scan_zone=0.80`
+- `PowerHouseTeam` affine at `scan_zone=0.60`
+- `PowerHouse1` affine at `scan_zone=0.80`
+- `PowerHouse1` opening-window guardrail (`1.0s-4.0s`) at `scan_zone=0.60`
+
+The report includes:
+
+- realtime factor
+- frame count
+- `scan_reason_counts.reg-invalid`
+- dominant registration invalid reason
+- `rescan_modes.full/partial/target_only`
+- `stage_timing.avg_total_ms`
+- average `registration_prep`, `registration_solve`, `thermal_scoring`,
+  `scan_planning`, and `refresh_mask_build`
+
+### Stage timing interpretation
+
+The current timing buckets are coarse pipeline stages, not line-by-line
+profiling:
+
+- `registration_prep`: motion-grid luma extraction plus registration prefilter
+- `registration_solve`: GMV or affine matching / fit
+- `scan_planning`: ROI-wide selective refresh planner
+- `refresh_mask_build`: sampled ROI refresh-mask selection for partial/target-only scans
+- `sampled_grid_prep`: sampled luma grid, integral-image setup, and color-tile statistics
+- `thermal_scoring`: thermal/background-model passes and thermal candidate work
+- `color_scoring`: color outlier scoring
+- `motion_scoring`: residual motion scoring after camera registration
+- `saliency_scoring`: unified saliency / persist scoring
+- `target_tracking`: track propagation, accumulator follow-up, revisit annotation
+- `overlay_draw`: hot-overlay and box drawing
+
+A few reading rules help avoid bad conclusions:
+
+- `avg_total_ms` is the best first number for throughput. It is the coarse
+  whole-frame detector time for analyzed frames.
+- Stage totals are directional, not exact accounting. They may not sum exactly
+  to `avg_total_ms` because some glue code and early-return paths sit outside
+  the named buckets.
+- `max_ms` is useful for finding spikes, allocator churn, or warmup outliers,
+  but do not treat one-frame maxima as representative steady-state cost.
+- A stage showing `0.00 ms` usually means that cue was disabled for the run,
+  not that the code path is universally free.
+- Compare runs using the same clip, stride, registration backend, and detector
+  settings. Timing numbers are not portable across different footage or
+  resolutions.
 
 ### Reviewing detections and labelling
 
@@ -268,7 +407,7 @@ two-frame sequence is usually enough to pin down a specific bug.
 |---|---|---|
 | `score_threshold` | 1.8σ native / ~2.8 app default | Min score to register a detection. The app's 60% sensitivity slider maps to ~2.8; the standalone harness default remains the raw native value 1.8 unless you pass `-t` |
 | `min_hits` | 2 | Consecutive analyzed frames a detection must persist before a box is drawn. Eliminates single-frame false positives |
-| `scan_zone` | 0.60 | Centered fraction of the frame that is scanned. Values < 1.0 exclude wide-angle lens distortion at the edges |
+| `scan_zone` | 0.80 | Centered fraction of the frame that is scanned. Values < 1.0 exclude wide-angle lens distortion at the edges |
 | `frame_stride` | 3 | Analyze every Nth frame. Higher values reduce CPU; combine with min_hits (total latency ≈ stride × min_hits × frame interval) |
 | `thermal_min_delta` | 10.0 luma units | Minimum absolute thermal contrast before either the warmup spatial score or the steady-state temporal score is considered |
 | `ANOMALY_ACC_HOLD_FRAMES` | 8 | Analyzed frames a box stays visible after the detection signal disappears |

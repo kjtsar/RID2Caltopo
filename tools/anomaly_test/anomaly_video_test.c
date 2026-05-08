@@ -56,6 +56,71 @@ static double clamp_double(double value, double min_value, double max_value) {
     return value;
 }
 
+typedef struct {
+    uint32_t flag;
+    const char *name;
+} scan_reason_counter_desc_t;
+
+static const scan_reason_counter_desc_t kScanReasonCounters[] = {
+    { ANOMALY_SCAN_REASON_NO_APPEARANCE_REFRESH, "no-appearance-refresh" },
+    { ANOMALY_SCAN_REASON_NO_SAMPLES, "no-samples" },
+    { ANOMALY_SCAN_REASON_PREV_STATE_INVALID, "prev-state-invalid" },
+    { ANOMALY_SCAN_REASON_SCENE_DISCONTINUITY, "scene-discontinuity" },
+    { ANOMALY_SCAN_REASON_REG_INVALID, "reg-invalid" },
+    { ANOMALY_SCAN_REASON_REG_HARD_DEGRADED, "reg-hard-degraded" },
+    { ANOMALY_SCAN_REASON_WARP_LOW, "warp-low" },
+    { ANOMALY_SCAN_REASON_NEW_EXPOSED_HIGH, "new-exposed-high" },
+    { ANOMALY_SCAN_REASON_STALE_HIGH, "stale-high" },
+    { ANOMALY_SCAN_REASON_SAMPLE_STEP_MISMATCH, "sample-step-mismatch" },
+    { ANOMALY_SCAN_REASON_TARGET_ONLY_ELIGIBLE, "target-only-eligible" },
+    { ANOMALY_SCAN_REASON_PARTIAL_ELIGIBLE, "partial-eligible" },
+    { ANOMALY_SCAN_REASON_MASK_BUILD_FAILED, "mask-build-failed" },
+    { ANOMALY_SCAN_REASON_MASK_EMPTY, "mask-empty" },
+    { ANOMALY_SCAN_REASON_MASK_TOO_BROAD, "mask-too-broad" },
+};
+
+typedef struct {
+    int code;
+    const char *name;
+} registration_reason_counter_desc_t;
+
+static const registration_reason_counter_desc_t kRegistrationReasonCounters[] = {
+    { ANOMALY_REG_INVALID_REASON_NONE, "none" },
+    { ANOMALY_REG_INVALID_REASON_DEBUG_INPUT_UNAVAILABLE, "debug-input-unavailable" },
+    { ANOMALY_REG_INVALID_REASON_GMV_TOO_FEW_ANCHORS, "gmv-too-few-anchors" },
+    { ANOMALY_REG_INVALID_REASON_GMV_FIT_INVALID, "gmv-fit-invalid" },
+    { ANOMALY_REG_INVALID_REASON_GMV_RESIDUAL_TOO_HIGH, "gmv-residual-too-high" },
+    { ANOMALY_REG_INVALID_REASON_GMV_MOTION_TOO_LARGE, "gmv-motion-too-large" },
+    { ANOMALY_REG_INVALID_REASON_GMV_SCALE_OUT_OF_RANGE, "gmv-scale-out-of-range" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_ROI_DEGENERATE, "affine-roi-degenerate" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_TOO_FEW_CORNERS, "affine-too-few-corners" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_TOO_FEW_MATCHES, "affine-too-few-matches" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_FIT_FAILED, "affine-fit-failed" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_RESIDUAL_TOO_HIGH, "affine-residual-too-high" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_MOTION_TOO_LARGE, "affine-motion-too-large" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_SCALE_OUT_OF_RANGE, "affine-scale-out-of-range" },
+    { ANOMALY_REG_INVALID_REASON_AFFINE_NEGATIVE_DET, "affine-negative-det" },
+};
+
+static const char *timing_stage_name(anomaly_timing_stage_t stage) {
+    switch (stage) {
+        case ANOMALY_TIMING_STAGE_REGISTRATION_PREP: return "registration_prep";
+        case ANOMALY_TIMING_STAGE_REGISTRATION_SOLVE: return "registration_solve";
+        case ANOMALY_TIMING_STAGE_SCAN_PLANNING: return "scan_planning";
+        case ANOMALY_TIMING_STAGE_REFRESH_MASK_BUILD: return "refresh_mask_build";
+        case ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP: return "sampled_grid_prep";
+        case ANOMALY_TIMING_STAGE_THERMAL_SCORING: return "thermal_scoring";
+        case ANOMALY_TIMING_STAGE_COLOR_SCORING: return "color_scoring";
+        case ANOMALY_TIMING_STAGE_MOTION_SCORING: return "motion_scoring";
+        case ANOMALY_TIMING_STAGE_SALIENCY_SCORING: return "saliency_scoring";
+        case ANOMALY_TIMING_STAGE_TARGET_TRACKING: return "target_tracking";
+        case ANOMALY_TIMING_STAGE_OVERLAY_DRAW: return "overlay_draw";
+        case ANOMALY_TIMING_STAGE_COUNT:
+        default:
+            return "unknown";
+    }
+}
+
 // Draw a single scaled pixel at (px,py) with RGBA colour; clips to frame.
 static void put_pixel(uint8_t *rgba, int stride, int W, int H,
                       int px, int py, uint8_t r, uint8_t g, uint8_t b) {
@@ -862,6 +927,12 @@ static void dump_gmv_debug(FILE *out, int frame_num, double time_s,
             (double)dbg->fit_scale,
             (double)dbg->fit_theta_deg,
             (double)dbg->fit_mean_residual);
+    fprintf(out, "  consistency: rstd=%.5f rmax=%.5f dxstd=%.5f dystd=%.5f qspread=%.5f\n",
+            (double)dbg->fit_anchor_residual_std,
+            (double)dbg->fit_anchor_residual_max,
+            (double)dbg->fit_motion_dx_std,
+            (double)dbg->fit_motion_dy_std,
+            (double)dbg->fit_quadrant_residual_spread);
     for (int i = 0; i < dbg->anchor_count && i < ANOMALY_GMV_MAX_DEBUG_ANCHORS; i++) {
         const anomaly_debug_gmv_anchor_t *a = &dbg->anchors[i];
         fprintf(out,
@@ -912,6 +983,9 @@ static void usage(const char *prog) {
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
         "  --pixel-step <n> Override appearance sampling step (default: 0=Auto)\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
+        "  --small-target-fraction <f>\n"
+        "                   Override the maximum normalized on-screen size\n"
+        "                   treated as a small target (default: %.6f)\n"
         "  --debug-frame N  Dump saliency candidate details for frame N\n"
         "  --debug-time-start S  Dump debug details beginning at time S seconds\n"
         "  --debug-time-end S    Dump debug details ending at time S seconds\n"
@@ -939,7 +1013,8 @@ static void usage(const char *prog) {
         (double)ANOMALY_DEFAULT_SCORE_THRESHOLD,
         ANOMALY_DEFAULT_MIN_HITS,
         (double)ANOMALY_SCAN_ZONE_DEFAULT,
-        (double)ANOMALY_THERMAL_MIN_DELTA);
+        (double)ANOMALY_THERMAL_MIN_DELTA,
+        (double)ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT);
 }
 
 // ── main ───────────────────────────────────────────────────────────────────
@@ -970,6 +1045,7 @@ int main(int argc, char **argv) {
         .scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT,
         .min_hits          = ANOMALY_DEFAULT_MIN_HITS,
         .thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA,
+        .small_target_screen_fraction = ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT,
     };
 
     // Probe state (--probe cx,cy).
@@ -1003,6 +1079,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--stride")    && i+1 < argc) cfg.frame_stride      = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pixel-step") && i+1 < argc) cfg.pixel_step       = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--min-delta") && i+1 < argc) min_delta_override    = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--small-target-fraction") && i+1 < argc) {
+            cfg.small_target_screen_fraction = (float)atof(argv[++i]);
+        }
         else if (!strcmp(argv[i], "-p")          && i+1 < argc) {
             cfg.thermal_polarity = strcmp(argv[++i], "bh") == 0
                                    ? ANOMALY_THERMAL_BLACK_HOT : ANOMALY_THERMAL_WHITE_HOT;
@@ -1165,6 +1244,8 @@ int main(int argc, char **argv) {
             cfg.pixel_step <= 0 ? " (Auto)" : "");
     fprintf(stderr, "  min_delta  = %.1f%s\n", effective_min_delta,
             min_delta_override > 0.0f ? " (override)" : "");
+    fprintf(stderr, "  small      = 1/%.1f\n",
+            1.0 / (double)cfg.small_target_screen_fraction);
     fprintf(stderr, "\n");
 
     // ── Allocate frame buffer ────────────────────────────────────────────
@@ -1186,13 +1267,15 @@ int main(int argc, char **argv) {
     // Header lines document the settings so the file is self-contained.
     fprintf(csv, "# input: %s\n", input);
     fprintf(csv, "# threshold: %.2f  min_hits: %d  scan_zone: %.2f  "
-                 "algo: %d  polarity: %s  stride: %d  pixel_step: %d  registration: %s\n",
+                 "algo: %d  polarity: %s  stride: %d  pixel_step: %d  registration: %s  "
+                 "small_target_fraction: %.6f\n",
             (double)cfg.score_threshold, cfg.min_hits, (double)cfg.scan_zone,
             cfg.algorithm_mask,
             cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh",
             cfg.frame_stride,
             cfg.pixel_step,
-            cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
+            cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv",
+            (double)cfg.small_target_screen_fraction);
     if (clip_time_end >= 0.0 || clip_duration_s > 0.0) {
         fprintf(csv, "# clip_start_s: %.3f  clip_end_s: %.3f\n",
                 clip_time_start,
@@ -1270,6 +1353,17 @@ int main(int argc, char **argv) {
     int    frame_num        = 0;
     int    detection_frames = 0;
     int    total_boxes      = 0;
+    int    rescan_full_frames = 0;
+    int    rescan_partial_frames = 0;
+    int    rescan_target_only_frames = 0;
+    int    rescan_stride_skip_frames = 0;
+    int    scan_reason_counts[sizeof(kScanReasonCounters) / sizeof(kScanReasonCounters[0])] = {0};
+    int    registration_reason_counts[sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0])] = {0};
+    int64_t stage_timing_total_us[ANOMALY_TIMING_STAGE_COUNT] = {0};
+    int64_t stage_timing_max_us[ANOMALY_TIMING_STAGE_COUNT] = {0};
+    int64_t frame_timing_total_us = 0;
+    int64_t frame_timing_max_us = 0;
+    int    timing_frame_count = 0;
     double wall_start_s     = monotonic_seconds();
 
     while (fread(rgba, 1, frame_bytes, in_pipe) == frame_bytes) {
@@ -1309,6 +1403,47 @@ int main(int argc, char **argv) {
 
         anomaly_result_t result;
         anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, 0, &result);
+        switch (result.rescan_mode) {
+            case ANOMALY_RESCAN_MODE_FULL:
+                rescan_full_frames++;
+                break;
+            case ANOMALY_RESCAN_MODE_PARTIAL:
+                rescan_partial_frames++;
+                break;
+            case ANOMALY_RESCAN_MODE_TARGET_ONLY:
+                rescan_target_only_frames++;
+                break;
+            case ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP:
+                rescan_stride_skip_frames++;
+                break;
+            case ANOMALY_RESCAN_MODE_UNSET:
+            default:
+                break;
+        }
+        for (size_t ri = 0; ri < sizeof(kScanReasonCounters) / sizeof(kScanReasonCounters[0]); ri++) {
+            if ((result.scan_plan.reason_flags & kScanReasonCounters[ri].flag) != 0u) {
+                scan_reason_counts[ri]++;
+            }
+        }
+        for (size_t ri = 0; ri < sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0]); ri++) {
+            if (result.gmv_debug.invalid_reason == kRegistrationReasonCounters[ri].code) {
+                registration_reason_counts[ri]++;
+                break;
+            }
+        }
+        if (result.timing.compiled) {
+            timing_frame_count++;
+            frame_timing_total_us += result.timing.total_us;
+            if (result.timing.total_us > frame_timing_max_us) {
+                frame_timing_max_us = result.timing.total_us;
+            }
+            for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
+                stage_timing_total_us[stage] += result.timing.stage_us[stage];
+                if (result.timing.stage_us[stage] > stage_timing_max_us[stage]) {
+                    stage_timing_max_us[stage] = result.timing.stage_us[stage];
+                }
+            }
+        }
         int debug_this_frame = (debug_frame > 0 && frame_num == debug_frame);
         if (debug_window_active) {
             int at_or_after_start = (debug_time_start < 0.0) || (time_s >= debug_time_start);
@@ -1403,6 +1538,38 @@ int main(int argc, char **argv) {
             detection_frames,
             frame_num > 0 ? 100.0 * detection_frames / frame_num : 0.0);
     fprintf(stderr, "  Total box events : %d\n", total_boxes);
+    fprintf(stderr, "  Rescan modes     : full=%d partial=%d target-only=%d stride-skip=%d\n",
+            rescan_full_frames,
+            rescan_partial_frames,
+            rescan_target_only_frames,
+            rescan_stride_skip_frames);
+    fprintf(stderr, "  Scan reasons     :");
+    for (size_t ri = 0; ri < sizeof(kScanReasonCounters) / sizeof(kScanReasonCounters[0]); ri++) {
+        if (scan_reason_counts[ri] <= 0) continue;
+        fprintf(stderr, " %s=%d",
+                kScanReasonCounters[ri].name,
+                scan_reason_counts[ri]);
+    }
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  Reg reasons      :");
+    for (size_t ri = 0; ri < sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0]); ri++) {
+        if (registration_reason_counts[ri] <= 0) continue;
+        fprintf(stderr, " %s=%d",
+                kRegistrationReasonCounters[ri].name,
+                registration_reason_counts[ri]);
+    }
+    fprintf(stderr, "\n");
+    if (timing_frame_count > 0) {
+        fprintf(stderr, "  Stage timing     : avg-total=%.2f ms max-total=%.2f ms\n",
+                (double)frame_timing_total_us / (double)timing_frame_count / 1000.0,
+                (double)frame_timing_max_us / 1000.0);
+        for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
+            fprintf(stderr, "    %-18s avg=%.2f ms max=%.2f ms\n",
+                    timing_stage_name((anomaly_timing_stage_t)stage),
+                    (double)stage_timing_total_us[stage] / (double)timing_frame_count / 1000.0,
+                    (double)stage_timing_max_us[stage] / 1000.0);
+        }
+    }
     fprintf(stderr, "  CSV written      : %s\n", output_csv);
     if (write_video)
         fprintf(stderr, "  Video written    : %s\n", output_video);
@@ -1442,7 +1609,47 @@ int main(int argc, char **argv) {
             fprintf(summary, "  \"realtime_factor\": %.6f,\n", realtime_factor);
             fprintf(summary, "  \"realtime_label\": ");
             json_write_string(summary, realtime_descriptor(realtime_factor));
-            fprintf(summary, ",\n  \"config\": {\n");
+            fprintf(summary, ",\n  \"rescan_modes\": {\n");
+            fprintf(summary, "    \"full\": %d,\n", rescan_full_frames);
+            fprintf(summary, "    \"partial\": %d,\n", rescan_partial_frames);
+            fprintf(summary, "    \"target_only\": %d,\n", rescan_target_only_frames);
+            fprintf(summary, "    \"appearance_stride_skip\": %d\n", rescan_stride_skip_frames);
+            fprintf(summary, "  },\n  \"scan_reason_counts\": {\n");
+            for (size_t ri = 0; ri < sizeof(kScanReasonCounters) / sizeof(kScanReasonCounters[0]); ri++) {
+                fprintf(summary, "    \"%s\": %d%s\n",
+                        kScanReasonCounters[ri].name,
+                        scan_reason_counts[ri],
+                        (ri + 1) < (sizeof(kScanReasonCounters) / sizeof(kScanReasonCounters[0])) ? "," : "");
+            }
+            fprintf(summary, "  },\n  \"registration_reason_counts\": {\n");
+            for (size_t ri = 0; ri < sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0]); ri++) {
+                fprintf(summary, "    \"%s\": %d%s\n",
+                        kRegistrationReasonCounters[ri].name,
+                        registration_reason_counts[ri],
+                        (ri + 1) < (sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0])) ? "," : "");
+            }
+            fprintf(summary, "  },\n  \"stage_timing\": {\n");
+            fprintf(summary, "    \"compiled\": %s,\n", timing_frame_count > 0 ? "true" : "false");
+            fprintf(summary, "    \"frame_count\": %d,\n", timing_frame_count);
+            fprintf(summary, "    \"avg_total_ms\": %.6f,\n",
+                    timing_frame_count > 0
+                        ? ((double)frame_timing_total_us / (double)timing_frame_count / 1000.0)
+                        : 0.0);
+            fprintf(summary, "    \"max_total_ms\": %.6f,\n",
+                    (double)frame_timing_max_us / 1000.0);
+            fprintf(summary, "    \"stages\": {\n");
+            for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
+                fprintf(summary,
+                        "      \"%s\": { \"avg_ms\": %.6f, \"max_ms\": %.6f }%s\n",
+                        timing_stage_name((anomaly_timing_stage_t)stage),
+                        timing_frame_count > 0
+                            ? ((double)stage_timing_total_us[stage] / (double)timing_frame_count / 1000.0)
+                            : 0.0,
+                        (double)stage_timing_max_us[stage] / 1000.0,
+                        (stage + 1) < ANOMALY_TIMING_STAGE_COUNT ? "," : "");
+            }
+            fprintf(summary, "    }\n");
+            fprintf(summary, "  },\n  \"config\": {\n");
             fprintf(summary, "    \"threshold\": %.6f,\n", (double)cfg.score_threshold);
             fprintf(summary, "    \"min_hits\": %d,\n", cfg.min_hits);
             fprintf(summary, "    \"scan_zone\": %.6f,\n", (double)cfg.scan_zone);
@@ -1455,7 +1662,9 @@ int main(int argc, char **argv) {
             fprintf(summary, "    \"registration\": ");
             json_write_string(summary,
                               cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
-            fprintf(summary, ",\n    \"thermal_min_delta\": %.6f\n", effective_min_delta);
+            fprintf(summary, ",\n    \"thermal_min_delta\": %.6f,\n", effective_min_delta);
+            fprintf(summary, "    \"small_target_fraction\": %.6f\n",
+                    (double)cfg.small_target_screen_fraction);
             fprintf(summary, "  }\n}\n");
             fclose(summary);
         }

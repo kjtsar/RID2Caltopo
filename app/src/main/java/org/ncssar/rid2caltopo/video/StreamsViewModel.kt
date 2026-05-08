@@ -2216,7 +2216,7 @@ class StreamsViewModel(
                 realtimeStatus(runtime.localPlaybackRealtimeFactor)?.let { status ->
                     lines += String.format(
                         Locale.US,
-                        "  Anomaly realtime: %.2fx realtime (%s)",
+                        "  Anomaly realtime: %.2fx realtime recent (%s)",
                         status.factor,
                         status.descriptor,
                     )
@@ -2224,12 +2224,23 @@ class StreamsViewModel(
                 val mediaSpanMs = runtime.localPlaybackMediaSpanMs
                 val wallSpanMs = runtime.localPlaybackWallSpanMs
                 if (mediaSpanMs != null && wallSpanMs != null) {
-                    lines += String.format(
-                        Locale.US,
-                        "  Analysis span: %.1f s media over %.1f s wall time",
-                        mediaSpanMs / 1000.0,
-                        wallSpanMs / 1000.0,
-                    )
+                    val sessionRealtimeStatus = realtimeStatus(runtime.localPlaybackSessionRealtimeFactor)
+                    lines += if (sessionRealtimeStatus != null) {
+                        String.format(
+                            Locale.US,
+                            "  Analysis span: %.1f s media over %.1f s wall time (session avg %.2fx)",
+                            mediaSpanMs / 1000.0,
+                            wallSpanMs / 1000.0,
+                            sessionRealtimeStatus.factor,
+                        )
+                    } else {
+                        String.format(
+                            Locale.US,
+                            "  Analysis span: %.1f s media over %.1f s wall time",
+                            mediaSpanMs / 1000.0,
+                            wallSpanMs / 1000.0,
+                        )
+                    }
                 }
                 runtime.anomalyDebugSummary?.takeIf { it.isNotBlank() }?.let {
                     lines += "  Anomaly debug: $it"

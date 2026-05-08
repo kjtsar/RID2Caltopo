@@ -23,7 +23,7 @@ For IR work, the default app posture is now:
 - `Appearance`: `Thermal`
 - `Registration`: `Affine`
 - `Frame Stride`: `1`
-- `Scan Zone`: `60%`
+- `Scan Zone`: `80%`
 - `Min Hits`: `2`
 - `Thermal Min Delta`: `10.0`
 
@@ -193,6 +193,32 @@ Both backends can declare a scene discontinuity or otherwise provide weak
 registration quality. When that happens, downstream scoring is suppressed or
 reset.
 
+### Registration Evolution
+
+The detector's recent registration work followed this path:
+
+1. The first focused diagnosis was that selective-refresh instability was being
+   driven mainly by registration starvation, not by planner-threshold tuning.
+   In the key black-hot replays, affine commonly failed as
+   `affine-too-few-corners` and GMV commonly failed as `gmv-too-few-anchors`.
+
+2. The main recovery pass was registration-only:
+   registration was allowed to use a broader ROI than anomaly scanning,
+   registration got its own lightly filtered luma path, and patch support was
+   increased for both GMV and affine matching. That substantially improved
+   registration validity in the focused replay matrix.
+
+3. After that fix, one planner-side selective-refresh experiment was tried and
+   reverted. It improved harness refresh mix but increased some quality issues
+   and did not sufficiently improve Android playback. That revert is important
+   because it means the present baseline should be understood as
+   post-registration-fix but pre-new-planner-tuning.
+
+4. Parallax is still considered real and worth measuring, but it is not
+   currently treated as the dominant blocker in the focused baseline. If
+   parallax handling is revisited, the safer direction is planner-side
+   softening rather than making registration invalidation more aggressive.
+
 ### Temporal Stabilization
 
 Every major cue feeds a temporal accumulator:
@@ -241,6 +267,65 @@ implicit:
 That makes it easier to compare a harness command line directly against app
 behavior.
 
+### Stage Timing
+
+For focused performance work, the shared detector can be compiled with coarse
+stage timing enabled via `ANOMALY_DEBUG_TIMING`.
+
+The intended usage right now is primarily through the host harness:
+
+```sh
+cd /Users/kjt/Projects/RID2Caltopo/tools/anomaly_test
+cmake -B build_timing -DANOMALY_DEBUG_TIMING=ON
+cmake --build build_timing
+./build_timing/anomaly_video_test /path/to/clip.mp4 \
+  --registration affine --stride 1 -p bh -a 6 -t 2.8 \
+  --summary-json /tmp/clip_summary.json --no-video
+```
+
+The focused four-case replay can also use the timing-enabled binary:
+
+```sh
+python3 /Users/kjt/Projects/RID2Caltopo/tools/anomaly_test/run_focused_registration_experiments.py \
+  --binary /Users/kjt/Projects/RID2Caltopo/tools/anomaly_test/build_timing/anomaly_video_test \
+  --output-dir /tmp/focused_registration_timing \
+  --stride 1 -p bh -a 6 -t 2.8 -m 2 -s 0.8
+```
+
+When compiled in, timing is surfaced in two places:
+
+- harness stderr end-of-run summary
+- harness `--summary-json` under `stage_timing`
+
+The current stage names mean:
+
+- `registration_prep`: build motion-grid luma plus registration-only prefilter
+- `registration_solve`: estimate GMV or affine registration model
+- `scan_planning`: selective refresh planner over the scan ROI
+- `refresh_mask_build`: partial/target-only refresh-mask construction
+- `sampled_grid_prep`: sampled-grid extraction, integral images, and color tile stats
+- `thermal_scoring`: thermal spatial/temporal scoring and thermal candidate work
+- `color_scoring`: color cue scoring
+- `motion_scoring`: residual motion scoring after registration compensation
+- `saliency_scoring`: persist / unified saliency scoring
+- `target_tracking`: track propagation, track updates, revisit annotation
+- `overlay_draw`: debug overlay and box drawing
+
+Interpretation guidance:
+
+- Start with `avg_total_ms` and `realtime_factor` for throughput.
+- Use the per-stage `avg_ms` values to identify steady-state hotspots.
+- Use `max_ms` values to spot spikes, but do not treat single-frame maxima as
+  typical cost.
+- Stage buckets are approximate and may not add up exactly to total frame
+  timing because some framing work is intentionally left outside the named
+  buckets.
+- Stages at `0.00 ms` usually indicate the corresponding cue was disabled in
+  that run.
+
+The compile-time flag defaults off so shipping builds do not carry this
+instrumentation unless explicitly enabled.
+
 ### Current App Defaults
 
 The app-side `AnomalyConfig` defaults currently resolve to:
@@ -253,7 +338,7 @@ The app-side `AnomalyConfig` defaults currently resolve to:
 - `Sensitivity`: `60%`
 - `Motion Evidence Sensitivity`: `60%`
 - `Min Area Fraction`: `0.0015`
-- `Scan Zone`: `0.60`
+- `Scan Zone`: `0.80`
 - `Min Hits`: `2`
 - `Thermal Min Delta`: `10.0`
 

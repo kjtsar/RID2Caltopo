@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(mediamtx_jni)
+option(ANOMALY_DEBUG_TIMING "Enable anomaly detector stage timing instrumentation" OFF)
 
 add_library(
     mediamtx_jni
@@ -49,6 +50,7 @@ target_link_libraries(
     ${log-lib}
     ${android-lib}
 )
+target_compile_definitions(ffmpeg_bridge PRIVATE ANOMALY_DEBUG_TIMING=$<BOOL:${ANOMALY_DEBUG_TIMING}>)
 
 if (FFMPEG_LIBS_FOUND)
     add_library(avformat SHARED IMPORTED)

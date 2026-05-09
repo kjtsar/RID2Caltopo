@@ -67,7 +67,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
@@ -104,12 +106,12 @@ fun StreamTile(
         onDispose { removeConsumer() }
     }
     val isFocused = (focusedPath == streamDesignator)
-    CTDebug(tag, "StreamTile(): isFocused:${isFocused}, designator:${streamDesignator}, focusedPath:$focusedPath")
     val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
     val isLocalPlaybackPaused = if (isLocalPlayback) viewModel.isLocalPlaybackPaused(streamDesignator) else false
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
     val resolvedAppearanceMode = viewModel.resolvedAppearanceModeFor(streamDesignator)
+    val anomalyPauseReason = viewModel.anomalyPauseReasonFor(streamDesignator)
     val currentIsFocused by rememberUpdatedState(isFocused)
     val currentDesignatorState by rememberUpdatedState(designatorState)
     var pendingAnnotationPoint by remember(streamDesignator) { mutableStateOf<Offset?>(null) }
@@ -125,14 +127,20 @@ fun StreamTile(
             return@produceState
         }
         while (true) {
-            value = viewModel.runtimeSnapshotFor(streamDesignator)
+            value = withContext(Dispatchers.Default) {
+                viewModel.runtimeSnapshotFor(streamDesignator)
+            }
             delay(if (isLocalPlaybackPaused) 120L else 400L)
         }
     }
     val currentFrameTimestampUs = localRuntimeSnapshot?.currentSourceTimestampUs
     val currentFrameAnnotations = viewModel.localPlaybackFrameAnnotations(streamDesignator, currentFrameTimestampUs)
     val currentFrameAnnotationSummary = viewModel.localPlaybackFrameAnnotationSummary(streamDesignator, currentFrameTimestampUs)
-    val currentFrameCounterText = if (isLocalPlayback) viewModel.localPlaybackFrameCounterText(streamDesignator) else null
+    val currentFrameCounterText = if (isLocalPlayback && currentFrameTimestampUs != null) {
+        "T ${formatPlaybackTimestampUs(currentFrameTimestampUs)}"
+    } else {
+        null
+    }
     val showLocalPlaybackLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyReviewLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyLegendControls = anomalyConfig.enabled
@@ -535,6 +543,13 @@ fun StreamTile(
                                 detectTapGestures(onTap = { showAnomalySettingsDialog = true })
                             }
                         )
+                        if (anomalyConfig.enabled && anomalyPauseReason != null) {
+                            Text(
+                                text = "AD paused: $anomalyPauseReason",
+                                color = Color(0xFFFFD54F),
+                                fontSize = 11.sp,
+                            )
+                        }
                         Text(
                             text = if (anomalyConfig.showHotOverlay) "ShowHot On" else "ShowHot Off",
                             color = Color.White,
@@ -892,6 +907,16 @@ fun StreamTile(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Text("Troubleshooting Debug")
+                                TextButton(onClick = { viewModel.toggleAnomalyTroubleshootingDebug(streamDesignator) }) {
+                                    Text(if (anomalyConfig.troubleshootingDebug) "On" else "Off")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text("Registration")
                                 TextButton(onClick = { viewModel.cycleAnomalyRegistrationMode(streamDesignator) }) {
                                     Text(anomalyConfig.registrationMode.label)
@@ -1034,12 +1059,8 @@ fun StreamTile(
                                 viewModel.setAnomalySensitivity(streamDesignator, sensitivityValue)
                                 viewModel.setMotionEvidenceSensitivity(streamDesignator, motionEvidenceSensitivityValue)
                                 viewModel.setScanZone(streamDesignator, scanZoneValue)
-                                while (viewModel.anomalyConfigFor(streamDesignator).minHits != minHitsValue) {
-                                    viewModel.cycleMinHits(streamDesignator)
-                                }
-                                while (viewModel.anomalyConfigFor(streamDesignator).frameStride != frameStrideValue) {
-                                    viewModel.cycleAnomalyFrameStride(streamDesignator)
-                                }
+                                viewModel.setMinHits(streamDesignator, minHitsValue)
+                                viewModel.setAnomalyFrameStride(streamDesignator, frameStrideValue)
                                 viewModel.setAnomalyPixelStep(streamDesignator, pixelStepValue)
                                 viewModel.setAnomalyThermalMinDelta(streamDesignator, thermalMinDeltaValue)
                                 viewModel.setAnomalySmallTargetScreenFraction(streamDesignator, smallTargetFractionValue)
@@ -1182,6 +1203,14 @@ fun StreamTile(
             )
         }
     }
+}
+
+private fun formatPlaybackTimestampUs(timestampUs: Long): String {
+    val totalMs = (timestampUs / 1_000L).coerceAtLeast(0L)
+    val minutes = totalMs / 60_000L
+    val seconds = (totalMs % 60_000L) / 1_000L
+    val millis = totalMs % 1_000L
+    return "%02d:%02d.%03d".format(minutes, seconds, millis)
 }
 
 @Composable

@@ -139,13 +139,50 @@
 // decoded_frame_gap are NOT gated by this flag — they remain active.
 #define FFMPEG_TELEMETRY_ENABLED 0
 #define LOCAL_PLAYBACK_HISTORY_CAPACITY 24
+// Live AD queue is intentionally sized above the nominal 750 ms budget so we
+// can absorb bursty RTMP/TCP delivery and occasional runs of "cheap" decodes
+// without tripping straight into full bypass.  At ~30 fps, 24 frames is ~800 ms.
+#define AD_INPUT_QUEUE_INITIAL_CAPACITY 24
+#define AD_INPUT_QUEUE_HARD_CAPACITY 24
+#define AD_INPUT_QUEUE_DEFAULT_BACKLOG_MS 750
+#define AD_PRESSURE_ANALYZE_ALTERNATE_PCT 50
+#define AD_PRESSURE_BYPASS_ALTERNATE_PCT 66
+#define AD_PRESSURE_BYPASS_ALL_PCT 80
+#define AD_PRESSURE_RECOVER_DEPTH 2
+#define LOCAL_PLAYBACK_MAX_PIPELINE_DEPTH 3
+
+typedef enum {
+    AD_PAUSE_REASON_NONE = 0,
+    AD_PAUSE_REASON_OVERLOAD = 1,
+    AD_PAUSE_REASON_THERMAL = 2,
+} ad_pause_reason_t;
+
+typedef enum {
+    AD_RUNTIME_MODE_BYPASSED = 0,
+    AD_RUNTIME_MODE_INLINE = 1,
+    AD_RUNTIME_MODE_THREADED = 2,
+} ad_runtime_mode_t;
+
+typedef enum {
+    AD_PRESSURE_MODE_NORMAL = 0,
+    AD_PRESSURE_MODE_ANALYZE_ALTERNATE = 1,
+    AD_PRESSURE_MODE_BYPASS_ALTERNATE = 2,
+    AD_PRESSURE_MODE_BYPASS_ALL = 3,
+} ad_pressure_mode_t;
 
 #if HAVE_FFMPEG && HAVE_SWSCALE
 typedef struct {
     AVFrame *frame;
     AVFrame *history_frame;
+    AVFrame *overlay_frame;
+    int64_t frame_id;
+    int64_t generation_id;
     int64_t source_ts_us;
     int64_t enqueued_at_ms;
+    int width;
+    int height;
+    enum AVPixelFormat pixel_format;
+    bool analyzed;
 } render_queue_slot_t;
 #endif
 
@@ -164,6 +201,12 @@ typedef struct ffmpeg_session_t {
     anomaly_state_t  anomaly_state;  // decode-owned, synchronized via anomaly_lock for resets
     pthread_mutex_t anomaly_lock;
     bool anomaly_lock_ready;
+    bool anomaly_thermal_paused;
+    bool anomaly_runtime_disabled;
+    bool anomaly_troubleshooting_debug;
+    ad_pause_reason_t anomaly_pause_reason;
+    int64_t anomaly_generation_id;
+    int64_t anomaly_next_frame_id;
     // Manual render stride — set via nativeSetRenderStride().
     // When render_stride > 1, every (render_stride - 1) out of render_stride
     // non-keyframe packets are dropped *before* decode.  Keyframe (IDR) packets
@@ -243,6 +286,7 @@ typedef struct ffmpeg_session_t {
     int anomaly_last_registration_health;
     int anomaly_last_rescan_mode;
     char latest_anomaly_debug_summary[512];
+    char latest_ad_bridge_debug_summary[256];
     int64_t reader_stall_started_at_ms;
     int64_t last_reader_stall_log_at_ms;
     int64_t reader_stall_timeout_events;
@@ -262,15 +306,25 @@ typedef struct ffmpeg_session_t {
 #if HAVE_SWSCALE
     // Render conversion resources are used only by the render thread.
     pthread_t render_thread;
+    pthread_t ad_thread;
     bool render_thread_started;
+    bool ad_thread_started;
     bool render_thread_stop;
+    bool ad_thread_stop;
     bool render_sync_ready;
+    bool ad_sync_ready;
     pthread_mutex_t render_lock;
+    pthread_mutex_t ad_lock;
     pthread_cond_t render_cond;
+    pthread_cond_t ad_cond;
     render_queue_slot_t *render_queue;
+    render_queue_slot_t *ad_input_queue;
     int render_queue_capacity;
     int render_queue_head;
     int render_queue_depth;
+    int ad_input_queue_capacity;
+    int ad_input_queue_head;
+    int ad_input_queue_depth;
     render_queue_slot_t local_playback_history[LOCAL_PLAYBACK_HISTORY_CAPACITY];
     int local_playback_history_count;
     int local_playback_history_next;
@@ -290,6 +344,19 @@ typedef struct ffmpeg_session_t {
     int anomaly_rgba_width;
     int anomaly_rgba_height;
     enum AVPixelFormat anomaly_src_fmt;
+    int64_t ad_forwarded_without_analysis_count;
+    int64_t ad_full_queue_disable_count;
+    int64_t ad_analyzed_rendered_frame_count;
+    int64_t ad_bypassed_rendered_frame_count;
+    int64_t ad_input_queue_depth_max;
+    int64_t ad_input_enqueued_count;
+    int64_t ad_worker_dequeued_frame_count;
+    int64_t ad_worker_processed_frame_count;
+    int64_t ad_worker_skipped_frame_count;
+    int64_t ad_worker_annotated_frame_count;
+    int64_t ad_worker_overlay_enqueued_count;
+    int64_t ad_pressure_frame_counter;
+    ad_pressure_mode_t ad_pressure_mode;
 #endif
 #endif
 } ffmpeg_session_t;
@@ -685,6 +752,9 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
 
     session->anomaly_rgba_frame = av_frame_alloc();
     if (session->anomaly_rgba_frame == NULL) return;
+    session->anomaly_rgba_frame->format = AV_PIX_FMT_RGBA;
+    session->anomaly_rgba_frame->width = width;
+    session->anomaly_rgba_frame->height = height;
 
     session->anomaly_rgba_buffer_size = av_image_get_buffer_size(AV_PIX_FMT_RGBA, width, height, 1);
     if (session->anomaly_rgba_buffer_size <= 0) return;
@@ -734,6 +804,74 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
     } else {
         anomaly_state_reset(&session->anomaly_state);
     }
+}
+
+static AVFrame *clone_rgba_frame(const AVFrame *src) {
+    if (src == NULL || src->width <= 0 || src->height <= 0) {
+        ct_warn(TAG, "clone_rgba_frame invalid source");
+        return NULL;
+    }
+    if (src->format != AV_PIX_FMT_RGBA) {
+        ct_warn(TAG,
+                "clone_rgba_frame unexpected format=%d width=%d height=%d",
+                src->format,
+                src->width,
+                src->height);
+        return NULL;
+    }
+    if (src->data[0] == NULL || src->linesize[0] <= 0) {
+        ct_warn(TAG,
+                "clone_rgba_frame missing pixels width=%d height=%d linesize=%d",
+                src->width,
+                src->height,
+                src->linesize[0]);
+        return NULL;
+    }
+
+    AVFrame *copy = av_frame_alloc();
+    if (copy == NULL) {
+        ct_warn(TAG, "clone_rgba_frame alloc failed");
+        return NULL;
+    }
+    copy->format = src->format;
+    copy->width = src->width;
+    copy->height = src->height;
+    if (av_frame_get_buffer(copy, 1) < 0) {
+        ct_warn(TAG,
+                "clone_rgba_frame get_buffer failed width=%d height=%d",
+                src->width,
+                src->height);
+        av_frame_free(&copy);
+        return NULL;
+    }
+    if (av_frame_make_writable(copy) < 0) {
+        ct_warn(TAG, "clone_rgba_frame make_writable failed");
+        av_frame_free(&copy);
+        return NULL;
+    }
+    av_image_copy(copy->data,
+                  copy->linesize,
+                  (const uint8_t * const *) src->data,
+                  src->linesize,
+                  AV_PIX_FMT_RGBA,
+                  src->width,
+                  src->height);
+
+    copy->pts = src->pts;
+    copy->pkt_dts = src->pkt_dts;
+    copy->best_effort_timestamp = src->best_effort_timestamp;
+    copy->sample_aspect_ratio = src->sample_aspect_ratio;
+    copy->color_range = src->color_range;
+    copy->color_primaries = src->color_primaries;
+    copy->color_trc = src->color_trc;
+    copy->colorspace = src->colorspace;
+
+    if (copy->data[0] == NULL || copy->linesize[0] <= 0) {
+        ct_warn(TAG, "clone_rgba_frame copied frame missing output pixels");
+        av_frame_free(&copy);
+        return NULL;
+    }
+    return copy;
 }
 
 static const char *registration_health_name(int value) {
@@ -897,6 +1035,7 @@ static const char *registration_invalid_reason_name(int value) {
 }
 
 static bool analyze_rgba_frame(ffmpeg_session_t *session,
+                               const anomaly_config_t *cfg_override,
                                int width,
                                int height,
                                uint8_t *rgba,
@@ -905,9 +1044,13 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
     anomaly_result_t result;
     memset(&result, 0, sizeof(result));
     anomaly_config_t cfg;
-    pthread_mutex_lock(&g_lock);
-    cfg = session->anomaly_cfg;
-    pthread_mutex_unlock(&g_lock);
+    if (cfg_override != NULL) {
+        cfg = *cfg_override;
+    } else {
+        pthread_mutex_lock(&g_lock);
+        cfg = session->anomaly_cfg;
+        pthread_mutex_unlock(&g_lock);
+    }
     if (session->anomaly_lock_ready) {
         pthread_mutex_lock(&session->anomaly_lock);
     }
@@ -1087,6 +1230,20 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
     if (session->anomaly_lock_ready) {
         pthread_mutex_unlock(&session->anomaly_lock);
     }
+    if (session->anomaly_troubleshooting_debug &&
+        (annotated ||
+         session->anomaly_process_frame_count <= 3 ||
+         (session->anomaly_process_frame_count % 60) == 0)) {
+        ct_debug(TAG,
+                 "anomaly frame result id=%lld designator=%s frame=%lld annotated=%d summary=%s",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) session->anomaly_process_frame_count,
+                 annotated ? 1 : 0,
+                 session->latest_anomaly_debug_summary[0] != '\0'
+                         ? session->latest_anomaly_debug_summary
+                         : "debug unavailable");
+    }
     return annotated;
 }
 
@@ -1095,20 +1252,110 @@ static bool anomaly_processing_enabled(ffmpeg_session_t *session) {
     if (session == NULL) return false;
     bool enabled = false;
     pthread_mutex_lock(&g_lock);
-    enabled = session->anomaly_cfg.enabled && (session->anomaly_cfg.algorithm_mask != 0);
+    enabled = session->anomaly_cfg.enabled &&
+              !session->anomaly_thermal_paused &&
+              !session->anomaly_runtime_disabled &&
+              (session->anomaly_cfg.algorithm_mask != 0);
     pthread_mutex_unlock(&g_lock);
     return enabled;
 }
 
-static void analyze_decoded_frame(ffmpeg_session_t *session,
-                                  AVFrame *decoded,
-                                  int64_t source_ts_us) {
-    if (session == NULL || decoded == NULL) return;
-    if (!anomaly_processing_enabled(session)) return;
+static bool anomaly_processing_enabled_locked(ffmpeg_session_t *session) {
+    if (session == NULL) return false;
+    return session->anomaly_cfg.enabled &&
+           !session->anomaly_thermal_paused &&
+           !session->anomaly_runtime_disabled &&
+           (session->anomaly_cfg.algorithm_mask != 0);
+}
+
+static ad_runtime_mode_t current_ad_runtime_mode(ffmpeg_session_t *session) {
+    if (session == NULL || !session->is_render) {
+        return AD_RUNTIME_MODE_BYPASSED;
+    }
+    bool enabled = session->anomaly_cfg.enabled &&
+                   !session->anomaly_thermal_paused &&
+                   !session->anomaly_runtime_disabled &&
+                   (session->anomaly_cfg.algorithm_mask != 0);
+    if (!enabled) {
+        return AD_RUNTIME_MODE_BYPASSED;
+    }
+    if (session->ad_thread_started && session->render_thread_started) {
+        return AD_RUNTIME_MODE_THREADED;
+    }
+    return AD_RUNTIME_MODE_INLINE;
+}
+
+static const char *ad_pressure_mode_name(ad_pressure_mode_t mode) {
+    switch (mode) {
+        case AD_PRESSURE_MODE_ANALYZE_ALTERNATE:
+            return "analyze-alternate";
+        case AD_PRESSURE_MODE_BYPASS_ALTERNATE:
+            return "bypass-alternate";
+        case AD_PRESSURE_MODE_BYPASS_ALL:
+            return "bypass-all";
+        case AD_PRESSURE_MODE_NORMAL:
+        default:
+            return "normal";
+    }
+}
+
+static int ad_queue_depth_threshold(const ffmpeg_session_t *session, int pct) {
+    if (session == NULL || session->ad_input_queue_capacity <= 0) return 0;
+    int cap = session->ad_input_queue_capacity;
+    int threshold = (cap * pct + 99) / 100;
+    if (threshold < 1) threshold = 1;
+    if (threshold > cap) threshold = cap;
+    return threshold;
+}
+
+static ad_pressure_mode_t select_ad_pressure_mode_locked(ffmpeg_session_t *session,
+                                                         int queue_depth_before_dequeue) {
+    if (session == NULL) return AD_PRESSURE_MODE_NORMAL;
+    ad_pressure_mode_t current = session->ad_pressure_mode;
+    if (queue_depth_before_dequeue <= AD_PRESSURE_RECOVER_DEPTH) {
+        return AD_PRESSURE_MODE_NORMAL;
+    }
+
+    int bypass_all_threshold = ad_queue_depth_threshold(session, AD_PRESSURE_BYPASS_ALL_PCT);
+    int bypass_alternate_threshold = ad_queue_depth_threshold(session, AD_PRESSURE_BYPASS_ALTERNATE_PCT);
+    int analyze_alternate_threshold = ad_queue_depth_threshold(session, AD_PRESSURE_ANALYZE_ALTERNATE_PCT);
+
+    if (queue_depth_before_dequeue >= bypass_all_threshold) {
+        return AD_PRESSURE_MODE_BYPASS_ALL;
+    }
+    if (current == AD_PRESSURE_MODE_BYPASS_ALL) {
+        return AD_PRESSURE_MODE_BYPASS_ALL;
+    }
+
+    if (queue_depth_before_dequeue >= bypass_alternate_threshold) {
+        return AD_PRESSURE_MODE_BYPASS_ALTERNATE;
+    }
+    if (current == AD_PRESSURE_MODE_BYPASS_ALTERNATE) {
+        return AD_PRESSURE_MODE_BYPASS_ALTERNATE;
+    }
+
+    if (queue_depth_before_dequeue >= analyze_alternate_threshold) {
+        return AD_PRESSURE_MODE_ANALYZE_ALTERNATE;
+    }
+    if (current == AD_PRESSURE_MODE_ANALYZE_ALTERNATE) {
+        return AD_PRESSURE_MODE_ANALYZE_ALTERNATE;
+    }
+
+    return AD_PRESSURE_MODE_NORMAL;
+}
+
+static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
+                                    AVFrame *decoded,
+                                    int64_t source_ts_us,
+                                    bool *out_analyzed,
+                                    int frame_stride_override) {
+    if (out_analyzed != NULL) *out_analyzed = false;
+    if (session == NULL || decoded == NULL) return NULL;
+    if (!anomaly_processing_enabled(session)) return NULL;
 
     ensure_anomaly_rgba_resources(session, decoded->width, decoded->height, decoded->format);
     if (session->anomaly_sws == NULL || session->anomaly_rgba_frame == NULL) {
-        return;
+        return NULL;
     }
 
     trace_begin_section("RID2C anomaly_rgba_convert");
@@ -1122,65 +1369,74 @@ static void analyze_decoded_frame(ffmpeg_session_t *session,
             session->anomaly_rgba_frame->linesize);
     trace_end_section();
 
+    anomaly_config_t cfg_override;
+    anomaly_config_t *cfg_override_ptr = NULL;
+    if (frame_stride_override > 1) {
+        pthread_mutex_lock(&g_lock);
+        cfg_override = session->anomaly_cfg;
+        pthread_mutex_unlock(&g_lock);
+        cfg_override.frame_stride = frame_stride_override;
+        cfg_override_ptr = &cfg_override;
+    }
+
     bool frame_annotated = analyze_rgba_frame(
             session,
+            cfg_override_ptr,
             decoded->width,
             decoded->height,
             session->anomaly_rgba_frame->data[0],
             session->anomaly_rgba_frame->linesize[0],
             source_ts_us);
-    if (!frame_annotated) return;
-    if (session->anomaly_back_sws == NULL) return;
-    if (av_frame_make_writable(decoded) < 0) return;
+    if (out_analyzed != NULL) *out_analyzed = true;
+    if (!frame_annotated) return NULL;
+    return clone_rgba_frame(session->anomaly_rgba_frame);
+}
+
+static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
+                                           AVFrame *decoded,
+                                           const AVFrame *overlay_frame) {
+    if (session == NULL || decoded == NULL || overlay_frame == NULL) return false;
+    if (overlay_frame->format != AV_PIX_FMT_RGBA || overlay_frame->data[0] == NULL) return false;
+
+    ensure_anomaly_rgba_resources(session, decoded->width, decoded->height, decoded->format);
+    if (session->anomaly_back_sws == NULL) {
+        ct_warn(TAG,
+                "overlay back-convert unavailable id=%lld designator=%s",
+                (long long) session->session_id,
+                session->designator);
+        return false;
+    }
+    if (av_frame_make_writable(decoded) < 0) {
+        ct_warn(TAG,
+                "decoded frame not writable for overlay id=%lld designator=%s",
+                (long long) session->session_id,
+                session->designator);
+        return false;
+    }
 
     trace_begin_section("RID2C anomaly_overlay_convert");
     sws_scale(
             session->anomaly_back_sws,
-            (const uint8_t *const *) session->anomaly_rgba_frame->data,
-            session->anomaly_rgba_frame->linesize,
+            (const uint8_t *const *) overlay_frame->data,
+            overlay_frame->linesize,
             0,
             decoded->height,
             decoded->data,
             decoded->linesize);
     trace_end_section();
+    return true;
 }
 
 static void render_frame_to_surface(ffmpeg_session_t *session,
                                     AVFrame *decoded,
                                     AVFrame *history_frame,
+                                    AVFrame *overlay_frame,
+                                    bool analyzed,
                                     int64_t source_ts_us,
                                     int64_t render_latency_ms,
                                     bool record_local_history) {
-    bool use_render_lock = session->render_sync_ready;
-    if (use_render_lock) {
-        pthread_mutex_lock(&session->render_lock);
-    }
-    ensure_rgba_resources(session, decoded->width, decoded->height, decoded->format);
-    if (session->sws == NULL || session->rgba_frame == NULL) {
-        if (use_render_lock) {
-            pthread_mutex_unlock(&session->render_lock);
-        }
-        dispatch_probe_event(session->designator, "render_skipped_no_rgba", session->session_id, source_ts_us,
-                             NAN, NAN, NAN, NAN, NAN, NAN);
-        return;
-    }
-
-    trace_begin_section("RID2C render_rgba_convert");
-    sws_scale(
-            session->sws,
-            (const uint8_t *const *) decoded->data,
-            decoded->linesize,
-            0,
-            decoded->height,
-            session->rgba_frame->data,
-            session->rgba_frame->linesize);
-    trace_end_section();
-
     ANativeWindow *window = acquire_window(session);
     if (window == NULL) {
-        if (use_render_lock) {
-            pthread_mutex_unlock(&session->render_lock);
-        }
         int64_t now_ms = monotonic_ms();
         if (now_ms - session->last_no_surface_log_at_ms >= RENDER_NO_SURFACE_LOG_INTERVAL_MS) {
             session->last_no_surface_log_at_ms = now_ms;
@@ -1191,6 +1447,39 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
         }
         return;
     }
+
+    bool use_render_lock = session->render_sync_ready;
+    if (use_render_lock) {
+        pthread_mutex_lock(&session->render_lock);
+    }
+    if (overlay_frame == NULL) {
+        ensure_rgba_resources(session, decoded->width, decoded->height, decoded->format);
+    }
+    if ((overlay_frame == NULL && (session->sws == NULL || session->rgba_frame == NULL)) ||
+        (overlay_frame != NULL && overlay_frame->data[0] == NULL)) {
+        if (use_render_lock) {
+            pthread_mutex_unlock(&session->render_lock);
+        }
+        ANativeWindow_release(window);
+        dispatch_probe_event(session->designator, "render_skipped_no_rgba", session->session_id, source_ts_us,
+                             NAN, NAN, NAN, NAN, NAN, NAN);
+        return;
+    }
+
+    AVFrame *display_rgba = overlay_frame;
+    if (display_rgba == NULL) {
+        trace_begin_section("RID2C render_rgba_convert");
+        sws_scale(
+                session->sws,
+                (const uint8_t *const *) decoded->data,
+                decoded->linesize,
+                0,
+                decoded->height,
+                session->rgba_frame->data,
+                session->rgba_frame->linesize);
+        trace_end_section();
+        display_rgba = session->rgba_frame;
+    }
     ANativeWindow_setBuffersGeometry(window, decoded->width, decoded->height, WINDOW_FORMAT_RGBA_8888);
 
     ANativeWindow_Buffer buffer;
@@ -1199,8 +1488,8 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
     if (lock_rc == 0) {
         uint8_t *dst = (uint8_t *) buffer.bits;
         const int dst_stride = buffer.stride * 4;
-        uint8_t *src = session->rgba_frame->data[0];
-        const int src_stride = session->rgba_frame->linesize[0];
+        uint8_t *src = display_rgba->data[0];
+        const int src_stride = display_rgba->linesize[0];
         const int copy_width = decoded->width * 4;
         for (int y = 0; y < decoded->height; y++) {
             memcpy(dst + (y * dst_stride), src + (y * src_stride), (size_t) copy_width);
@@ -1234,6 +1523,11 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
                                           NAN,
                                           NAN,
                                           NAN);
+        if (analyzed) {
+            session->ad_analyzed_rendered_frame_count += 1;
+        } else {
+            session->ad_bypassed_rendered_frame_count += 1;
+        }
     } else {
         ct_warn(TAG,
                 "ANativeWindow_lock failed id=%lld designator=%s rc=%d width=%d height=%d",
@@ -1952,8 +2246,15 @@ static void clear_render_queue_slot(render_queue_slot_t *slot) {
     if (slot == NULL) return;
     av_frame_free(&slot->frame);
     av_frame_free(&slot->history_frame);
+    av_frame_free(&slot->overlay_frame);
+    slot->frame_id = 0;
+    slot->generation_id = 0;
     slot->source_ts_us = 0;
     slot->enqueued_at_ms = 0;
+    slot->width = 0;
+    slot->height = 0;
+    slot->pixel_format = AV_PIX_FMT_NONE;
+    slot->analyzed = false;
 }
 
 static void clear_local_playback_history(ffmpeg_session_t *session) {
@@ -2023,6 +2324,13 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->anomaly_process_total_us = 0;
         session->anomaly_process_max_us = 0;
         session->anomaly_process_last_us = 0;
+        session->ad_forwarded_without_analysis_count = 0;
+        session->ad_full_queue_disable_count = 0;
+        session->ad_analyzed_rendered_frame_count = 0;
+        session->ad_bypassed_rendered_frame_count = 0;
+        session->ad_input_queue_depth_max = 0;
+        session->ad_input_enqueued_count = 0;
+        session->ad_worker_dequeued_frame_count = 0;
         session->anomaly_reg_health_healthy_count = 0;
         session->anomaly_reg_health_soft_count = 0;
         session->anomaly_reg_health_hard_count = 0;
@@ -2034,6 +2342,13 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->anomaly_last_registration_health = ANOMALY_REG_HEALTH_UNKNOWN;
         session->anomaly_last_rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
         session->latest_anomaly_debug_summary[0] = '\0';
+        session->latest_ad_bridge_debug_summary[0] = '\0';
+        session->ad_worker_processed_frame_count = 0;
+        session->ad_worker_skipped_frame_count = 0;
+        session->ad_worker_annotated_frame_count = 0;
+        session->ad_worker_overlay_enqueued_count = 0;
+        session->ad_pressure_frame_counter = 0;
+        session->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
     }
 }
 
@@ -2051,6 +2366,13 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     session->anomaly_process_total_us = 0;
     session->anomaly_process_max_us = 0;
     session->anomaly_process_last_us = 0;
+    session->ad_forwarded_without_analysis_count = 0;
+    session->ad_full_queue_disable_count = 0;
+    session->ad_analyzed_rendered_frame_count = 0;
+    session->ad_bypassed_rendered_frame_count = 0;
+    session->ad_input_queue_depth_max = 0;
+    session->ad_input_enqueued_count = 0;
+    session->ad_worker_dequeued_frame_count = 0;
     session->anomaly_reg_health_healthy_count = 0;
     session->anomaly_reg_health_soft_count = 0;
     session->anomaly_reg_health_hard_count = 0;
@@ -2062,6 +2384,13 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     session->anomaly_last_registration_health = ANOMALY_REG_HEALTH_UNKNOWN;
     session->anomaly_last_rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
     session->latest_anomaly_debug_summary[0] = '\0';
+    session->latest_ad_bridge_debug_summary[0] = '\0';
+    session->ad_worker_processed_frame_count = 0;
+    session->ad_worker_skipped_frame_count = 0;
+    session->ad_worker_annotated_frame_count = 0;
+    session->ad_worker_overlay_enqueued_count = 0;
+    session->ad_pressure_frame_counter = 0;
+    session->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
 }
 
 static void pace_local_file_playback(ffmpeg_session_t *session, int64_t pts_us) {
@@ -2193,6 +2522,34 @@ static bool wait_for_local_playback_advance(ffmpeg_session_t *session) {
     return false;
 }
 
+static bool wait_for_local_pipeline_capacity(ffmpeg_session_t *session,
+                                             bool ad_enabled) {
+    if (session == NULL || !is_local_file_source(session)) return true;
+    while (session_running(session)) {
+        int render_depth = 0;
+        int ad_depth = 0;
+        int ad_capacity = 0;
+        if (session->render_sync_ready) {
+            pthread_mutex_lock(&session->render_lock);
+            render_depth = session->render_queue_depth;
+            pthread_mutex_unlock(&session->render_lock);
+        }
+        if (session->ad_sync_ready) {
+            pthread_mutex_lock(&session->ad_lock);
+            ad_depth = session->ad_input_queue_depth;
+            ad_capacity = session->ad_input_queue_capacity;
+            pthread_mutex_unlock(&session->ad_lock);
+        }
+        bool total_has_capacity = (render_depth + ad_depth) < LOCAL_PLAYBACK_MAX_PIPELINE_DEPTH;
+        bool ad_has_capacity = !ad_enabled || ad_capacity <= 0 || ad_depth < ad_capacity;
+        if (total_has_capacity && ad_has_capacity) {
+            return true;
+        }
+        usleep(2000);
+    }
+    return false;
+}
+
 static void trim_render_queue_to_latest(ffmpeg_session_t *session, int keep_latest) {
     if (session == NULL ||
         session->render_queue == NULL ||
@@ -2256,6 +2613,8 @@ static int compute_render_queue_hard_cap_locked(const ffmpeg_session_t *session,
     return hard_cap;
 }
 
+static void clear_ad_input_queue(ffmpeg_session_t *session);
+
 static void destroy_render_queue_storage(ffmpeg_session_t *session) {
     if (session == NULL) return;
     clear_render_queue(session);
@@ -2265,6 +2624,16 @@ static void destroy_render_queue_storage(ffmpeg_session_t *session) {
         session->render_queue = NULL;
     }
     session->render_queue_capacity = 0;
+}
+
+static void destroy_ad_input_queue_storage(ffmpeg_session_t *session) {
+    if (session == NULL) return;
+    clear_ad_input_queue(session);
+    if (session->ad_input_queue != NULL) {
+        free(session->ad_input_queue);
+        session->ad_input_queue = NULL;
+    }
+    session->ad_input_queue_capacity = 0;
 }
 
 static bool ensure_render_queue_capacity(ffmpeg_session_t *session, int min_capacity) {
@@ -2304,35 +2673,68 @@ static bool ensure_render_queue_capacity(ffmpeg_session_t *session, int min_capa
     return true;
 }
 
+static bool ensure_ad_input_queue_capacity(ffmpeg_session_t *session, int min_capacity) {
+    if (session == NULL) return false;
+    if (min_capacity < 1) min_capacity = 1;
+    if (min_capacity > AD_INPUT_QUEUE_HARD_CAPACITY) return false;
+    if (session->ad_input_queue != NULL && session->ad_input_queue_capacity >= min_capacity) {
+        return true;
+    }
+
+    int new_capacity = session->ad_input_queue_capacity;
+    if (new_capacity < AD_INPUT_QUEUE_INITIAL_CAPACITY) {
+        new_capacity = AD_INPUT_QUEUE_INITIAL_CAPACITY;
+    }
+    while (new_capacity < min_capacity) {
+        if (new_capacity < 4096) {
+            new_capacity *= 2;
+        } else {
+            new_capacity += 1024;
+        }
+    }
+    if (new_capacity > AD_INPUT_QUEUE_HARD_CAPACITY) {
+        new_capacity = AD_INPUT_QUEUE_HARD_CAPACITY;
+    }
+    if (new_capacity < min_capacity) {
+        return false;
+    }
+
+    render_queue_slot_t *new_queue =
+            (render_queue_slot_t *) calloc((size_t) new_capacity, sizeof(render_queue_slot_t));
+    if (new_queue == NULL) return false;
+
+    if (session->ad_input_queue != NULL &&
+        session->ad_input_queue_depth > 0 &&
+        session->ad_input_queue_capacity > 0) {
+        for (int i = 0; i < session->ad_input_queue_depth; i++) {
+            int src_idx = (session->ad_input_queue_head + i) % session->ad_input_queue_capacity;
+            new_queue[i] = session->ad_input_queue[src_idx];
+        }
+    }
+
+    free(session->ad_input_queue);
+    session->ad_input_queue = new_queue;
+    session->ad_input_queue_capacity = new_capacity;
+    session->ad_input_queue_head = 0;
+    return true;
+}
+
 static int render_queue_tail_index(const ffmpeg_session_t *session) {
     if (session == NULL || session->render_queue_capacity <= 0) return 0;
     return (session->render_queue_head + session->render_queue_depth) % session->render_queue_capacity;
 }
 
-static bool enqueue_render_frame(ffmpeg_session_t *session,
-                                 AVFrame *decoded,
-                                 AVFrame *history_frame,
-                                 int64_t source_ts_us,
-                                 int64_t enqueued_at_ms) {
-    if (session == NULL || decoded == NULL) return false;
+static bool enqueue_render_packet_locked(ffmpeg_session_t *session,
+                                         render_queue_slot_t *packet) {
+    if (session == NULL || packet == NULL || packet->frame == NULL) return false;
     if (!ensure_render_queue_capacity(session, session->render_queue_depth + 1)) return false;
-
-    AVFrame *cloned = av_frame_clone(decoded);
-    if (cloned == NULL) return false;
-    AVFrame *history_cloned = NULL;
-    if (history_frame != NULL) {
-        history_cloned = av_frame_clone(history_frame);
-        if (history_cloned == NULL) {
-            av_frame_free(&cloned);
-            return false;
-        }
-    }
-
     int tail_idx = render_queue_tail_index(session);
-    session->render_queue[tail_idx].frame = cloned;
-    session->render_queue[tail_idx].history_frame = history_cloned;
-    session->render_queue[tail_idx].source_ts_us = source_ts_us;
-    session->render_queue[tail_idx].enqueued_at_ms = enqueued_at_ms;
+    session->render_queue[tail_idx] = *packet;
+    memset(packet, 0, sizeof(*packet));
+    session->render_queue[tail_idx].pixel_format =
+            session->render_queue[tail_idx].pixel_format == AV_PIX_FMT_NONE
+            ? session->render_queue[tail_idx].frame->format
+            : session->render_queue[tail_idx].pixel_format;
     session->render_queue_depth += 1;
     trace_set_counter("RID2C render_queue_depth", session->render_queue_depth);
     int keep_latest = compute_trim_keep_latest_locked(
@@ -2344,6 +2746,161 @@ static bool enqueue_render_frame(ffmpeg_session_t *session,
         trim_render_queue_to_latest(session, keep_latest);
     }
     log_render_queue_state(session, session->render_queue_depth, false);
+    return true;
+}
+
+static bool enqueue_render_frame(ffmpeg_session_t *session,
+                                 AVFrame *decoded,
+                                 AVFrame *history_frame,
+                                 AVFrame *overlay_frame,
+                                 bool analyzed,
+                                 int64_t frame_id,
+                                 int64_t generation_id,
+                                 int64_t source_ts_us,
+                                 int64_t enqueued_at_ms) {
+    if (session == NULL || decoded == NULL) return false;
+    render_queue_slot_t packet;
+    memset(&packet, 0, sizeof(packet));
+    packet.frame = av_frame_clone(decoded);
+    if (packet.frame == NULL) return false;
+    if (history_frame != NULL) {
+        packet.history_frame = av_frame_clone(history_frame);
+        if (packet.history_frame == NULL) {
+            clear_render_queue_slot(&packet);
+            return false;
+        }
+    }
+    packet.overlay_frame = overlay_frame;
+    packet.frame_id = frame_id;
+    packet.generation_id = generation_id;
+    packet.source_ts_us = source_ts_us;
+    packet.enqueued_at_ms = enqueued_at_ms;
+    packet.width = decoded->width;
+    packet.height = decoded->height;
+    packet.pixel_format = decoded->format;
+    packet.analyzed = analyzed;
+    bool ok = enqueue_render_packet_locked(session, &packet);
+    if (!ok) {
+        clear_render_queue_slot(&packet);
+    }
+    return ok;
+}
+
+static int ad_input_queue_tail_index(const ffmpeg_session_t *session) {
+    if (session == NULL || session->ad_input_queue_capacity <= 0) return 0;
+    return (session->ad_input_queue_head + session->ad_input_queue_depth) % session->ad_input_queue_capacity;
+}
+
+static void update_ad_bridge_debug_summary(ffmpeg_session_t *session,
+                                           const char *stage,
+                                           const render_queue_slot_t *packet,
+                                           bool processed,
+                                           bool analyzed,
+                                           bool overlay_present,
+                                           bool skipped) {
+    if (session == NULL || !session->anomaly_troubleshooting_debug) return;
+    snprintf(session->latest_ad_bridge_debug_summary,
+             sizeof(session->latest_ad_bridge_debug_summary),
+             "bridge stage=%s enq=%lld deq=%lld proc=%lld skip=%lld ann=%lld overlay=%lld q=%d/%lld last[id=%lld gen=%lld processed=%d analyzed=%d overlay=%d skipped=%d ts=%.3fs]",
+             stage != NULL ? stage : "unknown",
+             (long long) session->ad_input_enqueued_count,
+             (long long) session->ad_worker_dequeued_frame_count,
+             (long long) session->ad_worker_processed_frame_count,
+             (long long) session->ad_worker_skipped_frame_count,
+             (long long) session->ad_worker_annotated_frame_count,
+             (long long) session->ad_worker_overlay_enqueued_count,
+             session->ad_input_queue_depth,
+             (long long) session->ad_input_queue_depth_max,
+             packet != NULL ? (long long) packet->frame_id : 0LL,
+             packet != NULL ? (long long) packet->generation_id : 0LL,
+             processed ? 1 : 0,
+             analyzed ? 1 : 0,
+             overlay_present ? 1 : 0,
+             skipped ? 1 : 0,
+             (packet != NULL && packet->source_ts_us > 0)
+                     ? ((double) packet->source_ts_us / 1000000.0)
+                     : 0.0);
+}
+
+static void clear_ad_input_queue(ffmpeg_session_t *session) {
+    if (session == NULL || session->ad_input_queue == NULL) return;
+    for (int i = 0; i < session->ad_input_queue_depth; i++) {
+        int idx = (session->ad_input_queue_head + i) % session->ad_input_queue_capacity;
+        clear_render_queue_slot(&session->ad_input_queue[idx]);
+    }
+    session->ad_input_queue_head = 0;
+    session->ad_input_queue_depth = 0;
+    trace_set_counter("RID2C ad_queue_depth", 0);
+    update_ad_bridge_debug_summary(session, "queue-cleared", NULL, false, false, false, false);
+}
+
+static bool enqueue_ad_input_frame_locked(ffmpeg_session_t *session,
+                                          AVFrame *decoded,
+                                          AVFrame *history_frame,
+                                          int64_t frame_id,
+                                          int64_t generation_id,
+                                          int64_t source_ts_us,
+                                          int64_t enqueued_at_ms) {
+    if (session == NULL || decoded == NULL) return false;
+    if (!ensure_ad_input_queue_capacity(session, session->ad_input_queue_depth + 1)) return false;
+    int tail_idx = ad_input_queue_tail_index(session);
+    render_queue_slot_t *slot = &session->ad_input_queue[tail_idx];
+    memset(slot, 0, sizeof(*slot));
+    slot->frame = av_frame_clone(decoded);
+    if (slot->frame == NULL) return false;
+    if (history_frame != NULL) {
+        slot->history_frame = av_frame_clone(history_frame);
+        if (slot->history_frame == NULL) {
+            clear_render_queue_slot(slot);
+            return false;
+        }
+    }
+    slot->frame_id = frame_id;
+    slot->generation_id = generation_id;
+    slot->source_ts_us = source_ts_us;
+    slot->enqueued_at_ms = enqueued_at_ms;
+    slot->width = decoded->width;
+    slot->height = decoded->height;
+    slot->pixel_format = decoded->format;
+    session->ad_input_queue_depth += 1;
+    session->ad_input_enqueued_count += 1;
+    if (session->ad_input_queue_depth > session->ad_input_queue_depth_max) {
+        session->ad_input_queue_depth_max = session->ad_input_queue_depth;
+    }
+    trace_set_counter("RID2C ad_queue_depth", session->ad_input_queue_depth);
+    update_ad_bridge_debug_summary(session, "enqueued", slot, false, false, false, false);
+    if (session->anomaly_troubleshooting_debug &&
+        (session->ad_input_enqueued_count <= 3 ||
+         (session->ad_input_enqueued_count % 60) == 0 ||
+         session->ad_input_queue_depth >= session->ad_input_queue_capacity)) {
+        ct_debug(TAG,
+                 "ad input enqueued id=%lld designator=%s enq=%lld qDepth=%d frame=%lld gen=%lld ts=%.3fs",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) session->ad_input_enqueued_count,
+                 session->ad_input_queue_depth,
+                 (long long) slot->frame_id,
+                 (long long) slot->generation_id,
+                 slot->source_ts_us > 0 ? ((double) slot->source_ts_us / 1000000.0) : 0.0);
+    }
+    return true;
+}
+
+static bool dequeue_ad_input_frame_locked(ffmpeg_session_t *session,
+                                          render_queue_slot_t *out_packet) {
+    if (session == NULL || out_packet == NULL || session->ad_input_queue_depth <= 0) return false;
+    int idx = session->ad_input_queue_head;
+    *out_packet = session->ad_input_queue[idx];
+    memset(&session->ad_input_queue[idx], 0, sizeof(session->ad_input_queue[idx]));
+    session->ad_input_queue_head = (session->ad_input_queue_head + 1) % session->ad_input_queue_capacity;
+    session->ad_input_queue_depth -= 1;
+    if (session->ad_input_queue_depth <= 0) {
+        session->ad_input_queue_depth = 0;
+        session->ad_input_queue_head = 0;
+    }
+    trace_set_counter("RID2C ad_queue_depth", session->ad_input_queue_depth);
+    session->ad_worker_dequeued_frame_count += 1;
+    update_ad_bridge_debug_summary(session, "dequeued", out_packet, false, false, false, false);
     return true;
 }
 
@@ -2395,16 +2952,37 @@ static AVFrame *clone_local_playback_history_frame_locked(ffmpeg_session_t *sess
 static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
                                             AVFrame **out_frame,
                                             AVFrame **out_history_frame,
+                                            AVFrame **out_overlay_frame,
+                                            bool *out_analyzed,
                                             int64_t *out_source_ts_us,
                                             int64_t *out_render_latency_ms) {
     if (session == NULL ||
         out_frame == NULL ||
         out_history_frame == NULL ||
+        out_overlay_frame == NULL ||
+        out_analyzed == NULL ||
         out_source_ts_us == NULL ||
         out_render_latency_ms == NULL ||
         session->render_queue == NULL ||
         session->render_queue_capacity <= 0 ||
         session->render_queue_depth <= 0) {
+        return false;
+    }
+
+    while (session->render_queue_depth > 0) {
+        int stale_index = session->render_queue_head;
+        if (session->render_queue[stale_index].generation_id == session->anomaly_generation_id ||
+            session->render_queue[stale_index].generation_id == 0) {
+            break;
+        }
+        clear_render_queue_slot(&session->render_queue[stale_index]);
+        session->render_queue_head = (session->render_queue_head + 1) % session->render_queue_capacity;
+        session->render_queue_depth -= 1;
+    }
+    if (session->render_queue_depth <= 0) {
+        session->render_queue_depth = 0;
+        session->render_queue_head = 0;
+        trace_set_counter("RID2C render_queue_depth", 0);
         return false;
     }
 
@@ -2468,9 +3046,12 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
 
     *out_frame = session->render_queue[oldest_index].frame;
     *out_history_frame = session->render_queue[oldest_index].history_frame;
+    *out_overlay_frame = session->render_queue[oldest_index].overlay_frame;
+    *out_analyzed = session->render_queue[oldest_index].analyzed;
     *out_source_ts_us = session->render_queue[oldest_index].source_ts_us;
     session->render_queue[oldest_index].frame = NULL;
     session->render_queue[oldest_index].history_frame = NULL;
+    session->render_queue[oldest_index].overlay_frame = NULL;
     session->render_queue[oldest_index].source_ts_us = 0;
     session->render_queue[oldest_index].enqueued_at_ms = 0;
     session->render_queue_head = (session->render_queue_head + 1) % session->render_queue_capacity;
@@ -2520,8 +3101,10 @@ static void *render_thread_main(void *arg) {
     while (session_running(session)) {
         AVFrame *to_render = NULL;
         AVFrame *history_frame = NULL;
+        AVFrame *overlay_frame = NULL;
         int64_t source_ts_us = 0;
         int64_t render_latency_ms = 0;
+        bool analyzed = false;
         int64_t wait_ms = 20;
         bool should_stop = false;
 
@@ -2537,12 +3120,19 @@ static void *render_thread_main(void *arg) {
             dequeue_due_render_frame_locked(session,
                                             &to_render,
                                             &history_frame,
+                                            &overlay_frame,
+                                            &analyzed,
                                             &source_ts_us,
                                             &render_latency_ms)) {
             pthread_mutex_unlock(&session->render_lock);
-            render_frame_to_surface(session, to_render, history_frame, source_ts_us, render_latency_ms, true);
+            if (is_local_file_source(session)) {
+                pace_local_file_playback(session, source_ts_us);
+            }
+            render_frame_to_surface(session, to_render, history_frame, overlay_frame, analyzed,
+                                    source_ts_us, render_latency_ms, true);
             av_frame_free(&to_render);
             av_frame_free(&history_frame);
+            av_frame_free(&overlay_frame);
             continue;
         }
 
@@ -2591,6 +3181,208 @@ static void *render_thread_main(void *arg) {
 
         if (should_stop) break;
     }
+    return NULL;
+}
+
+static void reset_anomaly_tracking_state(ffmpeg_session_t *session);
+
+static void reconfigure_anomaly_mode(ffmpeg_session_t *session,
+                                     bool enable,
+                                     ad_pause_reason_t pause_reason,
+                                     bool reset_runtime_disable) {
+    if (session == NULL) return;
+    bool was_runtime_disabled = session->anomaly_runtime_disabled;
+    bool current_enabled = session->anomaly_cfg.enabled &&
+                           !session->anomaly_thermal_paused &&
+                           !was_runtime_disabled &&
+                           (session->anomaly_cfg.algorithm_mask != 0);
+    if (enable && reset_runtime_disable) {
+        session->anomaly_runtime_disabled = false;
+    } else if (!enable && pause_reason == AD_PAUSE_REASON_OVERLOAD) {
+        session->anomaly_runtime_disabled = true;
+    }
+    bool runtime_disabled_changed =
+            session->anomaly_runtime_disabled != was_runtime_disabled;
+    bool changed = current_enabled != enable ||
+                   session->anomaly_pause_reason != pause_reason ||
+                   runtime_disabled_changed;
+    session->anomaly_pause_reason = pause_reason;
+    if (!changed) {
+        return;
+    }
+    session->anomaly_generation_id += 1;
+    if (session->ad_sync_ready) {
+        pthread_mutex_lock(&session->ad_lock);
+        clear_ad_input_queue(session);
+        pthread_cond_signal(&session->ad_cond);
+        pthread_mutex_unlock(&session->ad_lock);
+    }
+    if (session->render_sync_ready) {
+        pthread_mutex_lock(&session->render_lock);
+        pthread_cond_signal(&session->render_cond);
+        pthread_mutex_unlock(&session->render_lock);
+    }
+    reset_anomaly_tracking_state(session);
+    if (enable) {
+        dispatch_probe_event(session->designator, "anomaly_resumed", session->session_id, 0,
+                             NAN, NAN, NAN, NAN, NAN, NAN);
+    } else if (pause_reason == AD_PAUSE_REASON_OVERLOAD) {
+        dispatch_probe_event(session->designator, "anomaly_paused_overload", session->session_id, 0,
+                             NAN, NAN, NAN, NAN, NAN, NAN);
+    } else if (pause_reason == AD_PAUSE_REASON_THERMAL) {
+        dispatch_probe_event(session->designator, "anomaly_paused_thermal", session->session_id, 0,
+                             NAN, NAN, NAN, NAN, NAN, NAN);
+    }
+}
+
+static void disable_anomaly_runtime(ffmpeg_session_t *session,
+                                    ad_pause_reason_t reason) {
+    if (session == NULL) return;
+    pthread_mutex_lock(&g_lock);
+    if (reason == AD_PAUSE_REASON_OVERLOAD) {
+        session->ad_full_queue_disable_count += 1;
+    }
+    reconfigure_anomaly_mode(session, false, reason, false);
+    pthread_mutex_unlock(&g_lock);
+}
+
+static void *ad_thread_main(void *arg) {
+    ffmpeg_session_t *session = (ffmpeg_session_t *) arg;
+    if (session == NULL) return NULL;
+    update_ad_bridge_debug_summary(session, "thread-start", NULL, false, false, false, false);
+    if (session->anomaly_troubleshooting_debug) {
+        ct_debug(TAG,
+                 "ad thread started id=%lld designator=%s",
+                 (long long) session->session_id,
+                 session->designator);
+    }
+
+    while (session_running(session)) {
+        render_queue_slot_t packet;
+        memset(&packet, 0, sizeof(packet));
+        ad_pressure_mode_t pressure_mode = AD_PRESSURE_MODE_NORMAL;
+        int queue_depth_before_dequeue = 0;
+
+        pthread_mutex_lock(&session->ad_lock);
+        while (session_running(session) &&
+               !session->ad_thread_stop &&
+               session->ad_input_queue_depth <= 0) {
+            render_cond_timed_wait_ms(&session->ad_cond, &session->ad_lock, 20);
+        }
+        if (!session_running(session) || session->ad_thread_stop) {
+            pthread_mutex_unlock(&session->ad_lock);
+            break;
+        }
+        queue_depth_before_dequeue = session->ad_input_queue_depth;
+        pressure_mode = select_ad_pressure_mode_locked(session, queue_depth_before_dequeue);
+        if (pressure_mode != session->ad_pressure_mode) {
+            session->ad_pressure_mode = pressure_mode;
+            if (session->anomaly_troubleshooting_debug) {
+                ct_debug(TAG,
+                         "ad pressure mode id=%lld designator=%s mode=%s qDepth=%d capacity=%d thresholds=%d/%d/%d recover=%d",
+                         (long long) session->session_id,
+                         session->designator,
+                         ad_pressure_mode_name(pressure_mode),
+                         queue_depth_before_dequeue,
+                         session->ad_input_queue_capacity,
+                         ad_queue_depth_threshold(session, AD_PRESSURE_ANALYZE_ALTERNATE_PCT),
+                         ad_queue_depth_threshold(session, AD_PRESSURE_BYPASS_ALTERNATE_PCT),
+                         ad_queue_depth_threshold(session, AD_PRESSURE_BYPASS_ALL_PCT),
+                         AD_PRESSURE_RECOVER_DEPTH);
+            }
+        }
+        if (!dequeue_ad_input_frame_locked(session, &packet)) {
+            pthread_mutex_unlock(&session->ad_lock);
+            continue;
+        }
+        session->ad_pressure_frame_counter += 1;
+        int64_t pressure_frame_counter = session->ad_pressure_frame_counter;
+        pthread_mutex_unlock(&session->ad_lock);
+
+        pthread_mutex_lock(&g_lock);
+        int64_t generation_id = session->anomaly_generation_id;
+        bool process_enabled = anomaly_processing_enabled_locked(session);
+        pthread_mutex_unlock(&g_lock);
+
+        bool skipped = false;
+        bool bypass_analysis = false;
+        int effective_frame_stride = 0;
+        if (pressure_mode == AD_PRESSURE_MODE_ANALYZE_ALTERNATE) {
+            pthread_mutex_lock(&g_lock);
+            effective_frame_stride = session->anomaly_cfg.frame_stride < 1
+                                     ? 2
+                                     : session->anomaly_cfg.frame_stride * 2;
+            pthread_mutex_unlock(&g_lock);
+        } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALTERNATE) {
+            bypass_analysis = (pressure_frame_counter % 2) == 0;
+        } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALL) {
+            bypass_analysis = true;
+        }
+
+        if (!process_enabled || packet.generation_id != generation_id || bypass_analysis) {
+            packet.analyzed = false;
+            skipped = true;
+            session->ad_worker_skipped_frame_count += 1;
+            session->ad_forwarded_without_analysis_count += 1;
+        } else {
+            bool analyzed = false;
+            packet.overlay_frame = build_overlay_frame(session,
+                                                       packet.frame,
+                                                       packet.source_ts_us,
+                                                       &analyzed,
+                                                       effective_frame_stride);
+            packet.analyzed = analyzed;
+        }
+        bool overlay_present = packet.overlay_frame != NULL;
+        if (overlay_present) {
+            apply_overlay_to_decoded_frame(session, packet.frame, packet.overlay_frame);
+        }
+        session->ad_worker_processed_frame_count += 1;
+        if (overlay_present) {
+            session->ad_worker_annotated_frame_count += 1;
+        }
+        if (overlay_present) {
+            session->ad_worker_overlay_enqueued_count += 1;
+        }
+        update_ad_bridge_debug_summary(
+                session,
+                skipped ? "skipped" : "processed",
+                &packet,
+                true,
+                packet.analyzed,
+                overlay_present,
+                skipped);
+        if (session->anomaly_troubleshooting_debug &&
+            (session->ad_worker_processed_frame_count <= 3 ||
+             (session->ad_worker_processed_frame_count % 60) == 0 ||
+             skipped ||
+             overlay_present)) {
+            ct_debug(TAG,
+                     "ad worker progress id=%lld designator=%s enq=%lld deq=%lld proc=%lld skip=%lld analyzed=%d overlay=%d mode=%s qDepth=%d ts=%.3fs",
+                     (long long) session->session_id,
+                     session->designator,
+                     (long long) session->ad_input_enqueued_count,
+                     (long long) session->ad_worker_dequeued_frame_count,
+                     (long long) session->ad_worker_processed_frame_count,
+                     (long long) session->ad_worker_skipped_frame_count,
+                    packet.analyzed ? 1 : 0,
+                    overlay_present ? 1 : 0,
+                     ad_pressure_mode_name(pressure_mode),
+                     session->ad_input_queue_depth,
+                     packet.source_ts_us > 0 ? ((double) packet.source_ts_us / 1000000.0) : 0.0);
+        }
+
+        pthread_mutex_lock(&session->render_lock);
+        bool enqueued = enqueue_render_packet_locked(session, &packet);
+        if (enqueued) {
+            pthread_cond_signal(&session->render_cond);
+        } else {
+            clear_render_queue_slot(&packet);
+            session->render_drop_count += 1;
+        }
+        pthread_mutex_unlock(&session->render_lock);
+    }
+    update_ad_bridge_debug_summary(session, "thread-stop", NULL, false, false, false, false);
     return NULL;
 }
 #endif
@@ -3114,7 +3906,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         session->last_render_queue_log_at_ms = 0;
         session->last_render_queue_warn_at_ms = 0;
         session->last_render_lag_log_at_ms = 0;
-        reset_render_timing_state_locked(session, true, true);
+        reset_render_timing_state_locked(session, !is_local_file_source(session), true);
         session->gap_sample_head = 0;
         session->reader_stall_started_at_ms = 0;
         session->last_reader_stall_log_at_ms = 0;
@@ -3129,7 +3921,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                  session->designator,
                  RENDER_STARTUP_OBSERVE_MS);
 #if HAVE_SWSCALE
-        if (session->render_sync_ready && !is_local_file_source(session)) {
+        if (session->render_sync_ready) {
             pthread_mutex_lock(&session->render_lock);
             session->render_thread_stop = false;
             clear_render_queue(session);
@@ -3151,6 +3943,23 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                         (long long) session->session_id,
                         session->designator,
                         render_thread_rc);
+            }
+        }
+        if (session->ad_sync_ready) {
+            pthread_mutex_lock(&session->ad_lock);
+            session->ad_thread_stop = false;
+            clear_ad_input_queue(session);
+            pthread_mutex_unlock(&session->ad_lock);
+            int ad_thread_rc = pthread_create(&session->ad_thread, NULL, ad_thread_main, session);
+            if (ad_thread_rc == 0) {
+                session->ad_thread_started = true;
+            } else {
+                session->ad_thread_started = false;
+                ct_warn(TAG,
+                        "ad thread start failed id=%lld designator=%s rc=%d",
+                        (long long) session->session_id,
+                        session->designator,
+                        ad_thread_rc);
             }
         }
 #endif
@@ -3495,34 +4304,112 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     av_frame_unref(frame);
                     break;
                 }
-                analyze_decoded_frame(session, frame, pts_us);
                 if (session->render_thread_started && session->render_sync_ready) {
+                    bool ad_enabled = false;
                     bool enqueued = false;
-                    pthread_mutex_lock(&session->render_lock);
-                    record_decode_timing_sample_locked(session, decoded_at_ms, pts_us);
-                    enqueued = enqueue_render_frame(
-                            session,
-                            frame,
-                            clean_history_frame,
-                            pts_us,
-                            decoded_at_ms);
-                    if (enqueued) {
-                        pthread_cond_signal(&session->render_cond);
+                    int64_t frame_id = 0;
+                    int64_t generation_id = 0;
+                    pthread_mutex_lock(&g_lock);
+                    ad_enabled = anomaly_processing_enabled_locked(session);
+                    frame_id = ++session->anomaly_next_frame_id;
+                    generation_id = session->anomaly_generation_id;
+                    pthread_mutex_unlock(&g_lock);
+                    if (local_file_source && !wait_for_local_pipeline_capacity(session, ad_enabled)) {
+                        av_frame_unref(frame);
+                        break;
                     }
-                    pthread_mutex_unlock(&session->render_lock);
+
+                    pthread_mutex_lock(ad_enabled ? &session->ad_lock : &session->render_lock);
+                    record_decode_timing_sample_locked(session, decoded_at_ms, pts_us);
+                    if (ad_enabled && session->ad_thread_started && session->ad_sync_ready) {
+                        enqueued = enqueue_ad_input_frame_locked(
+                                session,
+                                frame,
+                                clean_history_frame,
+                                frame_id,
+                                generation_id,
+                                pts_us,
+                                decoded_at_ms);
+                        if (enqueued) {
+                            pthread_cond_signal(&session->ad_cond);
+                        }
+                    } else {
+                        enqueued = enqueue_render_frame(
+                                session,
+                                frame,
+                                clean_history_frame,
+                                NULL,
+                                false,
+                                frame_id,
+                                generation_id,
+                                pts_us,
+                                decoded_at_ms);
+                        if (enqueued) {
+                            pthread_cond_signal(&session->render_cond);
+                        }
+                    }
+                    pthread_mutex_unlock(ad_enabled ? &session->ad_lock : &session->render_lock);
                     if (!enqueued) {
-                        // Queue ingest is effectively lossless unless allocation/clone fails.
-                        session->render_drop_count += 1;
-                        ct_warn(TAG,
-                                "render queue enqueue failed id=%lld designator=%s; dropping frame",
-                                (long long) session->session_id,
-                                session->designator);
+                        if (ad_enabled) {
+                            if (local_file_source) {
+                                if (!wait_for_local_pipeline_capacity(session, true)) {
+                                    av_frame_unref(frame);
+                                    break;
+                                }
+                                pthread_mutex_lock(&session->ad_lock);
+                                enqueued = enqueue_ad_input_frame_locked(
+                                        session,
+                                        frame,
+                                        clean_history_frame,
+                                        frame_id,
+                                        generation_id,
+                                        pts_us,
+                                        decoded_at_ms);
+                                if (enqueued) {
+                                    pthread_cond_signal(&session->ad_cond);
+                                }
+                                pthread_mutex_unlock(&session->ad_lock);
+                            }
+                        }
+                        if (ad_enabled && !enqueued) {
+                            ct_warn(TAG,
+                                    "ad input queue full id=%lld designator=%s; disabling anomaly path",
+                                    (long long) session->session_id,
+                                    session->designator);
+                            disable_anomaly_runtime(session, AD_PAUSE_REASON_OVERLOAD);
+                            pthread_mutex_lock(&session->render_lock);
+                            enqueued = enqueue_render_frame(
+                                    session,
+                                    frame,
+                                    clean_history_frame,
+                                    NULL,
+                                    false,
+                                    frame_id,
+                                    session->anomaly_generation_id,
+                                    pts_us,
+                                    decoded_at_ms);
+                            if (enqueued) {
+                                pthread_cond_signal(&session->render_cond);
+                            }
+                            pthread_mutex_unlock(&session->render_lock);
+                        }
+                        if (!enqueued) {
+                            session->render_drop_count += 1;
+                            ct_warn(TAG,
+                                    "render queue enqueue failed id=%lld designator=%s; dropping frame",
+                                    (long long) session->session_id,
+                                    session->designator);
+                        }
                     }
                 } else {
+                    bool analyzed = false;
+                    AVFrame *overlay_frame = build_overlay_frame(session, frame, pts_us, &analyzed, 0);
                     if (is_local_file_source(session)) {
                         pace_local_file_playback(session, pts_us);
                     }
-                    render_frame_to_surface(session, frame, clean_history_frame, pts_us, 0, true);
+                    render_frame_to_surface(session, frame, clean_history_frame, overlay_frame, analyzed,
+                                            pts_us, 0, true);
+                    av_frame_free(&overlay_frame);
                     session->next_render_due_ms = monotonic_ms() + current_render_interval_ms(session);
                 }
                 av_frame_free(&clean_history_frame);
@@ -3549,6 +4436,14 @@ static void run_decode_loop(ffmpeg_session_t *session) {
     session->reader_reconnecting_since_ms = 0;
 
 #if HAVE_SWSCALE
+    if (session->is_render && session->ad_thread_started && session->ad_sync_ready) {
+        pthread_mutex_lock(&session->ad_lock);
+        session->ad_thread_stop = true;
+        pthread_cond_signal(&session->ad_cond);
+        pthread_mutex_unlock(&session->ad_lock);
+        pthread_join(session->ad_thread, NULL);
+        session->ad_thread_started = false;
+    }
     if (session->is_render && session->render_thread_started && session->render_sync_ready) {
         pthread_mutex_lock(&session->render_lock);
         session->render_thread_stop = true;
@@ -3561,6 +4456,11 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         pthread_mutex_lock(&session->render_lock);
         clear_render_queue(session);
         pthread_mutex_unlock(&session->render_lock);
+    }
+    if (session->is_render && session->ad_sync_ready) {
+        pthread_mutex_lock(&session->ad_lock);
+        clear_ad_input_queue(session);
+        pthread_mutex_unlock(&session->ad_lock);
     }
 #endif
     av_frame_free(&frame);
@@ -3638,6 +4538,14 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT;
     slot->anomaly_cfg.min_hits          = ANOMALY_DEFAULT_MIN_HITS;
     slot->anomaly_cfg.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
+    slot->anomaly_thermal_paused = false;
+    slot->anomaly_runtime_disabled = false;
+    slot->anomaly_troubleshooting_debug = false;
+    slot->anomaly_pause_reason = AD_PAUSE_REASON_NONE;
+    slot->anomaly_generation_id = 1;
+    slot->anomaly_next_frame_id = 0;
+    slot->ad_pressure_frame_counter = 0;
+    slot->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
     anomaly_state_init(&slot->anomaly_state);
     if (pthread_mutex_init(&slot->anomaly_lock, NULL) != 0) {
         ct_error(TAG, "pthread_mutex_init failed for anomaly lock");
@@ -3680,13 +4588,43 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
             (*env)->ReleaseStringUTFChars(env, url, u);
             return 0;
         }
+        if (pthread_mutex_init(&slot->ad_lock, NULL) != 0) {
+            ct_error(TAG, "pthread_mutex_init failed for ad_lock");
+            pthread_cond_destroy(&slot->render_cond);
+            pthread_mutex_destroy(&slot->render_lock);
+            pthread_mutex_destroy(&slot->anomaly_lock);
+            memset(slot, 0, sizeof(*slot));
+            pthread_mutex_unlock(&g_lock);
+            (*env)->ReleaseStringUTFChars(env, designator, d);
+            (*env)->ReleaseStringUTFChars(env, url, u);
+            return 0;
+        }
+        if (pthread_cond_init(&slot->ad_cond, NULL) != 0) {
+            ct_error(TAG, "pthread_cond_init failed for ad_cond");
+            pthread_mutex_destroy(&slot->ad_lock);
+            pthread_cond_destroy(&slot->render_cond);
+            pthread_mutex_destroy(&slot->render_lock);
+            pthread_mutex_destroy(&slot->anomaly_lock);
+            memset(slot, 0, sizeof(*slot));
+            pthread_mutex_unlock(&g_lock);
+            (*env)->ReleaseStringUTFChars(env, designator, d);
+            (*env)->ReleaseStringUTFChars(env, url, u);
+            return 0;
+        }
         slot->render_sync_ready = true;
+        slot->ad_sync_ready = true;
         slot->render_thread_started = false;
+        slot->ad_thread_started = false;
         slot->render_thread_stop = false;
+        slot->ad_thread_stop = false;
         slot->render_queue = NULL;
+        slot->ad_input_queue = NULL;
         slot->render_queue_capacity = 0;
         slot->render_queue_head = 0;
         slot->render_queue_depth = 0;
+        slot->ad_input_queue_capacity = 0;
+        slot->ad_input_queue_head = 0;
+        slot->ad_input_queue_depth = 0;
     }
 #endif
 #endif
@@ -3700,6 +4638,12 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
                     (long long) slot->session_id,
                     slot->designator);
         }
+        if (!ensure_ad_input_queue_capacity(slot, AD_INPUT_QUEUE_INITIAL_CAPACITY)) {
+            ct_warn(TAG,
+                    "ad input queue prealloc failed id=%lld designator=%s",
+                    (long long) slot->session_id,
+                    slot->designator);
+        }
     }
 #endif
 
@@ -3709,9 +4653,13 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
 #if HAVE_FFMPEG && HAVE_SWSCALE
         if (slot->render_sync_ready) {
             destroy_render_queue_storage(slot);
+            destroy_ad_input_queue_storage(slot);
+            pthread_cond_destroy(&slot->ad_cond);
+            pthread_mutex_destroy(&slot->ad_lock);
             pthread_cond_destroy(&slot->render_cond);
             pthread_mutex_destroy(&slot->render_lock);
             slot->render_sync_ready = false;
+            slot->ad_sync_ready = false;
         }
 #endif
         if (slot->anomaly_lock_ready) {
@@ -3884,6 +4832,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeAttachSurface(
     if (was_surface_paused && session->is_render) {
         clear_render_queue(session);
         session->render_queue_flush_requested = false;
+        if (session->ad_sync_ready) {
+            pthread_mutex_lock(&session->ad_lock);
+            clear_ad_input_queue(session);
+            pthread_mutex_unlock(&session->ad_lock);
+        }
         reset_render_timing_state_locked(session, false, false);
         ct_debug(TAG,
                  "render resume reset id=%lld designator=%s targetLatencyMs=%lld",
@@ -3922,6 +4875,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeDetachSurface(
         // will drain and discard any already-queued frames on its next iteration.
         session->surface_paused = true;
         session->render_queue_flush_requested = true;
+        if (session->ad_sync_ready) {
+            pthread_mutex_lock(&session->ad_lock);
+            clear_ad_input_queue(session);
+            pthread_mutex_unlock(&session->ad_lock);
+        }
         dispatch_probe_event(session->designator, "surface_detached", session->session_id, 0,
                              NAN, NAN, NAN, NAN, NAN, NAN);
     }
@@ -3937,6 +4895,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jboolean enabled,
         jboolean show_hot_overlay,
         jboolean show_candidate_blobs,
+        jboolean troubleshooting_debug,
         jint algorithm_mask,
         jint registration_mode,
         jint frame_stride,
@@ -3952,6 +4911,9 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
 ) {
     (void) env;
     (void) thiz;
+    bool should_reconfigure = false;
+    bool should_enable = false;
+    ad_pause_reason_t pause_reason = AD_PAUSE_REASON_NONE;
     pthread_mutex_lock(&g_lock);
     ffmpeg_session_t *session = find_session_locked(session_id);
     if (session != NULL && session->active) {
@@ -3960,6 +4922,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.enabled           = (enabled == JNI_TRUE);
         session->anomaly_cfg.show_hot_overlay  = (show_hot_overlay == JNI_TRUE);
         session->anomaly_cfg.show_candidate_blobs = (show_candidate_blobs == JNI_TRUE);
+        session->anomaly_troubleshooting_debug = (troubleshooting_debug == JNI_TRUE);
         session->anomaly_cfg.algorithm_mask    = (int) algorithm_mask;
         session->anomaly_cfg.registration_mode = ((int) registration_mode == ANOMALY_REGISTRATION_AFFINE)
                                                  ? ANOMALY_REGISTRATION_AFFINE
@@ -3977,8 +4940,53 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                                                  ? thermal_min_delta : ANOMALY_THERMAL_MIN_DELTA;
         session->anomaly_cfg.small_target_screen_fraction =
                 small_target_screen_fraction > 0.0f ? small_target_screen_fraction : (1.0f / 250.0f);
-        // Reset accumulators so stale boxes don't persist across config changes.
-        reset_anomaly_tracking_state(session);
+        if (session->anomaly_troubleshooting_debug) {
+            ct_debug(TAG,
+                     "anomaly config applied id=%lld designator=%s enabled=%d mask=%d reg=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f thermalPause=%d runtimeDisabled=%d",
+                     (long long) session->session_id,
+                     session->designator,
+                     session->anomaly_cfg.enabled ? 1 : 0,
+                     session->anomaly_cfg.algorithm_mask,
+                     session->anomaly_cfg.registration_mode,
+                     session->anomaly_cfg.frame_stride,
+                     session->anomaly_cfg.pixel_step,
+                     session->anomaly_cfg.score_threshold,
+                     session->anomaly_cfg.min_hits,
+                     session->anomaly_cfg.scan_zone,
+                     session->anomaly_thermal_paused ? 1 : 0,
+                     session->anomaly_runtime_disabled ? 1 : 0);
+        }
+        should_enable = session->anomaly_cfg.enabled &&
+                        !session->anomaly_thermal_paused &&
+                        (session->anomaly_cfg.algorithm_mask != 0);
+        pause_reason = session->anomaly_thermal_paused ? AD_PAUSE_REASON_THERMAL : AD_PAUSE_REASON_NONE;
+        should_reconfigure = true;
+    }
+    if (should_reconfigure) {
+        reconfigure_anomaly_mode(session, should_enable, pause_reason, should_enable);
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+JNIEXPORT void JNICALL
+Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetAnomalyThermalPaused(
+        JNIEnv *env,
+        jobject thiz,
+        jlong session_id,
+        jboolean paused
+) {
+    (void) env;
+    (void) thiz;
+    pthread_mutex_lock(&g_lock);
+    ffmpeg_session_t *session = find_session_locked(session_id);
+    if (session != NULL && session->active) {
+        session->anomaly_thermal_paused = paused == JNI_TRUE;
+        bool should_enable = session->anomaly_cfg.enabled &&
+                             !session->anomaly_thermal_paused &&
+                             (session->anomaly_cfg.algorithm_mask != 0);
+        ad_pause_reason_t pause_reason =
+                session->anomaly_thermal_paused ? AD_PAUSE_REASON_THERMAL : AD_PAUSE_REASON_NONE;
+        reconfigure_anomaly_mode(session, should_enable, pause_reason, should_enable);
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -3990,7 +4998,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
         jlong session_id
 ) {
     (void) thiz;
-    jlong values[24];
+    jlong values[34];
     memset(values, 0, sizeof(values));
 
     pthread_mutex_lock(&g_lock);
@@ -4025,11 +5033,21 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
             &values[21],
             &values[22],
             &values[23]);
+    values[24] = (jlong) session->ad_input_queue_depth;
+    values[25] = (jlong) session->ad_input_queue_depth_max;
+    values[26] = (jlong) session->ad_forwarded_without_analysis_count;
+    values[27] = (jlong) session->ad_full_queue_disable_count;
+    values[28] = (jlong) session->ad_analyzed_rendered_frame_count;
+    values[29] = (jlong) session->ad_bypassed_rendered_frame_count;
+    values[30] = (jlong) current_ad_runtime_mode(session);
+    values[31] = (jlong) session->ad_worker_processed_frame_count;
+    values[32] = (jlong) session->ad_worker_annotated_frame_count;
+    values[33] = (jlong) session->ad_worker_overlay_enqueued_count;
     pthread_mutex_unlock(&g_lock);
 
-    jlongArray array = (*env)->NewLongArray(env, 24);
+    jlongArray array = (*env)->NewLongArray(env, 34);
     if (array == NULL) return NULL;
-    (*env)->SetLongArrayRegion(env, array, 0, 24, values);
+    (*env)->SetLongArrayRegion(env, array, 0, 34, values);
     return array;
 }
 
@@ -4040,14 +5058,23 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionDebugSumma
         jlong session_id
 ) {
     (void) thiz;
-    const char *summary = NULL;
+    char summary[1024];
+    summary[0] = '\0';
     pthread_mutex_lock(&g_lock);
     ffmpeg_session_t *session = find_session_locked(session_id);
-    if (session != NULL && session->active && session->latest_anomaly_debug_summary[0] != '\0') {
-        summary = session->latest_anomaly_debug_summary;
+    if (session != NULL && session->active && session->anomaly_troubleshooting_debug) {
+        const char *bridge = session->latest_ad_bridge_debug_summary;
+        const char *detector = session->latest_anomaly_debug_summary;
+        if (bridge[0] != '\0' && detector[0] != '\0') {
+            snprintf(summary, sizeof(summary), "%s | %s", bridge, detector);
+        } else if (bridge[0] != '\0') {
+            snprintf(summary, sizeof(summary), "%s", bridge);
+        } else if (detector[0] != '\0') {
+            snprintf(summary, sizeof(summary), "%s", detector);
+        }
     }
     pthread_mutex_unlock(&g_lock);
-    if (summary == NULL) return NULL;
+    if (summary[0] == '\0') return NULL;
     return (*env)->NewStringUTF(env, summary);
 }
 
@@ -4060,8 +5087,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetLocalPlaybackPaus
 ) {
     (void) env;
     (void) thiz;
+    ffmpeg_session_t *session = NULL;
+    bool should_update_render = false;
+    bool should_clear_render_queue = false;
     pthread_mutex_lock(&g_lock);
-    ffmpeg_session_t *session = find_session_locked(session_id);
+    session = find_session_locked(session_id);
     if (session != NULL && session->active && is_local_file_source(session)) {
         bool pause_enabled = paused == JNI_TRUE;
         session->local_playback_paused = pause_enabled;
@@ -4069,17 +5099,19 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetLocalPlaybackPaus
             session->local_playback_step_budget = 0;
             session->local_playback_history_replay_active = false;
         }
-        if (session->render_sync_ready) {
-            pthread_mutex_lock(&session->render_lock);
-            if (pause_enabled) {
-                clear_render_queue(session);
-            }
-            session->next_render_due_ms = 0;
-            pthread_cond_signal(&session->render_cond);
-            pthread_mutex_unlock(&session->render_lock);
-        }
+        should_update_render = session->render_sync_ready;
+        should_clear_render_queue = pause_enabled;
     }
     pthread_mutex_unlock(&g_lock);
+    if (session != NULL && should_update_render) {
+        pthread_mutex_lock(&session->render_lock);
+        if (should_clear_render_queue) {
+            clear_render_queue(session);
+        }
+        session->next_render_due_ms = 0;
+        pthread_cond_signal(&session->render_cond);
+        pthread_mutex_unlock(&session->render_lock);
+    }
 }
 
 JNIEXPORT void JNICALL
@@ -4137,7 +5169,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStepLocalPlayback(
                 clone_local_playback_history_frame_locked(session, history_offset, &history_pts_us);
         pthread_mutex_unlock(&session->render_lock);
         if (history_frame != NULL) {
-            render_frame_to_surface(session, history_frame, NULL, history_pts_us, 0, false);
+            render_frame_to_surface(session, history_frame, NULL, NULL, false, history_pts_us, 0, false);
             av_frame_free(&history_frame);
         }
     }
@@ -4184,7 +5216,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStepLocalPlaybackBac
                 clone_local_playback_history_frame_locked(session, history_offset, &history_pts_us);
         pthread_mutex_unlock(&session->render_lock);
         if (history_frame != NULL) {
-            render_frame_to_surface(session, history_frame, NULL, history_pts_us, 0, false);
+            render_frame_to_surface(session, history_frame, NULL, NULL, false, history_pts_us, 0, false);
             av_frame_free(&history_frame);
         }
     }
@@ -4250,9 +5282,13 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStop(
 #if HAVE_FFMPEG && HAVE_SWSCALE
     if (session->render_sync_ready) {
         destroy_render_queue_storage(session);
+        destroy_ad_input_queue_storage(session);
+        pthread_cond_destroy(&session->ad_cond);
+        pthread_mutex_destroy(&session->ad_lock);
         pthread_cond_destroy(&session->render_cond);
         pthread_mutex_destroy(&session->render_lock);
         session->render_sync_ready = false;
+        session->ad_sync_ready = false;
     }
 #endif
     if (session->anomaly_lock_ready) {

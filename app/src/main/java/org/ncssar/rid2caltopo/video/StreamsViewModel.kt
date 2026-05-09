@@ -661,6 +661,8 @@ class StreamsViewModel(
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
     private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
     private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
+    private val lastAppliedAnomalyPolicyByDesignator = mutableMapOf<String, AnomalyPolicyUpdate>()
+    private var anomalyPolicyApplyJob: Job? = null
     private var latestProcessLoadSnapshot by mutableStateOf<ProcessLoadSnapshot?>(null)
     private var lastProcessLoadLogAtMs = 0L
     /** Coordinator that owns all DEM / AGL / ATO / heading computation. */
@@ -837,22 +839,34 @@ class StreamsViewModel(
         val paused = probeService.isLocalPlaybackPaused(designator)
         val nextPaused = !paused
         localPlaybackPausedState[designator] = nextPaused
-        probeService.setLocalPlaybackPaused(designator, nextPaused)
+        viewModelScope.launch(Dispatchers.Default) {
+            probeService.setLocalPlaybackPaused(designator, nextPaused)
+        }
     }
 
     fun stepLocalPlaybackFrame(designator: String, frameCount: Int = 1) {
         localPlaybackPausedState[designator] = true
-        ffmpegProbeService?.stepLocalPlayback(designator, frameCount)
+        val probeService = ffmpegProbeService ?: return
+        viewModelScope.launch(Dispatchers.Default) {
+            probeService.stepLocalPlayback(designator, frameCount)
+        }
     }
 
     fun stepLocalPlaybackBack(designator: String) {
         localPlaybackPausedState[designator] = true
-        ffmpegProbeService?.stepLocalPlaybackBack(designator)
+        val probeService = ffmpegProbeService ?: return
+        viewModelScope.launch(Dispatchers.Default) {
+            probeService.stepLocalPlaybackBack(designator)
+        }
     }
 
     fun runtimeSnapshotFor(designator: String): StreamRuntimeSnapshot? {
         if (renderRouteByDesignator[designator] != true) return null
         return ffmpegProbeService?.runtimeSnapshot(designator)
+    }
+
+    fun anomalyPauseReasonFor(designator: String): String? {
+        return ffmpegProbeService?.anomalyPauseReason(designator)
     }
 
     fun localPlaybackFrameCounterText(designator: String): String? {
@@ -1550,6 +1564,12 @@ class StreamsViewModel(
         }
     }
 
+    fun toggleAnomalyTroubleshootingDebug(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(troubleshootingDebug = !current.troubleshootingDebug)
+        }
+    }
+
     fun toggleSaliencyEnabled(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(saliencyEnabled = !current.saliencyEnabled)
@@ -1568,6 +1588,12 @@ class StreamsViewModel(
             val idx = frameStrideSteps.indexOf(current.frameStride)
             val next = if (idx < 0) frameStrideSteps[0] else frameStrideSteps[(idx + 1) % frameStrideSteps.size]
             current.copy(frameStride = next)
+        }
+    }
+
+    fun setAnomalyFrameStride(designator: String, frameStride: Int) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(frameStride = frameStride.coerceIn(1, 8))
         }
     }
 
@@ -1628,6 +1654,12 @@ class StreamsViewModel(
         updateAnomalyConfig(designator) { current ->
             val next = if (current.minHits >= 5) 1 else current.minHits + 1
             current.copy(minHits = next)
+        }
+    }
+
+    fun setMinHits(designator: String, minHits: Int) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(minHits = minHits.coerceIn(1, 10))
         }
     }
 
@@ -1937,9 +1969,11 @@ class StreamsViewModel(
         val updated = reducer(current)
         _anomalyConfigByDesignator[designator] = updated
         defaultAnomalyConfig = updated
-        AnomalyPrefs.save(getApplication<Application>().applicationContext, updated)
+        val appContext = getApplication<Application>().applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            AnomalyPrefs.save(appContext, updated)
+        }
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-        syncStreamSessions(currentResyncSnapshot())
     }
 
     private fun currentResyncSnapshot(): Map<String, StreamInfo> {
@@ -2253,6 +2287,36 @@ class StreamsViewModel(
                 runtime.anomalyDebugSummary?.takeIf { it.isNotBlank() }?.let {
                     lines += "  Anomaly debug: $it"
                 }
+                val adRuntimeModeLabel =
+                    when (runtime.adRuntimeMode) {
+                        2 -> "threaded"
+                        1 -> "inline"
+                        else -> "bypassed"
+                    }
+                lines += "  AD mode: $adRuntimeModeLabel"
+                lines += String.format(
+                    Locale.US,
+                    "  AD queue: depth %d max %d forwarded %d overload-disables %d",
+                    runtime.adInputQueueDepth,
+                    runtime.adInputQueueDepthMax,
+                    runtime.adForwardedWithoutAnalysisCount,
+                    runtime.adFullQueueDisableCount,
+                )
+                lines += String.format(
+                    Locale.US,
+                    "  AD render mix: analyzed %d bypassed %d",
+                    runtime.adAnalyzedRenderedFrameCount,
+                    runtime.adBypassedRenderedFrameCount,
+                )
+                if (anomalyConfigFor(focusedDesignator).troubleshootingDebug) {
+                    lines += String.format(
+                        Locale.US,
+                        "  AD worker: processed %d annotated %d overlay-enqueued %d",
+                        runtime.adWorkerProcessedFrameCount,
+                        runtime.adWorkerAnnotatedFrameCount,
+                        runtime.adWorkerOverlayEnqueuedCount,
+                    )
+                }
                 lines += String.format(Locale.US, "  Idle poll count: %d", runtime.idlePollCount)
             }
         }
@@ -2279,6 +2343,12 @@ class StreamsViewModel(
             else -> "unk"
         }
     }
+
+    private data class AnomalyPolicyUpdate(
+        val designator: String,
+        val thermalPaused: Boolean,
+        val config: org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig,
+    )
 
     private fun estimateAnomalyHeadroom(
         processCpuFraction: Double,
@@ -2321,16 +2391,37 @@ class StreamsViewModel(
 
     private fun applyFocusedAnomalyPolicy(liveDesignators: Set<String>) {
         val focused = _focusedPath.value
-        (liveDesignators + _localPlaybackEntries.value.keys).forEach { designator ->
+        val thermalPause = currentThermalStatusLabel() in setOf("sev", "crit", "emrg", "sdwn")
+        val desiredDesignators = liveDesignators + _localPlaybackEntries.value.keys
+        val updates = mutableListOf<AnomalyPolicyUpdate>()
+        desiredDesignators.forEach { designator ->
             val config = _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
             val enableForDesignator = focused == designator && config.enabled
-            ffmpegProbeService?.setAnomalyConfig(
-                designator,
-                config.toNativeConfig(
+            val update = AnomalyPolicyUpdate(
+                designator = designator,
+                thermalPaused = enableForDesignator && thermalPause,
+                config = config.toNativeConfig(
                     enabledOverride = enableForDesignator,
                     detectedAppearanceMode = _detectedAppearanceModeByDesignator[designator]
                 )
             )
+            if (lastAppliedAnomalyPolicyByDesignator[designator] != update) {
+                updates += update
+                lastAppliedAnomalyPolicyByDesignator[designator] = update
+            }
+        }
+        lastAppliedAnomalyPolicyByDesignator.keys.retainAll(desiredDesignators)
+        if (updates.isEmpty()) return
+        anomalyPolicyApplyJob?.cancel()
+        anomalyPolicyApplyJob = viewModelScope.launch(Dispatchers.Default) {
+            val probeService = ffmpegProbeService ?: return@launch
+            updates.forEach { update ->
+                probeService.setAnomalyThermalPaused(
+                    designator = update.designator,
+                    paused = update.thermalPaused
+                )
+                probeService.setAnomalyConfig(update.designator, update.config)
+            }
         }
     }
 

@@ -66,6 +66,16 @@ data class StreamRuntimeSnapshot(
     val currentRescanMode: Int,
     val currentSourceTimestampUs: Long?,
     val anomalyDebugSummary: String?,
+    val adInputQueueDepth: Int,
+    val adInputQueueDepthMax: Int,
+    val adForwardedWithoutAnalysisCount: Long,
+    val adFullQueueDisableCount: Long,
+    val adAnalyzedRenderedFrameCount: Long,
+    val adBypassedRenderedFrameCount: Long,
+    val adRuntimeMode: Int,
+    val adWorkerProcessedFrameCount: Long,
+    val adWorkerAnnotatedFrameCount: Long,
+    val adWorkerOverlayEnqueuedCount: Long,
 )
 
 object FfmpegTelemetryReducer {
@@ -144,6 +154,15 @@ private data class ManagedRenderSession(
     var lastStartupRecoveryDeferredLogAtMs: Long = 0L,
 )
 
+private data class RuntimeSnapshotSeed(
+    val sessionId: Long,
+    val session: ManagedRenderSession,
+    val decodedFps: Double,
+    val renderedFps: Double,
+    val renderDelayMs: Long?,
+    val debugEnabled: Boolean,
+)
+
 class FfmpegProbeService(
     private val onLocalPlaybackEnded: (String) -> Unit = {},
 ) {
@@ -174,8 +193,11 @@ class FfmpegProbeService(
     private val renderDelayBaseMsByDesignator = mutableMapOf<String, Long>()
     private val renderDelayMeasuredAtMsByDesignator = mutableMapOf<String, Long>()
     private val anomalyConfigByDesignator = mutableMapOf<String, NativeAnomalyConfig>()
+    private val cachedAnomalyDebugSummaryBySessionId = mutableMapOf<Long, String?>()
+    private val lastAnomalyDebugFetchAtMsBySessionId = mutableMapOf<Long, Long>()
     private val localPlaybackPausedByDesignator = mutableMapOf<String, Boolean>()
     private val pendingRepublishByDesignator = mutableMapOf<String, UpstreamRepublishMarker>()
+    private val anomalyPauseReasonByDesignator = mutableMapOf<String, String>()
     private val _renderDelayMsByDesignator = MutableStateFlow<Map<String, Long>>(emptyMap())
     val renderDelayMsByDesignatorFlow: StateFlow<Map<String, Long>> =
         _renderDelayMsByDesignator.asStateFlow()
@@ -208,6 +230,17 @@ class FfmpegProbeService(
         }
         if (eventType == "telemetry") {
             mergeTelemetry(designator, telemetry)
+        }
+        when (eventType) {
+            "anomaly_paused_overload" -> synchronized(stateLock) {
+                anomalyPauseReasonByDesignator[designator] = "overloaded"
+            }
+            "anomaly_paused_thermal" -> synchronized(stateLock) {
+                anomalyPauseReasonByDesignator[designator] = "device hot"
+            }
+            "anomaly_resumed" -> synchronized(stateLock) {
+                anomalyPauseReasonByDesignator.remove(designator)
+            }
         }
 
         val now = System.currentTimeMillis()
@@ -507,7 +540,9 @@ class FfmpegProbeService(
             activeSessionId
         } ?: return
         CTDebug(tag, "Suspending FFmpeg render for $designator sessionId=$sessionId")
-        FfmpegBridge.detachSurface(sessionId)
+        sessionControlExecutor.execute {
+            FfmpegBridge.detachSurface(sessionId)
+        }
     }
 
     private fun sessionIdsForDesignatorLocked(designator: String): List<Long> {
@@ -711,13 +746,15 @@ class FfmpegProbeService(
                     "oldSurface=${action.requestedSurface?.let { System.identityHashCode(it) }} " +
                     "newSurface=${System.identityHashCode(action.fallbackSurface)}"
             )
-            FfmpegBridge.detachSurface(action.sessionId)
-            if (!FfmpegBridge.attachSurface(action.sessionId, action.fallbackSurface)) {
-                CTWarn(
-                    tag,
-                    "Unable to attach fallback render surface for $designator " +
-                        "sessionId=${action.sessionId}"
-                )
+            sessionControlExecutor.execute {
+                FfmpegBridge.detachSurface(action.sessionId)
+                if (!FfmpegBridge.attachSurface(action.sessionId, action.fallbackSurface)) {
+                    CTWarn(
+                        tag,
+                        "Unable to attach fallback render surface for $designator " +
+                            "sessionId=${action.sessionId}"
+                    )
+                }
             }
             return
         }
@@ -727,7 +764,9 @@ class FfmpegProbeService(
             "Unbinding render surface for $designator sessionId=${action.sessionId} " +
                 "surface=${action.requestedSurface?.let { System.identityHashCode(it) }}"
         )
-        FfmpegBridge.detachSurface(action.sessionId)
+        sessionControlExecutor.execute {
+            FfmpegBridge.detachSurface(action.sessionId)
+        }
     }
 
     fun telemetrySnapshot(designator: String): StreamTelemetrySnapshot? {
@@ -754,13 +793,49 @@ class FfmpegProbeService(
 
     fun runtimeSnapshot(designator: String): StreamRuntimeSnapshot? {
         val nowMs = System.currentTimeMillis()
-        return synchronized(stateLock) {
+        val seed = synchronized(stateLock) {
             val sessionId = renderSessions[designator] ?: suspendedRenderSessions[designator] ?: return@synchronized null
             val session = managedRenderSessions[sessionId] ?: return@synchronized null
             val elapsedMs = (nowMs - session.createdAtMs).coerceAtLeast(1L)
             val decodedFps = (session.decodedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
             val renderedFps = (session.renderedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
-            val perfStats = FfmpegBridge.sessionPerfStats(sessionId)
+            val debugEnabled = anomalyConfigByDesignator[designator]?.troubleshootingDebug == true
+            RuntimeSnapshotSeed(
+                sessionId = sessionId,
+                session = session.copy(),
+                decodedFps = decodedFps,
+                renderedFps = renderedFps,
+                renderDelayMs = renderDelayMsByDesignator[designator],
+                debugEnabled = debugEnabled,
+            )
+        } ?: return null
+
+        val perfStats = FfmpegBridge.sessionPerfStats(seed.sessionId)
+        val anomalyDebugSummary =
+            if (!seed.debugEnabled) {
+                synchronized(stateLock) {
+                    cachedAnomalyDebugSummaryBySessionId.remove(seed.sessionId)
+                    lastAnomalyDebugFetchAtMsBySessionId.remove(seed.sessionId)
+                }
+                null
+            } else {
+                val shouldRefresh = synchronized(stateLock) {
+                    val lastFetchAtMs = lastAnomalyDebugFetchAtMsBySessionId[seed.sessionId] ?: 0L
+                    (nowMs - lastFetchAtMs) >= 500L
+                }
+                if (shouldRefresh) {
+                    val refreshed = FfmpegBridge.sessionDebugSummary(seed.sessionId)
+                    synchronized(stateLock) {
+                        cachedAnomalyDebugSummaryBySessionId[seed.sessionId] = refreshed
+                        lastAnomalyDebugFetchAtMsBySessionId[seed.sessionId] = nowMs
+                    }
+                    refreshed
+                } else {
+                    synchronized(stateLock) { cachedAnomalyDebugSummaryBySessionId[seed.sessionId] }
+                }
+            }
+
+        return synchronized(stateLock) {
             val anomalyAnalyzedFrameCount = perfStats?.getOrNull(0) ?: 0L
             val anomalyAnnotatedFrameCount = perfStats?.getOrNull(1) ?: 0L
             val anomalyTotalProcessUs = perfStats?.getOrNull(2) ?: 0L
@@ -793,6 +868,16 @@ class FfmpegProbeService(
             val currentRegistrationHealth = (perfStats?.getOrNull(18) ?: 0L).toInt()
             val currentRescanMode = (perfStats?.getOrNull(19) ?: 0L).toInt()
             val currentSourceTimestampUs = perfStats?.getOrNull(9)?.takeIf { it > 0L }
+            val adInputQueueDepth = (perfStats?.getOrNull(24) ?: 0L).toInt()
+            val adInputQueueDepthMax = (perfStats?.getOrNull(25) ?: 0L).toInt()
+            val adForwardedWithoutAnalysisCount = perfStats?.getOrNull(26) ?: 0L
+            val adFullQueueDisableCount = perfStats?.getOrNull(27) ?: 0L
+            val adAnalyzedRenderedFrameCount = perfStats?.getOrNull(28) ?: 0L
+            val adBypassedRenderedFrameCount = perfStats?.getOrNull(29) ?: 0L
+            val adRuntimeMode = (perfStats?.getOrNull(30) ?: 0L).toInt()
+            val adWorkerProcessedFrameCount = perfStats?.getOrNull(31) ?: 0L
+            val adWorkerAnnotatedFrameCount = perfStats?.getOrNull(32) ?: 0L
+            val adWorkerOverlayEnqueuedCount = perfStats?.getOrNull(33) ?: 0L
             val localPlaybackRealtimeFactor =
                 if (recentPlaybackMediaSpanMs != null && recentPlaybackWallSpanMs != null && recentPlaybackWallSpanMs > 0L) {
                     recentPlaybackMediaSpanMs.toDouble() / recentPlaybackWallSpanMs.toDouble()
@@ -805,15 +890,14 @@ class FfmpegProbeService(
                 } else {
                     null
                 }
-            val anomalyDebugSummary = FfmpegBridge.sessionDebugSummary(sessionId)
             StreamRuntimeSnapshot(
-                decodedFrameCount = session.decodedFrameCount,
-                renderedFrameCount = session.renderedFrameCount,
-                avgDecodedFps = decodedFps,
-                avgRenderedFps = renderedFps,
-                idlePollCount = session.idlePollCount,
-                lastFrameAgeMs = session.lastFrameAtMs?.let { nowMs - it } ?: -1L,
-                renderDelayMs = renderDelayMsByDesignator[designator],
+                decodedFrameCount = seed.session.decodedFrameCount,
+                renderedFrameCount = seed.session.renderedFrameCount,
+                avgDecodedFps = seed.decodedFps,
+                avgRenderedFps = seed.renderedFps,
+                idlePollCount = seed.session.idlePollCount,
+                lastFrameAgeMs = seed.session.lastFrameAtMs?.let { nowMs - it } ?: -1L,
+                renderDelayMs = seed.renderDelayMs,
                 anomalyAnalyzedFrameCount = anomalyAnalyzedFrameCount,
                 anomalyAnnotatedFrameCount = anomalyAnnotatedFrameCount,
                 anomalyAvgProcessMs =
@@ -840,8 +924,22 @@ class FfmpegProbeService(
                 currentRescanMode = currentRescanMode,
                 currentSourceTimestampUs = currentSourceTimestampUs,
                 anomalyDebugSummary = anomalyDebugSummary,
+                adInputQueueDepth = adInputQueueDepth,
+                adInputQueueDepthMax = adInputQueueDepthMax,
+                adForwardedWithoutAnalysisCount = adForwardedWithoutAnalysisCount,
+                adFullQueueDisableCount = adFullQueueDisableCount,
+                adAnalyzedRenderedFrameCount = adAnalyzedRenderedFrameCount,
+                adBypassedRenderedFrameCount = adBypassedRenderedFrameCount,
+                adRuntimeMode = adRuntimeMode,
+                adWorkerProcessedFrameCount = adWorkerProcessedFrameCount,
+                adWorkerAnnotatedFrameCount = adWorkerAnnotatedFrameCount,
+                adWorkerOverlayEnqueuedCount = adWorkerOverlayEnqueuedCount,
             )
         }
+    }
+
+    fun anomalyPauseReason(designator: String): String? {
+        return synchronized(stateLock) { anomalyPauseReasonByDesignator[designator] }
     }
 
     fun isLocalPlaybackPaused(designator: String): Boolean {
@@ -893,8 +991,25 @@ class FfmpegProbeService(
     fun setAnomalyConfig(designator: String, config: NativeAnomalyConfig) {
         synchronized(stateLock) {
             anomalyConfigByDesignator[designator] = config
+            if (!config.enabled) {
+                anomalyPauseReasonByDesignator.remove(designator)
+            }
         }
         applyAnomalyConfig(designator)
+    }
+
+    fun setAnomalyThermalPaused(designator: String, paused: Boolean) {
+        val sessionIds = synchronized(stateLock) {
+            if (!paused && anomalyPauseReasonByDesignator[designator] == "device hot") {
+                anomalyPauseReasonByDesignator.remove(designator)
+            } else if (paused) {
+                anomalyPauseReasonByDesignator[designator] = "device hot"
+            }
+            listOfNotNull(renderSessions[designator]).distinct()
+        }
+        sessionIds.forEach { sessionId ->
+            FfmpegBridge.setAnomalyThermalPaused(sessionId, paused)
+        }
     }
 
     private fun ensureRenderSession(designator: String): Long? {
@@ -1497,6 +1612,15 @@ class FfmpegProbeService(
             Pair(sessionIds, config)
         }
         snapshot.first.forEach { sessionId ->
+            if (snapshot.second.troubleshootingDebug) {
+                CTDebug(
+                    tag,
+                    "Applying anomaly config to $designator sessionId=$sessionId " +
+                        "enabled=${snapshot.second.enabled} mask=${snapshot.second.algorithmMask} " +
+                        "reg=${snapshot.second.registrationMode} stride=${snapshot.second.frameStride} " +
+                        "pixelStep=${snapshot.second.pixelStep} threshold=${"%.2f".format(snapshot.second.scoreThreshold)}"
+                )
+            }
             FfmpegBridge.updateAnomalyConfig(sessionId, snapshot.second)
         }
     }
@@ -1505,6 +1629,15 @@ class FfmpegProbeService(
         val config = synchronized(stateLock) {
             anomalyConfigByDesignator[designator]
         } ?: return
+        if (config.troubleshootingDebug) {
+            CTDebug(
+                tag,
+                "Applying anomaly config to new session $designator sessionId=$sessionId " +
+                    "enabled=${config.enabled} mask=${config.algorithmMask} " +
+                    "reg=${config.registrationMode} stride=${config.frameStride} " +
+                    "pixelStep=${config.pixelStep} threshold=${"%.2f".format(config.scoreThreshold)}"
+            )
+        }
         FfmpegBridge.updateAnomalyConfig(sessionId, config)
     }
 

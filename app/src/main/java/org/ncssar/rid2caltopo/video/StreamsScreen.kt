@@ -49,6 +49,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
@@ -137,10 +138,27 @@ fun StreamsScreen(
     externalContentMode: ExternalDisplayContentMode? = null,
     allowModalDialogs: Boolean = true,
 ) {
-    DisposableEffect(viewModel) {
+    val currentOnBack = rememberUpdatedState(onBack)
+    val releaseStreamsUiConsumer = remember(viewModel) {
         val removeConsumer = viewModel.addStreamsUiConsumer()
+        var removed = false
+        {
+            if (!removed) {
+                removed = true
+                removeConsumer()
+            }
+        }
+    }
+    val handleBack = remember(releaseStreamsUiConsumer) {
+        {
+            releaseStreamsUiConsumer()
+            currentOnBack.value()
+        }
+    }
+
+    DisposableEffect(releaseStreamsUiConsumer) {
         onDispose {
-            removeConsumer()
+            releaseStreamsUiConsumer()
         }
     }
 
@@ -192,9 +210,9 @@ fun StreamsScreen(
     ) {
         Column {
             TopAppBar(
-                modifier = Modifier.pointerInput(onBack) {
+                modifier = Modifier.pointerInput(handleBack) {
                     detectTapGestures(
-                        onDoubleTap = { onBack() }
+                        onDoubleTap = { handleBack() }
                     )
                 },
                 title = {
@@ -217,10 +235,10 @@ fun StreamsScreen(
                         Box(
                             modifier = Modifier
                                 .weight(1f, fill = false)
-                                .pointerInput(onMapStatusTap, onBack) {
+                                .pointerInput(onMapStatusTap, handleBack) {
                                     detectTapGestures(
                                         onTap = { onMapStatusTap() },
-                                        onDoubleTap = { onBack() }
+                                        onDoubleTap = { handleBack() }
                                     )
                                 }
                         ) {
@@ -235,7 +253,7 @@ fun StreamsScreen(
                 },
                 navigationIcon = if (showNavigation) {
                     {
-                        IconButton(onClick = onBack) {
+                        IconButton(onClick = handleBack) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back"

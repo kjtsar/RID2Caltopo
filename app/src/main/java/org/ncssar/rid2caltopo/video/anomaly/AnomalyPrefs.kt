@@ -8,6 +8,7 @@ object AnomalyPrefs {
     private const val KEY_SHOW_GUIDE_BOXES = "show_guide_boxes"
     private const val KEY_SHOW_HOT_OVERLAY = "show_hot_overlay"
     private const val KEY_SHOW_CANDIDATE_BLOBS = "show_candidate_blobs"
+    private const val KEY_TROUBLESHOOTING_DEBUG = "troubleshooting_debug"
     private const val KEY_ALGORITHMS = "algorithms"
     private const val KEY_SALIENCY_ENABLED = "saliency_enabled"
     private const val KEY_APPEARANCE_SELECTION = "appearance_selection"
@@ -22,6 +23,38 @@ object AnomalyPrefs {
     private const val KEY_MIN_HITS = "min_hits"
     private const val KEY_THERMAL_MIN_DELTA = "thermal_min_delta"
     private const val KEY_SMALL_TARGET_SCREEN_FRACTION = "small_target_screen_fraction"
+
+    private fun migrateLegacyRealtimeDefaultsIfNeeded(config: AnomalyConfig): AnomalyConfig {
+        val legacyAlgorithms = setOf(AnomalyAlgorithm.ThermalHotspot)
+        val temporaryRealtimeAlgorithms = setOf(
+            AnomalyAlgorithm.ThermalHotspot,
+            AnomalyAlgorithm.Motion,
+        )
+        val persistedNonAppearanceAlgorithms = config.nonAppearanceAlgorithms
+        val thermalOnlyAppearance =
+            config.resolvedAppearanceMode() == AppearanceAnomalyMode.Thermal &&
+                persistedNonAppearanceAlgorithms.isEmpty()
+        val looksRealtimeDefault =
+            (config.algorithms == legacyAlgorithms ||
+                config.algorithms == temporaryRealtimeAlgorithms ||
+                thermalOnlyAppearance) &&
+                !config.saliencyEnabled &&
+                config.appearanceSelection == AppearanceAnomalySelection.Auto &&
+                config.frameStride == 1 &&
+                config.pixelStep == 0 &&
+                config.registrationMode == MotionRegistrationMode.Affine &&
+                config.scanZone >= 0.60f &&
+                config.minHits == 2 &&
+                kotlin.math.abs(config.thermalMinDelta - 10.0f) < 0.001f
+        return if (looksRealtimeDefault) {
+            config.copy(
+                algorithms = setOf(AnomalyAlgorithm.ThermalHotspot),
+                scanZone = 0.80f,
+            )
+        } else {
+            config
+        }
+    }
 
     @JvmStatic
     fun load(context: Context): AnomalyConfig {
@@ -41,11 +74,12 @@ object AnomalyPrefs {
             ?.let { name -> runCatching { MotionRegistrationMode.valueOf(name) }.getOrNull() }
             ?: defaults.registrationMode
 
-        return AnomalyConfig(
+        val loaded = AnomalyConfig(
             enabled = prefs.getBoolean(KEY_ENABLED, defaults.enabled),
             showGuideBoxes = prefs.getBoolean(KEY_SHOW_GUIDE_BOXES, defaults.showGuideBoxes),
             showHotOverlay = prefs.getBoolean(KEY_SHOW_HOT_OVERLAY, defaults.showHotOverlay),
             showCandidateBlobs = prefs.getBoolean(KEY_SHOW_CANDIDATE_BLOBS, defaults.showCandidateBlobs),
+            troubleshootingDebug = prefs.getBoolean(KEY_TROUBLESHOOTING_DEBUG, defaults.troubleshootingDebug),
             algorithms = algorithms,
             saliencyEnabled = prefs.getBoolean(KEY_SALIENCY_ENABLED, defaults.saliencyEnabled),
             appearanceSelection = appearanceSelection,
@@ -66,6 +100,11 @@ object AnomalyPrefs {
                 .getFloat(KEY_SMALL_TARGET_SCREEN_FRACTION, defaults.smallTargetScreenFraction)
                 .coerceIn(0.0015f, 0.03f),
         )
+        val migrated = migrateLegacyRealtimeDefaultsIfNeeded(loaded)
+        if (migrated != loaded) {
+            save(context, migrated)
+        }
+        return migrated
     }
 
     @JvmStatic
@@ -77,6 +116,7 @@ object AnomalyPrefs {
             .putBoolean(KEY_SHOW_GUIDE_BOXES, normalized.showGuideBoxes)
             .putBoolean(KEY_SHOW_HOT_OVERLAY, normalized.showHotOverlay)
             .putBoolean(KEY_SHOW_CANDIDATE_BLOBS, normalized.showCandidateBlobs)
+            .putBoolean(KEY_TROUBLESHOOTING_DEBUG, normalized.troubleshootingDebug)
             .putStringSet(KEY_ALGORITHMS, normalized.algorithms.map { it.name }.toSet())
             .putBoolean(KEY_SALIENCY_ENABLED, normalized.saliencyEnabled)
             .putString(KEY_APPEARANCE_SELECTION, normalized.appearanceSelection.name)

@@ -238,6 +238,39 @@ The report includes:
 
 - realtime factor
 - frame count
+
+## Preparing visible-color regression clips
+
+Visible-light profiling should live beside, not inside, the existing black-hot
+suite so we can compare color-path changes without perturbing the thermal
+baseline.
+
+Seed manifest:
+
+```sh
+tools/anomaly_test/regression_suite_color_manifest.json
+```
+
+It already contains two starter profiles:
+
+- `visible-color-baseline` — color + motion, affine registration, stride 1
+- `visible-color-dense-gold` — same, but with `--pixel-step 1` for dense profiling
+
+When new visible-light clips are added under
+`app/src/test/resources/vidcap/`, the next steps are:
+
+1. Add each clip to `source_clips` in `regression_suite_color_manifest.json`.
+2. Review useful excerpts and add them under `excerpts`.
+3. Run the suite with the color manifest instead of the black-hot one.
+
+Example:
+
+```sh
+python3 tools/anomaly_test/run_regression_suite.py \
+  --manifest tools/anomaly_test/regression_suite_color_manifest.json \
+  --binary tools/anomaly_test/build_timing/anomaly_video_test \
+  --output-dir /tmp/color_regression
+```
 - `scan_reason_counts.reg-invalid`
 - dominant registration invalid reason
 - `rescan_modes.full/partial/target_only`

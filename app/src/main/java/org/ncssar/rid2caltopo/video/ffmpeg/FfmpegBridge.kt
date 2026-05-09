@@ -88,6 +88,7 @@ object FfmpegBridge {
             enabled = config.enabled,
             showHotOverlay = config.showHotOverlay,
             showCandidateBlobs = config.showCandidateBlobs,
+            troubleshootingDebug = config.troubleshootingDebug,
             algorithmMask = config.algorithmMask,
             registrationMode = config.registrationMode,
             frameStride = config.frameStride,
@@ -101,6 +102,11 @@ object FfmpegBridge {
             thermalMinDelta = config.thermalMinDelta,
             smallTargetScreenFraction = config.smallTargetScreenFraction,
         )
+    }
+
+    fun setAnomalyThermalPaused(sessionId: Long, paused: Boolean) {
+        if (!nativeLoaded || sessionId <= 0L) return
+        nativeSetAnomalyThermalPaused(sessionId, paused)
     }
 
     fun sessionPerfStats(sessionId: Long): LongArray? {
@@ -211,6 +217,7 @@ object FfmpegBridge {
         enabled: Boolean,
         showHotOverlay: Boolean,
         showCandidateBlobs: Boolean,
+        troubleshootingDebug: Boolean,
         algorithmMask: Int,
         registrationMode: Int,
         frameStride: Int,
@@ -224,6 +231,7 @@ object FfmpegBridge {
         thermalMinDelta: Float,
         smallTargetScreenFraction: Float,
     )
+    private external fun nativeSetAnomalyThermalPaused(sessionId: Long, paused: Boolean)
     private external fun nativeGetSessionPerfStats(sessionId: Long): LongArray?
     private external fun nativeGetSessionDebugSummary(sessionId: Long): String?
     private external fun nativeSetLocalPlaybackPaused(sessionId: Long, paused: Boolean)

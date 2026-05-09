@@ -34,6 +34,13 @@
 #define ANOMALY_SALIENCY_EXTRA_TRACKS     1
 #define ANOMALY_MAX_TARGET_TRACKS         6
 
+#define ANOMALY_COLOR_U_BINS 12
+#define ANOMALY_COLOR_V_BINS 12
+#define ANOMALY_COLOR_HIST_BINS (ANOMALY_COLOR_U_BINS * ANOMALY_COLOR_V_BINS)
+#define ANOMALY_COLOR_HISTORY_DECAY_SHIFT 1
+#define ANOMALY_COLOR_RARITY_MIN 0.03125f
+#define ANOMALY_COLOR_RARITY_SCALE 72.0f
+
 // ── Local tile normalization ───────────────────────────────────────────────
 // The ROI is divided into a LOCAL_TILE_SIZE × LOCAL_TILE_SIZE grid.  Mean and
 // std are computed per tile so that scoring is relative to the immediate
@@ -191,6 +198,7 @@ typedef struct {
     uint32_t scan_flags;
     float max_thermal_score;
     float max_motion_support;
+    float max_color_score;
 } anomaly_roi_cell_summary_t;
 
 typedef struct {
@@ -205,10 +213,20 @@ typedef struct {
     float *last_luma;
     float *thermal_score;
     float *temporal_score;
+    float *color_luma;
+    float *color_u;
+    float *color_v;
+    float *color_raw_score;
+    float *color_contrast_weight;
+    uint8_t *color_u_bin;
+    uint8_t *color_v_bin;
     uint8_t *valid_mask;
     uint8_t *fresh_mask;
     uint8_t *carried_mask;
     uint8_t *new_exposed_mask;
+    uint8_t *color_valid_mask;
+    uint8_t *color_phase_x;
+    uint8_t *color_phase_y;
     float   *reg_confidence;
     uint8_t *coverage_age;
     size_t   pixel_capacity;
@@ -273,6 +291,10 @@ typedef struct {
     float   *thermal_target_persist;
     int      thermal_target_persist_w;
     int      thermal_target_persist_h;
+    uint8_t *color_recent_hist;
+    size_t   color_recent_hist_bins;
+    uint8_t *scratch_color_hist;
+    size_t   scratch_color_hist_bins;
     anomaly_roi_state_t roi_state;
     anomaly_target_track_t target_tracks[ANOMALY_MAX_TARGET_TRACKS];
     int      next_target_track_id;
@@ -333,13 +355,24 @@ typedef struct {
     float   *scratch_prev_roi_last_luma;
     float   *scratch_prev_roi_thermal_score;
     float   *scratch_prev_roi_temporal_score;
+    float   *scratch_prev_roi_color_luma;
+    float   *scratch_prev_roi_color_u;
+    float   *scratch_prev_roi_color_v;
+    float   *scratch_prev_roi_color_raw_score;
+    float   *scratch_prev_roi_color_contrast_weight;
+    uint8_t *scratch_prev_roi_color_u_bin;
+    uint8_t *scratch_prev_roi_color_v_bin;
     uint8_t *scratch_prev_roi_valid_mask;
     uint8_t *scratch_prev_roi_coverage_age;
+    uint8_t *scratch_prev_roi_color_valid_mask;
+    uint8_t *scratch_prev_roi_color_phase_x;
+    uint8_t *scratch_prev_roi_color_phase_y;
     size_t   scratch_prev_roi_capacity;
     uint8_t *scratch_refresh_mask;
     size_t   scratch_refresh_mask_capacity;
     int     *scratch_i32;
     size_t   scratch_i32_capacity;
+    uint64_t color_phase_counter;
 } anomaly_state_t;
 
 typedef struct {
@@ -413,6 +446,11 @@ typedef struct {
     float isolation_score;
     float ring_fraction;
     float support_mass;
+    float contrast_weight;
+    int   hist_key;
+    float hist_current_count;
+    float hist_recent_count;
+    float hist_rarity_score;
     float retention_rank;
     bool  above_threshold;
 } anomaly_debug_color_candidate_t;
@@ -515,6 +553,21 @@ typedef struct {
     float raw_score;
     float raw_x_norm;
     float raw_y_norm;
+    int   active_phase_index;
+    int   active_phase_x;
+    int   active_phase_y;
+    bool  selective_reuse_active;
+    bool  forced_full_refresh;
+    uint32_t fallback_reason_flags;
+    int   fresh_sample_count;
+    int   carried_sample_count;
+    int   unsampled_new_exposed_count;
+    float fresh_sample_fraction;
+    float carried_sample_fraction;
+    float unsampled_new_exposed_fraction;
+    int   nonzero_histogram_bins;
+    float max_histogram_current_count;
+    float max_histogram_recent_count;
     int   winning_candidate_index;
     int   candidate_count;
     anomaly_debug_color_candidate_t candidates[ANOMALY_DEBUG_TOP_COLOR_CANDIDATES];

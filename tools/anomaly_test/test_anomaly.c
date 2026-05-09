@@ -52,6 +52,32 @@ static void set_pixel(uint8_t *buf, int stride, int x, int y,
     px[0] = r; px[1] = g; px[2] = b; px[3] = 0xFF;
 }
 
+static void stamp_color_patch(uint8_t *buf, int stride, int w, int h,
+                              int cx, int cy, int radius,
+                              uint8_t r, uint8_t g, uint8_t b) {
+    for (int dy = -radius; dy <= radius; dy++) {
+        int y = cy + dy;
+        if (y < 0 || y >= h) continue;
+        for (int dx = -radius; dx <= radius; dx++) {
+            int x = cx + dx;
+            if (x < 0 || x >= w) continue;
+            set_pixel(buf, stride, x, y, r, g, b);
+        }
+    }
+}
+
+static void stamp_color_rect(uint8_t *buf, int stride, int w, int h,
+                             int x0, int y0, int rect_w, int rect_h,
+                             uint8_t r, uint8_t g, uint8_t b) {
+    for (int y = y0; y < y0 + rect_h; y++) {
+        if (y < 0 || y >= h) continue;
+        for (int x = x0; x < x0 + rect_w; x++) {
+            if (x < 0 || x >= w) continue;
+            set_pixel(buf, stride, x, y, r, g, b);
+        }
+    }
+}
+
 static void stamp_texture_field(uint8_t *buf, int stride, int w, int h, int shift_x) {
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
@@ -205,13 +231,13 @@ static void test_thermal_hotspot_detected(void) {
 }
 
 static void test_color_outlier_detected(void) {
-    // Red pixel in gray scene → color outlier.
+    // Compact red patch in gray scene → color outlier with local support.
     const int W = 160, H = 120;
     anomaly_state_t st;
     anomaly_state_init(&st);
 
     uint8_t *frame = make_gray_frame(W, H, 128);
-    set_pixel(frame, W * 4, W / 2, H / 2, 220, 20, 20);  // vivid red
+    stamp_color_rect(frame, W * 4, W, H, W / 2 - 1, H / 2 - 1, 4, 4, 220, 20, 20);
 
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
     cfg.score_threshold = 2.0f;
@@ -219,8 +245,7 @@ static void test_color_outlier_detected(void) {
 
     anomaly_result_t res;
     int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
-
-    EXPECT(boxes > 0, "color: red pixel in gray scene detected");
+    EXPECT(boxes > 0, "color: red patch in gray scene detected");
     free(frame);
     anomaly_state_cleanup(&st);
 }
@@ -571,12 +596,12 @@ static void test_frame_stride_skips(void) {
     anomaly_state_init(&st);
 
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
-    cfg.score_threshold = 2.0f;
+    cfg.score_threshold = 1.2f;
     cfg.min_hits = 1;
     cfg.frame_stride = 3;
 
     uint8_t *frame = make_gray_frame(W, H, 64);
-    set_pixel(frame, W * 4, W / 2, H / 2, 220, 20, 20);
+    stamp_color_rect(frame, W * 4, W, H, W / 2 - 1, H / 2 - 1, 4, 4, 220, 20, 20);
 
     anomaly_result_t res;
     // Frame counter starts at 0; first analyzed frame is at counter=3 (counter % 3 == 0).
@@ -604,7 +629,7 @@ static void test_frame_stride_hold_ages_on_skipped_frames(void) {
     cfg.frame_stride = 3;
 
     uint8_t *hotspot_frame = make_gray_frame(W, H, 64);
-    set_pixel(hotspot_frame, W * 4, W / 2, H / 2, 220, 20, 20);
+    stamp_color_rect(hotspot_frame, W * 4, W, H, W / 2 - 1, H / 2 - 1, 4, 4, 220, 20, 20);
     uint8_t *plain_frame = make_gray_frame(W, H, 64);
 
     anomaly_result_t res;
@@ -680,7 +705,7 @@ static void test_large_motion_discontinuity_clears_rois(void) {
     uint8_t *frame2 = make_gray_frame(W, H, 64);
     stamp_texture_field(frame1, W * 4, W, H, 0);
     stamp_texture_field(frame2, W * 4, W, H, 220);
-    set_pixel(frame1, W * 4, W / 2, H / 2, 255, 32, 32);
+    stamp_color_patch(frame1, W * 4, W, H, W / 2, H / 2, 2, 255, 32, 32);
 
     anomaly_result_t r1, r2;
     int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
@@ -748,8 +773,8 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     uint8_t *frame2 = make_gray_frame(W, H, 64);
     stamp_texture_field(frame1, W * 4, W, H, 0);
     stamp_texture_field(frame2, W * 4, W, H, 0);
-    set_pixel(frame1, W * 4, W / 2, H / 2, 255, 24, 24);
-    set_pixel(frame2, W * 4, W / 2, H / 2, 255, 24, 24);
+    stamp_color_patch(frame1, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
+    stamp_color_patch(frame2, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
 
     anomaly_result_t r1, r2;
     int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);

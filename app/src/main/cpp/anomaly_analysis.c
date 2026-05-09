@@ -79,6 +79,12 @@
 #define ANOMALY_TARGET_CONFIDENCE_MISS_DECAY 0.22f
 #define ANOMALY_TARGET_REVISIT_CONFIDENCE_MIN 0.20f
 #define ANOMALY_MAX_COLOR_CANDIDATES 8
+#define ANOMALY_COLOR_U_MIN (-112.0f)
+#define ANOMALY_COLOR_U_MAX (112.0f)
+#define ANOMALY_COLOR_V_MIN (-112.0f)
+#define ANOMALY_COLOR_V_MAX (112.0f)
+#define ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS 1
+#define ANOMALY_COLOR_LOCAL_SUPPORT_MIN 3
 
 static inline float clamp01f(float v) {
     if (v < 0.0f) return 0.0f;
@@ -96,6 +102,170 @@ static inline float clampf(float value, float min_value, float max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
     return value;
+}
+
+static inline int quantize_uv_bin(float value, float min_v, float max_v, int bins) {
+    float clamped = clampf(value, min_v, max_v);
+    float norm = (clamped - min_v) / fmaxf(max_v - min_v, 1e-6f);
+    int bin = (int)(norm * (float)bins);
+    if (bin < 0) bin = 0;
+    if (bin >= bins) bin = bins - 1;
+    return bin;
+}
+
+static inline int color_hist_key(int u_bin, int v_bin) {
+    return u_bin * ANOMALY_COLOR_V_BINS + v_bin;
+}
+
+static inline void fill_color_uv_bins(
+        anomaly_roi_state_t *roi_state,
+        size_t               idx) {
+    if (roi_state == NULL || roi_state->color_u_bin == NULL || roi_state->color_v_bin == NULL ||
+        roi_state->color_u == NULL || roi_state->color_v == NULL) {
+        return;
+    }
+    roi_state->color_u_bin[idx] = (uint8_t)quantize_uv_bin(
+        roi_state->color_u[idx],
+        ANOMALY_COLOR_U_MIN,
+        ANOMALY_COLOR_U_MAX,
+        ANOMALY_COLOR_U_BINS);
+    roi_state->color_v_bin[idx] = (uint8_t)quantize_uv_bin(
+        roi_state->color_v[idx],
+        ANOMALY_COLOR_V_MIN,
+        ANOMALY_COLOR_V_MAX,
+        ANOMALY_COLOR_V_BINS);
+}
+
+static bool ensure_color_hist_capacity(uint8_t **buffer, size_t *capacity_bins) {
+    if (buffer == NULL || capacity_bins == NULL) return false;
+    if (*buffer != NULL && *capacity_bins >= ANOMALY_COLOR_HIST_BINS) return true;
+    size_t old_bins = *capacity_bins;
+    uint8_t *grown = (uint8_t *)realloc(*buffer, ANOMALY_COLOR_HIST_BINS * sizeof(uint8_t));
+    if (grown == NULL) return false;
+    if (ANOMALY_COLOR_HIST_BINS > old_bins) {
+        memset(grown + old_bins, 0, (ANOMALY_COLOR_HIST_BINS - old_bins) * sizeof(uint8_t));
+    }
+    *buffer = grown;
+    *capacity_bins = ANOMALY_COLOR_HIST_BINS;
+    return true;
+}
+
+static int build_color_frame_histogram(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        uint8_t                   *hist_out) {
+    if (roi_state == NULL || hist_out == NULL || sg_w <= 0 || sg_h <= 0 ||
+        roi_state->color_valid_mask == NULL || roi_state->color_u_bin == NULL ||
+        roi_state->color_v_bin == NULL) {
+        return 0;
+    }
+
+    memset(hist_out, 0, ANOMALY_COLOR_HIST_BINS * sizeof(uint8_t));
+    int valid_samples = 0;
+    for (int sy = 0; sy < sg_h; sy++) {
+        for (int sx = 0; sx < sg_w; sx++) {
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (roi_state->color_valid_mask[idx] == 0u) continue;
+
+            int u_bin = (int)roi_state->color_u_bin[idx];
+            int v_bin = (int)roi_state->color_v_bin[idx];
+            int key = color_hist_key(u_bin, v_bin);
+            if (hist_out[key] < 255u) hist_out[key] += 1u;
+            valid_samples++;
+        }
+    }
+    return valid_samples;
+}
+
+static void update_color_recent_histogram(
+        anomaly_state_t *state,
+        const uint8_t   *current_hist,
+        bool             reset_history) {
+    if (state == NULL || current_hist == NULL || state->color_recent_hist == NULL) return;
+
+    if (reset_history) {
+        memcpy(state->color_recent_hist,
+               current_hist,
+               ANOMALY_COLOR_HIST_BINS * sizeof(uint8_t));
+        return;
+    }
+
+    for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) {
+        uint16_t decayed = (uint16_t)(state->color_recent_hist[i] >> ANOMALY_COLOR_HISTORY_DECAY_SHIFT);
+        uint16_t combined = decayed + (uint16_t)current_hist[i];
+        state->color_recent_hist[i] = (uint8_t)(combined > 255u ? 255u : combined);
+    }
+}
+
+static inline float score_color_hist_rarity(
+        const uint8_t *current_hist,
+        const uint8_t *recent_hist,
+        int          key) {
+    int cur = current_hist != NULL ? (int)current_hist[key] : 0;
+    int rec = recent_hist != NULL ? (int)recent_hist[key] : 0;
+    return 1.0f / (float)(cur + rec + 1);
+}
+
+static inline float score_color_hist_family_rarity(
+        const uint8_t *current_hist,
+        const uint8_t *recent_hist,
+        int            center_u_bin,
+        int            center_v_bin) {
+    int family = 0;
+    for (int dv = -1; dv <= 1; dv++) {
+        int v_bin = center_v_bin + dv;
+        if (v_bin < 0 || v_bin >= ANOMALY_COLOR_V_BINS) continue;
+        for (int du = -1; du <= 1; du++) {
+            int u_bin = center_u_bin + du;
+            if (u_bin < 0 || u_bin >= ANOMALY_COLOR_U_BINS) continue;
+            int key = color_hist_key(u_bin, v_bin);
+            family += current_hist != NULL ? (int)current_hist[key] : 0;
+            family += recent_hist != NULL ? (int)recent_hist[key] : 0;
+        }
+    }
+    return 1.0f / (float)(family + 1);
+}
+
+static int local_uv_support_count(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        center_sx,
+        int                        center_sy,
+        int                        center_u_bin,
+        int                        center_v_bin) {
+    if (roi_state == NULL || sg_w <= 0 || sg_h <= 0 ||
+        roi_state->color_valid_mask == NULL ||
+        roi_state->color_u_bin == NULL ||
+        roi_state->color_v_bin == NULL) {
+        return 0;
+    }
+
+    int support = 0;
+    int sx0 = center_sx - ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS;
+    int sx1 = center_sx + ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS;
+    int sy0 = center_sy - ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS;
+    int sy1 = center_sy + ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS;
+    if (sx0 < 0) sx0 = 0;
+    if (sy0 < 0) sy0 = 0;
+    if (sx1 >= sg_w) sx1 = sg_w - 1;
+    if (sy1 >= sg_h) sy1 = sg_h - 1;
+
+    for (int sy = sy0; sy <= sy1; sy++) {
+        for (int sx = sx0; sx <= sx1; sx++) {
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (roi_state->color_valid_mask[idx] == 0u) continue;
+
+            int u_bin = (int)roi_state->color_u_bin[idx];
+            int v_bin = (int)roi_state->color_v_bin[idx];
+            if (abs(u_bin - center_u_bin) <= 1 &&
+                abs(v_bin - center_v_bin) <= 1) {
+                support++;
+            }
+        }
+    }
+    return support;
 }
 
 #if ANOMALY_DEBUG_TIMING
@@ -272,10 +442,40 @@ static bool ensure_prev_roi_snapshot_capacity(anomaly_state_t *state, size_t sam
         ensure_float_capacity(&state->scratch_prev_roi_temporal_score,
                               &state->scratch_prev_roi_capacity,
                               sample_count) &&
+        ensure_float_capacity(&state->scratch_prev_roi_color_luma,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_float_capacity(&state->scratch_prev_roi_color_u,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_float_capacity(&state->scratch_prev_roi_color_v,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_float_capacity(&state->scratch_prev_roi_color_raw_score,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_float_capacity(&state->scratch_prev_roi_color_contrast_weight,
+                              &state->scratch_prev_roi_capacity,
+                              sample_count) &&
+        ensure_u8_capacity(&state->scratch_prev_roi_color_u_bin,
+                           &state->scratch_prev_roi_capacity,
+                           sample_count) &&
+        ensure_u8_capacity(&state->scratch_prev_roi_color_v_bin,
+                           &state->scratch_prev_roi_capacity,
+                           sample_count) &&
         ensure_u8_capacity(&state->scratch_prev_roi_valid_mask,
                            &state->scratch_prev_roi_capacity,
                            sample_count) &&
         ensure_u8_capacity(&state->scratch_prev_roi_coverage_age,
+                           &state->scratch_prev_roi_capacity,
+                           sample_count) &&
+        ensure_u8_capacity(&state->scratch_prev_roi_color_valid_mask,
+                           &state->scratch_prev_roi_capacity,
+                           sample_count) &&
+        ensure_u8_capacity(&state->scratch_prev_roi_color_phase_x,
+                           &state->scratch_prev_roi_capacity,
+                           sample_count) &&
+        ensure_u8_capacity(&state->scratch_prev_roi_color_phase_y,
                            &state->scratch_prev_roi_capacity,
                            sample_count);
 }
@@ -321,10 +521,20 @@ static bool ensure_roi_state_capacity(anomaly_roi_state_t *roi_state, size_t pix
         roi_state->last_luma != NULL &&
         roi_state->thermal_score != NULL &&
         roi_state->temporal_score != NULL &&
+        roi_state->color_luma != NULL &&
+        roi_state->color_u != NULL &&
+        roi_state->color_v != NULL &&
+        roi_state->color_raw_score != NULL &&
+        roi_state->color_contrast_weight != NULL &&
+        roi_state->color_u_bin != NULL &&
+        roi_state->color_v_bin != NULL &&
         roi_state->valid_mask != NULL &&
         roi_state->fresh_mask != NULL &&
         roi_state->carried_mask != NULL &&
         roi_state->new_exposed_mask != NULL &&
+        roi_state->color_valid_mask != NULL &&
+        roi_state->color_phase_x != NULL &&
+        roi_state->color_phase_y != NULL &&
         roi_state->reg_confidence != NULL &&
         roi_state->coverage_age != NULL) {
         return true;
@@ -332,10 +542,20 @@ static bool ensure_roi_state_capacity(anomaly_roi_state_t *roi_state, size_t pix
     if (!ensure_float_capacity(&roi_state->last_luma, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_float_capacity(&roi_state->thermal_score, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_float_capacity(&roi_state->temporal_score, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->color_luma, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->color_u, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->color_v, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->color_raw_score, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_float_capacity(&roi_state->color_contrast_weight, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->color_u_bin, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->color_v_bin, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_u8_capacity(&roi_state->valid_mask, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_u8_capacity(&roi_state->fresh_mask, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_u8_capacity(&roi_state->carried_mask, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_u8_capacity(&roi_state->new_exposed_mask, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->color_valid_mask, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->color_phase_x, &roi_state->pixel_capacity, pixel_count) ||
+        !ensure_u8_capacity(&roi_state->color_phase_y, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_float_capacity(&roi_state->reg_confidence, &roi_state->pixel_capacity, pixel_count) ||
         !ensure_u8_capacity(&roi_state->coverage_age, &roi_state->pixel_capacity, pixel_count)) {
         return false;
@@ -372,11 +592,31 @@ static void clear_roi_state(anomaly_roi_state_t *roi_state) {
     roi_state->cell_cols = 0;
     roi_state->cell_rows = 0;
     if (roi_state->pixel_capacity > 0) {
+        memset(roi_state->color_valid_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->color_phase_x, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->color_phase_y, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->color_u_bin, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        memset(roi_state->color_v_bin, 0, roi_state->pixel_capacity * sizeof(uint8_t));
         memset(roi_state->valid_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
         memset(roi_state->fresh_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
         memset(roi_state->carried_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
         memset(roi_state->new_exposed_mask, 0, roi_state->pixel_capacity * sizeof(uint8_t));
         memset(roi_state->coverage_age, 0, roi_state->pixel_capacity * sizeof(uint8_t));
+        if (roi_state->color_luma != NULL) {
+            memset(roi_state->color_luma, 0, roi_state->pixel_capacity * sizeof(float));
+        }
+        if (roi_state->color_u != NULL) {
+            memset(roi_state->color_u, 0, roi_state->pixel_capacity * sizeof(float));
+        }
+        if (roi_state->color_v != NULL) {
+            memset(roi_state->color_v, 0, roi_state->pixel_capacity * sizeof(float));
+        }
+        if (roi_state->color_raw_score != NULL) {
+            memset(roi_state->color_raw_score, 0, roi_state->pixel_capacity * sizeof(float));
+        }
+        if (roi_state->color_contrast_weight != NULL) {
+            memset(roi_state->color_contrast_weight, 0, roi_state->pixel_capacity * sizeof(float));
+        }
         if (roi_state->reg_confidence != NULL) {
             memset(roi_state->reg_confidence, 0, roi_state->pixel_capacity * sizeof(float));
         }
@@ -392,10 +632,20 @@ static void release_roi_state(anomaly_roi_state_t *roi_state) {
     free(roi_state->last_luma);
     free(roi_state->thermal_score);
     free(roi_state->temporal_score);
+    free(roi_state->color_luma);
+    free(roi_state->color_u);
+    free(roi_state->color_v);
+    free(roi_state->color_raw_score);
+    free(roi_state->color_contrast_weight);
+    free(roi_state->color_u_bin);
+    free(roi_state->color_v_bin);
     free(roi_state->valid_mask);
     free(roi_state->fresh_mask);
     free(roi_state->carried_mask);
     free(roi_state->new_exposed_mask);
+    free(roi_state->color_valid_mask);
+    free(roi_state->color_phase_x);
+    free(roi_state->color_phase_y);
     free(roi_state->reg_confidence);
     free(roi_state->coverage_age);
     free(roi_state->cell_summaries);
@@ -1248,9 +1498,519 @@ static void zero_u8_region(
     }
 }
 
+static inline void color_sampling_phase_for_frame(
+        const anomaly_state_t *state,
+        int sample_step,
+        int *phase_index_out,
+        int *phase_x_out,
+        int *phase_y_out) {
+    int phase_index = 0;
+    int phase_x = 0;
+    int phase_y = 0;
+    int step = sample_step > 0 ? sample_step : 1;
+    if (step > 1 && state != NULL) {
+        int phase_count = step * step;
+        if (phase_count < 1) phase_count = 1;
+        phase_index = (int)(state->color_phase_counter % (uint64_t)phase_count);
+        phase_x = phase_index % step;
+        phase_y = phase_index / step;
+    }
+    if (phase_index_out != NULL) *phase_index_out = phase_index;
+    if (phase_x_out != NULL) *phase_x_out = phase_x;
+    if (phase_y_out != NULL) *phase_y_out = phase_y;
+}
+
+static inline void advance_color_sampling_phase(
+        anomaly_state_t *state,
+        bool appearance_refresh_ran,
+        int sample_step) {
+    if (state == NULL || !appearance_refresh_ran) return;
+    int step = sample_step > 0 ? sample_step : 1;
+    if (step <= 1) return;
+    state->color_phase_counter += 1u;
+}
+
+static inline void compute_color_sample_xy(
+        int roi_x0,
+        int roi_y0,
+        int roi_x1,
+        int roi_y1,
+        int sx,
+        int sy,
+        int sample_step,
+        int phase_x,
+        int phase_y,
+        int *sample_x_out,
+        int *sample_y_out) {
+    int step = sample_step > 0 ? sample_step : 1;
+    int cell_x0 = roi_x0 + sx * step;
+    int cell_y0 = roi_y0 + sy * step;
+    int cell_x1 = cell_x0 + step;
+    int cell_y1 = cell_y0 + step;
+    if (cell_x1 > roi_x1) cell_x1 = roi_x1;
+    if (cell_y1 > roi_y1) cell_y1 = roi_y1;
+    if (cell_x1 <= cell_x0) cell_x1 = cell_x0 + 1;
+    if (cell_y1 <= cell_y0) cell_y1 = cell_y0 + 1;
+    int local_phase_x = phase_x;
+    int local_phase_y = phase_y;
+    if (local_phase_x < 0) local_phase_x = 0;
+    if (local_phase_y < 0) local_phase_y = 0;
+    int max_local_x = cell_x1 - cell_x0 - 1;
+    int max_local_y = cell_y1 - cell_y0 - 1;
+    if (local_phase_x > max_local_x) local_phase_x = max_local_x;
+    if (local_phase_y > max_local_y) local_phase_y = max_local_y;
+    int sample_x = cell_x0 + local_phase_x;
+    int sample_y = cell_y0 + local_phase_y;
+    if (sample_x >= roi_x1) sample_x = roi_x1 - 1;
+    if (sample_y >= roi_y1) sample_y = roi_y1 - 1;
+    if (sample_x < roi_x0) sample_x = roi_x0;
+    if (sample_y < roi_y0) sample_y = roi_y0;
+    if (sample_x_out != NULL) *sample_x_out = sample_x;
+    if (sample_y_out != NULL) *sample_y_out = sample_y;
+}
+
+typedef struct {
+    float m00;
+    float m01;
+    float m02;
+    float m10;
+    float m11;
+    float m12;
+    bool valid;
+} anomaly_color_inverse_affine_t;
+
+static inline bool color_registration_model_valid(const anomaly_registration_model_t *model) {
+    return model != NULL && model->similarity.valid;
+}
+
+static inline anomaly_color_inverse_affine_t color_registration_inverse_affine(
+        const anomaly_registration_model_t *model) {
+    anomaly_color_inverse_affine_t inv;
+    memset(&inv, 0, sizeof(inv));
+    if (model == NULL) return inv;
+    float det = model->affine[0] * model->affine[4] - model->affine[1] * model->affine[3];
+    if (fabsf(det) < 1e-6f) return inv;
+    float inv_det = 1.0f / det;
+    inv.m00 =  model->affine[4] * inv_det;
+    inv.m01 = -model->affine[1] * inv_det;
+    inv.m02 = (model->affine[1] * model->affine[5] - model->affine[4] * model->affine[2]) * inv_det;
+    inv.m10 = -model->affine[3] * inv_det;
+    inv.m11 =  model->affine[0] * inv_det;
+    inv.m12 = (model->affine[3] * model->affine[2] - model->affine[0] * model->affine[5]) * inv_det;
+    inv.valid = true;
+    return inv;
+}
+
+static inline bool color_registration_invert_point_fast(
+        const anomaly_color_inverse_affine_t *inv,
+        float                                 x,
+        float                                 y,
+        float                                *out_x,
+        float                                *out_y) {
+    if (inv == NULL || !inv->valid || out_x == NULL || out_y == NULL) return false;
+    *out_x = inv->m00 * x + inv->m01 * y + inv->m02;
+    *out_y = inv->m10 * x + inv->m11 * y + inv->m12;
+    return true;
+}
+
+static inline void sample_color_cell(
+        const uint8_t *rgba,
+        int rgba_stride,
+        int sample_x,
+        int sample_y,
+        float *luma_out,
+        float *u_out,
+        float *v_out) {
+    if (luma_out != NULL) *luma_out = 0.0f;
+    if (u_out != NULL) *u_out = 0.0f;
+    if (v_out != NULL) *v_out = 0.0f;
+    if (rgba == NULL || rgba_stride <= 0 || sample_x < 0 || sample_y < 0) return;
+    const uint8_t *px = rgba + sample_y * rgba_stride + sample_x * 4;
+    float r = (float)px[0];
+    float g = (float)px[1];
+    float b = (float)px[2];
+    if (luma_out != NULL) *luma_out = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
+    if (u_out != NULL) *u_out = (-0.14713f * r) - (0.28886f * g) + (0.43600f * b);
+    if (v_out != NULL) *v_out = ( 0.61500f * r) - (0.51499f * g) - (0.10001f * b);
+}
+
+static bool prepare_color_sampling_state(
+        anomaly_state_t                   *state,
+        const anomaly_registration_model_t *registration,
+        const uint8_t                     *rgba,
+        int                                rgba_stride,
+        int                                frame_width,
+        int                                frame_height,
+        int                                roi_x0,
+        int                                roi_y0,
+        int                                roi_x1,
+        int                                roi_y1,
+        int                                sample_step,
+        int                                sg_w,
+        int                                sg_h,
+        bool                               selective_refresh_active,
+        const uint8_t                     *refresh_mask,
+        int                                active_phase_x,
+        int                                active_phase_y,
+        bool                              *forced_full_refresh_out,
+        uint32_t                          *fallback_reason_flags_out,
+        int                               *fresh_count_out,
+        int                               *carried_count_out,
+        int                               *unsampled_count_out) {
+    if (forced_full_refresh_out != NULL) *forced_full_refresh_out = false;
+    if (fallback_reason_flags_out != NULL) *fallback_reason_flags_out = 0u;
+    if (fresh_count_out != NULL) *fresh_count_out = 0;
+    if (carried_count_out != NULL) *carried_count_out = 0;
+    if (unsampled_count_out != NULL) *unsampled_count_out = 0;
+    if (state == NULL) return false;
+    anomaly_roi_state_t *roi_state = &state->roi_state;
+    size_t sg_count = (size_t)sg_w * (size_t)sg_h;
+    if (!ensure_roi_state_capacity(roi_state, sg_count)) return false;
+
+    bool full_refresh = !selective_refresh_active || refresh_mask == NULL || !color_registration_model_valid(registration);
+    if (!full_refresh) {
+        if (!roi_state->valid ||
+            roi_state->width != sg_w ||
+            roi_state->height != sg_h ||
+            roi_state->sample_step != sample_step ||
+            roi_state->color_valid_mask == NULL) {
+            full_refresh = true;
+            if (fallback_reason_flags_out != NULL) {
+                *fallback_reason_flags_out |= ANOMALY_SCAN_REASON_PREV_STATE_INVALID;
+            }
+        }
+    }
+    if (full_refresh) {
+        if (forced_full_refresh_out != NULL) *forced_full_refresh_out = selective_refresh_active;
+        for (int sy = 0; sy < sg_h; sy++) {
+            for (int sx = 0; sx < sg_w; sx++) {
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                int sample_x = 0;
+                int sample_y = 0;
+                compute_color_sample_xy(
+                        roi_x0, roi_y0, roi_x1, roi_y1,
+                        sx, sy, sample_step,
+                        active_phase_x, active_phase_y,
+                        &sample_x, &sample_y);
+                sample_color_cell(
+                        rgba, rgba_stride, sample_x, sample_y,
+                        &roi_state->color_luma[idx],
+                        &roi_state->color_u[idx],
+                        &roi_state->color_v[idx]);
+                fill_color_uv_bins(roi_state, idx);
+                roi_state->color_valid_mask[idx] = 1u;
+                roi_state->color_phase_x[idx] = (uint8_t)active_phase_x;
+                roi_state->color_phase_y[idx] = (uint8_t)active_phase_y;
+            }
+        }
+        if (fresh_count_out != NULL) *fresh_count_out = (int)sg_count;
+        return true;
+    }
+
+    if (!ensure_prev_roi_snapshot_capacity(state, sg_count)) return false;
+    float *prev_color_luma = state->scratch_prev_roi_color_luma;
+    float *prev_color_u = state->scratch_prev_roi_color_u;
+    float *prev_color_v = state->scratch_prev_roi_color_v;
+    float *prev_color_raw_score = state->scratch_prev_roi_color_raw_score;
+    float *prev_color_contrast_weight = state->scratch_prev_roi_color_contrast_weight;
+    uint8_t *prev_color_u_bin = state->scratch_prev_roi_color_u_bin;
+    uint8_t *prev_color_v_bin = state->scratch_prev_roi_color_v_bin;
+    uint8_t *prev_color_valid_mask = state->scratch_prev_roi_color_valid_mask;
+    uint8_t *prev_color_phase_x = state->scratch_prev_roi_color_phase_x;
+    uint8_t *prev_color_phase_y = state->scratch_prev_roi_color_phase_y;
+    memcpy(prev_color_luma, roi_state->color_luma, sg_count * sizeof(float));
+    memcpy(prev_color_u, roi_state->color_u, sg_count * sizeof(float));
+    memcpy(prev_color_v, roi_state->color_v, sg_count * sizeof(float));
+    memcpy(prev_color_raw_score, roi_state->color_raw_score, sg_count * sizeof(float));
+    memcpy(prev_color_contrast_weight, roi_state->color_contrast_weight, sg_count * sizeof(float));
+    memcpy(prev_color_u_bin, roi_state->color_u_bin, sg_count * sizeof(uint8_t));
+    memcpy(prev_color_v_bin, roi_state->color_v_bin, sg_count * sizeof(uint8_t));
+    memcpy(prev_color_valid_mask, roi_state->color_valid_mask, sg_count * sizeof(uint8_t));
+    memcpy(prev_color_phase_x, roi_state->color_phase_x, sg_count * sizeof(uint8_t));
+    memcpy(prev_color_phase_y, roi_state->color_phase_y, sg_count * sizeof(uint8_t));
+
+    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
+    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    anomaly_color_inverse_affine_t inv = color_registration_inverse_affine(registration);
+    if (!inv.valid) {
+        if (fallback_reason_flags_out != NULL) {
+            *fallback_reason_flags_out |= ANOMALY_SCAN_REASON_MASK_BUILD_FAILED;
+        }
+        if (forced_full_refresh_out != NULL) *forced_full_refresh_out = true;
+        for (int sy = 0; sy < sg_h; sy++) {
+            for (int sx = 0; sx < sg_w; sx++) {
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                int sample_x = 0;
+                int sample_y = 0;
+                compute_color_sample_xy(
+                        roi_x0, roi_y0, roi_x1, roi_y1,
+                        sx, sy, sample_step,
+                        active_phase_x, active_phase_y,
+                        &sample_x, &sample_y);
+                sample_color_cell(
+                        rgba, rgba_stride, sample_x, sample_y,
+                        &roi_state->color_luma[idx],
+                        &roi_state->color_u[idx],
+                        &roi_state->color_v[idx]);
+                fill_color_uv_bins(roi_state, idx);
+                roi_state->color_valid_mask[idx] = 1u;
+                roi_state->color_phase_x[idx] = (uint8_t)active_phase_x;
+                roi_state->color_phase_y[idx] = (uint8_t)active_phase_y;
+            }
+        }
+        if (fresh_count_out != NULL) *fresh_count_out = (int)sg_count;
+        return true;
+    }
+
+    int fresh_count = 0;
+    int carried_count = 0;
+    int unsampled_count = 0;
+    int prev_roi_x0 = roi_state->roi_x0;
+    int prev_roi_y0 = roi_state->roi_y0;
+    int prev_roi_x1 = roi_state->roi_x1;
+    int prev_roi_y1 = roi_state->roi_y1;
+    int prev_width = roi_state->width;
+    int prev_height = roi_state->height;
+    int prev_sample_step = roi_state->sample_step;
+    for (int sy = 0; sy < sg_h; sy++) {
+        int center_y = roi_y0 + sy * sample_step + sample_step / 2;
+        if (center_y >= roi_y1) center_y = roi_y1 - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (refresh_mask[idx] != 0u) {
+                int sample_x = 0;
+                int sample_y = 0;
+                compute_color_sample_xy(
+                        roi_x0, roi_y0, roi_x1, roi_y1,
+                        sx, sy, sample_step,
+                        active_phase_x, active_phase_y,
+                        &sample_x, &sample_y);
+                sample_color_cell(
+                        rgba, rgba_stride, sample_x, sample_y,
+                        &roi_state->color_luma[idx],
+                        &roi_state->color_u[idx],
+                        &roi_state->color_v[idx]);
+                fill_color_uv_bins(roi_state, idx);
+                roi_state->color_valid_mask[idx] = 1u;
+                roi_state->color_phase_x[idx] = (uint8_t)active_phase_x;
+                roi_state->color_phase_y[idx] = (uint8_t)active_phase_y;
+                fresh_count++;
+                continue;
+            }
+
+            int center_x = roi_x0 + sx * sample_step + sample_step / 2;
+            if (center_x >= roi_x1) center_x = roi_x1 - 1;
+            float nx = clamp01f((float)center_x / fw);
+            float ny = clamp01f((float)center_y / fh);
+            float px = 0.0f;
+            float py = 0.0f;
+            bool carried = false;
+            if (color_registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
+                int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
+                int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
+                if (prev_px >= prev_roi_x0 && prev_px < prev_roi_x1 &&
+                    prev_py >= prev_roi_y0 && prev_py < prev_roi_y1) {
+                    int prev_sx = (prev_px - prev_roi_x0) / prev_sample_step;
+                    int prev_sy = (prev_py - prev_roi_y0) / prev_sample_step;
+                    if (prev_sx >= 0 && prev_sy >= 0 &&
+                        prev_sx < prev_width && prev_sy < prev_height) {
+                        size_t prev_idx = (size_t)prev_sy * (size_t)prev_width + (size_t)prev_sx;
+                        if (prev_color_valid_mask[prev_idx] != 0u) {
+                            roi_state->color_luma[idx] = prev_color_luma[prev_idx];
+                            roi_state->color_u[idx] = prev_color_u[prev_idx];
+                            roi_state->color_v[idx] = prev_color_v[prev_idx];
+                            roi_state->color_raw_score[idx] = prev_color_raw_score[prev_idx];
+                            roi_state->color_contrast_weight[idx] = prev_color_contrast_weight[prev_idx];
+                            roi_state->color_u_bin[idx] = prev_color_u_bin[prev_idx];
+                            roi_state->color_v_bin[idx] = prev_color_v_bin[prev_idx];
+                            roi_state->color_valid_mask[idx] = 1u;
+                            roi_state->color_phase_x[idx] = prev_color_phase_x[prev_idx];
+                            roi_state->color_phase_y[idx] = prev_color_phase_y[prev_idx];
+                            carried = true;
+                            carried_count++;
+                        }
+                    }
+                }
+            }
+            if (!carried) {
+                roi_state->color_luma[idx] = 0.0f;
+                roi_state->color_u[idx] = 0.0f;
+                roi_state->color_v[idx] = 0.0f;
+                roi_state->color_raw_score[idx] = 0.0f;
+                roi_state->color_contrast_weight[idx] = 0.0f;
+                roi_state->color_u_bin[idx] = 0u;
+                roi_state->color_v_bin[idx] = 0u;
+                roi_state->color_valid_mask[idx] = 0u;
+                roi_state->color_phase_x[idx] = 0u;
+                roi_state->color_phase_y[idx] = 0u;
+                unsampled_count++;
+            }
+        }
+    }
+    if (fresh_count_out != NULL) *fresh_count_out = fresh_count;
+    if (carried_count_out != NULL) *carried_count_out = carried_count;
+    if (unsampled_count_out != NULL) *unsampled_count_out = unsampled_count;
+    return true;
+}
+
+static void compute_local_color_contrast(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        sx,
+        int                        sy,
+        float                     *avg_chroma_out,
+        float                     *avg_luma_out,
+        int                       *neighbor_count_out) {
+    if (avg_chroma_out != NULL) *avg_chroma_out = 0.0f;
+    if (avg_luma_out != NULL) *avg_luma_out = 0.0f;
+    if (neighbor_count_out != NULL) *neighbor_count_out = 0;
+    if (roi_state == NULL || roi_state->color_valid_mask == NULL ||
+        roi_state->color_u == NULL || roi_state->color_v == NULL ||
+        roi_state->color_luma == NULL || sg_w <= 0 || sg_h <= 0 ||
+        sx < 0 || sy < 0 || sx >= sg_w || sy >= sg_h) {
+        return;
+    }
+    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+    if (roi_state->color_valid_mask[idx] == 0u) return;
+
+    float center_u = roi_state->color_u[idx];
+    float center_v = roi_state->color_v[idx];
+    float center_luma = roi_state->color_luma[idx];
+    float chroma_sum = 0.0f;
+    float luma_sum = 0.0f;
+    int neighbor_count = 0;
+    for (int ny = sy - 1; ny <= sy + 1; ny++) {
+        if (ny < 0 || ny >= sg_h) continue;
+        for (int nx = sx - 1; nx <= sx + 1; nx++) {
+            if (nx < 0 || nx >= sg_w || (nx == sx && ny == sy)) continue;
+            size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+            if (roi_state->color_valid_mask[nidx] == 0u) continue;
+            float du = center_u - roi_state->color_u[nidx];
+            float dv = center_v - roi_state->color_v[nidx];
+            chroma_sum += sqrtf((du * du) + (dv * dv));
+            luma_sum += fabsf(center_luma - roi_state->color_luma[nidx]);
+            neighbor_count++;
+        }
+    }
+    if (neighbor_count <= 0) return;
+    if (avg_chroma_out != NULL) *avg_chroma_out = chroma_sum / (float)neighbor_count;
+    if (avg_luma_out != NULL) *avg_luma_out = luma_sum / (float)neighbor_count;
+    if (neighbor_count_out != NULL) *neighbor_count_out = neighbor_count;
+}
+
+static void compute_color_contrast_weights(
+        anomaly_roi_state_t *roi_state,
+        int                  sg_w,
+        int                  sg_h) {
+    if (roi_state == NULL || roi_state->color_valid_mask == NULL ||
+        roi_state->color_contrast_weight == NULL || sg_w <= 0 || sg_h <= 0) {
+        return;
+    }
+
+#define T ANOMALY_LOCAL_TILE_SIZE
+    double tile_sum_chroma[T][T], tile_sum_chroma2[T][T];
+    double tile_sum_luma[T][T], tile_sum_luma2[T][T];
+    int tile_n[T][T];
+    memset(tile_sum_chroma, 0, sizeof(tile_sum_chroma));
+    memset(tile_sum_chroma2, 0, sizeof(tile_sum_chroma2));
+    memset(tile_sum_luma, 0, sizeof(tile_sum_luma));
+    memset(tile_sum_luma2, 0, sizeof(tile_sum_luma2));
+    memset(tile_n, 0, sizeof(tile_n));
+
+    double global_sum_chroma = 0.0;
+    double global_sum_chroma2 = 0.0;
+    double global_sum_luma = 0.0;
+    double global_sum_luma2 = 0.0;
+    int global_n = 0;
+    for (int sy = 0; sy < sg_h; sy++) {
+        int tr = sy * T / sg_h;
+        if (tr >= T) tr = T - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            int tc = sx * T / sg_w;
+            if (tc >= T) tc = T - 1;
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (roi_state->color_valid_mask[idx] == 0u) {
+                roi_state->color_contrast_weight[idx] = 0.0f;
+                continue;
+            }
+            float avg_chroma = 0.0f;
+            float avg_luma = 0.0f;
+            int neighbor_count = 0;
+            compute_local_color_contrast(roi_state, sg_w, sg_h, sx, sy, &avg_chroma, &avg_luma, &neighbor_count);
+            if (neighbor_count <= 0) {
+                roi_state->color_contrast_weight[idx] = 0.35f;
+                continue;
+            }
+            tile_sum_chroma[tr][tc] += avg_chroma;
+            tile_sum_chroma2[tr][tc] += (double)avg_chroma * (double)avg_chroma;
+            tile_sum_luma[tr][tc] += avg_luma;
+            tile_sum_luma2[tr][tc] += (double)avg_luma * (double)avg_luma;
+            tile_n[tr][tc]++;
+            global_sum_chroma += avg_chroma;
+            global_sum_chroma2 += (double)avg_chroma * (double)avg_chroma;
+            global_sum_luma += avg_luma;
+            global_sum_luma2 += (double)avg_luma * (double)avg_luma;
+            global_n++;
+        }
+    }
+
+    double global_mean_chroma = global_n > 0 ? global_sum_chroma / (double)global_n : 0.0;
+    double global_std_chroma = global_n > 0
+        ? sqrt(fmax(global_sum_chroma2 / (double)global_n - global_mean_chroma * global_mean_chroma, 0.01))
+        : 1.0;
+    double global_mean_luma = global_n > 0 ? global_sum_luma / (double)global_n : 0.0;
+    double global_std_luma = global_n > 0
+        ? sqrt(fmax(global_sum_luma2 / (double)global_n - global_mean_luma * global_mean_luma, 0.01))
+        : 1.0;
+
+    for (int sy = 0; sy < sg_h; sy++) {
+        int tr = sy * T / sg_h;
+        if (tr >= T) tr = T - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            int tc = sx * T / sg_w;
+            if (tc >= T) tc = T - 1;
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (roi_state->color_valid_mask[idx] == 0u) {
+                roi_state->color_contrast_weight[idx] = 0.0f;
+                continue;
+            }
+            float avg_chroma = 0.0f;
+            float avg_luma = 0.0f;
+            int neighbor_count = 0;
+            compute_local_color_contrast(roi_state, sg_w, sg_h, sx, sy, &avg_chroma, &avg_luma, &neighbor_count);
+            if (neighbor_count <= 0) {
+                roi_state->color_contrast_weight[idx] = 0.35f;
+                continue;
+            }
+
+            double mean_chroma = global_mean_chroma;
+            double std_chroma = global_std_chroma;
+            double mean_luma = global_mean_luma;
+            double std_luma = global_std_luma;
+            if (tile_n[tr][tc] >= ANOMALY_LOCAL_TILE_MIN_N) {
+                double fn = (double)tile_n[tr][tc];
+                mean_chroma = tile_sum_chroma[tr][tc] / fn;
+                std_chroma = sqrt(fmax(tile_sum_chroma2[tr][tc] / fn - mean_chroma * mean_chroma, 0.01));
+                mean_luma = tile_sum_luma[tr][tc] / fn;
+                std_luma = sqrt(fmax(tile_sum_luma2[tr][tc] / fn - mean_luma * mean_luma, 0.01));
+            }
+            double chroma_floor = mean_chroma + (0.35 * std_chroma);
+            double luma_floor = mean_luma + (0.35 * std_luma);
+            double chroma_signal = ((double)avg_chroma - chroma_floor) / fmax(chroma_floor + 1.5, 1.0);
+            double luma_signal = ((double)avg_luma - luma_floor) / fmax(luma_floor + 4.0, 1.0);
+            double combined = 0.65 * chroma_signal + 0.35 * luma_signal;
+            float weight = clampf(0.35f + (float)combined, 0.20f, 1.15f);
+            roi_state->color_contrast_weight[idx] = weight;
+        }
+    }
+#undef T
+}
+
 static void build_color_support_map(
         const anomaly_config_t *cfg,
         const float            *raw_map,
+        const float            *contrast_map,
         int                     sg_w,
         int                     sg_h,
         int                     frame_w,
@@ -1315,11 +2075,14 @@ static void build_color_support_map(
             float mean = count > 0 ? (sum / (float)count) : 0.0f;
             float ring_mean = patch_radius > 0 ? (ring_sum / (float)(patch_radius * 8)) : 0.0f;
             float density = count > 0 ? ((float)support_count / (float)count) : 0.0f;
+            float contrast_weight = contrast_map != NULL ? contrast_map[idx] : 1.0f;
+            float support_weight = clampf(0.55f + 0.45f * contrast_weight, 0.35f, 1.20f);
             float patch_support =
                 0.55f * center +
                 0.75f * mean +
                 0.90f * density -
                 0.30f * ring_mean;
+            patch_support *= support_weight;
             float clamped_support = clampf(patch_support, 0.0f, 4.0f);
             scratch_map[idx] = clamped_support;
             if (max_support_out != NULL && clamped_support > *max_support_out) {
@@ -1350,6 +2113,7 @@ static void build_color_support_map(
 static void extract_color_blob_candidates(
         const anomaly_config_t *cfg,
         const float            *color_support_map,
+        const float            *contrast_map,
         int                     sg_w,
         int                     sg_h,
         int                     frame_w,
@@ -1458,6 +2222,20 @@ static void extract_color_blob_candidates(
             float span_px = span * (float)(sample_step > 0 ? sample_step : 1);
             float mean_support = (float)(sum_support / (double)area);
             float center_share = sum_support > 0.0 ? (peak_support / (float)sum_support) : 0.0f;
+            float contrast_sum = 0.0f;
+            int contrast_count = 0;
+            for (int gy = min_y; gy <= max_y; gy++) {
+                for (int gx = min_x; gx <= max_x; gx++) {
+                    size_t cidx = (size_t)gy * (size_t)sg_w + (size_t)gx;
+                    if (color_support_map[cidx] <= 0.0f) continue;
+                    float contrast_weight = contrast_map != NULL ? contrast_map[cidx] : 1.0f;
+                    contrast_sum += contrast_weight;
+                    contrast_count++;
+                }
+            }
+            float mean_contrast_weight = contrast_count > 0
+                ? (contrast_sum / (float)contrast_count)
+                : 1.0f;
 
             int ring_total = 0;
             int ring_supported = 0;
@@ -1534,8 +2312,10 @@ static void extract_color_blob_candidates(
                 0.20f * clampf((0.30f - support_fraction) / 0.30f, 0.0f, 1.0f);
             float isolation_scale = 0.42f + 0.78f * clampf(isolation_score, 0.0f, 1.0f);
             float strength_scale = clampf((peak_support + 0.65f * mean_support) / 3.8f, 0.22f, 1.28f);
+            float contrast_scale = clampf(0.55f + 0.55f * mean_contrast_weight, 0.35f, 1.18f);
             float quality = area_scale * span_scale * fill_scale * center_scale * isolation_scale;
             quality *= apparent_size_scale;
+            quality *= contrast_scale;
             quality = clampf(quality, 0.0f, 1.40f);
             if (quality <= 0.0f) continue;
 
@@ -6852,6 +7632,10 @@ static void summarize_roi_cells(
                 roi_state->thermal_score[idx] > cell->max_thermal_score) {
                 cell->max_thermal_score = roi_state->thermal_score[idx];
             }
+            if (roi_state->color_raw_score != NULL &&
+                roi_state->color_raw_score[idx] > cell->max_color_score) {
+                cell->max_color_score = roi_state->color_raw_score[idx];
+            }
             float motion_support = motion_support_map != NULL ? motion_support_map[idx] : 0.0f;
             if (motion_support > cell->max_motion_support) {
                 cell->max_motion_support = motion_support;
@@ -7682,6 +8466,7 @@ void anomaly_state_init(anomaly_state_t *state) {
 void anomaly_state_reset(anomaly_state_t *state) {
     if (state == NULL) return;
     state->frame_counter = 0;
+    state->color_phase_counter = 0;
     memset(state->acc_cx,     0, sizeof(state->acc_cx));
     memset(state->acc_cy,     0, sizeof(state->acc_cy));
     memset(state->acc_hits,   0, sizeof(state->acc_hits));
@@ -7725,6 +8510,12 @@ void anomaly_state_reset(anomaly_state_t *state) {
     }
     state->thermal_target_persist_w = 0;
     state->thermal_target_persist_h = 0;
+    free(state->color_recent_hist);
+    state->color_recent_hist = NULL;
+    state->color_recent_hist_bins = 0;
+    free(state->scratch_color_hist);
+    state->scratch_color_hist = NULL;
+    state->scratch_color_hist_bins = 0;
     release_roi_state(&state->roi_state);
     clear_all_target_tracks(state);
     memset(state->saliency_aux_cx, 0, sizeof(state->saliency_aux_cx));
@@ -7776,10 +8567,26 @@ void anomaly_state_reset(anomaly_state_t *state) {
     state->scratch_prev_roi_thermal_score = NULL;
     free(state->scratch_prev_roi_temporal_score);
     state->scratch_prev_roi_temporal_score = NULL;
+    free(state->scratch_prev_roi_color_luma);
+    state->scratch_prev_roi_color_luma = NULL;
+    free(state->scratch_prev_roi_color_u);
+    state->scratch_prev_roi_color_u = NULL;
+    free(state->scratch_prev_roi_color_v);
+    state->scratch_prev_roi_color_v = NULL;
+    free(state->scratch_prev_roi_color_raw_score);
+    state->scratch_prev_roi_color_raw_score = NULL;
+    free(state->scratch_prev_roi_color_contrast_weight);
+    state->scratch_prev_roi_color_contrast_weight = NULL;
     free(state->scratch_prev_roi_valid_mask);
     state->scratch_prev_roi_valid_mask = NULL;
     free(state->scratch_prev_roi_coverage_age);
     state->scratch_prev_roi_coverage_age = NULL;
+    free(state->scratch_prev_roi_color_valid_mask);
+    state->scratch_prev_roi_color_valid_mask = NULL;
+    free(state->scratch_prev_roi_color_phase_x);
+    state->scratch_prev_roi_color_phase_x = NULL;
+    free(state->scratch_prev_roi_color_phase_y);
+    state->scratch_prev_roi_color_phase_y = NULL;
     state->scratch_prev_roi_capacity = 0;
     free(state->scratch_refresh_mask);
     state->scratch_refresh_mask = NULL;
@@ -8160,40 +8967,30 @@ int anomaly_process_frame(
         (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
     bool need_color_support_map = color_algorithm_enabled;
 
-    // Colour tile accumulators (kept for ANOMALY_ALGO_COLOR).
-#define T ANOMALY_LOCAL_TILE_SIZE
-    double tile_sum_u[T][T], tile_sum_u2[T][T];
-    double tile_sum_v[T][T], tile_sum_v2[T][T];
-    int    tile_n[T][T];
-    if (need_color_support) {
-        for (int tr = 0; tr < T; tr++)
-            for (int tc = 0; tc < T; tc++) {
-                tile_sum_u[tr][tc] = tile_sum_u2[tr][tc] = 0.0;
-                tile_sum_v[tr][tc] = tile_sum_v2[tr][tc] = 0.0;
-                tile_n[tr][tc] = 0;
-            }
-    }
+    int color_phase_index = 0;
+    int color_phase_x = 0;
+    int color_phase_y = 0;
+    color_sampling_phase_for_frame(state, sample_step, &color_phase_index, &color_phase_x, &color_phase_y);
+    bool color_forced_full_refresh = false;
+    uint32_t color_fallback_reason_flags = 0u;
+    int color_fresh_sample_count = 0;
+    int color_carried_sample_count = 0;
+    int color_unsampled_new_count = 0;
 
-    // Global sums (used for color-tile fallback and early-exit check).
+    // Global sums (used for thermal/global luma stats).
     double sum_l = 0.0, sum_l2 = 0.0;
-    double sum_u = 0.0, sum_u2 = 0.0;
-    double sum_v = 0.0, sum_v2 = 0.0;
     int sample_count = 0;
 
-    // Fill sampled-luma grid, integral images, and colour tile accumulators in one pass.
+    // Fill sampled-luma grid and integral images in one pass.
     for (int sy = 0; sy < sg_h; sy++) {
         int y  = roi_y0 + sy * sample_step;
         if (y >= roi_y1) y = roi_y1 - 1;
-        int tr = sy * T / sg_h;
-        if (tr >= T) tr = T - 1;
         const uint8_t *row = rgba + (y * rgba_stride);
         int row_offset = sy * sg_w;
         int prev_row_offset = row_offset - sg_w;
         for (int sx = 0; sx < sg_w; sx++) {
             int x  = roi_x0 + sx * sample_step;
             if (x >= roi_x1) x = roi_x1 - 1;
-            int tc = sx * T / sg_w;
-            if (tc >= T) tc = T - 1;
             const uint8_t *px = row + (x * 4);
             float r = (float)px[0], g = (float)px[1], b = (float)px[2];
             float lum = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
@@ -8209,15 +9006,6 @@ int anomaly_process_frame(
             float al2 = (sy > 0 && sx > 0) ? ii_sum2[prev_row_offset + (sx - 1)] : 0.0f;
             ii_sum2[idx] = lum2 + a2 + l2 - al2;
             sum_l  += lum; sum_l2 += lum2;
-            if (need_color_support) {
-                float u   = (-0.14713f * r) - (0.28886f * g) + (0.43600f * b);
-                float v   = ( 0.61500f * r) - (0.51499f * g) - (0.10001f * b);
-                sum_u  += u;  sum_u2  += u * u;
-                sum_v  += v;  sum_v2  += v * v;
-                tile_sum_u[tr][tc]  += u;  tile_sum_u2[tr][tc]  += u * u;
-                tile_sum_v[tr][tc]  += v;  tile_sum_v2[tr][tc]  += v * v;
-                tile_n[tr][tc]++;
-            }
             sample_count++;
         }
     }
@@ -8241,38 +9029,84 @@ int anomaly_process_frame(
         return 0;
     }
 
-    // Colour tile mean/std (fall back to global if tile too sparse).
-    double g_mean_l = sum_l / (double)sample_count;
-    double g_std_l  = sqrt(fmax((sum_l2/(double)sample_count) - g_mean_l*g_mean_l, 1.0));
-    double g_mean_u = 0.0;
-    double g_std_u  = 1.0;
-    double g_mean_v = 0.0;
-    double g_std_v  = 1.0;
-    double tile_mean_u[T][T], tile_std_u[T][T];
-    double tile_mean_v[T][T], tile_std_v[T][T];
     if (need_color_support) {
-        g_mean_u = sum_u / (double)sample_count;
-        g_std_u  = sqrt(fmax((sum_u2/(double)sample_count) - g_mean_u*g_mean_u, 1.0));
-        g_mean_v = sum_v / (double)sample_count;
-        g_std_v  = sqrt(fmax((sum_v2/(double)sample_count) - g_mean_v*g_mean_v, 1.0));
-
-        for (int tr = 0; tr < T; tr++) {
-            for (int tc = 0; tc < T; tc++) {
-                int n = tile_n[tr][tc];
-                if (n >= ANOMALY_LOCAL_TILE_MIN_N) {
-                    double fn = (double)n;
-                    tile_mean_u[tr][tc] = tile_sum_u[tr][tc] / fn;
-                    tile_std_u[tr][tc]  = sqrt(fmax(tile_sum_u2[tr][tc]/fn - tile_mean_u[tr][tc]*tile_mean_u[tr][tc], 1.0));
-                    tile_mean_v[tr][tc] = tile_sum_v[tr][tc] / fn;
-                    tile_std_v[tr][tc]  = sqrt(fmax(tile_sum_v2[tr][tc]/fn - tile_mean_v[tr][tc]*tile_mean_v[tr][tc], 1.0));
-                } else {
-                    tile_mean_u[tr][tc] = g_mean_u; tile_std_u[tr][tc] = g_std_u;
-                    tile_mean_v[tr][tc] = g_mean_v; tile_std_v[tr][tc] = g_std_v;
-                }
-            }
+        bool color_sampling_prepared = prepare_color_sampling_state(
+                state,
+                &registration,
+                rgba,
+                rgba_stride,
+                width,
+                height,
+                roi_x0,
+                roi_y0,
+                roi_x1,
+                roi_y1,
+                sample_step,
+                sg_w,
+                sg_h,
+                selective_refresh_active,
+                appearance_refresh_mask,
+                color_phase_x,
+                color_phase_y,
+                &color_forced_full_refresh,
+                &color_fallback_reason_flags,
+                &color_fresh_sample_count,
+                &color_carried_sample_count,
+                &color_unsampled_new_count);
+        if (!color_sampling_prepared) {
+            color_forced_full_refresh = true;
+            color_fallback_reason_flags |= ANOMALY_SCAN_REASON_PREV_STATE_INVALID;
+            prepare_color_sampling_state(
+                    state,
+                    &registration,
+                    rgba,
+                    rgba_stride,
+                    width,
+                    height,
+                    roi_x0,
+                    roi_y0,
+                    roi_x1,
+                    roi_y1,
+                    sample_step,
+                    sg_w,
+                    sg_h,
+                    false,
+                    NULL,
+                    color_phase_x,
+                    color_phase_y,
+                    &color_forced_full_refresh,
+                    &color_fallback_reason_flags,
+                    &color_fresh_sample_count,
+                    &color_carried_sample_count,
+                    &color_unsampled_new_count);
+        }
+        scan_plan.reason_flags |= color_fallback_reason_flags;
+        if (color_forced_full_refresh && result_out != NULL) {
+            result_out->scan_plan.reason_flags |= color_fallback_reason_flags;
+        }
+        if (result_out != NULL) {
+            result_out->scan_plan = scan_plan;
         }
     }
-#undef T
+
+    double g_mean_l = sum_l / (double)sample_count;
+    double g_std_l  = sqrt(fmax((sum_l2/(double)sample_count) - g_mean_l*g_mean_l, 1.0));
+    uint8_t *color_frame_hist = NULL;
+    int color_hist_valid_samples = 0;
+    if (need_color_support) {
+        anomaly_roi_state_t *roi_state = &state->roi_state;
+        compute_color_contrast_weights(roi_state, sg_w, sg_h);
+        if (ensure_color_hist_capacity(&state->scratch_color_hist, &state->scratch_color_hist_bins) &&
+            ensure_color_hist_capacity(&state->color_recent_hist, &state->color_recent_hist_bins)) {
+            color_frame_hist = state->scratch_color_hist;
+            color_hist_valid_samples = build_color_frame_histogram(roi_state, sg_w, sg_h, color_frame_hist);
+            if (color_hist_valid_samples <= 0) {
+                memset(color_frame_hist, 0, ANOMALY_COLOR_HIST_BINS * sizeof(uint8_t));
+            }
+        } else {
+            color_frame_hist = NULL;
+        }
+    }
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP, stage_started_us);
 
     int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
@@ -8295,7 +9129,7 @@ int anomaly_process_frame(
     //   a single clearing yet large enough for reliable statistics (49 samples).
     //   Produces a best-candidate pixel (best_thermal) used as fallback during
     //   EMA background warmup; after warmup the temporal pass below replaces it.
-    // Color: 8×8 tile grid (unchanged).
+    // Color: frame-level rarity gate followed by the existing support/blob stages.
 
     // Inline integral-image rectangle query.
     bool need_motion_candidates =
@@ -8347,11 +9181,12 @@ int anomaly_process_frame(
     int saliency_top_count = 0;
     float saliency_tracked_score_pre = -1.0f;
     bool saliency_switch_suppressed = false;
+    bool color_selective_refresh_active = selective_refresh_active && !color_forced_full_refresh;
     int color_active_min_sx = 0;
     int color_active_min_sy = 0;
     int color_active_max_sx = sg_w > 0 ? (sg_w - 1) : -1;
     int color_active_max_sy = sg_h > 0 ? (sg_h - 1) : -1;
-    if (color_algorithm_enabled && selective_refresh_active && appearance_refresh_mask != NULL) {
+    if (color_algorithm_enabled && color_selective_refresh_active && appearance_refresh_mask != NULL) {
         int color_bounds_pad = color_support_patch_radius(cfg, width, height, sample_step);
         compute_active_mask_bounds(
                 appearance_refresh_mask,
@@ -8369,22 +9204,17 @@ int anomaly_process_frame(
     for (int sy = 0; sy < sg_h; sy++) {
         int y  = roi_y0 + sy * sample_step;
         if (y >= roi_y1) y = roi_y1 - 1;
-        int tr = sy * ANOMALY_LOCAL_TILE_SIZE / sg_h;
-        if (tr >= ANOMALY_LOCAL_TILE_SIZE) tr = ANOMALY_LOCAL_TILE_SIZE - 1;
 
         for (int sx = 0; sx < sg_w; sx++) {
             int x  = roi_x0 + sx * sample_step;
             if (x >= roi_x1) x = roi_x1 - 1;
-            int tc = sx * ANOMALY_LOCAL_TILE_SIZE / sg_w;
-            if (tc >= ANOMALY_LOCAL_TILE_SIZE) tc = ANOMALY_LOCAL_TILE_SIZE - 1;
             size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-            if (selective_refresh_active && appearance_refresh_mask[idx] == 0u) {
-                continue;
-            }
 
             float lum = sg_luma[idx];
+            bool thermal_refresh_skip = selective_refresh_active && appearance_refresh_mask[idx] == 0u;
+            bool color_refresh_skip = color_selective_refresh_active && appearance_refresh_mask[idx] == 0u;
 
-            if (compute_spatial_thermal_scores) {
+            if (compute_spatial_thermal_scores && !thermal_refresh_skip) {
 #if ANOMALY_DEBUG_TIMING
                 int64_t branch_started_us = anomaly_timing_now_us();
 #endif
@@ -8421,22 +9251,47 @@ int anomaly_process_frame(
 #endif
             }
 
-            if (color_algorithm_enabled) {
+            if (color_algorithm_enabled && !color_refresh_skip) {
 #if ANOMALY_DEBUG_TIMING
                 int64_t branch_started_us = anomaly_timing_now_us();
 #endif
-                const uint8_t *px = rgba + (y * rgba_stride) + (x * 4);
-                double r = (double)px[0], g = (double)px[1], b = (double)px[2];
-                double u = (-0.14713 * r) - (0.28886 * g) + (0.43600 * b);
-                double v = ( 0.61500 * r) - (0.51499 * g) - (0.10001 * b);
-                float chroma_score = (float)(fabs((u - tile_mean_u[tr][tc]) / tile_std_u[tr][tc])
-                                          + fabs((v - tile_mean_v[tr][tc]) / tile_std_v[tr][tc]));
-                float luma_score = (float)fabs((lum - (float)g_mean_l) / (float)g_std_l);
-                float cs =
-                    0.65f * clampf(chroma_score - 1.20f, 0.0f, 6.0f) +
-                    0.35f * clampf(luma_score - 0.90f, 0.0f, 5.0f);
-                if (saliency_color_map != NULL) {
-                    saliency_color_map[idx] = clampf(cs, 0.0f, 4.0f);
+                anomaly_roi_state_t *roi_state = &state->roi_state;
+                if (roi_state->color_valid_mask != NULL &&
+                    roi_state->color_valid_mask[idx] != 0u &&
+                    color_frame_hist != NULL) {
+                    int u_bin = (int)roi_state->color_u_bin[idx];
+                    int v_bin = (int)roi_state->color_v_bin[idx];
+                    float rarity = score_color_hist_family_rarity(
+                        color_frame_hist,
+                        state->color_recent_hist,
+                        u_bin,
+                        v_bin);
+                    roi_state->color_raw_score[idx] = rarity;
+                    if (saliency_color_map != NULL) {
+                        int local_support = local_uv_support_count(
+                            roi_state,
+                            sg_w,
+                            sg_h,
+                            sx,
+                            sy,
+                            u_bin,
+                            v_bin);
+                        if (rarity < ANOMALY_COLOR_RARITY_MIN ||
+                            local_support < ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
+                            saliency_color_map[idx] = 0.0f;
+                        } else {
+                            float score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
+                                          ANOMALY_COLOR_RARITY_SCALE;
+                            float support_scale = clampf(
+                                0.60f + 0.20f * (float)(local_support - ANOMALY_COLOR_LOCAL_SUPPORT_MIN),
+                                0.60f,
+                                1.20f);
+                            saliency_color_map[idx] = clampf(score * support_scale, 0.0f, 4.0f);
+                        }
+                    }
+                } else {
+                    if (saliency_color_map != NULL) saliency_color_map[idx] = 0.0f;
+                    if (roi_state->color_raw_score != NULL) roi_state->color_raw_score[idx] = 0.0f;
                 }
 #if ANOMALY_DEBUG_TIMING
                 anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SCORING, branch_started_us);
@@ -8459,12 +9314,20 @@ int anomaly_process_frame(
     float color_candidate_isolation[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_ring_fraction[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_support_mass[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_contrast_weight[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_retention_rank[ANOMALY_MAX_COLOR_CANDIDATES];
     bool color_candidate_above_threshold[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_candidate_min_x[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_candidate_min_y[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_candidate_max_x[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_candidate_max_y[ANOMALY_MAX_COLOR_CANDIDATES];
+    int color_candidate_hist_key[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_hist_current_count[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_hist_recent_count[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_hist_rarity[ANOMALY_MAX_COLOR_CANDIDATES];
+    int color_hist_nonzero_bins = 0;
+    float color_hist_max_current_count = 0.0f;
+    float color_hist_max_recent_count = 0.0f;
     if (color_algorithm_enabled &&
         saliency_color_map != NULL &&
         color_support_scratch != NULL &&
@@ -8482,6 +9345,7 @@ int anomaly_process_frame(
         build_color_support_map(
                 cfg,
                 saliency_color_map,
+                state->roi_state.color_contrast_weight,
                 sg_w,
                 sg_h,
                 width,
@@ -8508,6 +9372,7 @@ int anomaly_process_frame(
             extract_color_blob_candidates(
                     cfg,
                     saliency_color_map,
+                    state->roi_state.color_contrast_weight,
                     sg_w,
                     sg_h,
                     width,
@@ -8542,6 +9407,11 @@ int anomaly_process_frame(
             color_candidate_isolation[ci] = color_blob_candidates[ci].isolation_score;
             color_candidate_ring_fraction[ci] = color_blob_candidates[ci].ring_fraction;
             color_candidate_support_mass[ci] = color_blob_candidates[ci].support_mass;
+            color_candidate_contrast_weight[ci] =
+                state->roi_state.color_contrast_weight != NULL
+                ? state->roi_state.color_contrast_weight[(size_t)color_candidates[ci].sg_y * (size_t)sg_w +
+                                                        (size_t)color_candidates[ci].sg_x]
+                : 1.0f;
             color_candidate_retention_rank[ci] = color_blob_candidates[ci].retention_rank;
             color_candidate_above_threshold[ci] =
                 color_blob_candidates[ci].candidate.color_score >= cfg->score_threshold;
@@ -8549,6 +9419,29 @@ int anomaly_process_frame(
             color_candidate_min_y[ci] = color_blob_candidates[ci].min_y;
             color_candidate_max_x[ci] = color_blob_candidates[ci].max_x;
             color_candidate_max_y[ci] = color_blob_candidates[ci].max_y;
+            color_candidate_hist_key[ci] = -1;
+            color_candidate_hist_current_count[ci] = 0.0f;
+            color_candidate_hist_recent_count[ci] = 0.0f;
+            color_candidate_hist_rarity[ci] = 0.0f;
+            if (color_frame_hist != NULL && state->roi_state.color_valid_mask != NULL) {
+                size_t cidx = (size_t)color_candidates[ci].sg_y * (size_t)sg_w +
+                              (size_t)color_candidates[ci].sg_x;
+                if (state->roi_state.color_valid_mask[cidx] != 0u) {
+                    int u_bin = (int)state->roi_state.color_u_bin[cidx];
+                    int v_bin = (int)state->roi_state.color_v_bin[cidx];
+                    int key = color_hist_key(u_bin, v_bin);
+                    color_candidate_hist_key[ci] = key;
+                    color_candidate_hist_current_count[ci] = (float)color_frame_hist[key];
+                    color_candidate_hist_recent_count[ci] = state->color_recent_hist != NULL
+                        ? (float)state->color_recent_hist[key]
+                        : 0.0f;
+                    color_candidate_hist_rarity[ci] = score_color_hist_family_rarity(
+                        color_frame_hist,
+                        state->color_recent_hist,
+                        u_bin,
+                        v_bin);
+                }
+            }
             if (color_candidate_above_threshold[ci]) {
                 if (best_color_candidate_idx < 0 ||
                     compare_color_blob_rank(&color_blob_candidates[ci],
@@ -8566,6 +9459,19 @@ int anomaly_process_frame(
             best_color_x = color_candidates[best_color_candidate_idx].pixel_x;
             best_color_y = color_candidates[best_color_candidate_idx].pixel_y;
         }
+    }
+    if (color_frame_hist != NULL) {
+        for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) {
+            float cur = (float)color_frame_hist[i];
+            float rec = state->color_recent_hist != NULL ? (float)state->color_recent_hist[i] : 0.0f;
+            if (cur > 0.0f) color_hist_nonzero_bins++;
+            if (cur > color_hist_max_current_count) color_hist_max_current_count = cur;
+            if (rec > color_hist_max_recent_count) color_hist_max_recent_count = rec;
+        }
+        update_color_recent_histogram(
+            state,
+            color_frame_hist,
+            scene_discontinuity || color_forced_full_refresh || color_hist_valid_samples <= 0);
     }
 
     anomaly_motion_candidate_t motion_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
@@ -10590,6 +11496,23 @@ int anomaly_process_frame(
             ? ((float)best_color_x / fw) : 0.0f;
         result_out->color_debug.raw_y_norm = (best_color_x > 0 || best_color_y > 0)
             ? ((float)best_color_y / fh) : 0.0f;
+        result_out->color_debug.active_phase_index = color_phase_index;
+        result_out->color_debug.active_phase_x = color_phase_x;
+        result_out->color_debug.active_phase_y = color_phase_y;
+        result_out->color_debug.selective_reuse_active = selective_refresh_active && !color_forced_full_refresh;
+        result_out->color_debug.forced_full_refresh = color_forced_full_refresh;
+        result_out->color_debug.fallback_reason_flags = color_fallback_reason_flags;
+        result_out->color_debug.fresh_sample_count = color_fresh_sample_count;
+        result_out->color_debug.carried_sample_count = color_carried_sample_count;
+        result_out->color_debug.unsampled_new_exposed_count = color_unsampled_new_count;
+        if (sg_count > 0) {
+            result_out->color_debug.fresh_sample_fraction = (float)color_fresh_sample_count / (float)sg_count;
+            result_out->color_debug.carried_sample_fraction = (float)color_carried_sample_count / (float)sg_count;
+            result_out->color_debug.unsampled_new_exposed_fraction = (float)color_unsampled_new_count / (float)sg_count;
+        }
+        result_out->color_debug.nonzero_histogram_bins = color_hist_nonzero_bins;
+        result_out->color_debug.max_histogram_current_count = color_hist_max_current_count;
+        result_out->color_debug.max_histogram_recent_count = color_hist_max_recent_count;
         result_out->color_debug.winning_candidate_index = best_color_candidate_idx;
         result_out->color_debug.candidate_count = color_candidate_count;
         for (int i = 0; i < color_candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
@@ -10614,6 +11537,11 @@ int anomaly_process_frame(
             dbg->isolation_score = color_candidate_isolation[i];
             dbg->ring_fraction = color_candidate_ring_fraction[i];
             dbg->support_mass = color_candidate_support_mass[i];
+            dbg->contrast_weight = color_candidate_contrast_weight[i];
+            dbg->hist_key = color_candidate_hist_key[i];
+            dbg->hist_current_count = color_candidate_hist_current_count[i];
+            dbg->hist_recent_count = color_candidate_hist_recent_count[i];
+            dbg->hist_rarity_score = color_candidate_hist_rarity[i];
             dbg->retention_rank = color_candidate_retention_rank[i];
             dbg->above_threshold = color_candidate_above_threshold[i];
         }
@@ -10649,6 +11577,7 @@ int anomaly_process_frame(
         }
     }
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_OVERLAY_DRAW, stage_started_us);
+    advance_color_sampling_phase(state, should_refresh_appearance, sample_step);
     finalize_result_timing(result_out, &timing, frame_started_us);
 
     return box_count;

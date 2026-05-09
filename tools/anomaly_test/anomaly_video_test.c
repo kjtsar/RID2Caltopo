@@ -756,17 +756,31 @@ static void dump_color_debug(FILE *out, int frame_num, double time_s,
     if (out == NULL || result == NULL) return;
     const anomaly_debug_color_t *dbg = &result->color_debug;
     fprintf(out, "\nColor debug for frame %d (%.3fs)\n", frame_num, time_s);
-    fprintf(out, "  raw_valid=%d raw_score=%.3f raw_xy=(%.4f, %.4f) winner_idx=%d\n",
+    fprintf(out, "  raw_valid=%d raw_score=%.3f raw_xy=(%.4f, %.4f) winner_idx=%d phase=%d (%d,%d)\n",
             dbg->raw_candidate_valid ? 1 : 0,
             (double)dbg->raw_score,
             (double)dbg->raw_x_norm,
             (double)dbg->raw_y_norm,
-            dbg->winning_candidate_index);
+            dbg->winning_candidate_index,
+            dbg->active_phase_index,
+            dbg->active_phase_x,
+            dbg->active_phase_y);
+    fprintf(out,
+            "  reuse=%d forced_full=%d fallback_flags=0x%X fresh=%d (%.2f) carried=%d (%.2f) unsampled=%d (%.2f)\n",
+            dbg->selective_reuse_active ? 1 : 0,
+            dbg->forced_full_refresh ? 1 : 0,
+            dbg->fallback_reason_flags,
+            dbg->fresh_sample_count,
+            (double)dbg->fresh_sample_fraction,
+            dbg->carried_sample_count,
+            (double)dbg->carried_sample_fraction,
+            dbg->unsampled_new_exposed_count,
+            (double)dbg->unsampled_new_exposed_fraction);
     fprintf(out, "  color candidates (%d):\n", dbg->candidate_count);
     for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
         const anomaly_debug_color_candidate_t *c = &dbg->candidates[i];
         fprintf(out,
-                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f ring=%.2f support=%.2f rank=%.2f%s\n",
+                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f ring=%.2f support=%.2f contrast=%.2f rank=%.2f%s\n",
                 i + 1,
                 c->pixel_x,
                 c->pixel_y,
@@ -782,6 +796,7 @@ static void dump_color_debug(FILE *out, int frame_num, double time_s,
                 (double)c->isolation_score,
                 (double)c->ring_fraction,
                 (double)c->support_mass,
+                (double)c->contrast_weight,
                 (double)c->retention_rank,
                 (i == dbg->winning_candidate_index) ? "  <winner>" : "");
     }

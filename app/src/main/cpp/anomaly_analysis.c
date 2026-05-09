@@ -1907,104 +1907,11 @@ static void compute_color_contrast_weights(
         roi_state->color_contrast_weight == NULL || sg_w <= 0 || sg_h <= 0) {
         return;
     }
-
-#define T ANOMALY_LOCAL_TILE_SIZE
-    double tile_sum_chroma[T][T], tile_sum_chroma2[T][T];
-    double tile_sum_luma[T][T], tile_sum_luma2[T][T];
-    int tile_n[T][T];
-    memset(tile_sum_chroma, 0, sizeof(tile_sum_chroma));
-    memset(tile_sum_chroma2, 0, sizeof(tile_sum_chroma2));
-    memset(tile_sum_luma, 0, sizeof(tile_sum_luma));
-    memset(tile_sum_luma2, 0, sizeof(tile_sum_luma2));
-    memset(tile_n, 0, sizeof(tile_n));
-
-    double global_sum_chroma = 0.0;
-    double global_sum_chroma2 = 0.0;
-    double global_sum_luma = 0.0;
-    double global_sum_luma2 = 0.0;
-    int global_n = 0;
-    for (int sy = 0; sy < sg_h; sy++) {
-        int tr = sy * T / sg_h;
-        if (tr >= T) tr = T - 1;
-        for (int sx = 0; sx < sg_w; sx++) {
-            int tc = sx * T / sg_w;
-            if (tc >= T) tc = T - 1;
-            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-            if (roi_state->color_valid_mask[idx] == 0u) {
-                roi_state->color_contrast_weight[idx] = 0.0f;
-                continue;
-            }
-            float avg_chroma = 0.0f;
-            float avg_luma = 0.0f;
-            int neighbor_count = 0;
-            compute_local_color_contrast(roi_state, sg_w, sg_h, sx, sy, &avg_chroma, &avg_luma, &neighbor_count);
-            if (neighbor_count <= 0) {
-                roi_state->color_contrast_weight[idx] = 0.35f;
-                continue;
-            }
-            tile_sum_chroma[tr][tc] += avg_chroma;
-            tile_sum_chroma2[tr][tc] += (double)avg_chroma * (double)avg_chroma;
-            tile_sum_luma[tr][tc] += avg_luma;
-            tile_sum_luma2[tr][tc] += (double)avg_luma * (double)avg_luma;
-            tile_n[tr][tc]++;
-            global_sum_chroma += avg_chroma;
-            global_sum_chroma2 += (double)avg_chroma * (double)avg_chroma;
-            global_sum_luma += avg_luma;
-            global_sum_luma2 += (double)avg_luma * (double)avg_luma;
-            global_n++;
-        }
+    size_t count = (size_t)sg_w * (size_t)sg_h;
+    for (size_t idx = 0; idx < count; idx++) {
+        roi_state->color_contrast_weight[idx] =
+            roi_state->color_valid_mask[idx] != 0u ? 1.0f : 0.0f;
     }
-
-    double global_mean_chroma = global_n > 0 ? global_sum_chroma / (double)global_n : 0.0;
-    double global_std_chroma = global_n > 0
-        ? sqrt(fmax(global_sum_chroma2 / (double)global_n - global_mean_chroma * global_mean_chroma, 0.01))
-        : 1.0;
-    double global_mean_luma = global_n > 0 ? global_sum_luma / (double)global_n : 0.0;
-    double global_std_luma = global_n > 0
-        ? sqrt(fmax(global_sum_luma2 / (double)global_n - global_mean_luma * global_mean_luma, 0.01))
-        : 1.0;
-
-    for (int sy = 0; sy < sg_h; sy++) {
-        int tr = sy * T / sg_h;
-        if (tr >= T) tr = T - 1;
-        for (int sx = 0; sx < sg_w; sx++) {
-            int tc = sx * T / sg_w;
-            if (tc >= T) tc = T - 1;
-            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-            if (roi_state->color_valid_mask[idx] == 0u) {
-                roi_state->color_contrast_weight[idx] = 0.0f;
-                continue;
-            }
-            float avg_chroma = 0.0f;
-            float avg_luma = 0.0f;
-            int neighbor_count = 0;
-            compute_local_color_contrast(roi_state, sg_w, sg_h, sx, sy, &avg_chroma, &avg_luma, &neighbor_count);
-            if (neighbor_count <= 0) {
-                roi_state->color_contrast_weight[idx] = 0.35f;
-                continue;
-            }
-
-            double mean_chroma = global_mean_chroma;
-            double std_chroma = global_std_chroma;
-            double mean_luma = global_mean_luma;
-            double std_luma = global_std_luma;
-            if (tile_n[tr][tc] >= ANOMALY_LOCAL_TILE_MIN_N) {
-                double fn = (double)tile_n[tr][tc];
-                mean_chroma = tile_sum_chroma[tr][tc] / fn;
-                std_chroma = sqrt(fmax(tile_sum_chroma2[tr][tc] / fn - mean_chroma * mean_chroma, 0.01));
-                mean_luma = tile_sum_luma[tr][tc] / fn;
-                std_luma = sqrt(fmax(tile_sum_luma2[tr][tc] / fn - mean_luma * mean_luma, 0.01));
-            }
-            double chroma_floor = mean_chroma + (0.35 * std_chroma);
-            double luma_floor = mean_luma + (0.35 * std_luma);
-            double chroma_signal = ((double)avg_chroma - chroma_floor) / fmax(chroma_floor + 1.5, 1.0);
-            double luma_signal = ((double)avg_luma - luma_floor) / fmax(luma_floor + 4.0, 1.0);
-            double combined = 0.65 * chroma_signal + 0.35 * luma_signal;
-            float weight = clampf(0.35f + (float)combined, 0.20f, 1.15f);
-            roi_state->color_contrast_weight[idx] = weight;
-        }
-    }
-#undef T
 }
 
 static void build_color_support_map(

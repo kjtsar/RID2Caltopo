@@ -289,7 +289,7 @@ profiling:
 - `refresh_mask_build`: sampled ROI refresh-mask selection for partial/target-only scans
 - `sampled_grid_prep`: sampled luma grid, integral-image setup, and color-tile statistics
 - `thermal_scoring`: thermal/background-model passes and thermal candidate work
-- `color_scoring`: color outlier scoring
+- `color_scoring`: color outlier scoring plus color support/blob post-processing
 - `motion_scoring`: residual motion scoring after camera registration
 - `saliency_scoring`: unified saliency / persist scoring
 - `target_tracking`: track propagation, accumulator follow-up, revisit annotation

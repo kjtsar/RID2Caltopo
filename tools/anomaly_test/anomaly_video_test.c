@@ -751,6 +751,42 @@ static void dump_thermal_debug(FILE *out, int frame_num, double time_s,
     }
 }
 
+static void dump_color_debug(FILE *out, int frame_num, double time_s,
+                             const anomaly_result_t *result) {
+    if (out == NULL || result == NULL) return;
+    const anomaly_debug_color_t *dbg = &result->color_debug;
+    fprintf(out, "\nColor debug for frame %d (%.3fs)\n", frame_num, time_s);
+    fprintf(out, "  raw_valid=%d raw_score=%.3f raw_xy=(%.4f, %.4f) winner_idx=%d\n",
+            dbg->raw_candidate_valid ? 1 : 0,
+            (double)dbg->raw_score,
+            (double)dbg->raw_x_norm,
+            (double)dbg->raw_y_norm,
+            dbg->winning_candidate_index);
+    fprintf(out, "  color candidates (%d):\n", dbg->candidate_count);
+    for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
+        const anomaly_debug_color_candidate_t *c = &dbg->candidates[i];
+        fprintf(out,
+                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f ring=%.2f support=%.2f rank=%.2f%s\n",
+                i + 1,
+                c->pixel_x,
+                c->pixel_y,
+                (double)c->x_norm,
+                (double)c->y_norm,
+                (double)c->base_score,
+                (double)c->final_score,
+                (double)c->area,
+                (double)c->span,
+                (double)c->fill,
+                (double)c->center_share,
+                (double)c->quality,
+                (double)c->isolation_score,
+                (double)c->ring_fraction,
+                (double)c->support_mass,
+                (double)c->retention_rank,
+                (i == dbg->winning_candidate_index) ? "  <winner>" : "");
+    }
+}
+
 static const char *thermal_target_stage_name(anomaly_debug_thermal_target_stage_t stage) {
     switch (stage) {
         case ANOMALY_THERMAL_TARGET_STAGE_NOT_HOT: return "not_hot";
@@ -1453,6 +1489,7 @@ int main(int argc, char **argv) {
         if (debug_this_frame) {
             dump_gmv_debug(stderr, frame_num, time_s, &result);
             dump_thermal_debug(stderr, frame_num, time_s, &result);
+            dump_color_debug(stderr, frame_num, time_s, &result);
             dump_saliency_debug(stderr, frame_num, time_s, raw_rgba, W, H, &cfg, &result);
             dump_motion_debug(stderr, frame_num, time_s, &result);
         }

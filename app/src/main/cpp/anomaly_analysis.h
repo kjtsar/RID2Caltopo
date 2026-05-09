@@ -141,6 +141,7 @@
 #define ANOMALY_MAX_BOXES_PER_FRAME 4
 #define ANOMALY_DEBUG_TOP_CANDIDATES 5
 #define ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES 8
+#define ANOMALY_DEBUG_TOP_COLOR_CANDIDATES 8
 #define ANOMALY_GMV_MAX_DEBUG_ANCHORS (ANOMALY_GMV_ZONE_GRID * ANOMALY_GMV_ZONE_GRID)
 
 #ifndef ANOMALY_DEBUG_TIMING
@@ -391,6 +392,31 @@ typedef struct {
     bool  above_threshold;
 } anomaly_debug_thermal_candidate_t;
 
+typedef struct {
+    bool  valid;
+    int   pixel_x;
+    int   pixel_y;
+    float x_norm;
+    float y_norm;
+    float bbox_left_norm;
+    float bbox_top_norm;
+    float bbox_right_norm;
+    float bbox_bottom_norm;
+    float base_score;
+    float final_score;
+    float temporal_score;
+    float area;
+    float span;
+    float fill;
+    float center_share;
+    float quality;
+    float isolation_score;
+    float ring_fraction;
+    float support_mass;
+    float retention_rank;
+    bool  above_threshold;
+} anomaly_debug_color_candidate_t;
+
 typedef enum {
     ANOMALY_THERMAL_TARGET_STAGE_NONE = 0,
     ANOMALY_THERMAL_TARGET_STAGE_NOT_HOT = 1,
@@ -483,6 +509,16 @@ typedef struct {
     anomaly_debug_thermal_candidate_t candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES];
     anomaly_debug_thermal_target_t target;
 } anomaly_debug_thermal_t;
+
+typedef struct {
+    bool  raw_candidate_valid;
+    float raw_score;
+    float raw_x_norm;
+    float raw_y_norm;
+    int   winning_candidate_index;
+    int   candidate_count;
+    anomaly_debug_color_candidate_t candidates[ANOMALY_DEBUG_TOP_COLOR_CANDIDATES];
+} anomaly_debug_color_t;
 
 typedef struct {
     bool  valid;
@@ -653,6 +689,7 @@ typedef struct {
     anomaly_debug_gmv_t gmv_debug;
     anomaly_debug_motion_t motion_debug;
     anomaly_debug_thermal_t thermal_debug;
+    anomaly_debug_color_t color_debug;
     anomaly_debug_saliency_t saliency_debug;
     anomaly_debug_timing_t timing;
 } anomaly_result_t;

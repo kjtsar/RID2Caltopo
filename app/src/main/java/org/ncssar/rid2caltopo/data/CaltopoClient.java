@@ -202,6 +202,7 @@ class ClientClassState {
     public String caltopoDomainAndPort;
     public CaltopoCredentials caltopoCredentials;
     public long newTrackDelayInSeconds;
+    public long maxFlatlineToneDurationInSeconds;
     public int debugLevel;
     public long maxIdleTimeInMinutes;
     public String incident;
@@ -240,6 +241,7 @@ class ClientClassState {
         caltopoDomainAndPort = "caltopo.com";
         usePeersFlag = true;
         newTrackDelayInSeconds = 30;
+        maxFlatlineToneDurationInSeconds = newTrackDelayInSeconds;
         maxIdleTimeInMinutes = 120;
         debugLevel = -1; // undefined.
         incident = "Training";
@@ -297,7 +299,7 @@ class ClientClassState {
         return String.format(Locale.US,
                 """
                         vers:'%d', minDist:'%d' ft, usePeersFlag:'%s', captureVideoStreamsFlag:'%s'
-                        newTrackDelayInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
+                        newTrackDelayInSec:%d, maxFlatlineToneDurationInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
                         predictiveHeadEnabled:%s, proximityAlertSpacingFeet:%d
                         notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
                         notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
@@ -305,7 +307,7 @@ class ClientClassState {
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
                 AppConfigStore.SCHEMA_VERSION, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
-                newTrackDelayInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
+                newTrackDelayInSeconds, maxFlatlineToneDurationInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
                 incident, opPeriod, coordinateDisplayFormat, predictiveHeadEnabled, proximityAlertSpacingFeet,
                 notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
                 notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
@@ -2387,6 +2389,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.newTrackDelayInSeconds;
     }
 
+    public static long GetMaxFlatlineToneDurationInSeconds() {
+        ClientClassState ccs = GetState();
+        long durationInSeconds = ccs.maxFlatlineToneDurationInSeconds;
+        if (durationInSeconds <= 0L) {
+            durationInSeconds = ccs.newTrackDelayInSeconds;
+        }
+        return durationInSeconds;
+    }
+
     public static long GetMinDistanceInFeet() {
         ClientClassState ccs = GetState();
         return ccs.minDistanceInFeet;
@@ -2953,6 +2964,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             UpdateDroneSpecs();
         }
         return ccs.newTrackDelayInSeconds;
+    }
+
+    public static long SetMaxFlatlineToneDurationInSeconds(long durationInSeconds) {
+        ClientClassState ccs = GetState();
+
+        if (durationInSeconds < 1L) {
+            durationInSeconds = 1L;
+        }
+
+        if (ccs.maxFlatlineToneDurationInSeconds != durationInSeconds) {
+            ccs.maxFlatlineToneDurationInSeconds = durationInSeconds;
+            ArchiveState("maxFlatlineToneDurationInSeconds changed");
+            UpdateDroneSpecs();
+        }
+        return ccs.maxFlatlineToneDurationInSeconds;
     }
 
 

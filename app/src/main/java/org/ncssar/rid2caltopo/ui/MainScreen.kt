@@ -213,10 +213,12 @@ fun MainScreen(
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
     var locationOverrideText by remember { mutableStateOf("") }
     var showCompliancePanel by remember { mutableStateOf(false) }
+    var showSignalLossPanel by remember { mutableStateOf(false) }
     var locationOverrideError by remember { mutableStateOf<String?>(null) }
     var locationOverrideLabel by remember { mutableStateOf(formatLocationOverride(CaltopoMap.GetMyLocationOverride())) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by streamsViewModel.overLimitDrones.collectAsStateWithLifecycle()
+    val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
     val coroutineScope = rememberCoroutineScope()
 
@@ -545,6 +547,14 @@ fun MainScreen(
             streamsViewModel.setComplianceAlertMuted(mappedId, muted)
         }
     )
+    SignalLossAlertDialog(
+        visible = showSignalLossPanel,
+        flights = signalLossFlights,
+        onDismiss = { showSignalLossPanel = false },
+        onToggleMuted = { flightKey, muted ->
+            DroneSignalLossAlertCenter.setMuted(flightKey, muted)
+        }
+    )
     if (showProximityDebugDialog) {
         AlertDialog(
             onDismissRequest = { showProximityDebugDialog = false },
@@ -824,10 +834,16 @@ fun MainScreen(
                 },
                 actions = {
                     val allOverLimitMuted = overLimitDrones.isNotEmpty() && overLimitDrones.all { it.muted }
+                    val allSignalLossMuted = signalLossFlights.isNotEmpty() && signalLossFlights.all { it.muted }
                     ComplianceAlertBell(
                         overLimitDrones = overLimitDrones,
                         allOverLimitMuted = allOverLimitMuted,
                         onClick = { showCompliancePanel = true }
+                    )
+                    SignalLossAlertButton(
+                        flights = signalLossFlights,
+                        allMuted = allSignalLossMuted,
+                        onClick = { showSignalLossPanel = true }
                     )
                     ResumeProximityAlertButton()
                     IconButton(onClick = { menuExpanded = true }) {

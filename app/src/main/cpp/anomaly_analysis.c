@@ -9093,6 +9093,11 @@ int anomaly_process_frame(
     int color_active_min_sy = 0;
     int color_active_max_sx = sg_w > 0 ? (sg_w - 1) : -1;
     int color_active_max_sy = sg_h > 0 ? (sg_h - 1) : -1;
+    int color_rarity_seed_min_sx = sg_w;
+    int color_rarity_seed_min_sy = sg_h;
+    int color_rarity_seed_max_sx = -1;
+    int color_rarity_seed_max_sy = -1;
+    int color_rarity_seed_count = 0;
     if (color_algorithm_enabled && color_selective_refresh_active && appearance_refresh_mask != NULL) {
         int color_bounds_pad = color_support_patch_radius(cfg, width, height, sample_step);
         compute_active_mask_bounds(
@@ -9194,6 +9199,11 @@ int anomaly_process_frame(
                                 0.60f,
                                 1.20f);
                             saliency_color_map[idx] = clampf(score * support_scale, 0.0f, 4.0f);
+                            color_rarity_seed_count++;
+                            if (sx < color_rarity_seed_min_sx) color_rarity_seed_min_sx = sx;
+                            if (sy < color_rarity_seed_min_sy) color_rarity_seed_min_sy = sy;
+                            if (sx > color_rarity_seed_max_sx) color_rarity_seed_max_sx = sx;
+                            if (sy > color_rarity_seed_max_sy) color_rarity_seed_max_sy = sy;
                         }
                     }
                 } else {
@@ -9249,27 +9259,47 @@ int anomaly_process_frame(
         int color_seed_max_sx = -1;
         int color_seed_max_sy = -1;
         int color_seed_count = 0;
-        build_color_support_map(
-                cfg,
-                saliency_color_map,
-                state->roi_state.color_contrast_weight,
-                sg_w,
-                sg_h,
-                width,
-                height,
-                sample_step,
-                color_active_min_sx,
-                color_active_min_sy,
-                color_active_max_sx,
-                color_active_max_sy,
-                saliency_color_map,
-                color_support_scratch,
-                &color_support_peak,
-                &color_seed_min_sx,
-                &color_seed_min_sy,
-                &color_seed_max_sx,
-                &color_seed_max_sy,
-                &color_seed_count);
+        int color_post_min_sx = color_active_min_sx;
+        int color_post_min_sy = color_active_min_sy;
+        int color_post_max_sx = color_active_max_sx;
+        int color_post_max_sy = color_active_max_sy;
+        if (color_rarity_seed_count > 0 &&
+            color_rarity_seed_max_sx >= color_rarity_seed_min_sx &&
+            color_rarity_seed_max_sy >= color_rarity_seed_min_sy) {
+            int support_pad = color_support_patch_radius(cfg, width, height, sample_step) + 1;
+            color_post_min_sx = color_rarity_seed_min_sx - support_pad;
+            color_post_min_sy = color_rarity_seed_min_sy - support_pad;
+            color_post_max_sx = color_rarity_seed_max_sx + support_pad;
+            color_post_max_sy = color_rarity_seed_max_sy + support_pad;
+            if (color_post_min_sx < color_active_min_sx) color_post_min_sx = color_active_min_sx;
+            if (color_post_min_sy < color_active_min_sy) color_post_min_sy = color_active_min_sy;
+            if (color_post_max_sx > color_active_max_sx) color_post_max_sx = color_active_max_sx;
+            if (color_post_max_sy > color_active_max_sy) color_post_max_sy = color_active_max_sy;
+        }
+        if (color_post_max_sx >= color_post_min_sx &&
+            color_post_max_sy >= color_post_min_sy) {
+            build_color_support_map(
+                    cfg,
+                    saliency_color_map,
+                    state->roi_state.color_contrast_weight,
+                    sg_w,
+                    sg_h,
+                    width,
+                    height,
+                    sample_step,
+                    color_post_min_sx,
+                    color_post_min_sy,
+                    color_post_max_sx,
+                    color_post_max_sy,
+                    saliency_color_map,
+                    color_support_scratch,
+                    &color_support_peak,
+                    &color_seed_min_sx,
+                    &color_seed_min_sy,
+                    &color_seed_max_sx,
+                    &color_seed_max_sy,
+                    &color_seed_count);
+        }
         anomaly_color_blob_candidate_t color_blob_candidates[ANOMALY_MAX_COLOR_CANDIDATES];
         memset(color_blob_candidates, 0, sizeof(color_blob_candidates));
         if (color_support_peak >= 0.55f &&

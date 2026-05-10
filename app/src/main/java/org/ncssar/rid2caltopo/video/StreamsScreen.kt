@@ -80,7 +80,10 @@ import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
+import org.ncssar.rid2caltopo.ui.DroneSignalLossAlertCenter
 import org.ncssar.rid2caltopo.ui.ResumeProximityAlertButton
+import org.ncssar.rid2caltopo.ui.SignalLossAlertButton
+import org.ncssar.rid2caltopo.ui.SignalLossAlertDialog
 import org.opendroneid.android.bluetooth.WiFiScanner
 import androidx.documentfile.provider.DocumentFile
 
@@ -180,6 +183,7 @@ fun StreamsScreen(
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
+    val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     val mapStatus by remember(mapName) {
         derivedStateOf {
             if (mapName != null) {
@@ -202,7 +206,9 @@ fun StreamsScreen(
     var showNotamPanel by remember { mutableStateOf(false) }
     var showPerformancePanel by remember { mutableStateOf(false) }
     var showCompliancePanel by remember { mutableStateOf(false) }
+    var showSignalLossPanel by remember { mutableStateOf(false) }
     val allOverLimitMuted = overLimitDrones.isNotEmpty() && overLimitDrones.all { it.muted }
+    val allSignalLossMuted = signalLossFlights.isNotEmpty() && signalLossFlights.all { it.muted }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -270,6 +276,11 @@ fun StreamsScreen(
                             allOverLimitMuted = allOverLimitMuted,
                             onClick = { showCompliancePanel = true }
                         )
+                        SignalLossAlertButton(
+                            flights = signalLossFlights,
+                            allMuted = allSignalLossMuted,
+                            onClick = { showSignalLossPanel = true }
+                        )
                         ResumeProximityAlertButton()
                         if (layoutMode != StreamsLayoutMode.Both) {
                             LayoutToggleChip(
@@ -332,6 +343,14 @@ fun StreamsScreen(
             onDismiss = { showCompliancePanel = false },
             onToggleMuted = { mappedId, muted ->
                 viewModel.setComplianceAlertMuted(mappedId, muted)
+            }
+        )
+        SignalLossAlertDialog(
+            visible = showSignalLossPanel,
+            flights = signalLossFlights,
+            onDismiss = { showSignalLossPanel = false },
+            onToggleMuted = { flightKey, muted ->
+                DroneSignalLossAlertCenter.setMuted(flightKey, muted)
             }
         )
     }

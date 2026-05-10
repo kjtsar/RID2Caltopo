@@ -102,7 +102,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String org;
     private String owner;
     private String model; /* This is the concise text description of the drone. */
-    public transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good packet was received */
+    public volatile transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good waypoint was received */
+    private volatile transient long mostRecentSignalMsecTimestamp; /* wall-clock time when the most recent valid RID position packet was received */
     private transient long startMsecTimestamp; /* timestamp carried by the first accepted waypoint in the current flight */
     private transient long mostRecentFlightMsecTimestamp; /* timestamp carried by the most recent accepted waypoint */
     private transient CtDroneSpecListener myListener;
@@ -172,6 +173,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         lastLng = 0.0F;
         okToLog = true;
         localArchiveOnly = false;
+        mostRecentSignalMsecTimestamp = 0;
         impliedTakeoffAltM        = null;
         impliedTakeoffSampleCount = 0;
         impliedTakeoffSealed      = false;
@@ -217,6 +219,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         localArchiveOnly = false;
         airborne = Boolean.FALSE;
         startMsecTimestamp = mostRecentMsecTimestamp = mostRecentFlightMsecTimestamp = 0;
+        mostRecentSignalMsecTimestamp = 0;
         int length = TransportTypeEnum.values().length;
         for (int i = 0; i < length; i++) transportCount[i] = 0;
         CaltopoClient.DroneSpecStatusChanged(this, false);
@@ -471,6 +474,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         trackLabel = EMPTY_STRING;
         startMsecTimestamp = jo.optLong("startTimeInMsec");
         mostRecentMsecTimestamp = jo.optLong("mostRecentTimeInMsec");
+        mostRecentSignalMsecTimestamp = mostRecentMsecTimestamp;
         mostRecentFlightMsecTimestamp = jo.optLong("mostRecentFlightTimeInMsec", startMsecTimestamp);
         transportCount[TransportTypeEnum.BT4.ordinal()] = jo.optInt(TransportTypeEnum.BT4.name(), 0);
         transportCount[TransportTypeEnum.BT5.ordinal()] = jo.optInt(TransportTypeEnum.BT5.name(), 0);
@@ -572,6 +576,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
         if (Double.compare(lastLat, lat) == 0 && Double.compare(lastLng, lng) == 0) {
             if ((goodCount == 0) || (System.currentTimeMillis() - mostRecentMsecTimestamp < 3000)) {
+                mostRecentSignalMsecTimestamp = nowWallMsec;
                 if (false && CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {            // these too.
                     CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
                             "rid_drop remoteId=%s reason=dedup wall=%d droneTs=%d lat=%.6f lng=%.6f transport=%s",
@@ -623,6 +628,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             distanceInFeet += lDistanceInFeet;
         }
 
+        mostRecentSignalMsecTimestamp = nowWallMsec;
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = nowWallMsec;
         long acceptedWaypointTimestampMsec =
                 (timestampInMilliseconds > 0) ? timestampInMilliseconds : nowWallMsec;
@@ -673,6 +679,18 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      */
     public long idleTimeInMsec(long currentTimeInMsec) {
         return (currentTimeInMsec - mostRecentMsecTimestamp);
+    }
+
+    /** signalIdleTimeInMsec()
+     *
+     * @param currentTimeInMsec current time in milliseconds.
+     * @return duration in milliseconds since the last valid RID position packet was received.
+     */
+    public long signalIdleTimeInMsec(long currentTimeInMsec) {
+        long referenceTimestamp = (mostRecentSignalMsecTimestamp > 0)
+                ? mostRecentSignalMsecTimestamp
+                : mostRecentMsecTimestamp;
+        return currentTimeInMsec - referenceTimestamp;
     }
 
     /** IdleTimeInMsec()

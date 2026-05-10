@@ -22,7 +22,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 7
+    const val SCHEMA_VERSION = 8
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -165,6 +165,7 @@ object AppConfigStore {
         if (config.legacyImportComplete) return true
         if (config.minDistanceFeet != 0L) return true
         if (config.newTrackDelaySeconds != 0L) return true
+        if (config.maxFlatlineToneDurationSeconds != 0L) return true
         if (config.maxIdleTimeMinutes != 0L) return true
         if (config.debugLevel != 0) return true
         if (config.coordinateDisplayFormat.isNotBlank()) return true
@@ -225,6 +226,10 @@ object AppConfigStore {
             config.caltopoCredentials.credentialSecret
         )
         state.newTrackDelayInSeconds = if (config.newTrackDelaySeconds > 0) config.newTrackDelaySeconds else 30
+        state.maxFlatlineToneDurationInSeconds = when {
+            config.maxFlatlineToneDurationSeconds > 0 -> config.maxFlatlineToneDurationSeconds
+            else -> state.newTrackDelayInSeconds
+        }
         state.debugLevel = config.debugLevel
         state.maxIdleTimeInMinutes = if (config.maxIdleTimeMinutes >= 0) config.maxIdleTimeMinutes else 120
         state.incident = activeProfile?.incident?.ifBlank { "Training" } ?: config.incident.ifBlank { "Training" }
@@ -297,6 +302,13 @@ object AppConfigStore {
             .setLegacyImportComplete(true)
             .setMinDistanceFeet(state.minDistanceInFeet)
             .setNewTrackDelaySeconds(state.newTrackDelayInSeconds)
+            .setMaxFlatlineToneDurationSeconds(
+                if (state.maxFlatlineToneDurationInSeconds > 0) {
+                    state.maxFlatlineToneDurationInSeconds
+                } else {
+                    state.newTrackDelayInSeconds
+                }
+            )
             .setMaxIdleTimeMinutes(state.maxIdleTimeInMinutes)
             .setDebugLevel(state.debugLevel)
             .setCoordinateDisplayFormat(state.coordinateDisplayFormat ?: "decimal")

@@ -29,6 +29,7 @@ fun CaltopoSettingsScreen(
 ) {
     val minDistance by settingsViewModel.minDistance.collectAsState()
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
+    val maxFlatlineToneDuration by settingsViewModel.maxFlatlineToneDuration.collectAsState()
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
@@ -68,6 +69,12 @@ fun CaltopoSettingsScreen(
                     onValueChange = { settingsViewModel.onNewTrackDelayChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     label = { Text("New Track Delay (s)") }
+                )
+                OutlinedTextField(
+                    value = maxFlatlineToneDuration,
+                    onValueChange = { settingsViewModel.onMaxFlatlineToneDurationChanged(it) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Max Flatline Tone Duration (s)") }
                 )
                 OutlinedTextField(
                     value = maxIdleTimeInMinutes,

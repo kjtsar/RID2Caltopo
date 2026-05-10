@@ -29,6 +29,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _newTrackDelay = MutableStateFlow(CaltopoClient.GetNewTrackDelayInSeconds().toString())
     val newTrackDelay = _newTrackDelay.asStateFlow()
 
+    private val _maxFlatlineToneDuration = MutableStateFlow(CaltopoClient.GetMaxFlatlineToneDurationInSeconds().toString())
+    val maxFlatlineToneDuration = _maxFlatlineToneDuration.asStateFlow()
+
     private val _usePeers = MutableStateFlow(CaltopoClient.GetUsePeersFlag())
     val usePeers = _usePeers.asStateFlow()
 
@@ -94,6 +97,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _predictiveHeadEnabled.value = CaltopoClient.GetPredictiveHeadEnabled()
         _proximityAlertSpacingFeet.value = CaltopoClient.GetProximityAlertSpacingFeet().toString()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
+        _maxFlatlineToneDuration.value = CaltopoClient.GetMaxFlatlineToneDurationInSeconds().toString()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
         _caltopoDomainAndPort.value = CaltopoClient.GetCaltopoDomainAndPort()
@@ -120,6 +124,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     fun onNewTrackDelayChanged(newDelay: String) {
         _newTrackDelay.value = newDelay
+    }
+
+    fun onMaxFlatlineToneDurationChanged(newDuration: String) {
+        _maxFlatlineToneDuration.value = newDuration
     }
 
     fun onMaxIdleTimeInMinutesChanged(newVal: String) {
@@ -186,6 +194,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }
+        val resolvedNewTrackDelay = CaltopoClient.GetNewTrackDelayInSeconds()
+        (_maxFlatlineToneDuration.value.toLongOrNull() ?: resolvedNewTrackDelay).let {
+            CaltopoClient.SetMaxFlatlineToneDurationInSeconds(it)
+        }
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)

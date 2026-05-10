@@ -72,6 +72,7 @@ import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.ComplianceAlertHost
+import org.ncssar.rid2caltopo.ui.DroneSignalLossAlertHost
 import org.ncssar.rid2caltopo.ui.DroneSpecConfirmationDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
 import org.ncssar.rid2caltopo.ui.MutualAidPackageImportDialog
@@ -417,6 +418,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     }
                 )
                 ComplianceAlertHost()
+                DroneSignalLossAlertHost()
                 if (maPackageImportState !is org.ncssar.rid2caltopo.data.MutualAidPackageImportState.Idle) {
                     MutualAidPackageImportDialog(
                         state = maPackageImportState,

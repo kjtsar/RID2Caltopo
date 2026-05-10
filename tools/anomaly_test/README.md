@@ -239,6 +239,52 @@ The report includes:
 - realtime factor
 - frame count
 
+### Visible-color performance benchmark driver
+
+For visible-light color-path work, there is also a fixed benchmark driver that
+uses app-like color-only settings and writes one aggregate JSON report for
+before/after comparisons:
+
+```sh
+python3 tools/anomaly_test/run_visible_color_perf_benchmarks.py \
+  --binary tools/anomaly_test/build_timing/anomaly_video_test \
+  --output-dir /tmp/visible_color_perf_bench
+```
+
+The default matrix uses:
+
+- `-a 1` color only
+- `--registration affine`
+- `--stride 1`
+- `-t 2.8`
+- `-m 2`
+- `-s 0.8`
+- `--small-target-fraction 0.005` (`1/200`)
+
+It runs two profiles:
+
+- `visible-color-app-like-auto`
+- `visible-color-dense-gold` (`--pixel-step 1`)
+
+Across fixed `0.0s–10.0s` windows from:
+
+- `Color1.mp4`
+- `Color2.mp4`
+- `Color3.mp4`
+
+The report includes per-case and aggregate:
+
+- `realtime_factor`
+- `stage_timing.avg_total_ms`
+- `sampled_grid_prep`
+- `color_scoring`
+- `scan_planning`
+- `refresh_mask_build`
+
+The aggregate JSON is written to:
+
+- `/tmp/visible_color_perf_bench/visible_color_perf_report.json`
+
 ## Preparing visible-color regression clips
 
 Visible-light profiling should live beside, not inside, the existing black-hot

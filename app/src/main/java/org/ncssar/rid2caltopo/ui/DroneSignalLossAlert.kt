@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import kotlin.math.max
@@ -51,7 +52,10 @@ data class DroneSignalLossFlightUiState(
 private data class FlightMonitorState(
     val hasExceededDistanceThreshold: Boolean = false,
     val lossObservedWhileFar: Boolean = false,
-    val alertStartedAtMs: Long? = null
+    val alertStartedAtMs: Long? = null,
+    val lastSignalTimestampMs: Long = 0L,
+    val learnedSignalIntervalMs: Long = 0L,
+    val learnedSignalSamples: Int = 0
 )
 
 object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
@@ -69,6 +73,7 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
     @Volatile
     private var registered = false
     private var currentAlertFlightKey: String? = null
+    private var previouslyLoggedAlertFlightKey: String? = null
     private var lastDroneSpecs: List<CtDroneSpec> = emptyList()
     private val mutedFlightKeys = linkedSetOf<String>()
     private val flightMonitorState = linkedMapOf<String, FlightMonitorState>()
@@ -119,27 +124,51 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                 val distanceFt = distanceFeetFromTablet(spec, tabletLocation) ?: return@mapNotNull null
                 val flightKey = spec.flightKey() ?: return@mapNotNull null
                 val priorState = flightMonitorState[flightKey] ?: FlightMonitorState()
+                val signalTimestampMs = spec.mostRecentSignalMsecTimestamp
+                val (learnedIntervalMs, learnedSamples) = learnSignalInterval(
+                    previousTimestampMs = priorState.lastSignalTimestampMs,
+                    currentTimestampMs = signalTimestampMs,
+                    previousIntervalMs = priorState.learnedSignalIntervalMs,
+                    previousSamples = priorState.learnedSignalSamples,
+                    maxTrackDelayMs = newTrackDelayMs
+                )
+                val effectiveIdleThresholdMs = effectiveIdleThresholdMs(
+                    learnedIntervalMs = learnedIntervalMs,
+                    learnedSamples = learnedSamples,
+                    maxTrackDelayMs = newTrackDelayMs
+                )
                 val exceededThreshold = priorState.hasExceededDistanceThreshold ||
                     distanceFt > ALERT_DISTANCE_THRESHOLD_FT
                 var lossWhileFar = priorState.lossObservedWhileFar ||
                     (exceededThreshold &&
-                        signalIdleMs > ALERT_IDLE_THRESHOLD_MS &&
+                        signalIdleMs > effectiveIdleThresholdMs &&
                         distanceFt > ALERT_DISTANCE_THRESHOLD_FT)
                 // Once the drone is back inside the near-tablet bubble and we are
                 // receiving timely RID again, clear the "loss while far" latch so
                 // normal low-motion 3-4 s broadcasts near the pilot do not keep
                 // retriggering the flatline for the rest of the flight.
                 if (distanceFt <= ALERT_DISTANCE_THRESHOLD_FT &&
-                    signalIdleMs <= ALERT_IDLE_THRESHOLD_MS) {
+                    signalIdleMs <= effectiveIdleThresholdMs) {
+                    if (priorState.lossObservedWhileFar) {
+                        CTDebug(
+                            SIGNAL_LOSS_ALERT_TAG,
+                            "Clearing far-loss latch for ${spec.mappedId} flightKey=$flightKey " +
+                                "distanceFt=${"%.1f".format(distanceFt)} signalIdleMs=$signalIdleMs " +
+                                "thresholdMs=$effectiveIdleThresholdMs"
+                        )
+                    }
                     lossWhileFar = false
                 }
                 val shouldEvaluateForAlertWindow =
-                    signalIdleMs > ALERT_IDLE_THRESHOLD_MS && signalIdleMs < newTrackDelayMs
+                    signalIdleMs > effectiveIdleThresholdMs && signalIdleMs < newTrackDelayMs
                 if (!shouldEvaluateForAlertWindow) {
                     flightMonitorState[flightKey] = FlightMonitorState(
                         hasExceededDistanceThreshold = exceededThreshold,
                         lossObservedWhileFar = lossWhileFar,
-                        alertStartedAtMs = null
+                        alertStartedAtMs = null,
+                        lastSignalTimestampMs = signalTimestampMs,
+                        learnedSignalIntervalMs = learnedIntervalMs,
+                        learnedSignalSamples = learnedSamples
                     )
                     return@mapNotNull null
                 }
@@ -147,17 +176,28 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                 val maxToneDurationMs = CaltopoClient.GetMaxFlatlineToneDurationInSeconds() * 1000L
                 if (maxToneDurationMs > 0L && nowMs - startedAtMs >= maxToneDurationMs) {
                     mutedFlightKeys.add(flightKey)
+                    CTDebug(
+                        SIGNAL_LOSS_ALERT_TAG,
+                        "Auto-muting ${spec.mappedId} flightKey=$flightKey after " +
+                            "${nowMs - startedAtMs} ms flatline playback"
+                    )
                     flightMonitorState[flightKey] = FlightMonitorState(
                         hasExceededDistanceThreshold = exceededThreshold,
                         lossObservedWhileFar = lossWhileFar,
-                        alertStartedAtMs = startedAtMs
+                        alertStartedAtMs = startedAtMs,
+                        lastSignalTimestampMs = signalTimestampMs,
+                        learnedSignalIntervalMs = learnedIntervalMs,
+                        learnedSignalSamples = learnedSamples
                     )
                     return@mapNotNull null
                 }
                 val nextState = FlightMonitorState(
                     hasExceededDistanceThreshold = exceededThreshold,
                     lossObservedWhileFar = lossWhileFar,
-                    alertStartedAtMs = startedAtMs
+                    alertStartedAtMs = startedAtMs,
+                    lastSignalTimestampMs = signalTimestampMs,
+                    learnedSignalIntervalMs = learnedIntervalMs,
+                    learnedSignalSamples = learnedSamples
                 )
                 flightMonitorState[flightKey] = nextState
                 val shouldAlertNearTablet = !nextState.hasExceededDistanceThreshold || nextState.lossObservedWhileFar
@@ -210,6 +250,21 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
             }
 
         currentAlertFlightKey = chosen?.flightKey
+        if (chosen?.flightKey != previouslyLoggedAlertFlightKey) {
+            if (chosen != null) {
+                CTDebug(
+                    SIGNAL_LOSS_ALERT_TAG,
+                    "Alerting ${chosen.mappedId} flightKey=${chosen.flightKey} " +
+                        "signalIdleMs=${chosen.signalIdleMs} distanceFt=${"%.1f".format(chosen.distanceFromTabletFt)}"
+                )
+            } else if (previouslyLoggedAlertFlightKey != null) {
+                CTDebug(
+                    SIGNAL_LOSS_ALERT_TAG,
+                    "Clearing active signal-loss alert for flightKey=$previouslyLoggedAlertFlightKey"
+                )
+            }
+            previouslyLoggedAlertFlightKey = chosen?.flightKey
+        }
         _uiState.value = chosen?.toUiState(newTrackDelayMs)
     }
 
@@ -238,6 +293,46 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         val startMsec = startMsecTimestamp
         if (!isActive || startMsec <= 0L) return null
         return "$remoteId:$startMsec"
+    }
+
+    private fun learnSignalInterval(
+        previousTimestampMs: Long,
+        currentTimestampMs: Long,
+        previousIntervalMs: Long,
+        previousSamples: Int,
+        maxTrackDelayMs: Long
+    ): Pair<Long, Int> {
+        if (currentTimestampMs <= 0L || currentTimestampMs <= previousTimestampMs) {
+            return previousIntervalMs to previousSamples
+        }
+        if (previousTimestampMs <= 0L) {
+            return previousIntervalMs to previousSamples
+        }
+        val intervalMs = currentTimestampMs - previousTimestampMs
+        if (intervalMs <= 0L || intervalMs >= maxTrackDelayMs) {
+            return previousIntervalMs to previousSamples
+        }
+        val nextIntervalMs = if (previousIntervalMs <= 0L) {
+            intervalMs
+        } else {
+            ((previousIntervalMs * 3L) + intervalMs) / 4L
+        }
+        val nextSamples = (previousSamples + 1).coerceAtMost(1000)
+        return nextIntervalMs to nextSamples
+    }
+
+    private fun effectiveIdleThresholdMs(
+        learnedIntervalMs: Long,
+        learnedSamples: Int,
+        maxTrackDelayMs: Long
+    ): Long {
+        if (learnedSamples < 2 || learnedIntervalMs <= 0L) {
+            return ALERT_IDLE_THRESHOLD_MS
+        }
+        val dynamicThresholdMs = learnedIntervalMs * 5L / 2L
+        return dynamicThresholdMs
+            .coerceAtLeast(ALERT_IDLE_THRESHOLD_MS)
+            .coerceAtMost((maxTrackDelayMs - 1L).coerceAtLeast(ALERT_IDLE_THRESHOLD_MS))
     }
 
     private fun distanceFeetFromTablet(

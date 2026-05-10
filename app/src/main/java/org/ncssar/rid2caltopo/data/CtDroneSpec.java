@@ -693,6 +693,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return currentTimeInMsec - referenceTimestamp;
     }
 
+    public long getMostRecentSignalMsecTimestamp() {
+        return (mostRecentSignalMsecTimestamp > 0)
+                ? mostRecentSignalMsecTimestamp
+                : mostRecentMsecTimestamp;
+    }
+
     /** IdleTimeInMsec()
      *
      * @return Idle time - in Milliseconds since app was started or last

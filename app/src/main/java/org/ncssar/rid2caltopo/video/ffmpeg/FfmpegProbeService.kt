@@ -152,6 +152,7 @@ private data class ManagedRenderSession(
     var lastObservedRenderedFrameCount: Long = 0L,
     var idlePollCount: Int = 0,
     var lastStartupRecoveryDeferredLogAtMs: Long = 0L,
+    var lastStallDiagnosticBucket: Int = -1,
 )
 
 private data class RuntimeSnapshotSeed(
@@ -245,6 +246,7 @@ class FfmpegProbeService(
 
         val now = System.currentTimeMillis()
         if (eventType == "reader_wait_long") {
+            var stallDiagnostic: String? = null
             synchronized(stateLock) {
                 val session = managedRenderSessions[sessionId]
                 session?.let {
@@ -252,10 +254,12 @@ class FfmpegProbeService(
                         it.readerWaitWindowStartedAtMs = now
                     }
                     it.readerWaitEventCountInWindow += 1
-                    session.lastReaderWaitAtMs = now
-                    session.recoveryFrameStreak = 0
+                    it.lastReaderWaitAtMs = now
+                    it.recoveryFrameStreak = 0
+                    stallDiagnostic = maybeBuildStallDiagnosticLocked(designator, sessionId, it, now)
                 }
             }
+            stallDiagnostic?.let { CTWarn(tag, it) }
         }
         if (
             eventType == "reader_wait_long" ||
@@ -385,6 +389,50 @@ class FfmpegProbeService(
         return "phase=${snapshot.phase.name.lowercase()} decodedFrames=${snapshot.decodedFrameCount} " +
             "renderedFrames=${snapshot.renderedFrameCount} idlePolls=${snapshot.idlePollCount} " +
             "lastFrameAgeMs=$lastFrameAgeMs lastReaderWaitAgeMs=$lastReaderWaitAgeMs"
+    }
+
+    private fun stallDiagnosticBucket(waitWindowMs: Long): Int {
+        return when {
+            waitWindowMs >= 25_000L -> 2
+            waitWindowMs >= 10_000L -> 1
+            waitWindowMs >= 3_000L -> 0
+            else -> -1
+        }
+    }
+
+    private fun maybeBuildStallDiagnosticLocked(
+        designator: String,
+        sessionId: Long,
+        sessionState: ManagedRenderSession,
+        nowMs: Long,
+    ): String? {
+        val waitWindowStartedAt = sessionState.readerWaitWindowStartedAtMs ?: return null
+        val waitWindowMs = nowMs - waitWindowStartedAt
+        val bucket = stallDiagnosticBucket(waitWindowMs)
+        if (bucket < 0 || bucket <= sessionState.lastStallDiagnosticBucket) return null
+        sessionState.lastStallDiagnosticBucket = bucket
+        val upstreamBoundary = latestUpstreamBoundary(designator)
+        val probableCause = when {
+            sessionState.phase != RenderSessionPhase.LIVE && sessionState.decodedFrameCount == 0L ->
+                "waiting_first_decodable_frame"
+            upstreamBoundary?.boundary == "stream_error" &&
+                upstreamBoundary.outcome == "deferred_transient_close" ->
+                "upstream_transient_close"
+            sessionState.decodedFrameCount == sessionState.lastObservedDecodedFrameCount ->
+                "upstream_starved_or_encoder_stalled"
+            sessionState.renderedFrameCount == sessionState.lastObservedRenderedFrameCount ->
+                "render_progress_stalled"
+            else -> "intermittent_upstream_gap"
+        }
+        val renderDelayMs = renderDelayMsByDesignator[designator]
+        return "Stall diagnosis designator=$designator sessionId=$sessionId " +
+            "probableCause=$probableCause waitWindowMs=$waitWindowMs " +
+            "phase=${sessionState.phase.name.lowercase()} decodedFrames=${sessionState.decodedFrameCount} " +
+            "renderedFrames=${sessionState.renderedFrameCount} idlePolls=${sessionState.idlePollCount} " +
+            "renderDelayMs=${renderDelayMs ?: -1L} upstreamBoundary=${upstreamBoundary?.boundary ?: "none"} " +
+            "upstreamOutcome=${upstreamBoundary?.outcome ?: "none"} " +
+            "upstreamPublisherConnId=${upstreamBoundary?.publisherConnId} " +
+            "upstreamReason=${upstreamBoundary?.reason}"
     }
 
     private fun setSessionPhaseLocked(
@@ -1245,6 +1293,7 @@ class FfmpegProbeService(
             )
             sessionState.readerWaitWindowStartedAtMs = null
             sessionState.readerWaitEventCountInWindow = 0
+            sessionState.lastStallDiagnosticBucket = -1
         }
     }
 

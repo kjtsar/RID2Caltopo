@@ -166,6 +166,7 @@ private data class RuntimeSnapshotSeed(
 
 class FfmpegProbeService(
     private val onLocalPlaybackEnded: (String) -> Unit = {},
+    private val onLocalPlaybackEof: (String) -> Unit = {},
 ) {
     private val tag = "FfmpegProbeService"
     private val recentReaderWaitPenaltyMs = 5_000L
@@ -285,8 +286,14 @@ class FfmpegProbeService(
                 }
             }
             "decoder_open_error" -> handleDecoderOpenError(designator, sessionId)
-            "local_playback_eof" -> synchronized(stateLock) {
-                localPlaybackEofByDesignator += designator
+            "local_playback_eof" -> {
+                var notifyEof = false
+                synchronized(stateLock) {
+                    notifyEof = localPlaybackEofByDesignator.add(designator)
+                }
+                if (notifyEof) {
+                    onLocalPlaybackEof(designator)
+                }
             }
             "session_stopped" -> handleSessionStopped(designator, sessionId)
         }
@@ -1667,7 +1674,8 @@ class FfmpegProbeService(
                     "Applying anomaly config to $designator sessionId=$sessionId " +
                         "enabled=${snapshot.second.enabled} mask=${snapshot.second.algorithmMask} " +
                         "reg=${snapshot.second.registrationMode} stride=${snapshot.second.frameStride} " +
-                        "pixelStep=${snapshot.second.pixelStep} threshold=${"%.2f".format(snapshot.second.scoreThreshold)}"
+                        "pixelStep=${snapshot.second.pixelStep} threshold=${"%.2f".format(snapshot.second.scoreThreshold)} " +
+                        "minHits=${snapshot.second.minHits} scanZone=${"%.2f".format(snapshot.second.scanZone)}"
                 )
             }
             FfmpegBridge.updateAnomalyConfig(sessionId, snapshot.second)
@@ -1684,7 +1692,8 @@ class FfmpegProbeService(
                 "Applying anomaly config to new session $designator sessionId=$sessionId " +
                     "enabled=${config.enabled} mask=${config.algorithmMask} " +
                     "reg=${config.registrationMode} stride=${config.frameStride} " +
-                    "pixelStep=${config.pixelStep} threshold=${"%.2f".format(config.scoreThreshold)}"
+                    "pixelStep=${config.pixelStep} threshold=${"%.2f".format(config.scoreThreshold)} " +
+                    "minHits=${config.minHits} scanZone=${"%.2f".format(config.scanZone)}"
             )
         }
         FfmpegBridge.updateAnomalyConfig(sessionId, config)

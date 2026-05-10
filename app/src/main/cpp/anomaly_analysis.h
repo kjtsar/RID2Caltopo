@@ -186,6 +186,9 @@ typedef struct {
     bool  thermal_debug_target_enabled;
     float thermal_debug_target_x_norm;
     float thermal_debug_target_y_norm;
+    bool  color_debug_target_enabled;
+    float color_debug_target_x_norm;
+    float color_debug_target_y_norm;
 } anomaly_config_t;
 
 typedef struct {
@@ -370,6 +373,8 @@ typedef struct {
     size_t   scratch_prev_roi_capacity;
     uint8_t *scratch_refresh_mask;
     size_t   scratch_refresh_mask_capacity;
+    int     *scratch_prev_sample_lookup;
+    size_t   scratch_prev_sample_lookup_capacity;
     int     *scratch_i32;
     size_t   scratch_i32_capacity;
     uint64_t color_phase_counter;
@@ -454,6 +459,78 @@ typedef struct {
     float retention_rank;
     bool  above_threshold;
 } anomaly_debug_color_candidate_t;
+
+typedef struct {
+    bool  valid;
+    int   sample_x;
+    int   sample_y;
+    float score;
+    int   hist_key;
+    float hist_current_count;
+    float hist_recent_count;
+    float hist_rarity_score;
+    int   local_support_count;
+} anomaly_debug_color_seed_t;
+
+typedef enum {
+    ANOMALY_COLOR_TARGET_STAGE_NONE = 0,
+    ANOMALY_COLOR_TARGET_STAGE_OUTSIDE_SCAN_ZONE = 1,
+    ANOMALY_COLOR_TARGET_STAGE_INVALID_SAMPLE = 2,
+    ANOMALY_COLOR_TARGET_STAGE_RARITY_REJECTED = 3,
+    ANOMALY_COLOR_TARGET_STAGE_LOCAL_SUPPORT_REJECTED = 4,
+    ANOMALY_COLOR_TARGET_STAGE_SUPPORT_MAP_REJECTED = 5,
+    ANOMALY_COLOR_TARGET_STAGE_NO_CANDIDATE = 6,
+    ANOMALY_COLOR_TARGET_STAGE_EXTRACTED = 7,
+    ANOMALY_COLOR_TARGET_STAGE_WINNER = 8,
+} anomaly_debug_color_target_stage_t;
+
+typedef struct {
+    bool  enabled;
+    bool  valid;
+    bool  inside_scan_zone;
+    bool  refresh_skipped;
+    bool  sampled_this_frame;
+    bool  carried_from_history;
+    int   pixel_x;
+    int   pixel_y;
+    int   sample_x;
+    int   sample_y;
+    float x_norm;
+    float y_norm;
+    int   hist_key;
+    float hist_current_count;
+    float hist_recent_count;
+    float hist_rarity_score;
+    int   local_support_count;
+    int   patch_valid_count;
+    int   coherent_patch_cell_count;
+    int   coherent_patch_fresh_cell_count;
+    bool  coherent_patch_multicell;
+    float patch_mean_u;
+    float patch_mean_v;
+    float patch_mean_luma;
+    float ring_mean_u;
+    float ring_mean_v;
+    float ring_mean_luma;
+    float ring_chroma_contrast;
+    float ring_luma_contrast;
+    int   ring_neighbor_count;
+    float pre_support_score;
+    float support_score;
+    bool  support_seed_eligible;
+    int   matched_candidate_index;
+    int   nearest_candidate_index;
+    float nearest_candidate_distance;
+    int   winning_candidate_index;
+    float matched_candidate_score;
+    float matched_candidate_x_norm;
+    float matched_candidate_y_norm;
+    float matched_bbox_left_norm;
+    float matched_bbox_top_norm;
+    float matched_bbox_right_norm;
+    float matched_bbox_bottom_norm;
+    anomaly_debug_color_target_stage_t stage;
+} anomaly_debug_color_target_t;
 
 typedef enum {
     ANOMALY_THERMAL_TARGET_STAGE_NONE = 0,
@@ -565,12 +642,23 @@ typedef struct {
     float fresh_sample_fraction;
     float carried_sample_fraction;
     float unsampled_new_exposed_fraction;
+    int   histogram_valid_sample_count;
+    bool  history_reset_applied;
     int   nonzero_histogram_bins;
     float max_histogram_current_count;
     float max_histogram_recent_count;
+    int   rarity_seed_count;
+    int   support_seed_count;
+    float support_peak_score;
+    int   blob_reject_area_count;
+    int   blob_reject_ring_count;
+    int   blob_reject_support_mass_count;
+    int   blob_reject_quality_count;
+    anomaly_debug_color_seed_t strongest_seed;
     int   winning_candidate_index;
     int   candidate_count;
     anomaly_debug_color_candidate_t candidates[ANOMALY_DEBUG_TOP_COLOR_CANDIDATES];
+    anomaly_debug_color_target_t target;
 } anomaly_debug_color_t;
 
 typedef struct {

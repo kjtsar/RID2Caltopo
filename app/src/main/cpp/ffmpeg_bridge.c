@@ -285,7 +285,7 @@ typedef struct ffmpeg_session_t {
     int64_t anomaly_rescan_stride_skip_count;
     int anomaly_last_registration_health;
     int anomaly_last_rescan_mode;
-    char latest_anomaly_debug_summary[512];
+    char latest_anomaly_debug_summary[1024];
     char latest_ad_bridge_debug_summary[256];
     int64_t reader_stall_started_at_ms;
     int64_t last_reader_stall_log_at_ms;
@@ -1233,6 +1233,62 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                 result.saliency_debug.switch_suppressed ? 1 : 0,
                 result.saliency_debug.raw_x_norm,
                 result.saliency_debug.raw_y_norm);
+    } else if ((cfg.algorithm_mask & ANOMALY_ALGO_COLOR) != 0 ||
+               result.color_debug.raw_candidate_valid ||
+               result.color_debug.target.enabled ||
+               result.box_count > 0) {
+        snprintf(
+                session->latest_anomaly_debug_summary,
+                sizeof(session->latest_anomaly_debug_summary),
+                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] color raw=%.2f cand=%d winner=%d fresh=%d carried=%d hist[v=%d nz=%d curMax=%.0f recMax=%.0f reset=%d] seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d lk=%d cur=%.0f rec=%.0f rar=%.4f] reject[a=%d r=%d m=%d q=%d] target[en=%d valid=%d inside=%d refreshSkip=%d sampled=%d carried=%d pre=%.2f support=%.2f eligible=%d stage=%d ring=%.2f/%.2f n=%d coh=%d/%d multi=%d] boxes=%d",
+                registration_health_name(result.registration_health),
+                rescan_mode_name(result.rescan_mode),
+                result.scan_plan.warped_valid_fraction,
+                result.scan_plan.newly_exposed_fraction,
+                result.scan_plan.stale_fraction,
+                result.scan_plan.refresh_mask_selected_fraction,
+                scan_reason_summary,
+                result.color_debug.raw_score,
+                result.color_debug.candidate_count,
+                result.color_debug.winning_candidate_index,
+                result.color_debug.fresh_sample_count,
+                result.color_debug.carried_sample_count,
+                result.color_debug.histogram_valid_sample_count,
+                result.color_debug.nonzero_histogram_bins,
+                result.color_debug.max_histogram_current_count,
+                result.color_debug.max_histogram_recent_count,
+                result.color_debug.history_reset_applied ? 1 : 0,
+                result.color_debug.rarity_seed_count,
+                result.color_debug.support_seed_count,
+                result.color_debug.support_peak_score,
+                result.color_debug.strongest_seed.score,
+                result.color_debug.strongest_seed.sample_x,
+                result.color_debug.strongest_seed.sample_y,
+                result.color_debug.strongest_seed.local_support_count,
+                result.color_debug.strongest_seed.hist_current_count,
+                result.color_debug.strongest_seed.hist_recent_count,
+                result.color_debug.strongest_seed.hist_rarity_score,
+                result.color_debug.blob_reject_area_count,
+                result.color_debug.blob_reject_ring_count,
+                result.color_debug.blob_reject_support_mass_count,
+                result.color_debug.blob_reject_quality_count,
+                result.color_debug.target.enabled ? 1 : 0,
+                result.color_debug.target.valid ? 1 : 0,
+                result.color_debug.target.inside_scan_zone ? 1 : 0,
+                result.color_debug.target.refresh_skipped ? 1 : 0,
+                result.color_debug.target.sampled_this_frame ? 1 : 0,
+                result.color_debug.target.carried_from_history ? 1 : 0,
+                result.color_debug.target.pre_support_score,
+                result.color_debug.target.support_score,
+                result.color_debug.target.support_seed_eligible ? 1 : 0,
+                result.color_debug.target.stage,
+                result.color_debug.target.ring_chroma_contrast,
+                result.color_debug.target.ring_luma_contrast,
+                result.color_debug.target.ring_neighbor_count,
+                result.color_debug.target.coherent_patch_cell_count,
+                result.color_debug.target.coherent_patch_fresh_cell_count,
+                result.color_debug.target.coherent_patch_multicell ? 1 : 0,
+                result.box_count);
     } else if (result.gmv_debug.valid) {
         snprintf(
                 session->latest_anomaly_debug_summary,
@@ -1284,16 +1340,36 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
     if (session->anomaly_lock_ready) {
         pthread_mutex_unlock(&session->anomaly_lock);
     }
-    if (session->anomaly_troubleshooting_debug &&
+    bool log_local_playback_summary =
+            is_local_file_source(session) &&
+            cfg.enabled &&
+            cfg.algorithm_mask != 0 &&
+            (session->anomaly_process_frame_count <= 3 ||
+             annotated ||
+             (session->anomaly_process_frame_count % 120) == 0);
+    if ((session->anomaly_troubleshooting_debug || log_local_playback_summary) &&
         (annotated ||
          session->anomaly_process_frame_count <= 3 ||
-         (session->anomaly_process_frame_count % 60) == 0)) {
+         (session->anomaly_process_frame_count % 60) == 0 ||
+         log_local_playback_summary)) {
+        const anomaly_box_t *first_box = result.box_count > 0 ? &result.boxes[0] : NULL;
         ct_debug(TAG,
-                 "anomaly frame result id=%lld designator=%s frame=%lld annotated=%d summary=%s",
+                 "anomaly frame result id=%lld designator=%s frame=%lld ts=%.3fs annotated=%d boxCount=%d bestColor=%.2f bestThermal=%.2f bestMotion=%.2f overlay0=[algo=%d l=%.3f t=%.3f r=%.3f b=%.3f weight=%.2f] summary=%s",
                  (long long) session->session_id,
                  session->designator,
                  (long long) session->anomaly_process_frame_count,
+                 source_ts_us > 0 ? ((double) source_ts_us / 1000000.0) : 0.0,
                  annotated ? 1 : 0,
+                 result.box_count,
+                 result.color_debug.raw_score,
+                 result.thermal_debug.raw_score,
+                 result.motion_debug.raw_score,
+                 first_box != NULL ? first_box->algorithm : 0,
+                 first_box != NULL ? first_box->left_norm : 0.0f,
+                 first_box != NULL ? first_box->top_norm : 0.0f,
+                 first_box != NULL ? first_box->right_norm : 0.0f,
+                 first_box != NULL ? first_box->bottom_norm : 0.0f,
+                 first_box != NULL ? first_box->weight : 0.0f,
                  session->latest_anomaly_debug_summary[0] != '\0'
                          ? session->latest_anomaly_debug_summary
                          : "debug unavailable");
@@ -5043,11 +5119,16 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                                                  ? thermal_min_delta : ANOMALY_THERMAL_MIN_DELTA;
         session->anomaly_cfg.small_target_screen_fraction =
                 small_target_screen_fraction > 0.0f ? small_target_screen_fraction : (1.0f / 250.0f);
-        if (session->anomaly_troubleshooting_debug) {
+        bool log_local_config =
+                is_local_file_source(session) &&
+                session->anomaly_cfg.enabled &&
+                session->anomaly_cfg.algorithm_mask != 0;
+        if (session->anomaly_troubleshooting_debug || log_local_config) {
             ct_debug(TAG,
-                     "anomaly config applied id=%lld designator=%s enabled=%d mask=%d reg=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f thermalPause=%d runtimeDisabled=%d",
+                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f thermalPause=%d runtimeDisabled=%d",
                      (long long) session->session_id,
                      session->designator,
+                     is_local_file_source(session) ? 1 : 0,
                      session->anomaly_cfg.enabled ? 1 : 0,
                      session->anomaly_cfg.algorithm_mask,
                      session->anomaly_cfg.registration_mode,

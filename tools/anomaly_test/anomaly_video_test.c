@@ -50,10 +50,93 @@ static const uint8_t kMinusFont[7]   = { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x0
 #define FONT_W 5
 #define FONT_H 7
 
+typedef struct {
+    int frame_num;
+    double time_s;
+    float x_norm;
+    float y_norm;
+} color_debug_target_row_t;
+
 static double clamp_double(double value, double min_value, double max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
     return value;
+}
+
+static double parse_ratio_or_zero(const char *text) {
+    if (text == NULL || text[0] == '\0') return 0.0;
+    int num = 0;
+    int den = 0;
+    if (sscanf(text, "%d/%d", &num, &den) == 2) {
+        if (den != 0) return (double)num / (double)den;
+        return 0.0;
+    }
+    double value = 0.0;
+    if (sscanf(text, "%lf", &value) == 1) return value;
+    return 0.0;
+}
+
+static int load_color_target_csv(const char *path,
+                                 color_debug_target_row_t **rows_out,
+                                 int *count_out) {
+    if (rows_out) *rows_out = NULL;
+    if (count_out) *count_out = 0;
+    if (path == NULL || path[0] == '\0' || rows_out == NULL || count_out == NULL) return 0;
+
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) return -1;
+
+    int capacity = 0;
+    int count = 0;
+    color_debug_target_row_t *rows = NULL;
+    char line[512];
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *cursor = line;
+        while (*cursor == ' ' || *cursor == '\t') cursor++;
+        if (*cursor == '\0' || *cursor == '\n' || *cursor == '#') continue;
+
+        color_debug_target_row_t row;
+        if (sscanf(cursor, "%d,%lf,%f,%f",
+                   &row.frame_num, &row.time_s, &row.x_norm, &row.y_norm) != 4) {
+            continue;
+        }
+        if (count >= capacity) {
+            int new_capacity = capacity > 0 ? capacity * 2 : 64;
+            color_debug_target_row_t *grown =
+                (color_debug_target_row_t *)realloc(rows, (size_t)new_capacity * sizeof(*grown));
+            if (grown == NULL) {
+                free(rows);
+                fclose(fp);
+                return -1;
+            }
+            rows = grown;
+            capacity = new_capacity;
+        }
+        rows[count++] = row;
+    }
+    fclose(fp);
+    *rows_out = rows;
+    *count_out = count;
+    return 0;
+}
+
+static const color_debug_target_row_t *find_color_target_row(
+        const color_debug_target_row_t *rows,
+        int row_count,
+        int frame_num,
+        double time_s,
+        int *cursor_io) {
+    if (rows == NULL || row_count <= 0) return NULL;
+    int cursor = (cursor_io != NULL && *cursor_io >= 0) ? *cursor_io : 0;
+    if (cursor >= row_count) return NULL;
+    while (cursor < row_count && rows[cursor].frame_num < frame_num) {
+        cursor++;
+    }
+    if (cursor_io != NULL) *cursor_io = cursor;
+    if (cursor >= row_count) return NULL;
+    if (rows[cursor].frame_num == frame_num) return &rows[cursor];
+    if (fabs(rows[cursor].time_s - time_s) <= 0.051) return &rows[cursor];
+    return NULL;
 }
 
 typedef struct {
@@ -800,6 +883,45 @@ static void dump_color_debug(FILE *out, int frame_num, double time_s,
                 (double)c->retention_rank,
                 (i == dbg->winning_candidate_index) ? "  <winner>" : "");
     }
+    if (dbg->target.enabled) {
+        fprintf(out,
+                "  target enabled=%d valid=%d inside=%d refresh_skipped=%d sampled=%d carried=%d sample=(%d,%d) "
+                "rarity=%.4f local_support=%d patch_valid=%d coherent=%d fresh_coherent=%d multicell=%d "
+                "ring_neighbors=%d ring_chroma=%.3f ring_luma=%.3f "
+                "patch_uvl=(%.3f,%.3f,%.3f) ring_uvl=(%.3f,%.3f,%.3f) "
+                "pre_support=%.3f support=%.3f seed=%d matched=%d nearest=%d dist=%.4f winner=%d stage=%d\n",
+                dbg->target.enabled ? 1 : 0,
+                dbg->target.valid ? 1 : 0,
+                dbg->target.inside_scan_zone ? 1 : 0,
+                dbg->target.refresh_skipped ? 1 : 0,
+                dbg->target.sampled_this_frame ? 1 : 0,
+                dbg->target.carried_from_history ? 1 : 0,
+                dbg->target.sample_x,
+                dbg->target.sample_y,
+                (double)dbg->target.hist_rarity_score,
+                dbg->target.local_support_count,
+                dbg->target.patch_valid_count,
+                dbg->target.coherent_patch_cell_count,
+                dbg->target.coherent_patch_fresh_cell_count,
+                dbg->target.coherent_patch_multicell ? 1 : 0,
+                dbg->target.ring_neighbor_count,
+                (double)dbg->target.ring_chroma_contrast,
+                (double)dbg->target.ring_luma_contrast,
+                (double)dbg->target.patch_mean_u,
+                (double)dbg->target.patch_mean_v,
+                (double)dbg->target.patch_mean_luma,
+                (double)dbg->target.ring_mean_u,
+                (double)dbg->target.ring_mean_v,
+                (double)dbg->target.ring_mean_luma,
+                (double)dbg->target.pre_support_score,
+                (double)dbg->target.support_score,
+                dbg->target.support_seed_eligible ? 1 : 0,
+                dbg->target.matched_candidate_index,
+                dbg->target.nearest_candidate_index,
+                (double)dbg->target.nearest_candidate_distance,
+                dbg->target.winning_candidate_index,
+                dbg->target.stage);
+    }
 }
 
 static const char *thermal_target_stage_name(anomaly_debug_thermal_target_stage_t stage) {
@@ -823,6 +945,21 @@ static const char *thermal_target_gate_name(anomaly_debug_thermal_target_gate_t 
         case ANOMALY_THERMAL_TARGET_GATE_SUPPORT_NEAR: return "support_near";
         case ANOMALY_THERMAL_TARGET_GATE_ZERO_QUALITY: return "zero_quality";
         case ANOMALY_THERMAL_TARGET_GATE_NONE:
+        default: return "none";
+    }
+}
+
+static const char *color_target_stage_name(anomaly_debug_color_target_stage_t stage) {
+    switch (stage) {
+        case ANOMALY_COLOR_TARGET_STAGE_OUTSIDE_SCAN_ZONE: return "outside_scan_zone";
+        case ANOMALY_COLOR_TARGET_STAGE_INVALID_SAMPLE: return "invalid_sample";
+        case ANOMALY_COLOR_TARGET_STAGE_RARITY_REJECTED: return "rarity_rejected";
+        case ANOMALY_COLOR_TARGET_STAGE_LOCAL_SUPPORT_REJECTED: return "local_support_rejected";
+        case ANOMALY_COLOR_TARGET_STAGE_SUPPORT_MAP_REJECTED: return "support_map_rejected";
+        case ANOMALY_COLOR_TARGET_STAGE_NO_CANDIDATE: return "no_candidate";
+        case ANOMALY_COLOR_TARGET_STAGE_EXTRACTED: return "extracted";
+        case ANOMALY_COLOR_TARGET_STAGE_WINNER: return "winner";
+        case ANOMALY_COLOR_TARGET_STAGE_NONE:
         default: return "none";
     }
 }
@@ -959,6 +1096,152 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             dbg->target.winning_rank);
 }
 
+static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
+                                    const anomaly_result_t *result) {
+    if (out == NULL || result == NULL) return;
+    const anomaly_debug_color_t *dbg = &result->color_debug;
+    fprintf(out,
+            "{\"frame\":%d,\"time_s\":%.3f,\"raw_candidate_valid\":%s,"
+            "\"raw_score\":%.6f,\"raw_x_norm\":%.6f,\"raw_y_norm\":%.6f,"
+            "\"active_phase_index\":%d,\"active_phase_x\":%d,\"active_phase_y\":%d,"
+            "\"selective_reuse_active\":%s,\"forced_full_refresh\":%s,"
+            "\"fallback_reason_flags\":%u,\"fresh_sample_count\":%d,\"carried_sample_count\":%d,"
+            "\"unsampled_new_exposed_count\":%d,\"fresh_sample_fraction\":%.6f,"
+            "\"carried_sample_fraction\":%.6f,\"unsampled_new_exposed_fraction\":%.6f,"
+            "\"nonzero_histogram_bins\":%d,\"max_histogram_current_count\":%.6f,"
+            "\"max_histogram_recent_count\":%.6f,\"winning_candidate_index\":%d,"
+            "\"candidate_count\":%d,\"candidates\":[",
+            frame_num,
+            time_s,
+            dbg->raw_candidate_valid ? "true" : "false",
+            (double)dbg->raw_score,
+            (double)dbg->raw_x_norm,
+            (double)dbg->raw_y_norm,
+            dbg->active_phase_index,
+            dbg->active_phase_x,
+            dbg->active_phase_y,
+            dbg->selective_reuse_active ? "true" : "false",
+            dbg->forced_full_refresh ? "true" : "false",
+            dbg->fallback_reason_flags,
+            dbg->fresh_sample_count,
+            dbg->carried_sample_count,
+            dbg->unsampled_new_exposed_count,
+            (double)dbg->fresh_sample_fraction,
+            (double)dbg->carried_sample_fraction,
+            (double)dbg->unsampled_new_exposed_fraction,
+            dbg->nonzero_histogram_bins,
+            (double)dbg->max_histogram_current_count,
+            (double)dbg->max_histogram_recent_count,
+            dbg->winning_candidate_index,
+            dbg->candidate_count);
+    for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
+        const anomaly_debug_color_candidate_t *c = &dbg->candidates[i];
+        fprintf(out,
+                "%s{\"index\":%d,\"valid\":%s,\"pixel_x\":%d,\"pixel_y\":%d,"
+                "\"x_norm\":%.6f,\"y_norm\":%.6f,\"bbox_left_norm\":%.6f,"
+                "\"bbox_top_norm\":%.6f,\"bbox_right_norm\":%.6f,\"bbox_bottom_norm\":%.6f,"
+                "\"base_score\":%.6f,\"final_score\":%.6f,\"temporal_score\":%.6f,"
+                "\"area\":%.6f,\"span\":%.6f,\"fill\":%.6f,\"center_share\":%.6f,"
+                "\"quality\":%.6f,\"isolation_score\":%.6f,\"ring_fraction\":%.6f,"
+                "\"support_mass\":%.6f,\"contrast_weight\":%.6f,\"hist_key\":%d,"
+                "\"hist_current_count\":%.6f,\"hist_recent_count\":%.6f,\"hist_rarity_score\":%.6f,"
+                "\"retention_rank\":%.6f,\"above_threshold\":%s}",
+                (i == 0) ? "" : ",",
+                i,
+                c->valid ? "true" : "false",
+                c->pixel_x,
+                c->pixel_y,
+                (double)c->x_norm,
+                (double)c->y_norm,
+                (double)c->bbox_left_norm,
+                (double)c->bbox_top_norm,
+                (double)c->bbox_right_norm,
+                (double)c->bbox_bottom_norm,
+                (double)c->base_score,
+                (double)c->final_score,
+                (double)c->temporal_score,
+                (double)c->area,
+                (double)c->span,
+                (double)c->fill,
+                (double)c->center_share,
+                (double)c->quality,
+                (double)c->isolation_score,
+                (double)c->ring_fraction,
+                (double)c->support_mass,
+                (double)c->contrast_weight,
+                c->hist_key,
+                (double)c->hist_current_count,
+                (double)c->hist_recent_count,
+                (double)c->hist_rarity_score,
+                (double)c->retention_rank,
+                c->above_threshold ? "true" : "false");
+    }
+    fprintf(out,
+            "],\"target\":{\"enabled\":%s,\"valid\":%s,\"inside_scan_zone\":%s,"
+            "\"refresh_skipped\":%s,\"sampled_this_frame\":%s,\"carried_from_history\":%s,"
+            "\"pixel_x\":%d,\"pixel_y\":%d,\"sample_x\":%d,\"sample_y\":%d,"
+            "\"x_norm\":%.6f,\"y_norm\":%.6f,\"hist_key\":%d,\"hist_current_count\":%.6f,"
+            "\"hist_recent_count\":%.6f,\"hist_rarity_score\":%.6f,\"local_support_count\":%d,"
+            "\"patch_valid_count\":%d,\"coherent_patch_cell_count\":%d,"
+            "\"coherent_patch_fresh_cell_count\":%d,\"coherent_patch_multicell\":%s,"
+            "\"patch_mean_u\":%.6f,\"patch_mean_v\":%.6f,\"patch_mean_luma\":%.6f,"
+            "\"ring_mean_u\":%.6f,\"ring_mean_v\":%.6f,\"ring_mean_luma\":%.6f,"
+            "\"ring_chroma_contrast\":%.6f,\"ring_luma_contrast\":%.6f,"
+            "\"ring_neighbor_count\":%d,"
+            "\"pre_support_score\":%.6f,\"support_score\":%.6f,\"support_seed_eligible\":%s,"
+            "\"matched_candidate_index\":%d,\"nearest_candidate_index\":%d,"
+            "\"nearest_candidate_distance\":%.6f,\"winning_candidate_index\":%d,"
+            "\"matched_candidate_score\":%.6f,\"matched_candidate_x_norm\":%.6f,"
+            "\"matched_candidate_y_norm\":%.6f,\"matched_bbox_left_norm\":%.6f,"
+            "\"matched_bbox_top_norm\":%.6f,\"matched_bbox_right_norm\":%.6f,"
+            "\"matched_bbox_bottom_norm\":%.6f,\"stage\":\"%s\"}}\n",
+            dbg->target.enabled ? "true" : "false",
+            dbg->target.valid ? "true" : "false",
+            dbg->target.inside_scan_zone ? "true" : "false",
+            dbg->target.refresh_skipped ? "true" : "false",
+            dbg->target.sampled_this_frame ? "true" : "false",
+            dbg->target.carried_from_history ? "true" : "false",
+            dbg->target.pixel_x,
+            dbg->target.pixel_y,
+            dbg->target.sample_x,
+            dbg->target.sample_y,
+            (double)dbg->target.x_norm,
+            (double)dbg->target.y_norm,
+            dbg->target.hist_key,
+            (double)dbg->target.hist_current_count,
+            (double)dbg->target.hist_recent_count,
+            (double)dbg->target.hist_rarity_score,
+            dbg->target.local_support_count,
+            dbg->target.patch_valid_count,
+            dbg->target.coherent_patch_cell_count,
+            dbg->target.coherent_patch_fresh_cell_count,
+            dbg->target.coherent_patch_multicell ? "true" : "false",
+            (double)dbg->target.patch_mean_u,
+            (double)dbg->target.patch_mean_v,
+            (double)dbg->target.patch_mean_luma,
+            (double)dbg->target.ring_mean_u,
+            (double)dbg->target.ring_mean_v,
+            (double)dbg->target.ring_mean_luma,
+            (double)dbg->target.ring_chroma_contrast,
+            (double)dbg->target.ring_luma_contrast,
+            dbg->target.ring_neighbor_count,
+            (double)dbg->target.pre_support_score,
+            (double)dbg->target.support_score,
+            dbg->target.support_seed_eligible ? "true" : "false",
+            dbg->target.matched_candidate_index,
+            dbg->target.nearest_candidate_index,
+            (double)dbg->target.nearest_candidate_distance,
+            dbg->target.winning_candidate_index,
+            (double)dbg->target.matched_candidate_score,
+            (double)dbg->target.matched_candidate_x_norm,
+            (double)dbg->target.matched_candidate_y_norm,
+            (double)dbg->target.matched_bbox_left_norm,
+            (double)dbg->target.matched_bbox_top_norm,
+            (double)dbg->target.matched_bbox_right_norm,
+            (double)dbg->target.matched_bbox_bottom_norm,
+            color_target_stage_name(dbg->target.stage));
+}
+
 static void dump_gmv_debug(FILE *out, int frame_num, double time_s,
                            const anomaly_result_t *result) {
     if (out == NULL || result == NULL) return;
@@ -1081,6 +1364,8 @@ int main(int argc, char **argv) {
     char output_csv[1024]   = "";
     char output_summary_json[1024] = "";
     char thermal_debug_jsonl_path[1024] = "";
+    char color_debug_jsonl_path[1024] = "";
+    char color_target_csv_path[1024] = "";
     int  write_video = 1;
 
     anomaly_config_t cfg = {
@@ -1174,6 +1459,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--thermal-debug-jsonl") && i+1 < argc) {
             snprintf(thermal_debug_jsonl_path, sizeof(thermal_debug_jsonl_path), "%s", argv[++i]);
         }
+        else if (!strcmp(argv[i], "--color-debug-jsonl") && i+1 < argc) {
+            snprintf(color_debug_jsonl_path, sizeof(color_debug_jsonl_path), "%s", argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--color-target-csv") && i+1 < argc) {
+            snprintf(color_target_csv_path, sizeof(color_target_csv_path), "%s", argv[++i]);
+        }
         else if (!strcmp(argv[i], "--debug-overlay")) {
             debug_overlay = 1;
         }
@@ -1188,14 +1479,28 @@ int main(int argc, char **argv) {
         char cmd[2048];
         snprintf(cmd, sizeof(cmd),
             "ffprobe -v error -select_streams v:0 "
-            "-show_entries stream=width,height,r_frame_rate,duration "
-            "-of csv=p=0 \"%s\" 2>/dev/null", input);
+            "-show_entries stream=width,height,avg_frame_rate,r_frame_rate,duration "
+            "-of default=noprint_wrappers=1:nokey=1 \"%s\" 2>/dev/null", input);
         FILE *p = popen(cmd, "r");
         if (!p) { fprintf(stderr, "Error: ffprobe failed — is ffprobe on PATH?\n"); return 1; }
-        int fps_n = 30, fps_d = 1;
-        fscanf(p, "%d,%d,%d/%d,%lf", &W, &H, &fps_n, &fps_d, &full_duration_s);
+        char avg_fps_text[64] = "";
+        char real_fps_text[64] = "";
+        char duration_text[64] = "";
+        if (fscanf(p, "%d\n%d\n%63s\n%63s\n%63s", &W, &H,
+                   avg_fps_text, real_fps_text, duration_text) != 5) {
+            pclose(p);
+            fprintf(stderr, "Error: could not parse ffprobe output for \"%s\"\n", input);
+            return 1;
+        }
         pclose(p);
-        if (fps_d > 0) fps = (double)fps_n / (double)fps_d;
+        double avg_fps = parse_ratio_or_zero(avg_fps_text);
+        double real_fps = parse_ratio_or_zero(real_fps_text);
+        full_duration_s = parse_ratio_or_zero(duration_text);
+        if (avg_fps > 0.0 && avg_fps < 240.0) {
+            fps = avg_fps;
+        } else if (real_fps > 0.0 && real_fps < 240.0) {
+            fps = real_fps;
+        }
     }
     if (W <= 0 || H <= 0) {
         fprintf(stderr, "Error: could not read video info from \"%s\"\n", input);
@@ -1369,6 +1674,10 @@ int main(int argc, char **argv) {
     // ── Open probe CSV (if requested) ────────────────────────────────────
     FILE *probe_csv = NULL;
     FILE *thermal_debug_jsonl = NULL;
+    FILE *color_debug_jsonl = NULL;
+    color_debug_target_row_t *color_target_rows = NULL;
+    int color_target_row_count = 0;
+    int color_target_row_cursor = 0;
     if (probe_active) {
         probe_csv = fopen(probe_csv_path, "w");
         if (!probe_csv) {
@@ -1393,6 +1702,22 @@ int main(int argc, char **argv) {
         thermal_debug_jsonl = fopen(thermal_debug_jsonl_path, "w");
         if (!thermal_debug_jsonl) {
             fprintf(stderr, "Cannot write thermal debug JSONL: %s\n", thermal_debug_jsonl_path);
+            return 1;
+        }
+    }
+    if (color_target_csv_path[0]) {
+        if (load_color_target_csv(color_target_csv_path, &color_target_rows, &color_target_row_count) != 0) {
+            fprintf(stderr, "Cannot read color target CSV: %s\n", color_target_csv_path);
+            if (thermal_debug_jsonl) fclose(thermal_debug_jsonl);
+            return 1;
+        }
+    }
+    if (color_debug_jsonl_path[0]) {
+        color_debug_jsonl = fopen(color_debug_jsonl_path, "w");
+        if (!color_debug_jsonl) {
+            fprintf(stderr, "Cannot write color debug JSONL: %s\n", color_debug_jsonl_path);
+            if (thermal_debug_jsonl) fclose(thermal_debug_jsonl);
+            free(color_target_rows);
             return 1;
         }
     }
@@ -1450,6 +1775,21 @@ int main(int argc, char **argv) {
                     probe.temporal_score,
                     probe.effective_score,
                     passes_delta, passes_threshold);
+        }
+
+        cfg.color_debug_target_enabled = false;
+        cfg.color_debug_target_x_norm = 0.0f;
+        cfg.color_debug_target_y_norm = 0.0f;
+        const color_debug_target_row_t *color_target_row = find_color_target_row(
+            color_target_rows,
+            color_target_row_count,
+            frame_num,
+            time_s,
+            &color_target_row_cursor);
+        if (color_target_row != NULL) {
+            cfg.color_debug_target_enabled = true;
+            cfg.color_debug_target_x_norm = color_target_row->x_norm;
+            cfg.color_debug_target_y_norm = color_target_row->y_norm;
         }
 
         anomaly_result_t result;
@@ -1511,6 +1851,9 @@ int main(int argc, char **argv) {
         if (thermal_debug_jsonl != NULL) {
             write_thermal_debug_jsonl(thermal_debug_jsonl, frame_num, time_s, &result);
         }
+        if (color_debug_jsonl != NULL) {
+            write_color_debug_jsonl(color_debug_jsonl, frame_num, time_s, &result);
+        }
 
         if (result.box_count > 0) {
             detection_frames++;
@@ -1564,9 +1907,11 @@ int main(int argc, char **argv) {
     fclose(csv);
     if (probe_csv) fclose(probe_csv);
     if (thermal_debug_jsonl) fclose(thermal_debug_jsonl);
+    if (color_debug_jsonl) fclose(color_debug_jsonl);
     anomaly_state_cleanup(&state);
     free(rgba);
     free(raw_rgba);
+    free(color_target_rows);
 
     // ── Summary ──────────────────────────────────────────────────────────
     double analysis_wall_s = monotonic_seconds() - wall_start_s;
@@ -1629,6 +1974,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  Probe CSV        : %s\n", probe_csv_path);
     if (thermal_debug_jsonl_path[0])
         fprintf(stderr, "  Thermal JSONL    : %s\n", thermal_debug_jsonl_path);
+    if (color_debug_jsonl_path[0])
+        fprintf(stderr, "  Color JSONL      : %s\n", color_debug_jsonl_path);
     fprintf(stderr, "\n");
     if (output_summary_json[0]) {
         FILE *summary = fopen(output_summary_json, "w");

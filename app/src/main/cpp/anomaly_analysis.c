@@ -85,6 +85,15 @@
 #define ANOMALY_COLOR_V_MAX (112.0f)
 #define ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS 1
 #define ANOMALY_COLOR_LOCAL_SUPPORT_MIN 3
+#define ANOMALY_COLOR_CONTRAST_MIN_TOTAL_NEIGHBORS 4
+#define ANOMALY_COLOR_CONTRAST_CHROMA_SOFT 3.0f
+#define ANOMALY_COLOR_CONTRAST_CHROMA_HARD 14.0f
+#define ANOMALY_COLOR_CONTRAST_LUMA_SOFT 2.0f
+#define ANOMALY_COLOR_CONTRAST_LUMA_HARD 10.0f
+#define ANOMALY_COLOR_CONTRAST_RESCUE_MIN 1.06f
+#define ANOMALY_COLOR_RESCUE_LOCAL_SUPPORT_MIN 3
+#define ANOMALY_COLOR_RESCUE_SCORE_BASE 0.85f
+#define ANOMALY_COLOR_RESCUE_SCORE_RANGE 1.45f
 
 static inline float clamp01f(float v) {
     if (v < 0.0f) return 0.0f;
@@ -225,6 +234,130 @@ static inline float score_color_hist_family_rarity(
         }
     }
     return 1.0f / (float)(family + 1);
+}
+
+static void build_color_family_rarity_lut(
+        const uint8_t *current_hist,
+        const uint8_t *recent_hist,
+        float         *rarity_out) {
+    if (rarity_out == NULL) return;
+    for (int v_bin = 0; v_bin < ANOMALY_COLOR_V_BINS; v_bin++) {
+        for (int u_bin = 0; u_bin < ANOMALY_COLOR_U_BINS; u_bin++) {
+            int key = color_hist_key(u_bin, v_bin);
+            rarity_out[key] = score_color_hist_family_rarity(
+                current_hist,
+                recent_hist,
+                u_bin,
+                v_bin);
+        }
+    }
+}
+
+static void compute_local_color_contrast(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        sx,
+        int                        sy,
+        float                     *avg_chroma_out,
+        float                     *avg_luma_out,
+        int                       *neighbor_count_out);
+
+static void compute_ring_color_contrast(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        sx,
+        int                        sy,
+        int                        inner_radius,
+        int                        outer_radius,
+        float                     *avg_chroma_out,
+        float                     *avg_luma_out,
+        int                       *neighbor_count_out);
+
+typedef struct {
+    int   patch_valid_count;
+    int   coherent_patch_cell_count;
+    int   coherent_patch_fresh_cell_count;
+    bool  coherent_patch_multicell;
+    float patch_mean_u;
+    float patch_mean_v;
+    float patch_mean_luma;
+    float ring_mean_u;
+    float ring_mean_v;
+    float ring_mean_luma;
+    float ring_chroma_contrast;
+    float ring_luma_contrast;
+    int   ring_neighbor_count;
+} anomaly_color_target_telemetry_t;
+
+static void compute_color_target_telemetry(
+        const anomaly_roi_state_t            *roi_state,
+        int                                   sg_w,
+        int                                   sg_h,
+        int                                   sx,
+        int                                   sy,
+        int                                   inner_radius,
+        int                                   outer_radius,
+        bool                                  full_refresh,
+        const uint8_t                        *refresh_mask,
+        anomaly_color_target_telemetry_t     *telemetry_out);
+
+static inline float score_color_contrast_rescue(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        sx,
+        int                        sy,
+        bool                       sampled_this_frame,
+        int                        local_support) {
+    if (roi_state == NULL ||
+        !sampled_this_frame ||
+        local_support < ANOMALY_COLOR_RESCUE_LOCAL_SUPPORT_MIN) {
+        return 0.0f;
+    }
+
+    float avg_chroma = 0.0f;
+    float avg_luma = 0.0f;
+    int neighbor_count = 0;
+    compute_ring_color_contrast(
+            roi_state,
+            sg_w,
+            sg_h,
+            sx,
+            sy,
+            1,
+            3,
+            &avg_chroma,
+            &avg_luma,
+            &neighbor_count);
+    if (neighbor_count < ANOMALY_COLOR_CONTRAST_MIN_TOTAL_NEIGHBORS) {
+        return 0.0f;
+    }
+
+    float chroma_strength = clampf(
+        (avg_chroma - ANOMALY_COLOR_CONTRAST_CHROMA_SOFT) /
+        (ANOMALY_COLOR_CONTRAST_CHROMA_HARD - ANOMALY_COLOR_CONTRAST_CHROMA_SOFT),
+        0.0f,
+        1.0f);
+    float luma_strength = clampf(
+        (avg_luma - ANOMALY_COLOR_CONTRAST_LUMA_SOFT) /
+        (ANOMALY_COLOR_CONTRAST_LUMA_HARD - ANOMALY_COLOR_CONTRAST_LUMA_SOFT),
+        0.0f,
+        1.0f);
+    float contrast_weight = 1.0f + 0.45f * (0.65f * chroma_strength + 0.35f * luma_strength);
+    if (contrast_weight < ANOMALY_COLOR_CONTRAST_RESCUE_MIN) return 0.0f;
+    float contrast_strength = clampf(
+        (contrast_weight - ANOMALY_COLOR_CONTRAST_RESCUE_MIN) /
+        (1.40f - ANOMALY_COLOR_CONTRAST_RESCUE_MIN),
+        0.0f,
+        1.0f);
+    float support_strength = clampf(
+        (float)(local_support - ANOMALY_COLOR_RESCUE_LOCAL_SUPPORT_MIN) / 4.0f,
+        0.0f,
+        1.0f);
+    float strength = 0.75f * contrast_strength + 0.25f * support_strength;
+    return ANOMALY_COLOR_RESCUE_SCORE_BASE + ANOMALY_COLOR_RESCUE_SCORE_RANGE * strength;
 }
 
 static int local_uv_support_count(
@@ -1899,6 +2032,175 @@ static void compute_local_color_contrast(
     if (neighbor_count_out != NULL) *neighbor_count_out = neighbor_count;
 }
 
+static void compute_ring_color_contrast(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        sx,
+        int                        sy,
+        int                        inner_radius,
+        int                        outer_radius,
+        float                     *avg_chroma_out,
+        float                     *avg_luma_out,
+        int                       *neighbor_count_out) {
+    if (avg_chroma_out != NULL) *avg_chroma_out = 0.0f;
+    if (avg_luma_out != NULL) *avg_luma_out = 0.0f;
+    if (neighbor_count_out != NULL) *neighbor_count_out = 0;
+    if (roi_state == NULL || roi_state->color_valid_mask == NULL ||
+        roi_state->color_u == NULL || roi_state->color_v == NULL ||
+        roi_state->color_luma == NULL || sg_w <= 0 || sg_h <= 0 ||
+        sx < 0 || sy < 0 || sx >= sg_w || sy >= sg_h ||
+        outer_radius <= inner_radius) {
+        return;
+    }
+    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+    if (roi_state->color_valid_mask[idx] == 0u) return;
+
+    float center_u = roi_state->color_u[idx];
+    float center_v = roi_state->color_v[idx];
+    float center_luma = roi_state->color_luma[idx];
+    float chroma_sum = 0.0f;
+    float luma_sum = 0.0f;
+    int neighbor_count = 0;
+    for (int ny = sy - outer_radius; ny <= sy + outer_radius; ny++) {
+        if (ny < 0 || ny >= sg_h) continue;
+        for (int nx = sx - outer_radius; nx <= sx + outer_radius; nx++) {
+            if (nx < 0 || nx >= sg_w || (nx == sx && ny == sy)) continue;
+            int chebyshev = abs(nx - sx);
+            int dy = abs(ny - sy);
+            if (dy > chebyshev) chebyshev = dy;
+            if (chebyshev <= inner_radius || chebyshev > outer_radius) continue;
+            size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+            if (roi_state->color_valid_mask[nidx] == 0u) continue;
+            float du = center_u - roi_state->color_u[nidx];
+            float dv = center_v - roi_state->color_v[nidx];
+            chroma_sum += sqrtf((du * du) + (dv * dv));
+            luma_sum += fabsf(center_luma - roi_state->color_luma[nidx]);
+            neighbor_count++;
+        }
+    }
+    if (neighbor_count <= 0) return;
+    if (avg_chroma_out != NULL) *avg_chroma_out = chroma_sum / (float)neighbor_count;
+    if (avg_luma_out != NULL) *avg_luma_out = luma_sum / (float)neighbor_count;
+    if (neighbor_count_out != NULL) *neighbor_count_out = neighbor_count;
+}
+
+static void compute_color_target_telemetry(
+        const anomaly_roi_state_t        *roi_state,
+        int                               sg_w,
+        int                               sg_h,
+        int                               sx,
+        int                               sy,
+        int                               inner_radius,
+        int                               outer_radius,
+        bool                              full_refresh,
+        const uint8_t                    *refresh_mask,
+        anomaly_color_target_telemetry_t *telemetry_out) {
+    if (telemetry_out != NULL) memset(telemetry_out, 0, sizeof(*telemetry_out));
+    if (telemetry_out == NULL ||
+        roi_state == NULL || roi_state->color_valid_mask == NULL ||
+        roi_state->color_u == NULL || roi_state->color_v == NULL ||
+        roi_state->color_luma == NULL || roi_state->color_u_bin == NULL ||
+        roi_state->color_v_bin == NULL ||
+        sg_w <= 0 || sg_h <= 0 ||
+        sx < 0 || sy < 0 || sx >= sg_w || sy >= sg_h ||
+        inner_radius < 0 || outer_radius <= inner_radius) {
+        return;
+    }
+
+    size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+    if (roi_state->color_valid_mask[idx] == 0u) return;
+
+    const float center_u = roi_state->color_u[idx];
+    const float center_v = roi_state->color_v[idx];
+    const float center_luma = roi_state->color_luma[idx];
+    const int center_u_bin = (int)roi_state->color_u_bin[idx];
+    const int center_v_bin = (int)roi_state->color_v_bin[idx];
+
+    float patch_u_sum = 0.0f;
+    float patch_v_sum = 0.0f;
+    float patch_luma_sum = 0.0f;
+    float ring_u_sum = 0.0f;
+    float ring_v_sum = 0.0f;
+    float ring_luma_sum = 0.0f;
+    int patch_count = 0;
+    int ring_count = 0;
+    int coherent_count = 0;
+    int coherent_fresh_count = 0;
+
+    for (int ny = sy - outer_radius; ny <= sy + outer_radius; ny++) {
+        if (ny < 0 || ny >= sg_h) continue;
+        for (int nx = sx - outer_radius; nx <= sx + outer_radius; nx++) {
+            if (nx < 0 || nx >= sg_w) continue;
+            int chebyshev = abs(nx - sx);
+            int dy = abs(ny - sy);
+            if (dy > chebyshev) chebyshev = dy;
+            if (chebyshev > outer_radius) continue;
+
+            size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+            if (roi_state->color_valid_mask[nidx] == 0u) continue;
+
+            if (chebyshev <= inner_radius) {
+                patch_u_sum += roi_state->color_u[nidx];
+                patch_v_sum += roi_state->color_v[nidx];
+                patch_luma_sum += roi_state->color_luma[nidx];
+                patch_count++;
+                int u_bin = (int)roi_state->color_u_bin[nidx];
+                int v_bin = (int)roi_state->color_v_bin[nidx];
+                if (abs(u_bin - center_u_bin) <= 1 &&
+                    abs(v_bin - center_v_bin) <= 1) {
+                    coherent_count++;
+                    bool fresh_now = full_refresh;
+                    if (!fresh_now && refresh_mask != NULL && refresh_mask[nidx] != 0u) {
+                        fresh_now = true;
+                    }
+                    if (!fresh_now &&
+                        refresh_mask == NULL &&
+                        roi_state->fresh_mask != NULL &&
+                        roi_state->fresh_mask[nidx] != 0u) {
+                        fresh_now = true;
+                    }
+                    if (fresh_now) {
+                        coherent_fresh_count++;
+                    }
+                }
+            } else {
+                ring_u_sum += roi_state->color_u[nidx];
+                ring_v_sum += roi_state->color_v[nidx];
+                ring_luma_sum += roi_state->color_luma[nidx];
+                ring_count++;
+            }
+        }
+    }
+
+    telemetry_out->patch_valid_count = patch_count;
+    telemetry_out->coherent_patch_cell_count = coherent_count;
+    telemetry_out->coherent_patch_fresh_cell_count = coherent_fresh_count;
+    telemetry_out->coherent_patch_multicell = coherent_count > 1;
+    telemetry_out->ring_neighbor_count = ring_count;
+
+    if (patch_count > 0) {
+        telemetry_out->patch_mean_u = patch_u_sum / (float)patch_count;
+        telemetry_out->patch_mean_v = patch_v_sum / (float)patch_count;
+        telemetry_out->patch_mean_luma = patch_luma_sum / (float)patch_count;
+    } else {
+        telemetry_out->patch_mean_u = center_u;
+        telemetry_out->patch_mean_v = center_v;
+        telemetry_out->patch_mean_luma = center_luma;
+    }
+
+    if (ring_count > 0) {
+        telemetry_out->ring_mean_u = ring_u_sum / (float)ring_count;
+        telemetry_out->ring_mean_v = ring_v_sum / (float)ring_count;
+        telemetry_out->ring_mean_luma = ring_luma_sum / (float)ring_count;
+        float du = telemetry_out->patch_mean_u - telemetry_out->ring_mean_u;
+        float dv = telemetry_out->patch_mean_v - telemetry_out->ring_mean_v;
+        telemetry_out->ring_chroma_contrast = sqrtf((du * du) + (dv * dv));
+        telemetry_out->ring_luma_contrast =
+            fabsf(telemetry_out->patch_mean_luma - telemetry_out->ring_mean_luma);
+    }
+}
+
 static void compute_color_contrast_weights(
         anomaly_roi_state_t *roi_state,
         int                  sg_w,
@@ -2035,8 +2337,16 @@ static void extract_color_blob_candidates(
         uint8_t                *visited,
         int                    *queue,
         anomaly_color_blob_candidate_t *out_candidates,
-        int                    *out_count) {
+        int                    *out_count,
+        int                    *reject_area_count_out,
+        int                    *reject_ring_count_out,
+        int                    *reject_support_mass_count_out,
+        int                    *reject_quality_count_out) {
     if (out_count != NULL) *out_count = 0;
+    if (reject_area_count_out != NULL) *reject_area_count_out = 0;
+    if (reject_ring_count_out != NULL) *reject_ring_count_out = 0;
+    if (reject_support_mass_count_out != NULL) *reject_support_mass_count_out = 0;
+    if (reject_quality_count_out != NULL) *reject_quality_count_out = 0;
     if (color_support_map == NULL || visited == NULL || queue == NULL ||
         out_candidates == NULL || out_count == NULL || sg_w <= 0 || sg_h <= 0) {
         return;
@@ -2192,9 +2502,18 @@ static void extract_color_blob_candidates(
             float support_mass = area > 0 ? ((float)support_supported / (float)area) : 0.0f;
             float near_fraction = near_total > 0 ? ((float)near_supported / (float)near_total) : 0.0f;
 
-            if (area > max_blob_area) continue;
-            if (ring_fraction >= 0.36f) continue;
-            if (support_mass >= 2.80f && near_fraction >= 0.22f) continue;
+            if (area > max_blob_area) {
+                if (reject_area_count_out != NULL) (*reject_area_count_out)++;
+                continue;
+            }
+            if (ring_fraction >= 0.36f) {
+                if (reject_ring_count_out != NULL) (*reject_ring_count_out)++;
+                continue;
+            }
+            if (support_mass >= 2.80f && near_fraction >= 0.22f) {
+                if (reject_support_mass_count_out != NULL) (*reject_support_mass_count_out)++;
+                continue;
+            }
 
             float apparent_size_scale = thermal_small_target_apparent_scale(cfg, span_px, frame_w, frame_h);
             float area_scale;
@@ -2224,7 +2543,10 @@ static void extract_color_blob_candidates(
             quality *= apparent_size_scale;
             quality *= contrast_scale;
             quality = clampf(quality, 0.0f, 1.40f);
-            if (quality <= 0.0f) continue;
+            if (quality <= 0.0f) {
+                if (reject_quality_count_out != NULL) (*reject_quality_count_out)++;
+                continue;
+            }
 
             float final_score = peak_support * strength_scale * (0.62f + 0.58f * quality);
             float retention_rank = 0.0f;
@@ -3139,6 +3461,104 @@ static inline bool registration_invert_point_fast(
     if (inv == NULL || !inv->valid || out_x == NULL || out_y == NULL) return false;
     *out_x = inv->m00 * x + inv->m01 * y + inv->m02;
     *out_y = inv->m10 * x + inv->m11 * y + inv->m12;
+    return true;
+}
+
+#define ANOMALY_PREV_SAMPLE_LOOKUP_INVALID (-1)
+
+typedef struct {
+    int carried_samples;
+    int newly_exposed_samples;
+    int stale_samples;
+} anomaly_prev_sample_lookup_summary_t;
+
+static bool build_prev_sample_lookup_map(
+        const anomaly_roi_state_t              *prev,
+        const anomaly_registration_model_t     *model,
+        int                                     frame_width,
+        int                                     frame_height,
+        int                                     roi_x0,
+        int                                     roi_y0,
+        int                                     roi_x1,
+        int                                     roi_y1,
+        int                                     sample_step,
+        int                                     sg_w,
+        int                                     sg_h,
+        int                                     stale_limit,
+        int                                    *prev_lookup_out,
+        anomaly_prev_sample_lookup_summary_t   *summary_out) {
+    if (summary_out != NULL) {
+        summary_out->carried_samples = 0;
+        summary_out->newly_exposed_samples = 0;
+        summary_out->stale_samples = 0;
+    }
+    if (prev == NULL || model == NULL || prev_lookup_out == NULL ||
+        frame_width <= 0 || frame_height <= 0 ||
+        sample_step <= 0 || sg_w <= 0 || sg_h <= 0 ||
+        !prev->valid || prev->sample_step <= 0 ||
+        prev->width <= 0 || prev->height <= 0 ||
+        prev->valid_mask == NULL ||
+        !registration_model_valid(model)) {
+        return false;
+    }
+
+    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
+    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    anomaly_inverse_affine_t inv = registration_inverse_affine(model);
+    if (!inv.valid) return false;
+
+    int carried_samples = 0;
+    int newly_exposed_samples = 0;
+    int stale_samples = 0;
+    for (int sy = 0; sy < sg_h; sy++) {
+        int y = roi_y0 + sy * sample_step + sample_step / 2;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        for (int sx = 0; sx < sg_w; sx++) {
+            int x = roi_x0 + sx * sample_step + sample_step / 2;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            prev_lookup_out[idx] = ANOMALY_PREV_SAMPLE_LOOKUP_INVALID;
+
+            float nx = clamp01f((float)x / fw);
+            float ny = clamp01f((float)y / fh);
+            float px = 0.0f;
+            float py = 0.0f;
+            if (!registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
+                newly_exposed_samples++;
+                continue;
+            }
+            int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
+            int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
+            if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||
+                prev_py < prev->roi_y0 || prev_py >= prev->roi_y1) {
+                newly_exposed_samples++;
+                continue;
+            }
+            int prev_sx = (prev_px - prev->roi_x0) / prev->sample_step;
+            int prev_sy = (prev_py - prev->roi_y0) / prev->sample_step;
+            if (prev_sx < 0 || prev_sy < 0 ||
+                prev_sx >= prev->width || prev_sy >= prev->height) {
+                newly_exposed_samples++;
+                continue;
+            }
+            size_t prev_idx = (size_t)prev_sy * (size_t)prev->width + (size_t)prev_sx;
+            if (!prev->valid_mask[prev_idx]) {
+                newly_exposed_samples++;
+                continue;
+            }
+
+            prev_lookup_out[idx] = (int)prev_idx;
+            carried_samples++;
+            int age = (int)prev->coverage_age[prev_idx] + 1;
+            if (age > stale_limit) stale_samples++;
+        }
+    }
+
+    if (summary_out != NULL) {
+        summary_out->carried_samples = carried_samples;
+        summary_out->newly_exposed_samples = newly_exposed_samples;
+        summary_out->stale_samples = stale_samples;
+    }
     return true;
 }
 
@@ -7594,23 +8014,17 @@ static void annotate_target_revisit_cells(
 
 static bool build_selective_refresh_mask(
         const anomaly_state_t               *state,
-        const anomaly_registration_model_t  *model,
         anomaly_rescan_mode_t                mode,
-        int                                  frame_width,
-        int                                  frame_height,
-        int                                  roi_x0,
-        int                                  roi_y0,
-        int                                  roi_x1,
-        int                                  roi_y1,
-        int                                  sample_step,
         int                                  sg_w,
         int                                  sg_h,
+        const int                           *prev_lookup,
         uint8_t                             *refresh_mask,
         int                                 *selected_count_out,
         uint32_t                            *reason_flags_out) {
     if (selected_count_out != NULL) *selected_count_out = 0;
     if (reason_flags_out != NULL) *reason_flags_out = 0u;
     if (refresh_mask == NULL || state == NULL ||
+        prev_lookup == NULL ||
         (mode != ANOMALY_RESCAN_MODE_PARTIAL &&
          mode != ANOMALY_RESCAN_MODE_TARGET_ONLY)) {
         if (reason_flags_out != NULL) *reason_flags_out |= ANOMALY_SCAN_REASON_MASK_BUILD_FAILED;
@@ -7619,25 +8033,16 @@ static bool build_selective_refresh_mask(
 
     const anomaly_roi_state_t *prev = &state->roi_state;
     if (!prev->valid ||
-        prev->sample_step != sample_step ||
         prev->width <= 0 || prev->height <= 0 ||
         prev->cell_cols <= 0 || prev->cell_rows <= 0 ||
         prev->valid_mask == NULL ||
-        prev->cell_summaries == NULL ||
-        !registration_model_valid(model)) {
+        prev->cell_summaries == NULL) {
         if (reason_flags_out != NULL) *reason_flags_out |= ANOMALY_SCAN_REASON_MASK_BUILD_FAILED;
         return false;
     }
 
     size_t total_samples = (size_t)sg_w * (size_t)sg_h;
     memset(refresh_mask, 0, total_samples * sizeof(uint8_t));
-    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
-    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
-    anomaly_inverse_affine_t inv = registration_inverse_affine(model);
-    if (!inv.valid) {
-        if (reason_flags_out != NULL) *reason_flags_out |= ANOMALY_SCAN_REASON_MASK_BUILD_FAILED;
-        return false;
-    }
     int prev_cell_span = roi_grid_cell_span(prev->sample_step);
     if (prev_cell_span <= 0) return false;
 
@@ -7649,44 +8054,20 @@ static bool build_selective_refresh_mask(
     bool target_only = (mode == ANOMALY_RESCAN_MODE_TARGET_ONLY);
     int selected_count = 0;
     for (int sy = 0; sy < sg_h; sy++) {
-        int y = roi_y0 + sy * sample_step + sample_step / 2;
-        if (y >= roi_y1) y = roi_y1 - 1;
         for (int sx = 0; sx < sg_w; sx++) {
-            int x = roi_x0 + sx * sample_step + sample_step / 2;
-            if (x >= roi_x1) x = roi_x1 - 1;
             size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
             bool select_sample = false;
-            float nx = clamp01f((float)x / fw);
-            float ny = clamp01f((float)y / fh);
-            float px = 0.0f;
-            float py = 0.0f;
-            if (!registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
+            int prev_idx = prev_lookup[idx];
+            if (prev_idx < 0) {
                 select_sample = !target_only;
             } else {
-                int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
-                int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
-                if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||
-                    prev_py < prev->roi_y0 || prev_py >= prev->roi_y1) {
-                    select_sample = !target_only;
-                } else {
-                    int prev_sx = (prev_px - prev->roi_x0) / prev->sample_step;
-                    int prev_sy = (prev_py - prev->roi_y0) / prev->sample_step;
-                    if (prev_sx < 0 || prev_sy < 0 ||
-                        prev_sx >= prev->width || prev_sy >= prev->height) {
-                        select_sample = !target_only;
-                    } else {
-                        size_t prev_idx = (size_t)prev_sy * (size_t)prev->width + (size_t)prev_sx;
-                        if (!prev->valid_mask[prev_idx]) {
-                            select_sample = !target_only;
-                        } else {
-                            int cell_x = clamp_i32(prev_sx / prev_cell_span, 0, prev->cell_cols - 1);
-                            int cell_y = clamp_i32(prev_sy / prev_cell_span, 0, prev->cell_rows - 1);
-                            size_t cell_idx = (size_t)cell_y * (size_t)prev->cell_cols + (size_t)cell_x;
-                            uint32_t scan_flags = prev->cell_summaries[cell_idx].scan_flags;
-                            select_sample = (scan_flags & required_flags) != 0u;
-                        }
-                    }
-                }
+                int prev_sx = prev_idx % prev->width;
+                int prev_sy = prev_idx / prev->width;
+                int cell_x = clamp_i32(prev_sx / prev_cell_span, 0, prev->cell_cols - 1);
+                int cell_y = clamp_i32(prev_sy / prev_cell_span, 0, prev->cell_rows - 1);
+                size_t cell_idx = (size_t)cell_y * (size_t)prev->cell_cols + (size_t)cell_x;
+                uint32_t scan_flags = prev->cell_summaries[cell_idx].scan_flags;
+                select_sample = (scan_flags & required_flags) != 0u;
             }
             refresh_mask[idx] = select_sample ? 1u : 0u;
             selected_count += select_sample ? 1 : 0;
@@ -7784,9 +8165,6 @@ static void update_roi_state_full_refresh(
 
 static bool update_roi_state_selective_refresh(
         anomaly_state_t                  *state,
-        const anomaly_registration_model_t *registration,
-        int                               frame_width,
-        int                               frame_height,
         int                               roi_x0,
         int                               roi_y0,
         int                               roi_x1,
@@ -7804,8 +8182,9 @@ static bool update_roi_state_selective_refresh(
         float                             delta_mean,
         float                             delta_norm,
         anomaly_registration_health_t     registration_health,
+        const int                        *prev_lookup,
         const uint8_t                    *refresh_mask) {
-    if (state == NULL || registration == NULL || refresh_mask == NULL) return false;
+    if (state == NULL || prev_lookup == NULL || refresh_mask == NULL) return false;
     anomaly_roi_state_t *roi_state = &state->roi_state;
     if (!roi_state->valid ||
         roi_state->sample_step != sample_step ||
@@ -7815,7 +8194,6 @@ static bool update_roi_state_selective_refresh(
         roi_state->temporal_score == NULL ||
         roi_state->valid_mask == NULL ||
         roi_state->coverage_age == NULL ||
-        !registration_model_valid(registration) ||
         !ensure_roi_state_capacity(roi_state, (size_t)sg_w * (size_t)sg_h)) {
         return false;
     }
@@ -7857,16 +8235,8 @@ static bool update_roi_state_selective_refresh(
     roi_state->cell_rows = (sg_h + roi_grid_cell_span(sample_step) - 1) / roi_grid_cell_span(sample_step);
 
     float reg_conf = registration_health_confidence(registration_health);
-    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
-    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
-    anomaly_inverse_affine_t inv = registration_inverse_affine(registration);
-    if (!inv.valid) return false;
     for (int sy = 0; sy < sg_h; sy++) {
-        int y = roi_y0 + sy * sample_step + sample_step / 2;
-        if (y >= roi_y1) y = roi_y1 - 1;
         for (int sx = 0; sx < sg_w; sx++) {
-            int x = roi_x0 + sx * sample_step + sample_step / 2;
-            if (x >= roi_x1) x = roi_x1 - 1;
             size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
             if (refresh_mask[idx] != 0u) {
                 roi_state->last_luma[idx] = sg_luma[idx];
@@ -7894,36 +8264,22 @@ static bool update_roi_state_selective_refresh(
                 continue;
             }
 
-            float nx = clamp01f((float)x / fw);
-            float ny = clamp01f((float)y / fh);
-            float px = 0.0f;
-            float py = 0.0f;
             bool carried = false;
-            if (registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
-                int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
-                int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
-                if (prev_px >= prev_roi_x0 && prev_px < prev_roi_x1 &&
-                    prev_py >= prev_roi_y0 && prev_py < prev_roi_y1) {
-                    int prev_sx = (prev_px - prev_roi_x0) / prev_sample_step;
-                    int prev_sy = (prev_py - prev_roi_y0) / prev_sample_step;
-                    if (prev_sx >= 0 && prev_sy >= 0 &&
-                        prev_sx < prev_width && prev_sy < prev_height) {
-                        size_t prev_idx = (size_t)prev_sy * (size_t)prev_width + (size_t)prev_sx;
-                        if (prev_valid_mask[prev_idx]) {
-                            roi_state->last_luma[idx] = prev_last_luma[prev_idx];
-                            roi_state->thermal_score[idx] = prev_thermal_score[prev_idx];
-                            roi_state->temporal_score[idx] = prev_temporal_score[prev_idx];
-                            roi_state->valid_mask[idx] = 1u;
-                            roi_state->fresh_mask[idx] = 0u;
-                            roi_state->carried_mask[idx] = 1u;
-                            roi_state->new_exposed_mask[idx] = 0u;
-                            roi_state->reg_confidence[idx] = reg_conf;
-                            roi_state->coverage_age[idx] =
-                                prev_coverage_age[prev_idx] < 255u ? (uint8_t)(prev_coverage_age[prev_idx] + 1u) : 255u;
-                            carried = true;
-                        }
-                    }
-                }
+            int prev_idx = prev_lookup[idx];
+            if (prev_idx >= 0 &&
+                prev_idx < (int)((size_t)prev_width * (size_t)prev_height) &&
+                prev_valid_mask[prev_idx]) {
+                roi_state->last_luma[idx] = prev_last_luma[prev_idx];
+                roi_state->thermal_score[idx] = prev_thermal_score[prev_idx];
+                roi_state->temporal_score[idx] = prev_temporal_score[prev_idx];
+                roi_state->valid_mask[idx] = 1u;
+                roi_state->fresh_mask[idx] = 0u;
+                roi_state->carried_mask[idx] = 1u;
+                roi_state->new_exposed_mask[idx] = 0u;
+                roi_state->reg_confidence[idx] = reg_conf;
+                roi_state->coverage_age[idx] =
+                    prev_coverage_age[prev_idx] < 255u ? (uint8_t)(prev_coverage_age[prev_idx] + 1u) : 255u;
+                carried = true;
             }
             if (!carried) {
                 roi_state->last_luma[idx] = sg_luma[idx];
@@ -7948,17 +8304,12 @@ static anomaly_scan_plan_t build_scan_plan(
         const anomaly_state_t               *state,
         const anomaly_registration_model_t  *model,
         anomaly_registration_health_t        base_registration_health,
-        int                                  frame_width,
-        int                                  frame_height,
-        int                                  roi_x0,
-        int                                  roi_y0,
-        int                                  roi_x1,
-        int                                  roi_y1,
         int                                  sample_step,
         int                                  sg_w,
         int                                  sg_h,
         bool                                 appearance_refresh_ran,
         bool                                 scene_discontinuity,
+        const anomaly_prev_sample_lookup_summary_t *prev_lookup_summary,
         anomaly_registration_health_t       *registration_health_out) {
     anomaly_scan_plan_t plan;
     memset(&plan, 0, sizeof(plan));
@@ -8016,55 +8367,14 @@ static anomaly_scan_plan_t build_scan_plan(
     }
 
     float reg_conf = registration_health_confidence(base_registration_health);
-    int stale_limit = ANOMALY_ROI_REALTIME_CARRY_EXPIRY;
-    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
-    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
-    anomaly_inverse_affine_t inv = registration_inverse_affine(model);
-    if (!inv.valid) {
+    if (prev_lookup_summary == NULL) {
         plan.reason_flags |= ANOMALY_SCAN_REASON_REG_INVALID;
         if (registration_health_out != NULL) *registration_health_out = refined;
         return plan;
     }
-
-    for (int sy = 0; sy < sg_h; sy++) {
-        int y = roi_y0 + sy * sample_step + sample_step / 2;
-        if (y >= roi_y1) y = roi_y1 - 1;
-        for (int sx = 0; sx < sg_w; sx++) {
-            int x = roi_x0 + sx * sample_step + sample_step / 2;
-            if (x >= roi_x1) x = roi_x1 - 1;
-            float nx = clamp01f((float)x / fw);
-            float ny = clamp01f((float)y / fh);
-            float px = 0.0f;
-            float py = 0.0f;
-            if (!registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
-                plan.newly_exposed_samples++;
-                continue;
-            }
-            int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
-            int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
-            if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||
-                prev_py < prev->roi_y0 || prev_py >= prev->roi_y1) {
-                plan.newly_exposed_samples++;
-                continue;
-            }
-            int prev_sx = (prev_px - prev->roi_x0) / prev->sample_step;
-            int prev_sy = (prev_py - prev->roi_y0) / prev->sample_step;
-            if (prev_sx < 0 || prev_sy < 0 || prev_sx >= prev->width || prev_sy >= prev->height) {
-                plan.newly_exposed_samples++;
-                continue;
-            }
-            size_t prev_idx = (size_t)prev_sy * (size_t)prev->width + (size_t)prev_sx;
-            if (!prev->valid_mask[prev_idx]) {
-                plan.newly_exposed_samples++;
-                continue;
-            }
-            plan.carried_samples++;
-            int age = (int)prev->coverage_age[prev_idx] + 1;
-            if (age > stale_limit) {
-                plan.stale_samples++;
-            }
-        }
-    }
+    plan.carried_samples = prev_lookup_summary->carried_samples;
+    plan.newly_exposed_samples = prev_lookup_summary->newly_exposed_samples;
+    plan.stale_samples = prev_lookup_summary->stale_samples;
 
     if (plan.total_samples > 0) {
         float inv_total = 1.0f / (float)plan.total_samples;
@@ -8498,6 +8808,9 @@ void anomaly_state_reset(anomaly_state_t *state) {
     free(state->scratch_refresh_mask);
     state->scratch_refresh_mask = NULL;
     state->scratch_refresh_mask_capacity = 0;
+    free(state->scratch_prev_sample_lookup);
+    state->scratch_prev_sample_lookup = NULL;
+    state->scratch_prev_sample_lookup_capacity = 0;
     free(state->scratch_i32);
     state->scratch_i32 = NULL;
     state->scratch_i32_capacity = 0;
@@ -8686,25 +8999,63 @@ int anomaly_process_frame(
     anomaly_registration_health_t registration_health_base =
         classify_registration_health(&registration, width, height);
     anomaly_registration_health_t registration_health = registration_health_base;
+    int *prev_sample_lookup = NULL;
+    anomaly_prev_sample_lookup_summary_t prev_sample_lookup_summary;
+    memset(&prev_sample_lookup_summary, 0, sizeof(prev_sample_lookup_summary));
+    if (sg_w > 0 && sg_h > 0 &&
+        state->roi_state.valid &&
+        state->roi_state.sample_step == sample_step &&
+        !scene_discontinuity &&
+        registration_model_valid(&registration) &&
+        ensure_int_capacity(
+            &state->scratch_prev_sample_lookup,
+            &state->scratch_prev_sample_lookup_capacity,
+            (size_t)sg_w * (size_t)sg_h)) {
+        if (build_prev_sample_lookup_map(
+                &state->roi_state,
+                &registration,
+                width,
+                height,
+                roi_x0,
+                roi_y0,
+                roi_x1,
+                roi_y1,
+                sample_step,
+                sg_w,
+                sg_h,
+                ANOMALY_ROI_REALTIME_CARRY_EXPIRY,
+                state->scratch_prev_sample_lookup,
+                &prev_sample_lookup_summary)) {
+            prev_sample_lookup = state->scratch_prev_sample_lookup;
+        }
+    }
     stage_started_us = anomaly_timing_now_us();
     anomaly_scan_plan_t scan_plan = build_scan_plan(
         state,
         &registration,
         registration_health_base,
-        width,
-        height,
-        roi_x0,
-        roi_y0,
-        roi_x1,
-        roi_y1,
         sample_step,
         sg_w,
         sg_h,
         should_refresh_appearance,
         scene_discontinuity,
+        prev_sample_lookup != NULL ? &prev_sample_lookup_summary : NULL,
         &registration_health);
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SCAN_PLANNING, stage_started_us);
     anomaly_rescan_mode_t rescan_mode = scan_plan.mode;
+    bool color_only_runtime =
+        anomaly_detection_active &&
+        cfg->algorithm_mask == ANOMALY_ALGO_COLOR;
+    if (color_only_runtime &&
+        rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY) {
+        // Visible-color detection needs broader reacquisition coverage than a
+        // narrow target-revisit mask can provide. In Red1-like clips we can
+        // get a single startup color hit and then starve fresh sampling on the
+        // very next frame, preventing any sustained candidate from forming.
+        rescan_mode = ANOMALY_RESCAN_MODE_PARTIAL;
+        scan_plan.mode = ANOMALY_RESCAN_MODE_PARTIAL;
+        scan_plan.reason_flags |= ANOMALY_SCAN_REASON_PARTIAL_ELIGIBLE;
+    }
     cache_registration_model(state, &registration, registration_health, rescan_mode);
     size_t sg_count = (size_t)sg_w * (size_t)sg_h;
     uint8_t *appearance_refresh_mask = NULL;
@@ -8722,17 +9073,10 @@ int anomaly_process_frame(
             appearance_refresh_mask = state->scratch_refresh_mask;
             selective_refresh_active = build_selective_refresh_mask(
                     state,
-                    &registration,
                     rescan_mode,
-                    width,
-                    height,
-                    roi_x0,
-                    roi_y0,
-                    roi_x1,
-                    roi_y1,
-                    sample_step,
                     sg_w,
                     sg_h,
+                    prev_sample_lookup,
                     appearance_refresh_mask,
                     &selected_samples,
                     &selective_refresh_reason_flags);
@@ -8748,6 +9092,23 @@ int anomaly_process_frame(
             scan_plan.mode = ANOMALY_RESCAN_MODE_FULL;
             scan_plan.reason_flags |= selective_refresh_reason_flags;
         }
+    }
+    if (color_only_runtime &&
+        rescan_mode == ANOMALY_RESCAN_MODE_PARTIAL &&
+        selective_refresh_active &&
+        scan_plan.refresh_mask_selected_fraction > 0.0f &&
+        scan_plan.refresh_mask_selected_fraction < 0.10f) {
+        // Color-only reacquisition needs substantially more fresh coverage than
+        // a tiny partial mask provides. If the selective mask covers less than
+        // 10% of samples, we tend to carry almost the entire prior field and
+        // never rebuild a visible-light candidate after the first frame.
+        selective_refresh_active = false;
+        appearance_refresh_mask = NULL;
+        rescan_mode = ANOMALY_RESCAN_MODE_FULL;
+        scan_plan.mode = ANOMALY_RESCAN_MODE_FULL;
+        scan_plan.reason_flags |= ANOMALY_SCAN_REASON_MASK_TOO_BROAD;
+        scan_plan.refresh_mask_selected_samples = 0;
+        scan_plan.refresh_mask_selected_fraction = 0.0f;
     }
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_REFRESH_MASK_BUILD, stage_started_us);
 
@@ -8999,6 +9360,8 @@ int anomaly_process_frame(
     double g_mean_l = sum_l / (double)sample_count;
     double g_std_l  = sqrt(fmax((sum_l2/(double)sample_count) - g_mean_l*g_mean_l, 1.0));
     uint8_t *color_frame_hist = NULL;
+    float color_family_rarity_lut[ANOMALY_COLOR_HIST_BINS];
+    for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) color_family_rarity_lut[i] = 0.0f;
     int color_hist_valid_samples = 0;
     if (need_color_support) {
         anomaly_roi_state_t *roi_state = &state->roi_state;
@@ -9010,6 +9373,10 @@ int anomaly_process_frame(
             if (color_hist_valid_samples <= 0) {
                 memset(color_frame_hist, 0, ANOMALY_COLOR_HIST_BINS * sizeof(uint8_t));
             }
+            build_color_family_rarity_lut(
+                color_frame_hist,
+                state->color_recent_hist,
+                color_family_rarity_lut);
         } else {
             color_frame_hist = NULL;
         }
@@ -9098,6 +9465,61 @@ int anomaly_process_frame(
     int color_rarity_seed_max_sx = -1;
     int color_rarity_seed_max_sy = -1;
     int color_rarity_seed_count = 0;
+    bool color_target_enabled = cfg != NULL && cfg->color_debug_target_enabled;
+    bool color_target_valid = false;
+    bool color_target_inside_scan_zone = false;
+    bool color_target_refresh_skipped = false;
+    bool color_target_sampled_this_frame = false;
+    bool color_target_carried_from_history = false;
+    int color_target_px = -1;
+    int color_target_py = -1;
+    int color_target_sx = -1;
+    int color_target_sy = -1;
+    size_t color_target_idx = 0;
+    int color_target_hist_key = -1;
+    float color_target_hist_current_count = 0.0f;
+    float color_target_hist_recent_count = 0.0f;
+    float color_target_hist_rarity = 0.0f;
+    int color_target_local_support = 0;
+    anomaly_color_target_telemetry_t color_target_telemetry = {0};
+    float color_target_pre_support_score = 0.0f;
+    float color_target_support_score = 0.0f;
+    bool color_target_support_seed_eligible = false;
+    int color_target_matched_candidate_idx = -1;
+    int color_target_nearest_candidate_idx = -1;
+    float color_target_nearest_candidate_distance = -1.0f;
+    anomaly_debug_color_target_stage_t color_target_stage =
+        ANOMALY_COLOR_TARGET_STAGE_NONE;
+    float color_strongest_seed_score = 0.0f;
+    int color_strongest_seed_sx = -1;
+    int color_strongest_seed_sy = -1;
+    int color_strongest_seed_hist_key = -1;
+    float color_strongest_seed_hist_current_count = 0.0f;
+    float color_strongest_seed_hist_recent_count = 0.0f;
+    float color_strongest_seed_hist_rarity = 0.0f;
+    int color_strongest_seed_local_support = 0;
+    if (color_target_enabled && sg_w > 0 && sg_h > 0) {
+        float fw_dbg = (float)(width > 1 ? width - 1 : 1);
+        float fh_dbg = (float)(height > 1 ? height - 1 : 1);
+        color_target_px = clamp_i32(
+            (int)lroundf(cfg->color_debug_target_x_norm * fw_dbg), 0, width - 1);
+        color_target_py = clamp_i32(
+            (int)lroundf(cfg->color_debug_target_y_norm * fh_dbg), 0, height - 1);
+        color_target_inside_scan_zone =
+            color_target_px >= roi_x0 && color_target_px < roi_x1 &&
+            color_target_py >= roi_y0 && color_target_py < roi_y1;
+        if (color_target_inside_scan_zone) {
+            color_target_sx = clamp_i32(
+                (color_target_px - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
+            color_target_sy = clamp_i32(
+                (color_target_py - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
+            color_target_idx =
+                (size_t)color_target_sy * (size_t)sg_w + (size_t)color_target_sx;
+            color_target_valid = true;
+        } else {
+            color_target_stage = ANOMALY_COLOR_TARGET_STAGE_OUTSIDE_SCAN_ZONE;
+        }
+    }
     if (color_algorithm_enabled && color_selective_refresh_active && appearance_refresh_mask != NULL) {
         int color_bounds_pad = color_support_patch_radius(cfg, width, height, sample_step);
         compute_active_mask_bounds(
@@ -9173,11 +9595,7 @@ int anomaly_process_frame(
                     color_frame_hist != NULL) {
                     int u_bin = (int)roi_state->color_u_bin[idx];
                     int v_bin = (int)roi_state->color_v_bin[idx];
-                    float rarity = score_color_hist_family_rarity(
-                        color_frame_hist,
-                        state->color_recent_hist,
-                        u_bin,
-                        v_bin);
+                    float rarity = color_family_rarity_lut[color_hist_key(u_bin, v_bin)];
                     roi_state->color_raw_score[idx] = rarity;
                     if (saliency_color_map != NULL) {
                         int local_support = local_uv_support_count(
@@ -9188,22 +9606,104 @@ int anomaly_process_frame(
                             sy,
                             u_bin,
                             v_bin);
-                        if (rarity < ANOMALY_COLOR_RARITY_MIN ||
-                            local_support < ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
+                        if (local_support < ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
                             saliency_color_map[idx] = 0.0f;
                         } else {
-                            float score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
-                                          ANOMALY_COLOR_RARITY_SCALE;
                             float support_scale = clampf(
                                 0.60f + 0.20f * (float)(local_support - ANOMALY_COLOR_LOCAL_SUPPORT_MIN),
                                 0.60f,
                                 1.20f);
-                            saliency_color_map[idx] = clampf(score * support_scale, 0.0f, 4.0f);
-                            color_rarity_seed_count++;
-                            if (sx < color_rarity_seed_min_sx) color_rarity_seed_min_sx = sx;
-                            if (sy < color_rarity_seed_min_sy) color_rarity_seed_min_sy = sy;
-                            if (sx > color_rarity_seed_max_sx) color_rarity_seed_max_sx = sx;
-                            if (sy > color_rarity_seed_max_sy) color_rarity_seed_max_sy = sy;
+                            float rarity_score = 0.0f;
+                            if (rarity >= ANOMALY_COLOR_RARITY_MIN) {
+                                rarity_score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
+                                               ANOMALY_COLOR_RARITY_SCALE;
+                            }
+                            float rescue_score = 0.0f;
+                            if (color_target_valid &&
+                                sx == color_target_sx &&
+                                sy == color_target_sy) {
+                                rescue_score = score_color_contrast_rescue(
+                                    roi_state,
+                                    sg_w,
+                                    sg_h,
+                                    sx,
+                                    sy,
+                                    !color_refresh_skip,
+                                    local_support);
+                            }
+                            float seed_score = fmaxf(rarity_score, rescue_score);
+                            saliency_color_map[idx] = clampf(seed_score * support_scale, 0.0f, 4.0f);
+                            if (saliency_color_map[idx] > color_strongest_seed_score) {
+                                int key = color_hist_key(u_bin, v_bin);
+                                color_strongest_seed_score = saliency_color_map[idx];
+                                color_strongest_seed_sx = sx;
+                                color_strongest_seed_sy = sy;
+                                color_strongest_seed_hist_key = key;
+                                color_strongest_seed_hist_current_count = (float)color_frame_hist[key];
+                                color_strongest_seed_hist_recent_count = state->color_recent_hist != NULL
+                                    ? (float)state->color_recent_hist[key]
+                                    : 0.0f;
+                                color_strongest_seed_hist_rarity = rarity;
+                                color_strongest_seed_local_support = local_support;
+                            }
+                            if (saliency_color_map[idx] >= 0.55f) {
+                                color_rarity_seed_count++;
+                                if (sx < color_rarity_seed_min_sx) color_rarity_seed_min_sx = sx;
+                                if (sy < color_rarity_seed_min_sy) color_rarity_seed_min_sy = sy;
+                                if (sx > color_rarity_seed_max_sx) color_rarity_seed_max_sx = sx;
+                                if (sy > color_rarity_seed_max_sy) color_rarity_seed_max_sy = sy;
+                            }
+                        }
+                    }
+                    if (color_target_valid && sx == color_target_sx && sy == color_target_sy) {
+                        int key = color_hist_key(u_bin, v_bin);
+                        color_target_hist_key = key;
+                        color_target_hist_current_count = (float)color_frame_hist[key];
+                        color_target_hist_recent_count = state->color_recent_hist != NULL
+                            ? (float)state->color_recent_hist[key]
+                            : 0.0f;
+                        color_target_hist_rarity = rarity;
+                        color_target_local_support = local_uv_support_count(
+                            roi_state,
+                            sg_w,
+                            sg_h,
+                            sx,
+                            sy,
+                            u_bin,
+                            v_bin);
+                        compute_color_target_telemetry(
+                            roi_state,
+                            sg_w,
+                            sg_h,
+                            sx,
+                            sy,
+                            1,
+                            3,
+                            !color_selective_refresh_active,
+                            color_selective_refresh_active ? appearance_refresh_mask : NULL,
+                            &color_target_telemetry);
+                        if (color_target_local_support >= ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
+                            float support_scale = clampf(
+                                0.60f + 0.20f * (float)(color_target_local_support - ANOMALY_COLOR_LOCAL_SUPPORT_MIN),
+                                0.60f,
+                                1.20f);
+                            float rarity_score = 0.0f;
+                            if (rarity >= ANOMALY_COLOR_RARITY_MIN) {
+                                rarity_score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
+                                               ANOMALY_COLOR_RARITY_SCALE;
+                            }
+                            float rescue_score = score_color_contrast_rescue(
+                                roi_state,
+                                sg_w,
+                                sg_h,
+                                sx,
+                                sy,
+                                !color_refresh_skip,
+                                color_target_local_support);
+                            color_target_pre_support_score =
+                                clampf(fmaxf(rarity_score, rescue_score) * support_scale, 0.0f, 4.0f);
+                        } else {
+                            color_target_pre_support_score = 0.0f;
                         }
                     }
                 } else {
@@ -9213,6 +9713,11 @@ int anomaly_process_frame(
 #if ANOMALY_DEBUG_TIMING
                 anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SCORING, branch_started_us);
 #endif
+            }
+            if (color_target_valid && sx == color_target_sx && sy == color_target_sy) {
+                color_target_refresh_skipped = color_refresh_skip;
+                color_target_sampled_this_frame = !color_refresh_skip;
+                color_target_carried_from_history = color_refresh_skip;
             }
         }
     }
@@ -9245,6 +9750,12 @@ int anomaly_process_frame(
     int color_hist_nonzero_bins = 0;
     float color_hist_max_current_count = 0.0f;
     float color_hist_max_recent_count = 0.0f;
+    float color_support_peak = 0.0f;
+    int color_support_seed_count = 0;
+    int color_blob_reject_area_count = 0;
+    int color_blob_reject_ring_count = 0;
+    int color_blob_reject_support_mass_count = 0;
+    int color_blob_reject_quality_count = 0;
     if (color_algorithm_enabled &&
         saliency_color_map != NULL &&
         color_support_scratch != NULL &&
@@ -9253,7 +9764,6 @@ int anomaly_process_frame(
 #if ANOMALY_DEBUG_TIMING
         int64_t color_post_started_us = anomaly_timing_now_us();
 #endif
-        float color_support_peak = 0.0f;
         int color_seed_min_sx = sg_w;
         int color_seed_min_sy = sg_h;
         int color_seed_max_sx = -1;
@@ -9300,6 +9810,7 @@ int anomaly_process_frame(
                     &color_seed_max_sy,
                     &color_seed_count);
         }
+        color_support_seed_count = color_seed_count;
         anomaly_color_blob_candidate_t color_blob_candidates[ANOMALY_MAX_COLOR_CANDIDATES];
         memset(color_blob_candidates, 0, sizeof(color_blob_candidates));
         if (color_support_peak >= 0.55f &&
@@ -9324,7 +9835,11 @@ int anomaly_process_frame(
                     state->scratch_u8,
                     state->scratch_i32,
                     color_blob_candidates,
-                    &color_candidate_count);
+                    &color_candidate_count,
+                    &color_blob_reject_area_count,
+                    &color_blob_reject_ring_count,
+                    &color_blob_reject_support_mass_count,
+                    &color_blob_reject_quality_count);
         }
 #if ANOMALY_DEBUG_TIMING
         anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SCORING, color_post_started_us);
@@ -9396,7 +9911,58 @@ int anomaly_process_frame(
             best_color_x = color_candidates[best_color_candidate_idx].pixel_x;
             best_color_y = color_candidates[best_color_candidate_idx].pixel_y;
         }
+        if (color_target_valid) {
+            anomaly_roi_state_t *roi_state = &state->roi_state;
+            bool target_sample_valid =
+                roi_state->color_valid_mask != NULL &&
+                roi_state->color_valid_mask[color_target_idx] != 0u;
+            color_target_support_score =
+                saliency_color_map != NULL ? saliency_color_map[color_target_idx] : 0.0f;
+            color_target_support_seed_eligible = color_target_support_score >= 0.55f;
+            if (!target_sample_valid) {
+                color_target_stage = ANOMALY_COLOR_TARGET_STAGE_INVALID_SAMPLE;
+            } else if (color_target_hist_rarity < ANOMALY_COLOR_RARITY_MIN &&
+                       color_target_pre_support_score < 0.55f) {
+                color_target_stage = ANOMALY_COLOR_TARGET_STAGE_RARITY_REJECTED;
+            } else if (color_target_local_support < ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
+                color_target_stage = ANOMALY_COLOR_TARGET_STAGE_LOCAL_SUPPORT_REJECTED;
+            } else if (!color_target_support_seed_eligible) {
+                color_target_stage = ANOMALY_COLOR_TARGET_STAGE_SUPPORT_MAP_REJECTED;
+            } else {
+                color_target_stage = ANOMALY_COLOR_TARGET_STAGE_NO_CANDIDATE;
+            }
+            float target_fw = (float)(width > 1 ? width - 1 : 1);
+            float target_fh = (float)(height > 1 ? height - 1 : 1);
+            float target_x_norm = cfg->color_debug_target_x_norm;
+            float target_y_norm = cfg->color_debug_target_y_norm;
+            for (int ci = 0; ci < color_candidate_count; ci++) {
+                float left = (float)(roi_x0 + color_candidate_min_x[ci] * sample_step) / target_fw;
+                float top = (float)(roi_y0 + color_candidate_min_y[ci] * sample_step) / target_fh;
+                float right = (float)(roi_x0 + color_candidate_max_x[ci] * sample_step) / target_fw;
+                float bottom = (float)(roi_y0 + color_candidate_max_y[ci] * sample_step) / target_fh;
+                float dx = ((float)color_candidates[ci].pixel_x / target_fw) - target_x_norm;
+                float dy = ((float)color_candidates[ci].pixel_y / target_fh) - target_y_norm;
+                float distance = sqrtf(dx * dx + dy * dy);
+                if (color_target_nearest_candidate_idx < 0 ||
+                    distance < color_target_nearest_candidate_distance) {
+                    color_target_nearest_candidate_idx = ci;
+                    color_target_nearest_candidate_distance = distance;
+                }
+                bool contains_target =
+                    target_x_norm >= left && target_x_norm <= right &&
+                    target_y_norm >= top && target_y_norm <= bottom;
+                if (contains_target) {
+                    color_target_matched_candidate_idx = ci;
+                    color_target_stage = (ci == best_color_candidate_idx)
+                        ? ANOMALY_COLOR_TARGET_STAGE_WINNER
+                        : ANOMALY_COLOR_TARGET_STAGE_EXTRACTED;
+                    break;
+                }
+            }
+        }
     }
+    bool color_history_reset_applied =
+        scene_discontinuity || color_forced_full_refresh || color_hist_valid_samples <= 0;
     if (color_frame_hist != NULL) {
         for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) {
             float cur = (float)color_frame_hist[i];
@@ -9408,7 +9974,7 @@ int anomaly_process_frame(
         update_color_recent_histogram(
             state,
             color_frame_hist,
-            scene_discontinuity || color_forced_full_refresh || color_hist_valid_samples <= 0);
+            color_history_reset_applied);
     }
 
     anomaly_motion_candidate_t motion_candidates[ANOMALY_MAX_MOTION_CANDIDATES];
@@ -10590,9 +11156,6 @@ int anomaly_process_frame(
     if (selective_refresh_active) {
         roi_state_updated = update_roi_state_selective_refresh(
                 state,
-                &registration,
-                width,
-                height,
                 roi_x0,
                 roi_y0,
                 roi_x1,
@@ -10610,6 +11173,7 @@ int anomaly_process_frame(
                 delta_mean,
                 delta_norm,
                 registration_health,
+                prev_sample_lookup,
                 appearance_refresh_mask);
         if (!roi_state_updated) {
             rescan_mode = ANOMALY_RESCAN_MODE_FULL;
@@ -11443,15 +12007,96 @@ int anomaly_process_frame(
         result_out->color_debug.carried_sample_count = color_carried_sample_count;
         result_out->color_debug.unsampled_new_exposed_count = color_unsampled_new_count;
         if (sg_count > 0) {
-            result_out->color_debug.fresh_sample_fraction = (float)color_fresh_sample_count / (float)sg_count;
-            result_out->color_debug.carried_sample_fraction = (float)color_carried_sample_count / (float)sg_count;
-            result_out->color_debug.unsampled_new_exposed_fraction = (float)color_unsampled_new_count / (float)sg_count;
+        result_out->color_debug.fresh_sample_fraction = (float)color_fresh_sample_count / (float)sg_count;
+        result_out->color_debug.carried_sample_fraction = (float)color_carried_sample_count / (float)sg_count;
+        result_out->color_debug.unsampled_new_exposed_fraction = (float)color_unsampled_new_count / (float)sg_count;
         }
+        result_out->color_debug.histogram_valid_sample_count = color_hist_valid_samples;
+        result_out->color_debug.history_reset_applied = color_history_reset_applied;
         result_out->color_debug.nonzero_histogram_bins = color_hist_nonzero_bins;
         result_out->color_debug.max_histogram_current_count = color_hist_max_current_count;
         result_out->color_debug.max_histogram_recent_count = color_hist_max_recent_count;
+        result_out->color_debug.rarity_seed_count = color_rarity_seed_count;
+        result_out->color_debug.support_seed_count = color_support_seed_count;
+        result_out->color_debug.support_peak_score = color_support_peak;
+        result_out->color_debug.blob_reject_area_count = color_blob_reject_area_count;
+        result_out->color_debug.blob_reject_ring_count = color_blob_reject_ring_count;
+        result_out->color_debug.blob_reject_support_mass_count = color_blob_reject_support_mass_count;
+        result_out->color_debug.blob_reject_quality_count = color_blob_reject_quality_count;
+        memset(&result_out->color_debug.strongest_seed, 0, sizeof(result_out->color_debug.strongest_seed));
+        result_out->color_debug.strongest_seed.valid = color_strongest_seed_score > 0.0f;
+        result_out->color_debug.strongest_seed.sample_x = color_strongest_seed_sx;
+        result_out->color_debug.strongest_seed.sample_y = color_strongest_seed_sy;
+        result_out->color_debug.strongest_seed.score = color_strongest_seed_score;
+        result_out->color_debug.strongest_seed.hist_key = color_strongest_seed_hist_key;
+        result_out->color_debug.strongest_seed.hist_current_count = color_strongest_seed_hist_current_count;
+        result_out->color_debug.strongest_seed.hist_recent_count = color_strongest_seed_hist_recent_count;
+        result_out->color_debug.strongest_seed.hist_rarity_score = color_strongest_seed_hist_rarity;
+        result_out->color_debug.strongest_seed.local_support_count = color_strongest_seed_local_support;
         result_out->color_debug.winning_candidate_index = best_color_candidate_idx;
         result_out->color_debug.candidate_count = color_candidate_count;
+        memset(&result_out->color_debug.target, 0, sizeof(result_out->color_debug.target));
+        result_out->color_debug.target.enabled = color_target_enabled;
+        result_out->color_debug.target.valid = color_target_valid;
+        result_out->color_debug.target.inside_scan_zone = color_target_inside_scan_zone;
+        result_out->color_debug.target.refresh_skipped = color_target_refresh_skipped;
+        result_out->color_debug.target.sampled_this_frame = color_target_sampled_this_frame;
+        result_out->color_debug.target.carried_from_history = color_target_carried_from_history;
+        result_out->color_debug.target.pixel_x = color_target_px;
+        result_out->color_debug.target.pixel_y = color_target_py;
+        result_out->color_debug.target.sample_x = color_target_sx;
+        result_out->color_debug.target.sample_y = color_target_sy;
+        result_out->color_debug.target.x_norm = color_target_enabled ? cfg->color_debug_target_x_norm : 0.0f;
+        result_out->color_debug.target.y_norm = color_target_enabled ? cfg->color_debug_target_y_norm : 0.0f;
+        result_out->color_debug.target.hist_key = color_target_hist_key;
+        result_out->color_debug.target.hist_current_count = color_target_hist_current_count;
+        result_out->color_debug.target.hist_recent_count = color_target_hist_recent_count;
+        result_out->color_debug.target.hist_rarity_score = color_target_hist_rarity;
+        result_out->color_debug.target.local_support_count = color_target_local_support;
+        result_out->color_debug.target.patch_valid_count = color_target_telemetry.patch_valid_count;
+        result_out->color_debug.target.coherent_patch_cell_count =
+            color_target_telemetry.coherent_patch_cell_count;
+        result_out->color_debug.target.coherent_patch_fresh_cell_count =
+            color_target_telemetry.coherent_patch_fresh_cell_count;
+        result_out->color_debug.target.coherent_patch_multicell =
+            color_target_telemetry.coherent_patch_multicell;
+        result_out->color_debug.target.patch_mean_u = color_target_telemetry.patch_mean_u;
+        result_out->color_debug.target.patch_mean_v = color_target_telemetry.patch_mean_v;
+        result_out->color_debug.target.patch_mean_luma = color_target_telemetry.patch_mean_luma;
+        result_out->color_debug.target.ring_mean_u = color_target_telemetry.ring_mean_u;
+        result_out->color_debug.target.ring_mean_v = color_target_telemetry.ring_mean_v;
+        result_out->color_debug.target.ring_mean_luma = color_target_telemetry.ring_mean_luma;
+        result_out->color_debug.target.ring_chroma_contrast =
+            color_target_telemetry.ring_chroma_contrast;
+        result_out->color_debug.target.ring_luma_contrast =
+            color_target_telemetry.ring_luma_contrast;
+        result_out->color_debug.target.ring_neighbor_count =
+            color_target_telemetry.ring_neighbor_count;
+        result_out->color_debug.target.pre_support_score = color_target_pre_support_score;
+        result_out->color_debug.target.support_score = color_target_support_score;
+        result_out->color_debug.target.support_seed_eligible = color_target_support_seed_eligible;
+        result_out->color_debug.target.matched_candidate_index = color_target_matched_candidate_idx;
+        result_out->color_debug.target.nearest_candidate_index = color_target_nearest_candidate_idx;
+        result_out->color_debug.target.nearest_candidate_distance = color_target_nearest_candidate_distance;
+        result_out->color_debug.target.winning_candidate_index = best_color_candidate_idx;
+        result_out->color_debug.target.stage = color_target_stage;
+        if (color_target_matched_candidate_idx >= 0 &&
+            color_target_matched_candidate_idx < color_candidate_count) {
+            int ci = color_target_matched_candidate_idx;
+            result_out->color_debug.target.matched_candidate_score = color_candidate_final_score[ci];
+            result_out->color_debug.target.matched_candidate_x_norm =
+                (float)color_candidates[ci].pixel_x / fw;
+            result_out->color_debug.target.matched_candidate_y_norm =
+                (float)color_candidates[ci].pixel_y / fh;
+            result_out->color_debug.target.matched_bbox_left_norm =
+                (float)(roi_x0 + color_candidate_min_x[ci] * sample_step) / fw;
+            result_out->color_debug.target.matched_bbox_top_norm =
+                (float)(roi_y0 + color_candidate_min_y[ci] * sample_step) / fh;
+            result_out->color_debug.target.matched_bbox_right_norm =
+                (float)(roi_x0 + color_candidate_max_x[ci] * sample_step) / fw;
+            result_out->color_debug.target.matched_bbox_bottom_norm =
+                (float)(roi_y0 + color_candidate_max_y[ci] * sample_step) / fh;
+        }
         for (int i = 0; i < color_candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
             anomaly_debug_color_candidate_t *dbg = &result_out->color_debug.candidates[i];
             dbg->valid = true;

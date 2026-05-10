@@ -50,6 +50,38 @@ def run_review_eval(
     return json.loads(raw)
 
 
+def detector_args_use_color(detector_args: list[str]) -> bool:
+    for idx, arg in enumerate(detector_args):
+        if arg == "-a" and idx + 1 < len(detector_args):
+            try:
+                return (int(detector_args[idx + 1]) & 0x01) != 0
+            except ValueError:
+                return False
+    return False
+
+
+def write_color_target_csv(
+    *,
+    review_path: Path,
+    out_path: Path,
+    start_s: float | None,
+    end_s: float | None,
+) -> bool:
+    annotations = load_review(review_path, start_s=start_s, end_s=end_s)
+    positive_by_frame: dict[int, tuple[float, float, float]] = {}
+    for ann in annotations:
+        if ann.review_kind not in POSITIVE_KINDS:
+            continue
+        positive_by_frame.setdefault(ann.frame_idx, (ann.time_s, ann.x, ann.y))
+    if not positive_by_frame:
+        return False
+    lines = ["# frame,time_s,x_norm,y_norm"]
+    for frame_idx, (time_s, x_norm, y_norm) in sorted(positive_by_frame.items()):
+        lines.append(f"{frame_idx},{time_s:.6f},{x_norm:.6f},{y_norm:.6f}")
+    out_path.write_text("\n".join(lines) + "\n")
+    return True
+
+
 def format_ratio(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.3f}"
 
@@ -534,6 +566,20 @@ def main() -> int:
             csv_path = excerpt_dir / "detections.csv"
             summary_path = excerpt_dir / "summary.json"
             thermal_telemetry_path = excerpt_dir / "thermal_debug.jsonl"
+            color_debug_jsonl_path = excerpt_dir / "color_debug.jsonl"
+            color_target_csv_path = excerpt_dir / "color_target.csv"
+            review_path = resolve_path(repo_root, excerpt.get("review_path"))
+            if review_path is None:
+                raise RuntimeError(f"reviewed excerpt missing review path: {excerpt['id']}")
+            color_debug_enabled = detector_args_use_color(profile_args)
+            color_target_written = False
+            if color_debug_enabled:
+                color_target_written = write_color_target_csv(
+                    review_path=review_path,
+                    out_path=color_target_csv_path,
+                    start_s=excerpt.get("start_s"),
+                    end_s=excerpt.get("end_s"),
+                )
 
             cmd = [
                 str(binary),
@@ -550,13 +596,14 @@ def main() -> int:
                 cmd += ["--time-end", f"{float(excerpt['end_s']):.3f}"]
             if profile["id"] in telemetry_profiles:
                 cmd += ["--thermal-debug-jsonl", str(thermal_telemetry_path)]
+            if color_debug_enabled:
+                cmd += ["--color-debug-jsonl", str(color_debug_jsonl_path)]
+                if color_target_written:
+                    cmd += ["--color-target-csv", str(color_target_csv_path)]
             cmd += profile_args
             cmd += excerpt.get("extra_detector_args", [])
             subprocess.run(cmd, check=True)
 
-            review_path = resolve_path(repo_root, excerpt.get("review_path"))
-            if review_path is None:
-                raise RuntimeError(f"reviewed excerpt missing review path: {excerpt['id']}")
             summary = json.loads(summary_path.read_text())
             review_metrics = run_review_eval(
                 review_eval=review_eval,
@@ -572,6 +619,10 @@ def main() -> int:
             excerpt_result["review_path"] = str(review_path)
             excerpt_result["csv_path"] = str(csv_path)
             excerpt_result["summary_path"] = str(summary_path)
+            if color_debug_enabled:
+                excerpt_result["color_debug_jsonl_path"] = str(color_debug_jsonl_path)
+                if color_target_written:
+                    excerpt_result["color_target_csv_path"] = str(color_target_csv_path)
             if profile["id"] in telemetry_profiles:
                 thermal_summary = summarize_thermal_telemetry(
                     review_path=review_path,
@@ -679,6 +730,8 @@ def main() -> int:
                 f"- Track latency avg/p95/max: {format_seconds(score['latency_to_first_box_avg_s'])} / {format_seconds(score['latency_to_first_box_p95_s'])} / {format_seconds(score['latency_to_first_box_max_s'])}",
                 f"- Runtime: {summary['analysis_wall_s']:.3f}s, realtime {summary['realtime_factor']:.3f}x ({summary['realtime_label']})",
             ]
+            if item.get("color_debug_jsonl_path"):
+                lines.append(f"- Color debug JSONL: `{item['color_debug_jsonl_path']}`")
             if item.get("thermal_telemetry_summary_md"):
                 lines.append(f"- Thermal telemetry: `{item['thermal_telemetry_summary_md']}`")
             lines.append("")

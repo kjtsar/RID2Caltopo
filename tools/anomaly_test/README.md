@@ -317,6 +317,11 @@ python3 tools/anomaly_test/run_regression_suite.py \
   --binary tools/anomaly_test/build_timing/anomaly_video_test \
   --output-dir /tmp/color_regression
 ```
+
+`Red1` is the first reviewed visible-color correctness guardrail in this suite.
+If a change touches color scoring, color candidate selection, or selective
+refresh behavior, rerun the color manifest and check `red1-opening-target-track`
+before considering the change safe.
 - `scan_reason_counts.reg-invalid`
 - dominant registration invalid reason
 - `rescan_modes.full/partial/target_only`

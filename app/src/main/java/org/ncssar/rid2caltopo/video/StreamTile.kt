@@ -108,6 +108,7 @@ fun StreamTile(
     val isFocused = (focusedPath == streamDesignator)
     val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
     val isLocalPlaybackPaused = if (isLocalPlayback) viewModel.isLocalPlaybackPaused(streamDesignator) else false
+    val pauseLocalPlaybackOnOpen = if (isLocalPlayback) viewModel.pauseLocalPlaybackOnOpenEnabled() else false
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
     val resolvedAppearanceMode = viewModel.resolvedAppearanceModeFor(streamDesignator)
@@ -396,51 +397,18 @@ fun StreamTile(
                     expanded = anomalyMenuExpanded,
                     onDismissRequest = { anomalyMenuExpanded = false }
                 ) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                if (anomalyConfig.enabled) {
-                                    "Anomaly Detection: On (tap to turn Off)"
-                                } else {
-                                    "Anomaly Detection: Off (tap to turn On)"
-                                }
-                            )
-                        },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            viewModel.toggleAnomalyEnabled(streamDesignator)
-                        }
+                    AnomalySettingsMenuContent(
+                        viewModel = viewModel,
+                        streamDesignator = streamDesignator,
+                        anomalyEnabled = anomalyConfig.enabled,
+                        isLocalPlayback = isLocalPlayback,
+                        pauseLocalPlaybackOnOpen = pauseLocalPlaybackOnOpen,
+                        onShowSettings = { showAnomalySettingsDialog = true },
+                        onShowHelp = { showAdHelpDialog = true },
+                        onCloseStream = onCloseStream,
+                        onRestartServer = if (!isLocalPlayback) onRestartServer else null,
+                        onDismissMenu = { anomalyMenuExpanded = false },
                     )
-                    DropdownMenuItem(
-                        text = { Text("Anomaly Detector Settings") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            showAnomalySettingsDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("AD Help") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            showAdHelpDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Close Stream") },
-                        onClick = {
-                            anomalyMenuExpanded = false
-                            onCloseStream()
-                        }
-                    )
-                    if (!isLocalPlayback) {
-                        DropdownMenuItem(
-                            text = { Text("Restart Streams Server") },
-                            onClick = {
-                                anomalyMenuExpanded = false
-                                onRestartServer()
-                            }
-                        )
-                    }
                 }
             }
             if (showAnomalyLegendControls) {
@@ -748,381 +716,16 @@ fun StreamTile(
                     }
                 )
             }
-            if (showAnomalySettingsDialog) {
-                var sensitivityValue by remember(streamDesignator, anomalyConfig.sensitivity) {
-                    mutableStateOf(anomalyConfig.sensitivity.coerceIn(0f, 1f))
-                }
-                var scanZoneValue by remember(streamDesignator, anomalyConfig.scanZone) {
-                    mutableStateOf(anomalyConfig.scanZone.coerceIn(0.5f, 1f))
-                }
-                var motionEvidenceSensitivityValue by remember(streamDesignator, anomalyConfig.motionEvidenceSensitivity) {
-                    mutableStateOf(anomalyConfig.motionEvidenceSensitivity.coerceIn(0f, 1f))
-                }
-                var minHitsValue by remember(streamDesignator, anomalyConfig.minHits) {
-                    mutableStateOf(anomalyConfig.minHits.coerceIn(1, 5))
-                }
-                var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
-                    mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 4))
-                }
-                var pixelStepValue by remember(streamDesignator, anomalyConfig.pixelStep) {
-                    mutableStateOf(anomalyConfig.pixelStep.coerceIn(0, 4))
-                }
-                var thermalMinDeltaValue by remember(streamDesignator, anomalyConfig.thermalMinDelta) {
-                    mutableStateOf(anomalyConfig.thermalMinDelta.coerceIn(1.0f, 64.0f))
-                }
-                var smallTargetFractionValue by remember(streamDesignator, anomalyConfig.smallTargetScreenFraction) {
-                    mutableStateOf(anomalyConfig.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f))
-                }
-                AlertDialog(
-                    onDismissRequest = { showAnomalySettingsDialog = false },
-                    title = { Text("Anomaly Detector") },
-                    text = {
-                        val settingsScroll = rememberScrollState()
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 420.dp)
-                                .verticalScroll(settingsScroll),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Detection")
-                                TextButton(onClick = { viewModel.toggleAnomalyEnabled(streamDesignator) }) {
-                                    Text(if (anomalyConfig.enabled) "On" else "Off")
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Reset to Realtime Defaults")
-                                TextButton(onClick = { viewModel.resetAnomalyRealtimeDefaults(streamDesignator) }) {
-                                    Text("Reset")
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Appearance (${anomalyConfig.appearanceSelection.label})")
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button(
-                                        onClick = {
-                                            viewModel.setAppearanceAnomalySelection(
-                                                streamDesignator,
-                                                AppearanceAnomalySelection.Auto
-                                            )
-                                        }
-                                    ) {
-                                        Text("Auto")
-                                    }
-                                    Button(
-                                        onClick = {
-                                            viewModel.setAppearanceAnomalySelection(
-                                                streamDesignator,
-                                                AppearanceAnomalySelection.Thermal
-                                            )
-                                        }
-                                    ) {
-                                    Text("Infrared")
-                                    }
-                                    Button(
-                                        onClick = {
-                                            viewModel.setAppearanceAnomalySelection(
-                                                streamDesignator,
-                                                AppearanceAnomalySelection.Color
-                                            )
-                                        }
-                                    ) {
-                                        Text("Color")
-                                    }
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Motion")
-                                TextButton(onClick = {
-                                    viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
-                                }) {
-                                    Text(
-                                        if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) {
-                                            "On"
-                                        } else {
-                                            "Off"
-                                        }
-                                    )
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Saliency")
-                                TextButton(onClick = { viewModel.toggleSaliencyEnabled(streamDesignator) }) {
-                                    Text(if (anomalyConfig.saliencyEnabled) "On" else "Off")
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Show Guide Boxes")
-                                TextButton(onClick = { viewModel.toggleShowGuideBoxes(streamDesignator) }) {
-                                    Text(if (anomalyConfig.showGuideBoxes) "On" else "Off")
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Show Hottest Region")
-                                TextButton(onClick = { viewModel.toggleShowHotOverlay(streamDesignator) }) {
-                                    Text(if (anomalyConfig.showHotOverlay) "On" else "Off")
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Show Candidate Blobs")
-                                TextButton(onClick = { viewModel.toggleShowCandidateBlobs(streamDesignator) }) {
-                                    Text(if (anomalyConfig.showCandidateBlobs) "On" else "Off")
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Troubleshooting Debug")
-                                TextButton(onClick = { viewModel.toggleAnomalyTroubleshootingDebug(streamDesignator) }) {
-                                    Text(if (anomalyConfig.troubleshootingDebug) "On" else "Off")
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Registration")
-                                TextButton(onClick = { viewModel.cycleAnomalyRegistrationMode(streamDesignator) }) {
-                                    Text(anomalyConfig.registrationMode.label)
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Infrared Palette")
-                                TextButton(onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }) {
-                                    Text(anomalyConfig.thermalPolarity.label)
-                                }
-                            }
-                            Text("Sensitivity ${((sensitivityValue * 100f).toInt())}%")
-                            Slider(
-                                value = sensitivityValue,
-                                onValueChange = { sensitivityValue = it },
-                                valueRange = 0f..1f
-                            )
-                            Text("Motion Evidence ${((motionEvidenceSensitivityValue * 100f).toInt())}%")
-                            Slider(
-                                value = motionEvidenceSensitivityValue,
-                                onValueChange = { motionEvidenceSensitivityValue = it },
-                                valueRange = 0f..1f
-                            )
-                            Text("Scan Zone ${((scanZoneValue * 100f).toInt())}%")
-                            Slider(
-                                value = scanZoneValue,
-                                onValueChange = { scanZoneValue = it },
-                                valueRange = 0.5f..1f
-                            )
-                            Text("Min Hits $minHitsValue")
-                            Slider(
-                                value = minHitsValue.toFloat(),
-                                onValueChange = { minHitsValue = it.toInt().coerceIn(1, 5) },
-                                valueRange = 1f..5f,
-                                steps = 3
-                            )
-                            Text("Frame Stride ${frameStrideValue}x")
-                            Slider(
-                                value = frameStrideValue.toFloat(),
-                                onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 4) },
-                                valueRange = 1f..4f,
-                                steps = 2
-                            )
-                            Text(
-                                if (pixelStepValue <= 0) {
-                                    "Detail Auto"
-                                } else {
-                                    "Detail ${pixelStepValue}px step"
-                                }
-                            )
-                            Slider(
-                                value = pixelStepValue.toFloat(),
-                                onValueChange = { pixelStepValue = it.toInt().coerceIn(0, 4) },
-                                valueRange = 0f..4f,
-                                steps = 3
-                            )
-                            Text("Thermal Min Delta ${"%.1f".format(thermalMinDeltaValue)}")
-                            Slider(
-                                value = thermalMinDeltaValue,
-                                onValueChange = { thermalMinDeltaValue = it },
-                                valueRange = 1f..64f
-                            )
-                            val smallTargetDenominator =
-                                (1.0f / smallTargetFractionValue.coerceIn(0.0015f, 0.03f)).roundToInt()
-                            Text("Small Target Scale 1/$smallTargetDenominator screen diagonal")
-                            Slider(
-                                value = smallTargetFractionValue,
-                                onValueChange = { smallTargetFractionValue = it },
-                                valueRange = 0.0015f..0.03f
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(16f / 9f)
-                                    .background(Color.Black.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
-                            ) {
-                                Canvas(modifier = Modifier.fillMaxSize()) {
-                                    val guideColor = Color(0xFF80CBC4).copy(alpha = 0.80f)
-                                    val previewConfig = anomalyConfig.copy(
-                                        scanZone = scanZoneValue,
-                                        smallTargetScreenFraction = smallTargetFractionValue,
-                                    )
-                                    val (scanZoneWidth, scanZoneHeight) = previewConfig.scanZoneSize(
-                                        frameWidth = size.width,
-                                        frameHeight = size.height,
-                                    )
-                                    val scanZoneTopLeft = Offset(
-                                        x = (size.width - scanZoneWidth) * 0.5f,
-                                        y = (size.height - scanZoneHeight) * 0.5f,
-                                    )
-                                    drawRect(
-                                        color = guideColor,
-                                        topLeft = scanZoneTopLeft,
-                                        size = Size(scanZoneWidth, scanZoneHeight),
-                                        style = Stroke(width = 2.dp.toPx())
-                                    )
-                                    val targetSpanPx = anomalyConfig.copy(
-                                        smallTargetScreenFraction = smallTargetFractionValue
-                                    ).effectiveSmallTargetSpanPx(
-                                        frameWidth = size.width.roundToInt(),
-                                        frameHeight = size.height.roundToInt(),
-                                    ).coerceAtMost(size.minDimension * 0.40f)
-                                    val topLeft = Offset(
-                                        x = (size.width - targetSpanPx) * 0.5f,
-                                        y = (size.height - targetSpanPx) * 0.5f,
-                                    )
-                                    drawRect(
-                                        color = guideColor,
-                                        topLeft = topLeft,
-                                        size = Size(targetSpanPx, targetSpanPx),
-                                        style = Stroke(width = 2.dp.toPx())
-                                    )
-                                }
-                            }
-                            if (isLocalPlayback) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("Clear Review Annotations")
-                                    TextButton(
-                                        onClick = {
-                                            viewModel.clearLocalPlaybackReviewAnnotations(streamDesignator)
-                                        }
-                                    ) {
-                                        Text("Clear")
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                viewModel.setAnomalySensitivity(streamDesignator, sensitivityValue)
-                                viewModel.setMotionEvidenceSensitivity(streamDesignator, motionEvidenceSensitivityValue)
-                                viewModel.setScanZone(streamDesignator, scanZoneValue)
-                                viewModel.setMinHits(streamDesignator, minHitsValue)
-                                viewModel.setAnomalyFrameStride(streamDesignator, frameStrideValue)
-                                viewModel.setAnomalyPixelStep(streamDesignator, pixelStepValue)
-                                viewModel.setAnomalyThermalMinDelta(streamDesignator, thermalMinDeltaValue)
-                                viewModel.setAnomalySmallTargetScreenFraction(streamDesignator, smallTargetFractionValue)
-                                showAnomalySettingsDialog = false
-                            }
-                        ) {
-                            Text("Apply")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showAnomalySettingsDialog = false }) {
-                            Text("Close")
-                        }
-                    }
-                )
-            }
-            if (showAdHelpDialog) {
-                val helpScroll = rememberScrollState()
-                AlertDialog(
-                    onDismissRequest = { showAdHelpDialog = false },
-                    title = { Text("Anomaly Detection Help") },
-                    text = {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 420.dp)
-                                .verticalScroll(helpScroll),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text("Legend controls")
-                            Text("Sens: Detection sensitivity. Lower values are stricter and require a stronger outlier before drawing a box.")
-                            Text("Zone: Centered portion of the frame scanned for anomalies. Lower values ignore more of the outer frame.")
-                            Text("Hits: Consecutive analyzed-frame hits required in roughly the same motion-stabilized region before a detection is promoted.")
-                            Text("Stride: Analyze every Nth frame. Higher stride reduces CPU load but may miss brief motion.")
-                            Text("Detail: Pixel sampling step for appearance analysis. Auto chooses a default from frame size; smaller steps inspect more detail at higher cost.")
-                            Text("Appearance: Infrared is the recommended default for SAR thermal video. Color Outlier is mainly for visible-light footage or special cases.")
-                            Text("ShowHot: Draws a red ring around the hottest region in the frame as a thermal debug aid.")
-                            Text("Guide Boxes: Shows cyan outlines for the centered scan zone and the maximum small-target size.")
-                            Text("Saliency: Enables the unified saliency detector. Turn it off to match harness runs that omit the saliency algorithm.")
-                            Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
-                            Text("Registration: Chooses the motion-registration backend used to stabilize detections. Affine usually tracks camera motion more accurately; GMV is simpler and may be cheaper.")
-                            Text("Infrared (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
-                            Text("Thermal Min Delta: Minimum infrared contrast before thermal/saliency evidence is considered. Raise it to ignore weaker temperature differences.")
-                            Text("Small: Maximum on-screen small-target box size. The cyan rectangle shows the largest blob the anomaly detector should treat as a 'small target' for the squinter. As the camera zooms in, targets larger than this are down-ranked and can disappear.")
-                            Text("Motion badge: Indicates whether the motion detector is currently part of the active anomaly stack.")
-                            if (isLocalPlayback) {
-                                Text("Playback review controls")
-                                Text("Back: Step backward through the recent paused-frame history.")
-                                Text("Run/Pause: Resume or freeze captured-video playback.")
-                                Text("Step: Advance forward one frame while paused.")
-                                Text("Notes: Number of annotations saved for the held frame.")
-                                Text("Tap on a paused frame while AD is on to open an annotation dialog for that frame point.")
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { showAdHelpDialog = false }) {
-                            Text("Close")
-                        }
-                    }
-                )
-            }
+            AnomalySettingsDialogs(
+                viewModel = viewModel,
+                streamDesignator = streamDesignator,
+                anomalyConfig = anomalyConfig,
+                isLocalPlayback = isLocalPlayback,
+                showAnomalySettingsDialog = showAnomalySettingsDialog,
+                onDismissAnomalySettingsDialog = { showAnomalySettingsDialog = false },
+                showAdHelpDialog = showAdHelpDialog,
+                onDismissAdHelpDialog = { showAdHelpDialog = false },
+            )
         }
         DesignatorIndicator(
             streamDesignator = streamDesignator,
@@ -1202,6 +805,404 @@ fun StreamTile(
                 }
             )
         }
+    }
+}
+
+@Composable
+internal fun AnomalySettingsMenuContent(
+    viewModel: StreamsViewModel,
+    streamDesignator: String,
+    anomalyEnabled: Boolean,
+    isLocalPlayback: Boolean,
+    pauseLocalPlaybackOnOpen: Boolean,
+    onShowSettings: () -> Unit,
+    onShowHelp: () -> Unit,
+    onCloseStream: (() -> Unit)?,
+    onRestartServer: (() -> Unit)?,
+    onDismissMenu: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = {
+            Text(
+                if (anomalyEnabled) {
+                    "Anomaly Detection: On (tap to turn Off)"
+                } else {
+                    "Anomaly Detection: Off (tap to turn On)"
+                }
+            )
+        },
+        onClick = {
+            onDismissMenu()
+            viewModel.toggleAnomalyEnabled(streamDesignator)
+        }
+    )
+    DropdownMenuItem(
+        text = { Text("Anomaly Detector Settings") },
+        onClick = {
+            onDismissMenu()
+            onShowSettings()
+        }
+    )
+    DropdownMenuItem(
+        text = { Text("AD Help") },
+        onClick = {
+            onDismissMenu()
+            onShowHelp()
+        }
+    )
+    if (isLocalPlayback) {
+        DropdownMenuItem(
+            text = { Text(if (pauseLocalPlaybackOnOpen) "Pause On Open: On" else "Pause On Open: Off") },
+            onClick = {
+                onDismissMenu()
+                viewModel.setPauseLocalPlaybackOnOpen(!pauseLocalPlaybackOnOpen)
+            }
+        )
+    }
+    onRestartServer?.let { restartServer ->
+        DropdownMenuItem(
+            text = { Text("Restart Streams Server") },
+            onClick = {
+                onDismissMenu()
+                restartServer()
+            }
+        )
+    }
+    onCloseStream?.let { closeStream ->
+        DropdownMenuItem(
+            text = { Text("Close Stream") },
+            onClick = {
+                onDismissMenu()
+                closeStream()
+            }
+        )
+    }
+}
+
+@Composable
+internal fun AnomalySettingsDialogs(
+    viewModel: StreamsViewModel,
+    streamDesignator: String,
+    anomalyConfig: org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig,
+    isLocalPlayback: Boolean,
+    showAnomalySettingsDialog: Boolean,
+    onDismissAnomalySettingsDialog: () -> Unit,
+    showAdHelpDialog: Boolean,
+    onDismissAdHelpDialog: () -> Unit,
+) {
+    if (showAnomalySettingsDialog) {
+        var sensitivityValue by remember(streamDesignator, anomalyConfig.sensitivity) {
+            mutableStateOf(anomalyConfig.sensitivity.coerceIn(0f, 1f))
+        }
+        var scanZoneValue by remember(streamDesignator, anomalyConfig.scanZone) {
+            mutableStateOf(anomalyConfig.scanZone.coerceIn(0.5f, 1f))
+        }
+        var motionEvidenceSensitivityValue by remember(streamDesignator, anomalyConfig.motionEvidenceSensitivity) {
+            mutableStateOf(anomalyConfig.motionEvidenceSensitivity.coerceIn(0f, 1f))
+        }
+        var minHitsValue by remember(streamDesignator, anomalyConfig.minHits) {
+            mutableStateOf(anomalyConfig.minHits.coerceIn(1, 5))
+        }
+        var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
+            mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 4))
+        }
+        var pixelStepValue by remember(streamDesignator, anomalyConfig.pixelStep) {
+            mutableStateOf(anomalyConfig.pixelStep.coerceIn(0, 4))
+        }
+        var thermalMinDeltaValue by remember(streamDesignator, anomalyConfig.thermalMinDelta) {
+            mutableStateOf(anomalyConfig.thermalMinDelta.coerceIn(1.0f, 64.0f))
+        }
+        var smallTargetFractionValue by remember(streamDesignator, anomalyConfig.smallTargetScreenFraction) {
+            mutableStateOf(anomalyConfig.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f))
+        }
+        AlertDialog(
+            onDismissRequest = onDismissAnomalySettingsDialog,
+            title = { Text("Anomaly Detector") },
+            text = {
+                val settingsScroll = rememberScrollState()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(settingsScroll),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Detection")
+                        TextButton(onClick = { viewModel.toggleAnomalyEnabled(streamDesignator) }) {
+                            Text(if (anomalyConfig.enabled) "On" else "Off")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Reset to Realtime Defaults")
+                        TextButton(onClick = { viewModel.resetAnomalyRealtimeDefaults(streamDesignator) }) {
+                            Text("Reset")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Appearance (${anomalyConfig.appearanceSelection.label})")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Auto)
+                            }) { Text("Auto") }
+                            Button(onClick = {
+                                viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Thermal)
+                            }) { Text("Infrared") }
+                            Button(onClick = {
+                                viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Color)
+                            }) { Text("Color") }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Motion")
+                        TextButton(onClick = {
+                            viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
+                        }) {
+                            Text(if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) "On" else "Off")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Saliency")
+                        TextButton(onClick = { viewModel.toggleSaliencyEnabled(streamDesignator) }) {
+                            Text(if (anomalyConfig.saliencyEnabled) "On" else "Off")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Show Guide Boxes")
+                        TextButton(onClick = { viewModel.toggleShowGuideBoxes(streamDesignator) }) {
+                            Text(if (anomalyConfig.showGuideBoxes) "On" else "Off")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Show Hottest Region")
+                        TextButton(onClick = { viewModel.toggleShowHotOverlay(streamDesignator) }) {
+                            Text(if (anomalyConfig.showHotOverlay) "On" else "Off")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Show Candidate Blobs")
+                        TextButton(onClick = { viewModel.toggleShowCandidateBlobs(streamDesignator) }) {
+                            Text(if (anomalyConfig.showCandidateBlobs) "On" else "Off")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Troubleshooting Debug")
+                        TextButton(onClick = { viewModel.toggleAnomalyTroubleshootingDebug(streamDesignator) }) {
+                            Text(if (anomalyConfig.troubleshootingDebug) "On" else "Off")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Registration")
+                        TextButton(onClick = { viewModel.cycleAnomalyRegistrationMode(streamDesignator) }) {
+                            Text(anomalyConfig.registrationMode.label)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Infrared Palette")
+                        TextButton(onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }) {
+                            Text(anomalyConfig.thermalPolarity.label)
+                        }
+                    }
+                    Text("Sensitivity ${((sensitivityValue * 100f).toInt())}%")
+                    Slider(value = sensitivityValue, onValueChange = { sensitivityValue = it }, valueRange = 0f..1f)
+                    Text("Motion Evidence ${((motionEvidenceSensitivityValue * 100f).toInt())}%")
+                    Slider(value = motionEvidenceSensitivityValue, onValueChange = { motionEvidenceSensitivityValue = it }, valueRange = 0f..1f)
+                    Text("Scan Zone ${((scanZoneValue * 100f).toInt())}%")
+                    Slider(value = scanZoneValue, onValueChange = { scanZoneValue = it }, valueRange = 0.5f..1f)
+                    Text("Min Hits $minHitsValue")
+                    Slider(
+                        value = minHitsValue.toFloat(),
+                        onValueChange = { minHitsValue = it.toInt().coerceIn(1, 5) },
+                        valueRange = 1f..5f,
+                        steps = 3
+                    )
+                    Text("Frame Stride ${frameStrideValue}x")
+                    Slider(
+                        value = frameStrideValue.toFloat(),
+                        onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 4) },
+                        valueRange = 1f..4f,
+                        steps = 2
+                    )
+                    Text(if (pixelStepValue <= 0) "Detail Auto" else "Detail ${pixelStepValue}px step")
+                    Slider(
+                        value = pixelStepValue.toFloat(),
+                        onValueChange = { pixelStepValue = it.toInt().coerceIn(0, 4) },
+                        valueRange = 0f..4f,
+                        steps = 3
+                    )
+                    Text("Thermal Min Delta ${"%.1f".format(thermalMinDeltaValue)}")
+                    Slider(value = thermalMinDeltaValue, onValueChange = { thermalMinDeltaValue = it }, valueRange = 1f..64f)
+                    val smallTargetDenominator =
+                        (1.0f / smallTargetFractionValue.coerceIn(0.0015f, 0.03f)).roundToInt()
+                    Text("Small Target Scale 1/$smallTargetDenominator screen diagonal")
+                    Slider(value = smallTargetFractionValue, onValueChange = { smallTargetFractionValue = it }, valueRange = 0.0015f..0.03f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                            .background(Color.Black.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
+                    ) {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val guideColor = Color(0xFF80CBC4).copy(alpha = 0.80f)
+                            val previewConfig = anomalyConfig.copy(
+                                scanZone = scanZoneValue,
+                                smallTargetScreenFraction = smallTargetFractionValue,
+                            )
+                            val (scanZoneWidth, scanZoneHeight) = previewConfig.scanZoneSize(
+                                frameWidth = size.width,
+                                frameHeight = size.height,
+                            )
+                            val scanZoneTopLeft = Offset(
+                                x = (size.width - scanZoneWidth) * 0.5f,
+                                y = (size.height - scanZoneHeight) * 0.5f,
+                            )
+                            drawRect(
+                                color = guideColor,
+                                topLeft = scanZoneTopLeft,
+                                size = Size(scanZoneWidth, scanZoneHeight),
+                                style = Stroke(width = 2.dp.toPx())
+                            )
+                            val targetSpanPx = anomalyConfig.copy(
+                                smallTargetScreenFraction = smallTargetFractionValue
+                            ).effectiveSmallTargetSpanPx(
+                                frameWidth = size.width.roundToInt(),
+                                frameHeight = size.height.roundToInt(),
+                            ).coerceAtMost(size.minDimension * 0.40f)
+                            val topLeft = Offset(
+                                x = (size.width - targetSpanPx) * 0.5f,
+                                y = (size.height - targetSpanPx) * 0.5f,
+                            )
+                            drawRect(
+                                color = guideColor,
+                                topLeft = topLeft,
+                                size = Size(targetSpanPx, targetSpanPx),
+                                style = Stroke(width = 2.dp.toPx())
+                            )
+                        }
+                    }
+                    if (isLocalPlayback) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Clear Review Annotations")
+                            TextButton(onClick = { viewModel.clearLocalPlaybackReviewAnnotations(streamDesignator) }) {
+                                Text("Clear")
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.setAnomalySensitivity(streamDesignator, sensitivityValue)
+                        viewModel.setMotionEvidenceSensitivity(streamDesignator, motionEvidenceSensitivityValue)
+                        viewModel.setScanZone(streamDesignator, scanZoneValue)
+                        viewModel.setMinHits(streamDesignator, minHitsValue)
+                        viewModel.setAnomalyFrameStride(streamDesignator, frameStrideValue)
+                        viewModel.setAnomalyPixelStep(streamDesignator, pixelStepValue)
+                        viewModel.setAnomalyThermalMinDelta(streamDesignator, thermalMinDeltaValue)
+                        viewModel.setAnomalySmallTargetScreenFraction(streamDesignator, smallTargetFractionValue)
+                        onDismissAnomalySettingsDialog()
+                    }
+                ) { Text("Apply") }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissAnomalySettingsDialog) { Text("Close") }
+            }
+        )
+    }
+
+    if (showAdHelpDialog) {
+        val helpScroll = rememberScrollState()
+        AlertDialog(
+            onDismissRequest = onDismissAdHelpDialog,
+            title = { Text("Anomaly Detection Help") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(helpScroll),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("Legend controls")
+                    Text("Sens: Detection sensitivity. Lower values are stricter and require a stronger outlier before drawing a box.")
+                    Text("Zone: Centered portion of the frame scanned for anomalies. Lower values ignore more of the outer frame.")
+                    Text("Hits: Consecutive analyzed-frame hits required in roughly the same motion-stabilized region before a detection is promoted.")
+                    Text("Stride: Analyze every Nth frame. Higher stride reduces CPU load but may miss brief motion.")
+                    Text("Detail: Pixel sampling step for appearance analysis. Auto chooses a default from frame size; smaller steps inspect more detail at higher cost.")
+                    Text("Appearance: Infrared is the recommended default for SAR thermal video. Color Outlier is mainly for visible-light footage or special cases.")
+                    Text("ShowHot: Draws a red ring around the hottest region in the frame as a thermal debug aid.")
+                    Text("Guide Boxes: Shows cyan outlines for the centered scan zone and the maximum small-target size.")
+                    Text("Saliency: Enables the unified saliency detector. Turn it off to match harness runs that omit the saliency algorithm.")
+                    Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
+                    Text("Registration: Chooses the motion-registration backend used to stabilize detections. Affine usually tracks camera motion more accurately; GMV is simpler and may be cheaper.")
+                    Text("Infrared (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
+                    Text("Thermal Min Delta: Minimum infrared contrast before thermal/saliency evidence is considered. Raise it to ignore weaker temperature differences.")
+                    Text("Small: Maximum on-screen small-target box size. The cyan rectangle shows the largest blob the anomaly detector should treat as a 'small target' for the squinter. As the camera zooms in, targets larger than this are down-ranked and can disappear.")
+                    Text("Motion badge: Indicates whether the motion detector is currently part of the active anomaly stack.")
+                    if (isLocalPlayback) {
+                        Text("Playback review controls")
+                        Text("Back: Step backward through the recent paused-frame history.")
+                        Text("Run/Pause: Resume or freeze captured-video playback.")
+                        Text("Step: Advance forward one frame while paused.")
+                        Text("Pause On Open: Optional local-playback mode that starts newly opened clips paused on their first available frame.")
+                        Text("Notes: Number of annotations saved for the held frame.")
+                        Text("Tap on a paused frame while AD is on to open an annotation dialog for that frame point.")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onDismissAdHelpDialog) { Text("Close") }
+            }
+        )
     }
 }
 

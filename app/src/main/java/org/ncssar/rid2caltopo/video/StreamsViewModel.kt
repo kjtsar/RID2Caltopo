@@ -551,6 +551,11 @@ class StreamsViewModel(
     private val processLoadLogIntervalMs = 5_000L
     private val ffmpegProbeService: FfmpegProbeService? = try {
         FfmpegProbeService(
+            onLocalPlaybackEof = { designator ->
+                viewModelScope.launch {
+                    handleLocalPlaybackEof(designator)
+                }
+            },
             onLocalPlaybackEnded = { designator ->
                 viewModelScope.launch {
                     val localInfo = streamInfoByDesignator[designator]
@@ -642,6 +647,7 @@ class StreamsViewModel(
     private val _focusedPath = MutableStateFlow<String?>(null)
     val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
     private val localPlaybackPausedState = mutableStateMapOf<String, Boolean>()
+    private var localPlaybackPauseOnOpenEnabled by mutableStateOf(false)
     private val localPlaybackReviewByDesignator = mutableStateMapOf<String, LocalPlaybackReviewFile>()
     private var pendingLocalPlaybackReviewExport by mutableStateOf<PendingLocalPlaybackReviewExport?>(null)
     private val dirtyLocalPlaybackReviews = mutableStateSetOf<String>()
@@ -834,6 +840,12 @@ class StreamsViewModel(
             ?: (ffmpegProbeService?.isLocalPlaybackPaused(designator) == true)
     }
 
+    fun pauseLocalPlaybackOnOpenEnabled(): Boolean = localPlaybackPauseOnOpenEnabled
+
+    fun setPauseLocalPlaybackOnOpen(enabled: Boolean) {
+        localPlaybackPauseOnOpenEnabled = enabled
+    }
+
     fun toggleLocalPlaybackPaused(designator: String) {
         val probeService = ffmpegProbeService ?: return
         val paused = probeService.isLocalPlaybackPaused(designator)
@@ -857,6 +869,16 @@ class StreamsViewModel(
         val probeService = ffmpegProbeService ?: return
         viewModelScope.launch(Dispatchers.Default) {
             probeService.stepLocalPlaybackBack(designator)
+        }
+    }
+
+    private fun handleLocalPlaybackEof(designator: String) {
+        localPlaybackPausedState[designator] = true
+        val localInfo = streamInfoByDesignator[designator] ?: return
+        if (!localInfo.isLocalPlayback) return
+        queueLocalPlaybackReviewExportIfNeeded(localInfo)
+        if (pendingLocalPlaybackReviewExport != null) {
+            CaltopoClient.ShowToast("Reached end of ${localInfo.designator}. Save the review annotations when ready.")
         }
     }
 
@@ -1047,6 +1069,11 @@ class StreamsViewModel(
         _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
             this[designator] = pendingInfo
         }
+        if (!_anomalyConfigByDesignator.containsKey(designator)) {
+            _anomalyConfigByDesignator[designator] = defaultAnomalyConfig
+        }
+        localPlaybackPausedState[designator] = localPlaybackPauseOnOpenEnabled
+        ffmpegProbeService?.setLocalPlaybackPaused(designator, localPlaybackPauseOnOpenEnabled)
         _focusedPath.value = designator
         syncStreamSessions(currentResyncSnapshot())
         viewModelScope.launch(Dispatchers.IO) {
@@ -1063,6 +1090,7 @@ class StreamsViewModel(
                 )
                 withContext(Dispatchers.Main) {
                     _detectedAppearanceModeByDesignator[designator] = appearanceGuess.mode
+                    applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
                 }
                 pendingInfo.copy(
                     sourcePath = cachedUri.toString(),
@@ -1487,7 +1515,7 @@ class StreamsViewModel(
     }
 
     fun anomalyConfigFor(designator: String): AnomalyConfig {
-        return _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
+        return effectiveAnomalyConfigFor(designator)
     }
 
     fun resolvedAppearanceModeFor(designator: String): AppearanceAnomalyMode {
@@ -1976,6 +2004,10 @@ class StreamsViewModel(
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
     }
 
+    private fun effectiveAnomalyConfigFor(designator: String): AnomalyConfig {
+        return _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
+    }
+
     private fun currentResyncSnapshot(): Map<String, StreamInfo> {
         val latestDirectSnapshot = buildMap<String, StreamInfo> {
             putAll(StreamRegistry.streams.value)
@@ -2048,7 +2080,9 @@ class StreamsViewModel(
                         val ffmpegStreamCount = streamInfoByDesignator.values.count { info ->
                             info.state == StreamState.LIVE && shouldUseFfmpegRender(info.designator)
                         }
-                        val anomalyEnabledCount = _anomalyConfigByDesignator.values.count { it.enabled }
+                        val anomalyEnabledCount = streamInfoByDesignator.values.count { info ->
+                            effectiveAnomalyConfigFor(info.designator).enabled
+                        }
                         val thermalStatusLabel = currentThermalStatusLabel()
                         val anomalyHeadroomLabel = estimateAnomalyHeadroom(
                             processCpuFraction = smoothedProcessCpuFraction,
@@ -2395,7 +2429,7 @@ class StreamsViewModel(
         val desiredDesignators = liveDesignators + _localPlaybackEntries.value.keys
         val updates = mutableListOf<AnomalyPolicyUpdate>()
         desiredDesignators.forEach { designator ->
-            val config = _anomalyConfigByDesignator[designator] ?: defaultAnomalyConfig
+            val config = effectiveAnomalyConfigFor(designator)
             val enableForDesignator = focused == designator && config.enabled
             val update = AnomalyPolicyUpdate(
                 designator = designator,

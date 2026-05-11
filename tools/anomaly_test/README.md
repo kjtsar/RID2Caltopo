@@ -33,6 +33,12 @@ app/src/main/cpp/
 `ffmpeg_bridge.c` is a thin wrapper that reads the Kotlin config under its
 lock and calls `anomaly_process_frame()` — it contains no algorithm logic.
 
+Important nuance: app behavior is not determined by the C file alone. The
+Android app also derives native detector settings from higher-level Kotlin
+preferences (`AnomalyConfig -> NativeAnomalyConfig`). If you want harness runs
+to resemble app runs, use the app-parity flags described below rather than the
+raw native defaults.
+
 ## Build and run
 
 ```sh
@@ -258,6 +264,46 @@ The default matrix uses:
 - `--stride 1`
 - `-t 2.8`
 - `-m 2`
+
+### App-parity mode
+
+`anomaly_video_test` now supports an opt-in app-parity mode that reproduces the
+same Kotlin-side config derivation used by the Android app before
+`FfmpegBridge.nativeUpdateAnomalyConfig(...)`.
+
+Use this when you want the harness to behave like the app, not like a raw
+native-detector experiment.
+
+Example: app-default thermal replay
+
+```sh
+./build/anomaly_video_test path/to/clip.mp4 \
+  --app-defaults \
+  --no-video
+```
+
+Example: app-like visible-color run
+
+```sh
+./build/anomaly_video_test path/to/clip.mp4 \
+  --app-defaults \
+  --app-appearance color \
+  --app-motion off \
+  --app-saliency off
+```
+
+Useful app-parity flags:
+
+- `--app-defaults` starts from the app's `AnomalyConfig` defaults.
+- `--app-appearance <auto|thermal|color>` mirrors the app appearance selection.
+- `--app-motion <on|off>` toggles the motion algorithm the way the app does.
+- `--app-saliency <on|off>` toggles persistent dark patch / unified saliency.
+- `--app-sensitivity <0..1>` uses the app's logarithmic threshold mapping.
+- `--app-motion-sensitivity <0..1>` uses the app's motion evidence scaling.
+
+When app-parity mode is enabled, the harness prints both the high-level app
+inputs and the derived native detector settings at startup and records the
+parity metadata into the CSV header.
 - `-s 0.8`
 - `--small-target-fraction 0.005` (`1/200`)
 

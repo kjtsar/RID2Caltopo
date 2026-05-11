@@ -287,6 +287,7 @@ typedef struct ffmpeg_session_t {
     int anomaly_last_rescan_mode;
     char latest_anomaly_debug_summary[1024];
     char latest_ad_bridge_debug_summary[256];
+    char latest_local_playback_ad_decision[256];
     int64_t reader_stall_started_at_ms;
     int64_t last_reader_stall_log_at_ms;
     int64_t reader_stall_timeout_events;
@@ -647,6 +648,10 @@ static bool frame_looks_scalable(const AVFrame *frame) {
     if (frame->linesize[0] == 0) return false;
     return true;
 }
+
+static void *ad_thread_main(void *arg);
+static void clear_ad_input_queue(ffmpeg_session_t *session);
+static const char *color_blob_reject_reason_name(int reason);
 
 static void set_io_interrupt_timeout(ffmpeg_session_t *session, int64_t timeout_ms) {
     if (session == NULL) return;
@@ -1240,7 +1245,7 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] color raw=%.2f cand=%d winner=%d fresh=%d carried=%d hist[v=%d nz=%d curMax=%.0f recMax=%.0f reset=%d] seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d lk=%d cur=%.0f rec=%.0f rar=%.4f] reject[a=%d r=%d m=%d q=%d] target[en=%d valid=%d inside=%d refreshSkip=%d sampled=%d carried=%d pre=%.2f support=%.2f eligible=%d stage=%d ring=%.2f/%.2f n=%d coh=%d/%d multi=%d] boxes=%d",
+                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] color raw=%.2f cand=%d winner=%d fresh=%d carried=%d hist[v=%d nz=%d curMax=%.0f recMax=%.0f reset=%d recovery=%d scale=%.2f] seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d lk=%d cur=%.0f rec=%.0f rar=%.4f] reject[a=%d r=%d m=%d q=%d] target[en=%d valid=%d inside=%d refreshSkip=%d sampled=%d carried=%d pre=%.2f support=%.2f eligible=%d stage=%d ring=%.2f/%.2f n=%d coh=%d/%d multi=%d] boxes=%d",
                 registration_health_name(result.registration_health),
                 rescan_mode_name(result.rescan_mode),
                 result.scan_plan.warped_valid_fraction,
@@ -1258,6 +1263,8 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                 result.color_debug.max_histogram_current_count,
                 result.color_debug.max_histogram_recent_count,
                 result.color_debug.history_reset_applied ? 1 : 0,
+                result.color_debug.history_recovery_frames_remaining,
+                result.color_debug.history_recent_scale,
                 result.color_debug.rarity_seed_count,
                 result.color_debug.support_seed_count,
                 result.color_debug.support_peak_score,
@@ -1374,6 +1381,48 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                          ? session->latest_anomaly_debug_summary
                          : "debug unavailable");
     }
+    if ((session->anomaly_troubleshooting_debug || log_local_playback_summary) &&
+        cfg.enabled &&
+        (cfg.algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
+        result.color_debug.candidate_count == 0 &&
+        (result.color_debug.rarity_seed_count > 0 || result.color_debug.support_seed_count > 0)) {
+        ct_debug(TAG,
+                 "color dropout id=%lld designator=%s frame=%lld ts=%.3fs seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d cur=%.0f rec=%.0f rar=%.4f lk=%d] blobs[targetSpanPx=%.1f targetCells=%d maxArea=%d examined=%d strongestReject=%s peak=%.2f area=%.0f span=%.1f ring=%.2f mass=%.2f quality=%.2f] reject[a=%d r=%d m=%d q=%d] hist[nz=%d curMax=%.0f recMax=%.0f recovery=%d scale=%.2f]",
+                 (long long) session->session_id,
+                 session->designator,
+                 (long long) session->anomaly_process_frame_count,
+                 source_ts_us > 0 ? ((double) source_ts_us / 1000000.0) : 0.0,
+                 result.color_debug.rarity_seed_count,
+                 result.color_debug.support_seed_count,
+                 result.color_debug.support_peak_score,
+                 result.color_debug.strongest_seed.score,
+                 result.color_debug.strongest_seed.sample_x,
+                 result.color_debug.strongest_seed.sample_y,
+                 result.color_debug.strongest_seed.hist_current_count,
+                 result.color_debug.strongest_seed.hist_recent_count,
+                 result.color_debug.strongest_seed.hist_rarity_score,
+                 result.color_debug.strongest_seed.local_support_count,
+                 result.color_debug.target_span_px,
+                 result.color_debug.target_span_cells,
+                 result.color_debug.max_blob_area_budget,
+                 result.color_debug.blob_examined_count,
+                 color_blob_reject_reason_name(result.color_debug.strongest_reject_reason),
+                 result.color_debug.strongest_reject_peak_support,
+                 result.color_debug.strongest_reject_area,
+                 result.color_debug.strongest_reject_span,
+                 result.color_debug.strongest_reject_ring_fraction,
+                 result.color_debug.strongest_reject_support_mass,
+                 result.color_debug.strongest_reject_quality,
+                 result.color_debug.blob_reject_area_count,
+                 result.color_debug.blob_reject_ring_count,
+                 result.color_debug.blob_reject_support_mass_count,
+                 result.color_debug.blob_reject_quality_count,
+                 result.color_debug.nonzero_histogram_bins,
+                 result.color_debug.max_histogram_current_count,
+                 result.color_debug.max_histogram_recent_count,
+                 result.color_debug.history_recovery_frames_remaining,
+                 result.color_debug.history_recent_scale);
+    }
     return annotated;
 }
 
@@ -1413,6 +1462,86 @@ static ad_runtime_mode_t current_ad_runtime_mode(ffmpeg_session_t *session) {
         return AD_RUNTIME_MODE_THREADED;
     }
     return AD_RUNTIME_MODE_INLINE;
+}
+
+static const char *color_blob_reject_reason_name(int reason) {
+    switch (reason) {
+        case ANOMALY_COLOR_BLOB_REJECT_AREA:
+            return "area";
+        case ANOMALY_COLOR_BLOB_REJECT_RING:
+            return "ring";
+        case ANOMALY_COLOR_BLOB_REJECT_SUPPORT_MASS:
+            return "support-mass";
+        case ANOMALY_COLOR_BLOB_REJECT_QUALITY:
+            return "quality";
+        default:
+            return "none";
+    }
+}
+
+static void update_local_playback_ad_decision_summary(
+        ffmpeg_session_t *session,
+        int64_t frame_id,
+        int64_t generation_id,
+        int64_t source_ts_us,
+        bool ad_enabled,
+        bool ad_thread_started,
+        bool ad_sync_ready,
+        ad_runtime_mode_t runtime_mode,
+        const char *decision,
+        const char *reason) {
+    if (session == NULL) return;
+    snprintf(session->latest_local_playback_ad_decision,
+             sizeof(session->latest_local_playback_ad_decision),
+             "frame=%lld gen=%lld ts=%.3fs decision=%s reason=%s adEnabled=%d adThread=%d adSync=%d runtimeMode=%d q=%d/%lld disabled=%d thermalPause=%d",
+             (long long) frame_id,
+             (long long) generation_id,
+             source_ts_us > 0 ? ((double) source_ts_us / 1000000.0) : 0.0,
+             decision != NULL ? decision : "unknown",
+             reason != NULL ? reason : "unknown",
+             ad_enabled ? 1 : 0,
+             ad_thread_started ? 1 : 0,
+             ad_sync_ready ? 1 : 0,
+             (int) runtime_mode,
+             session->ad_input_queue_depth,
+             (long long) session->ad_input_queue_depth_max,
+             session->anomaly_runtime_disabled ? 1 : 0,
+             session->anomaly_thermal_paused ? 1 : 0);
+}
+
+static bool start_ad_thread_if_needed_locked(ffmpeg_session_t *session,
+                                             const char *reason) {
+    if (session == NULL || !session->is_render || !session->ad_sync_ready) {
+        return false;
+    }
+    if (!anomaly_processing_enabled_locked(session)) {
+        return false;
+    }
+    if (session->ad_thread_started) {
+        return true;
+    }
+
+    session->ad_thread_stop = false;
+    clear_ad_input_queue(session);
+    int ad_thread_rc = pthread_create(&session->ad_thread, NULL, ad_thread_main, session);
+    if (ad_thread_rc == 0) {
+        session->ad_thread_started = true;
+        ct_debug(TAG,
+                 "ad thread started id=%lld designator=%s reason=%s",
+                 (long long) session->session_id,
+                 session->designator,
+                 reason != NULL ? reason : "unknown");
+        return true;
+    }
+
+    session->ad_thread_started = false;
+    ct_warn(TAG,
+            "ad thread start failed id=%lld designator=%s reason=%s rc=%d",
+            (long long) session->session_id,
+            session->designator,
+            reason != NULL ? reason : "unknown",
+            ad_thread_rc);
+    return false;
 }
 
 static const char *ad_pressure_mode_name(ad_pressure_mode_t mode) {
@@ -2498,6 +2627,7 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->anomaly_last_rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
         session->latest_anomaly_debug_summary[0] = '\0';
         session->latest_ad_bridge_debug_summary[0] = '\0';
+        session->latest_local_playback_ad_decision[0] = '\0';
         session->ad_worker_processed_frame_count = 0;
         session->ad_worker_skipped_frame_count = 0;
         session->ad_worker_annotated_frame_count = 0;
@@ -2540,6 +2670,7 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     session->anomaly_last_rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
     session->latest_anomaly_debug_summary[0] = '\0';
     session->latest_ad_bridge_debug_summary[0] = '\0';
+    session->latest_local_playback_ad_decision[0] = '\0';
     session->ad_worker_processed_frame_count = 0;
     session->ad_worker_skipped_frame_count = 0;
     session->ad_worker_annotated_frame_count = 0;
@@ -3387,12 +3518,21 @@ static void reconfigure_anomaly_mode(ffmpeg_session_t *session,
     }
     bool runtime_disabled_changed =
             session->anomaly_runtime_disabled != was_runtime_disabled;
+    bool needs_ad_thread_start =
+            enable &&
+            session->is_render &&
+            session->ad_sync_ready &&
+            !session->ad_thread_started;
     bool changed = current_enabled != enable ||
                    session->anomaly_pause_reason != pause_reason ||
-                   runtime_disabled_changed;
+                   runtime_disabled_changed ||
+                   needs_ad_thread_start;
     session->anomaly_pause_reason = pause_reason;
     if (!changed) {
         return;
+    }
+    if (enable) {
+        start_ad_thread_if_needed_locked(session, "config_enable");
     }
     session->anomaly_generation_id += 1;
     if (session->ad_sync_ready) {
@@ -4122,21 +4262,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
             }
         }
         if (session->ad_sync_ready) {
-            pthread_mutex_lock(&session->ad_lock);
-            session->ad_thread_stop = false;
-            clear_ad_input_queue(session);
-            pthread_mutex_unlock(&session->ad_lock);
-            int ad_thread_rc = pthread_create(&session->ad_thread, NULL, ad_thread_main, session);
-            if (ad_thread_rc == 0) {
-                session->ad_thread_started = true;
-            } else {
-                session->ad_thread_started = false;
-                ct_warn(TAG,
-                        "ad thread start failed id=%lld designator=%s rc=%d",
-                        (long long) session->session_id,
-                        session->designator,
-                        ad_thread_rc);
-            }
+            start_ad_thread_if_needed_locked(session, "session_start");
         }
 #endif
     }
@@ -4485,10 +4611,16 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     bool enqueued = false;
                     int64_t frame_id = 0;
                     int64_t generation_id = 0;
+                    bool ad_thread_started = false;
+                    bool ad_sync_ready = false;
+                    ad_runtime_mode_t runtime_mode = AD_RUNTIME_MODE_BYPASSED;
                     pthread_mutex_lock(&g_lock);
                     ad_enabled = anomaly_processing_enabled_locked(session);
                     frame_id = ++session->anomaly_next_frame_id;
                     generation_id = session->anomaly_generation_id;
+                    ad_thread_started = session->ad_thread_started;
+                    ad_sync_ready = session->ad_sync_ready;
+                    runtime_mode = current_ad_runtime_mode(session);
                     pthread_mutex_unlock(&g_lock);
                     if (local_file_source && !wait_for_local_pipeline_capacity(session, ad_enabled)) {
                         av_frame_unref(frame);
@@ -4498,6 +4630,17 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     pthread_mutex_lock(ad_enabled ? &session->ad_lock : &session->render_lock);
                     record_decode_timing_sample_locked(session, decoded_at_ms, pts_us);
                     if (ad_enabled && session->ad_thread_started && session->ad_sync_ready) {
+                        update_local_playback_ad_decision_summary(
+                                session,
+                                frame_id,
+                                generation_id,
+                                pts_us,
+                                ad_enabled,
+                                ad_thread_started,
+                                ad_sync_ready,
+                                runtime_mode,
+                                "enqueue-ad",
+                                "threaded-ready");
                         enqueued = enqueue_ad_input_frame_locked(
                                 session,
                                 frame,
@@ -4510,6 +4653,21 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                             pthread_cond_signal(&session->ad_cond);
                         }
                     } else {
+                        const char *bypass_reason = !ad_enabled ? "ad-disabled"
+                                : (!ad_thread_started ? "ad-thread-not-started"
+                                   : (!ad_sync_ready ? "ad-sync-not-ready"
+                                      : "inline-render"));
+                        update_local_playback_ad_decision_summary(
+                                session,
+                                frame_id,
+                                generation_id,
+                                pts_us,
+                                ad_enabled,
+                                ad_thread_started,
+                                ad_sync_ready,
+                                runtime_mode,
+                                "bypass-render",
+                                bypass_reason);
                         enqueued = enqueue_render_frame(
                                 session,
                                 frame,
@@ -4525,6 +4683,20 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                         }
                     }
                     pthread_mutex_unlock(ad_enabled ? &session->ad_lock : &session->render_lock);
+                    if (local_file_source &&
+                        session->anomaly_cfg.enabled &&
+                        session->anomaly_cfg.algorithm_mask != 0 &&
+                        (session->anomaly_troubleshooting_debug ||
+                         !enqueued ||
+                         session->anomaly_process_frame_count == 0 ||
+                         frame_id <= 3 ||
+                         (frame_id % 120) == 0)) {
+                        ct_debug(TAG,
+                                 "local playback AD branch id=%lld designator=%s %s",
+                                 (long long) session->session_id,
+                                 session->designator,
+                                 session->latest_local_playback_ad_decision);
+                    }
                     if (!enqueued) {
                         if (ad_enabled) {
                             if (local_file_source) {
@@ -4542,6 +4714,17 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                         pts_us,
                                         decoded_at_ms);
                                 if (enqueued) {
+                                    update_local_playback_ad_decision_summary(
+                                            session,
+                                            frame_id,
+                                            generation_id,
+                                            pts_us,
+                                            ad_enabled,
+                                            ad_thread_started,
+                                            ad_sync_ready,
+                                            runtime_mode,
+                                            "enqueue-ad-retry",
+                                            "local-capacity-wait");
                                     pthread_cond_signal(&session->ad_cond);
                                 }
                                 pthread_mutex_unlock(&session->ad_lock);
@@ -4565,6 +4748,17 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                     pts_us,
                                     decoded_at_ms);
                             if (enqueued) {
+                                update_local_playback_ad_decision_summary(
+                                        session,
+                                        frame_id,
+                                        session->anomaly_generation_id,
+                                        pts_us,
+                                        false,
+                                        ad_thread_started,
+                                        ad_sync_ready,
+                                        AD_RUNTIME_MODE_BYPASSED,
+                                        "fallback-render",
+                                        "queue-full-runtime-disabled");
                                 pthread_cond_signal(&session->render_cond);
                             }
                             pthread_mutex_unlock(&session->render_lock);
@@ -4613,20 +4807,36 @@ static void run_decode_loop(ffmpeg_session_t *session) {
 
 #if HAVE_SWSCALE
     if (session->is_render && session->ad_thread_started && session->ad_sync_ready) {
+        ct_debug(TAG,
+                 "teardown begin join ad_thread id=%lld designator=%s",
+                 (long long) session->session_id,
+                 session->designator);
         pthread_mutex_lock(&session->ad_lock);
         session->ad_thread_stop = true;
         pthread_cond_signal(&session->ad_cond);
         pthread_mutex_unlock(&session->ad_lock);
         pthread_join(session->ad_thread, NULL);
         session->ad_thread_started = false;
+        ct_debug(TAG,
+                 "teardown joined ad_thread id=%lld designator=%s",
+                 (long long) session->session_id,
+                 session->designator);
     }
     if (session->is_render && session->render_thread_started && session->render_sync_ready) {
+        ct_debug(TAG,
+                 "teardown begin join render_thread id=%lld designator=%s",
+                 (long long) session->session_id,
+                 session->designator);
         pthread_mutex_lock(&session->render_lock);
         session->render_thread_stop = true;
         pthread_cond_signal(&session->render_cond);
         pthread_mutex_unlock(&session->render_lock);
         pthread_join(session->render_thread, NULL);
         session->render_thread_started = false;
+        ct_debug(TAG,
+                 "teardown joined render_thread id=%lld designator=%s",
+                 (long long) session->session_id,
+                 session->designator);
     }
     if (session->is_render && session->render_sync_ready) {
         pthread_mutex_lock(&session->render_lock);
@@ -4637,6 +4847,31 @@ static void run_decode_loop(ffmpeg_session_t *session) {
         pthread_mutex_lock(&session->ad_lock);
         clear_ad_input_queue(session);
         pthread_mutex_unlock(&session->ad_lock);
+    }
+    if (session->is_render &&
+        is_local_file_source(session) &&
+        session->anomaly_cfg.enabled &&
+        session->anomaly_cfg.algorithm_mask != 0 &&
+        session->anomaly_process_frame_count == 0 &&
+        (session->ad_analyzed_rendered_frame_count > 0 ||
+         session->ad_bypassed_rendered_frame_count > 0)) {
+        ct_warn(TAG,
+                "local playback anomaly never ran id=%lld designator=%s runtimeMode=%d renderedAnalyzed=%lld renderedBypassed=%lld forwardedWithoutAnalysis=%lld adProcessed=%lld adAnnotated=%lld adOverlay=%lld qMax=%d thermalPause=%d runtimeDisabled=%d lastDecision=%s",
+                (long long) session->session_id,
+                session->designator,
+                (int) current_ad_runtime_mode(session),
+                (long long) session->ad_analyzed_rendered_frame_count,
+                (long long) session->ad_bypassed_rendered_frame_count,
+                (long long) session->ad_forwarded_without_analysis_count,
+                (long long) session->ad_worker_processed_frame_count,
+                (long long) session->ad_worker_annotated_frame_count,
+                (long long) session->ad_worker_overlay_enqueued_count,
+                session->ad_input_queue_depth_max,
+                session->anomaly_thermal_paused ? 1 : 0,
+                session->anomaly_runtime_disabled ? 1 : 0,
+                session->latest_local_playback_ad_decision[0] != '\0'
+                        ? session->latest_local_playback_ad_decision
+                        : "unavailable");
     }
     if (session->is_render) {
         cleanup_anomaly_resources(session);

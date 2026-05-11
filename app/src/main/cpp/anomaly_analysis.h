@@ -38,8 +38,14 @@
 #define ANOMALY_COLOR_V_BINS 12
 #define ANOMALY_COLOR_HIST_BINS (ANOMALY_COLOR_U_BINS * ANOMALY_COLOR_V_BINS)
 #define ANOMALY_COLOR_HISTORY_DECAY_SHIFT 1
+#define ANOMALY_COLOR_HISTORY_UPDATE_SHIFT 3
+#define ANOMALY_COLOR_HISTORY_RECOVERY_FRAMES 6
+#define ANOMALY_COLOR_HISTORY_RECOVERY_SEED_SHIFT 4
 #define ANOMALY_COLOR_RARITY_MIN 0.03125f
 #define ANOMALY_COLOR_RARITY_SCALE 72.0f
+#define ANOMALY_COLOR_TEMPORAL_RESCUE_RADIUS_CELLS 3
+#define ANOMALY_COLOR_TEMPORAL_RESCUE_SCORE_BASE 0.68f
+#define ANOMALY_COLOR_TEMPORAL_RESCUE_SCORE_RANGE 0.92f
 
 // ── Local tile normalization ───────────────────────────────────────────────
 // The ROI is divided into a LOCAL_TILE_SIZE × LOCAL_TILE_SIZE grid.  Mean and
@@ -298,6 +304,7 @@ typedef struct {
     size_t   color_recent_hist_bins;
     uint8_t *scratch_color_hist;
     size_t   scratch_color_hist_bins;
+    int      color_history_recovery_frames;
     anomaly_roi_state_t roi_state;
     anomaly_target_track_t target_tracks[ANOMALY_MAX_TARGET_TRACKS];
     int      next_target_track_id;
@@ -459,6 +466,14 @@ typedef struct {
     float retention_rank;
     bool  above_threshold;
 } anomaly_debug_color_candidate_t;
+
+typedef enum {
+    ANOMALY_COLOR_BLOB_REJECT_NONE = 0,
+    ANOMALY_COLOR_BLOB_REJECT_AREA = 1,
+    ANOMALY_COLOR_BLOB_REJECT_RING = 2,
+    ANOMALY_COLOR_BLOB_REJECT_SUPPORT_MASS = 3,
+    ANOMALY_COLOR_BLOB_REJECT_QUALITY = 4,
+} anomaly_color_blob_reject_reason_t;
 
 typedef struct {
     bool  valid;
@@ -630,6 +645,9 @@ typedef struct {
     float raw_score;
     float raw_x_norm;
     float raw_y_norm;
+    float target_span_px;
+    int   target_span_cells;
+    int   max_blob_area_budget;
     int   active_phase_index;
     int   active_phase_x;
     int   active_phase_y;
@@ -644,6 +662,8 @@ typedef struct {
     float unsampled_new_exposed_fraction;
     int   histogram_valid_sample_count;
     bool  history_reset_applied;
+    int   history_recovery_frames_remaining;
+    float history_recent_scale;
     int   nonzero_histogram_bins;
     float max_histogram_current_count;
     float max_histogram_recent_count;
@@ -654,6 +674,14 @@ typedef struct {
     int   blob_reject_ring_count;
     int   blob_reject_support_mass_count;
     int   blob_reject_quality_count;
+    int   blob_examined_count;
+    int   strongest_reject_reason;
+    float strongest_reject_peak_support;
+    float strongest_reject_area;
+    float strongest_reject_span;
+    float strongest_reject_ring_fraction;
+    float strongest_reject_support_mass;
+    float strongest_reject_quality;
     anomaly_debug_color_seed_t strongest_seed;
     int   winning_candidate_index;
     int   candidate_count;

@@ -29,6 +29,175 @@
 #include <string.h>
 #include <time.h>
 
+#define APP_DEFAULT_SENSITIVITY 0.60f
+#define APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY 0.60f
+#define APP_DEFAULT_MIN_AREA_FRACTION 0.0015f
+#define APP_DEFAULT_SCAN_ZONE 0.80f
+#define APP_DEFAULT_MIN_HITS 2
+#define APP_DEFAULT_THERMAL_MIN_DELTA 10.0f
+#define APP_DEFAULT_SMALL_TARGET_SCREEN_FRACTION (1.0f / 200.0f)
+
+typedef enum {
+    APP_APPEARANCE_AUTO = 0,
+    APP_APPEARANCE_THERMAL = 1,
+    APP_APPEARANCE_COLOR = 2,
+} app_appearance_selection_t;
+
+typedef enum {
+    APP_REGISTRATION_GMV = 1,
+    APP_REGISTRATION_AFFINE = 2,
+} app_registration_mode_t;
+
+typedef enum {
+    APP_THERMAL_POLARITY_WHITE_HOT = 1,
+    APP_THERMAL_POLARITY_BLACK_HOT = 2,
+} app_thermal_polarity_t;
+
+typedef struct {
+    bool enabled;
+    bool show_hot_overlay;
+    bool show_candidate_blobs;
+    bool troubleshooting_debug;
+    bool color_algorithm_enabled;
+    bool motion_algorithm_enabled;
+    bool saliency_enabled;
+    app_appearance_selection_t appearance_selection;
+    int frame_stride;
+    int pixel_step;
+    float sensitivity;
+    float motion_evidence_sensitivity;
+    float min_area_fraction;
+    app_thermal_polarity_t thermal_polarity;
+    app_registration_mode_t registration_mode;
+    float scan_zone;
+    int min_hits;
+    float thermal_min_delta;
+    float small_target_screen_fraction;
+} app_anomaly_config_t;
+
+static float app_clampf(float value, float min_value, float max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static int app_clampi(int value, int min_value, int max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static app_anomaly_config_t default_app_cfg(void) {
+    app_anomaly_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.enabled = true;
+    cfg.show_hot_overlay = false;
+    cfg.show_candidate_blobs = false;
+    cfg.troubleshooting_debug = false;
+    cfg.color_algorithm_enabled = false;
+    cfg.motion_algorithm_enabled = false;
+    cfg.saliency_enabled = false;
+    cfg.appearance_selection = APP_APPEARANCE_AUTO;
+    cfg.frame_stride = 1;
+    cfg.pixel_step = 0;
+    cfg.sensitivity = APP_DEFAULT_SENSITIVITY;
+    cfg.motion_evidence_sensitivity = APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY;
+    cfg.min_area_fraction = APP_DEFAULT_MIN_AREA_FRACTION;
+    cfg.thermal_polarity = APP_THERMAL_POLARITY_BLACK_HOT;
+    cfg.registration_mode = APP_REGISTRATION_AFFINE;
+    cfg.scan_zone = APP_DEFAULT_SCAN_ZONE;
+    cfg.min_hits = APP_DEFAULT_MIN_HITS;
+    cfg.thermal_min_delta = APP_DEFAULT_THERMAL_MIN_DELTA;
+    cfg.small_target_screen_fraction = APP_DEFAULT_SMALL_TARGET_SCREEN_FRACTION;
+    return cfg;
+}
+
+static const char *app_appearance_name(app_appearance_selection_t selection) {
+    switch (selection) {
+        case APP_APPEARANCE_COLOR: return "color";
+        case APP_APPEARANCE_THERMAL: return "thermal";
+        case APP_APPEARANCE_AUTO:
+        default:
+            return "auto";
+    }
+}
+
+static const char *app_registration_name(app_registration_mode_t mode) {
+    return mode == APP_REGISTRATION_AFFINE ? "affine" : "gmv";
+}
+
+static const char *app_polarity_name(app_thermal_polarity_t polarity) {
+    return polarity == APP_THERMAL_POLARITY_BLACK_HOT ? "black-hot" : "white-hot";
+}
+
+static bool parse_app_appearance(const char *text, app_appearance_selection_t *out) {
+    if (text == NULL || out == NULL) return false;
+    if (strcmp(text, "auto") == 0) {
+        *out = APP_APPEARANCE_AUTO;
+        return true;
+    }
+    if (strcmp(text, "thermal") == 0 || strcmp(text, "ir") == 0) {
+        *out = APP_APPEARANCE_THERMAL;
+        return true;
+    }
+    if (strcmp(text, "color") == 0) {
+        *out = APP_APPEARANCE_COLOR;
+        return true;
+    }
+    return false;
+}
+
+static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
+                                       anomaly_config_t *native_cfg) {
+    if (app_cfg == NULL || native_cfg == NULL) return;
+
+    int mask = 0;
+    if (app_cfg->appearance_selection == APP_APPEARANCE_COLOR) {
+        mask |= ANOMALY_ALGO_COLOR;
+    } else {
+        // App Auto resolves to thermal unless a detected mode is supplied.
+        mask |= ANOMALY_ALGO_THERMAL;
+    }
+    if (app_cfg->motion_algorithm_enabled) mask |= ANOMALY_ALGO_MOTION;
+    if (app_cfg->saliency_enabled) mask |= ANOMALY_ALGO_PERSIST;
+
+    float sensitivity = app_clampf(app_cfg->sensitivity, 0.0f, 1.0f);
+    float motion_sensitivity = app_clampf(app_cfg->motion_evidence_sensitivity, 0.0f, 1.0f);
+    float score_threshold =
+        (float)pow(15.0, 1.0 - (double)sensitivity);
+    score_threshold = app_clampf(score_threshold, 1.0f, 15.0f);
+    float motion_evidence_scale =
+        0.25f + (1.75f * motion_sensitivity * motion_sensitivity);
+    motion_evidence_scale = app_clampf(motion_evidence_scale, 0.25f, 2.0f);
+    float area_scale = 0.10f + (4.90f * sensitivity * sensitivity);
+    float effective_min_area_fraction =
+        app_clampf(app_cfg->min_area_fraction * area_scale, 0.00005f, 0.03f);
+
+    memset(native_cfg, 0, sizeof(*native_cfg));
+    native_cfg->enabled = app_cfg->enabled;
+    native_cfg->show_hot_overlay = app_cfg->show_hot_overlay;
+    native_cfg->show_candidate_blobs = app_cfg->show_candidate_blobs;
+    native_cfg->algorithm_mask = mask;
+    native_cfg->registration_mode =
+        app_cfg->registration_mode == APP_REGISTRATION_AFFINE
+            ? ANOMALY_REGISTRATION_AFFINE
+            : ANOMALY_REGISTRATION_GMV;
+    native_cfg->frame_stride = app_clampi(app_cfg->frame_stride, 1, 8);
+    native_cfg->pixel_step = app_clampi(app_cfg->pixel_step, 0, 8);
+    native_cfg->score_threshold = score_threshold;
+    native_cfg->motion_evidence_scale = motion_evidence_scale;
+    native_cfg->min_area_fraction = effective_min_area_fraction;
+    native_cfg->thermal_polarity =
+        app_cfg->thermal_polarity == APP_THERMAL_POLARITY_BLACK_HOT
+            ? ANOMALY_THERMAL_BLACK_HOT
+            : ANOMALY_THERMAL_WHITE_HOT;
+    native_cfg->scan_zone = app_clampf(app_cfg->scan_zone, 0.5f, 1.0f);
+    native_cfg->min_hits = app_clampi(app_cfg->min_hits, 1, 10);
+    native_cfg->thermal_min_delta = app_clampf(app_cfg->thermal_min_delta, 1.0f, 64.0f);
+    native_cfg->small_target_screen_fraction =
+        app_clampf(app_cfg->small_target_screen_fraction, 0.0015f, 0.03f);
+}
+
 // ── pixel-font frame-number overlay ───────────────────────────────────────
 // 5×7 bitmap glyphs for digits 0-9.  Each byte is one row, MSB = leftmost px.
 static const uint8_t kDigitFont[10][7] = {
@@ -1342,6 +1511,17 @@ static void usage(const char *prog) {
         "                   every frame; write detector-side spatial/temporal scores\n"
         "                   to _probe.csv. Use this to tune threshold / min-delta.\n"
         "\n"
+        "App-parity mode:\n"
+        "  --app-defaults   Derive native detector config from the app's Kotlin\n"
+        "                   AnomalyConfig defaults and mapping logic\n"
+        "  --app-appearance <auto|thermal|color>\n"
+        "  --app-motion <on|off>\n"
+        "  --app-saliency <on|off>\n"
+        "  --app-sensitivity <0..1>\n"
+        "  --app-motion-sensitivity <0..1>\n"
+        "                   These flags mirror the app-side config derivation in\n"
+        "                   AnomalyModels.kt before the native bridge call.\n"
+        "\n"
         "Tip for IR/thermal footage: add  -p bh -a 6  (thermal + motion, black-hot)\n",
         prog,
         (double)ANOMALY_DEFAULT_SCORE_THRESHOLD,
@@ -1398,6 +1578,8 @@ int main(int argc, char **argv) {
     int    debug_overlay = 0;
     // min-delta override (0 = use compiled-in constant).
     float  min_delta_override = 0.0f;
+    bool   app_parity_mode = false;
+    app_anomaly_config_t app_cfg = default_app_cfg();
 
     for (int i = 2; i < argc; i++) {
         if      (!strcmp(argv[i], "-o")          && i+1 < argc) snprintf(output_video, sizeof(output_video), "%s", argv[++i]);
@@ -1417,6 +1599,84 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--min-delta") && i+1 < argc) min_delta_override    = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--small-target-fraction") && i+1 < argc) {
             cfg.small_target_screen_fraction = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-defaults")) {
+            app_parity_mode = true;
+        }
+        else if (!strcmp(argv[i], "--app-appearance") && i+1 < argc) {
+            app_parity_mode = true;
+            if (!parse_app_appearance(argv[++i], &app_cfg.appearance_selection)) {
+                fprintf(stderr, "Error: --app-appearance expects auto, thermal, or color\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--app-motion") && i+1 < argc) {
+            app_parity_mode = true;
+            const char *value = argv[++i];
+            if (!strcmp(value, "on")) app_cfg.motion_algorithm_enabled = true;
+            else if (!strcmp(value, "off")) app_cfg.motion_algorithm_enabled = false;
+            else {
+                fprintf(stderr, "Error: --app-motion expects on or off\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--app-saliency") && i+1 < argc) {
+            app_parity_mode = true;
+            const char *value = argv[++i];
+            if (!strcmp(value, "on")) app_cfg.saliency_enabled = true;
+            else if (!strcmp(value, "off")) app_cfg.saliency_enabled = false;
+            else {
+                fprintf(stderr, "Error: --app-saliency expects on or off\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--app-sensitivity") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.sensitivity = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-motion-sensitivity") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.motion_evidence_sensitivity = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-registration") && i+1 < argc) {
+            app_parity_mode = true;
+            const char *value = argv[++i];
+            app_cfg.registration_mode =
+                strcmp(value, "affine") == 0 ? APP_REGISTRATION_AFFINE : APP_REGISTRATION_GMV;
+        }
+        else if (!strcmp(argv[i], "--app-polarity") && i+1 < argc) {
+            app_parity_mode = true;
+            const char *value = argv[++i];
+            app_cfg.thermal_polarity =
+                strcmp(value, "bh") == 0 ? APP_THERMAL_POLARITY_BLACK_HOT : APP_THERMAL_POLARITY_WHITE_HOT;
+        }
+        else if (!strcmp(argv[i], "--app-scan-zone") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.scan_zone = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-min-hits") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.min_hits = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-frame-stride") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.frame_stride = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-pixel-step") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.pixel_step = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-min-area-fraction") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.min_area_fraction = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-thermal-min-delta") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.thermal_min_delta = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-small-target-fraction") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.small_target_screen_fraction = (float)atof(argv[++i]);
         }
         else if (!strcmp(argv[i], "-p")          && i+1 < argc) {
             cfg.thermal_polarity = strcmp(argv[++i], "bh") == 0
@@ -1470,6 +1730,10 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--no-video")) write_video = 0;
         else { fprintf(stderr, "Unknown option: %s\n\n", argv[i]); usage(argv[0]); return 1; }
+    }
+
+    if (app_parity_mode) {
+        derive_native_cfg_from_app(&app_cfg, &cfg);
     }
 
     // ── Auto-detect dimensions and fps with ffprobe ──────────────────────
@@ -1580,6 +1844,16 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "\n");
     fprintf(stderr, "Detector settings:\n");
+    if (app_parity_mode) {
+        fprintf(stderr, "  mode       = app-parity\n");
+        fprintf(stderr, "  app appearance = %s\n", app_appearance_name(app_cfg.appearance_selection));
+        fprintf(stderr, "  app motion     = %s\n", app_cfg.motion_algorithm_enabled ? "on" : "off");
+        fprintf(stderr, "  app saliency   = %s\n", app_cfg.saliency_enabled ? "on" : "off");
+        fprintf(stderr, "  app sensitivity= %.2f\n", (double)app_cfg.sensitivity);
+        fprintf(stderr, "  app motion sens= %.2f\n", (double)app_cfg.motion_evidence_sensitivity);
+        fprintf(stderr, "  app register   = %s\n", app_registration_name(app_cfg.registration_mode));
+        fprintf(stderr, "  app polarity   = %s\n", app_polarity_name(app_cfg.thermal_polarity));
+    }
     fprintf(stderr, "  threshold  = %.2f\n", (double)cfg.score_threshold);
     fprintf(stderr, "  min_hits   = %d\n",   cfg.min_hits);
     fprintf(stderr, "  scan_zone  = %.2f\n", (double)cfg.scan_zone);
@@ -1622,6 +1896,18 @@ int main(int argc, char **argv) {
 
     // Header lines document the settings so the file is self-contained.
     fprintf(csv, "# input: %s\n", input);
+    if (app_parity_mode) {
+        fprintf(csv,
+                "# mode: app-parity  app_appearance: %s  app_motion: %d  app_saliency: %d  "
+                "app_sensitivity: %.4f  app_motion_sensitivity: %.4f  app_registration: %s  app_polarity: %s\n",
+                app_appearance_name(app_cfg.appearance_selection),
+                app_cfg.motion_algorithm_enabled ? 1 : 0,
+                app_cfg.saliency_enabled ? 1 : 0,
+                (double)app_cfg.sensitivity,
+                (double)app_cfg.motion_evidence_sensitivity,
+                app_registration_name(app_cfg.registration_mode),
+                app_polarity_name(app_cfg.thermal_polarity));
+    }
     fprintf(csv, "# threshold: %.2f  min_hits: %d  scan_zone: %.2f  "
                  "algo: %d  polarity: %s  stride: %d  pixel_step: %d  registration: %s  "
                  "small_target_fraction: %.6f\n",
@@ -1793,7 +2079,8 @@ int main(int argc, char **argv) {
         }
 
         anomaly_result_t result;
-        anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, 0, &result);
+        int64_t source_ts_us = (int64_t)llround(time_s * 1000000.0);
+        anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, source_ts_us, &result);
         switch (result.rescan_mode) {
             case ANOMALY_RESCAN_MODE_FULL:
                 rescan_full_frames++;

@@ -54,4 +54,15 @@ class CtDroneSpecTest {
             )
         )
     }
+
+    @Test
+    fun signalIdleTime_tracksReceivedRidPacketBeforeWaypointAcceptance() {
+        val drone = CtDroneSpec("RID123")
+        val nowMs = 12_345L
+
+        drone.noteRidPositionPacketReceived(nowMs)
+
+        assertEquals(nowMs, drone.mostRecentSignalMsecTimestamp)
+        assertEquals(1500L, drone.signalIdleTimeInMsec(nowMs + 1500L))
+    }
 }

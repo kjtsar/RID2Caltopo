@@ -103,7 +103,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String owner;
     private String model; /* This is the concise text description of the drone. */
     public volatile transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good waypoint was received */
-    private volatile transient long mostRecentSignalMsecTimestamp; /* wall-clock time when the most recent valid RID position packet was received */
+    private volatile transient long mostRecentSignalMsecTimestamp; /* wall-clock time when the most recent received RID position packet was seen */
     private transient long startMsecTimestamp; /* timestamp carried by the first accepted waypoint in the current flight */
     private transient long mostRecentFlightMsecTimestamp; /* timestamp carried by the most recent accepted waypoint */
     private transient CtDroneSpecListener myListener;
@@ -669,6 +669,16 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
 
         return true;
+    }
+
+    /** noteRidPositionPacketReceived()
+     *
+     * Record that we heard a RID position packet for this aircraft, even if the waypoint is later
+     * rejected by validity or dedup filters. Signal-loss alerting should reflect radio silence,
+     * not waypoint acceptance.
+     */
+    public void noteRidPositionPacketReceived(long nowWallMsec) {
+        mostRecentSignalMsecTimestamp = nowWallMsec;
     }
 
     /** idleTimeInMsec()

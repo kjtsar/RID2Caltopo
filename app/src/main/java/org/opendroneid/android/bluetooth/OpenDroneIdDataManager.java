@@ -223,6 +223,10 @@ public class OpenDroneIdDataManager {
         double lng = location.getLongitude();
         double altitudeInMeters = getAltitudeInMeters(location);
 
+        // Count any received RID position packet as connectivity, even if waypoint-quality
+        // filters later reject it for tracking purposes.
+        droneSpec.noteRidPositionPacketReceived(nowWallMsec);
+
         // feed altitude context into droneSpec for cross-broadcast tracking.
         CtDroneSpec.AltSourceEnum altSource =
                 isRidAltitudeValid(location.getAltitudePressure())  ? CtDroneSpec.AltSourceEnum.BARO
@@ -251,7 +255,7 @@ public class OpenDroneIdDataManager {
                 ? status == LocationData.StatusEnum.Airborne
                 : null;
 
-        // let the droneSpec be final arbiter of what constitutes a reasonable waypoint.
+        // Let the droneSpec be final arbiter of what constitutes a reasonable waypoint.
         if (!droneSpec.checkNewWaypoint(lat, lng, altitudeInMeters, timestampInMilliseconds, nowWallMsec, airborne, transportType)) return;
 
         // Update signal strength only for accepted waypoints so that the displayed RSSI is

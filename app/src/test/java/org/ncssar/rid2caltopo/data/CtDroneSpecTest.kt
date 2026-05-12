@@ -65,4 +65,17 @@ class CtDroneSpecTest {
         assertEquals(nowMs, drone.mostRecentSignalMsecTimestamp)
         assertEquals(1500L, drone.signalIdleTimeInMsec(nowMs + 1500L))
     }
+
+    @Test
+    fun noteRidPositionPacketReceived_learnsPacketCadenceAtIngress() {
+        val drone = CtDroneSpec("RID123")
+        val nowMs = 20_000L
+
+        drone.noteRidPositionPacketReceived(nowMs)
+        drone.noteRidPositionPacketReceived(nowMs + 3_000L)
+        drone.noteRidPositionPacketReceived(nowMs + 9_000L)
+
+        assertEquals(2, drone.learnedSignalIntervalSamples)
+        assertEquals(3_750L, drone.learnedSignalIntervalMs)
+    }
 }

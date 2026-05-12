@@ -104,6 +104,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String model; /* This is the concise text description of the drone. */
     public volatile transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good waypoint was received */
     private volatile transient long mostRecentSignalMsecTimestamp; /* wall-clock time when the most recent received RID position packet was seen */
+    private volatile transient long learnedSignalIntervalMs; /* smoothed wall-clock interval between RID position packets */
+    private volatile transient int learnedSignalIntervalSamples;
     private transient long startMsecTimestamp; /* timestamp carried by the first accepted waypoint in the current flight */
     private transient long mostRecentFlightMsecTimestamp; /* timestamp carried by the most recent accepted waypoint */
     private transient CtDroneSpecListener myListener;
@@ -174,6 +176,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         okToLog = true;
         localArchiveOnly = false;
         mostRecentSignalMsecTimestamp = 0;
+        learnedSignalIntervalMs = 0;
+        learnedSignalIntervalSamples = 0;
         impliedTakeoffAltM        = null;
         impliedTakeoffSampleCount = 0;
         impliedTakeoffSealed      = false;
@@ -220,6 +224,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         airborne = Boolean.FALSE;
         startMsecTimestamp = mostRecentMsecTimestamp = mostRecentFlightMsecTimestamp = 0;
         mostRecentSignalMsecTimestamp = 0;
+        learnedSignalIntervalMs = 0;
+        learnedSignalIntervalSamples = 0;
         int length = TransportTypeEnum.values().length;
         for (int i = 0; i < length; i++) transportCount[i] = 0;
         CaltopoClient.DroneSpecStatusChanged(this, false);
@@ -475,6 +481,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         startMsecTimestamp = jo.optLong("startTimeInMsec");
         mostRecentMsecTimestamp = jo.optLong("mostRecentTimeInMsec");
         mostRecentSignalMsecTimestamp = mostRecentMsecTimestamp;
+        learnedSignalIntervalMs = 0;
+        learnedSignalIntervalSamples = 0;
         mostRecentFlightMsecTimestamp = jo.optLong("mostRecentFlightTimeInMsec", startMsecTimestamp);
         transportCount[TransportTypeEnum.BT4.ordinal()] = jo.optInt(TransportTypeEnum.BT4.name(), 0);
         transportCount[TransportTypeEnum.BT5.ordinal()] = jo.optInt(TransportTypeEnum.BT5.name(), 0);
@@ -678,6 +686,16 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      * not waypoint acceptance.
      */
     public void noteRidPositionPacketReceived(long nowWallMsec) {
+        if (mostRecentSignalMsecTimestamp > 0 && nowWallMsec > mostRecentSignalMsecTimestamp) {
+            long intervalMs = nowWallMsec - mostRecentSignalMsecTimestamp;
+            long maxTrackDelayMs = CaltopoClient.GetNewTrackDelayInSeconds() * 1000L;
+            if (intervalMs < maxTrackDelayMs) {
+                learnedSignalIntervalMs = (learnedSignalIntervalMs <= 0)
+                        ? intervalMs
+                        : ((learnedSignalIntervalMs * 3L) + intervalMs) / 4L;
+                learnedSignalIntervalSamples = Math.min(learnedSignalIntervalSamples + 1, 1000);
+            }
+        }
         mostRecentSignalMsecTimestamp = nowWallMsec;
     }
 
@@ -707,6 +725,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return (mostRecentSignalMsecTimestamp > 0)
                 ? mostRecentSignalMsecTimestamp
                 : mostRecentMsecTimestamp;
+    }
+
+    public long getLearnedSignalIntervalMs() {
+        return learnedSignalIntervalMs;
+    }
+
+    public int getLearnedSignalIntervalSamples() {
+        return learnedSignalIntervalSamples;
     }
 
     /** IdleTimeInMsec()

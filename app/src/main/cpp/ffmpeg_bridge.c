@@ -1245,7 +1245,7 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         snprintf(
                 session->latest_anomaly_debug_summary,
                 sizeof(session->latest_anomaly_debug_summary),
-                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] color raw=%.2f cand=%d winner=%d fresh=%d carried=%d hist[v=%d nz=%d curMax=%.0f recMax=%.0f reset=%d recovery=%d scale=%.2f] seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d lk=%d cur=%.0f rec=%.0f rar=%.4f] reject[a=%d r=%d m=%d q=%d] target[en=%d valid=%d inside=%d refreshSkip=%d sampled=%d carried=%d pre=%.2f support=%.2f eligible=%d stage=%d ring=%.2f/%.2f n=%d coh=%d/%d multi=%d] boxes=%d",
+                "reg=%s mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] regdbg[scale=%.4f theta=%.2f tx=%.3f ty=%.3f resid=%.4f min=%.4f max=%.4f] color raw=%.2f cand=%d winner=%d fresh=%d carried=%d hist[v=%d nz=%d curMax=%.0f recMax=%.0f reset=%d recovery=%d scale=%.2f] seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d lk=%d cur=%.0f rec=%.0f rar=%.4f ratio=%.2f src=%d coarse=%d over=%d dense=%d] reject[a=%d r=%d m=%d q=%d] target[en=%d valid=%d inside=%d refreshSkip=%d sampled=%d carried=%d pre=%.2f support=%.2f eligible=%d stage=%d ring=%.2f/%.2f n=%d coh=%d/%d multi=%d] boxes=%d",
                 registration_health_name(result.registration_health),
                 rescan_mode_name(result.rescan_mode),
                 result.scan_plan.warped_valid_fraction,
@@ -1253,6 +1253,13 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                 result.scan_plan.stale_fraction,
                 result.scan_plan.refresh_mask_selected_fraction,
                 scan_reason_summary,
+                result.gmv_debug.fit_scale,
+                result.gmv_debug.fit_theta_deg,
+                result.gmv_debug.fit_tx,
+                result.gmv_debug.fit_ty,
+                result.gmv_debug.fit_mean_residual,
+                result.gmv_debug.fit_min_scale,
+                result.gmv_debug.fit_max_scale,
                 result.color_debug.raw_score,
                 result.color_debug.candidate_count,
                 result.color_debug.winning_candidate_index,
@@ -1275,6 +1282,11 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                 result.color_debug.strongest_seed.hist_current_count,
                 result.color_debug.strongest_seed.hist_recent_count,
                 result.color_debug.strongest_seed.hist_rarity_score,
+                result.color_debug.fresh_distinctness_ratio,
+                result.color_debug.adaptive_source_coarse_count,
+                result.color_debug.coarse_component_count,
+                result.color_debug.coarse_oversized_count,
+                result.color_debug.dense_verify_component_count,
                 result.color_debug.blob_reject_area_count,
                 result.color_debug.blob_reject_ring_count,
                 result.color_debug.blob_reject_support_mass_count,
@@ -1387,11 +1399,22 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         result.color_debug.candidate_count == 0 &&
         (result.color_debug.rarity_seed_count > 0 || result.color_debug.support_seed_count > 0)) {
         ct_debug(TAG,
-                 "color dropout id=%lld designator=%s frame=%lld ts=%.3fs seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d cur=%.0f rec=%.0f rar=%.4f lk=%d] blobs[targetSpanPx=%.1f targetCells=%d maxArea=%d examined=%d strongestReject=%s peak=%.2f area=%.0f span=%.1f ring=%.2f mass=%.2f quality=%.2f] reject[a=%d r=%d m=%d q=%d] hist[nz=%d curMax=%.0f recMax=%.0f recovery=%d scale=%.2f]",
+                 "color dropout id=%lld designator=%s frame=%lld ts=%.3fs mode=%s plan[w=%.2f new=%.2f stale=%.2f mask=%.2f reasons=%s] regdbg[scale=%.4f theta=%.2f tx=%.3f ty=%.3f resid=%.4f] seeds[rare=%d support=%d peak=%.2f top=%.2f@%d,%d cur=%.0f rec=%.0f rar=%.4f lk=%d] blobs[targetSpanPx=%.1f targetCells=%d maxArea=%d examined=%d strongestReject=%s peak=%.2f area=%.0f span=%.1f ring=%.2f mass=%.2f quality=%.2f] reject[a=%d r=%d m=%d q=%d] hist[nz=%d curMax=%.0f recMax=%.0f recovery=%d scale=%.2f]",
                  (long long) session->session_id,
                  session->designator,
                  (long long) session->anomaly_process_frame_count,
                  source_ts_us > 0 ? ((double) source_ts_us / 1000000.0) : 0.0,
+                 rescan_mode_name(result.rescan_mode),
+                 result.scan_plan.warped_valid_fraction,
+                 result.scan_plan.newly_exposed_fraction,
+                 result.scan_plan.stale_fraction,
+                 result.scan_plan.refresh_mask_selected_fraction,
+                 scan_reason_summary,
+                 result.gmv_debug.fit_scale,
+                 result.gmv_debug.fit_theta_deg,
+                 result.gmv_debug.fit_tx,
+                 result.gmv_debug.fit_ty,
+                 result.gmv_debug.fit_mean_residual,
                  result.color_debug.rarity_seed_count,
                  result.color_debug.support_seed_count,
                  result.color_debug.support_peak_score,
@@ -1780,6 +1803,15 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
         }
         ANativeWindow_unlockAndPost(window);
         session->last_render_post_at_ms = monotonic_ms();
+        if (overlay_frame != NULL) {
+            ct_debug(TAG,
+                     "render posted overlay id=%lld designator=%s ts=%.3fs analyzed=%d latencyMs=%lld",
+                     (long long) session->session_id,
+                     session->designator,
+                     source_ts_us > 0 ? ((double) source_ts_us / 1000000.0) : 0.0,
+                     analyzed ? 1 : 0,
+                     (long long) render_latency_ms);
+        }
         if (is_local_file_source(session) && source_ts_us > 0) {
             // Track both the full-session and recent playback spans from actual
             // surface posts so the UI can distinguish steady-state speed from a
@@ -4952,6 +4984,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.scan_zone         = ANOMALY_SCAN_ZONE_DEFAULT;
     slot->anomaly_cfg.min_hits          = ANOMALY_DEFAULT_MIN_HITS;
     slot->anomaly_cfg.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
+    slot->anomaly_cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
     slot->anomaly_thermal_paused = false;
     slot->anomaly_runtime_disabled = false;
     slot->anomaly_troubleshooting_debug = false;
@@ -5321,7 +5354,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jfloat scan_zone,
         jint min_hits,
         jfloat thermal_min_delta,
-        jfloat small_target_screen_fraction
+        jfloat small_target_screen_fraction,
+        jint color_frontend_mode
 ) {
     (void) env;
     (void) thiz;
@@ -5341,7 +5375,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.registration_mode = ((int) registration_mode == ANOMALY_REGISTRATION_AFFINE)
                                                  ? ANOMALY_REGISTRATION_AFFINE
                                                  : ANOMALY_REGISTRATION_GMV;
-        session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (int) frame_stride;
+        session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (((int) frame_stride > 10) ? 10 : (int) frame_stride);
         session->anomaly_cfg.pixel_step        = ((int) pixel_step < 0) ? 0 : (int) pixel_step;
         session->anomaly_cfg.score_threshold   = fmaxf(0.1f, score_threshold);
         session->anomaly_cfg.motion_evidence_scale = fminf(fmaxf(motion_evidence_scale, 0.1f), 4.0f);
@@ -5354,13 +5388,19 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                                                  ? thermal_min_delta : ANOMALY_THERMAL_MIN_DELTA;
         session->anomaly_cfg.small_target_screen_fraction =
                 small_target_screen_fraction > 0.0f ? small_target_screen_fraction : (1.0f / 250.0f);
+        session->anomaly_cfg.color_frontend_mode =
+                (color_frontend_mode == ANOMALY_COLOR_FRONTEND_FRESH_YUV)
+                ? ANOMALY_COLOR_FRONTEND_FRESH_YUV
+                : ((color_frontend_mode == ANOMALY_COLOR_FRONTEND_FRESH_RGBA)
+                    ? ANOMALY_COLOR_FRONTEND_FRESH_RGBA
+                    : ANOMALY_COLOR_FRONTEND_LEGACY);
         bool log_local_config =
                 is_local_file_source(session) &&
                 session->anomaly_cfg.enabled &&
                 session->anomaly_cfg.algorithm_mask != 0;
         if (session->anomaly_troubleshooting_debug || log_local_config) {
             ct_debug(TAG,
-                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f thermalPause=%d runtimeDisabled=%d",
+                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d thermalPause=%d runtimeDisabled=%d",
                      (long long) session->session_id,
                      session->designator,
                      is_local_file_source(session) ? 1 : 0,
@@ -5372,6 +5412,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                      session->anomaly_cfg.score_threshold,
                      session->anomaly_cfg.min_hits,
                      session->anomaly_cfg.scan_zone,
+                     session->anomaly_cfg.color_frontend_mode,
                      session->anomaly_thermal_paused ? 1 : 0,
                      session->anomaly_runtime_disabled ? 1 : 0);
         }

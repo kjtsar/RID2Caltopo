@@ -27,6 +27,13 @@ private data class DroneSignalLossCandidate(
     val remoteId: String,
     val mappedId: String,
     val signalIdleMs: Long,
+    val thresholdMs: Long,
+    val learnedIntervalMs: Long,
+    val learnedSamples: Int,
+    val newTrackDelayMs: Long,
+    val bridgeCheckDistanceFt: Double,
+    val lossObservedWhileFar: Boolean,
+    val hasExceededDistanceThreshold: Boolean,
     val distanceFromTabletFt: Double
 )
 
@@ -58,7 +65,6 @@ private data class FlightMonitorState(
 object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
     private const val ALERT_IDLE_THRESHOLD_MS = 2_000L
     private const val ALERT_BOOTSTRAP_IDLE_THRESHOLD_MS = 10_000L
-    private const val ALERT_DISTANCE_THRESHOLD_FT = 100.0
     private const val MIN_VOLUME = 0.20f
     private const val MAX_VOLUME = 0.80f
 
@@ -114,6 +120,7 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
 
         val nowMs = System.currentTimeMillis()
         val newTrackDelayMs = CaltopoClient.GetNewTrackDelayInSeconds() * 1000L
+        val bridgeCheckDistanceFt = CaltopoClient.GetBridgeCheckDistanceFeet().toDouble()
         val tabletLocation = CaltopoMap.GetMyLocation()
         val eligible = if (tabletLocation != null && newTrackDelayMs > ALERT_IDLE_THRESHOLD_MS) {
             activeFlights.values.mapNotNull { spec ->
@@ -128,23 +135,23 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     maxTrackDelayMs = newTrackDelayMs
                 )
                 val exceededThreshold = priorState.hasExceededDistanceThreshold ||
-                    distanceFt > ALERT_DISTANCE_THRESHOLD_FT
+                    distanceFt > bridgeCheckDistanceFt
                 var lossWhileFar = priorState.lossObservedWhileFar ||
                     (exceededThreshold &&
                         signalIdleMs > effectiveIdleThresholdMs &&
-                        distanceFt > ALERT_DISTANCE_THRESHOLD_FT)
-                // Once the drone is back inside the near-tablet bubble and we are
-                // receiving timely RID again, clear the "loss while far" latch so
-                // normal low-motion 3-4 s broadcasts near the pilot do not keep
-                // retriggering the flatline for the rest of the flight.
-                if (distanceFt <= ALERT_DISTANCE_THRESHOLD_FT &&
-                    signalIdleMs <= effectiveIdleThresholdMs) {
+                        distanceFt > bridgeCheckDistanceFt)
+                // Once the drone is back inside the bridge-check distance, clear
+                // the far-loss latch so a stale post-flight RID stream does not
+                // keep the flatline tone alive during landing or after touchdown.
+                if (distanceFt <= bridgeCheckDistanceFt || spec.airborne == false) {
                     if (priorState.lossObservedWhileFar) {
                         CTDebug(
                             SIGNAL_LOSS_ALERT_TAG,
                             "Clearing far-loss latch for ${spec.mappedId} flightKey=$flightKey " +
                                 "distanceFt=${"%.1f".format(distanceFt)} signalIdleMs=$signalIdleMs " +
-                                "thresholdMs=$effectiveIdleThresholdMs"
+                                "thresholdMs=$effectiveIdleThresholdMs " +
+                                "bridgeCheckDistanceFt=${"%.1f".format(bridgeCheckDistanceFt)} " +
+                                "airborne=${spec.airborne}"
                         )
                     }
                     lossWhileFar = false
@@ -182,7 +189,7 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                 )
                 flightMonitorState[flightKey] = nextState
                 val shouldAlertNearTablet = !nextState.hasExceededDistanceThreshold || nextState.lossObservedWhileFar
-                if (distanceFt <= ALERT_DISTANCE_THRESHOLD_FT && !shouldAlertNearTablet) {
+                if (distanceFt <= bridgeCheckDistanceFt && !shouldAlertNearTablet) {
                     return@mapNotNull null
                 }
                 DroneSignalLossCandidate(
@@ -190,6 +197,13 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     remoteId = spec.remoteId,
                     mappedId = spec.mappedId,
                     signalIdleMs = signalIdleMs,
+                    thresholdMs = effectiveIdleThresholdMs,
+                    learnedIntervalMs = spec.learnedSignalIntervalMs,
+                    learnedSamples = spec.learnedSignalIntervalSamples,
+                    newTrackDelayMs = newTrackDelayMs,
+                    bridgeCheckDistanceFt = bridgeCheckDistanceFt,
+                    lossObservedWhileFar = nextState.lossObservedWhileFar,
+                    hasExceededDistanceThreshold = nextState.hasExceededDistanceThreshold,
                     distanceFromTabletFt = distanceFt
                 )
             }
@@ -236,7 +250,14 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                 CTDebug(
                     SIGNAL_LOSS_ALERT_TAG,
                     "Alerting ${chosen.mappedId} flightKey=${chosen.flightKey} " +
-                        "signalIdleMs=${chosen.signalIdleMs} distanceFt=${"%.1f".format(chosen.distanceFromTabletFt)}"
+                        "signalIdleMs=${chosen.signalIdleMs} thresholdMs=${chosen.thresholdMs} " +
+                        "learnedIntervalMs=${chosen.learnedIntervalMs} " +
+                        "learnedSamples=${chosen.learnedSamples} " +
+                        "newTrackDelayMs=${chosen.newTrackDelayMs} " +
+                        "bridgeCheckDistanceFt=${"%.1f".format(chosen.bridgeCheckDistanceFt)} " +
+                        "distanceFt=${"%.1f".format(chosen.distanceFromTabletFt)} " +
+                        "hasExceededDistance=${chosen.hasExceededDistanceThreshold} " +
+                        "lossObservedWhileFar=${chosen.lossObservedWhileFar}"
                 )
             } else if (previouslyLoggedAlertFlightKey != null) {
                 CTDebug(

@@ -27,10 +27,11 @@ class AnomalyConfigTest {
         assertFalse(native.enabled)
         assertEquals(expectedMask, native.algorithmMask)
         assertEquals(MotionRegistrationMode.Affine.nativeValue, native.registrationMode)
-        assertEquals(8, native.frameStride)
+        assertEquals(10, native.frameStride)
         assertTrue(native.scoreThreshold in 1.0f..15.0f)
         assertTrue(native.minAreaFraction in 0.00005f..0.03f)
         assertEquals(ThermalPolarity.BlackHot.nativeValue, native.thermalPolarity)
+        assertEquals(ColorFrontendMode.FreshRgba.nativeValue, native.colorFrontendMode)
     }
 
     @Test
@@ -73,6 +74,22 @@ class AnomalyConfigTest {
 
         assertEquals(expectedMask, native.algorithmMask)
         assertEquals(0, native.algorithmMask and AnomalyAlgorithm.ColorOutlier.nativeMask)
+        assertEquals(ColorFrontendMode.Legacy.nativeValue, native.colorFrontendMode)
+    }
+
+    @Test
+    fun toNativeConfig_autoColorDetectionUsesFreshRgbaFrontend() {
+        val config = AnomalyConfig(
+            appearanceSelection = AppearanceAnomalySelection.Auto,
+            colorFrontendMode = ColorFrontendMode.Legacy,
+        )
+
+        val native = config.toNativeConfig(
+            detectedAppearanceMode = AppearanceAnomalyMode.Color
+        )
+
+        assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask, native.algorithmMask)
+        assertEquals(ColorFrontendMode.FreshRgba.nativeValue, native.colorFrontendMode)
     }
 
     @Test
@@ -82,8 +99,8 @@ class AnomalyConfigTest {
         assertEquals(AppearanceAnomalySelection.Auto, config.appearanceSelection)
         assertEquals(ThermalPolarity.BlackHot, config.thermalPolarity)
         assertEquals(MotionRegistrationMode.Affine, config.registrationMode)
-        assertEquals(1, config.frameStride)
-        assertEquals(0.60f, config.scanZone)
+        assertEquals(10, config.frameStride)
+        assertEquals(0.80f, config.scanZone)
         assertEquals(2, config.minHits)
         assertEquals(10.0f, config.thermalMinDelta)
     }

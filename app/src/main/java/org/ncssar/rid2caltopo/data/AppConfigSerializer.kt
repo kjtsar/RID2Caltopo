@@ -11,6 +11,8 @@ object AppConfigSerializer : Serializer<AppConfig> {
         .setSchemaVersion(AppConfigStore.SCHEMA_VERSION)
         .setMinDistanceFeet(CaltopoClient.MIN_DISTANCE_IN_FEET)
         .setNewTrackDelaySeconds(30)
+        .setMaxFlatlineToneDurationSeconds(CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS)
+        .setBridgeCheckDistanceFeet(CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET)
         .setMaxIdleTimeMinutes(120)
         .setDebugLevel(-1)
         .setCoordinateDisplayFormat("decimal")

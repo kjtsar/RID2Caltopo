@@ -203,6 +203,7 @@ class ClientClassState {
     public CaltopoCredentials caltopoCredentials;
     public long newTrackDelayInSeconds;
     public long maxFlatlineToneDurationInSeconds;
+    public long bridgeCheckDistanceFeet;
     public int debugLevel;
     public long maxIdleTimeInMinutes;
     public String incident;
@@ -241,7 +242,8 @@ class ClientClassState {
         caltopoDomainAndPort = "caltopo.com";
         usePeersFlag = true;
         newTrackDelayInSeconds = 30;
-        maxFlatlineToneDurationInSeconds = newTrackDelayInSeconds;
+        maxFlatlineToneDurationInSeconds = CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS;
+        bridgeCheckDistanceFeet = CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET;
         maxIdleTimeInMinutes = 120;
         debugLevel = -1; // undefined.
         incident = "Training";
@@ -299,7 +301,7 @@ class ClientClassState {
         return String.format(Locale.US,
                 """
                         vers:'%d', minDist:'%d' ft, usePeersFlag:'%s', captureVideoStreamsFlag:'%s'
-                        newTrackDelayInSec:%d, maxFlatlineToneDurationInSec:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
+                        newTrackDelayInSec:%d, maxFlatlineToneDurationInSec:%d, bridgeCheckDistanceFeet:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
                         predictiveHeadEnabled:%s, proximityAlertSpacingFeet:%d
                         notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
                         notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
@@ -307,7 +309,8 @@ class ClientClassState {
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
                 AppConfigStore.SCHEMA_VERSION, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
-                newTrackDelayInSeconds, maxFlatlineToneDurationInSeconds, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
+                newTrackDelayInSeconds, maxFlatlineToneDurationInSeconds, bridgeCheckDistanceFeet,
+                LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
                 incident, opPeriod, coordinateDisplayFormat, predictiveHeadEnabled, proximityAlertSpacingFeet,
                 notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
                 notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
@@ -336,6 +339,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     static final long MIN_DISTANCE_IN_FEET = 2;
     static final long MIN_NEW_TRACK_DELAY_IN_SECONDS = 15;
+    public static final long DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS = 5;
+    static final long DEFAULT_BRIDGE_CHECK_DISTANCE_FEET = 20;
     static final long MainThreadId = Process.myTid();
     static final long ProcessId = Process.myPid();
     private static final String BASE_URL = "https://caltopo.com/api/v1/position/report/";
@@ -2408,9 +2413,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         long durationInSeconds = ccs.maxFlatlineToneDurationInSeconds;
         if (durationInSeconds <= 0L) {
-            durationInSeconds = ccs.newTrackDelayInSeconds;
+            durationInSeconds = DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS;
         }
         return durationInSeconds;
+    }
+
+    public static long GetBridgeCheckDistanceFeet() {
+        ClientClassState ccs = GetState();
+        if (ccs.bridgeCheckDistanceFeet <= 0L) {
+            ccs.bridgeCheckDistanceFeet = DEFAULT_BRIDGE_CHECK_DISTANCE_FEET;
+        }
+        return ccs.bridgeCheckDistanceFeet;
     }
 
     public static long GetMinDistanceInFeet() {
@@ -2994,6 +3007,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             UpdateDroneSpecs();
         }
         return ccs.maxFlatlineToneDurationInSeconds;
+    }
+
+    public static long SetBridgeCheckDistanceFeet(long feet) {
+        ClientClassState ccs = GetState();
+
+        if (feet < 1L) {
+            feet = 1L;
+        }
+
+        if (ccs.bridgeCheckDistanceFeet != feet) {
+            ccs.bridgeCheckDistanceFeet = feet;
+            ArchiveState("bridgeCheckDistanceFeet changed");
+            UpdateDroneSpecs();
+        }
+        return ccs.bridgeCheckDistanceFeet;
     }
 
 

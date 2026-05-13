@@ -30,6 +30,7 @@ fun CaltopoSettingsScreen(
     val minDistance by settingsViewModel.minDistance.collectAsState()
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
     val maxFlatlineToneDuration by settingsViewModel.maxFlatlineToneDuration.collectAsState()
+    val bridgeCheckDistanceFeet by settingsViewModel.bridgeCheckDistanceFeet.collectAsState()
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
@@ -75,6 +76,14 @@ fun CaltopoSettingsScreen(
                     onValueChange = { settingsViewModel.onMaxFlatlineToneDurationChanged(it) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     label = { Text("Max Flatline Tone Duration (s)") }
+                )
+                OutlinedTextField(
+                    value = bridgeCheckDistanceFeet,
+                    onValueChange = {
+                        settingsViewModel.onBridgeCheckDistanceFeetChanged(it.filter { ch -> ch.isDigit() })
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Bridge Check Distance (ft)") }
                 )
                 OutlinedTextField(
                     value = maxIdleTimeInMinutes,

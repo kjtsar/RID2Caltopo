@@ -87,6 +87,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     static final float FT_TO_METERS = 0.3048f;
     /** Maximum plausible drone speed in ft/sec (~200 mph). Waypoints implying greater speed are rejected. */
     private static final float MAX_WAYPOINT_SPEED_FPS = 293.3f;
+    private static final long MIN_SIGNAL_INTERVAL_LEARN_MS = 1000L;
     private static final String EMPTY_STRING = "";
     private static final String RID_FILTER_REGEX = "[^A-Z0-9]";
     private static final String MAPPED_ID_FILTER_REGEX = "[^_a-zA-Z0-9]";
@@ -689,7 +690,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         if (mostRecentSignalMsecTimestamp > 0 && nowWallMsec > mostRecentSignalMsecTimestamp) {
             long intervalMs = nowWallMsec - mostRecentSignalMsecTimestamp;
             long maxTrackDelayMs = CaltopoClient.GetNewTrackDelayInSeconds() * 1000L;
-            if (intervalMs < maxTrackDelayMs) {
+            if (intervalMs >= MIN_SIGNAL_INTERVAL_LEARN_MS && intervalMs < maxTrackDelayMs) {
                 learnedSignalIntervalMs = (learnedSignalIntervalMs <= 0)
                         ? intervalMs
                         : ((learnedSignalIntervalMs * 3L) + intervalMs) / 4L;
@@ -733,6 +734,11 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public int getLearnedSignalIntervalSamples() {
         return learnedSignalIntervalSamples;
+    }
+
+    @Nullable
+    public Boolean getAirborne() {
+        return airborne;
     }
 
     /** IdleTimeInMsec()

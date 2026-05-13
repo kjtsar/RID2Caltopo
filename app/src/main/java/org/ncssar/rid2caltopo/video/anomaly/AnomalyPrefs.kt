@@ -34,12 +34,15 @@ object AnomalyPrefs {
         val thermalOnlyAppearance =
             config.resolvedAppearanceMode() == AppearanceAnomalyMode.Thermal &&
                 persistedNonAppearanceAlgorithms.isEmpty()
+        val colorOnlyAppearance =
+            config.resolvedAppearanceMode() == AppearanceAnomalyMode.Color &&
+                persistedNonAppearanceAlgorithms.isEmpty()
         val looksRealtimeDefault =
             (config.algorithms == legacyAlgorithms ||
                 config.algorithms == temporaryRealtimeAlgorithms ||
-                thermalOnlyAppearance) &&
+                thermalOnlyAppearance ||
+                colorOnlyAppearance) &&
                 !config.saliencyEnabled &&
-                config.appearanceSelection == AppearanceAnomalySelection.Auto &&
                 config.frameStride == 1 &&
                 config.pixelStep == 0 &&
                 config.registrationMode == MotionRegistrationMode.Affine &&
@@ -48,8 +51,8 @@ object AnomalyPrefs {
                 kotlin.math.abs(config.thermalMinDelta - 10.0f) < 0.001f
         return if (looksRealtimeDefault) {
             config.copy(
-                algorithms = setOf(AnomalyAlgorithm.ThermalHotspot),
                 scanZone = 0.80f,
+                frameStride = 10,
             )
         } else {
             config
@@ -83,7 +86,7 @@ object AnomalyPrefs {
             algorithms = algorithms,
             saliencyEnabled = prefs.getBoolean(KEY_SALIENCY_ENABLED, defaults.saliencyEnabled),
             appearanceSelection = appearanceSelection,
-            frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 8),
+            frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 10),
             pixelStep = prefs.getInt(KEY_PIXEL_STEP, defaults.pixelStep).coerceIn(0, 8),
             sensitivity = prefs.getFloat(KEY_SENSITIVITY, defaults.sensitivity).coerceIn(0f, 1f),
             motionEvidenceSensitivity = prefs
@@ -120,7 +123,7 @@ object AnomalyPrefs {
             .putStringSet(KEY_ALGORITHMS, normalized.algorithms.map { it.name }.toSet())
             .putBoolean(KEY_SALIENCY_ENABLED, normalized.saliencyEnabled)
             .putString(KEY_APPEARANCE_SELECTION, normalized.appearanceSelection.name)
-            .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 8))
+            .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 10))
             .putInt(KEY_PIXEL_STEP, normalized.pixelStep.coerceIn(0, 8))
             .putFloat(KEY_SENSITIVITY, normalized.sensitivity.coerceIn(0f, 1f))
             .putFloat(

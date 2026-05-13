@@ -22,7 +22,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 8
+    const val SCHEMA_VERSION = 10
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -166,6 +166,7 @@ object AppConfigStore {
         if (config.minDistanceFeet != 0L) return true
         if (config.newTrackDelaySeconds != 0L) return true
         if (config.maxFlatlineToneDurationSeconds != 0L) return true
+        if (config.bridgeCheckDistanceFeet != 0L) return true
         if (config.maxIdleTimeMinutes != 0L) return true
         if (config.debugLevel != 0) return true
         if (config.coordinateDisplayFormat.isNotBlank()) return true
@@ -227,8 +228,15 @@ object AppConfigStore {
         )
         state.newTrackDelayInSeconds = if (config.newTrackDelaySeconds > 0) config.newTrackDelaySeconds else 30
         state.maxFlatlineToneDurationInSeconds = when {
+            config.schemaVersion < 10 &&
+                config.maxFlatlineToneDurationSeconds == config.newTrackDelaySeconds ->
+                CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS
             config.maxFlatlineToneDurationSeconds > 0 -> config.maxFlatlineToneDurationSeconds
-            else -> state.newTrackDelayInSeconds
+            else -> CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS
+        }
+        state.bridgeCheckDistanceFeet = when {
+            config.bridgeCheckDistanceFeet > 0L -> config.bridgeCheckDistanceFeet
+            else -> CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET
         }
         state.debugLevel = config.debugLevel
         state.maxIdleTimeInMinutes = if (config.maxIdleTimeMinutes >= 0) config.maxIdleTimeMinutes else 120
@@ -306,7 +314,14 @@ object AppConfigStore {
                 if (state.maxFlatlineToneDurationInSeconds > 0) {
                     state.maxFlatlineToneDurationInSeconds
                 } else {
-                    state.newTrackDelayInSeconds
+                    CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS
+                }
+            )
+            .setBridgeCheckDistanceFeet(
+                if (state.bridgeCheckDistanceFeet > 0) {
+                    state.bridgeCheckDistanceFeet
+                } else {
+                    CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET
                 }
             )
             .setMaxIdleTimeMinutes(state.maxIdleTimeInMinutes)

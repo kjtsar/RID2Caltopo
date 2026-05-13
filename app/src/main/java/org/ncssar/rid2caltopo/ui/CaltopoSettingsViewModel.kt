@@ -32,6 +32,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _maxFlatlineToneDuration = MutableStateFlow(CaltopoClient.GetMaxFlatlineToneDurationInSeconds().toString())
     val maxFlatlineToneDuration = _maxFlatlineToneDuration.asStateFlow()
 
+    private val _bridgeCheckDistanceFeet = MutableStateFlow(CaltopoClient.GetBridgeCheckDistanceFeet().toString())
+    val bridgeCheckDistanceFeet = _bridgeCheckDistanceFeet.asStateFlow()
+
     private val _usePeers = MutableStateFlow(CaltopoClient.GetUsePeersFlag())
     val usePeers = _usePeers.asStateFlow()
 
@@ -98,6 +101,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _proximityAlertSpacingFeet.value = CaltopoClient.GetProximityAlertSpacingFeet().toString()
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
         _maxFlatlineToneDuration.value = CaltopoClient.GetMaxFlatlineToneDurationInSeconds().toString()
+        _bridgeCheckDistanceFeet.value = CaltopoClient.GetBridgeCheckDistanceFeet().toString()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
         _caltopoDomainAndPort.value = CaltopoClient.GetCaltopoDomainAndPort()
@@ -128,6 +132,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     fun onMaxFlatlineToneDurationChanged(newDuration: String) {
         _maxFlatlineToneDuration.value = newDuration
+    }
+
+    fun onBridgeCheckDistanceFeetChanged(newDistance: String) {
+        _bridgeCheckDistanceFeet.value = newDistance
     }
 
     fun onMaxIdleTimeInMinutesChanged(newVal: String) {
@@ -194,10 +202,11 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         val restartMediaMtx = CaltopoClient.GetCaptureVideoStreamsFlag() != _captureIncomingVideo.value
         _minDistance.value.toLongOrNull()?.let { CaltopoClient.setMinDistanceInFeet(it) }
         _newTrackDelay.value.toLongOrNull()?.let { CaltopoClient.SetNewTrackDelayInSeconds(it) }
-        val resolvedNewTrackDelay = CaltopoClient.GetNewTrackDelayInSeconds()
-        (_maxFlatlineToneDuration.value.toLongOrNull() ?: resolvedNewTrackDelay).let {
+        (_maxFlatlineToneDuration.value.toLongOrNull()
+            ?: CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS).let {
             CaltopoClient.SetMaxFlatlineToneDurationInSeconds(it)
         }
+        _bridgeCheckDistanceFeet.value.toLongOrNull()?.let { CaltopoClient.SetBridgeCheckDistanceFeet(it) }
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)

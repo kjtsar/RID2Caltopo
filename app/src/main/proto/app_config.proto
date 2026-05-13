@@ -104,6 +104,7 @@ message AppConfig {
   bool predictive_head_enabled = 33;
   int64 proximity_alert_spacing_feet = 34;
   bool proximity_alert_spacing_configured = 35;
+  int64 bridge_check_distance_feet = 36;
 
   string caltopo_track_folder = 40;
   string caltopo_domain_and_port = 41;

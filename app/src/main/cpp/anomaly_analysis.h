@@ -25,12 +25,14 @@
 #define ANOMALY_REGISTRATION_AFFINE 2
 
 // ── Default tuning knobs ───────────────────────────────────────────────────
-#define ANOMALY_DEFAULT_FRAME_STRIDE      1
+#define ANOMALY_DEFAULT_FRAME_STRIDE      10
 #define ANOMALY_DEFAULT_SCORE_THRESHOLD   1.8f
 #define ANOMALY_DEFAULT_MIN_AREA_FRACTION 0.0015f
 #define ANOMALY_SCAN_ZONE_DEFAULT         0.80f
 #define ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT (1.0f / 200.0f)
 #define ANOMALY_DEFAULT_MIN_HITS          2
+#define ANOMALY_FULL_RESCAN_INTERVAL_US   333000LL
+#define ANOMALY_FULL_RESCAN_INTERVAL_FRAMES 20
 #define ANOMALY_SALIENCY_EXTRA_TRACKS     1
 #define ANOMALY_MAX_TARGET_TRACKS         6
 
@@ -46,6 +48,11 @@
 #define ANOMALY_COLOR_TEMPORAL_RESCUE_RADIUS_CELLS 3
 #define ANOMALY_COLOR_TEMPORAL_RESCUE_SCORE_BASE 0.68f
 #define ANOMALY_COLOR_TEMPORAL_RESCUE_SCORE_RANGE 0.92f
+
+// ── Visible-color frontend modes ────────────────────────────────────────────
+#define ANOMALY_COLOR_FRONTEND_LEGACY     0
+#define ANOMALY_COLOR_FRONTEND_FRESH_RGBA 1
+#define ANOMALY_COLOR_FRONTEND_FRESH_YUV  2
 
 // ── Local tile normalization ───────────────────────────────────────────────
 // The ROI is divided into a LOCAL_TILE_SIZE × LOCAL_TILE_SIZE grid.  Mean and
@@ -124,6 +131,10 @@
 #define ANOMALY_ACC_MAX_HITS     10
 #define ANOMALY_MOTION_PRESENCE_WINDOW 3
 #define ANOMALY_MOTION_PRESENCE_MIN_HITS 2
+#define ANOMALY_COLOR_PROMOTION_TRACKS 4
+#define ANOMALY_COLOR_PROMOTION_GATE_RADIUS 0.028f
+#define ANOMALY_COLOR_PROMOTION_HOLD_FRAMES 14
+#define ANOMALY_COLOR_PROMOTION_MAX_HITS 8
 
 // ── Thermal background model (one-sided EMA) ───────────────────────────────
 // The background represents "what this pixel looks like when no warm body is
@@ -189,6 +200,7 @@ typedef struct {
     int   min_hits;
     float thermal_min_delta;
     float small_target_screen_fraction;
+    int   color_frontend_mode;
     bool  thermal_debug_target_enabled;
     float thermal_debug_target_x_norm;
     float thermal_debug_target_y_norm;
@@ -225,8 +237,8 @@ typedef struct {
     float *color_luma;
     float *color_u;
     float *color_v;
-    float *color_raw_score;
-    float *color_contrast_weight;
+    float *color_raw_score;       // current-frame front-end color evidence
+    float *color_contrast_weight; // current-frame blob cohesion weight
     uint8_t *color_u_bin;
     uint8_t *color_v_bin;
     uint8_t *valid_mask;
@@ -275,6 +287,11 @@ typedef struct {
     int      acc_hold[4];
     bool     acc_active[4];
     uint8_t  acc_presence_mask[4];
+    float    color_promotion_cx[ANOMALY_COLOR_PROMOTION_TRACKS];
+    float    color_promotion_cy[ANOMALY_COLOR_PROMOTION_TRACKS];
+    int      color_promotion_hits[ANOMALY_COLOR_PROMOTION_TRACKS];
+    int      color_promotion_hold[ANOMALY_COLOR_PROMOTION_TRACKS];
+    bool     color_promotion_active[ANOMALY_COLOR_PROMOTION_TRACKS];
     // Previous-frame luma grid for motion estimation
     uint8_t *prev_luma;
     int      prev_luma_width;
@@ -385,6 +402,10 @@ typedef struct {
     int     *scratch_i32;
     size_t   scratch_i32_capacity;
     uint64_t color_phase_counter;
+    int64_t  last_full_refresh_source_ts_us;
+    int64_t  last_full_refresh_frame_counter;
+    int      last_color_full_scan_coarse_count;
+    float    fresh_color_distinctness_ratio;
 } anomaly_state_t;
 
 typedef struct {
@@ -463,6 +484,9 @@ typedef struct {
     float hist_current_count;
     float hist_recent_count;
     float hist_rarity_score;
+    float small_target_span_ratio;
+    float small_target_area_ratio;
+    float scene_commonness;
     float retention_rank;
     bool  above_threshold;
 } anomaly_debug_color_candidate_t;
@@ -474,6 +498,13 @@ typedef enum {
     ANOMALY_COLOR_BLOB_REJECT_SUPPORT_MASS = 3,
     ANOMALY_COLOR_BLOB_REJECT_QUALITY = 4,
 } anomaly_color_blob_reject_reason_t;
+
+typedef enum {
+    ANOMALY_COLOR_WINNER_GATE_NONE = 0,
+    ANOMALY_COLOR_WINNER_GATE_SIZE = 1,
+    ANOMALY_COLOR_WINNER_GATE_COMMONNESS = 2,
+    ANOMALY_COLOR_WINNER_GATE_SIZE_AND_COMMONNESS = 3,
+} anomaly_color_winner_gate_reason_t;
 
 typedef struct {
     bool  valid;
@@ -532,7 +563,33 @@ typedef struct {
     int   ring_neighbor_count;
     float pre_support_score;
     float support_score;
+    float support_map_local_peak;
+    float support_map_ring_mean;
+    float support_map_density;
+    float support_map_distinctness_ratio;
+    float support_map_compact_prominence;
+    float support_map_core_share;
+    float support_map_seed_floor;
     bool  support_seed_eligible;
+    int   component_seed_x;
+    int   component_seed_y;
+    int   component_peak_x;
+    int   component_peak_y;
+    float component_area;
+    float component_span;
+    float component_fill;
+    float component_peak_support;
+    float component_mean_support;
+    float component_quality;
+    float component_ring_fraction;
+    float component_support_mass;
+    bool  component_rejected;
+    int   component_rejection_reason;
+    float component_bbox_left_norm;
+    float component_bbox_top_norm;
+    float component_bbox_right_norm;
+    float component_bbox_bottom_norm;
+    int   extracted_candidate_index;
     int   matched_candidate_index;
     int   nearest_candidate_index;
     float nearest_candidate_distance;
@@ -670,6 +727,11 @@ typedef struct {
     int   rarity_seed_count;
     int   support_seed_count;
     float support_peak_score;
+    int   coarse_component_count;
+    int   coarse_oversized_count;
+    int   dense_verify_component_count;
+    int   adaptive_source_coarse_count;
+    float fresh_distinctness_ratio;
     int   blob_reject_area_count;
     int   blob_reject_ring_count;
     int   blob_reject_support_mass_count;
@@ -683,6 +745,13 @@ typedef struct {
     float strongest_reject_support_mass;
     float strongest_reject_quality;
     anomaly_debug_color_seed_t strongest_seed;
+    int   raw_candidate_index;
+    bool  winner_gate_active;
+    int   winner_gate_reject_reason;
+    float winner_gate_max_span;
+    float winner_gate_max_area;
+    float winner_gate_min_rarity;
+    float winner_gate_max_commonness;
     int   winning_candidate_index;
     int   candidate_count;
     anomaly_debug_color_candidate_t candidates[ANOMALY_DEBUG_TOP_COLOR_CANDIDATES];
@@ -805,6 +874,7 @@ typedef enum {
 #define ANOMALY_SCAN_REASON_MASK_BUILD_FAILED      0x1000u
 #define ANOMALY_SCAN_REASON_MASK_EMPTY             0x2000u
 #define ANOMALY_SCAN_REASON_MASK_TOO_BROAD         0x4000u
+#define ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH  0x8000u
 
 typedef struct {
     bool  valid;

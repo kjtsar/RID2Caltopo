@@ -78,4 +78,20 @@ class CtDroneSpecTest {
         assertEquals(2, drone.learnedSignalIntervalSamples)
         assertEquals(3_750L, drone.learnedSignalIntervalMs)
     }
+
+    @Test
+    fun noteRidPositionPacketReceived_ignoresBurstSpacingForCadenceLearning() {
+        val drone = CtDroneSpec("RID123")
+        val nowMs = 30_000L
+
+        drone.noteRidPositionPacketReceived(nowMs)
+        drone.noteRidPositionPacketReceived(nowMs + 36L)
+        drone.noteRidPositionPacketReceived(nowMs + 3_800L)
+        drone.noteRidPositionPacketReceived(nowMs + 3_845L)
+        drone.noteRidPositionPacketReceived(nowMs + 7_600L)
+
+        assertEquals(nowMs + 7_600L, drone.mostRecentSignalMsecTimestamp)
+        assertEquals(2, drone.learnedSignalIntervalSamples)
+        assertEquals(3_761L, drone.learnedSignalIntervalMs)
+    }
 }

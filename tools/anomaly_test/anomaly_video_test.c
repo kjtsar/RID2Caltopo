@@ -98,7 +98,7 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.motion_algorithm_enabled = false;
     cfg.saliency_enabled = false;
     cfg.appearance_selection = APP_APPEARANCE_AUTO;
-    cfg.frame_stride = 1;
+    cfg.frame_stride = ANOMALY_DEFAULT_FRAME_STRIDE;
     cfg.pixel_step = 0;
     cfg.sensitivity = APP_DEFAULT_SENSITIVITY;
     cfg.motion_evidence_sensitivity = APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY;
@@ -124,6 +124,16 @@ static const char *app_appearance_name(app_appearance_selection_t selection) {
 
 static const char *app_registration_name(app_registration_mode_t mode) {
     return mode == APP_REGISTRATION_AFFINE ? "affine" : "gmv";
+}
+
+static const char *color_frontend_name(int mode) {
+    switch (mode) {
+        case ANOMALY_COLOR_FRONTEND_FRESH_RGBA: return "fresh-rgba";
+        case ANOMALY_COLOR_FRONTEND_FRESH_YUV: return "fresh-yuv";
+        case ANOMALY_COLOR_FRONTEND_LEGACY:
+        default:
+            return "legacy";
+    }
 }
 
 static const char *app_polarity_name(app_thermal_polarity_t polarity) {
@@ -182,7 +192,7 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
         app_cfg->registration_mode == APP_REGISTRATION_AFFINE
             ? ANOMALY_REGISTRATION_AFFINE
             : ANOMALY_REGISTRATION_GMV;
-    native_cfg->frame_stride = app_clampi(app_cfg->frame_stride, 1, 8);
+    native_cfg->frame_stride = app_clampi(app_cfg->frame_stride, 1, 10);
     native_cfg->pixel_step = app_clampi(app_cfg->pixel_step, 0, 8);
     native_cfg->score_threshold = score_threshold;
     native_cfg->motion_evidence_scale = motion_evidence_scale;
@@ -196,6 +206,7 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
     native_cfg->thermal_min_delta = app_clampf(app_cfg->thermal_min_delta, 1.0f, 64.0f);
     native_cfg->small_target_screen_fraction =
         app_clampf(app_cfg->small_target_screen_fraction, 0.0015f, 0.03f);
+    native_cfg->color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
 }
 
 // ── pixel-font frame-number overlay ───────────────────────────────────────
@@ -329,6 +340,7 @@ static const scan_reason_counter_desc_t kScanReasonCounters[] = {
     { ANOMALY_SCAN_REASON_MASK_BUILD_FAILED, "mask-build-failed" },
     { ANOMALY_SCAN_REASON_MASK_EMPTY, "mask-empty" },
     { ANOMALY_SCAN_REASON_MASK_TOO_BROAD, "mask-too-broad" },
+    { ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH, "periodic-full-refresh" },
 };
 
 typedef struct {
@@ -1278,7 +1290,21 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
             "\"unsampled_new_exposed_count\":%d,\"fresh_sample_fraction\":%.6f,"
             "\"carried_sample_fraction\":%.6f,\"unsampled_new_exposed_fraction\":%.6f,"
             "\"nonzero_histogram_bins\":%d,\"max_histogram_current_count\":%.6f,"
-            "\"max_histogram_recent_count\":%.6f,\"winning_candidate_index\":%d,"
+            "\"max_histogram_recent_count\":%.6f,\"support_seed_count\":%d,"
+            "\"support_peak_score\":%.6f,\"coarse_component_count\":%d,"
+            "\"coarse_oversized_count\":%d,\"dense_verify_component_count\":%d,"
+            "\"adaptive_source_coarse_count\":%d,\"fresh_distinctness_ratio\":%.6f,"
+            "\"blob_reject_area_count\":%d,"
+            "\"blob_reject_ring_count\":%d,\"blob_reject_support_mass_count\":%d,"
+            "\"blob_reject_quality_count\":%d,\"blob_examined_count\":%d,"
+            "\"strongest_reject_reason\":%d,\"strongest_reject_peak_support\":%.6f,"
+            "\"strongest_reject_area\":%.6f,\"strongest_reject_span\":%.6f,"
+            "\"strongest_reject_ring_fraction\":%.6f,\"strongest_reject_support_mass\":%.6f,"
+            "\"strongest_reject_quality\":%.6f,\"raw_candidate_index\":%d,"
+            "\"winner_gate_active\":%s,\"winner_gate_reject_reason\":%d,"
+            "\"winner_gate_max_span\":%.6f,\"winner_gate_max_area\":%.6f,"
+            "\"winner_gate_min_rarity\":%.6f,\"winner_gate_max_commonness\":%.6f,"
+            "\"winning_candidate_index\":%d,"
             "\"candidate_count\":%d,\"candidates\":[",
             frame_num,
             time_s,
@@ -1301,6 +1327,32 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
             dbg->nonzero_histogram_bins,
             (double)dbg->max_histogram_current_count,
             (double)dbg->max_histogram_recent_count,
+            dbg->support_seed_count,
+            (double)dbg->support_peak_score,
+            dbg->coarse_component_count,
+            dbg->coarse_oversized_count,
+            dbg->dense_verify_component_count,
+            dbg->adaptive_source_coarse_count,
+            (double)dbg->fresh_distinctness_ratio,
+            dbg->blob_reject_area_count,
+            dbg->blob_reject_ring_count,
+            dbg->blob_reject_support_mass_count,
+            dbg->blob_reject_quality_count,
+            dbg->blob_examined_count,
+            dbg->strongest_reject_reason,
+            (double)dbg->strongest_reject_peak_support,
+            (double)dbg->strongest_reject_area,
+            (double)dbg->strongest_reject_span,
+            (double)dbg->strongest_reject_ring_fraction,
+            (double)dbg->strongest_reject_support_mass,
+            (double)dbg->strongest_reject_quality,
+            dbg->raw_candidate_index,
+            dbg->winner_gate_active ? "true" : "false",
+            dbg->winner_gate_reject_reason,
+            (double)dbg->winner_gate_max_span,
+            (double)dbg->winner_gate_max_area,
+            (double)dbg->winner_gate_min_rarity,
+            (double)dbg->winner_gate_max_commonness,
             dbg->winning_candidate_index,
             dbg->candidate_count);
     for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
@@ -1314,7 +1366,8 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
                 "\"quality\":%.6f,\"isolation_score\":%.6f,\"ring_fraction\":%.6f,"
                 "\"support_mass\":%.6f,\"contrast_weight\":%.6f,\"hist_key\":%d,"
                 "\"hist_current_count\":%.6f,\"hist_recent_count\":%.6f,\"hist_rarity_score\":%.6f,"
-                "\"retention_rank\":%.6f,\"above_threshold\":%s}",
+                "\"small_target_span_ratio\":%.6f,\"small_target_area_ratio\":%.6f,"
+                "\"scene_commonness\":%.6f,\"retention_rank\":%.6f,\"above_threshold\":%s}",
                 (i == 0) ? "" : ",",
                 i,
                 c->valid ? "true" : "false",
@@ -1342,6 +1395,9 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
                 (double)c->hist_current_count,
                 (double)c->hist_recent_count,
                 (double)c->hist_rarity_score,
+                (double)c->small_target_span_ratio,
+                (double)c->small_target_area_ratio,
+                (double)c->scene_commonness,
                 (double)c->retention_rank,
                 c->above_threshold ? "true" : "false");
     }
@@ -1357,7 +1413,21 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
             "\"ring_mean_u\":%.6f,\"ring_mean_v\":%.6f,\"ring_mean_luma\":%.6f,"
             "\"ring_chroma_contrast\":%.6f,\"ring_luma_contrast\":%.6f,"
             "\"ring_neighbor_count\":%d,"
-            "\"pre_support_score\":%.6f,\"support_score\":%.6f,\"support_seed_eligible\":%s,"
+            "\"pre_support_score\":%.6f,\"support_score\":%.6f,"
+            "\"support_map_local_peak\":%.6f,\"support_map_ring_mean\":%.6f,"
+            "\"support_map_density\":%.6f,\"support_map_distinctness_ratio\":%.6f,"
+            "\"support_map_compact_prominence\":%.6f,\"support_map_core_share\":%.6f,"
+            "\"support_map_seed_floor\":%.6f,\"support_seed_eligible\":%s,"
+            "\"component_seed_x\":%d,\"component_seed_y\":%d,"
+            "\"component_peak_x\":%d,\"component_peak_y\":%d,"
+            "\"component_area\":%.6f,\"component_span\":%.6f,\"component_fill\":%.6f,"
+            "\"component_peak_support\":%.6f,\"component_mean_support\":%.6f,"
+            "\"component_quality\":%.6f,\"component_ring_fraction\":%.6f,"
+            "\"component_support_mass\":%.6f,\"component_rejected\":%s,"
+            "\"component_rejection_reason\":%d,"
+            "\"component_bbox_left_norm\":%.6f,\"component_bbox_top_norm\":%.6f,"
+            "\"component_bbox_right_norm\":%.6f,\"component_bbox_bottom_norm\":%.6f,"
+            "\"extracted_candidate_index\":%d,"
             "\"matched_candidate_index\":%d,\"nearest_candidate_index\":%d,"
             "\"nearest_candidate_distance\":%.6f,\"winning_candidate_index\":%d,"
             "\"matched_candidate_score\":%.6f,\"matched_candidate_x_norm\":%.6f,"
@@ -1396,7 +1466,33 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
             dbg->target.ring_neighbor_count,
             (double)dbg->target.pre_support_score,
             (double)dbg->target.support_score,
+            (double)dbg->target.support_map_local_peak,
+            (double)dbg->target.support_map_ring_mean,
+            (double)dbg->target.support_map_density,
+            (double)dbg->target.support_map_distinctness_ratio,
+            (double)dbg->target.support_map_compact_prominence,
+            (double)dbg->target.support_map_core_share,
+            (double)dbg->target.support_map_seed_floor,
             dbg->target.support_seed_eligible ? "true" : "false",
+            dbg->target.component_seed_x,
+            dbg->target.component_seed_y,
+            dbg->target.component_peak_x,
+            dbg->target.component_peak_y,
+            (double)dbg->target.component_area,
+            (double)dbg->target.component_span,
+            (double)dbg->target.component_fill,
+            (double)dbg->target.component_peak_support,
+            (double)dbg->target.component_mean_support,
+            (double)dbg->target.component_quality,
+            (double)dbg->target.component_ring_fraction,
+            (double)dbg->target.component_support_mass,
+            dbg->target.component_rejected ? "true" : "false",
+            dbg->target.component_rejection_reason,
+            (double)dbg->target.component_bbox_left_norm,
+            (double)dbg->target.component_bbox_top_norm,
+            (double)dbg->target.component_bbox_right_norm,
+            (double)dbg->target.component_bbox_bottom_norm,
+            dbg->target.extracted_candidate_index,
             dbg->target.matched_candidate_index,
             dbg->target.nearest_candidate_index,
             (double)dbg->target.nearest_candidate_distance,
@@ -1485,6 +1581,8 @@ static void usage(const char *prog) {
         "                   Camera registration backend (default: gmv)\n"
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
         "  --pixel-step <n> Override appearance sampling step (default: 0=Auto)\n"
+        "  --color-frontend <legacy|fresh-rgba|fresh-yuv>\n"
+        "                   Visible-color frontend mode (default here: fresh-rgba)\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
         "  --small-target-fraction <f>\n"
         "                   Override the maximum normalized on-screen size\n"
@@ -1562,7 +1660,10 @@ int main(int argc, char **argv) {
         .min_hits          = ANOMALY_DEFAULT_MIN_HITS,
         .thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA,
         .small_target_screen_fraction = ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT,
+        .color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
     };
+    int requested_color_frontend_mode = cfg.color_frontend_mode;
+    bool color_frontend_overridden = false;
 
     // Probe state (--probe cx,cy).
     int    probe_active  = 0;
@@ -1596,6 +1697,21 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--stride")    && i+1 < argc) cfg.frame_stride      = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pixel-step") && i+1 < argc) cfg.pixel_step       = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--color-frontend") && i+1 < argc) {
+            const char *mode = argv[++i];
+            if (strcmp(mode, "legacy") == 0) {
+                requested_color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
+            } else if (strcmp(mode, "fresh-rgba") == 0) {
+                requested_color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+            } else if (strcmp(mode, "fresh-yuv") == 0) {
+                requested_color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_YUV;
+            } else {
+                fprintf(stderr, "Error: --color-frontend expects legacy, fresh-rgba, or fresh-yuv\n");
+                return 1;
+            }
+            cfg.color_frontend_mode = requested_color_frontend_mode;
+            color_frontend_overridden = true;
+        }
         else if (!strcmp(argv[i], "--min-delta") && i+1 < argc) min_delta_override    = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--small-target-fraction") && i+1 < argc) {
             cfg.small_target_screen_fraction = (float)atof(argv[++i]);
@@ -1734,6 +1850,11 @@ int main(int argc, char **argv) {
 
     if (app_parity_mode) {
         derive_native_cfg_from_app(&app_cfg, &cfg);
+        if (color_frontend_overridden) {
+            cfg.color_frontend_mode = requested_color_frontend_mode;
+        } else {
+            cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
+        }
     }
 
     // ── Auto-detect dimensions and fps with ffprobe ──────────────────────
@@ -1872,6 +1993,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "  stride     = %d\n",   cfg.frame_stride);
     fprintf(stderr, "  pixel_step = %d%s\n", cfg.pixel_step,
             cfg.pixel_step <= 0 ? " (Auto)" : "");
+    fprintf(stderr, "  color      = %s\n", color_frontend_name(cfg.color_frontend_mode));
     fprintf(stderr, "  min_delta  = %.1f%s\n", effective_min_delta,
             min_delta_override > 0.0f ? " (override)" : "");
     fprintf(stderr, "  small      = 1/%.1f\n",
@@ -1910,13 +2032,14 @@ int main(int argc, char **argv) {
     }
     fprintf(csv, "# threshold: %.2f  min_hits: %d  scan_zone: %.2f  "
                  "algo: %d  polarity: %s  stride: %d  pixel_step: %d  registration: %s  "
-                 "small_target_fraction: %.6f\n",
+                 "color_frontend: %s  small_target_fraction: %.6f\n",
             (double)cfg.score_threshold, cfg.min_hits, (double)cfg.scan_zone,
             cfg.algorithm_mask,
             cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh",
             cfg.frame_stride,
             cfg.pixel_step,
             cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv",
+            color_frontend_name(cfg.color_frontend_mode),
             (double)cfg.small_target_screen_fraction);
     if (clip_time_end >= 0.0 || clip_duration_s > 0.0) {
         fprintf(csv, "# clip_start_s: %.3f  clip_end_s: %.3f\n",
@@ -2348,6 +2471,8 @@ int main(int argc, char **argv) {
             fprintf(summary, "    \"registration\": ");
             json_write_string(summary,
                               cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
+            fprintf(summary, ",\n    \"color_frontend\": ");
+            json_write_string(summary, color_frontend_name(cfg.color_frontend_mode));
             fprintf(summary, ",\n    \"thermal_min_delta\": %.6f,\n", effective_min_delta);
             fprintf(summary, "    \"small_target_fraction\": %.6f\n",
                     (double)cfg.small_target_screen_fraction);

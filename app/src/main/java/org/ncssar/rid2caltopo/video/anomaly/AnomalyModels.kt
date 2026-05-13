@@ -90,7 +90,14 @@ data class NativeAnomalyConfig(
     val minHits: Int,
     val thermalMinDelta: Float,
     val smallTargetScreenFraction: Float,
+    val colorFrontendMode: Int,
 )
+
+enum class ColorFrontendMode(val nativeValue: Int) {
+    Legacy(0),
+    FreshRgba(1),
+    FreshYuv(2),
+}
 
 data class AnomalyConfig(
     val enabled: Boolean = false,
@@ -101,7 +108,7 @@ data class AnomalyConfig(
     val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.ThermalHotspot),
     val saliencyEnabled: Boolean = false,
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
-    val frameStride: Int = 1,
+    val frameStride: Int = 10,
     val pixelStep: Int = 0,
     val sensitivity: Float = 0.60f,
     val motionEvidenceSensitivity: Float = 0.60f,
@@ -112,6 +119,7 @@ data class AnomalyConfig(
     val minHits: Int = 2,
     val thermalMinDelta: Float = 10.0f,
     val smallTargetScreenFraction: Float = 1.0f / 200.0f,
+    val colorFrontendMode: ColorFrontendMode = ColorFrontendMode.Legacy,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {
@@ -185,7 +193,8 @@ data class AnomalyConfig(
         enabledOverride: Boolean? = null,
         detectedAppearanceMode: AppearanceAnomalyMode? = null,
     ): NativeAnomalyConfig {
-        val mask = resolvedAlgorithms(detectedAppearanceMode).fold(0) { acc, algo -> acc or algo.nativeMask }
+        val resolvedAppearanceMode = resolvedAppearanceMode(detectedAppearanceMode)
+        val mask = resolvedAlgorithms(resolvedAppearanceMode).fold(0) { acc, algo -> acc or algo.nativeMask }
         val sensitivityClamped = sensitivity.coerceIn(0f, 1f)
         val motionSensitivityClamped = motionEvidenceSensitivity.coerceIn(0f, 1f)
         // Logarithmic curve: 0% → ~15σ (essentially silent), 60% → ~2.8σ (default), 100% → 1.0σ.
@@ -194,6 +203,11 @@ data class AnomalyConfig(
             (0.25f + (1.75f * motionSensitivityClamped * motionSensitivityClamped)).coerceIn(0.25f, 2.0f)
         val areaScale = 0.10f + (4.90f * sensitivityClamped * sensitivityClamped)
         val effectiveMinAreaFraction = (minAreaFraction * areaScale).coerceIn(0.00005f, 0.03f)
+        val nativeColorFrontendMode = when {
+            resolvedAppearanceMode == AppearanceAnomalyMode.Color &&
+                colorFrontendMode == ColorFrontendMode.Legacy -> ColorFrontendMode.FreshRgba.nativeValue
+            else -> colorFrontendMode.nativeValue
+        }
         return NativeAnomalyConfig(
             enabled = enabledOverride ?: enabled,
             showHotOverlay = showHotOverlay,
@@ -201,7 +215,7 @@ data class AnomalyConfig(
             troubleshootingDebug = troubleshootingDebug,
             algorithmMask = mask,
             registrationMode = registrationMode.nativeValue,
-            frameStride = frameStride.coerceIn(1, 8),
+            frameStride = frameStride.coerceIn(1, 10),
             pixelStep = pixelStep.coerceIn(0, 8),
             scoreThreshold = scoreThreshold,
             motionEvidenceScale = motionEvidenceScale,
@@ -211,6 +225,7 @@ data class AnomalyConfig(
             minHits = minHits.coerceIn(1, 10),
             thermalMinDelta = thermalMinDelta.coerceIn(1.0f, 64.0f),
             smallTargetScreenFraction = smallTargetScreenFraction.coerceIn(0.0015f, 0.03f),
+            colorFrontendMode = nativeColorFrontendMode,
         )
     }
 }

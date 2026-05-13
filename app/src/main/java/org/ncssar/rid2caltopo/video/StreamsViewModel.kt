@@ -1611,7 +1611,7 @@ class StreamsViewModel(
     }
 
     fun cycleAnomalyFrameStride(designator: String) {
-        val frameStrideSteps = listOf(1, 2, 3, 4)
+        val frameStrideSteps = listOf(1, 2, 3, 4, 6, 8, 10)
         updateAnomalyConfig(designator) { current ->
             val idx = frameStrideSteps.indexOf(current.frameStride)
             val next = if (idx < 0) frameStrideSteps[0] else frameStrideSteps[(idx + 1) % frameStrideSteps.size]
@@ -1621,7 +1621,7 @@ class StreamsViewModel(
 
     fun setAnomalyFrameStride(designator: String, frameStride: Int) {
         updateAnomalyConfig(designator) { current ->
-            current.copy(frameStride = frameStride.coerceIn(1, 8))
+            current.copy(frameStride = frameStride.coerceIn(1, 10))
         }
     }
 

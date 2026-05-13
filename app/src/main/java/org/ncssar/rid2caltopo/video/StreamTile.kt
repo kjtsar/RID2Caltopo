@@ -904,7 +904,7 @@ internal fun AnomalySettingsDialogs(
             mutableStateOf(anomalyConfig.minHits.coerceIn(1, 5))
         }
         var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
-            mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 4))
+            mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 10))
         }
         var pixelStepValue by remember(streamDesignator, anomalyConfig.pixelStep) {
             mutableStateOf(anomalyConfig.pixelStep.coerceIn(0, 4))
@@ -1063,9 +1063,9 @@ internal fun AnomalySettingsDialogs(
                     Text("Frame Stride ${frameStrideValue}x")
                     Slider(
                         value = frameStrideValue.toFloat(),
-                        onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 4) },
-                        valueRange = 1f..4f,
-                        steps = 2
+                        onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 10) },
+                        valueRange = 1f..10f,
+                        steps = 8
                     )
                     Text(if (pixelStepValue <= 0) "Detail Auto" else "Detail ${pixelStepValue}px step")
                     Slider(

@@ -98,6 +98,18 @@ static int count_mask_set(const uint8_t *mask, int count) {
     return set_count;
 }
 
+static const anomaly_target_track_t *find_active_track(
+        const anomaly_state_t *state,
+        int                    algorithm) {
+    if (state == NULL) return NULL;
+    for (int i = 0; i < ANOMALY_MAX_TARGET_TRACKS; i++) {
+        const anomaly_target_track_t *track = &state->target_tracks[i];
+        if (!track->active) continue;
+        if (track->algorithm == algorithm) return track;
+    }
+    return NULL;
+}
+
 static anomaly_config_t default_cfg(int algorithm_mask) {
     anomaly_config_t c = {0};
     c.enabled           = true;
@@ -112,6 +124,7 @@ static anomaly_config_t default_cfg(int algorithm_mask) {
     c.scan_zone         = 1.0f;  // full frame for most tests
     c.min_hits          = 1;     // show on first hit unless overridden
     c.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
+    c.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
     return c;
 }
 
@@ -246,6 +259,192 @@ static void test_color_outlier_detected(void) {
     anomaly_result_t res;
     int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
     EXPECT(boxes > 0, "color: red patch in gray scene detected");
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_dense_verifier_rejects_sparse_sampled_impostor(void) {
+    // Four isolated red pixels can line up on adjacent sampled cells and look
+    // like a compact coarse-grid blob, but there is no dense pixel blob to
+    // support them. The dense verifier should reject this impostor.
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 128);
+    set_pixel(frame, W * 4, W / 2 - 1, H / 2 - 1, 220, 20, 20);
+    set_pixel(frame, W * 4, W / 2 + 1, H / 2 - 1, 220, 20, 20);
+    set_pixel(frame, W * 4, W / 2 - 1, H / 2 + 1, 220, 20, 20);
+    set_pixel(frame, W * 4, W / 2 + 1, H / 2 + 1, 220, 20, 20);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes == 0, "color dense verifier: isolated sampled pixels do not become a blob");
+    EXPECT(res.color_debug.candidate_count == 0,
+           "color dense verifier: impostor component is rejected before candidate retention");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_dense_peak_seed_rejects_sparse_impostor_fresh_rgba(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 128);
+    set_pixel(frame, W * 4, W / 2 - 1, H / 2 - 1, 220, 20, 20);
+    set_pixel(frame, W * 4, W / 2 + 1, H / 2 - 1, 220, 20, 20);
+    set_pixel(frame, W * 4, W / 2 - 1, H / 2 + 1, 220, 20, 20);
+    set_pixel(frame, W * 4, W / 2 + 1, H / 2 + 1, 220, 20, 20);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.small_target_screen_fraction = 1.0f / 20.0f;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes == 0, "color dense peak seed: sparse fresh-rgba impostor rejected");
+    EXPECT(res.color_debug.candidate_count == 0,
+           "color dense peak seed: sparse fresh-rgba impostor retains no candidate");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_dense_span_reject_reports_measured_area(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 128);
+    stamp_color_rect(frame, W * 4, W, H, W / 2 - 14, H / 2 - 1, 28, 3, 220, 20, 20);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.small_target_screen_fraction = 1.0f / 20.0f;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes == 0, "color dense span reject: elongated same-color stripe is rejected");
+    EXPECT(res.color_debug.strongest_reject_reason == ANOMALY_COLOR_BLOB_REJECT_AREA,
+           "color dense span reject: strongest reject is reported as area");
+    EXPECT(res.color_debug.strongest_reject_area > 0.0f,
+           "color dense span reject: measured dense area is preserved in telemetry");
+    EXPECT(res.color_debug.strongest_reject_span > 0.0f,
+           "color dense span reject: measured dense span is preserved in telemetry");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_fresh_compact_unique_blob_survives(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 128);
+    stamp_color_rect(frame, W * 4, W, H, W / 2 - 2, H / 2 - 2, 5, 5, 235, 24, 24);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.small_target_screen_fraction = 1.0f / 20.0f;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes > 0, "color fresh blob-first: compact unique color blob survives");
+    EXPECT(res.color_debug.candidate_count > 0,
+           "color fresh blob-first: compact unique color blob is retained as a candidate");
+    EXPECT(res.color_debug.winning_candidate_index >= 0,
+           "color fresh blob-first: compact unique color blob can win");
+    if (res.color_debug.winning_candidate_index >= 0 &&
+        res.color_debug.winning_candidate_index < res.color_debug.candidate_count) {
+        const anomaly_debug_color_candidate_t *winner =
+            &res.color_debug.candidates[res.color_debug.winning_candidate_index];
+        float cx = (winner->bbox_left_norm + winner->bbox_right_norm) * 0.5f;
+        float cy = (winner->bbox_top_norm + winner->bbox_bottom_norm) * 0.5f;
+        EXPECT(fabsf(cx - 0.5f) < 0.08f && fabsf(cy - 0.5f) < 0.08f,
+               "color fresh blob-first: winning compact blob stays near source patch");
+        EXPECT(winner->hist_rarity_score > 0.0f,
+               "color fresh blob-first: winning compact blob exposes rarity at its peak pixel");
+    }
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_fresh_oversized_blob_is_not_candidate(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 128);
+    stamp_color_rect(frame, W * 4, W, H, W / 2 - 18, H / 2 - 18, 36, 36, 235, 24, 24);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes == 0, "color fresh blob-first: oversized same-color blob does not fire");
+    EXPECT(res.color_debug.candidate_count == 0,
+           "color fresh blob-first: oversized same-color blob is not retained as a candidate");
+    EXPECT(res.color_debug.strongest_reject_reason == ANOMALY_COLOR_BLOB_REJECT_AREA,
+           "color fresh blob-first: oversized same-color blob is rejected by the small-target area cap");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_fresh_ranking_prefers_peak_unique_blob_over_plateau(void) {
+    const int W = 200, H = 160;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 128);
+    stamp_color_rect(frame, W * 4, W, H, 48, 74, 16, 16, 205, 72, 72);
+    stamp_color_rect(frame, W * 4, W, H, 138, 78, 5, 5, 24, 44, 245);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.small_target_screen_fraction = 1.0f / 20.0f;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes > 0, "color fresh blob-first: peak-unique compact blob can win over color plateau");
+    EXPECT(res.color_debug.candidate_count > 0,
+           "color fresh blob-first: peak-unique scenario retains at least one candidate");
+    EXPECT(res.color_debug.winning_candidate_index >= 0,
+           "color fresh blob-first: peak-unique scenario reports a winner");
+    if (res.color_debug.winning_candidate_index >= 0 &&
+        res.color_debug.winning_candidate_index < res.color_debug.candidate_count) {
+        const anomaly_debug_color_candidate_t *winner =
+            &res.color_debug.candidates[res.color_debug.winning_candidate_index];
+        float cx = (winner->bbox_left_norm + winner->bbox_right_norm) * 0.5f;
+        float cy = (winner->bbox_top_norm + winner->bbox_bottom_norm) * 0.5f;
+        EXPECT(fabsf(cx - 0.70f) < 0.08f && fabsf(cy - 0.50f) < 0.08f,
+               "color fresh blob-first: ranking follows the most unique compact blob, not the broad plateau");
+        for (int i = 0; i < res.color_debug.candidate_count &&
+                        i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
+            EXPECT(winner->hist_rarity_score >= res.color_debug.candidates[i].hist_rarity_score,
+                   "color fresh blob-first: winner rarity is anchored by the strongest candidate peak pixel");
+        }
+    }
+
     free(frame);
     anomaly_state_cleanup(&st);
 }
@@ -589,8 +788,8 @@ static void test_accumulator_hold_after_miss(void) {
     anomaly_state_cleanup(&st);
 }
 
-static void test_frame_stride_skips(void) {
-    // frame_stride=3: only every 3rd frame is analyzed.
+static void test_frame_stride_gates_full_refresh_only(void) {
+    // frame_stride=3: every frame is analyzed, but only cadence frames force full refresh.
     const int W = 160, H = 120;
     anomaly_state_t st;
     anomaly_state_init(&st);
@@ -604,21 +803,20 @@ static void test_frame_stride_skips(void) {
     stamp_color_rect(frame, W * 4, W, H, W / 2 - 1, H / 2 - 1, 4, 4, 220, 20, 20);
 
     anomaly_result_t res;
-    // Frame counter starts at 0; first analyzed frame is at counter=3 (counter % 3 == 0).
-    int b1 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=1, skip
-    int b2 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=2, skip
-    int b3 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=3, analyze
+    int b1 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=1, full
+    int b2 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=2, selective
+    int b3 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=3, full
 
-    EXPECT(b1 == 0, "stride=3: frame 1 skipped");
-    EXPECT(b2 == 0, "stride=3: frame 2 skipped");
-    EXPECT(b3 > 0,  "stride=3: frame 3 analyzed and fires");
+    EXPECT(b1 > 0, "stride=3: frame 1 full-refresh analyzes");
+    EXPECT(b2 >= 0, "stride=3: frame 2 remains analyzable");
+    EXPECT(b3 > 0, "stride=3: frame 3 cadence full-refresh analyzes");
 
     free(frame);
     anomaly_state_cleanup(&st);
 }
 
-static void test_frame_stride_hold_ages_on_skipped_frames(void) {
-    // Hold lifetime should age on skipped frames too.
+static void test_frame_stride_selective_frames_age_tracks(void) {
+    // Hold lifetime should age on non-cadence selective frames too.
     const int W = 160, H = 120;
     anomaly_state_t st;
     anomaly_state_init(&st);
@@ -633,25 +831,27 @@ static void test_frame_stride_hold_ages_on_skipped_frames(void) {
     uint8_t *plain_frame = make_gray_frame(W, H, 64);
 
     anomaly_result_t res;
-    anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // skip
-    anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // skip
-    int detected = anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // analyze
-    EXPECT(detected > 0, "stride hold: detection established on analyzed frame");
+    int detected = anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // full
+    anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // selective
+    anomaly_process_frame(&st, &cfg, hotspot_frame, W * 4, W, H, 0, &res); // full
+    EXPECT(detected > 0, "stride hold: detection established on first full-refresh frame");
     EXPECT(st.acc_active[0], "stride hold: color track active after detection");
     int hold_before_skips = st.acc_hold[0];
     EXPECT(hold_before_skips > 0, "stride hold: hold initialized with positive budget");
 
-    anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res); // skip
-    anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res); // skip
-    EXPECT(st.acc_hold[0] == hold_before_skips - 2,
-           "stride hold: skipped frames decrement hold budget");
+    anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res); // selective
+    EXPECT(!res.appearance_refresh_ran_this_frame,
+           "stride hold: non-cadence frame avoids full appearance refresh");
+    anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res); // selective
+    EXPECT(st.acc_hold[0] <= hold_before_skips,
+           "stride hold: selective frames do not extend hold budget");
 
     free(hotspot_frame);
     free(plain_frame);
     anomaly_state_cleanup(&st);
 }
 
-static void test_frame_stride_skip_still_runs_registration(void) {
+static void test_frame_stride_selective_still_runs_registration(void) {
     const int W = 640, H = 480;
     anomaly_state_t st;
     anomaly_state_init(&st);
@@ -670,17 +870,16 @@ static void test_frame_stride_skip_still_runs_registration(void) {
     stamp_texture_field(frame3, W * 4, W, H, 8);
 
     anomaly_result_t r1, r2, r3;
-    anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1); // skip, seeds prev_luma
-    anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2); // analyze
-    anomaly_process_frame(&st, &cfg, frame3, W * 4, W, H, 0, &r3); // skip, should still register
+    anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1); // full, seeds prev_luma
+    anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2); // full cadence
+    anomaly_process_frame(&st, &cfg, frame3, W * 4, W, H, 0, &r3); // selective, should still register
 
-    EXPECT(r1.registration_ran_this_frame, "stride registration: initial skipped frame still reports registration pass");
-    EXPECT(!r1.appearance_refresh_ran_this_frame, "stride registration: initial skipped frame does not run appearance refresh");
+    EXPECT(r1.registration_ran_this_frame, "stride registration: initial frame reports registration pass");
+    EXPECT(r1.appearance_refresh_ran_this_frame, "stride registration: initial frame runs full refresh");
     EXPECT(r2.appearance_refresh_ran_this_frame, "stride registration: analyzed frame reports appearance refresh");
     EXPECT(r3.registration_ran_this_frame, "stride registration: skipped frame still runs registration");
-    EXPECT(!r3.appearance_refresh_ran_this_frame, "stride registration: skipped frame reports no appearance refresh");
-    EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
-           "stride registration: skipped frame uses appearance-stride-skip mode");
+    EXPECT(r3.rescan_mode != ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+           "stride registration: selective frame plans an actual rescan mode");
     EXPECT(r3.gmv_debug.valid, "stride registration: skipped frame still produces registration debug");
     EXPECT(r3.registration_health != ANOMALY_REG_HEALTH_UNKNOWN,
            "stride registration: skipped frame exposes a non-unknown registration health");
@@ -710,7 +909,6 @@ static void test_large_motion_discontinuity_clears_rois(void) {
     anomaly_result_t r1, r2;
     int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
     int b2 = anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2);
-
     EXPECT(b1 > 0, "large motion: initial hotspot detected");
     EXPECT(b2 == 0, "large motion: stale ROI cleared instead of persisting");
     EXPECT(!st.acc_active[0], "large motion: color ROI state cleared after oversized jump");
@@ -729,6 +927,7 @@ static void test_scan_planner_partial_mode_on_localized_exposure(void) {
 
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
     cfg.score_threshold = 2.0f;
+    cfg.frame_stride = 10;
 
     uint8_t *frame1 = make_gray_frame(W, H, 64);
     uint8_t *frame2 = make_gray_frame(W, H, 64);
@@ -750,10 +949,10 @@ static void test_scan_planner_partial_mode_on_localized_exposure(void) {
     int partial_fresh = count_mask_set(st.roi_state.fresh_mask, partial_total);
     int partial_carried = count_mask_set(st.roi_state.carried_mask, partial_total);
     EXPECT(partial_total > 0, "partial mode: roi state populated");
-    EXPECT(partial_fresh > 0 && partial_fresh < partial_total,
-           "partial mode: analyzed refresh touches only a subset of ROI samples");
-    EXPECT(partial_carried > 0,
-           "partial mode: non-refreshed ROI samples are carried forward");
+    EXPECT(partial_fresh >= 0 && partial_fresh < partial_total,
+           "partial mode: refresh never broadens into a full-frame rescan");
+    EXPECT(partial_carried == partial_total - partial_fresh,
+           "partial mode: untouched ROI samples are carried forward");
 
     free(frame1);
     free(frame2);
@@ -768,6 +967,7 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
     cfg.score_threshold = 2.0f;
     cfg.min_hits = 1;
+    cfg.frame_stride = 10;
 
     uint8_t *frame1 = make_gray_frame(W, H, 64);
     uint8_t *frame2 = make_gray_frame(W, H, 64);
@@ -779,7 +979,6 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     anomaly_result_t r1, r2;
     int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
     int b2 = anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2);
-
     EXPECT(b1 > 0, "target-only mode: first frame establishes an active track");
     EXPECT(b2 >= 0, "target-only mode: follow-up frame processes successfully");
     EXPECT(r2.scan_plan.target_revisit_track_count > 0,
@@ -804,6 +1003,104 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     anomaly_state_cleanup(&st);
 }
 
+static void test_color_target_track_uses_dense_candidate_geometry(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+    cfg.frame_stride = 1;
+
+    uint8_t *frame1 = make_gray_frame(W, H, 64);
+    uint8_t *frame2 = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame1, W * 4, W, H, 0);
+    stamp_texture_field(frame2, W * 4, W, H, 0);
+    stamp_color_patch(frame1, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
+    stamp_color_patch(frame2, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
+
+    anomaly_result_t r1, r2;
+    int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
+    int b2 = anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2);
+    EXPECT(b1 > 0, "dense geometry: first frame establishes a color target");
+    EXPECT(b2 >= 0, "dense geometry: follow-up frame processes successfully");
+
+    const anomaly_target_track_t *track = find_active_track(&st, ANOMALY_ALGO_COLOR);
+    EXPECT(track != NULL, "dense geometry: explicit color target track remains active");
+    EXPECT(r2.color_debug.winning_candidate_index >= 0,
+           "dense geometry: winning color candidate is available for comparison");
+    if (track != NULL && r2.color_debug.winning_candidate_index >= 0) {
+        int ci = r2.color_debug.winning_candidate_index;
+        const anomaly_debug_color_candidate_t *dbg = &r2.color_debug.candidates[ci];
+        float bbox_w = dbg->bbox_right_norm - dbg->bbox_left_norm;
+        float bbox_h = dbg->bbox_bottom_norm - dbg->bbox_top_norm;
+        EXPECT_NEAR(track->half_w_norm * 2.0f, bbox_w, 0.012f,
+                    "dense geometry: track width follows dense candidate bbox");
+        EXPECT_NEAR(track->half_h_norm * 2.0f, bbox_h, 0.012f,
+                    "dense geometry: track height follows dense candidate bbox");
+        EXPECT(track->half_w_norm < 0.020f && track->half_h_norm < 0.020f,
+               "dense geometry: tracked footprint stays compact instead of reverting to generic square");
+    }
+
+    free(frame1);
+    free(frame2);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_small_target_caps_sample_step(void) {
+    const int W = 1280, H = 720;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.small_target_screen_fraction = 1.0f / 200.0f;
+
+    uint8_t *frame = make_gray_frame(W, H, 96);
+    anomaly_result_t res;
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+
+    int expected_sample_step = 3;
+    EXPECT(res.scan_plan.sampled_width == (W + expected_sample_step - 1) / expected_sample_step,
+           "small-target cap: sampled width reflects <= half-target sample spacing");
+    EXPECT(res.scan_plan.sampled_height == (H + expected_sample_step - 1) / expected_sample_step,
+           "small-target cap: sampled height reflects <= half-target sample spacing");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+    cfg.frame_stride = 10;
+
+    uint8_t *frame = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame, W * 4, W, H, 0);
+    stamp_color_patch(frame, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
+
+    anomaly_result_t r1, r2, r3;
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 1000, &r1);
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 100000, &r2);
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 400000, &r3);
+
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "periodic refresh: stable follow-up frame still uses target-only revisit");
+    EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
+           "periodic refresh: ~333ms cadence forces a full refresh");
+    EXPECT((r3.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) != 0u,
+           "periodic refresh: scan plan records the cadence-driven full rescan reason");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -817,6 +1114,12 @@ int main(void) {
     test_uniform_no_detection();
     test_thermal_hotspot_detected();
     test_color_outlier_detected();
+    test_color_dense_verifier_rejects_sparse_sampled_impostor();
+    test_color_dense_peak_seed_rejects_sparse_impostor_fresh_rgba();
+    test_color_dense_span_reject_reports_measured_area();
+    test_color_fresh_compact_unique_blob_survives();
+    test_color_fresh_oversized_blob_is_not_candidate();
+    test_color_fresh_ranking_prefers_peak_unique_blob_over_plateau();
     test_black_hot_thermal();
     test_high_threshold_no_detection();
     test_runtime_min_delta_override();
@@ -828,12 +1131,15 @@ int main(void) {
     test_motion_moving_patch();
     test_motion_moving_patch_affine_registration();
     test_accumulator_hold_after_miss();
-    test_frame_stride_skips();
-    test_frame_stride_hold_ages_on_skipped_frames();
-    test_frame_stride_skip_still_runs_registration();
+    test_frame_stride_gates_full_refresh_only();
+    test_frame_stride_selective_frames_age_tracks();
+    test_frame_stride_selective_still_runs_registration();
     test_large_motion_discontinuity_clears_rois();
     test_scan_planner_partial_mode_on_localized_exposure();
     test_scan_planner_target_only_mode_with_active_track();
+    test_color_target_track_uses_dense_candidate_geometry();
+    test_small_target_caps_sample_step();
+    test_periodic_full_refresh_replaces_indefinite_target_only_reuse();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

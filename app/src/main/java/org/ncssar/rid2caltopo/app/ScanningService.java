@@ -205,6 +205,10 @@ public class ScanningService extends Service {
     }
 
     public static void requestStop(@NonNull Context context) {
+        if (!IsRunning()) {
+            CTDebug(TAG, "requestStop(): ScanningService already stopped; ignoring stop request.");
+            return;
+        }
         Intent stopIntent = new Intent(context, ScanningService.class);
         stopIntent.setAction(ACTION_STOP_SERVICE);
         context.getApplicationContext().startService(stopIntent);

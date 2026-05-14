@@ -439,7 +439,7 @@ fun DroneSpecConfirmationDialog(
         },
         dismissButton = {
             TextButton(onClick = onUnknown) {
-                Text("Unknown")
+                Text("Ignore")
             }
         },
     )

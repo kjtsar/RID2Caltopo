@@ -109,6 +109,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private volatile transient int learnedSignalIntervalSamples;
     private transient long startMsecTimestamp; /* timestamp carried by the first accepted waypoint in the current flight */
     private transient long mostRecentFlightMsecTimestamp; /* timestamp carried by the most recent accepted waypoint */
+    private transient double takeoffLat;
+    private transient double takeoffLng;
     private transient CtDroneSpecListener myListener;
     private transient CaltopoLiveTrack myLiveTrack;
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
@@ -138,8 +140,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient double distanceInFeet;
     private transient int goodCount; // only the number of good waypoints.
     private transient int nonCount;  // bad or duplicate waypoints.
+    private transient int stationaryRepeatCount;
     private boolean okToLog;
     private transient boolean localArchiveOnly;
+    private volatile transient boolean outOfRange;
     @Nullable private transient Boolean airborne = Boolean.FALSE;
 
     @NonNull
@@ -171,11 +175,15 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         trackLabel = EMPTY_STRING;
         startMsecTimestamp = 0;
         mostRecentFlightMsecTimestamp = 0;
+        takeoffLat = 0.0F;
+        takeoffLng = 0.0F;
         distanceInFeet = 0.0F;
+        stationaryRepeatCount = 0;
         lastLat = 0.0F;
         lastLng = 0.0F;
         okToLog = true;
         localArchiveOnly = false;
+        outOfRange = false;
         mostRecentSignalMsecTimestamp = 0;
         learnedSignalIntervalMs = 0;
         learnedSignalIntervalSamples = 0;
@@ -203,12 +211,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
 
     public void reset() {
+        outOfRange = false;
         if (trackLabel.isEmpty()) return;
         CTDebug(TAG, "reset(): Advising dronespec inactive: " + trackLabel);
         trackLabel = EMPTY_STRING;
         goodCount = 0;
         totalCount = 0;
         distanceInFeet = 0.0F;
+        stationaryRepeatCount = 0;
         lastLat = 0.0F;
         lastLng = 0.0F;
         lastPositionTelemetry     = null;
@@ -224,6 +234,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         localArchiveOnly = false;
         airborne = Boolean.FALSE;
         startMsecTimestamp = mostRecentMsecTimestamp = mostRecentFlightMsecTimestamp = 0;
+        takeoffLat = 0.0F;
+        takeoffLng = 0.0F;
         mostRecentSignalMsecTimestamp = 0;
         learnedSignalIntervalMs = 0;
         learnedSignalIntervalSamples = 0;
@@ -444,6 +456,22 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return goodCount;
     }
 
+    public boolean hasStationaryRidReports() {
+        return stationaryRepeatCount >= 2;
+    }
+
+    public boolean hasTakeoffLocation() {
+        return takeoffLat != 0.0F && takeoffLng != 0.0F;
+    }
+
+    public double getTakeoffLat() {
+        return takeoffLat;
+    }
+
+    public double getTakeoffLng() {
+        return takeoffLng;
+    }
+
     public CtDroneSpec() throws RuntimeException {
         throw new RuntimeException("Use one of the other constructor methods.");
     }
@@ -538,6 +566,20 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public static double MyLng = 0.0F;
     // Reject altitude spikes/drops that imply unrealistic vertical rates for small UAS.
 
+    private void updateStationaryRepeatState(double lat, double lng, long timestampInMilliseconds) {
+        boolean samePosition = lastLat != 0.0F &&
+                Double.compare(lastLat, lat) == 0 &&
+                Double.compare(lastLng, lng) == 0;
+        boolean staleTimestamp = timestampInMilliseconds > 0 &&
+                mostRecentFlightMsecTimestamp > 0 &&
+                timestampInMilliseconds <= mostRecentFlightMsecTimestamp;
+        if (samePosition && staleTimestamp) {
+            stationaryRepeatCount++;
+        } else {
+            stationaryRepeatCount = 0;
+        }
+    }
+
     /** checkNewWaypoint()
      * FIXME: Need to include check of change in distance over change in time to see if waypoint
      *        updates are even close to sane.   Assume maximum DD/DT of 100mph or 45m/sec.  The
@@ -585,6 +627,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
         if (Double.compare(lastLat, lat) == 0 && Double.compare(lastLng, lng) == 0) {
             if ((goodCount == 0) || (System.currentTimeMillis() - mostRecentMsecTimestamp < 3000)) {
+                updateStationaryRepeatState(lat, lng, timestampInMilliseconds);
                 mostRecentSignalMsecTimestamp = nowWallMsec;
                 if (false && CaltopoClient.CTDebugEnabled(ICON_LATENCY_TAG)) {            // these too.
                     CaltopoClient.CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
@@ -637,6 +680,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             distanceInFeet += lDistanceInFeet;
         }
 
+        updateStationaryRepeatState(lat, lng, timestampInMilliseconds);
         mostRecentSignalMsecTimestamp = nowWallMsec;
         MostRecentWaypointTimestampInMsec = mostRecentMsecTimestamp = nowWallMsec;
         long acceptedWaypointTimestampMsec =
@@ -660,6 +704,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // "airborne" is logged for visibility only and must not drive flight timing.
         if (startMsecTimestamp == 0) {
             startMsecTimestamp = acceptedWaypointTimestampMsec;
+            takeoffLat = lat;
+            takeoffLng = lng;
             updateTrackLabel();
         }
         if (acceptedWaypointTimestampMsec > mostRecentFlightMsecTimestamp) {
@@ -726,6 +772,14 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return (mostRecentSignalMsecTimestamp > 0)
                 ? mostRecentSignalMsecTimestamp
                 : mostRecentMsecTimestamp;
+    }
+
+    public boolean isOutOfRange() {
+        return outOfRange;
+    }
+
+    public void setOutOfRange(boolean outOfRange) {
+        this.outOfRange = outOfRange;
     }
 
     public long getLearnedSignalIntervalMs() {

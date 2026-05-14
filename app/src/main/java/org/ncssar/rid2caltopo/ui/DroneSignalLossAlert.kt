@@ -32,9 +32,11 @@ private data class DroneSignalLossCandidate(
     val learnedSamples: Int,
     val newTrackDelayMs: Long,
     val bridgeCheckDistanceFt: Double,
+    val outOfRange: Boolean,
     val lossObservedWhileFar: Boolean,
     val hasExceededDistanceThreshold: Boolean,
-    val distanceFromTabletFt: Double
+    val distanceFromTabletFt: Double,
+    val distanceFromTakeoffFt: Double?
 )
 
 data class DroneSignalLossAlertUiState(
@@ -59,7 +61,9 @@ data class DroneSignalLossFlightUiState(
 private data class FlightMonitorState(
     val hasExceededDistanceThreshold: Boolean = false,
     val lossObservedWhileFar: Boolean = false,
-    val alertStartedAtMs: Long? = null
+    val alertStartedAtMs: Long? = null,
+    val toneLimited: Boolean = false,
+    val outOfRangeNotified: Boolean = false
 )
 
 object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
@@ -121,12 +125,17 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         val nowMs = System.currentTimeMillis()
         val newTrackDelayMs = CaltopoClient.GetNewTrackDelayInSeconds() * 1000L
         val bridgeCheckDistanceFt = CaltopoClient.GetBridgeCheckDistanceFeet().toDouble()
+        val outOfRangeDistanceFt = CaltopoClient.OUT_OF_RANGE_DISTANCE_FEET.toDouble()
+        val returnToTakeoffDistanceFt = CaltopoClient.RETURN_TO_TAKEOFF_DISTANCE_FEET.toDouble()
+        val signalToneDurationMs = CaltopoClient.LOSS_OF_SIGNAL_TONE_DURATION_SECONDS * 1000L
         val tabletLocation = CaltopoMap.GetMyLocation()
         val eligible = if (tabletLocation != null && newTrackDelayMs > ALERT_IDLE_THRESHOLD_MS) {
             activeFlights.values.mapNotNull { spec ->
                 if (spec.lastLat == 0.0 || spec.lastLng == 0.0) return@mapNotNull null
                 val signalIdleMs = spec.signalIdleTimeInMsec(nowMs)
                 val distanceFt = distanceFeetFromTablet(spec, tabletLocation) ?: return@mapNotNull null
+                val takeoffDistanceFt = distanceFeetFromTakeoff(spec)
+                val oorReferenceDistanceFt = takeoffDistanceFt ?: distanceFt
                 val flightKey = spec.flightKey() ?: return@mapNotNull null
                 val priorState = flightMonitorState[flightKey] ?: FlightMonitorState()
                 val effectiveIdleThresholdMs = effectiveIdleThresholdMs(
@@ -134,16 +143,44 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     learnedSamples = spec.learnedSignalIntervalSamples,
                     maxTrackDelayMs = newTrackDelayMs
                 )
-                val exceededThreshold = priorState.hasExceededDistanceThreshold ||
-                    distanceFt > bridgeCheckDistanceFt
+                if (spec.isOutOfRange &&
+                    (signalIdleMs <= effectiveIdleThresholdMs || oorReferenceDistanceFt < outOfRangeDistanceFt)
+                ) {
+                    CTDebug(
+                        SIGNAL_LOSS_ALERT_TAG,
+                        "Clearing OOR for ${spec.mappedId} flightKey=$flightKey " +
+                            "distanceFt=${"%.1f".format(distanceFt)} signalIdleMs=$signalIdleMs " +
+                            "thresholdMs=$effectiveIdleThresholdMs " +
+                            "takeoffDistanceFt=${takeoffDistanceFt?.let { "%.1f".format(it) } ?: "unknown"}"
+                    )
+                    spec.setOutOfRange(false)
+                    CaltopoClient.InvalidateTrackAgingSchedule()
+                }
+                val bridgeVerified = priorState.hasExceededDistanceThreshold ||
+                    distanceFt > bridgeCheckDistanceFt ||
+                    (takeoffDistanceFt != null && takeoffDistanceFt > bridgeCheckDistanceFt)
                 var lossWhileFar = priorState.lossObservedWhileFar ||
-                    (exceededThreshold &&
+                    (bridgeVerified &&
                         signalIdleMs > effectiveIdleThresholdMs &&
-                        distanceFt > bridgeCheckDistanceFt)
-                // Once the drone is back inside the bridge-check distance, clear
-                // the far-loss latch so a stale post-flight RID stream does not
-                // keep the flatline tone alive during landing or after touchdown.
-                if (distanceFt <= bridgeCheckDistanceFt || spec.airborne == false) {
+                        distanceFt > bridgeCheckDistanceFt &&
+                        (takeoffDistanceFt == null || takeoffDistanceFt > returnToTakeoffDistanceFt))
+                val returnedToBridge = isReturnedToBridge(
+                    bridgeVerified = bridgeVerified,
+                    distanceFt = distanceFt,
+                    bridgeCheckDistanceFt = bridgeCheckDistanceFt
+                )
+                val returnedToTakeoff = isReturnedToTakeoff(
+                    bridgeVerified = bridgeVerified,
+                    takeoffDistanceFt = takeoffDistanceFt,
+                    returnToTakeoffDistanceFt = returnToTakeoffDistanceFt
+                )
+                val stationaryNearBridge = isStationaryNearBridge(
+                    bridgeVerified = bridgeVerified,
+                    stationaryRidReports = spec.hasStationaryRidReports(),
+                    referenceDistanceFt = oorReferenceDistanceFt,
+                    outOfRangeDistanceFt = outOfRangeDistanceFt
+                )
+                if (returnedToBridge || returnedToTakeoff || stationaryNearBridge) {
                     if (priorState.lossObservedWhileFar) {
                         CTDebug(
                             SIGNAL_LOSS_ALERT_TAG,
@@ -151,41 +188,87 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                                 "distanceFt=${"%.1f".format(distanceFt)} signalIdleMs=$signalIdleMs " +
                                 "thresholdMs=$effectiveIdleThresholdMs " +
                                 "bridgeCheckDistanceFt=${"%.1f".format(bridgeCheckDistanceFt)} " +
-                                "airborne=${spec.airborne}"
+                                "takeoffDistanceFt=${takeoffDistanceFt?.let { "%.1f".format(it) } ?: "unknown"}"
                         )
                     }
                     lossWhileFar = false
+                    if (signalIdleMs > effectiveIdleThresholdMs) {
+                        CTDebug(
+                            SIGNAL_LOSS_ALERT_TAG,
+                            "Suppressing LOS for returned/stationary ${spec.mappedId} flightKey=$flightKey " +
+                                "distanceFt=${"%.1f".format(distanceFt)} signalIdleMs=$signalIdleMs " +
+                                "thresholdMs=$effectiveIdleThresholdMs " +
+                                "bridgeCheckDistanceFt=${"%.1f".format(bridgeCheckDistanceFt)} " +
+                                "takeoffDistanceFt=${takeoffDistanceFt?.let { "%.1f".format(it) } ?: "unknown"} " +
+                                "returnToTakeoffDistanceFt=${"%.1f".format(returnToTakeoffDistanceFt)} " +
+                                "stationaryRidReports=${spec.hasStationaryRidReports()}"
+                        )
+                    }
+                    flightMonitorState[flightKey] = FlightMonitorState(
+                        hasExceededDistanceThreshold = true,
+                        lossObservedWhileFar = false,
+                        alertStartedAtMs = null,
+                        outOfRangeNotified = priorState.outOfRangeNotified && spec.isOutOfRange
+                    )
+                    return@mapNotNull null
                 }
                 val shouldEvaluateForAlertWindow =
                     signalIdleMs > effectiveIdleThresholdMs && signalIdleMs < newTrackDelayMs
                 if (!shouldEvaluateForAlertWindow) {
                     flightMonitorState[flightKey] = FlightMonitorState(
-                        hasExceededDistanceThreshold = exceededThreshold,
+                        hasExceededDistanceThreshold = bridgeVerified,
                         lossObservedWhileFar = lossWhileFar,
-                        alertStartedAtMs = null
+                        alertStartedAtMs = null,
+                        outOfRangeNotified = priorState.outOfRangeNotified && spec.isOutOfRange
+                    )
+                    return@mapNotNull null
+                }
+                val outOfRangeLoss = oorReferenceDistanceFt >= outOfRangeDistanceFt
+                if (outOfRangeLoss && !spec.isOutOfRange) {
+                    CTDebug(
+                        SIGNAL_LOSS_ALERT_TAG,
+                        "Classifying ${spec.mappedId} as OOR flightKey=$flightKey " +
+                            "distanceFt=${"%.1f".format(distanceFt)} signalIdleMs=$signalIdleMs " +
+                            "thresholdMs=$effectiveIdleThresholdMs " +
+                            "takeoffDistanceFt=${takeoffDistanceFt?.let { "%.1f".format(it) } ?: "unknown"} " +
+                            "oorTrackDelayMs=${CaltopoClient.OUT_OF_RANGE_TRACK_DELAY_SECONDS * 1000L}"
+                    )
+                    spec.setOutOfRange(true)
+                    CaltopoClient.InvalidateTrackAgingSchedule()
+                }
+                if (outOfRangeLoss && priorState.outOfRangeNotified) {
+                    flightMonitorState[flightKey] = FlightMonitorState(
+                        hasExceededDistanceThreshold = bridgeVerified,
+                        lossObservedWhileFar = lossWhileFar,
+                        alertStartedAtMs = priorState.alertStartedAtMs,
+                        toneLimited = true,
+                        outOfRangeNotified = true
                     )
                     return@mapNotNull null
                 }
                 val startedAtMs = priorState.alertStartedAtMs ?: nowMs
-                val maxToneDurationMs = CaltopoClient.GetMaxFlatlineToneDurationInSeconds() * 1000L
-                if (maxToneDurationMs > 0L && nowMs - startedAtMs >= maxToneDurationMs) {
-                    mutedFlightKeys.add(flightKey)
-                    CTDebug(
-                        SIGNAL_LOSS_ALERT_TAG,
-                        "Auto-muting ${spec.mappedId} flightKey=$flightKey after " +
-                            "${nowMs - startedAtMs} ms flatline playback"
-                    )
+                if (signalToneDurationMs > 0L && nowMs - startedAtMs >= signalToneDurationMs) {
+                    if (!priorState.toneLimited) {
+                        CTDebug(
+                            SIGNAL_LOSS_ALERT_TAG,
+                            "Stopping LOS tone for ${spec.mappedId} flightKey=$flightKey after " +
+                                "${nowMs - startedAtMs} ms playback outOfRange=$outOfRangeLoss"
+                        )
+                    }
                     flightMonitorState[flightKey] = FlightMonitorState(
-                        hasExceededDistanceThreshold = exceededThreshold,
+                        hasExceededDistanceThreshold = bridgeVerified,
                         lossObservedWhileFar = lossWhileFar,
-                        alertStartedAtMs = startedAtMs
+                        alertStartedAtMs = startedAtMs,
+                        toneLimited = true,
+                        outOfRangeNotified = priorState.outOfRangeNotified || outOfRangeLoss
                     )
                     return@mapNotNull null
                 }
                 val nextState = FlightMonitorState(
-                    hasExceededDistanceThreshold = exceededThreshold,
+                    hasExceededDistanceThreshold = bridgeVerified,
                     lossObservedWhileFar = lossWhileFar,
-                    alertStartedAtMs = startedAtMs
+                    alertStartedAtMs = startedAtMs,
+                    outOfRangeNotified = priorState.outOfRangeNotified
                 )
                 flightMonitorState[flightKey] = nextState
                 val shouldAlertNearTablet = !nextState.hasExceededDistanceThreshold || nextState.lossObservedWhileFar
@@ -202,9 +285,11 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     learnedSamples = spec.learnedSignalIntervalSamples,
                     newTrackDelayMs = newTrackDelayMs,
                     bridgeCheckDistanceFt = bridgeCheckDistanceFt,
+                    outOfRange = spec.isOutOfRange,
                     lossObservedWhileFar = nextState.lossObservedWhileFar,
                     hasExceededDistanceThreshold = nextState.hasExceededDistanceThreshold,
-                    distanceFromTabletFt = distanceFt
+                    distanceFromTabletFt = distanceFt,
+                    distanceFromTakeoffFt = takeoffDistanceFt
                 )
             }
         } else {
@@ -256,6 +341,8 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                         "newTrackDelayMs=${chosen.newTrackDelayMs} " +
                         "bridgeCheckDistanceFt=${"%.1f".format(chosen.bridgeCheckDistanceFt)} " +
                         "distanceFt=${"%.1f".format(chosen.distanceFromTabletFt)} " +
+                        "takeoffDistanceFt=${chosen.distanceFromTakeoffFt?.let { "%.1f".format(it) } ?: "unknown"} " +
+                        "outOfRange=${chosen.outOfRange} " +
                         "hasExceededDistance=${chosen.hasExceededDistanceThreshold} " +
                         "lossObservedWhileFar=${chosen.lossObservedWhileFar}"
                 )
@@ -308,9 +395,64 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         }
         val dynamicThresholdMs = learnedIntervalMs * 5L / 2L
         return dynamicThresholdMs
-            .coerceAtLeast(ALERT_IDLE_THRESHOLD_MS)
+            .coerceAtLeast(ALERT_BOOTSTRAP_IDLE_THRESHOLD_MS)
             .coerceAtMost((maxTrackDelayMs - 1L).coerceAtLeast(ALERT_IDLE_THRESHOLD_MS))
     }
+
+    private fun isReturnedToBridge(
+        bridgeVerified: Boolean,
+        distanceFt: Double,
+        bridgeCheckDistanceFt: Double
+    ): Boolean = bridgeVerified && distanceFt <= bridgeCheckDistanceFt
+
+    private fun isReturnedToTakeoff(
+        bridgeVerified: Boolean,
+        takeoffDistanceFt: Double?,
+        returnToTakeoffDistanceFt: Double
+    ): Boolean = bridgeVerified &&
+        takeoffDistanceFt != null &&
+        takeoffDistanceFt <= returnToTakeoffDistanceFt
+
+    private fun isStationaryNearBridge(
+        bridgeVerified: Boolean,
+        stationaryRidReports: Boolean,
+        referenceDistanceFt: Double,
+        outOfRangeDistanceFt: Double
+    ): Boolean = bridgeVerified && stationaryRidReports && referenceDistanceFt < outOfRangeDistanceFt
+
+    internal fun isReturnedToBridgeForTests(
+        bridgeVerified: Boolean,
+        distanceFt: Double,
+        bridgeCheckDistanceFt: Double
+    ): Boolean = isReturnedToBridge(bridgeVerified, distanceFt, bridgeCheckDistanceFt)
+
+    internal fun isReturnedToTakeoffForTests(
+        bridgeVerified: Boolean,
+        takeoffDistanceFt: Double?,
+        returnToTakeoffDistanceFt: Double
+    ): Boolean = isReturnedToTakeoff(
+        bridgeVerified = bridgeVerified,
+        takeoffDistanceFt = takeoffDistanceFt,
+        returnToTakeoffDistanceFt = returnToTakeoffDistanceFt
+    )
+
+    internal fun isStationaryNearBridgeForTests(
+        bridgeVerified: Boolean,
+        stationaryRidReports: Boolean,
+        referenceDistanceFt: Double,
+        outOfRangeDistanceFt: Double
+    ): Boolean = isStationaryNearBridge(
+        bridgeVerified = bridgeVerified,
+        stationaryRidReports = stationaryRidReports,
+        referenceDistanceFt = referenceDistanceFt,
+        outOfRangeDistanceFt = outOfRangeDistanceFt
+    )
+
+    internal fun effectiveIdleThresholdMsForTests(
+        learnedIntervalMs: Long,
+        learnedSamples: Int,
+        maxTrackDelayMs: Long
+    ): Long = effectiveIdleThresholdMs(learnedIntervalMs, learnedSamples, maxTrackDelayMs)
 
     private fun distanceFeetFromTablet(
         spec: CtDroneSpec,
@@ -321,6 +463,23 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
             Location.distanceBetween(
                 tabletLocation.latitude,
                 tabletLocation.longitude,
+                spec.lastLat,
+                spec.lastLng,
+                result
+            )
+            result[0] * 3.28084
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun distanceFeetFromTakeoff(spec: CtDroneSpec): Double? {
+        if (!spec.hasTakeoffLocation() || spec.lastLat == 0.0 || spec.lastLng == 0.0) return null
+        val result = FloatArray(1)
+        return try {
+            Location.distanceBetween(
+                spec.takeoffLat,
+                spec.takeoffLng,
                 spec.lastLat,
                 spec.lastLng,
                 result

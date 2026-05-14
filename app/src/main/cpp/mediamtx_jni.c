@@ -676,3 +676,10 @@ Java_org_ncssar_rid2caltopo_data_MediaMTXNative_stop(
         // let monitor_child() catch and report back the status so it can exit cleanly.
     }
 }
+
+JNIEXPORT jint JNICALL
+Java_org_ncssar_rid2caltopo_data_MediaMTXNative_currentPid(
+        JNIEnv *env,
+        jobject this) {
+    return mediamtx_pid;
+}

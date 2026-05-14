@@ -774,7 +774,6 @@ class StreamsViewModel(
                 _droneStates.remove(key)
             }
         }
-        mutedComplianceAlertDesignators.retainAll(_droneStates.keys)
         val overLimit = _droneStates.mapNotNull { (designator, _) ->
             val displayState = altitudeCoordinator.displayStateByDesignator[designator] ?: return@mapNotNull null
             val aglFt = displayState.aglFt ?: return@mapNotNull null

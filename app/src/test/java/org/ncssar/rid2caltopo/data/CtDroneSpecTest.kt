@@ -94,4 +94,101 @@ class CtDroneSpecTest {
         assertEquals(2, drone.learnedSignalIntervalSamples)
         assertEquals(3_761L, drone.learnedSignalIntervalMs)
     }
+
+    @Test
+    fun reset_clearsOutOfRangeClassification() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.setOutOfRange(true)
+        assertEquals(true, drone.isOutOfRange)
+
+        drone.reset()
+
+        assertEquals(false, drone.isOutOfRange)
+    }
+
+    @Test
+    fun repeatedStationaryRidReports_areExposedForLandingSuppression() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.checkNewWaypoint(
+            39.0,
+            -121.0,
+            100.0,
+            1_000L,
+            1_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        assertEquals(false, drone.hasStationaryRidReports())
+
+        drone.checkNewWaypoint(
+            39.0,
+            -121.0,
+            100.0,
+            1_000L,
+            2_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        assertEquals(false, drone.hasStationaryRidReports())
+
+        drone.checkNewWaypoint(
+            39.0,
+            -121.0,
+            100.0,
+            1_000L,
+            3_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        assertEquals(true, drone.hasStationaryRidReports())
+
+        drone.checkNewWaypoint(
+            39.0001,
+            -121.0,
+            100.0,
+            4_000L,
+            4_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        assertEquals(false, drone.hasStationaryRidReports())
+    }
+
+    @Test
+    fun firstAcceptedWaypoint_recordsTakeoffLocationUntilReset() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.checkNewWaypoint(
+            39.0,
+            -121.0,
+            100.0,
+            1_000L,
+            1_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+
+        assertEquals(true, drone.hasTakeoffLocation())
+        assertEquals(39.0, drone.takeoffLat, 0.000001)
+        assertEquals(-121.0, drone.takeoffLng, 0.000001)
+
+        drone.checkNewWaypoint(
+            39.001,
+            -121.001,
+            110.0,
+            2_000L,
+            2_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+
+        assertEquals(39.0, drone.takeoffLat, 0.000001)
+        assertEquals(-121.0, drone.takeoffLng, 0.000001)
+
+        drone.reset()
+
+        assertEquals(false, drone.hasTakeoffLocation())
+    }
 }

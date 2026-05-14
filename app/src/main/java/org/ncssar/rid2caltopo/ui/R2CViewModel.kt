@@ -460,7 +460,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 // Every new flight should prompt once, even for known drones, so the
                 // operator can confirm or update pilot/callsign ownership for this flight.
                 flightKey != null &&
-                    flightKey !in promptedFlightKeys
+                    flightKey !in promptedFlightKeys &&
+                    !CaltopoClient.IsSessionUnknownDrone(drone.remoteId)
             }
             if (droneToConfirm != null) {
                 val flightKey = currentFlightKey(droneToConfirm)

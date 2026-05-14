@@ -56,6 +56,7 @@ public class MediaMTXService extends Service {
     private static boolean recordingListenerRegistered = false;
     private static int processPid = 0;
     private static volatile boolean serviceRunning = false;
+    private static volatile int expectedRestartExitPid = 0;
     private boolean foregroundStarted = false;
     private boolean foregroundStartBlocked = false;
     public static boolean IsRunning() { return serviceRunning; }
@@ -110,6 +111,13 @@ public class MediaMTXService extends Service {
         CTDebug(TAG, "MediaMTX exited pid=" + pid +
                 " status=" + status +
                 " signaled=" + signaled);
+        if (pid > 0 && pid == expectedRestartExitPid) {
+            expectedRestartExitPid = 0;
+            CTDebug(TAG, "Ignoring expected MediaMTX exit during app-requested restart.");
+            return;
+        }
+        processPid = 0;
+        serviceRunning = false;
         String description;
         if (0 != signaled) {
             if (signaled == SIGRTMAX) {
@@ -233,8 +241,38 @@ public class MediaMTXService extends Service {
 
     private void restartNativeServer() {
         MediaMTXRecordingSync.syncAll(getApplicationContext(), null);
+        int restartingPid = MediaMTXNative.currentPid();
+        if (restartingPid > 0) {
+            expectedRestartExitPid = restartingPid;
+        }
         MediaMTXNative.stop();
+        if (!waitForNativeServerStop(restartingPid)) {
+            expectedRestartExitPid = 0;
+            CTError(TAG, "Timed out waiting for MediaMTX to stop before restart; keeping existing server state.");
+            MediaMTXStatus.INSTANCE.onServerStarted("existing");
+            serviceRunning = true;
+            return;
+        }
         startNativeServer();
+    }
+
+    private boolean waitForNativeServerStop(int pid) {
+        if (pid <= 0) {
+            return true;
+        }
+        for (int i = 0; i < 60; i++) {
+            int currentPid = MediaMTXNative.currentPid();
+            if (currentPid <= 0 || currentPid != pid) {
+                return true;
+            }
+            try {
+                sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
     }
 
     private void startNativeServer() {
@@ -247,10 +285,17 @@ public class MediaMTXService extends Service {
             int rc = MediaMTXNative.start(bin.getAbsolutePath(), cfg.getAbsolutePath());
             if (rc != 0) {
                 CTError(TAG, "MediaMTX failed to start");
+                processPid = 0;
+                serviceRunning = false;
+                MediaMTXStatus.onServerExited("failed to start");
                 stopSelf();
             }
         } catch (Exception e) {
             CTError(TAG, "MediaMTX_Start() raised", e);
+            processPid = 0;
+            serviceRunning = false;
+            MediaMTXStatus.onServerExited("start exception: " + e.getClass().getSimpleName());
+            stopSelf();
         }
     }
 

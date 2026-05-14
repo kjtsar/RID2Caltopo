@@ -383,6 +383,10 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         streamsViewModel = ViewModelProvider(this)[StreamsViewModel::class.java]
         CaltopoClient.AddDroneSpecsChangedListener(localViewModel)
         CaltopoClient.CheckIdle()
+        if (CaltopoClient.IsExitRequested()) {
+            CTDebug(TAG, "onCreate(): idle check requested app exit; skipping remaining initialization.")
+            return
+        }
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         displayManager?.registerDisplayListener(displayListener, null)
         reloadExternalDisplayConfig()

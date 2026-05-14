@@ -51,7 +51,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -85,12 +84,15 @@ import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
+import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.MediaMTXStatus
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
+import org.ncssar.rid2caltopo.ui.CaltopoActionInterface
+import org.ncssar.rid2caltopo.ui.CaltopoConnectionState
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
 import org.ncssar.rid2caltopo.ui.DroneSignalLossAlertCenter
 import org.ncssar.rid2caltopo.ui.ResumeProximityAlertButton
@@ -201,16 +203,6 @@ fun StreamsScreen(
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
-    val mapStatus by remember(mapName) {
-        derivedStateOf {
-            if (mapName != null) {
-                "Connected to $mapName"
-            } else {
-                "No map connection"
-            }
-        }
-    }
-
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
     val persistedLayoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
     val layoutMode = when (externalContentMode) {
@@ -255,23 +247,13 @@ fun StreamsScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Box(
+                        StreamsMapStatusButton(
+                            mapName = mapName,
+                            onClick = onMapStatusTap,
                             modifier = Modifier
-                                .weight(1f, fill = false)
-                                .pointerInput(onMapStatusTap, handleBack) {
-                                    detectTapGestures(
-                                        onTap = { onMapStatusTap() },
-                                        onDoubleTap = { handleBack() }
-                                    )
-                                }
-                        ) {
-                            Text(
-                                text = mapStatus,
-                                fontSize = 14.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+                                .weight(1f)
+                                .height(36.dp)
+                        )
                     }
                 },
                 navigationIcon = if (showNavigation) {
@@ -323,6 +305,7 @@ fun StreamsScreen(
                             allowCapturedVideoPicker = allowModalDialogs,
                             splitFraction = splitFraction,
                             onSplitFractionChange = { splitFraction = it },
+                            onMapStatusTap = onMapStatusTap,
                             onStreamsPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
                             onMapPaneTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) }
                         )
@@ -332,6 +315,7 @@ fun StreamsScreen(
                         StreamsGrid(
                             viewModel = viewModel,
                             allowCapturedVideoPicker = allowModalDialogs,
+                            onMapStatusTap = onMapStatusTap,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -516,6 +500,7 @@ private fun SplitStreamsAndMap(
     allowCapturedVideoPicker: Boolean,
     splitFraction: Float,
     onSplitFractionChange: (Float) -> Unit,
+    onMapStatusTap: () -> Unit,
     onStreamsPaneTap: () -> Unit,
     onMapPaneTap: () -> Unit
 ) {
@@ -546,6 +531,7 @@ private fun SplitStreamsAndMap(
                     StreamsGrid(
                         viewModel = viewModel,
                         allowCapturedVideoPicker = allowCapturedVideoPicker,
+                        onMapStatusTap = onMapStatusTap,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -598,6 +584,7 @@ private fun SplitStreamsAndMap(
                     StreamsGrid(
                         viewModel = viewModel,
                         allowCapturedVideoPicker = allowCapturedVideoPicker,
+                        onMapStatusTap = onMapStatusTap,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -653,6 +640,35 @@ private fun LayoutToggleChip(
     }
 }
 
+@Composable
+private fun StreamsMapStatusButton(
+    mapName: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier) {
+        CaltopoActionInterface(
+            state = streamsMapConnectionState(mapName),
+            onActionClicked = onClick
+        )
+    }
+}
+
+private fun streamsMapConnectionState(mapName: String?): CaltopoConnectionState {
+    val connectedMapName = mapName?.takeIf { it.isNotBlank() }
+    return if (connectedMapName == null) {
+        CaltopoConnectionState.StandAlone
+    } else {
+        CaltopoConnectionState.MapSelected(
+            CaltopoNode.MapNode(
+                id = "",
+                title = connectedMapName,
+                updated = 0L
+            )
+        )
+    }
+}
+
 fun <T> List<T>.padTo(size: Int): List<T?> =
     this + List(size - this.size) { null }
 
@@ -660,6 +676,7 @@ fun <T> List<T>.padTo(size: Int): List<T?> =
 private fun StreamsGrid(
     viewModel: StreamsViewModel,
     allowCapturedVideoPicker: Boolean,
+    onMapStatusTap: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tag = "StreamsGrid"
@@ -669,15 +686,6 @@ private fun StreamsGrid(
         .filter { (_, info) -> viewModel.isStreamVisible(info) }
         .toList()
     val mapName = viewModel.mapName
-    val mapStatus by remember(mapName) {
-        derivedStateOf {
-            if (mapName != null) {
-                "Connected to $mapName"
-            } else {
-                "No map connection"
-            }
-        }
-    }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val visibleEntries =
         if (focusedPath != null) {
@@ -732,7 +740,8 @@ private fun StreamsGrid(
             CTDebug(tag, "No streams to show.")
             EmptyStreamsView(
                 viewModel = viewModel,
-                mapStatus = mapStatus,
+                mapName = mapName,
+                onMapStatusTap = onMapStatusTap,
                 onPlayCapturedVideo = onPlayCapturedVideo,
                 onRestartServer = {
                     restartMediaMtxServer(context)
@@ -817,8 +826,9 @@ private fun StreamsGrid(
 @Composable
 private fun EmptyStreamsView(
     viewModel: StreamsViewModel,
-    mapStatus: String,
+    mapName: String?,
     myIpAddress: String = R2CMqttManager.GetMyIpAddress(),
+    onMapStatusTap: () -> Unit,
     onPlayCapturedVideo: (() -> Unit)?,
     onRestartServer: () -> Unit,
     modifier: Modifier = Modifier
@@ -879,9 +889,12 @@ private fun EmptyStreamsView(
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = mapStatus,
-                style = MaterialTheme.typography.titleLarge
+            StreamsMapStatusButton(
+                mapName = mapName,
+                onClick = onMapStatusTap,
+                modifier = Modifier
+                    .width(220.dp)
+                    .height(48.dp)
             )
         }
 

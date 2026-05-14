@@ -14,6 +14,7 @@ public final class MediaMTXNative {
 
     public static native int start(String binPath, String configPath);
     public static native void stop();
+    public static native int currentPid();
 
     public static void onNativeProcessExit(int pid, int status, int signaled) {
         MediaMTXService.onNativeProcessExit(pid, status, signaled);

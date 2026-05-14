@@ -3,6 +3,7 @@ package org.ncssar.rid2caltopo.data
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotNull
 import org.junit.Before
 import org.junit.Test
@@ -53,5 +54,43 @@ class CaltopoClientUnknownPromotionTest {
         val event = peerCoordinator.latestEventOfKind("onLiveTrackCreated")
         assertNotNull(event)
         assertEquals("DRONE1 dist=NaN", event!!.summary)
+    }
+
+    @Test
+    fun unknownConfirmationPersistsForAppSessionUntilPromoted() {
+        val remoteId = "DRONE2"
+        CaltopoClient.SaveDroneSpecUnknownConfirmation(remoteId)
+        val drone = CaltopoClient.GetDroneSpec(remoteId)!!
+        assertTrue(CaltopoClient.IsSessionUnknownDrone(remoteId))
+        assertTrue(drone.isLocalArchiveOnly)
+        drone.checkNewWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            1234L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+
+        drone.reset()
+        assertFalse(drone.isLocalArchiveOnly)
+
+        val client = CaltopoClient.ClientForRemoteId(remoteId)
+        client.newWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            CtDroneSpec.TransportTypeEnum.BT4,
+            true
+        )
+
+        assertTrue(drone.isLocalArchiveOnly)
+
+        CaltopoClient.promoteLocalArchiveOnlyDrone(remoteId, FakeLiveTrack(remoteId))
+
+        assertFalse(CaltopoClient.IsSessionUnknownDrone(remoteId))
+        assertFalse(drone.isLocalArchiveOnly)
     }
 }

@@ -340,6 +340,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     static final long MIN_DISTANCE_IN_FEET = 2;
     static final long MIN_NEW_TRACK_DELAY_IN_SECONDS = 15;
     public static final long DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS = 5;
+    public static final long LOSS_OF_SIGNAL_TONE_DURATION_SECONDS = 2;
+    public static final long OUT_OF_RANGE_DISTANCE_FEET = 300;
+    public static final long OUT_OF_RANGE_TRACK_DELAY_SECONDS = 20 * 60;
+    public static final long RETURN_TO_TAKEOFF_DISTANCE_FEET = 30;
     static final long DEFAULT_BRIDGE_CHECK_DISTANCE_FEET = 20;
     static final long MainThreadId = Process.myTid();
     static final long ProcessId = Process.myPid();
@@ -378,6 +382,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final Object ShutdownLock = new Object();
     private static boolean ShutdownInProgress = false;
     private static boolean AppExitRequested = false;
+
+    private static void ResetDebugOutputStream() {
+        DebugOutputStream = new DeferredLogOutputStream(STARTUP_LOG_BUFFER_BYTES);
+        DebugLogPath = null;
+        LogFilePath = null;
+        BytesWrittenToDebugOutputStream = 0;
+    }
     private static volatile boolean ArchivePermissionMissingFlag = false;
 
     // CaltopoClient INSTANCE VARS:=
@@ -392,6 +403,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final ArrayList<CtDroneSpec> DsArray = new ArrayList<>(16);
     private static long DroneSpecsArraySize = DsArray.size();
     private static boolean NotifySettingsChangedFlag;
+    private static final Set<String> SessionUnknownDroneRemoteIds = new HashSet<>();
 
     private static final class DeferredLogOutputStream extends OutputStream {
         private final Object lock = new Object();
@@ -490,6 +502,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 ccs.droneSpecTable.put(rid, lDroneSpec);
                 droneSpec = lDroneSpec;
             }
+        }
+        if (SessionUnknownDroneRemoteIds.contains(rid)) {
+            droneSpec.setLocalArchiveOnly(true);
         }
         droneSpec.setDroneSpecListener(this);
         idleTimeoutPoll = new DelayedExec();
@@ -2057,6 +2072,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void ResetPersistedClientState() {
         Ccstate = new ClientClassState();
+        SessionUnknownDroneRemoteIds.clear();
         DebugLevel = DebugLevelDebug;
         ClearDebugTagFilter();
         ArchivePermissionMissingFlag = false;
@@ -2099,14 +2115,20 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void SaveDroneSpecUnknownConfirmation(@NonNull String remoteId) {
         ClientClassState ccs = GetState();
-        CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
+        String trimmedRemoteId = remoteId.trim();
+        SessionUnknownDroneRemoteIds.add(trimmedRemoteId);
+        CtDroneSpec activeDs = ccs.droneSpecTable.get(trimmedRemoteId);
         if (activeDs == null) {
-            activeDs = new CtDroneSpec(remoteId);
-            ccs.droneSpecTable.put(remoteId, activeDs);
+            activeDs = new CtDroneSpec(trimmedRemoteId);
+            ccs.droneSpecTable.put(trimmedRemoteId, activeDs);
         }
         activeDs.setLocalArchiveOnly(true);
 
         UpdateDroneSpecs();
+    }
+
+    public static boolean IsSessionUnknownDrone(@NonNull String remoteId) {
+        return SessionUnknownDroneRemoteIds.contains(remoteId.trim());
     }
 
     public static void PromoteLocalArchiveOnlyDrone(@NonNull String remoteId) {
@@ -2119,6 +2141,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
         if (activeDs == null || !activeDs.isLocalArchiveOnly()) return;
 
+        SessionUnknownDroneRemoteIds.remove(remoteId.trim());
         activeDs.setLocalArchiveOnly(false);
         UpdateDroneSpecs();
         R2CMqttManager.onDroneSpecChanged(remoteId);
@@ -2331,6 +2354,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ProcessSortedCurrentDroneSpecArray(false);
     }
 
+    public static void InvalidateTrackAgingSchedule() {
+        PreviousEarliestAgeOutInMsec = 0;
+    }
+
     /**
      * ProcessSortedCurrentDroneSpecArray()
      * Sorts active droneSpecs by flight start Time, so oldest will appear first in
@@ -2351,13 +2378,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (changedFlag || currentTimeInMsec >= PreviousEarliestAgeOutInMsec) {
             DsArray.clear();
             for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+                long trackDelayInMsec = ds.isOutOfRange()
+                        ? OUT_OF_RANGE_TRACK_DELAY_SECONDS * 1000
+                        : newTrackDelayInMsec;
                 long droneSpecIdleInMsec = ds.idleTimeInMsec(currentTimeInMsec);
-                if (ds.isActive() && droneSpecIdleInMsec > newTrackDelayInMsec) {
+                if (ds.isActive() && droneSpecIdleInMsec > trackDelayInMsec) {
                     CaltopoClient client = (ClientMap != null) ? ClientMap.get(ds.getRemoteId()) : null;
                     String msg = String.format(Locale.US,
-                            "ProcessSortedCurrentDroneSpecArray(%s): %s idle for %.3f/%.3f seconds. Finishing track...",
+                            "ProcessSortedCurrentDroneSpecArray(%s): %s idle for %.3f/%.3f seconds%s. Finishing track...",
                             changedFlag, ds.trackLabel(),
-                            (double) droneSpecIdleInMsec / 1000.0, (double) newTrackDelayInMsec / 1000.0);
+                            (double) droneSpecIdleInMsec / 1000.0, (double) trackDelayInMsec / 1000.0,
+                            ds.isOutOfRange() ? " (OOR)" : "");
                     CTInfo(TAG, msg);
                     if (client != null) {
                         client.terminateTrack(msg, false);
@@ -2367,12 +2398,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     changedFlag = true;
                     continue;
                 }
-                long currentAgeOutInMsec = newTrackDelayInMsec - droneSpecIdleInMsec;
+                long currentAgeOutInMsec = trackDelayInMsec - droneSpecIdleInMsec;
                 if (currentAgeOutInMsec <= 0) continue;
                 if (currentAgeOutInMsec < nextAgeOutInMsec) nextAgeOutInMsec = currentAgeOutInMsec;
                 if (CTDebugEnabled(TAG)) CTDebug(TAG, String.format(Locale.US,
-                        "ProcessSortedCurrentDroneSpecArray(%s): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds",
-                        changedFlag, ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0));
+                        "ProcessSortedCurrentDroneSpecArray(%s): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds%s",
+                        changedFlag, ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0,
+                        ds.isOutOfRange() ? " (OOR)" : ""));
                 DsArray.add(ds);
             }
             PreviousEarliestAgeOutInMsec = currentTimeInMsec + nextAgeOutInMsec;
@@ -2762,19 +2794,23 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 DocumentFile dataFilepath = todaysArchiveDir.createFile("text/plain", filepath);
                 ContentResolver resolver = ctxt.getContentResolver();
                 if (null != dataFilepath) {
-                    DebugLogPath = dataFilepath.getUri();
-                    OutputStream fileOutputStream = resolver.openOutputStream(DebugLogPath);
+                    Uri logPath = dataFilepath.getUri();
+                    OutputStream fileOutputStream = resolver.openOutputStream(logPath);
                     if (fileOutputStream != null && DebugOutputStream instanceof DeferredLogOutputStream) {
                         ((DeferredLogOutputStream) DebugOutputStream).attach(fileOutputStream);
+                        DebugLogPath = logPath;
                     } else if (fileOutputStream != null) {
                         DebugOutputStream = fileOutputStream;
+                        DebugLogPath = logPath;
+                    } else {
+                        Log.e(TAG, "CTError: InitArchiveDir(): openOutputStream returned null for " + logPath);
                     }
                 }
             } catch (Exception e) {
                 CTError(TAG, "InitArchiveDir() raised: ", e);
             }
 
-            if (null != DebugOutputStream) {
+            if (null != DebugLogPath && null != DebugOutputStream) {
                 LogFilePath = todaysArchiveDir + "/" + filepath;
                 R2CActivity activity = R2CActivity.getR2CActivity();
                 String appVers = BuildConfig.BUILD_VERSION;
@@ -2949,9 +2985,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 try {
                     DebugOutputStream.flush();
                     DebugOutputStream.close();
-                    DebugOutputStream = null;
+                    ResetDebugOutputStream();
                 } catch (IOException e) {
                     Log.e(TAG, "CTError: Shutdown raised: " + e);
+                    ResetDebugOutputStream();
                 }
             }
         } finally {
@@ -3253,6 +3290,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                                CtDroneSpec.TransportTypeEnum transportType, @Nullable Boolean airborne) {
         long longAltitudeInMeters = Math.round(altitudeInMeters);
         ArrayList<CtDroneSpec> proximityDrones = new ArrayList<>(GetState().droneSpecTable.values());
+        if (SessionUnknownDroneRemoteIds.contains(remoteId)) {
+            droneSpec.setLocalArchiveOnly(true);
+        }
 
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
         ProximityAlertCenter.INSTANCE.updateDrones(proximityDrones);

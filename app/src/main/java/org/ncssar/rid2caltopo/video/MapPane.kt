@@ -178,6 +178,8 @@ internal const val AGL_ICON_NEAR_DELTA_FT = 20.0
 internal const val FT_TO_METERS = 0.3048
 internal const val NEAR_LIMIT_RATIO = 0.90
 internal const val NEAR_ALERT_COOLDOWN_MS = 30_000L
+private const val STARTUP_MY_LOCATION_FRESH_MS = 60_000L
+private const val STARTUP_MY_LOCATION_WAIT_MS = 20_000L
 internal const val OVER_ALERT_COOLDOWN_MS = 12_000L
 internal const val METERS_TO_FEET = 3.28084
 internal const val DEM_RETRY_INTERVAL_MS = 2_000L
@@ -568,6 +570,9 @@ internal fun SplitMapPane(
     var lastAlignmentStats by remember { mutableStateOf("") }
     var initialViewportApplied by remember(restoredViewport) { mutableStateOf(restoredViewport != null) }
     var initialViewportArtifactCount by remember { mutableStateOf(-1) }
+    var restoredViewportStartupCheckComplete by remember(restoredViewport) { mutableStateOf(restoredViewport == null) }
+    var restoredViewportStartupWaitLogged by remember(restoredViewport) { mutableStateOf(false) }
+    var restoredViewportStartupCheckStartedAtMs by remember(restoredViewport) { mutableStateOf(System.currentTimeMillis()) }
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
     val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
     val caltopoMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
@@ -1622,6 +1627,9 @@ internal fun SplitMapPane(
         complianceByDesignator.clear()
         initialViewportApplied = persistedViewport != null
         initialViewportArtifactCount = -1
+        restoredViewportStartupCheckComplete = persistedViewport == null
+        restoredViewportStartupWaitLogged = false
+        restoredViewportStartupCheckStartedAtMs = System.currentTimeMillis()
     }
     LaunchedEffect(Unit) {
         while (isActive) {
@@ -2490,6 +2498,81 @@ internal fun SplitMapPane(
                     if (MAP_PANE_VERBOSE_LOGS && alignStats != lastAlignmentStats) {
                         lastAlignmentStats = alignStats
                         if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(MAP_PANE_TAG, "Drone alignment: $alignStats")
+                    }
+                }
+
+                val restoredStartupViewport = restoredViewport
+                if (!restoredViewportStartupCheckComplete && restoredStartupViewport != null) {
+                    val startupMyLocation = CaltopoMap.GetMyLocation()
+                    val startupLocationValid =
+                        startupMyLocation != null &&
+                            startupMyLocation.latitude.isFinite() &&
+                            startupMyLocation.longitude.isFinite()
+                    val startupLocationAgeMs =
+                        startupMyLocation?.let { locationAgeMs(it, uiNowWallMsec) } ?: Long.MAX_VALUE
+                    val startupLocationFresh =
+                        startupLocationValid && startupLocationAgeMs <= STARTUP_MY_LOCATION_FRESH_MS
+                    val operationalContentPresent =
+                        dronePoints.isNotEmpty() || artifactOverlayState.totalFeatures > 0
+                    val viewportContainsMyLocation =
+                        startupMyLocation?.let { mapView.boundingBox.containsLocation(it) } ?: false
+                    val timedOut =
+                        uiNowWallMsec - restoredViewportStartupCheckStartedAtMs >= STARTUP_MY_LOCATION_WAIT_MS
+                    var action: String? = null
+
+                    when {
+                        operationalContentPresent -> {
+                            action = "kept-operational-content"
+                            restoredViewportStartupCheckComplete = true
+                        }
+
+                        startupLocationFresh && viewportContainsMyLocation -> {
+                            action = "kept-my-location-visible"
+                            restoredViewportStartupCheckComplete = true
+                        }
+
+                        startupLocationFresh -> {
+                            mapView.controller.setCenter(GeoPoint(startupMyLocation.latitude, startupMyLocation.longitude))
+                            mapView.controller.setZoom(15.0)
+                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                            initialViewportApplied = true
+                            initialViewportArtifactCount = artifactOverlayState.totalFeatures
+                            action = "centered-on-my-location"
+                            restoredViewportStartupCheckComplete = true
+                        }
+
+                        timedOut -> {
+                            action = "kept-restored-no-fresh-location"
+                            restoredViewportStartupCheckComplete = true
+                        }
+
+                        !restoredViewportStartupWaitLogged -> {
+                            action = "waiting-for-fresh-location"
+                            restoredViewportStartupWaitLogged = true
+                        }
+                    }
+
+                    action?.let {
+                        CTDebug(
+                            MAP_PANE_TAG,
+                            String.format(
+                                Locale.US,
+                                "Startup viewport check: restoredLat=%.6f restoredLng=%.6f restoredZoom=%.2f " +
+                                    "myLocation=%s locationAgeMs=%d locationFresh=%s operationalContent=%s " +
+                                    "viewportContainsMyLocation=%s action=%s",
+                                restoredStartupViewport.latitude,
+                                restoredStartupViewport.longitude,
+                                restoredStartupViewport.zoom,
+                                startupMyLocation?.let { loc ->
+                                    String.format(Locale.US, "%.6f,%.6f", loc.latitude, loc.longitude)
+                                } ?: "none",
+                                startupLocationAgeMs,
+                                startupLocationFresh,
+                                operationalContentPresent,
+                                viewportContainsMyLocation,
+                                it
+                            )
+                        )
                     }
                 }
 
@@ -4134,6 +4217,23 @@ private fun boundingBoxFromPoints(points: List<GeoPoint>): BoundingBox {
         maxLon = maxOf(maxLon, p.longitude)
     }
     return BoundingBox(maxLat, maxLon, minLat, minLon)
+}
+
+private fun BoundingBox.containsLocation(location: Location): Boolean {
+    val minLat = minOf(latNorth, latSouth)
+    val maxLat = maxOf(latNorth, latSouth)
+    val minLon = minOf(lonWest, lonEast)
+    val maxLon = maxOf(lonWest, lonEast)
+    return location.latitude in minLat..maxLat && location.longitude in minLon..maxLon
+}
+
+private fun locationAgeMs(location: Location, nowMs: Long): Long {
+    val locationTimeMs = location.time
+    return if (locationTimeMs > 0L) {
+        (nowMs - locationTimeMs).coerceAtLeast(0L)
+    } else {
+        Long.MAX_VALUE
+    }
 }
 
 private fun nearestDistanceMeters(dronePoint: DroneMapPoint, artifactPoints: List<GeoPoint>): Double? {

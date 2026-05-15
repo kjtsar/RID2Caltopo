@@ -56,6 +56,7 @@ internal class DroneAltitudeCoordinator(
     private val demPending              = HashSet<String>()
     private val demCorrectionPending    = HashSet<String>()
     private val demLastAttemptMs        = HashMap<String, Long>()
+    private val latestLocalPointByDesignator = HashMap<String, LocalAltitudePoint>()
 
     // ── Heading state — keyed by designator (mappedId) ──────────────────────────────────────
     private val telemetryHeading      = HashMap<String, Double>()
@@ -81,6 +82,7 @@ internal class DroneAltitudeCoordinator(
         if (!lat.isFinite() || !lng.isFinite()) return@LocalTrackListener
         if (lat == 0.0 && lng == 0.0) return@LocalTrackListener
         scope.launch(Dispatchers.Main.immediate) {
+            latestLocalPointByDesignator[mappedId] = LocalAltitudePoint(lat, lng, altitudeMeters)
             updateHeading(mappedId, lat, lng)
             updateCalibration(mappedId, lat, lng, altitudeMeters)
             // Schedule DEM fetch using the fresh lat/lng from this position update.
@@ -138,6 +140,7 @@ internal class DroneAltitudeCoordinator(
                     telemetryHeading.keys.retainAll(activeDesignators)
                     fallbackHeading.keys.retainAll(activeDesignators)
                     fallbackHeadingAnchor.keys.retainAll(activeDesignators)
+                    latestLocalPointByDesignator.keys.retainAll(activeDesignators)
                     displayStateByDesignator.keys
                         .filter { it !in activeDesignators }
                         .forEach { displayStateByDesignator.remove(it) }
@@ -310,6 +313,7 @@ internal class DroneAltitudeCoordinator(
         telemetryHeading.clear()
         fallbackHeading.clear()
         fallbackHeadingAnchor.clear()
+        latestLocalPointByDesignator.clear()
     }
 
     // ── DEM lookup ───────────────────────────────────────────────────────────────────────────
@@ -435,12 +439,15 @@ internal class DroneAltitudeCoordinator(
     private fun recomputeDisplayState(designator: String) {
         val state       = droneStates[designator] ?: return
         val remoteId    = state.remoteId
-        val altM        = state.lastAlt
+        val localPoint  = latestLocalPointByDesignator[designator]
+        val altM        = localPoint?.altM ?: state.lastAlt
         val aglState    = demGroundByRemoteId[remoteId]
         val freshAgl    = aglState?.takeUnless { it.stale }
         val correctionM = demCorrectionByRemoteId[remoteId]
         val calibration = calibrationByRemoteId[remoteId]
-        val demKey      = demElevationService.cacheKey(state.lastLat, state.lastLng)
+        val demLat      = localPoint?.lat ?: state.lastLat
+        val demLng      = localPoint?.lng ?: state.lastLng
+        val demKey      = demElevationService.cacheKey(demLat, demLng)
         val priorKey    = demKeyByRemoteId[remoteId]
         val locationChanged = priorKey != null && priorKey != demKey
         val demIsPending    = demPending.contains(remoteId)
@@ -462,7 +469,14 @@ internal class DroneAltitudeCoordinator(
         val aglFt = if (correctionM != null) {
             (freshAgl ?: aglState)?.let {
                 val demScaleToMeters = demScaleToMetersByRemoteId[remoteId] ?: 1.0
-                (altM - (it.groundM * demScaleToMeters) - correctionM) * METERS_TO_FEET
+                calculateDemBackedAglMeters(
+                    altM = altM,
+                    ridHeightAtoM = ridHeightAtoM,
+                    calibration = calibration,
+                    correctionM = correctionM,
+                    demGroundRaw = it.groundM,
+                    demScaleToMeters = demScaleToMeters,
+                ) * METERS_TO_FEET
             }
         } else {
             ridHeightAtoM?.let { it * METERS_TO_FEET }
@@ -515,6 +529,22 @@ internal class DroneAltitudeCoordinator(
         private const val METERS_TO_FEET = 3.28084
         private const val CALIBRATE_ATO_TARGET_FT = 50.0
 
+        internal fun calculateDemBackedAglMeters(
+            altM: Double,
+            ridHeightAtoM: Double?,
+            calibration: DroneAltitudeCalibration?,
+            correctionM: Double,
+            demGroundRaw: Double,
+            demScaleToMeters: Double,
+        ): Double {
+            val demGroundM = demGroundRaw * demScaleToMeters
+            if (ridHeightAtoM != null && calibration != null) {
+                val takeoffGroundM = calibration.takeoffTrackAltitudeM - correctionM
+                return ridHeightAtoM + takeoffGroundM - demGroundM
+            }
+            return altM - demGroundM - correctionM
+        }
+
         internal fun shouldPreserveCalibrationOnMapReconnect(
             calibration: DroneAltitudeCalibration?
         ): Boolean {
@@ -523,3 +553,9 @@ internal class DroneAltitudeCoordinator(
         }
     }
 }
+
+private data class LocalAltitudePoint(
+    val lat: Double,
+    val lng: Double,
+    val altM: Double,
+)

@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -927,6 +928,12 @@ internal fun AnomalySettingsDialogs(
                         .verticalScroll(settingsScroll),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    val appearanceStatus =
+                        if (anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Auto) {
+                            "Appearance: Auto (${viewModel.resolvedAppearanceModeFor(streamDesignator).label})"
+                        } else {
+                            "Appearance: ${anomalyConfig.appearanceSelection.label}"
+                        }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -943,7 +950,10 @@ internal fun AnomalySettingsDialogs(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("Reset to Realtime Defaults")
-                        TextButton(onClick = { viewModel.resetAnomalyRealtimeDefaults(streamDesignator) }) {
+                        TextButton(onClick = {
+                            viewModel.resetAnomalyRealtimeDefaults(streamDesignator)
+                            CaltopoClient.ShowToast("Anomaly detector reset to realtime defaults.")
+                        }) {
                             Text("Reset")
                         }
                     }
@@ -952,17 +962,32 @@ internal fun AnomalySettingsDialogs(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Appearance (${anomalyConfig.appearanceSelection.label})")
+                        Text(appearanceStatus)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = {
-                                viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Auto)
-                            }) { Text("Auto") }
-                            Button(onClick = {
-                                viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Thermal)
-                            }) { Text("Infrared") }
-                            Button(onClick = {
-                                viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Color)
-                            }) { Text("Color") }
+                            AppearanceSelectionButton(
+                                label = "Auto",
+                                selected = anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Auto,
+                                onClick = {
+                                    viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Auto)
+                                    CaltopoClient.ShowToast("Appearance set to Auto.")
+                                }
+                            )
+                            AppearanceSelectionButton(
+                                label = "Infrared",
+                                selected = anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Thermal,
+                                onClick = {
+                                    viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Thermal)
+                                    CaltopoClient.ShowToast("Appearance set to Infrared.")
+                                }
+                            )
+                            AppearanceSelectionButton(
+                                label = "Color",
+                                selected = anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Color,
+                                onClick = {
+                                    viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Color)
+                                    CaltopoClient.ShowToast("Appearance set to Color.")
+                                }
+                            )
                         }
                     }
                     Row(
@@ -1203,6 +1228,31 @@ internal fun AnomalySettingsDialogs(
                 TextButton(onClick = onDismissAdHelpDialog) { Text("Close") }
             }
         )
+    }
+}
+
+@Composable
+private fun AppearanceSelectionButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            contentColor = if (selected) {
+                MaterialTheme.colorScheme.onPrimary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+    ) {
+        Text(label)
     }
 }
 

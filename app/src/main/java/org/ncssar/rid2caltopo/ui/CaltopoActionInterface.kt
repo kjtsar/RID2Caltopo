@@ -20,12 +20,13 @@ import androidx.compose.ui.text.style.TextOverflow
 @Composable
 fun CaltopoActionInterface(
     state: CaltopoConnectionState,
-    onActionClicked: () -> Unit
+    onActionClicked: () -> Unit,
+    modifier: Modifier = Modifier.fillMaxSize()
 ) {
     val colorScheme = MaterialTheme.colorScheme
     Button(
         onClick = onActionClicked,
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier,
         shape = RoundedCornerShape(6.dp),
         colors = when (state) {
             is CaltopoConnectionState.MapSelected -> ButtonDefaults.buttonColors(containerColor = colorScheme.primary)

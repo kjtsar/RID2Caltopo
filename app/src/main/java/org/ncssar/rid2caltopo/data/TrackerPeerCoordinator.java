@@ -337,6 +337,32 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public void onDroneConfirmed(@NonNull String remoteId,
+                                 long flightStartMsec,
+                                 @NonNull String org,
+                                 @NonNull String model,
+                                 @NonNull String owner,
+                                 @NonNull String mappedId) {
+        JSONObject jo = new JSONObject();
+        try {
+            jo.put("type", "drone_confirmed");
+            jo.put("mapId", mapId != null ? mapId : "");
+            jo.put("zoneId", myGuid != null ? myGuid : "");
+            jo.put("guid", myGuid != null ? myGuid : "");
+            jo.put("remoteId", remoteId);
+            jo.put("flightStartMsec", flightStartMsec);
+            jo.put("mappedId", mappedId);
+            jo.put("trackLabel", mappedId);
+            jo.put("org", org);
+            jo.put("model", model);
+            jo.put("ownerName", owner);
+            sendJson(jo);
+        } catch (Exception e) {
+            CTError(TAG, "onDroneConfirmed() raised", e);
+        }
+    }
+
+    @Override
     public boolean isLocalOwner(@NonNull String remoteId) {
         String ownerGuid = ownerByRemoteId.get(remoteId);
         return ownerGuid != null && ownerGuid.equals(myGuid);
@@ -812,6 +838,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 case "relay_sighting":
                     onRelaySighting(jo);
                     break;
+                case "drone_confirmed":
+                    onDroneConfirmedByPeer(jo);
+                    break;
                 default:
                     CTDebug(TAG, "Ignoring tracker message type: " + type);
                     break;
@@ -945,6 +974,17 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 jo.optLong("droneTs", 0L),
                 parseTelemetry(jo.optJSONObject("telemetry"))
         );
+    }
+
+    private void onDroneConfirmedByPeer(@NonNull JSONObject jo) {
+        String remoteId = jo.optString("remoteId");
+        if (remoteId.isEmpty()) return;
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+                remoteId,
+                jo.optString("org"),
+                jo.optString("model"),
+                jo.optString("ownerName"),
+                jo.optString("mappedId"));
     }
 
     void handleOwnerAssignedForTesting(@NonNull String remoteId, @NonNull String ownerGuid, long leaseSeq) {

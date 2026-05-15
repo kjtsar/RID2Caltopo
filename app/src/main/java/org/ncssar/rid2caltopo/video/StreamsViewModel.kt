@@ -78,6 +78,7 @@ import org.ncssar.rid2caltopo.video.StreamInfo
 import org.ncssar.rid2caltopo.video.StreamAdmissionGuardResult
 import org.ncssar.rid2caltopo.video.StreamAdmissionState
 import org.ncssar.rid2caltopo.video.StreamRegistry
+import org.ncssar.rid2caltopo.video.mapcache.MapCacheSettings
 import org.ncssar.rid2caltopo.video.StreamState
 import org.ncssar.rid2caltopo.video.buildLocalPlaybackFrameAnnotationSummary
 import org.ncssar.rid2caltopo.video.localPlaybackReviewFromJson
@@ -742,7 +743,9 @@ class StreamsViewModel(
     )
     val coordinateDisplayFormat: CoordinateDisplayFormat
         get() = _coordinateDisplayFormat.value
-    private val _baseLayer = mutableStateOf(org.ncssar.rid2caltopo.video.BaseLayerOption.OpenStreetMap)
+    private val _baseLayer = mutableStateOf(
+        MapCacheSettings.baseLayer(application.applicationContext)
+    )
     internal val baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption
         get() = _baseLayer.value
     private var persistedMapViewportState: MapViewportState? = null
@@ -1262,6 +1265,7 @@ class StreamsViewModel(
     internal fun setBaseLayer(baseLayer: org.ncssar.rid2caltopo.video.BaseLayerOption) {
         if (_baseLayer.value == baseLayer) return
         _baseLayer.value = baseLayer
+        MapCacheSettings.setBaseLayer(getApplication<Application>().applicationContext, baseLayer)
     }
 
     fun setLayoutMode(layoutMode: StreamsLayoutMode) {

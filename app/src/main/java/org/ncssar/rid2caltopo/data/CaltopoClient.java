@@ -404,6 +404,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static long DroneSpecsArraySize = DsArray.size();
     private static boolean NotifySettingsChangedFlag;
     private static final Set<String> SessionUnknownDroneRemoteIds = new HashSet<>();
+    private static final Set<String> SessionConfirmedDroneRemoteIds = new HashSet<>();
 
     private static final class DeferredLogOutputStream extends OutputStream {
         private final Object lock = new Object();
@@ -2106,6 +2107,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void ResetPersistedClientState() {
         Ccstate = new ClientClassState();
         SessionUnknownDroneRemoteIds.clear();
+        SessionConfirmedDroneRemoteIds.clear();
         DebugLevel = DebugLevelDebug;
         ClearDebugTagFilter();
         ArchivePermissionMissingFlag = false;
@@ -2142,6 +2144,35 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             activeDs.setMappedId(trimmedMappedId);
         }
         activeDs.setLocalArchiveOnly(false);
+        SessionConfirmedDroneRemoteIds.add(remoteId.trim());
+
+        UpdateDroneSpecs();
+    }
+
+    public static void ApplyPeerDroneSpecConfirmation(
+            @NonNull String remoteId,
+            @NonNull String org,
+            @NonNull String model,
+            @NonNull String owner,
+            @NonNull String mappedId
+    ) {
+        ClientClassState ccs = GetState();
+        String trimmedRemoteId = remoteId.trim();
+        if (trimmedRemoteId.isEmpty()) return;
+        SessionConfirmedDroneRemoteIds.add(trimmedRemoteId);
+
+        CtDroneSpec activeDs = ccs.droneSpecTable.get(trimmedRemoteId);
+        if (activeDs != null) {
+            String trimmedOrg = org.trim();
+            String trimmedModel = model.trim();
+            String trimmedOwner = owner.trim();
+            String trimmedMappedId = mappedId.trim();
+            if (!trimmedOrg.isEmpty()) activeDs.setOrg(trimmedOrg);
+            if (!trimmedModel.isEmpty()) activeDs.setModel(trimmedModel);
+            if (!trimmedOwner.isEmpty()) activeDs.setOwner(trimmedOwner);
+            if (!trimmedMappedId.isEmpty()) activeDs.setMappedId(trimmedMappedId);
+            activeDs.setLocalArchiveOnly(false);
+        }
 
         UpdateDroneSpecs();
     }
@@ -2162,6 +2193,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static boolean IsSessionUnknownDrone(@NonNull String remoteId) {
         return SessionUnknownDroneRemoteIds.contains(remoteId.trim());
+    }
+
+    public static boolean IsSessionDroneConfirmationIgnored(@NonNull String remoteId) {
+        return SessionConfirmedDroneRemoteIds.contains(remoteId.trim());
     }
 
     public static void PromoteLocalArchiveOnlyDrone(@NonNull String remoteId) {

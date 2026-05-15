@@ -28,6 +28,7 @@ import org.ncssar.rid2caltopo.data.CaltopoNode
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.DelayedExec
 import org.ncssar.rid2caltopo.data.R2CMqttManager
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.SimpleTimer
 
 enum class ActiveScreen {
@@ -420,6 +421,14 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             callsign,
             mappedId
         )
+        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.onDroneConfirmed(
+            remoteId,
+            current.flightStartMsec,
+            organization,
+            droneDescription,
+            callsign,
+            mappedId
+        )
         _pendingDroneConfirmation.value = null
         restoreScreenAfterConfirmation()
     }
@@ -444,7 +453,13 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             anyPeerFlightKey(drone)
         }
         promptedFlightKeys.retainAll(activeFlightKeys)
-        val pendingRemoteId = _pendingDroneConfirmation.value?.remoteId
+        var pendingRemoteId = _pendingDroneConfirmation.value?.remoteId
+        if (pendingRemoteId != null && CaltopoClient.IsSessionDroneConfirmationIgnored(pendingRemoteId)) {
+            CTDebug(tag, "Clearing pending confirmation for $pendingRemoteId: confirmed by peer")
+            _pendingDroneConfirmation.value = null
+            restoreScreenAfterConfirmation()
+            pendingRemoteId = null
+        }
         val pendingStillActive = droneSpecs.any { drone ->
             pendingRemoteId == drone.remoteId && currentFlightKey(drone) != null
         }
@@ -461,7 +476,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 // operator can confirm or update pilot/callsign ownership for this flight.
                 flightKey != null &&
                     flightKey !in promptedFlightKeys &&
-                    !CaltopoClient.IsSessionUnknownDrone(drone.remoteId)
+                    !CaltopoClient.IsSessionUnknownDrone(drone.remoteId) &&
+                    !CaltopoClient.IsSessionDroneConfirmationIgnored(drone.remoteId)
             }
             if (droneToConfirm != null) {
                 val flightKey = currentFlightKey(droneToConfirm)

@@ -31,6 +31,13 @@ public interface PeerCoordinator {
                             long timestampMsec,
                             @Nullable CtDroneSpec.PositionTelemetry telemetry);
     void onDroneLost(@NonNull String remoteId);
+    default void onDroneConfirmed(@NonNull String remoteId,
+                                  long flightStartMsec,
+                                  @NonNull String org,
+                                  @NonNull String model,
+                                  @NonNull String owner,
+                                  @NonNull String mappedId) {
+    }
     boolean isLocalOwner(@NonNull String remoteId);
     void updateCaltopoRtt(long rttMs);
     long getCaltopoRttMs();

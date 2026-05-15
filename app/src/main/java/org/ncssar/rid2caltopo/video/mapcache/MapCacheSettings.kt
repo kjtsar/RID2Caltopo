@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video.mapcache
 
 import android.content.Context
+import org.ncssar.rid2caltopo.video.BaseLayerOption
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -9,6 +10,7 @@ internal object MapCacheSettings {
     const val PREWARM_SIGNATURE_KEY = "prewarm_signature_v1"
     private const val MAX_CACHE_BYTES_KEY = "max_cache_bytes_v1"
     private const val MAX_TILE_AGE_DAYS_KEY = "max_tile_age_days_v1"
+    private const val BASE_LAYER_KEY = "base_layer_v1"
 
     private const val DECIMAL_GB_BYTES = 1_000_000_000L
     private const val MIN_CACHE_BYTES = 100_000_000L
@@ -45,6 +47,21 @@ internal object MapCacheSettings {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(MAX_TILE_AGE_DAYS_KEY, normalized)
+            .apply()
+    }
+
+    fun baseLayer(context: Context): BaseLayerOption {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val stored = prefs.getString(BASE_LAYER_KEY, null)
+        return BaseLayerOption.entries.firstOrNull { it.name == stored }
+            ?: BaseLayerOption.OpenStreetMap
+    }
+
+    fun setBaseLayer(context: Context, baseLayer: BaseLayerOption) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(BASE_LAYER_KEY, baseLayer.name)
             .apply()
     }
 

@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -251,7 +252,7 @@ fun StreamsScreen(
                             mapName = mapName,
                             onClick = onMapStatusTap,
                             modifier = Modifier
-                                .weight(1f)
+                                .widthIn(max = 220.dp)
                                 .height(36.dp)
                         )
                     }
@@ -649,7 +650,8 @@ private fun StreamsMapStatusButton(
     Box(modifier = modifier) {
         CaltopoActionInterface(
             state = streamsMapConnectionState(mapName),
-            onActionClicked = onClick
+            onActionClicked = onClick,
+            modifier = Modifier.height(36.dp)
         )
     }
 }

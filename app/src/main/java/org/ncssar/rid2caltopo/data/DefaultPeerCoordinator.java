@@ -3,6 +3,7 @@ package org.ncssar.rid2caltopo.data;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
@@ -48,6 +49,7 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     private volatile long myCaltopoRttMs = 2_000L;
     @NonNull private volatile PeerCoordinator activeCoordinator = getMqttCoordinator();
     @NonNull private volatile CoordinationIndicatorState lastIndicatorState = CoordinationIndicatorState.UNCONFIGURED;
+    @NonNull private volatile String lastLoggedStatusSignature = "";
 
     private DefaultPeerCoordinator() { }
 
@@ -240,12 +242,37 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         return CoordinationIndicatorState.UNCONFIGURED;
     }
 
+    @NonNull
+    @Override
+    public String getCoordinationStatusText() {
+        CoordinationIndicatorState state = getCoordinationIndicatorState();
+        if (state == CoordinationIndicatorState.UNCONFIGURED) {
+            return "R2C link not configured";
+        }
+        String channel = isTrackerConfiguredForCoordination() ? "Tracker" : "MQTT";
+        return channel + (state == CoordinationIndicatorState.HEALTHY
+                ? " link healthy"
+                : " link degraded");
+    }
+
+    @NonNull
+    @Override
+    public List<String> getCoordinationDiagnosticLines() {
+        ArrayList<String> lines = new ArrayList<>(activeCoordinator.getCoordinationDiagnosticLines());
+        if (isTrackerConfiguredForCoordination() && !trackerSelected) {
+            lines.add("Tracker coordinator waiting for map connection");
+        }
+        lines.add(describePeers(getPeerList()));
+        return lines;
+    }
+
     private void handleChildCoordinationIndicatorStateChanged(@NonNull CoordinationIndicatorState ignoredState) {
         emitCoordinationIndicatorIfChanged();
     }
 
     private synchronized void emitCoordinationIndicatorIfChanged() {
         CoordinationIndicatorState current = getCoordinationIndicatorState();
+        logCoordinationStatusIfChanged(current);
         if (current == lastIndicatorState) return;
         lastIndicatorState = current;
         CoordinationIndicatorListener listener = coordinationIndicatorListener;
@@ -254,9 +281,36 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         }
     }
 
+    private void logCoordinationStatusIfChanged(@NonNull CoordinationIndicatorState state) {
+        String statusText = getCoordinationStatusText();
+        String signature = state.name() + "|" + statusText;
+        if (signature.equals(lastLoggedStatusSignature)) return;
+        lastLoggedStatusSignature = signature;
+
+        StringBuilder diagnostics = new StringBuilder();
+        for (String line : getCoordinationDiagnosticLines()) {
+            if (line == null || line.isEmpty()) continue;
+            if (diagnostics.length() > 0) diagnostics.append(" | ");
+            diagnostics.append(line);
+        }
+        String diagnosticText = diagnostics.length() > 0
+                ? " diagnostics=\"" + diagnostics + "\""
+                : "";
+        CaltopoClient.CTInfo(
+                "DefaultPeerCoord",
+                "coordination status changed: state=" + state +
+                        " status=\"" + statusText + "\"" +
+                        diagnosticText
+        );
+    }
+
     private boolean shouldUseTrackerCoordinator() {
         return CaltopoClient.GetUsePeersFlag()
-                && !CaltopoClient.GetTrackerApiKey().isEmpty()
+                && isTrackerConfiguredForCoordination();
+    }
+
+    private boolean isTrackerConfiguredForCoordination() {
+        return !CaltopoClient.GetTrackerApiKey().isEmpty()
                 && !CaltopoClient.GetTrackerUrlPfx().isEmpty();
     }
 
@@ -313,5 +367,29 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             return right == null;
         }
         return left.equals(right);
+    }
+
+    @NonNull
+    private static String describePeers(@NonNull List<R2CMqttManager.PeerState> peers) {
+        if (peers.isEmpty()) return "Peers: none";
+        int onlineCount = 0;
+        StringBuilder names = new StringBuilder();
+        int listed = 0;
+        for (R2CMqttManager.PeerState peer : peers) {
+            if (peer.online) onlineCount++;
+            if (listed >= 3) continue;
+            String name = peer.name != null && !peer.name.isEmpty() ? peer.name : peer.guid;
+            if (name == null || name.isEmpty()) continue;
+            if (names.length() > 0) names.append(", ");
+            names.append(name);
+            listed++;
+        }
+        String suffix = names.length() > 0 ? " (" + names + ")" : "";
+        if (peers.size() > listed) {
+            suffix = suffix.isEmpty()
+                    ? " (+" + (peers.size() - listed) + ")"
+                    : suffix.substring(0, suffix.length() - 1) + ", +" + (peers.size() - listed) + ")";
+        }
+        return "Peers: " + onlineCount + "/" + peers.size() + " online" + suffix;
     }
 }

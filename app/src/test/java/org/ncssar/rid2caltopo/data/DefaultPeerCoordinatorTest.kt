@@ -70,6 +70,17 @@ class DefaultPeerCoordinatorTest {
     }
 
     @Test
+    fun statusBeforeStartNamesConfiguredTrackerCoordinator() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+
+        assertEquals("Tracker link degraded", coordinator.coordinationStatusText)
+        assertTrue(
+            coordinator.coordinationDiagnosticLines.toString(),
+            coordinator.coordinationDiagnosticLines.any { it == "Tracker coordinator waiting for map connection" }
+        )
+    }
+
+    @Test
     fun hardTrackerFailure_fallsBackToMqttCoordinator() {
         val coordinator = DefaultPeerCoordinator.getInstance()
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)

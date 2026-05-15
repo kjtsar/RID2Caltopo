@@ -118,6 +118,7 @@ public class CaltopoMap {
     private static CaltopoNode.MapNode MapNode;
     private static String FolderName;
     private static MapStatusListener.mapStatus MapStatus = MapStatusListener.mapStatus.down;
+    private static String LastStandaloneCoordinationScopeId = "";
     private static int WaitForGpsAccuracy;
     // NOTE: UsePeersFlag was removed as a static field.
     // MQTT peer coordination is now unconditional whenever the map is up.
@@ -281,7 +282,7 @@ public class CaltopoMap {
         String trackerUrl = CaltopoClient.GetTrackerCoordinationUrlPfx().trim();
         if (!trackerUrl.isEmpty()) {
             String trackerStatusUrl = trackerUrl.endsWith("/") ? trackerUrl + "r2c" : trackerUrl + "/r2c";
-            return "Drone/zone arbitration via r2c-tracker: " + trackerStatusUrl;
+            return "Zone arbitration via r2c-tracker: " + trackerStatusUrl;
         }
         String broker = R2CMqttManager.GetBrokerUri().trim();
         if (!broker.isEmpty()) {
@@ -430,16 +431,18 @@ public class CaltopoMap {
             return;
         }
         DisconnectInProgress = false;
+        if (mapNode == null) {
+            CTDebug(TAG, "OpenMap(): Map connection reset.");
+            ResetMapConnection(4_000L);
+            MapNode = null;
+            SetMapStatus(MapStatusListener.mapStatus.down, "Disconnect request.");
+            return;
+        }
         if (MapNode != null) {
             // don't wait around for reset operations to complete:
             ResetMapConnection(0);
         }
         MapNode = mapNode;
-        if (null == MapNode) {
-            CTDebug(TAG, "OpenMap(): Map connection reset.");
-            SetMapStatus(MapStatusListener.mapStatus.down, "Disconnect request.");
-            return;
-        }
 
         SetMapStatus(MapStatusListener.mapStatus.connecting, null);
         try {
@@ -645,7 +648,10 @@ public class CaltopoMap {
 
 
     public static void ResetMapConnection(long maxWaitInMilliseconds) {
-        if (MapStatus == MapStatusListener.mapStatus.down) return;
+        if (MapStatus == MapStatusListener.mapStatus.down && MapNode == null) {
+            stopPeerCoordinationForMapDisconnect();
+            return;
+        }
         DisconnectInProgress = true;
         MapCheckerDelay.stop();
         InitialMarkerPublishDelay.stop();
@@ -662,11 +668,17 @@ public class CaltopoMap {
                 maxWaitInMilliseconds = (maxWaitInMilliseconds - (System.currentTimeMillis() - startTime));
         }
         LiveTracksById.clear();
-        getCurrentRuntime().getPeerCoordinator().stop();
+        stopPeerCoordinationForMapDisconnect();
         PeerIdMap.clear();
         FolderId = null;
         ArchiveFolderId = null;
         LastErrorString = null;
+    }
+
+    private static void stopPeerCoordinationForMapDisconnect() {
+        LastStandaloneCoordinationScopeId = "";
+        getCurrentRuntime().getPeerCoordinator().setCoordinationIndicatorListener(null);
+        getCurrentRuntime().getPeerCoordinator().stop();
     }
 
     @NonNull
@@ -1116,6 +1128,9 @@ public class CaltopoMap {
             if ((location.getAccuracy() < MyLocation.getAccuracy()) ||
                     (distanceInMeters > (2.5*location.getAccuracy()))) updateNeeded = true;
         }
+        startTrackerCoordinationWithoutActiveMapIfNeeded(location);
+        getCurrentRuntime().getPeerCoordinator()
+                .updateMyPosition(location.getLatitude(), location.getLongitude());
 
         if (updateNeeded) {
             if (null == MyLocation) MyLocation = location;
@@ -1128,13 +1143,42 @@ public class CaltopoMap {
                     MyLocation.getLatitude(), MyLocation.getLongitude(), MyLocation.getAccuracy(),
                     distanceInMeters));
             MyLocation = location;
-            getCurrentRuntime().getPeerCoordinator()
-                    .updateMyPosition(location.getLatitude(), location.getLongitude());
             if (!InitialMarkerPublishPending && !DisconnectInProgress) {
                 publishMyDeviceMarkerIfPossible(location);
             }
             refreshDeviceMarkerColorIfNeeded();
         }
+    }
+
+    private static void startTrackerCoordinationWithoutActiveMapIfNeeded(@NonNull Location location) {
+        if (!CaltopoClient.GetUsePeersFlag()) return;
+        if (MapStatus == MapStatusListener.mapStatus.up && MapNode != null) return;
+        if (CaltopoClient.GetTrackerCoordinationUrlPfx().isEmpty() ||
+                CaltopoClient.GetTrackerCoordinationApiKey().isEmpty()) {
+            return;
+        }
+        String scopeId = CaltopoClient.GetTrackerCoordinationScopeId();
+        if (scopeId.isEmpty()) return;
+        PeerCoordinator.CoordinationIndicatorState currentState =
+                getCurrentRuntime().getPeerCoordinator().getCoordinationIndicatorState();
+        if (scopeId.equals(LastStandaloneCoordinationScopeId) &&
+                currentState != PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED) {
+            return;
+        }
+        LastStandaloneCoordinationScopeId = scopeId;
+        CTInfo(TAG, String.format(Locale.US,
+                "startTrackerCoordinationWithoutActiveMapIfNeeded(): scopeId='%s' lat=%.6f lng=%.6f %s",
+                scopeId,
+                location.getLatitude(),
+                location.getLongitude(),
+                CaltopoClient.DescribeTrackerCredentialSelection("coordination")));
+        getCurrentRuntime().getPeerCoordinator().start(
+                scopeId,
+                GetMyUUID(),
+                R2CActivity.MyDeviceName,
+                null);
+        getCurrentRuntime().getPeerCoordinator()
+                .setCoordinationIndicatorListener(CaltopoMap::onCoordinationIndicatorStateChanged);
     }
 
     @NonNull

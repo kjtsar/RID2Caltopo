@@ -52,7 +52,9 @@ internal class DroneAltitudeCoordinator(
     private val demGroundByRemoteId     = HashMap<String, DroneAglState>()
     private val demKeyByRemoteId        = HashMap<String, String>()
     private val demCorrectionByRemoteId = HashMap<String, Double>()
+    private val demScaleToMetersByRemoteId = HashMap<String, Double>()
     private val demPending              = HashSet<String>()
+    private val demCorrectionPending    = HashSet<String>()
     private val demLastAttemptMs        = HashMap<String, Long>()
 
     // ── Heading state — keyed by designator (mappedId) ──────────────────────────────────────
@@ -198,13 +200,15 @@ internal class DroneAltitudeCoordinator(
                 if (isSealed) {
                     val demGround = demGroundByRemoteId[remoteId]?.groundM
                     if (demGround != null) {
-                        val refinedCorrF = ridTakeoff - demGround
+                        val demScaleToMeters = inferAndStoreDemScaleToMeters(remoteId, ridTakeoff, demGround)
+                        val refinedCorrF = ridTakeoff - (demGround * demScaleToMeters)
                         demCorrectionByRemoteId[remoteId] = refinedCorrF
                         if (CTDebugEnabled(tag)) CTDebug(
                             tag,
                             "AGL correctionF refined at seal for $designator: " +
                                 "takeoffAlt=${"%.1f".format(ridTakeoff)}m " +
-                                "demGround=${"%.1f".format(demGround)}m " +
+                                "demGroundRaw=${"%.1f".format(demGround)} " +
+                                "demScale=${"%.4f".format(demScaleToMeters)} " +
                                 "correctionF=${"%.1f".format(refinedCorrF)}m"
                         )
                     }
@@ -252,14 +256,16 @@ internal class DroneAltitudeCoordinator(
         demCorrectionByRemoteId.remove(remoteId)
         val demGround = demGroundByRemoteId[remoteId]?.groundM
         if (demGround != null) {
-            val correctionF = calibratedTakeoffAltM - demGround
+            val demScaleToMeters = inferAndStoreDemScaleToMeters(remoteId, calibratedTakeoffAltM, demGround)
+            val correctionF = calibratedTakeoffAltM - (demGround * demScaleToMeters)
             demCorrectionByRemoteId[remoteId] = correctionF
             if (CTDebugEnabled(tag)) CTDebug(
                 tag,
                 "ATO+AGL manually calibrated for $designator: " +
                     "droneAlt=${"%.1f".format(currentAltM)}m (${"%.0f".format(currentAltM * METERS_TO_FEET)}ft) " +
                     "takeoffTrackAlt=${"%.1f".format(calibratedTakeoffAltM)}m " +
-                    "demGround=${"%.1f".format(demGround)}m " +
+                    "demGroundRaw=${"%.1f".format(demGround)} " +
+                    "demScale=${"%.4f".format(demScaleToMeters)} " +
                     "correctionF=${"%.1f".format(correctionF)}m"
             )
         } else {
@@ -280,20 +286,25 @@ internal class DroneAltitudeCoordinator(
 
     /**
      * Resets per-flight DEM and heading state when the Caltopo map reconnects.
-     * Preserves MANUAL calibrations (and their AGL corrections) — the user explicitly set
-     * those and forcing a re-calibration on reconnect would be disruptive.  AUTO/AUTO_SEALED
-     * entries are derived from live RID data and will be re-derived from the next packets.
+     * Preserves MANUAL and AUTO_SEALED calibrations (and their AGL corrections). MANUAL is an
+     * explicit operator reference; AUTO_SEALED is the flight's converged takeoff reference.
+     * Rebuilding either one from the next current-position DEM sample would silently move the
+     * takeoff ground reference to wherever the drone happens to be during the reconnect.
      */
     fun onMapReconnect() {
         demGroundByRemoteId.clear()
         demPending.clear()
+        demCorrectionPending.clear()
         demLastAttemptMs.clear()
         demKeyByRemoteId.clear()
-        // Preserve MANUAL calibrations and their corrections.
+        // Preserve locked calibrations and their corrections.
         calibrationByRemoteId.keys.retainAll { key ->
-            calibrationByRemoteId[key]?.seedSource == AtoSeedSource.MANUAL
+            shouldPreserveCalibrationOnMapReconnect(calibrationByRemoteId[key])
         }
         demCorrectionByRemoteId.keys.retainAll { key ->
+            calibrationByRemoteId.containsKey(key)
+        }
+        demScaleToMetersByRemoteId.keys.retainAll { key ->
             calibrationByRemoteId.containsKey(key)
         }
         telemetryHeading.clear()
@@ -347,17 +358,8 @@ internal class DroneAltitudeCoordinator(
                         //
                         // Computed only once (on first DEM result after calibration is ready).
                         // The AUTO_SEALED path later refines this with the converged EMA value.
-                        val cal = calibrationByRemoteId[remoteId]
-                        if (cal != null && !demCorrectionByRemoteId.containsKey(remoteId)) {
-                            val correctionF = cal.takeoffTrackAltitudeM - sample.elevationMeters
-                            demCorrectionByRemoteId[remoteId] = correctionF
-                            if (CTDebugEnabled(tag)) CTDebug(
-                                tag,
-                                "AGL correctionF set for remoteId=$remoteId (${cal.seedSource}): " +
-                                    "takeoffTrackAlt=${"%.1f".format(cal.takeoffTrackAltitudeM)}m " +
-                                    "demGround=${"%.1f".format(sample.elevationMeters)}m " +
-                                    "correctionF=${"%.1f".format(correctionF)}m"
-                            )
+                        if (!demCorrectionByRemoteId.containsKey(remoteId)) {
+                            ensureCorrectionFromTakeoffDem(remoteId, designator, lat, lng, sample.elevationMeters)
                         }
                     } else {
                         // DEM fetch failed; mark existing data stale so the UI shows '?'
@@ -369,6 +371,63 @@ internal class DroneAltitudeCoordinator(
                 }
             }
         }
+    }
+
+    private fun ensureCorrectionFromTakeoffDem(
+        remoteId: String,
+        designator: String,
+        currentLat: Double,
+        currentLng: Double,
+        currentDemRaw: Double,
+    ) {
+        val cal = calibrationByRemoteId[remoteId] ?: return
+        val spec = droneStates[designator]?.source
+        val takeoffLat = spec?.takeoffLat ?: 0.0
+        val takeoffLng = spec?.takeoffLng ?: 0.0
+        if (spec?.hasTakeoffLocation() == true &&
+            takeoffLat.isFinite() &&
+            takeoffLng.isFinite() &&
+            !(takeoffLat == 0.0 && takeoffLng == 0.0) &&
+            demElevationService.cacheKey(takeoffLat, takeoffLng) != demElevationService.cacheKey(currentLat, currentLng)
+        ) {
+            if (demCorrectionPending.add(remoteId)) {
+                scope.launch(Dispatchers.IO) {
+                    val takeoffSample = demElevationService.sampleElevationMeters(takeoffLat, takeoffLng)
+                    withContext(Dispatchers.Main.immediate) {
+                        demCorrectionPending.remove(remoteId)
+                        if (takeoffSample != null && !demCorrectionByRemoteId.containsKey(remoteId)) {
+                            setCorrectionFromDem(remoteId, cal, takeoffSample.elevationMeters, "takeoff")
+                            recomputeDisplayState(designator)
+                        }
+                    }
+                }
+            }
+        } else {
+            setCorrectionFromDem(remoteId, cal, currentDemRaw, "current")
+        }
+    }
+
+    private fun setCorrectionFromDem(
+        remoteId: String,
+        cal: DroneAltitudeCalibration,
+        demGroundRaw: Double,
+        sourceLabel: String,
+    ) {
+        val demScaleToMeters = inferAndStoreDemScaleToMeters(
+            remoteId,
+            cal.takeoffTrackAltitudeM,
+            demGroundRaw
+        )
+        val correctionF = cal.takeoffTrackAltitudeM - (demGroundRaw * demScaleToMeters)
+        demCorrectionByRemoteId[remoteId] = correctionF
+        if (CTDebugEnabled(tag)) CTDebug(
+            tag,
+            "AGL correctionF set for remoteId=$remoteId (${cal.seedSource}/$sourceLabel): " +
+                "takeoffTrackAlt=${"%.1f".format(cal.takeoffTrackAltitudeM)}m " +
+                "demGroundRaw=${"%.1f".format(demGroundRaw)} " +
+                "demScale=${"%.4f".format(demScaleToMeters)} " +
+                "correctionF=${"%.1f".format(correctionF)}m"
+        )
     }
 
     // ── Display state recompute ───────────────────────────────────────────────────────────────
@@ -401,7 +460,10 @@ internal class DroneAltitudeCoordinator(
         // AGL = droneAlt − demGround − correctionF when calibrated.
         // Before calibration, fall back to ridHeight (relative baro from takeoff point).
         val aglFt = if (correctionM != null) {
-            (freshAgl ?: aglState)?.let { (altM - it.groundM - correctionM) * METERS_TO_FEET }
+            (freshAgl ?: aglState)?.let {
+                val demScaleToMeters = demScaleToMetersByRemoteId[remoteId] ?: 1.0
+                (altM - (it.groundM * demScaleToMeters) - correctionM) * METERS_TO_FEET
+            }
         } else {
             ridHeightAtoM?.let { it * METERS_TO_FEET }
         }
@@ -426,6 +488,21 @@ internal class DroneAltitudeCoordinator(
         return ridHeightAtoM ?: cal?.let { altM - it.takeoffTrackAltitudeM }
     }
 
+    private fun inferAndStoreDemScaleToMeters(
+        remoteId: String,
+        referenceGroundM: Double,
+        demGroundRaw: Double
+    ): Double {
+        demScaleToMetersByRemoteId[remoteId]?.let { return it }
+        val scale = inferDemScaleToMeters(
+            droneAltMeters = referenceGroundM,
+            knownGroundMeters = referenceGroundM,
+            droneDemRaw = demGroundRaw
+        )
+        demScaleToMetersByRemoteId[remoteId] = scale
+        return scale
+    }
+
     private fun normalizeDegrees(value: Double): Double {
         val normalized = value % 360.0
         return if (normalized < 0.0) normalized + 360.0 else normalized
@@ -437,5 +514,12 @@ internal class DroneAltitudeCoordinator(
         private const val DEM_RETRY_INTERVAL_MS = 2_000L
         private const val METERS_TO_FEET = 3.28084
         private const val CALIBRATE_ATO_TARGET_FT = 50.0
+
+        internal fun shouldPreserveCalibrationOnMapReconnect(
+            calibration: DroneAltitudeCalibration?
+        ): Boolean {
+            return calibration?.seedSource == AtoSeedSource.MANUAL ||
+                calibration?.seedSource == AtoSeedSource.AUTO_SEALED
+        }
     }
 }

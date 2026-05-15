@@ -1385,6 +1385,39 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.trackerUrlPfx;
     }
 
+    @NonNull
+    public static String GetTrackerCoordinationScopeId() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        String currentMapId = CaltopoMap.GetMapId();
+        if (!currentMapId.isEmpty()) return currentMapId;
+
+        CaltopoProfileRecord preferred = GetPreferredCoordinationTrackerProfile();
+        if (preferred != null && preferred.targetMapId != null && !preferred.targetMapId.isEmpty()) {
+            return preferred.targetMapId;
+        }
+
+        CaltopoProfileRecord active = GetActiveCaltopoProfile();
+        String profileId = active != null && active.profileId != null && !active.profileId.isEmpty()
+                ? active.profileId
+                : "default";
+        String incident = GetIncident();
+        String opPeriod = GetOpPeriod();
+        return String.format(Locale.US,
+                "profile:%s:incident:%s:op:%s",
+                sanitizeTrackerScopeComponent(profileId),
+                sanitizeTrackerScopeComponent(incident),
+                sanitizeTrackerScopeComponent(opPeriod));
+    }
+
+    @NonNull
+    private static String sanitizeTrackerScopeComponent(@Nullable String value) {
+        if (value == null) return "unknown";
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) return "unknown";
+        return trimmed.replaceAll("[^A-Za-z0-9._-]+", "_");
+    }
+
     public static int RemoveExpiredCaltopoProfiles(long nowMs, boolean disconnectIfActive) {
         ClientClassState ccs = GetState();
         if (ccs.caltopoProfiles == null || ccs.caltopoProfiles.isEmpty()) return 0;
@@ -2788,7 +2821,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
         if (DebugLogPath == null) try {
             CTDebug(TAG, "InitArchiveDir(): Initializing log stream...");
-            String filepath = "Log_" + TimeDatestampString(ScanningService.GetStartTimeInMsec());
+            String filepath = BuildDebugLogFilename(System.currentTimeMillis());
             Context ctxt = R2CApplication.getAppCtxt();
             if (null != ctxt) try {
                 DocumentFile dataFilepath = todaysArchiveDir.createFile("text/plain", filepath);
@@ -2825,6 +2858,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         } catch (Exception e) {
             Log.e(TAG, "CTError: Not able to open DebugOutputStream: " + e);
         }
+    }
+
+    static String BuildDebugLogFilename(long startTimeInMsec) {
+        return "Log_" + TimeDatestampString(startTimeInMsec) + ".txt";
     }
 
     public static void SetArchiveUri(@NonNull Uri pathUri) {

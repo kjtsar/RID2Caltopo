@@ -108,6 +108,23 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun diagnosticsReportPendingTrackerAck() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        coordinator.markHeartbeatSentForTesting(7L, clock.nowMs)
+
+        clock.advanceBy(2_000L)
+
+        assertEquals("Tracker link healthy", coordinator.coordinationStatusText)
+        val diagnosticLines = coordinator.coordinationDiagnosticLines
+        assertTrue(diagnosticLines.any { it == "Hello ack 2 sec ago" })
+        assertTrue(
+            diagnosticLines.toString(),
+            diagnosticLines.any { it == "Waiting for heartbeat ack seq 7 2 sec" }
+        )
+    }
+
+    @Test
     fun ownerAssignedToLocalZone_setsLocalOwner() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         val drone = CtDroneSpec("DRONE1")

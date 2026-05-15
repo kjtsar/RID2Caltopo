@@ -308,7 +308,7 @@ internal data class DroneMapPoint(
 
 internal data class DroneComplianceState(
     val aglM: Double?,
-    val rangeFromHomeM: Double?,
+    val rangeFromTakeoffM: Double?,
     val nearAgl: Boolean,
     val nearRange: Boolean,
     val overAgl: Boolean,
@@ -561,6 +561,7 @@ internal fun SplitMapPane(
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val currentFlightTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     var trackOverlayRefreshToken by remember { mutableIntStateOf(0) }
+    var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
     var lastRenderStats by remember { mutableStateOf("") }
@@ -1622,6 +1623,12 @@ internal fun SplitMapPane(
         initialViewportApplied = persistedViewport != null
         initialViewportArtifactCount = -1
     }
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            delay(2_000L)
+            localDeviceRefreshToken++
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -1812,23 +1819,7 @@ internal fun SplitMapPane(
             val aglFeet  = bubbleDisplayState?.aglFt
             val aglStale = bubbleDisplayState?.aglStale ?: false
             val atoFeet  = bubbleDisplayState?.atoFt
-            val myLocation = CaltopoMap.GetMyLocation()
-            val rangeFeet = if (myLocation != null &&
-                myLocation.latitude.isFinite() &&
-                myLocation.longitude.isFinite()
-            ) {
-                val out = FloatArray(1)
-                Location.distanceBetween(
-                    myLocation.latitude,
-                    myLocation.longitude,
-                    point.lat,
-                    point.lng,
-                    out
-                )
-                if (out[0].isFinite()) out[0].toDouble() * METERS_TO_FEET else null
-            } else {
-                null
-            }
+            val rangeFeet = distanceFeetFromTakeoff(point)
             val detailLines = buildList {
                 add("Location: ${CoordinateFormatter.format(point.lat, point.lng, coordinateDisplayFormat)} (${coordinateDisplayFormat.label})")
                 add("AGL: ${aglFeet?.let { "${"%.0f".format(it)}'${if (aglStale) "?" else ""}" } ?: "--"}")
@@ -2031,6 +2022,7 @@ internal fun SplitMapPane(
             },
             update = { mapView ->
                 trackOverlayRefreshToken
+                localDeviceRefreshToken
                 val uiNowWallMsec = System.currentTimeMillis()
                 mapBounds = mapView.boundingBox
                 val tileSource = when (baseLayer) {
@@ -2319,6 +2311,9 @@ internal fun SplitMapPane(
                         } else {
                             localDeviceName
                         }
+                        val statusLines = localDeviceStatusLines()
+                        snippet = statusLines.firstOrNull().orEmpty()
+                        setSubDescription(statusLines.drop(1).joinToString("<br/>"))
                     }
                     mapView.overlays.add(localMarker)
                     managedOverlays.add(localMarker)
@@ -2326,7 +2321,6 @@ internal fun SplitMapPane(
 
                 val iconLimitAglM = AGL_LIMIT_FT * FT_TO_METERS
                 val nearIconAglM = (AGL_LIMIT_FT - AGL_ICON_NEAR_DELTA_FT) * FT_TO_METERS
-                val homeLocation = CaltopoMap.GetMyLocation()
                 dronePoints.forEach { point ->
                     val pointLatencyKey =
                         "${point.timestampMsec}|${"%.6f".format(Locale.US, point.lat)}|${"%.6f".format(Locale.US, point.lng)}|${"%.1f".format(Locale.US, point.altitudeM)}"
@@ -2360,19 +2354,7 @@ internal fun SplitMapPane(
                     val labelAglFeet = displayState?.aglFt
                     val labelAglStale = displayState?.aglStale ?: false
                     val labelAtoFeet = displayState?.atoFt
-                    val labelRangeFeet = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
-                        val out = FloatArray(1)
-                        Location.distanceBetween(
-                            homeLocation.latitude,
-                            homeLocation.longitude,
-                            renderLat,
-                            renderLng,
-                            out
-                        )
-                        if (out[0].isFinite()) out[0].toDouble() * METERS_TO_FEET else null
-                    } else {
-                        null
-                    }
+                    val labelRangeFeet = distanceFeetFromTakeoff(point, renderLat, renderLng)
                     val marker = Marker(mapView).apply {
                         position = GeoPoint(renderLat, renderLng)
                         val effectiveAglM = labelAglFeet?.let { it / METERS_TO_FEET }
@@ -2450,26 +2432,14 @@ internal fun SplitMapPane(
                     val compDisplayState = viewModel.droneDisplayStateFor(point.designator)
                     val aglM    = compDisplayState?.aglFt?.let { it / METERS_TO_FEET }
                     val staleDem = compDisplayState?.aglStale ?: false
-                    val rangeM = if (homeLocation != null && homeLocation.latitude.isFinite() && homeLocation.longitude.isFinite()) {
-                        val out = FloatArray(1)
-                        Location.distanceBetween(
-                            homeLocation.latitude,
-                            homeLocation.longitude,
-                            point.lat,
-                            point.lng,
-                            out
-                        )
-                        if (out[0].isFinite()) out[0].toDouble() else null
-                    } else {
-                        null
-                    }
+                    val rangeM = distanceFeetFromTakeoff(point)?.let { it * FT_TO_METERS }
                     val nearAgl  = aglM != null && aglM >= nearAglM
                     val overAgl  = aglM != null && aglM >= limitAglM
                     val nearRange = rangeM != null && rangeM >= nearRangeM
                     val overRange = rangeM != null && rangeM >= limitRangeM
                     complianceByDesignator[point.designator] = DroneComplianceState(
                         aglM = aglM,
-                        rangeFromHomeM = rangeM,
+                        rangeFromTakeoffM = rangeM,
                         nearAgl = nearAgl,
                         nearRange = nearRange,
                         overAgl = overAgl,
@@ -4118,6 +4088,14 @@ private fun localDeviceMarkerColor(): String {
     }
 }
 
+private fun localDeviceStatusLines(): List<String> {
+    val coordinator = R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+    return buildList {
+        add(coordinator.coordinationStatusText)
+        addAll(coordinator.coordinationDiagnosticLines)
+    }
+}
+
 private fun geoPointFromLngLat(coords: JSONArray): GeoPoint? {
     if (coords.length() < 2) return null
     val lng = coords.optDouble(0, Double.NaN)
@@ -4175,6 +4153,22 @@ private fun nearestDistanceMeters(dronePoint: DroneMapPoint, artifactPoints: Lis
         }
     }
     return if (best.isFinite()) best else null
+}
+
+private fun distanceFeetFromTakeoff(
+    point: DroneMapPoint,
+    lat: Double = point.lat,
+    lng: Double = point.lng
+): Double? {
+    val spec = point.droneSpec ?: return null
+    if (!spec.hasTakeoffLocation()) return null
+    val takeoffLat = spec.takeoffLat
+    val takeoffLng = spec.takeoffLng
+    if (!takeoffLat.isFinite() || !takeoffLng.isFinite()) return null
+    if (!lat.isFinite() || !lng.isFinite()) return null
+    val result = FloatArray(1)
+    Location.distanceBetween(takeoffLat, takeoffLng, lat, lng, result)
+    return if (result[0].isFinite()) result[0].toDouble() * METERS_TO_FEET else null
 }
 
 private fun nearestLocalTrackTailDistanceMeters(

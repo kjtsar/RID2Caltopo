@@ -391,6 +391,69 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 : CoordinationIndicatorState.DEGRADED;
     }
 
+    @NonNull
+    @Override
+    public String getCoordinationStatusText() {
+        CoordinationIndicatorState state = getCoordinationIndicatorState();
+        switch (state) {
+            case HEALTHY:
+                return "Tracker link healthy";
+            case DEGRADED:
+                return "Tracker link degraded";
+            case UNCONFIGURED:
+            default:
+                return "Tracker link not configured";
+        }
+    }
+
+    @NonNull
+    @Override
+    public List<String> getCoordinationDiagnosticLines() {
+        ArrayList<String> lines = new ArrayList<>();
+        long nowMs = nowMs();
+        if (!started) {
+            lines.add("Tracker coordinator stopped");
+            return lines;
+        }
+        if (trackerWsUrl == null || trackerApiKey == null) {
+            lines.add("Tracker websocket not configured");
+            return lines;
+        }
+
+        if (helloAckAtMs > 0L) {
+            lines.add("Hello ack " + formatDuration(nowMs - helloAckAtMs) + " ago");
+        } else if (helloSeqSentAtMs > 0L) {
+            lines.add("Waiting for hello ack " + formatDuration(nowMs - helloSeqSentAtMs));
+        } else {
+            lines.add("Waiting for tracker hello");
+        }
+
+        if (lastHeartbeatAckAtMs > 0L) {
+            lines.add(String.format(Locale.US,
+                    "Heartbeat ack %s ago (seq %d)",
+                    formatDuration(nowMs - lastHeartbeatAckAtMs),
+                    lastHeartbeatSeqAcked));
+        } else if (lastHeartbeatSentAtMs > 0L) {
+            lines.add(String.format(Locale.US,
+                    "Waiting for heartbeat ack seq %d %s",
+                    lastHeartbeatSeqSent,
+                    formatDuration(nowMs - lastHeartbeatSentAtMs)));
+        }
+
+        if (reconnectPending) {
+            lines.add("Reconnect pending in " + formatDuration(Math.max(reconnectTargetAtMs - nowMs, 0L)));
+        } else if (!lastReconnectCause.isEmpty() && !"connected".equals(lastReconnectCause)) {
+            lines.add("Last tracker event: " + lastReconnectCause);
+        }
+
+        if (lastCloseCode != 0 || !lastCloseReason.isEmpty()) {
+            String reason = lastCloseReason.isEmpty() ? "" : " " + lastCloseReason;
+            lines.add("Last close: " + lastCloseCode + reason);
+        }
+
+        return lines;
+    }
+
     private boolean isConnected() {
         TrackerCoordinationTransport activeTransport = transport;
         return activeTransport != null && activeTransport.isConnected();
@@ -1056,6 +1119,24 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private long ageSince(long timestampMs) {
         if (timestampMs <= 0) return -1L;
         return nowMs() - timestampMs;
+    }
+
+    @NonNull
+    private static String formatDuration(long durationMs) {
+        long safeDurationMs = Math.max(durationMs, 0L);
+        if (safeDurationMs < 1_000L) {
+            return safeDurationMs + " ms";
+        }
+        long seconds = safeDurationMs / 1_000L;
+        if (seconds < 60L) {
+            return seconds + " sec";
+        }
+        long minutes = seconds / 60L;
+        long remainingSeconds = seconds % 60L;
+        if (remainingSeconds == 0L) {
+            return minutes + " min";
+        }
+        return minutes + " min " + remainingSeconds + " sec";
     }
 
     static void setTransportFactoryForTesting(@Nullable TrackerCoordinationTransportFactory factory) {

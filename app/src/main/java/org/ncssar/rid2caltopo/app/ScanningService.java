@@ -91,6 +91,7 @@ public class ScanningService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        ScannerUptime.restartTimer();
         CTDebug(TAG, String.format(Locale.US,
                 "onCreate(): Starting ScanningService:0x%x in pid:%d",
                 this.hashCode(), Process.myPid()));

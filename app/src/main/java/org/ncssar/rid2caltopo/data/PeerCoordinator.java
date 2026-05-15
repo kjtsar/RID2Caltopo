@@ -3,6 +3,7 @@ package org.ncssar.rid2caltopo.data;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.util.Collections;
 import java.util.List;
 
 public interface PeerCoordinator {
@@ -38,4 +39,20 @@ public interface PeerCoordinator {
     void setCoordinationIndicatorListener(@Nullable CoordinationIndicatorListener listener);
     @NonNull List<R2CMqttManager.PeerState> getPeerList();
     @NonNull CoordinationIndicatorState getCoordinationIndicatorState();
+    @NonNull
+    default String getCoordinationStatusText() {
+        switch (getCoordinationIndicatorState()) {
+            case HEALTHY:
+                return "R2C link healthy";
+            case DEGRADED:
+                return "R2C link degraded";
+            case UNCONFIGURED:
+            default:
+                return "R2C link not configured";
+        }
+    }
+    @NonNull
+    default List<String> getCoordinationDiagnosticLines() {
+        return Collections.emptyList();
+    }
 }

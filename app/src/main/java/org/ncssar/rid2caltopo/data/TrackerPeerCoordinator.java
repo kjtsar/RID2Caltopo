@@ -979,6 +979,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private void onDroneConfirmedByPeer(@NonNull JSONObject jo) {
         String remoteId = jo.optString("remoteId");
         if (remoteId.isEmpty()) return;
+        CTInfo(TAG, String.format(Locale.US,
+                "drone_confirmed received: remoteId=%s confirmedBy=%s mappedId='%s'",
+                remoteId,
+                firstNonEmpty(jo.optString("confirmedByGuid"), firstNonEmpty(jo.optString("guid"), jo.optString("zoneId"))),
+                jo.optString("mappedId")));
         CaltopoClient.ApplyPeerDroneSpecConfirmation(
                 remoteId,
                 jo.optString("org"),

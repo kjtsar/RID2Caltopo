@@ -1,0 +1,139 @@
+package org.ncssar.rid2caltopo.ui
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class DroneSignalLossAlertCenterTest {
+    @Test
+    fun effectiveIdleThreshold_keepsBootstrapFloorAfterCadenceIsLearned() {
+        val thresholdMs = DroneSignalLossAlertCenter.effectiveIdleThresholdMsForTests(
+            learnedIntervalMs = 2_231L,
+            learnedSamples = 57,
+            maxTrackDelayMs = 30_000L
+        )
+
+        assertEquals(10_000L, thresholdMs)
+    }
+
+    @Test
+    fun effectiveIdleThreshold_usesDynamicThresholdWhenAboveBootstrapFloor() {
+        val thresholdMs = DroneSignalLossAlertCenter.effectiveIdleThresholdMsForTests(
+            learnedIntervalMs = 6_000L,
+            learnedSamples = 3,
+            maxTrackDelayMs = 30_000L
+        )
+
+        assertEquals(15_000L, thresholdMs)
+    }
+
+    @Test
+    fun returnedToBridge_requiresPriorBridgeVerification() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isReturnedToBridgeForTests(
+                bridgeVerified = false,
+                distanceFt = 10.0,
+                bridgeCheckDistanceFt = 20.0
+            )
+        )
+    }
+
+    @Test
+    fun returnedToBridge_detectsVerifiedDroneInsideBridgeRadius() {
+        assertEquals(
+            true,
+            DroneSignalLossAlertCenter.isReturnedToBridgeForTests(
+                bridgeVerified = true,
+                distanceFt = 20.0,
+                bridgeCheckDistanceFt = 20.0
+            )
+        )
+    }
+
+    @Test
+    fun returnedToBridge_keepsVerifiedDroneEligibleOutsideBridgeRadius() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isReturnedToBridgeForTests(
+                bridgeVerified = true,
+                distanceFt = 20.1,
+                bridgeCheckDistanceFt = 20.0
+            )
+        )
+    }
+
+    @Test
+    fun stationaryNearBridge_requiresBridgeVerification() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isStationaryNearBridgeForTests(
+                bridgeVerified = false,
+                stationaryRidReports = true,
+                referenceDistanceFt = 44.0,
+                outOfRangeDistanceFt = 300.0
+            )
+        )
+    }
+
+    @Test
+    fun stationaryNearBridge_suppressesVerifiedStationaryDroneInsideOorRadius() {
+        assertEquals(
+            true,
+            DroneSignalLossAlertCenter.isStationaryNearBridgeForTests(
+                bridgeVerified = true,
+                stationaryRidReports = true,
+                referenceDistanceFt = 44.0,
+                outOfRangeDistanceFt = 300.0
+            )
+        )
+    }
+
+    @Test
+    fun stationaryNearBridge_keepsMovingDroneEligible() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isStationaryNearBridgeForTests(
+                bridgeVerified = true,
+                stationaryRidReports = false,
+                referenceDistanceFt = 44.0,
+                outOfRangeDistanceFt = 300.0
+            )
+        )
+    }
+
+    @Test
+    fun returnedToTakeoff_requiresBridgeVerification() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isReturnedToTakeoffForTests(
+                bridgeVerified = false,
+                takeoffDistanceFt = 10.0,
+                returnToTakeoffDistanceFt = 30.0
+            )
+        )
+    }
+
+    @Test
+    fun returnedToTakeoff_detectsVerifiedDroneInsideTakeoffRadius() {
+        assertEquals(
+            true,
+            DroneSignalLossAlertCenter.isReturnedToTakeoffForTests(
+                bridgeVerified = true,
+                takeoffDistanceFt = 30.0,
+                returnToTakeoffDistanceFt = 30.0
+            )
+        )
+    }
+
+    @Test
+    fun returnedToTakeoff_keepsVerifiedDroneEligibleOutsideTakeoffRadius() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isReturnedToTakeoffForTests(
+                bridgeVerified = true,
+                takeoffDistanceFt = 30.1,
+                returnToTakeoffDistanceFt = 30.0
+            )
+        )
+    }
+}

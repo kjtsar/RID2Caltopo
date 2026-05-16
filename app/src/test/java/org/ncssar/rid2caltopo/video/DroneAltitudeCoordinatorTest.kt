@@ -1,0 +1,87 @@
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class DroneAltitudeCoordinatorTest {
+    @Test
+    fun shouldPreserveCalibrationOnMapReconnect_keepsLockedReferences() {
+        assertTrue(
+            DroneAltitudeCoordinator.shouldPreserveCalibrationOnMapReconnect(
+                DroneAltitudeCalibration(512.4, AtoSeedSource.AUTO_SEALED)
+            )
+        )
+        assertTrue(
+            DroneAltitudeCoordinator.shouldPreserveCalibrationOnMapReconnect(
+                DroneAltitudeCalibration(512.4, AtoSeedSource.MANUAL)
+            )
+        )
+    }
+
+    @Test
+    fun shouldPreserveCalibrationOnMapReconnect_dropsUnsealedAutoReference() {
+        assertFalse(
+            DroneAltitudeCoordinator.shouldPreserveCalibrationOnMapReconnect(
+                DroneAltitudeCalibration(512.4, AtoSeedSource.AUTO)
+            )
+        )
+        assertFalse(DroneAltitudeCoordinator.shouldPreserveCalibrationOnMapReconnect(null))
+    }
+
+    @Test
+    fun calculateDemBackedAglMeters_prefersAtoOverDriftingAbsoluteAltitude() {
+        val calibration = DroneAltitudeCalibration(522.6, AtoSeedSource.AUTO_SEALED)
+        val demScaleToMeters = 0.3048
+        val takeoffGroundRaw = 1567.5
+        val correctionM = calibration.takeoffTrackAltitudeM - (takeoffGroundRaw * demScaleToMeters)
+
+        val aglAtReturn = DroneAltitudeCoordinator.calculateDemBackedAglMeters(
+            altM = 520.0,
+            ridHeightAtoM = 0.0,
+            calibration = calibration,
+            correctionM = correctionM,
+            demGroundRaw = takeoffGroundRaw,
+            demScaleToMeters = demScaleToMeters,
+        )
+
+        assertEquals(0.0, aglAtReturn, 0.000001)
+    }
+
+    @Test
+    fun calculateDemBackedAglMeters_appliesTerrainDeltaToAto() {
+        val calibration = DroneAltitudeCalibration(522.6, AtoSeedSource.AUTO_SEALED)
+        val demScaleToMeters = 0.3048
+        val takeoffGroundRaw = 1567.5
+        val correctionM = calibration.takeoffTrackAltitudeM - (takeoffGroundRaw * demScaleToMeters)
+
+        val aglOverLowerGround = DroneAltitudeCoordinator.calculateDemBackedAglMeters(
+            altM = 520.0,
+            ridHeightAtoM = 10.0,
+            calibration = calibration,
+            correctionM = correctionM,
+            demGroundRaw = takeoffGroundRaw - (5.0 / demScaleToMeters),
+            demScaleToMeters = demScaleToMeters,
+        )
+
+        assertEquals(15.0, aglOverLowerGround, 0.000001)
+    }
+
+    @Test
+    fun calculateDemBackedAglMeters_fallsBackToAbsoluteAltitudeWithoutAto() {
+        val calibration = DroneAltitudeCalibration(522.6, AtoSeedSource.AUTO_SEALED)
+        val demScaleToMeters = 0.3048
+        val takeoffGroundRaw = 1567.5
+        val correctionM = calibration.takeoffTrackAltitudeM - (takeoffGroundRaw * demScaleToMeters)
+
+        val aglWithoutAto = DroneAltitudeCoordinator.calculateDemBackedAglMeters(
+            altM = 520.0,
+            ridHeightAtoM = null,
+            calibration = calibration,
+            correctionM = correctionM,
+            demGroundRaw = takeoffGroundRaw,
+            demScaleToMeters = demScaleToMeters,
+        )
+
+        assertEquals(-2.6, aglWithoutAto, 0.000001)
+    }
+}

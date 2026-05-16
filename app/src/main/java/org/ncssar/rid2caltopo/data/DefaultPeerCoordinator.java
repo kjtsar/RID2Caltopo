@@ -176,6 +176,23 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public void onDroneConfirmed(@NonNull String remoteId,
+                                 long flightStartMsec,
+                                 @NonNull String org,
+                                 @NonNull String model,
+                                 @NonNull String owner,
+                                 @NonNull String mappedId) {
+        activeCoordinator.onDroneConfirmed(
+                remoteId,
+                flightStartMsec,
+                org,
+                model,
+                owner,
+                mappedId
+        );
+    }
+
+    @Override
     public boolean isLocalOwner(@NonNull String remoteId) {
         return activeCoordinator.isLocalOwner(remoteId);
     }

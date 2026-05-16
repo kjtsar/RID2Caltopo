@@ -466,9 +466,11 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                             )
                         },
                         onSave = {
+                            CTDebug("R2CActivity", "Drone confirmation Save clicked: remoteId=${confirmationState.remoteId}")
                             localViewModel.savePendingDroneConfirmation()
                         },
                         onUnknown = {
+                            CTDebug("R2CActivity", "Drone confirmation Ignore clicked: remoteId=${confirmationState.remoteId}")
                             localViewModel.markPendingDroneConfirmationUnknown()
                         },
                     )

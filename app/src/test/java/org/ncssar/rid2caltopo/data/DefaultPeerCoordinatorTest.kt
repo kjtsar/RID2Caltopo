@@ -49,6 +49,7 @@ class DefaultPeerCoordinatorTest {
         mqttFallback = FakePeerCoordinator("mqtt-fallback")
         TrackerPeerCoordinator.setTransportFactoryForTesting { transport }
         DefaultPeerCoordinator.setMqttCoordinatorOverrideForTesting(mqttFallback)
+        CaltopoClient.SetUsePeers(true)
         CaltopoClient.SetTrackerApiKey("tracker-token")
         CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
     }
@@ -58,6 +59,7 @@ class DefaultPeerCoordinatorTest {
         DefaultPeerCoordinator.getInstance().stop()
         TrackerPeerCoordinator.resetForTesting()
         DefaultPeerCoordinator.setMqttCoordinatorOverrideForTesting(null)
+        CaltopoClient.SetUsePeers(false)
         CaltopoClient.SetTrackerApiKey("")
         CaltopoClient.SetTrackerUrlPfx("")
     }
@@ -96,6 +98,26 @@ class DefaultPeerCoordinatorTest {
         assertTrue(mqttFallback.isStarted())
         assertEquals("MAP1", mqttFallback.getStartedMapId())
         assertEquals(1, mqttFallback.countEvents("onLiveTrackCreated"))
+    }
+
+    @Test
+    fun droneConfirmed_forwardsToActiveCoordinator() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        CaltopoClient.SetTrackerApiKey("")
+        CaltopoClient.SetTrackerUrlPfx("")
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        coordinator.onDroneConfirmed(
+            "RID-1",
+            1234L,
+            "NCSSAR",
+            "DJI Mini 4 Pro",
+            "1sar7",
+            "1sar7DjMn4Pr"
+        )
+
+        val event = mqttFallback.latestEventOfKind("onDroneConfirmed")
+        assertEquals("RID-1 mappedId=1sar7DjMn4Pr flight=1234", event?.summary)
     }
 
     @Test

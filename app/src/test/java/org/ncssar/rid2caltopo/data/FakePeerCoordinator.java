@@ -88,6 +88,17 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public void onDroneConfirmed(@NonNull String remoteId,
+                                 long flightStartMsec,
+                                 @NonNull String org,
+                                 @NonNull String model,
+                                 @NonNull String owner,
+                                 @NonNull String mappedId) {
+        record("onDroneConfirmed",
+                String.format(Locale.US, "%s mappedId=%s flight=%d", remoteId, mappedId, flightStartMsec));
+    }
+
+    @Override
     public boolean isLocalOwner(@NonNull String remoteId) {
         return locallyOwnedRemoteIds.contains(remoteId);
     }

@@ -384,7 +384,9 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
      */
     fun markPendingDroneConfirmationUnknown() {
         val current = _pendingDroneConfirmation.value ?: return
-        CaltopoClient.SaveDroneSpecUnknownConfirmation(current.remoteId.trim())
+        val remoteId = current.remoteId.trim()
+        CTDebug(tag, "markPendingDroneConfirmationUnknown(): remoteId=$remoteId")
+        CaltopoClient.SaveDroneSpecUnknownConfirmation(remoteId)
         _pendingDroneConfirmation.value = null
         restoreScreenAfterConfirmation()
     }
@@ -395,7 +397,15 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         val organization = current.organization.trim()
         val callsign = current.pilotCallsign.trim()
         val droneDescription = current.droneDescription.trim()
+        CTDebug(
+            tag,
+            "savePendingDroneConfirmation(): requested remoteId=$remoteId flightStartMsec=${current.flightStartMsec} org='$organization' callsign='$callsign' model='$droneDescription'"
+        )
         if (remoteId.isEmpty() || organization.isEmpty() || callsign.isEmpty() || droneDescription.isEmpty()) {
+            CTDebug(
+                tag,
+                "savePendingDroneConfirmation(): blocked by empty field remoteIdEmpty=${remoteId.isEmpty()} orgEmpty=${organization.isEmpty()} callsignEmpty=${callsign.isEmpty()} modelEmpty=${droneDescription.isEmpty()}"
+            )
             return
         }
         val existingMappedId = CaltopoClient.GetDroneSpec(remoteId)?.mappedId?.trim().orEmpty()
@@ -414,16 +424,22 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         } else {
             CtDroneSpec.BuildMappedId(callsign, droneDescription, remoteId)
         }
-        CaltopoClient.SaveDroneSpecConfirmation(
+        val peerCoordinator = R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
+        CTDebug(
+            tag,
+            "savePendingDroneConfirmation(): notifying peer remoteId=$remoteId mappedId='$mappedId' peer=${peerCoordinator.javaClass.simpleName}"
+        )
+        peerCoordinator.onDroneConfirmed(
             remoteId,
+            current.flightStartMsec,
             organization,
             droneDescription,
             callsign,
             mappedId
         )
-        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.onDroneConfirmed(
+        CTDebug(tag, "savePendingDroneConfirmation(): saving local confirmation remoteId=$remoteId mappedId='$mappedId'")
+        CaltopoClient.SaveDroneSpecConfirmation(
             remoteId,
-            current.flightStartMsec,
             organization,
             droneDescription,
             callsign,

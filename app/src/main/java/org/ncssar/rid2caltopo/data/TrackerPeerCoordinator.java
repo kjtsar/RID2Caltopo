@@ -77,6 +77,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     @NonNull private final ConcurrentHashMap<String, PendingDrone> pendingDrones = new ConcurrentHashMap<>();
+    @NonNull private final ConcurrentHashMap<String, JSONObject> pendingConfirmationsByRemoteId = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, R2CMqttManager.PeerState> peers = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, String> ownerByRemoteId = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, Long> leaseSeqByRemoteId = new ConcurrentHashMap<>();
@@ -250,6 +251,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             entry.getValue().liveTrack.setLocalOwner(false);
             iterator.remove();
         }
+        pendingConfirmationsByRemoteId.clear();
         peers.clear();
         ownerByRemoteId.clear();
         leaseSeqByRemoteId.clear();
@@ -356,7 +358,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("org", org);
             jo.put("model", model);
             jo.put("ownerName", owner);
-            sendJson(jo);
+            pendingConfirmationsByRemoteId.put(remoteId, jo);
+            CTInfo(TAG, String.format(Locale.US,
+                    "onDroneConfirmed(): queued remoteId=%s mappedId='%s'",
+                    remoteId,
+                    mappedId));
+            flushPendingConfirmations();
         } catch (Exception e) {
             CTError(TAG, "onDroneConfirmed() raised", e);
         }
@@ -610,6 +617,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         ackWatchdogTimer.start(TrackerPeerCoordinator.this::checkAckLiveness, ACK_WATCHDOG_INTERVAL_MS, ACK_WATCHDOG_INTERVAL_MS);
         markAllPendingFirstSightingsDirty();
         replayPendingFirstSightings();
+        flushPendingConfirmations();
         notifyCoordinationIndicatorListener();
     }
 
@@ -755,11 +763,32 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
     }
 
-    private void sendJson(@NonNull JSONObject jo) {
+    private boolean sendJson(@NonNull JSONObject jo) {
         lastOutboundJsonForTesting = jo.toString();
         TrackerCoordinationTransport activeTransport = transport;
-        if (activeTransport == null || !activeTransport.isConnected()) return;
+        if (activeTransport == null || !activeTransport.isConnected()) return false;
         activeTransport.send(jo.toString());
+        return true;
+    }
+
+    private void flushPendingConfirmations() {
+        TrackerCoordinationTransport activeTransport = transport;
+        if (activeTransport == null || !activeTransport.isConnected()) {
+            if (!pendingConfirmationsByRemoteId.isEmpty()) {
+                CTDebug(TAG, String.format(Locale.US,
+                        "flushPendingConfirmations(): waiting for tracker connection pending=%d",
+                        pendingConfirmationsByRemoteId.size()));
+            }
+            return;
+        }
+        for (Map.Entry<String, JSONObject> entry : pendingConfirmationsByRemoteId.entrySet()) {
+            if (sendJson(entry.getValue())) {
+                CTInfo(TAG, String.format(Locale.US,
+                        "flushPendingConfirmations(): sent remoteId=%s",
+                        entry.getKey()));
+                pendingConfirmationsByRemoteId.remove(entry.getKey(), entry.getValue());
+            }
+        }
     }
 
     private void checkAckLiveness() {

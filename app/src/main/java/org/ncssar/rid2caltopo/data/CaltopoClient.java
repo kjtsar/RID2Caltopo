@@ -2117,7 +2117,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             activeDs.setMappedId(trimmedMappedId);
         }
         activeDs.setLocalArchiveOnly(false);
-        SessionConfirmedDroneRemoteIds.add(remoteId.trim());
 
         UpdateDroneSpecs();
     }

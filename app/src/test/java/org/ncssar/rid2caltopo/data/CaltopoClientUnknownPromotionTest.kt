@@ -93,4 +93,29 @@ class CaltopoClientUnknownPromotionTest {
         assertFalse(CaltopoClient.IsSessionUnknownDrone(remoteId))
         assertFalse(drone.isLocalArchiveOnly)
     }
+
+    @Test
+    fun localSaveDoesNotIgnoreFutureFlightsButPeerConfirmationDoes() {
+        val remoteId = "DRONE3"
+
+        CaltopoClient.SaveDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Mavic 3",
+            "1SAR7",
+            "1SAR7m3"
+        )
+
+        assertFalse(CaltopoClient.IsSessionDroneConfirmationIgnored(remoteId))
+
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Mavic 3",
+            "1SAR8",
+            "1SAR8m3"
+        )
+
+        assertTrue(CaltopoClient.IsSessionDroneConfirmationIgnored(remoteId))
+    }
 }

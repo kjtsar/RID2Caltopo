@@ -211,8 +211,7 @@ public class ScanningService extends Service {
             return;
         }
         Intent stopIntent = new Intent(context, ScanningService.class);
-        stopIntent.setAction(ACTION_STOP_SERVICE);
-        context.getApplicationContext().startService(stopIntent);
+        context.getApplicationContext().stopService(stopIntent);
     }
     @Override
     public void onTrimMemory(int level) {

@@ -119,6 +119,7 @@ public class CaltopoMap {
     private static String FolderName;
     private static MapStatusListener.mapStatus MapStatus = MapStatusListener.mapStatus.down;
     private static String LastStandaloneCoordinationScopeId = "";
+    private static boolean StandaloneCoordinationStarted = false;
     private static int WaitForGpsAccuracy;
     // NOTE: UsePeersFlag was removed as a static field.
     // MQTT peer coordination is now unconditional whenever the map is up.
@@ -677,6 +678,7 @@ public class CaltopoMap {
 
     private static void stopPeerCoordinationForMapDisconnect() {
         LastStandaloneCoordinationScopeId = "";
+        StandaloneCoordinationStarted = false;
         getCurrentRuntime().getPeerCoordinator().setCoordinationIndicatorListener(null);
         getCurrentRuntime().getPeerCoordinator().stop();
     }
@@ -1011,7 +1013,7 @@ public class CaltopoMap {
                             !CaltopoClient.GetTrackerApiKey().isEmpty() &&
                                     !CaltopoClient.GetTrackerUrlPfx().isEmpty()));
                     getCurrentRuntime().getPeerCoordinator().start(
-                            MapNode.getId(), GetMyUUID(), R2CActivity.MyDeviceName, null);
+                            MapNode.getTitle(), GetMyUUID(), R2CActivity.MyDeviceName, null);
                     getCurrentRuntime().getPeerCoordinator()
                             .setCoordinationIndicatorListener(CaltopoMap::onCoordinationIndicatorStateChanged);
                     getCurrentRuntime().getPeerCoordinator().updateMyPosition(
@@ -1150,6 +1152,14 @@ public class CaltopoMap {
         }
     }
 
+    public static void EnsureStandaloneTrackerCoordinationStarted() {
+        Location location = MyLocation;
+        if (location == null) return;
+        startTrackerCoordinationWithoutActiveMapIfNeeded(location);
+        getCurrentRuntime().getPeerCoordinator()
+                .updateMyPosition(location.getLatitude(), location.getLongitude());
+    }
+
     private static void startTrackerCoordinationWithoutActiveMapIfNeeded(@NonNull Location location) {
         if (!CaltopoClient.GetUsePeersFlag()) return;
         if (MapStatus == MapStatusListener.mapStatus.up && MapNode != null) return;
@@ -1158,14 +1168,15 @@ public class CaltopoMap {
             return;
         }
         String scopeId = CaltopoClient.GetTrackerCoordinationScopeId();
-        if (scopeId.isEmpty()) return;
         PeerCoordinator.CoordinationIndicatorState currentState =
                 getCurrentRuntime().getPeerCoordinator().getCoordinationIndicatorState();
-        if (scopeId.equals(LastStandaloneCoordinationScopeId) &&
+        if (StandaloneCoordinationStarted &&
+                scopeId.equals(LastStandaloneCoordinationScopeId) &&
                 currentState != PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED) {
             return;
         }
         LastStandaloneCoordinationScopeId = scopeId;
+        StandaloneCoordinationStarted = true;
         CTInfo(TAG, String.format(Locale.US,
                 "startTrackerCoordinationWithoutActiveMapIfNeeded(): scopeId='%s' lat=%.6f lng=%.6f %s",
                 scopeId,

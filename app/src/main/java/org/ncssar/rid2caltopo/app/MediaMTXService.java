@@ -324,8 +324,7 @@ public class MediaMTXService extends Service {
 
     public static void requestStop(Context context) {
         Intent stopIntent = new Intent(context, MediaMTXService.class);
-        stopIntent.setAction(ACTION_STOP_SERVICE);
-        context.getApplicationContext().startService(stopIntent);
+        context.getApplicationContext().stopService(stopIntent);
     }
 
     @Nullable

@@ -1388,35 +1388,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     @NonNull
     public static String GetTrackerCoordinationScopeId() {
-        ClientClassState ccs = GetState();
-        ensureProfileStateFresh(ccs, false);
-        String currentMapId = CaltopoMap.GetMapId();
-        if (!currentMapId.isEmpty()) return currentMapId;
-
-        CaltopoProfileRecord preferred = GetPreferredCoordinationTrackerProfile();
-        if (preferred != null && preferred.targetMapId != null && !preferred.targetMapId.isEmpty()) {
-            return preferred.targetMapId;
-        }
-
-        CaltopoProfileRecord active = GetActiveCaltopoProfile();
-        String profileId = active != null && active.profileId != null && !active.profileId.isEmpty()
-                ? active.profileId
-                : "default";
-        String incident = GetIncident();
-        String opPeriod = GetOpPeriod();
-        return String.format(Locale.US,
-                "profile:%s:incident:%s:op:%s",
-                sanitizeTrackerScopeComponent(profileId),
-                sanitizeTrackerScopeComponent(incident),
-                sanitizeTrackerScopeComponent(opPeriod));
-    }
-
-    @NonNull
-    private static String sanitizeTrackerScopeComponent(@Nullable String value) {
-        if (value == null) return "unknown";
-        String trimmed = value.trim();
-        if (trimmed.isEmpty()) return "unknown";
-        return trimmed.replaceAll("[^A-Za-z0-9._-]+", "_");
+        String currentMapName = CaltopoMap.GetMapName();
+        return currentMapName != null ? currentMapName : "";
     }
 
     public static int RemoveExpiredCaltopoProfiles(long nowMs, boolean disconnectIfActive) {

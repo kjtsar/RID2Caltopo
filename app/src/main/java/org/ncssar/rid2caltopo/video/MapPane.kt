@@ -180,6 +180,7 @@ internal const val NEAR_LIMIT_RATIO = 0.90
 internal const val NEAR_ALERT_COOLDOWN_MS = 30_000L
 private const val STARTUP_MY_LOCATION_FRESH_MS = 60_000L
 private const val STARTUP_MY_LOCATION_WAIT_MS = 20_000L
+private const val STARTUP_MY_LOCATION_MIN_ZOOM = 14.0
 internal const val OVER_ALERT_COOLDOWN_MS = 12_000L
 internal const val METERS_TO_FEET = 3.28084
 internal const val DEM_RETRY_INTERVAL_MS = 2_000L
@@ -573,6 +574,8 @@ internal fun SplitMapPane(
     var restoredViewportStartupCheckComplete by remember(restoredViewport) { mutableStateOf(restoredViewport == null) }
     var restoredViewportStartupWaitLogged by remember(restoredViewport) { mutableStateOf(false) }
     var restoredViewportStartupCheckStartedAtMs by remember(restoredViewport) { mutableStateOf(System.currentTimeMillis()) }
+    var lastLocalDeviceMarkerStats by remember { mutableStateOf("") }
+    var localDeviceViewportRescueApplied by remember(restoredViewport) { mutableStateOf(false) }
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
     val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
     val caltopoMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
@@ -1622,6 +1625,8 @@ internal fun SplitMapPane(
         lastRenderStats = ""
         lastAlignmentStats = ""
         lastCacheStats = ""
+        lastLocalDeviceMarkerStats = ""
+        localDeviceViewportRescueApplied = false
         viewModel.altitudeCoordinator.onMapReconnect()
         renderLatencyKeyByDesignator.clear()
         complianceByDesignator.clear()
@@ -2284,6 +2289,7 @@ internal fun SplitMapPane(
 
                 val myLocation = CaltopoMap.GetMyLocation()
                 if (myLocation != null && myLocation.latitude.isFinite() && myLocation.longitude.isFinite()) {
+                    CaltopoMap.EnsureStandaloneTrackerCoordinationStarted()
                     val localDeviceColor = localDeviceMarkerColor()
                     val localCacheKey = iconCacheService.cacheKey(LOCAL_DEVICE_SYMBOL, localDeviceColor)
                     val localRemoteIcon = caltopoMarkerCache[localCacheKey]
@@ -2325,6 +2331,56 @@ internal fun SplitMapPane(
                     }
                     mapView.overlays.add(localMarker)
                     managedOverlays.add(localMarker)
+                    val mapCenter = mapView.mapCenter
+                    val localDeviceVisible = mapView.boundingBox.containsLocation(myLocation)
+                    val defaultViewportCenter =
+                        kotlin.math.abs(mapCenter.latitude) < 0.000001 &&
+                            kotlin.math.abs(mapCenter.longitude) < 0.000001
+                    val operationalContentPresent =
+                        dronePoints.isNotEmpty() || artifactOverlayState.totalFeatures > 0
+                    if (!localDeviceViewportRescueApplied &&
+                        !localDeviceVisible &&
+                        defaultViewportCenter &&
+                        !operationalContentPresent
+                    ) {
+                        mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
+                        mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
+                        viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                        initialViewportApplied = true
+                        restoredViewportStartupCheckComplete = true
+                        localDeviceViewportRescueApplied = true
+                        CTDebug(
+                            MAP_PANE_TAG,
+                            String.format(
+                                Locale.US,
+                                "Local device viewport rescue: lat=%.6f lng=%.6f previousCenter=%.6f,%.6f zoom=%.2f",
+                                myLocation.latitude,
+                                myLocation.longitude,
+                                mapCenter.latitude,
+                                mapCenter.longitude,
+                                mapView.zoomLevelDouble
+                            )
+                        )
+                    }
+                    val localDeviceMarkerStats = String.format(
+                        Locale.US,
+                        "lat=%.6f lng=%.6f center=%.6f,%.6f zoom=%.2f contains=%s",
+                        myLocation.latitude,
+                        myLocation.longitude,
+                        mapView.mapCenter.latitude,
+                        mapView.mapCenter.longitude,
+                        mapView.zoomLevelDouble,
+                        mapView.boundingBox.containsLocation(myLocation)
+                    )
+                    if (localDeviceMarkerStats != lastLocalDeviceMarkerStats) {
+                        lastLocalDeviceMarkerStats = localDeviceMarkerStats
+                        if (CTDebugEnabled(MAP_PANE_TAG)) {
+                            CTDebug(
+                                MAP_PANE_TAG,
+                                "Local device marker: $localDeviceMarkerStats ageMs=${locationAgeMs(myLocation, uiNowWallMsec)}"
+                            )
+                        }
+                    }
                 }
 
                 val iconLimitAglM = AGL_LIMIT_FT * FT_TO_METERS
@@ -2516,6 +2572,8 @@ internal fun SplitMapPane(
                         dronePoints.isNotEmpty() || artifactOverlayState.totalFeatures > 0
                     val viewportContainsMyLocation =
                         startupMyLocation?.let { mapView.boundingBox.containsLocation(it) } ?: false
+                    val restoredViewportUsefulForMyLocation =
+                        viewportContainsMyLocation && mapView.zoomLevelDouble >= STARTUP_MY_LOCATION_MIN_ZOOM
                     val timedOut =
                         uiNowWallMsec - restoredViewportStartupCheckStartedAtMs >= STARTUP_MY_LOCATION_WAIT_MS
                     var action: String? = null
@@ -2526,18 +2584,22 @@ internal fun SplitMapPane(
                             restoredViewportStartupCheckComplete = true
                         }
 
-                        startupLocationFresh && viewportContainsMyLocation -> {
+                        startupLocationFresh && restoredViewportUsefulForMyLocation -> {
                             action = "kept-my-location-visible"
                             restoredViewportStartupCheckComplete = true
                         }
 
-                        startupLocationFresh -> {
+                        startupLocationValid && !restoredViewportUsefulForMyLocation -> {
                             mapView.controller.setCenter(GeoPoint(startupMyLocation.latitude, startupMyLocation.longitude))
-                            mapView.controller.setZoom(15.0)
+                            mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
                             viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
                             initialViewportApplied = true
                             initialViewportArtifactCount = artifactOverlayState.totalFeatures
-                            action = "centered-on-my-location"
+                            action = if (startupLocationFresh) {
+                                "centered-on-my-location"
+                            } else {
+                                "centered-on-stale-my-location"
+                            }
                             restoredViewportStartupCheckComplete = true
                         }
 
@@ -2559,7 +2621,7 @@ internal fun SplitMapPane(
                                 Locale.US,
                                 "Startup viewport check: restoredLat=%.6f restoredLng=%.6f restoredZoom=%.2f " +
                                     "myLocation=%s locationAgeMs=%d locationFresh=%s operationalContent=%s " +
-                                    "viewportContainsMyLocation=%s action=%s",
+                                    "viewportContainsMyLocation=%s restoredUseful=%s currentZoom=%.2f action=%s",
                                 restoredStartupViewport.latitude,
                                 restoredStartupViewport.longitude,
                                 restoredStartupViewport.zoom,
@@ -2570,6 +2632,8 @@ internal fun SplitMapPane(
                                 startupLocationFresh,
                                 operationalContentPresent,
                                 viewportContainsMyLocation,
+                                restoredViewportUsefulForMyLocation,
+                                mapView.zoomLevelDouble,
                                 it
                             )
                         )
@@ -2595,30 +2659,55 @@ internal fun SplitMapPane(
                             val bounds = boundingBoxFromPoints(viewportPoints)
                             mapView.zoomToBoundingBox(bounds, true, 96)
                             viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
-                            if (MAP_PANE_VERBOSE_LOGS) {
-                                CTDebug(
-                                    MAP_PANE_TAG,
-                                    "Initial viewport: myLocation=${myLocation != null}, artifactPts=${artifactPoints.size}, mode=bounds"
+                            CTDebug(
+                                MAP_PANE_TAG,
+                                String.format(
+                                    Locale.US,
+                                    "Initial viewport: mode=bounds myLocation=%s artifactPts=%d center=%.6f,%.6f zoom=%.2f",
+                                    myLocation != null,
+                                    artifactPoints.size,
+                                    mapView.mapCenter.latitude,
+                                    mapView.mapCenter.longitude,
+                                    mapView.zoomLevelDouble
                                 )
-                            }
+                            )
                         }
 
                         myLocation != null -> {
                             mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
                             mapView.controller.setZoom(15.0)
                             viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
-                            if (MAP_PANE_VERBOSE_LOGS) {
-                                CTDebug(MAP_PANE_TAG, "Initial viewport: centered on MyLocation.")
-                            }
+                            CTDebug(
+                                MAP_PANE_TAG,
+                                String.format(
+                                    Locale.US,
+                                    "Initial viewport: mode=my-location lat=%.6f lng=%.6f ageMs=%d center=%.6f,%.6f zoom=%.2f",
+                                    myLocation.latitude,
+                                    myLocation.longitude,
+                                    locationAgeMs(myLocation, uiNowWallMsec),
+                                    mapView.mapCenter.latitude,
+                                    mapView.mapCenter.longitude,
+                                    mapView.zoomLevelDouble
+                                )
+                            )
                         }
 
                         focusPoint != null -> {
                             mapView.controller.setCenter(GeoPoint(focusPoint.lat, focusPoint.lng))
                             mapView.controller.setZoom(14.0)
                             viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
-                            if (MAP_PANE_VERBOSE_LOGS) {
-                                CTDebug(MAP_PANE_TAG, "Initial viewport: fallback to focused drone point.")
-                            }
+                            CTDebug(
+                                MAP_PANE_TAG,
+                                String.format(
+                                    Locale.US,
+                                    "Initial viewport: mode=focused-drone lat=%.6f lng=%.6f center=%.6f,%.6f zoom=%.2f",
+                                    focusPoint.lat,
+                                    focusPoint.lng,
+                                    mapView.mapCenter.latitude,
+                                    mapView.mapCenter.longitude,
+                                    mapView.zoomLevelDouble
+                                )
+                            )
                         }
                     }
                     initialViewportApplied = true

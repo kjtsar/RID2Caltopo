@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import android.location.Location
 import java.lang.reflect.Field
 
 class CaltopoMapTest {
@@ -19,6 +20,8 @@ class CaltopoMapTest {
     private lateinit var shutdownInProgressField: Field
     private lateinit var disconnectInProgressField: Field
     private lateinit var currentRuntimeField: Field
+    private lateinit var lastStandaloneScopeField: Field
+    private lateinit var standaloneStartedField: Field
 
     private lateinit var originalMapStatus: CaltopoMap.MapStatusListener.mapStatus
     private var originalMapNode: Any? = null
@@ -29,6 +32,11 @@ class CaltopoMapTest {
     private var originalShutdownInProgress: Boolean = false
     private var originalDisconnectInProgress: Boolean = false
     private var originalCurrentRuntime: Any? = null
+    private var originalLastStandaloneScope: String? = null
+    private var originalStandaloneStarted: Boolean = false
+    private var originalTrackerApiKey: String = ""
+    private var originalTrackerUrlPfx: String = ""
+    private var originalMyLocation: Location? = null
 
     @Before
     fun setUp() {
@@ -44,6 +52,8 @@ class CaltopoMapTest {
         shutdownInProgressField = CaltopoMap::class.java.getDeclaredField("ShutdownInProgress").apply { isAccessible = true }
         disconnectInProgressField = CaltopoMap::class.java.getDeclaredField("DisconnectInProgress").apply { isAccessible = true }
         currentRuntimeField = CaltopoMap::class.java.getDeclaredField("CurrentRuntime").apply { isAccessible = true }
+        lastStandaloneScopeField = CaltopoMap::class.java.getDeclaredField("LastStandaloneCoordinationScopeId").apply { isAccessible = true }
+        standaloneStartedField = CaltopoMap::class.java.getDeclaredField("StandaloneCoordinationStarted").apply { isAccessible = true }
 
         originalMapStatus = mapStatusField.get(null) as CaltopoMap.MapStatusListener.mapStatus
         originalMapNode = mapNodeField.get(null)
@@ -54,6 +64,11 @@ class CaltopoMapTest {
         originalShutdownInProgress = shutdownInProgressField.getBoolean(null)
         originalDisconnectInProgress = disconnectInProgressField.getBoolean(null)
         originalCurrentRuntime = currentRuntimeField.get(null)
+        originalLastStandaloneScope = lastStandaloneScopeField.get(null) as String?
+        originalStandaloneStarted = standaloneStartedField.getBoolean(null)
+        originalTrackerApiKey = CaltopoClient.GetTrackerApiKey()
+        originalTrackerUrlPfx = CaltopoClient.GetTrackerUrlPfx()
+        originalMyLocation = CaltopoMap.MyLocation
 
         mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.up)
         mapNodeField.set(null, CaltopoNode.MapNode("map-test", "Map Test", 0L))
@@ -64,6 +79,8 @@ class CaltopoMapTest {
         shutdownInProgressField.setBoolean(null, false)
         disconnectInProgressField.setBoolean(null, false)
         currentRuntimeField.set(null, fixture.runtime)
+        lastStandaloneScopeField.set(null, "")
+        standaloneStartedField.setBoolean(null, false)
     }
 
     @After
@@ -77,6 +94,11 @@ class CaltopoMapTest {
         shutdownInProgressField.setBoolean(null, originalShutdownInProgress)
         disconnectInProgressField.setBoolean(null, originalDisconnectInProgress)
         currentRuntimeField.set(null, originalCurrentRuntime)
+        lastStandaloneScopeField.set(null, originalLastStandaloneScope)
+        standaloneStartedField.setBoolean(null, originalStandaloneStarted)
+        CaltopoMap.MyLocation = originalMyLocation
+        CaltopoClient.SetTrackerApiKey(originalTrackerApiKey)
+        CaltopoClient.SetTrackerUrlPfx(originalTrackerUrlPfx)
         R2cRuntimeRegistry.resetDefaultRuntimeForTesting()
     }
 
@@ -88,5 +110,45 @@ class CaltopoMapTest {
         assertEquals(1, fixture.calTopoSessionGateway.countOperations("deleteMarker"))
         val deleteIndex = operations.indexOfFirst { it.kind == "deleteMarker" }
         assertTrue(operations.toString(), deleteIndex >= 0)
+    }
+
+    @Test
+    fun updateMyLocation_startsStandaloneTrackerWithEmptyMapString() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoClient.SetTrackerApiKey("tracker-token")
+        CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+
+        val location = Location("test").apply {
+            latitude = 39.153061
+            longitude = -121.132946
+            accuracy = 5.0f
+        }
+
+        CaltopoMap.UpdateMyLocation(location)
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertTrue(peerCoordinator.isStarted())
+        assertEquals("", peerCoordinator.getStartedMapId())
+    }
+
+    @Test
+    fun ensureStandaloneTrackerCoordinationStarted_usesCachedLocation() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoClient.SetTrackerApiKey("tracker-token")
+        CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoMap.MyLocation = Location("cached").apply {
+            latitude = 39.153062
+            longitude = -121.132960
+            accuracy = 8.0f
+        }
+
+        CaltopoMap.EnsureStandaloneTrackerCoordinationStarted()
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertTrue(peerCoordinator.isStarted())
+        assertEquals("", peerCoordinator.getStartedMapId())
+        assertEquals(1, peerCoordinator.countEvents("updateMyPosition"))
     }
 }

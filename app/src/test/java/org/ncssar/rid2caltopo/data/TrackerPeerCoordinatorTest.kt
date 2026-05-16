@@ -108,6 +108,14 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun start_allowsEmptyMapString() {
+        coordinator.start("", "zone-alpha", "Alpha", null)
+
+        assertEquals(1, transport.connectCount)
+        assertTrue(transport.connected)
+    }
+
+    @Test
     fun diagnosticsReportPendingTrackerAck() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         coordinator.handleHelloAckForTesting()

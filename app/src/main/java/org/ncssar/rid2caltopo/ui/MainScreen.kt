@@ -1097,7 +1097,7 @@ fun MainScreen(
                     },
                     enabled = !loadingLogArchiveDays && !sendingLogArchive && selectedLogArchiveDays.isNotEmpty() && logArchiveDays.isNotEmpty()
                 ) {
-                    Text("Send")
+                    Text("Package Logs")
                 }
             },
             dismissButton = {

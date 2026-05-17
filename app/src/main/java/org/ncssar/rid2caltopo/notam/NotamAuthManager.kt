@@ -8,6 +8,7 @@ import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
+import org.ncssar.rid2caltopo.data.FaaConfigManager
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -51,6 +52,12 @@ internal object NotamAuthManager {
     }
 
     @Synchronized
+    fun clearCachedToken() {
+        cachedToken = null
+        cachedTokenExpiryEpochMs = 0L
+    }
+
+    @Synchronized
     fun getBearerToken(): String {
         val now = System.currentTimeMillis()
         val existing = cachedToken
@@ -90,6 +97,7 @@ internal object NotamAuthManager {
                 }
                 if (!response.isSuccessful) {
                     if (response.code == 401 || response.code == 403) {
+                        FaaConfigManager.markAuthorizationFailure("NOTAM authentication failed (HTTP ${response.code}).")
                         throw NotamAuthException.Authorization("NOTAM authentication failed (HTTP ${response.code}).")
                     }
                     throw NotamAuthException.Service("NOTAM token request failed with HTTP ${response.code}.")

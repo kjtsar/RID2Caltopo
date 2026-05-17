@@ -54,6 +54,8 @@ object GoogleDriveConfigSync {
     private const val MUTUAL_AID_FOLDER_NAME = "RID2Caltopo_MutualAid"
     private const val MUTUAL_AID_APP_PROPERTY_VALUE = "mutual_aid_profile_v1"
     private const val KEY_MUTUAL_AID_FOLDER_ID = "mutual_aid_folder_id"
+    private const val FAA_CONFIG_FILE_NAME = "RID2Caltopo_FAA_Config.json"
+    private const val FAA_CONFIG_APP_PROPERTY_VALUE = "faa_config_v1"
     private const val DRIVE_PERMISSIONS_URL = "https://www.googleapis.com/drive/v3/files/%s/permissions"
     // Public (unauthenticated) download URL for files shared with "anyone with link".
     private const val PUBLIC_DOWNLOAD_URL = "https://drive.google.com/uc?export=download&id=%s"
@@ -529,6 +531,47 @@ object GoogleDriveConfigSync {
         return fileId
     }
 
+    @JvmStatic
+    fun uploadFaaConfigFile(
+        context: Context,
+        account: GoogleSignInAccount,
+        encryptedJson: String,
+        label: String
+    ): String {
+        val token = requireAccessToken(context, account)
+        val bytes = encryptedJson.toByteArray(StandardCharsets.UTF_8)
+        val existingId = findScopedPublicJsonFileId(token, FAA_CONFIG_FILE_NAME, FAA_CONFIG_APP_PROPERTY_VALUE)
+        val metadataObj = JSONObject()
+            .put("name", FAA_CONFIG_FILE_NAME)
+            .put("appProperties", JSONObject()
+                .put(APP_PROPERTY_KEY, FAA_CONFIG_APP_PROPERTY_VALUE)
+                .put("label", label))
+        val boundary = "RID2CaltopoFaaConfigBoundary"
+        val bodyBytes = buildMultipartBody(boundary, metadataObj.toString(), bytes, "application/json; charset=UTF-8")
+        val body = bodyBytes.toRequestBody("multipart/related; boundary=$boundary".toMediaType())
+        val url = if (existingId == null) {
+            "$DRIVE_UPLOAD_URL?uploadType=multipart"
+        } else {
+            "$DRIVE_UPLOAD_URL/$existingId?uploadType=multipart"
+        }
+        val builder = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $token")
+        val request = if (existingId == null) builder.post(body).build() else builder.patch(body).build()
+        val fileId = httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val details = response.body?.string().orEmpty()
+                throw IOException(formatDriveError("FAA config upload failed", response.code, details))
+            }
+            val payload = response.body?.string().orEmpty()
+            JSONObject(payload).optString("id").ifBlank {
+                existingId ?: throw IOException("FAA config upload succeeded but returned no file ID.")
+            }
+        }
+        makeFilePublic(token, fileId)
+        return fileId
+    }
+
     /**
      * Find or create the RID2Caltopo_Configs folder at the root of the admin's
      * Drive and return its file ID.  The ID is cached in SharedPreferences so
@@ -633,6 +676,28 @@ object GoogleDriveConfigSync {
             if (!body.contains("rid2caltopo_mutual_aid_profile")) {
                 CaltopoClient.CTWarn(TAG, "downloadMutualAidBundlePublic(): invalid bundle for fileId=$fileId; first 200 chars: ${body.take(200)}")
                 throw IOException("Downloaded file does not appear to be a valid mutual-aid config bundle.")
+            }
+            return body
+        }
+    }
+
+    @JvmStatic
+    fun downloadFaaConfigPublic(fileId: String): String {
+        val url = PUBLIC_DOWNLOAD_URL.format(fileId)
+        val request = Request.Builder()
+            .url(url)
+            .header("Cache-Control", "no-cache")
+            .get()
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("FAA config download failed: HTTP ${response.code}")
+            }
+            val body = response.body?.string()
+                ?: throw IOException("FAA config download returned an empty body.")
+            if (!body.contains(FaaConfigManager.TYPE_ENCRYPTED)) {
+                CaltopoClient.CTWarn(TAG, "downloadFaaConfigPublic(): invalid FAA bundle for fileId=$fileId; first 200 chars: ${body.take(200)}")
+                throw IOException("Downloaded file does not appear to be a valid FAA config bundle.")
             }
             return body
         }

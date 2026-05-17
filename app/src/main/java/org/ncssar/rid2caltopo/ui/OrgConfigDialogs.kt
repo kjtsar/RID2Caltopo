@@ -41,6 +41,7 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.MutualAidToken
 import org.ncssar.rid2caltopo.data.OrgConfigToken
 
@@ -102,6 +103,13 @@ private sealed class MutualAidExportStep {
     object Uploading : MutualAidExportStep()
     data class ShowQr(val token: String) : MutualAidExportStep()
     data class Error(val message: String) : MutualAidExportStep()
+}
+
+private sealed class FaaExportStep {
+    object Confirm : FaaExportStep()
+    object Uploading : FaaExportStep()
+    data class ShowQr(val token: String) : FaaExportStep()
+    data class Error(val message: String) : FaaExportStep()
 }
 
 /**
@@ -249,6 +257,114 @@ fun OrgConfigExportDialog(
 }
 
 @Composable
+fun FaaConfigExportDialog(
+    onDismiss: () -> Unit,
+    onUploadRequested: (callback: (Boolean, String, String?) -> Unit) -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    var step by remember { mutableStateOf<FaaExportStep>(FaaExportStep.Confirm) }
+
+    AlertDialog(
+        onDismissRequest = {
+            if (step !is FaaExportStep.Uploading) onDismiss()
+        },
+        title = {
+            Text(
+                when (step) {
+                    is FaaExportStep.Confirm -> "Publish FAA Config"
+                    is FaaExportStep.Uploading -> "Uploading…"
+                    is FaaExportStep.ShowQr -> "FAA Config QR"
+                    is FaaExportStep.Error -> "Upload Failed"
+                }
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                when (val s = step) {
+                    is FaaExportStep.Confirm -> {
+                        Text(
+                            "The app will upload the loaded FAA NOTAM credentials to Google Drive as an obfuscated shared config and generate a QR token for R2C administrators.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    is FaaExportStep.Uploading -> {
+                        Spacer(Modifier.height(8.dp))
+                        CircularProgressIndicator()
+                        Spacer(Modifier.height(8.dp))
+                        Text("Uploading FAA config to Google Drive…")
+                    }
+                    is FaaExportStep.ShowQr -> {
+                        Text(
+                            "Share this QR with R2C administrators. They scan it once to cache FAA NOTAM access.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        QrCodeImage(
+                            content = FaaConfigToken.toQrUri(s.token),
+                            modifier = Modifier.size(240.dp)
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text("Or share as text:", style = MaterialTheme.typography.labelSmall)
+                        Spacer(Modifier.height(4.dp))
+                        SelectionContainer {
+                            Text(
+                                text = s.token,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = {
+                            clipboard.setText(AnnotatedString(s.token))
+                        }) {
+                            Text("Copy Token")
+                        }
+                    }
+                    is FaaExportStep.Error -> {
+                        Text(s.message, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            when (step) {
+                is FaaExportStep.Confirm -> {
+                    TextButton(
+                        onClick = {
+                            step = FaaExportStep.Uploading
+                            onUploadRequested { success, message, token ->
+                                step = if (success && token != null) {
+                                    FaaExportStep.ShowQr(token)
+                                } else {
+                                    FaaExportStep.Error(message)
+                                }
+                            }
+                        }
+                    ) { Text("Publish FAA Config") }
+                }
+                is FaaExportStep.ShowQr, is FaaExportStep.Error -> {
+                    TextButton(onClick = onDismiss) { Text("Done") }
+                }
+                else -> { }
+            }
+        },
+        dismissButton = {
+            if (step !is FaaExportStep.Uploading) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    )
+}
+
+@Composable
 fun MutualAidExportDialog(
     defaultIncident: String,
     defaultOpPeriod: String,
@@ -378,7 +494,7 @@ fun MutualAidExportDialog(
                     }
                     is MutualAidExportStep.ShowQr -> {
                         Text(
-                            "Share this QR with the assisting agency. They can import it once using Menu -> Import MA Config.",
+                            "Share this QR with the assisting agency. They can import it once using Menu -> Import Config.",
                             style = MaterialTheme.typography.bodySmall,
                             textAlign = TextAlign.Center
                         )
@@ -458,28 +574,36 @@ fun MutualAidExportDialog(
     )
 }
 
-// ── Join dialog (member) ──────────────────────────────────────────────────────
+// ── Import dialog ─────────────────────────────────────────────────────────────
 
 /**
- * Single-step dialog shown to a team member for joining an org config.
+ * Single-step dialog shown for importing shared configuration.
  *
- * The member pastes (or types) the R2C1:… token they received from the admin.
- * The token is validated in real time; the "Join" button is only enabled when
- * the token looks valid.  On confirm, the app downloads the bundle (no sign-in
- * required) and decrypts credentials locally before applying.
+ * The user scans or pastes an org, FAA, or MA token, or chooses a packaged MA
+ * config file. Tokens are validated in real time and routed to the matching
+ * config manager when confirmed.
  *
  * [onDismiss] is called when the dialog should close.
- * [onJoin] is called with the trimmed token string when the member confirms.
+ * [onJoin] is called with the normalized org token when confirmed.
+ * [onFaaJoin] is called with the normalized FAA token when confirmed.
+ * [onMutualAidJoin] is called with the normalized MA token when confirmed.
+ * [onPickFile] is called when the user chooses an MA package file.
  */
 @Composable
-fun OrgConfigJoinDialog(
+fun ImportConfigDialog(
     onDismiss: () -> Unit,
-    onJoin: (token: String) -> Unit
+    onJoin: (token: String) -> Unit,
+    onFaaJoin: (token: String) -> Unit,
+    onMutualAidJoin: (token: String) -> Unit,
+    onPickFile: () -> Unit
 ) {
     val context = LocalContext.current
     var tokenText by remember { mutableStateOf("") }
-    val isValid = remember(tokenText) { OrgConfigToken.isValidToken(tokenText) }
-    val decoded = remember(tokenText) { OrgConfigToken.decode(tokenText.trim()) }
+    val normalizedToken = remember(tokenText) { normalizeImportToken(tokenText.trim()) }
+    val orgDecoded = remember(normalizedToken) { OrgConfigToken.decode(normalizedToken) }
+    val faaDecoded = remember(normalizedToken) { FaaConfigToken.decode(normalizedToken) }
+    val mutualAidDecoded = remember(normalizedToken) { MutualAidToken.decode(normalizedToken) }
+    val isValid = orgDecoded != null || faaDecoded != null || mutualAidDecoded != null
 
     val scanner = remember(context) {
         GmsBarcodeScanning.getClient(
@@ -492,11 +616,11 @@ fun OrgConfigJoinDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Import Org Config") },
+        title = { Text("Import Config") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Scan the QR code from your org admin, or paste the join token below.",
+                    "Scan a config QR code, paste a config token, or choose an MA package file.",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Spacer(Modifier.height(12.dp))
@@ -504,7 +628,7 @@ fun OrgConfigJoinDialog(
                     value = tokenText,
                     onValueChange = { tokenText = it },
                     label = { Text("Import token") },
-                    placeholder = { Text("${OrgConfigToken.MAGIC_PREFIX}…") },
+                    placeholder = { Text("${OrgConfigToken.MAGIC_PREFIX}…, ${FaaConfigToken.MAGIC_PREFIX}…, or ${MutualAidToken.MAGIC_PREFIX}…") },
                     singleLine = false,
                     isError = tokenText.isNotBlank() && !isValid,
                     trailingIcon = {
@@ -512,10 +636,7 @@ fun OrgConfigJoinDialog(
                             scanner.startScan()
                                 .addOnSuccessListener { barcode ->
                                     val raw = barcode.rawValue ?: return@addOnSuccessListener
-                                    // Convert r2c1://payload → R2C1:payload
-                                    tokenText = if (raw.startsWith("r2c1://")) {
-                                        OrgConfigToken.MAGIC_PREFIX + raw.removePrefix("r2c1://")
-                                    } else raw
+                                    tokenText = normalizeImportToken(raw)
                                 }
                                 .addOnFailureListener { /* user cancelled or scan failed — leave field as-is */ }
                         }) {
@@ -527,90 +648,12 @@ fun OrgConfigJoinDialog(
                     },
                     supportingText = {
                         when {
-                            tokenText.isBlank()        -> Text("Scan QR or paste token from your admin")
-                            isValid && decoded != null -> Text("Org: ${decoded.orgName}")
-                            else                       -> Text(
-                                "Token not recognised",
-                                color = MaterialTheme.colorScheme.error
+                            tokenText.isBlank() -> Text("Scan QR, paste token, or choose an MA package file")
+                            orgDecoded != null -> Text("Org: ${orgDecoded.orgName}")
+                            faaDecoded != null -> Text(
+                                "FAA: ${faaDecoded.label.ifBlank { "Shared NOTAM credentials" }}"
                             )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = isValid,
-                onClick = { onJoin(tokenText.trim()) }
-            ) {
-                Text("Import")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
-
-@Composable
-fun MutualAidJoinDialog(
-    onDismiss: () -> Unit,
-    onJoin: (token: String) -> Unit,
-    onPickFile: () -> Unit
-) {
-    val context = LocalContext.current
-    var tokenText by remember { mutableStateOf("") }
-    val isValid = remember(tokenText) { MutualAidToken.isValidToken(tokenText) }
-    val decoded = remember(tokenText) { MutualAidToken.decode(tokenText.trim()) }
-
-    val scanner = remember(context) {
-        GmsBarcodeScanning.getClient(
-            context,
-            GmsBarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                .build()
-        )
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Import MA Package") },
-        text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    "Scan the mutual-aid QR code, paste the token below, or choose an MA package file.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = tokenText,
-                    onValueChange = { tokenText = it },
-                    label = { Text("Mutual aid token") },
-                    placeholder = { Text("${MutualAidToken.MAGIC_PREFIX}…") },
-                    singleLine = false,
-                    isError = tokenText.isNotBlank() && !isValid,
-                    trailingIcon = {
-                        IconButton(onClick = {
-                            scanner.startScan()
-                                .addOnSuccessListener { barcode ->
-                                    val raw = barcode.rawValue ?: return@addOnSuccessListener
-                                    tokenText = if (raw.startsWith("r2cma1://")) {
-                                        MutualAidToken.MAGIC_PREFIX + raw.removePrefix("r2cma1://")
-                                    } else raw
-                                }
-                                .addOnFailureListener { }
-                        }) {
-                            Icon(
-                                imageVector = Icons.Filled.QrCodeScanner,
-                                contentDescription = "Scan QR code"
-                            )
-                        }
-                    },
-                    supportingText = {
-                        when {
-                            tokenText.isBlank() -> Text("Scan QR or paste token from the hosting agency")
-                            isValid && decoded != null -> Text("Source org: ${decoded.sourceOrg}")
+                            mutualAidDecoded != null -> Text("MA: ${mutualAidDecoded.sourceOrg}")
                             else -> Text(
                                 "Token not recognised",
                                 color = MaterialTheme.colorScheme.error
@@ -624,7 +667,13 @@ fun MutualAidJoinDialog(
         confirmButton = {
             TextButton(
                 enabled = isValid,
-                onClick = { onJoin(tokenText.trim()) }
+                onClick = {
+                    when {
+                        faaDecoded != null -> onFaaJoin(normalizedToken)
+                        mutualAidDecoded != null -> onMutualAidJoin(normalizedToken)
+                        else -> onJoin(normalizedToken)
+                    }
+                }
             ) {
                 Text("Import")
             }
@@ -636,4 +685,17 @@ fun MutualAidJoinDialog(
             }
         }
     )
+}
+
+private fun normalizeImportToken(raw: String): String {
+    val trimmed = raw.trim()
+    return when {
+        trimmed.startsWith("r2c1://") ->
+            OrgConfigToken.MAGIC_PREFIX + trimmed.removePrefix("r2c1://")
+        trimmed.startsWith("${FaaConfigToken.QR_SCHEME}://") ->
+            FaaConfigToken.fromQrUri(trimmed) ?: trimmed
+        trimmed.startsWith("r2cma1://") ->
+            MutualAidToken.MAGIC_PREFIX + trimmed.removePrefix("r2cma1://")
+        else -> trimmed
+    }
 }

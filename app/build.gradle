@@ -21,7 +21,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 5
-    def versionPatch = 2
+    def versionPatch = 3
 
     signingConfigs {
         register("release") {
@@ -36,7 +36,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 70
+        versionCode = 71
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -169,6 +169,7 @@ dependencies {
     implementation libs.androidx.ui
 
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20231013")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

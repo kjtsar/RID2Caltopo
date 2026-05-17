@@ -18,6 +18,7 @@ import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
+import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import java.time.Instant
@@ -133,7 +134,7 @@ internal class NotamRepository {
                     summary = "NOTAM monitoring is enabled, but FAA onboarding credentials have not been loaded yet.",
                     distanceNm = null,
                     effectiveText = "Waiting for credentials",
-                    details = "Load the shared ct_credentials file after FAA onboarding completes to activate live nearby NOTAM queries.",
+                    details = "Load or scan the shared FAA config token to activate live nearby NOTAM queries.",
                     rawText = "",
                     severity = NotamChipSeverity.Neutral
                 )
@@ -276,7 +277,10 @@ internal class NotamRepository {
                 }
                 if (!response.isSuccessful) {
                     val message = when (response.code) {
-                        401, 403 -> "NOTAM authentication failed (HTTP ${response.code})."
+                        401, 403 -> {
+                            FaaConfigManager.markAuthorizationFailure("NOTAM authentication failed (HTTP ${response.code}).")
+                            "NOTAM authentication failed (HTTP ${response.code})."
+                        }
                         else -> "$requestLabel failed with HTTP ${response.code}."
                     }
                     throw IOException(message)

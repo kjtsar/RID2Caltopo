@@ -225,6 +225,12 @@ class ClientClassState {
     public String notamClientSecret;
     public String notamScope;
     public long notamLastUpdatedEpochMs;
+    public String faaRemoteToken;
+    public String faaConfigLabel;
+    public String faaPayloadEnc;
+    public long faaLastValidatedEpochMs;
+    public boolean faaConfigStale;
+    public String faaLastFailureReason;
     public Hashtable<String, CtDroneSpec> cachedDroneSpecTable;  // Table to map remoteIDs to their data
     public String configFilesLoaded;
     public MutualAidTemplateRecord mutualAidTemplate;
@@ -265,6 +271,12 @@ class ClientClassState {
         notamClientSecret = "";
         notamScope = "";
         notamLastUpdatedEpochMs = 0L;
+        faaRemoteToken = "";
+        faaConfigLabel = "";
+        faaPayloadEnc = "";
+        faaLastValidatedEpochMs = 0L;
+        faaConfigStale = false;
+        faaLastFailureReason = "";
         configFilesLoaded = "";
         mutualAidTemplate = new MutualAidTemplateRecord();
         caltopoProfiles = new ArrayList<>();
@@ -305,6 +317,7 @@ class ClientClassState {
                         predictiveHeadEnabled:%s, proximityAlertSpacingFeet:%d
                         notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
                         notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
+                        faaConfigLabel:'%s', faaTokenPresent:%s, faaPayloadCached:%s, faaStale:%s, faaLastValidatedEpochMs:%d, faaLastFailureReason:'%s'
                         activeCaltopoProfileId:'%s', caltopoProfiles:%d, maTemplateConfigured:%s
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
@@ -315,6 +328,8 @@ class ClientClassState {
                 notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
                 notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
                 notamClientSecret.isEmpty() ? "" : "###########", notamScope, notamLastUpdatedEpochMs,
+                faaConfigLabel, !faaRemoteToken.isEmpty(), !faaPayloadEnc.isEmpty(), faaConfigStale,
+                faaLastValidatedEpochMs, faaLastFailureReason,
                 activeCaltopoProfileId, caltopoProfiles != null ? caltopoProfiles.size() : 0,
                 mutualAidTemplate != null && CaltopoCredentials.sniffTest(
                         new CaltopoCredentials(
@@ -1628,12 +1643,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.caltopoDomainAndPort;
     }
 
-    public static JSONObject ReadJsonFile(Uri uri) {
+    public static String ReadTextFile(Uri uri) {
         StringBuilder stringBuilder = new StringBuilder();
         InputStream is;
         InputStreamReader isr;
         BufferedReader bufferedReader;
-        JSONObject retval;
 
         try {
             Context ctxt = R2CApplication.getAppCtxt();
@@ -1663,14 +1677,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTError(TAG, String.format(Locale.US, "Not able to read '%s'", uri), e);
             return null;
         }
+        return stringBuilder.toString();
+    }
 
+    public static JSONObject ReadJsonFile(Uri uri) {
+        String content = ReadTextFile(uri);
+        if (null == content) return null;
         try {
-            retval = new JSONObject(stringBuilder.toString());
+            return new JSONObject(content);
         } catch (JSONException e) {
             CTError(TAG, String.format(Locale.US, "Not able to parse '%s'", uri), e);
             return null;
         }
-        return retval;
     }
 
     public static void ShowToast(String msg) {
@@ -1728,9 +1746,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         SetNotamWarnInsideOneNm(notamWarnInsideOneNm);
         if (!notamApiBaseUrl.isEmpty()) SetNotamApiBaseUrl(notamApiBaseUrl);
         if (!notamTokenUrl.isEmpty()) SetNotamTokenUrl(notamTokenUrl);
-        if (!notamClientId.isEmpty()) SetNotamClientId(notamClientId);
-        if (!notamClientSecret.isEmpty()) SetNotamClientSecret(notamClientSecret);
-        if (!notamScope.isEmpty()) SetNotamScope(notamScope);
+        if (!notamClientId.isEmpty() && !notamClientSecret.isEmpty()) {
+            FaaConfigManager.importLegacyCredentialsFromJson(json);
+        } else {
+            if (!notamClientId.isEmpty()) SetNotamClientId(notamClientId);
+            if (!notamClientSecret.isEmpty()) SetNotamClientSecret(notamClientSecret);
+            if (!notamScope.isEmpty()) SetNotamScope(notamScope);
+        }
         if (!orgName.isEmpty()) SetHomeOrgName(orgName);
         if (!teamId.isEmpty() || !credentialId.isEmpty() || !credentialSecret.isEmpty()) {
             SetCaltopoCredentials(new CaltopoCredentials(teamId, credentialId, credentialSecret));
@@ -1844,8 +1866,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         try {
             ClientClassState ccs = GetState();
 
-            JSONObject json = ReadJsonFile(uri);
-            if (null == json) return false;
+            String content = ReadTextFile(uri);
+            if (null == content) return false;
+            Context ctxt = R2CApplication.getAppCtxt();
+            if (FaaConfigManager.tryHandleRawConfigText(ctxt, content)) {
+                if (ctxt != null) {
+                    ccs.configFilesLoaded = AppConfigStore.recordLoadedConfigFile(ctxt, "ct_faa_remote_config", "config_file", "");
+                }
+                NotifySettingsChanged();
+                ShowToast("FAA config token accepted.");
+                return true;
+            }
+            JSONObject json = new JSONObject(content);
             String type = json.optString("type").trim().toLowerCase();
             String fileVersion = json.optString("file_version");
             String updated = json.optString("updated");
@@ -1853,7 +1885,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             CTDebug(TAG, String.format(Locale.US, "Reading v%s %s config file last updated by %s on %s",
                     fileVersion, type, editor, updated));
 
-            Context ctxt = R2CApplication.getAppCtxt();
             if (ctxt != null) {
                 ccs.configFilesLoaded = AppConfigStore.recordLoadedConfigFile(ctxt, type, editor, updated);
             }
@@ -1864,6 +1895,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 readCredentialsFileContent(json);
             } else if (type.equals("ct_mutual_aid_credentials")) {
                 readMutualAidCredentialsFileContent(json);
+            } else if (FaaConfigManager.readConfigObject(json)) {
+                // handled by FAA config manager
             }
             NotifySettingsChanged();
             ShowToast(String.format(Locale.US, "%s:%s successfully loaded.", type, fileVersion));
@@ -1956,13 +1989,14 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 credentials.put("notam_api_base_url",   ccs.notamApiBaseUrl);
             if (ccs.notamTokenUrl != null && !ccs.notamTokenUrl.isEmpty())
                 credentials.put("notam_token_url",      ccs.notamTokenUrl);
-            if (ccs.notamClientId != null && !ccs.notamClientId.isEmpty())
-                credentials.put("notam_client_id",      ccs.notamClientId);
-            if (ccs.notamClientSecret != null && !ccs.notamClientSecret.isEmpty())
-                credentials.put("notam_client_secret",  ccs.notamClientSecret);
             if (ccs.notamScope != null && !ccs.notamScope.isEmpty())
                 credentials.put("notam_scope",          ccs.notamScope);
             configs.put(credentials);
+
+            JSONObject faaRemoteConfig = FaaConfigManager.buildRemoteConfigObject();
+            if (faaRemoteConfig != null) {
+                configs.put(faaRemoteConfig);
+            }
 
             // ── ct_mutual_aid_credentials ───────────────────────────────────
             MutualAidTemplateRecord template = ccs.mutualAidTemplate;
@@ -2040,6 +2074,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                     applied++;
                 } else if (type.equals("ct_mutual_aid_credentials")) {
                     readMutualAidCredentialsFileContent(config);
+                    applied++;
+                } else if (FaaConfigManager.readConfigObject(config)) {
                     applied++;
                 } else {
                     CTWarn(TAG, "ApplyOrgConfigBundle(): unknown config type ignored: " + type);
@@ -2818,6 +2854,65 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (ccs.notamLastUpdatedEpochMs != value) {
             ccs.notamLastUpdatedEpochMs = value;
         }
+    }
+
+    @NonNull
+    public static String GetFaaRemoteToken() {
+        String value = GetState().faaRemoteToken;
+        return value != null ? value : "";
+    }
+
+    @NonNull
+    public static String GetFaaConfigLabel() {
+        String value = GetState().faaConfigLabel;
+        return value != null ? value : "";
+    }
+
+    @NonNull
+    public static String GetFaaPayloadEnc() {
+        String value = GetState().faaPayloadEnc;
+        return value != null ? value : "";
+    }
+
+    public static long GetFaaLastValidatedEpochMs() {
+        return GetState().faaLastValidatedEpochMs;
+    }
+
+    public static boolean GetFaaConfigStale() {
+        return GetState().faaConfigStale;
+    }
+
+    @NonNull
+    public static String GetFaaLastFailureReason() {
+        String value = GetState().faaLastFailureReason;
+        return value != null ? value : "";
+    }
+
+    public static void StoreFaaRemoteConfig(
+            @NonNull String token,
+            @NonNull String label,
+            @NonNull String payloadEnc,
+            long lastValidatedEpochMs,
+            boolean stale,
+            @NonNull String failureReason
+    ) {
+        ClientClassState ccs = GetState();
+        ccs.faaRemoteToken = token.trim();
+        ccs.faaConfigLabel = label.trim();
+        ccs.faaPayloadEnc = payloadEnc;
+        ccs.faaLastValidatedEpochMs = Math.max(0L, lastValidatedEpochMs);
+        ccs.faaConfigStale = stale;
+        ccs.faaLastFailureReason = failureReason.trim();
+        NotifySettingsChanged();
+        ArchiveState("faa remote config changed");
+    }
+
+    public static void MarkFaaConfigStale(@NonNull String reason) {
+        ClientClassState ccs = GetState();
+        ccs.faaConfigStale = true;
+        ccs.faaLastFailureReason = reason.trim();
+        NotifySettingsChanged();
+        ArchiveState("faa remote config marked stale");
     }
 
     public static void InitArchiveDir() {

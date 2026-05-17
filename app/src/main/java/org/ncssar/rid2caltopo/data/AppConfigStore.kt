@@ -22,7 +22,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 10
+    const val SCHEMA_VERSION = 11
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -198,6 +198,8 @@ object AppConfigStore {
         if (config.notam.clientSecret.isNotBlank()) return true
         if (config.notam.scope.isNotBlank()) return true
         if (config.notam.lastUpdatedEpochMs != 0L) return true
+        if (config.faaRemoteConfig.token.isNotBlank()) return true
+        if (config.faaRemoteConfig.payloadEnc.isNotBlank()) return true
         if (config.ridMappingsCount > 0) return true
         if (config.loadedConfigFilesCount > 0) return true
         if (config.mutualAidTemplate.teamId.isNotBlank()) return true
@@ -272,6 +274,13 @@ object AppConfigStore {
         state.notamClientSecret = config.notam.clientSecret
         state.notamScope = config.notam.scope
         state.notamLastUpdatedEpochMs = config.notam.lastUpdatedEpochMs
+        state.faaRemoteToken = config.faaRemoteConfig.token
+        state.faaConfigLabel = config.faaRemoteConfig.label
+        state.faaPayloadEnc = config.faaRemoteConfig.payloadEnc
+        state.faaLastValidatedEpochMs = config.faaRemoteConfig.lastValidatedEpochMs
+        state.faaConfigStale = config.faaRemoteConfig.stale
+        state.faaLastFailureReason = config.faaRemoteConfig.lastFailureReason
+        FaaConfigManager.applyCachedPayloadToState(state)
         state.cachedDroneSpecTable = Hashtable<String, CtDroneSpec>(16)
         for (mapping in config.ridMappingsList) {
             val spec = CtDroneSpec(
@@ -347,10 +356,20 @@ object AppConfigStore {
                     .setWarnInsideOneNm(state.notamWarnInsideOneNm)
                     .setApiBaseUrl(state.notamApiBaseUrl ?: "")
                     .setTokenUrl(state.notamTokenUrl ?: "")
-                    .setClientId(state.notamClientId ?: "")
-                    .setClientSecret(state.notamClientSecret ?: "")
+                    .setClientId(if (state.faaPayloadEnc.isNullOrBlank()) state.notamClientId ?: "" else "")
+                    .setClientSecret(if (state.faaPayloadEnc.isNullOrBlank()) state.notamClientSecret ?: "" else "")
                     .setScope(state.notamScope ?: "")
                     .setLastUpdatedEpochMs(state.notamLastUpdatedEpochMs)
+                    .build()
+            )
+            .setFaaRemoteConfig(
+                AppConfig.FaaRemoteConfig.newBuilder()
+                    .setToken(state.faaRemoteToken ?: "")
+                    .setLabel(state.faaConfigLabel ?: "")
+                    .setPayloadEnc(state.faaPayloadEnc ?: "")
+                    .setLastValidatedEpochMs(state.faaLastValidatedEpochMs)
+                    .setStale(state.faaConfigStale)
+                    .setLastFailureReason(state.faaLastFailureReason ?: "")
                     .build()
             )
             .setCaltopoCredentials(

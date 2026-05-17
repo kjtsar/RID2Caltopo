@@ -71,6 +71,8 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
+import org.ncssar.rid2caltopo.data.FaaConfigManager
+import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
@@ -354,6 +356,14 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 val token = MutualAidPackageTransferToken.MAGIC_PREFIX + uri.toString().removePrefix("r2cmapkg1://")
                 CTDebug(TAG, "handleR2cIntent(): importing mutual aid package from scanned QR")
                 MutualAidPackageTransferManager.importFromToken(this, token)
+            }
+            FaaConfigToken.QR_SCHEME -> {
+                val token = FaaConfigToken.fromQrUri(uri.toString()) ?: return
+                CTDebug(TAG, "handleR2cIntent(): importing FAA config from scanned QR")
+                FaaConfigManager.importToken(this, token) { _, message ->
+                    showToast(message)
+                    NotamCenter.requestImmediateRefresh()
+                }
             }
         }
     }

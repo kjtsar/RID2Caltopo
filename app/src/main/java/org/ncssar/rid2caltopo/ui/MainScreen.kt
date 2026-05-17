@@ -55,6 +55,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.DriveSyncAction
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
+import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
 import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
@@ -189,12 +190,13 @@ fun MainScreen(
     val context =  LocalContext.current
     var pendingDriveAction by remember { mutableStateOf<DriveSyncAction?>(null) }
     var pendingOrgExport by remember { mutableStateOf(false) }
+    var pendingFaaExport by remember { mutableStateOf(false) }
     var driveSyncInProgress by remember { mutableStateOf(false) }
     var showDriveRestoreDialog by remember { mutableStateOf(shouldOfferDriveRestore(context)) }
     var linkedDriveEmail by remember { mutableStateOf(GoogleDriveConfigSync.getLinkedAccountEmail(context)) }
     var showOrgExportDialog by remember { mutableStateOf(false) }
-    var showOrgJoinDialog by remember { mutableStateOf(false) }
-    var showMutualAidJoinDialog by remember { mutableStateOf(false) }
+    var showFaaExportDialog by remember { mutableStateOf(false) }
+    var showImportConfigDialog by remember { mutableStateOf(false) }
     var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingMutualAidImportPreview by remember { mutableStateOf<MutualAidPackageManager.PackagePreview?>(null) }
     var showMutualAidImportPreviewDialog by remember { mutableStateOf(false) }
@@ -259,8 +261,10 @@ fun MainScreen(
         onResult = { result ->
             val requestedAction = pendingDriveAction
             val orgExport = pendingOrgExport
+            val faaExport = pendingFaaExport
             pendingDriveAction = null
             pendingOrgExport = false
+            pendingFaaExport = false
 
             val account = if (result.data != null) {
                 try {
@@ -282,6 +286,13 @@ fun MainScreen(
                     refreshDriveState()
                 }
                 orgExport ->
+                    CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
+                faaExport && account != null -> {
+                    showFaaExportDialog = true
+                    CaltopoClient.ShowToast("Signed in to Google Drive.")
+                    refreshDriveState()
+                }
+                faaExport ->
                     CaltopoClient.ShowToast("Google Drive authorization was cancelled.")
             }
         }
@@ -335,6 +346,26 @@ fun MainScreen(
                 } else {
                     showOrgExportDialog = false
                     pendingOrgExport = true
+                    driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                    callback(false, "Signing in to Google Drive…", null)
+                }
+            }
+        )
+    }
+
+    if (showFaaExportDialog) {
+        FaaConfigExportDialog(
+            onDismiss = { showFaaExportDialog = false },
+            onUploadRequested = { callback ->
+                val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
+                if (account != null) {
+                    FaaConfigManager.uploadFaaConfig(context, account) { success, message, token ->
+                        refreshDriveState()
+                        callback(success, message, token)
+                    }
+                } else {
+                    showFaaExportDialog = false
+                    pendingFaaExport = true
                     driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
                     callback(false, "Signing in to Google Drive…", null)
                 }
@@ -399,29 +430,30 @@ fun MainScreen(
         )
     }
 
-    if (showOrgJoinDialog) {
-        OrgConfigJoinDialog(
-            onDismiss = { showOrgJoinDialog = false },
+    if (showImportConfigDialog) {
+        ImportConfigDialog(
+            onDismiss = { showImportConfigDialog = false },
             onJoin = { token ->
-                showOrgJoinDialog = false
+                showImportConfigDialog = false
                 OrgConfigManager.joinFromToken(context, token) { _, message ->
                     CaltopoClient.ShowToast(message)
                 }
-            }
-        )
-    }
-
-    if (showMutualAidJoinDialog) {
-        MutualAidJoinDialog(
-            onDismiss = { showMutualAidJoinDialog = false },
-            onJoin = { token ->
-                showMutualAidJoinDialog = false
+            },
+            onFaaJoin = { token ->
+                showImportConfigDialog = false
+                FaaConfigManager.importToken(context, token) { _, message ->
+                    CaltopoClient.ShowToast(message)
+                    NotamCenter.requestImmediateRefresh()
+                }
+            },
+            onMutualAidJoin = { token ->
+                showImportConfigDialog = false
                 MutualAidProfileManager.joinFromToken(context, token) { _, message ->
                     CaltopoClient.ShowToast(message)
                 }
             },
             onPickFile = {
-                showMutualAidJoinDialog = false
+                showImportConfigDialog = false
                 importMutualAidPackageLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
             }
         )
@@ -440,7 +472,7 @@ fun MainScreen(
                 pendingMutualAidImportUri = null
                 pendingMutualAidImportPreview = null
             },
-            title = { Text("Import MA Package") },
+            title = { Text("Import Config") },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     if (preview != null) {
@@ -922,44 +954,11 @@ fun MainScreen(
                             showTestingToolsDialog = true
                             menuExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("Load config file") }, onClick = {
-                            loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
-                            menuExpanded = false
-                        })
-                        DropdownMenuItem(text = { Text("Export Org Config") }, onClick = {
-                            menuExpanded = false
-                            if (CaltopoClient.GetHomeOrgName().isBlank()) {
-                                CaltopoClient.ShowToast("Load ct_credentials with org_name before exporting org config.")
-                            } else if (GoogleDriveConfigSync.getAuthorizedAccount(context) != null) {
-                                showOrgExportDialog = true
-                            } else {
-                                pendingOrgExport = true
-                                driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
-                            }
-                        })
                         DropdownMenuItem(
-                            text = { Text("Import Org Config") },
+                            text = { Text("Import Config") },
                             onClick = {
                                 menuExpanded = false
-                                showOrgJoinDialog = true
-                            }
-                        )
-                        DropdownMenuItem(text = { Text("Export MA Package") }, onClick = {
-                            menuExpanded = false
-                            if (!CaltopoClient.HasMutualAidTemplate()) {
-                                CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting an MA package.")
-                            } else if (CaltopoMap.GetMapId().isBlank()) {
-                                CaltopoClient.ShowToast("Connect to a CalTopo map before exporting an MA package.")
-                            } else {
-                                MutualAidExportCoordinator.requestExportDialog()
-                                localViewModel.showStreams()
-                            }
-                        })
-                        DropdownMenuItem(
-                            text = { Text("Import MA Package") },
-                            onClick = {
-                                menuExpanded = false
-                                showMutualAidJoinDialog = true
+                                showImportConfigDialog = true
                             }
                         )
                         DropdownMenuItem(text = { Text("Settings") }, onClick = {
@@ -1116,7 +1115,53 @@ fun MainScreen(
             onDismissRequest = { showTestingToolsDialog = false },
             title = { Text("Developer Tools") },
             text = {
-                Column {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                ) {
+                    Button(
+                        onClick = {
+                            showTestingToolsDialog = false
+                            loadConfigFileLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Load Config File")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            showTestingToolsDialog = false
+                            if (CaltopoClient.GetHomeOrgName().isBlank()) {
+                                CaltopoClient.ShowToast("Load ct_credentials with org_name before exporting org config.")
+                            } else if (GoogleDriveConfigSync.getAuthorizedAccount(context) != null) {
+                                showOrgExportDialog = true
+                            } else {
+                                pendingOrgExport = true
+                                driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Export Org Config")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            showTestingToolsDialog = false
+                            if (!CaltopoClient.HasMutualAidTemplate()) {
+                                CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting an MA package.")
+                            } else if (CaltopoMap.GetMapId().isBlank()) {
+                                CaltopoClient.ShowToast("Connect to a CalTopo map before exporting an MA package.")
+                            } else {
+                                MutualAidExportCoordinator.requestExportDialog()
+                                localViewModel.showStreams()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Export MA Package")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {
                             showTestingToolsDialog = false
@@ -1125,6 +1170,22 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Load RID Replay")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
+                            showTestingToolsDialog = false
+                            if (account != null) {
+                                showFaaExportDialog = true
+                            } else {
+                                pendingFaaExport = true
+                                driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Publish FAA Config")
                     }
                     if (RidReplayManager.isReplayRunning()) {
                         Spacer(modifier = Modifier.height(8.dp))

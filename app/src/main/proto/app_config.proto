@@ -91,6 +91,15 @@ message AppConfig {
     int64 last_updated_epoch_ms = 11;
   }
 
+  message FaaRemoteConfig {
+    string token = 1;
+    string label = 2;
+    string payload_enc = 3;
+    int64 last_validated_epoch_ms = 4;
+    bool stale = 5;
+    string last_failure_reason = 6;
+  }
+
   int64 min_distance_feet = 20;
   int64 new_track_delay_seconds = 21;
   int64 max_idle_time_minutes = 22;
@@ -117,6 +126,7 @@ message AppConfig {
 
   ArchiveLocation archive_location = 60;
   NotamConfig notam = 61;
+  FaaRemoteConfig faa_remote_config = 62;
 
   repeated RidMapping rid_mappings = 70;
   repeated LoadedConfigFileRecord loaded_config_files = 80;

@@ -239,7 +239,7 @@ internal class DroneAltitudeCoordinator(
         }
     }
 
-    // ── Manual calibration (called by MapPane "Calibrate ATO at 50'" button) ────────────────
+    // ── Manual calibration ─────────────────────────────────────────────────────────────────
 
     /**
      * Applies a manual ATO/AGL calibration for the drone identified by [remoteId] at

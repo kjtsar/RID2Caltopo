@@ -19,7 +19,7 @@ class StreamRenderRouterTest {
         liveStreams: Map<String, StreamInfo>,
         focusedDesignator: String? = null,
         ffmpegAvailable: Boolean = true,
-        displayedTileCount: Int = liveStreams.size,
+        displayedTileCount: Int = displayedTileCount(liveStreams, focusedDesignator),
     ) = StreamRenderRouter.useFfmpeg(
         designator = designator,
         liveStreams = liveStreams,
@@ -27,6 +27,15 @@ class StreamRenderRouterTest {
         ffmpegAvailable = ffmpegAvailable,
         displayedTileCount = displayedTileCount,
     )
+
+    private fun displayedTileCount(
+        liveStreams: Map<String, StreamInfo>,
+        focusedDesignator: String?,
+    ): Int {
+        val liveCount = liveStreams.values.count { it.state == StreamState.LIVE }
+        if (liveCount <= 0) return 0
+        return if (focusedDesignator != null) 1 else liveCount
+    }
 
     // --- Single stream ---
 
@@ -97,6 +106,15 @@ class StreamRenderRouterTest {
         assertTrue(useFfmpeg("d1", streams, focusedDesignator = "d1"))
         assertFalse(useFfmpeg("d2", streams, focusedDesignator = "d1"))
         assertFalse(useFfmpeg("d3", streams, focusedDesignator = "d1"))
+    }
+
+    @Test
+    fun focusedStream_withMultipleDisplayedTiles_usesExoPlayer() {
+        val streams = mapOf(
+            "d1" to liveInfo("d1"),
+            "d2" to liveInfo("d2"),
+        )
+        assertFalse(useFfmpeg("d1", streams, focusedDesignator = "d1", displayedTileCount = 2))
     }
 
     // --- Transition: sole stream gains a second stream ---

@@ -104,4 +104,56 @@ class RidReplayScenarioParserTest {
         assertNull(drone.points.first().trackDeg)
         assertNull(drone.points.first().altitudeRateFpm)
     }
+
+    @Test
+    fun parseScenario_readsArchivedGeoJsonTrack() {
+        val scenario = RidReplayScenarioParser.parse(
+            """
+            {
+              "type": "FeatureCollection",
+              "features": [
+                {
+                  "type": "Feature",
+                  "properties": {
+                    "title": "1SAR7A360-120000",
+                    "r2c_prop": {
+                      "rid": "RID-ARCHIVE",
+                      "mid": "1SAR7A360",
+                      "org": "NCSSAR",
+                      "model": "Avata 2",
+                      "owner": "Pilot"
+                    }
+                  },
+                  "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                      [-121.01, 39.01, 100.0, 1750000001000],
+                      [-121.02, 39.02, 110.0, 1750000000000]
+                    ]
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals("Archived RID Replay", scenario.scenarioName)
+        assertEquals(RidReplayScenario.TimeMode.ABSOLUTE_EPOCH_MS, scenario.timeMode)
+        assertEquals(1.0, scenario.speedMultiplier, 0.0)
+        assertEquals(1, scenario.drones.size)
+
+        val drone = scenario.drones.first()
+        assertEquals("RID-ARCHIVE", drone.remoteId)
+        assertEquals("1SAR7A360", drone.mappedId)
+        assertEquals("NCSSAR", drone.org)
+        assertEquals("Avata 2", drone.model)
+        assertEquals("Pilot", drone.owner)
+        assertEquals(CtDroneSpec.TransportTypeEnum.R2C, drone.transport)
+        assertEquals(true, drone.airborne)
+        assertEquals(2, drone.points.size)
+        assertEquals(1750000000000L, drone.points[0].tMs)
+        assertEquals(39.02, drone.points[0].lat, 0.0)
+        assertEquals(-121.02, drone.points[0].lng, 0.0)
+        assertEquals(110.0, drone.points[0].altM, 0.0)
+    }
 }

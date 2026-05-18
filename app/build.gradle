@@ -265,10 +265,24 @@ tasks.register("jacocoTestReport", JacocoReport) {
     ))
 }
 
+tasks.register("releaseVerification") {
+    group = "verification"
+    description = "Runs all verification required before producing release artifacts."
+    dependsOn("testDebugUnitTest", "connectedDebugAndroidTest", "trackerCoordinationTests")
+}
+
+tasks.matching {
+    it.name == "assembleRelease" ||
+            it.name == "bundleRelease" ||
+            it.name.startsWith("publishRelease")
+}.configureEach {
+    dependsOn("releaseVerification")
+}
+
 tasks.register("releaseCheck") {
     group = "verification"
-    description = "Runs unit tests, connected Android tests, and assembles the release build."
-    dependsOn("testDebugUnitTest", "connectedDebugAndroidTest", "assembleRelease", "trackerCoordinationTests")
+    description = "Runs release verification and assembles the release build."
+    dependsOn("releaseVerification", "assembleRelease")
 }
 
 tasks.register("trackerCoordinationTests") {

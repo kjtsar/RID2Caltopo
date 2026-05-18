@@ -61,7 +61,6 @@ import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.MutualAidPackageManager
 import org.ncssar.rid2caltopo.data.OrgConfigManager
-import org.ncssar.rid2caltopo.data.RidReplayManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
@@ -779,27 +778,6 @@ fun MainScreen(
         }
     )
 
-    val loadRidReplayLauncher = rememberLauncherForActivityResult(
-        contract = FreshOpenDocument(),
-        onResult = { uri ->
-            if (uri == null) {
-                CaltopoClient.ShowToast("RID replay file selection cancelled.")
-                return@rememberLauncherForActivityResult
-            }
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) {
-                // Some providers do not grant persistable access; best effort is fine.
-            }
-            RidReplayManager.startReplayFromUri(context, uri) { _, message ->
-                CaltopoClient.ShowToast(message)
-            }
-        }
-    )
-
     LaunchedEffect(localViewModel.overlay) {
         if (localViewModel.overlay == OverlayState.RequestConfigFile && !isPickerOpen) {
             CTDebug(tag, "LaunchedEffect(): requesting config file...")
@@ -1164,16 +1142,6 @@ fun MainScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {
-                            showTestingToolsDialog = false
-                            loadRidReplayLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Load RID Replay")
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = {
                             val account = GoogleDriveConfigSync.getAuthorizedAccount(context)
                             showTestingToolsDialog = false
                             if (account != null) {
@@ -1186,18 +1154,6 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Publish FAA Config")
-                    }
-                    if (RidReplayManager.isReplayRunning()) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Button(
-                            onClick = {
-                                showTestingToolsDialog = false
-                                CaltopoClient.ShowToast(RidReplayManager.stopReplay())
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Stop RID Replay")
-                        }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(

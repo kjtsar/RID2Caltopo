@@ -15,6 +15,7 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.location.Location
 import android.os.StatFs
+import android.view.MotionEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -172,7 +173,6 @@ internal const val LOCAL_DEVICE_COLOR_DEGRADED = "FFA500"
 internal const val LOCAL_DEVICE_COLOR_UNCONFIGURED = "FF0000"
 internal const val ICON_LATENCY_TAG = "RidIconLatency"
 internal const val AGL_LIMIT_FT = 200.0
-internal const val CALIBRATE_ATO_TARGET_FT = 50.0
 internal const val RANGE_LIMIT_FT = 5280.0
 internal const val AGL_ICON_NEAR_DELTA_FT = 20.0
 internal const val FT_TO_METERS = 0.3048
@@ -493,7 +493,6 @@ internal fun SplitMapPane(
     var mapManagementMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
     var badTilesMenuExpanded by remember { mutableStateOf(false) }
-    var calibrateMenuExpanded by remember { mutableStateOf(false) }
     var mapReloadInFlight by remember { mutableStateOf(false) }
     var showMapCacheSizeDialog by remember { mutableStateOf(false) }
     var showMapTileAgeDialog by remember { mutableStateOf(false) }
@@ -574,6 +573,7 @@ internal fun SplitMapPane(
     var restoredViewportStartupCheckComplete by remember(restoredViewport) { mutableStateOf(restoredViewport == null) }
     var restoredViewportStartupWaitLogged by remember(restoredViewport) { mutableStateOf(false) }
     var restoredViewportStartupCheckStartedAtMs by remember(restoredViewport) { mutableStateOf(System.currentTimeMillis()) }
+    var operatorAdjustedViewport by remember(restoredViewport) { mutableStateOf(false) }
     var lastLocalDeviceMarkerStats by remember { mutableStateOf("") }
     var localDeviceViewportRescueApplied by remember(restoredViewport) { mutableStateOf(false) }
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
@@ -978,10 +978,6 @@ internal fun SplitMapPane(
             )
         }
         offlinePrepCacheStatus = computed
-    }
-
-    fun calibrateDroneAto50(target: DroneMapPoint) {
-        viewModel.altitudeCoordinator.manualCalibrate(target.remoteId, target.altitudeM, target.designator)
     }
 
     fun selectedTileSource(): org.osmdroid.tileprovider.tilesource.ITileSource {
@@ -1635,6 +1631,7 @@ internal fun SplitMapPane(
         restoredViewportStartupCheckComplete = persistedViewport == null
         restoredViewportStartupWaitLogged = false
         restoredViewportStartupCheckStartedAtMs = System.currentTimeMillis()
+        operatorAdjustedViewport = false
     }
     LaunchedEffect(Unit) {
         while (isActive) {
@@ -2011,6 +2008,19 @@ internal fun SplitMapPane(
                     setUseDataConnection(true)
                     tileMapProvider.setUseDataConnection(true)
                     setMaxZoomLevel(OSM_MAX_ZOOM)
+                    setOnTouchListener { _, event ->
+                        when (event?.actionMasked) {
+                            MotionEvent.ACTION_DOWN,
+                            MotionEvent.ACTION_POINTER_DOWN,
+                            MotionEvent.ACTION_MOVE -> {
+                                if (!operatorAdjustedViewport) {
+                                    operatorAdjustedViewport = true
+                                    CTDebug(MAP_PANE_TAG, "Map viewport operator-adjusted; suppressing startup recenter")
+                                }
+                            }
+                        }
+                        false
+                    }
                     val initialViewport = restoredViewport
                     if (initialViewport != null) {
                         controller.setCenter(GeoPoint(initialViewport.latitude, initialViewport.longitude))
@@ -2341,7 +2351,8 @@ internal fun SplitMapPane(
                     if (!localDeviceViewportRescueApplied &&
                         !localDeviceVisible &&
                         defaultViewportCenter &&
-                        !operationalContentPresent
+                        !operationalContentPresent &&
+                        !operatorAdjustedViewport
                     ) {
                         mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
                         mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
@@ -2589,6 +2600,11 @@ internal fun SplitMapPane(
                             restoredViewportStartupCheckComplete = true
                         }
 
+                        operatorAdjustedViewport -> {
+                            action = "kept-operator-adjusted-viewport"
+                            restoredViewportStartupCheckComplete = true
+                        }
+
                         startupLocationValid && !restoredViewportUsefulForMyLocation -> {
                             mapView.controller.setCenter(GeoPoint(startupMyLocation.latitude, startupMyLocation.longitude))
                             mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
@@ -2812,23 +2828,14 @@ internal fun SplitMapPane(
                     mapManagementMenuExpanded = false
                     baseLayerMenuExpanded = false
                     badTilesMenuExpanded = false
-                    calibrateMenuExpanded = false
                 }
             ) {
                 DropdownMenuItem(
-                    text = { Text("Base: ${baseLayer.label}") },
+                    text = { Text("Layer: ${baseLayer.label}") },
                     onClick = {
                         settingsMenuExpanded = false
                         baseLayerMenuExpanded = true
                     }
-                )
-                DropdownMenuItem(
-                    text = { Text("Calibrate 50' ATO...") },
-                    onClick = {
-                        settingsMenuExpanded = false
-                        calibrateMenuExpanded = true
-                    },
-                    enabled = dronePoints.isNotEmpty()
                 )
                 DropdownMenuItem(
                     text = { Text(if (predictiveHeadEnabled) "Predictive Head: On" else "Predictive Head: Off") },
@@ -2836,13 +2843,6 @@ internal fun SplitMapPane(
                         predictiveHeadEnabled = !predictiveHeadEnabled
                         CaltopoClient.SetPredictiveHeadEnabled(predictiveHeadEnabled)
                         settingsMenuExpanded = false
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Bad Tiles...") },
-                    onClick = {
-                        settingsMenuExpanded = false
-                        badTilesMenuExpanded = true
                     }
                 )
                 DropdownMenuItem(
@@ -2898,6 +2898,13 @@ internal fun SplitMapPane(
                         }
                     },
                     enabled = mapName != null && !mapReloadInFlight
+                )
+                DropdownMenuItem(
+                    text = { Text("Bad Tiles...") },
+                    onClick = {
+                        mapManagementMenuExpanded = false
+                        badTilesMenuExpanded = true
+                    }
                 )
                 DropdownMenuItem(
                     text = { Text("Max Cache Size: ${MapCacheSettings.formatDecimalGb(MapCacheSettings.maxCacheBytes(context))}") },
@@ -2975,22 +2982,6 @@ internal fun SplitMapPane(
                         }
                     )
                 }
-            }
-            DropdownMenu(
-                expanded = calibrateMenuExpanded,
-                onDismissRequest = { calibrateMenuExpanded = false }
-            ) {
-                dronePoints
-                    .sortedBy { it.designator }
-                    .forEach { point ->
-                        DropdownMenuItem(
-                            text = { Text(point.designator) },
-                            onClick = {
-                                calibrateDroneAto50(point)
-                                calibrateMenuExpanded = false
-                            }
-                        )
-                    }
             }
         }
 
@@ -3538,7 +3529,7 @@ private fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapF
         }
 }
 
-private fun buildArtifactOverlayState(
+internal fun buildArtifactOverlayState(
     features: Collection<JSONObject>,
     hiddenFolderIds: Set<String> = emptySet(),
     hiddenItemIds: Set<String> = emptySet()
@@ -3547,6 +3538,14 @@ private fun buildArtifactOverlayState(
     val lines = mutableListOf<ArtifactLineSpec>()
     val polygons = mutableListOf<ArtifactPolygonSpec>()
     var ignoredTrackLikeFeatures = 0
+    val representedFolderIds = features.mapNotNull { feature ->
+        val props = feature.optJSONObject("properties") ?: return@mapNotNull null
+        if (props.optString("class") == "Folder") {
+            feature.optString("id").takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+    }.toSet()
 
     for (feature in features) {
         val geometry = feature.optJSONObject("geometry") ?: continue
@@ -3556,6 +3555,7 @@ private fun buildArtifactOverlayState(
 
         val featureId = feature.optString("id")
         val folderId = properties?.optString("folderId").orEmpty()
+        if (folderId.isBlank() || folderId !in representedFolderIds) continue
         if (folderId.isNotBlank() && folderId in hiddenFolderIds) continue
         if (featureId.isNotBlank() && featureId in hiddenItemIds) continue
         val featureTitle = properties?.optString("title")

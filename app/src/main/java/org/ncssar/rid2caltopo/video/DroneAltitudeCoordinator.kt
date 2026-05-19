@@ -469,14 +469,37 @@ internal class DroneAltitudeCoordinator(
         val aglFt = if (correctionM != null) {
             (freshAgl ?: aglState)?.let {
                 val demScaleToMeters = demScaleToMetersByRemoteId[remoteId] ?: 1.0
-                calculateDemBackedAglMeters(
+                val aglMeters = calculateDemBackedAglMeters(
                     altM = altM,
                     ridHeightAtoM = ridHeightAtoM,
                     calibration = calibration,
                     correctionM = correctionM,
                     demGroundRaw = it.groundM,
                     demScaleToMeters = demScaleToMeters,
-                ) * METERS_TO_FEET
+                )
+                val recovery = recoverNegativeAglMeters(
+                    aglMeters = aglMeters,
+                    altM = altM,
+                    ridHeightAtoM = ridHeightAtoM,
+                    calibration = calibration,
+                    correctionM = correctionM,
+                    demGroundRaw = it.groundM,
+                    demScaleToMeters = demScaleToMeters,
+                    demIsFreshForCurrentLocation = freshAgl != null && !locationChanged && !demIsPending,
+                )
+                if (recovery.correctionM != correctionM) {
+                    demCorrectionByRemoteId[remoteId] = recovery.correctionM
+                    if (CTDebugEnabled(tag)) CTDebug(
+                        tag,
+                        "Negative AGL recovery for $designator: " +
+                            "priorAgl=${"%.1f".format(aglMeters * METERS_TO_FEET)}ft " +
+                            "ridAto=${ridHeightAtoM?.let { h -> "%.1f".format(h) } ?: "n/a"}m " +
+                            "demGroundRaw=${"%.1f".format(it.groundM)} " +
+                            "correctionSource=${calibration?.seedSource ?: "NONE"} " +
+                            "correctionF=${"%.1f".format(correctionM)}m->${"%.1f".format(recovery.correctionM)}m"
+                    )
+                }
+                recovery.aglMeters * METERS_TO_FEET
             }
         } else {
             ridHeightAtoM?.let { it * METERS_TO_FEET }
@@ -528,6 +551,8 @@ internal class DroneAltitudeCoordinator(
         private const val DEM_RETRY_INTERVAL_MS = 2_000L
         private const val METERS_TO_FEET = 3.28084
         private const val CALIBRATE_ATO_TARGET_FT = 50.0
+        private const val NEGATIVE_AGL_RECOVERY_THRESHOLD_M = -0.5
+        private const val MAX_RID_ATO_FOR_NEGATIVE_AGL_RECOVERY_M = 3.0
 
         internal fun calculateDemBackedAglMeters(
             altM: Double,
@@ -545,6 +570,39 @@ internal class DroneAltitudeCoordinator(
             return altM - demGroundM - correctionM
         }
 
+        internal fun recoverNegativeAglMeters(
+            aglMeters: Double,
+            altM: Double,
+            ridHeightAtoM: Double?,
+            calibration: DroneAltitudeCalibration?,
+            correctionM: Double,
+            demGroundRaw: Double,
+            demScaleToMeters: Double,
+            demIsFreshForCurrentLocation: Boolean,
+        ): NegativeAglRecovery {
+            if (aglMeters >= NEGATIVE_AGL_RECOVERY_THRESHOLD_M) {
+                return NegativeAglRecovery(aglMeters, correctionM)
+            }
+            if (calibration?.seedSource == AtoSeedSource.MANUAL) {
+                return NegativeAglRecovery(0.0, correctionM)
+            }
+            if (!demIsFreshForCurrentLocation || calibration == null) {
+                return NegativeAglRecovery(aglMeters, correctionM)
+            }
+            if (ridHeightAtoM != null && ridHeightAtoM > MAX_RID_ATO_FOR_NEGATIVE_AGL_RECOVERY_M) {
+                return NegativeAglRecovery(aglMeters, correctionM)
+            }
+
+            val demGroundM = demGroundRaw * demScaleToMeters
+            val recoveredCorrectionM = if (ridHeightAtoM != null) {
+                val recoveredTakeoffGroundM = demGroundM - ridHeightAtoM
+                calibration.takeoffTrackAltitudeM - recoveredTakeoffGroundM
+            } else {
+                altM - demGroundM
+            }
+            return NegativeAglRecovery(0.0, recoveredCorrectionM)
+        }
+
         internal fun shouldPreserveCalibrationOnMapReconnect(
             calibration: DroneAltitudeCalibration?
         ): Boolean {
@@ -558,4 +616,9 @@ private data class LocalAltitudePoint(
     val lat: Double,
     val lng: Double,
     val altM: Double,
+)
+
+internal data class NegativeAglRecovery(
+    val aglMeters: Double,
+    val correctionM: Double,
 )

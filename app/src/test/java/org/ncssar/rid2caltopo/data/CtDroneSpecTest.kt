@@ -96,6 +96,40 @@ class CtDroneSpecTest {
     }
 
     @Test
+    fun updateAltitudeContext_firstLowAtoSampleSeedsImpliedTakeoffAltitude() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.updateAltitudeContext(
+            101.0,
+            CtDroneSpec.AltSourceEnum.BARO,
+            1.0,
+            true
+        )
+
+        assertEquals(100.0, drone.impliedTakeoffAltM!!, 0.000001)
+    }
+
+    @Test
+    fun updateAltitudeContext_followupLowAtoSampleDoesNotKeepNudgingSeed() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.updateAltitudeContext(
+            101.0,
+            CtDroneSpec.AltSourceEnum.BARO,
+            1.0,
+            true
+        )
+        drone.updateAltitudeContext(
+            103.0,
+            CtDroneSpec.AltSourceEnum.BARO,
+            1.0,
+            true
+        )
+
+        assertEquals(100.0, drone.impliedTakeoffAltM!!, 0.000001)
+    }
+
+    @Test
     fun reset_clearsOutOfRangeClassification() {
         val drone = CtDroneSpec("RID123")
 

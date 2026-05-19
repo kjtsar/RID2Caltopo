@@ -52,9 +52,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
     public enum AltSourceEnum { BARO, GEODETIC, NONE }
 
-    // Minimum ridHeight (metres) required before a sample contributes to impliedTakeoffAltM.
-    // Filters out near-ground packets (ridHeight ≈ 0) where absAlt − ridHeight ≈ absAlt,
-    // which would seed the EMA with an inflated value and cause it to converge slowly.
+    // Minimum ridHeight (metres) required before follow-up samples continue converging
+    // impliedTakeoffAltM. The first ATO sample is accepted even below this gate because
+    // a first RID fix can arrive after liftoff, and absAlt − ridHeight is still the best
+    // takeoff-reference signal available.
     private static final double MIN_RIDHEIGHT_FOR_ATO_SAMPLE_M = 2.0;  // ~6.5 ft
     // EMA sealing: require this many qualifying samples AND a per-step delta below the
     // threshold before the estimate is considered stable enough to lock in.
@@ -337,14 +338,12 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // absAlt − ridHeight(ATO) = baro altitude at the takeoff site — a constant
         // throughout the flight regardless of the drone's current elevation.
         //
-        // Gate: skip packets where ridHeight < 2 m (~6.5 ft).  When the drone has
-        // just lifted off, ridHeight ≈ 0 while absAlt already reflects the baro bias
-        // of the launch site, so the estimate absAlt − ridHeight ≈ absAlt is inflated
-        // and would force many EMA iterations to correct.  Waiting for ridHeight to
-        // reach a modest flight altitude gives an accurate first sample immediately.
+        // After the first seed, gate near-ground samples so tiny ATO noise does not keep
+        // nudging the EMA. The initial seed is allowed through even below the gate because
+        // the first accepted RID packet may already be a few feet in the air.
         if (absAltM != -1000.0 && ridHeightM != -1000.0 && isAtoType
-                && ridHeightM >= MIN_RIDHEIGHT_FOR_ATO_SAMPLE_M
-                && !impliedTakeoffSealed) {
+                && !impliedTakeoffSealed
+                && (impliedTakeoffAltM == null || ridHeightM >= MIN_RIDHEIGHT_FOR_ATO_SAMPLE_M)) {
             double sample = absAltM - ridHeightM;
             if (impliedTakeoffAltM == null) {
                 impliedTakeoffAltM = sample;

@@ -84,4 +84,43 @@ class DroneAltitudeCoordinatorTest {
 
         assertEquals(-2.6, aglWithoutAto, 0.000001)
     }
+
+    @Test
+    fun recoverNegativeAglMeters_refreshesAutoCorrectionAtLanding() {
+        val calibration = DroneAltitudeCalibration(100.0, AtoSeedSource.AUTO_SEALED)
+        val priorCorrectionM = 1.0
+
+        val recovery = DroneAltitudeCoordinator.recoverNegativeAglMeters(
+            aglMeters = -0.9144,
+            altM = 99.0,
+            ridHeightAtoM = 0.0,
+            calibration = calibration,
+            correctionM = priorCorrectionM,
+            demGroundRaw = 100.0,
+            demScaleToMeters = 1.0,
+            demIsFreshForCurrentLocation = true,
+        )
+
+        assertEquals(0.0, recovery.aglMeters, 0.000001)
+        assertEquals(0.0, recovery.correctionM, 0.000001)
+    }
+
+    @Test
+    fun recoverNegativeAglMeters_clampsManualCalibrationWithoutReplacingCorrection() {
+        val priorCorrectionM = 1.0
+
+        val recovery = DroneAltitudeCoordinator.recoverNegativeAglMeters(
+            aglMeters = -0.9144,
+            altM = 99.0,
+            ridHeightAtoM = 0.0,
+            calibration = DroneAltitudeCalibration(100.0, AtoSeedSource.MANUAL),
+            correctionM = priorCorrectionM,
+            demGroundRaw = 100.0,
+            demScaleToMeters = 1.0,
+            demIsFreshForCurrentLocation = true,
+        )
+
+        assertEquals(0.0, recovery.aglMeters, 0.000001)
+        assertEquals(priorCorrectionM, recovery.correctionM, 0.000001)
+    }
 }

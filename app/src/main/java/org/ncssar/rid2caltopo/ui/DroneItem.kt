@@ -10,12 +10,12 @@ package org.ncssar.rid2caltopo.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -25,20 +25,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -98,13 +93,7 @@ fun SignalStrengthBars(rssi: Int, modifier: Modifier = Modifier) {
 @Composable
 fun DroneItem(drone: CtDroneSpec,
               totalCount: Int, // just used to force compose to redraw the DroneItem on chg.
-              onMappedIdChange: (String) -> Unit) {
-    var text by remember { mutableStateOf(drone.mappedId) }
-    val focusManager = LocalFocusManager.current
-
-    LaunchedEffect(drone.mappedId) {
-        if (text != drone.mappedId) text = drone.mappedId
-    }
+              onConfirmDrone: () -> Unit) {
     Card(
         modifier = Modifier
             .padding(vertical = 4.dp, horizontal = 4.dp)
@@ -140,45 +129,23 @@ fun DroneItem(drone: CtDroneSpec,
                 modifier = Modifier.width(200.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
-                BasicTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 14.sp,
-                        textAlign = TextAlign.Center
-                    ),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(
-                        onDone = {
-                            onMappedIdChange(text)
-                            focusManager.clearFocus()
-                        }
-                    ),
-                    decorationBox = { innerTextField ->
-                        Box(
-                            modifier = Modifier
-                                .border(
-                                    width = 1.dp,
-                                    color = MaterialTheme.colorScheme.secondaryContainer,
-                                    shape = RoundedCornerShape(4.dp)
-                                )
-                                .padding(2.dp)
-                        ) {
-                            innerTextField()
-                        }
-                    },
+                OutlinedButton(
+                    onClick = onConfirmDrone,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(2.dp)
-                        .height(26.dp)
-                        .onFocusChanged {
-                            if (!it.isFocused) {
-                                onMappedIdChange(text)
-                            }
-                        },
-                )
+                        .height(30.dp),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                ) {
+                    Text(
+                        text = drone.mappedId.ifBlank { "Confirm Drone" },
+                        textAlign = TextAlign.Center,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             Column(

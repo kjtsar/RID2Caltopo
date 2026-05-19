@@ -419,7 +419,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static long DroneSpecsArraySize = DsArray.size();
     private static boolean NotifySettingsChangedFlag;
     private static final Set<String> SessionUnknownDroneRemoteIds = new HashSet<>();
-    private static final Set<String> SessionConfirmedDroneRemoteIds = new HashSet<>();
+    private static final Set<String> CurrentPeerConfirmedDroneRemoteIds = new HashSet<>();
 
     private static final class DeferredLogOutputStream extends OutputStream {
         private final Object lock = new Object();
@@ -2116,7 +2116,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void ResetPersistedClientState() {
         Ccstate = new ClientClassState();
         SessionUnknownDroneRemoteIds.clear();
-        SessionConfirmedDroneRemoteIds.clear();
+        CurrentPeerConfirmedDroneRemoteIds.clear();
         DebugLevel = DebugLevelDebug;
         ClearDebugTagFilter();
         ArchivePermissionMissingFlag = false;
@@ -2152,9 +2152,13 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             activeDs.setOwner(trimmedOwner);
             activeDs.setMappedId(trimmedMappedId);
         }
-        activeDs.setLocalArchiveOnly(false);
-
-        UpdateDroneSpecs();
+        if (activeDs.isLocalArchiveOnly()) {
+            PromoteLocalArchiveOnlyDrone(remoteId);
+        } else {
+            SessionUnknownDroneRemoteIds.remove(remoteId.trim());
+            activeDs.setLocalArchiveOnly(false);
+            UpdateDroneSpecs();
+        }
     }
 
     public static void ApplyPeerDroneSpecConfirmation(
@@ -2167,7 +2171,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ClientClassState ccs = GetState();
         String trimmedRemoteId = remoteId.trim();
         if (trimmedRemoteId.isEmpty()) return;
-        SessionConfirmedDroneRemoteIds.add(trimmedRemoteId);
+        CurrentPeerConfirmedDroneRemoteIds.add(trimmedRemoteId);
 
         CtDroneSpec activeDs = ccs.droneSpecTable.get(trimmedRemoteId);
         if (activeDs != null) {
@@ -2203,8 +2207,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return SessionUnknownDroneRemoteIds.contains(remoteId.trim());
     }
 
-    public static boolean IsSessionDroneConfirmationIgnored(@NonNull String remoteId) {
-        return SessionConfirmedDroneRemoteIds.contains(remoteId.trim());
+    public static boolean IsCurrentPeerDroneConfirmed(@NonNull String remoteId) {
+        return CurrentPeerConfirmedDroneRemoteIds.contains(remoteId.trim());
+    }
+
+    public static void ClearCurrentPeerDroneConfirmation(@NonNull String remoteId) {
+        CurrentPeerConfirmedDroneRemoteIds.remove(remoteId.trim());
     }
 
     public static void PromoteLocalArchiveOnlyDrone(@NonNull String remoteId) {

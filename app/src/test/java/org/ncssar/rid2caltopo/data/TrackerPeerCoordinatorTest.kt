@@ -18,6 +18,7 @@ class TrackerPeerCoordinatorTest {
         var connected = false
         var connectCount = 0
         var autoOpen = true
+        var rejectNextSend = false
 
         override fun setCallback(callback: TrackerCoordinationTransport.Callback?) {
             this.transportCallback = callback
@@ -36,8 +37,13 @@ class TrackerPeerCoordinatorTest {
 
         override fun isConnected(): Boolean = connected
 
-        override fun send(text: String) {
+        override fun send(text: String): Boolean {
+            if (rejectNextSend) {
+                rejectNextSend = false
+                return false
+            }
             sentMessages += text
+            return true
         }
 
         fun open() {
@@ -159,6 +165,32 @@ class TrackerPeerCoordinatorTest {
         assertTrue(messages.none { it.optString("type") == "first_sighting" && it.optString("remoteId") == "DRONE1" })
         assertEquals("DRONE1", coordinator.getLastWaypointRemoteIdForTesting())
         assertFalse(coordinator.isLocalOwner("DRONE1"))
+    }
+
+    @Test
+    fun rejectedDroneConfirmationSend_isRetriedAfterHeartbeatAck() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.sentMessages.clear()
+        transport.rejectNextSend = true
+
+        coordinator.onDroneConfirmed(
+            "RID-1",
+            "NCSSAR",
+            "DJI Mini 4 Pro",
+            "1sar7",
+            "1sar7DjMn4Pr"
+        )
+
+        assertTrue(transport.sentMessages.none { JSONObject(it).optString("type") == "drone_confirmed" })
+
+        coordinator.markHeartbeatSentForTesting(1L, clock.now())
+        coordinator.handleHeartbeatAckForTesting(1L, 0L)
+
+        val confirmations = transport.sentMessages
+            .map { JSONObject(it) }
+            .filter { it.optString("type") == "drone_confirmed" }
+        assertEquals(1, confirmations.size)
+        assertEquals("RID-1", confirmations.single().optString("remoteId"))
     }
 
     @Test

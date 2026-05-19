@@ -48,7 +48,7 @@ fun R2CView(
     viewModel: R2CViewModel?,
     drones : List<CtDroneSpec>,
     appUptime : String,
-    onMappedIdChange: (CtDroneSpec, String) -> Unit
+    onConfirmDrone: (CtDroneSpec) -> Unit
 ) {
     val tag = "R2CView"
     Column {
@@ -61,8 +61,8 @@ fun R2CView(
                     DroneItem(
                         drone = drone,
                         totalCount = drone.totalCount
-                    ) { newMappedId ->
-                        onMappedIdChange(drone, newMappedId)
+                    ) {
+                        onConfirmDrone(drone)
                     }
                 }
             }
@@ -92,6 +92,17 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
     ) {
         Column(modifier = colModifier) {
             if (null != viewModel) MapStateView(viewModel)
+        }
+        Column(modifier = colModifier) {
+            val coordinatorStatus = coordinatorStatusDisplayText(
+                R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationStatusText
+            )
+            Text(
+                text = "Coordinator:\n$coordinatorStatus",
+                modifier = textMod,
+                style = MaterialTheme.typography.titleSmall,
+                textAlign = TextAlign.Center
+            )
         }
         Column (modifier = colModifier) {
             Text(
@@ -141,6 +152,16 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
             )
         }
     }
+}
+
+internal fun coordinatorStatusDisplayText(statusText: String): String = when (statusText) {
+    "Tracker link healthy" -> "Tracker OK"
+    "Tracker link degraded" -> "Tracker degraded"
+    "Tracker link not configured",
+    "R2C link not configured" -> "Not configured"
+    "MQTT link healthy" -> "MQTT OK"
+    "MQTT link degraded" -> "MQTT degraded"
+    else -> statusText
 }
 
 @Composable
@@ -364,7 +385,7 @@ fun R2CViewPreview() {
             null,
             emptyList(),
             "",
-            { _, _ -> }
+            {}
         )
     }
 }

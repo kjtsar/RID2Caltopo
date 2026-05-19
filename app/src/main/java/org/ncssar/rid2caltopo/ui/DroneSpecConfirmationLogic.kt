@@ -4,7 +4,6 @@ import org.ncssar.rid2caltopo.data.CtDroneSpec
 
 data class DroneSpecConfirmationUiState(
     val remoteId: String,
-    val flightStartMsec: Long,
     val organization: String,
     val pilotCallsign: String,
     val droneDescription: String,
@@ -38,7 +37,6 @@ object DroneSpecConfirmationLogic {
         }
         return DroneSpecConfirmationUiState(
             remoteId = drone.remoteId,
-            flightStartMsec = drone.startMsecTimestamp,
             organization = organization,
             pilotCallsign = pilotCallsign,
             droneDescription = droneDescription,

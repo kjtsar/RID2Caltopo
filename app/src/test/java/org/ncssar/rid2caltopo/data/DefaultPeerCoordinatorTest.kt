@@ -6,12 +6,14 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.json.JSONObject
 
 class DefaultPeerCoordinatorTest {
     private class FakeTransport : TrackerCoordinationTransport {
         var connected = false
         var connectCount = 0
         var autoOpen = true
+        val sentMessages = java.util.Collections.synchronizedList(mutableListOf<String>())
         private var callback: TrackerCoordinationTransport.Callback? = null
 
         override fun setCallback(callback: TrackerCoordinationTransport.Callback?) {
@@ -32,7 +34,10 @@ class DefaultPeerCoordinatorTest {
 
         override fun isConnected(): Boolean = connected
 
-        override fun send(text: String) = Unit
+        override fun send(text: String): Boolean {
+            sentMessages.add(text)
+            return true
+        }
 
         fun fail(responseCode: Int, responseMessage: String) {
             connected = false
@@ -109,7 +114,6 @@ class DefaultPeerCoordinatorTest {
 
         coordinator.onDroneConfirmed(
             "RID-1",
-            1234L,
             "NCSSAR",
             "DJI Mini 4 Pro",
             "1sar7",
@@ -117,7 +121,32 @@ class DefaultPeerCoordinatorTest {
         )
 
         val event = mqttFallback.latestEventOfKind("onDroneConfirmed")
-        assertEquals("RID-1 mappedId=1sar7DjMn4Pr flight=1234", event?.summary)
+        assertEquals("RID-1 mappedId=1sar7DjMn4Pr", event?.summary)
+    }
+
+    @Test
+    fun droneConfirmed_usesTrackerCoordinatorWhenConfigured() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        coordinator.onDroneConfirmed(
+            "RID-1",
+            "NCSSAR",
+            "DJI Mini 4 Pro",
+            "1sar7",
+            "1sar7DjMn4Pr"
+        )
+
+        val sentMessages = synchronized(transport.sentMessages) {
+            transport.sentMessages.toList()
+        }
+        assertTrue(sentMessages.any {
+            val message = JSONObject(it)
+            message.optString("type") == "drone_confirmed" &&
+                message.optString("remoteId") == "RID-1" &&
+                !message.has("flight" + "StartMsec")
+        })
+        assertEquals(null, mqttFallback.latestEventOfKind("onDroneConfirmed"))
     }
 
     @Test

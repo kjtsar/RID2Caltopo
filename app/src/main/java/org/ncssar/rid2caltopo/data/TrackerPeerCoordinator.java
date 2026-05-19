@@ -340,7 +340,6 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void onDroneConfirmed(@NonNull String remoteId,
-                                 long flightStartMsec,
                                  @NonNull String org,
                                  @NonNull String model,
                                  @NonNull String owner,
@@ -352,14 +351,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("zoneId", myGuid != null ? myGuid : "");
             jo.put("guid", myGuid != null ? myGuid : "");
             jo.put("remoteId", remoteId);
-            jo.put("flightStartMsec", flightStartMsec);
             jo.put("mappedId", mappedId);
             jo.put("trackLabel", mappedId);
             jo.put("org", org);
             jo.put("model", model);
             jo.put("ownerName", owner);
             pendingConfirmationsByRemoteId.put(remoteId, jo);
-            CTInfo(TAG, String.format(Locale.US,
+            CTDebug(TAG, String.format(Locale.US,
                     "onDroneConfirmed(): queued remoteId=%s mappedId='%s'",
                     remoteId,
                     mappedId));
@@ -555,6 +553,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 reconnectTargetAtMs > reconnectScheduledAtMs
                         ? (reconnectTargetAtMs - reconnectScheduledAtMs)
                         : -1L));
+        reconnectPending = false;
         TrackerCoordinationTransport activeTransport = transport;
         if (activeTransport == null) {
             activeTransport = transportFactory.create();
@@ -767,8 +766,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         lastOutboundJsonForTesting = jo.toString();
         TrackerCoordinationTransport activeTransport = transport;
         if (activeTransport == null || !activeTransport.isConnected()) return false;
-        activeTransport.send(jo.toString());
-        return true;
+        return activeTransport.send(jo.toString());
     }
 
     private void flushPendingConfirmations() {
@@ -783,10 +781,15 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         for (Map.Entry<String, JSONObject> entry : pendingConfirmationsByRemoteId.entrySet()) {
             if (sendJson(entry.getValue())) {
-                CTInfo(TAG, String.format(Locale.US,
+                CTDebug(TAG, String.format(Locale.US,
                         "flushPendingConfirmations(): sent remoteId=%s",
                         entry.getKey()));
                 pendingConfirmationsByRemoteId.remove(entry.getKey(), entry.getValue());
+            } else {
+                CTDebug(TAG, String.format(Locale.US,
+                        "flushPendingConfirmations(): send rejected remoteId=%s pending=%d",
+                        entry.getKey(),
+                        pendingConfirmationsByRemoteId.size()));
             }
         }
     }
@@ -926,6 +929,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         CTDebug(TAG, String.format(Locale.US,
                 "heartbeat_ack received: seq=%d rttMs=%d ownerLeaseExpireTs=%d",
                 ackSeq, nowMs - lastHeartbeatSentAtMs, ownerLeaseExpireTs));
+        flushPendingConfirmations();
     }
 
     private void applyOwnerAssignment(@NonNull String remoteId, @Nullable String ownerGuid, long leaseSeq, long leaseExpireTs) {
@@ -977,6 +981,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private void clearOwner(@NonNull String remoteId) {
         ownerByRemoteId.remove(remoteId);
         leaseSeqByRemoteId.remove(remoteId);
+        CaltopoClient.ClearCurrentPeerDroneConfirmation(remoteId);
         PendingDrone pending = pendingDrones.get(remoteId);
         if (pending != null) {
             pending.ownershipActivationTimer.stop();
@@ -1008,7 +1013,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private void onDroneConfirmedByPeer(@NonNull JSONObject jo) {
         String remoteId = jo.optString("remoteId");
         if (remoteId.isEmpty()) return;
-        CTInfo(TAG, String.format(Locale.US,
+        CTDebug(TAG, String.format(Locale.US,
                 "drone_confirmed received: remoteId=%s confirmedBy=%s mappedId='%s'",
                 remoteId,
                 firstNonEmpty(jo.optString("confirmedByGuid"), firstNonEmpty(jo.optString("guid"), jo.optString("zoneId"))),

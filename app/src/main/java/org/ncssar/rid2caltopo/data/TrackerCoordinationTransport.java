@@ -20,5 +20,5 @@ interface TrackerCoordinationTransport {
 
     boolean isConnected();
 
-    void send(@NonNull String text);
+    boolean send(@NonNull String text);
 }

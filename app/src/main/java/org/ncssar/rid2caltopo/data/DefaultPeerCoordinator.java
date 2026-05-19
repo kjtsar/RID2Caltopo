@@ -177,14 +177,21 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
 
     @Override
     public void onDroneConfirmed(@NonNull String remoteId,
-                                 long flightStartMsec,
                                  @NonNull String org,
                                  @NonNull String model,
                                  @NonNull String owner,
                                  @NonNull String mappedId) {
+        CaltopoClient.CTInfo(
+                "DefaultPeerCoord",
+                String.format(
+                        "onDroneConfirmed(): forwarding remoteId=%s mappedId='%s' via %s",
+                        remoteId,
+                        mappedId,
+                        activeCoordinator.getClass().getSimpleName()
+                )
+        );
         activeCoordinator.onDroneConfirmed(
                 remoteId,
-                flightStartMsec,
                 org,
                 model,
                 owner,

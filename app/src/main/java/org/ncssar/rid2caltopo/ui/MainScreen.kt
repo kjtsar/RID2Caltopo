@@ -995,8 +995,8 @@ fun MainScreen(
                                 drones = localDrones,
                                 appUptime = appUptime,
                                 viewModel = item.viewModel,
-                                onMappedIdChange = { drone, newId ->
-                                    item.viewModel.updateMappedId(drone, newId)
+                                onConfirmDrone = { drone ->
+                                    item.viewModel.requestDroneConfirmation(drone)
                                 }
                             )
                         }

@@ -170,11 +170,12 @@ final class OkHttpTrackerCoordinationTransport implements TrackerCoordinationTra
     }
 
     @Override
-    public void send(@NonNull String text) {
+    public boolean send(@NonNull String text) {
         WebSocket socket = webSocket;
         if (socket != null) {
-            socket.send(text);
+            return socket.send(text);
         }
+        return false;
     }
 
     private boolean isActiveSocket(@NonNull WebSocket candidate) {

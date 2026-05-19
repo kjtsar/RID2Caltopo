@@ -95,7 +95,7 @@ class CaltopoClientUnknownPromotionTest {
     }
 
     @Test
-    fun localSaveDoesNotIgnoreFutureFlightsButPeerConfirmationDoes() {
+    fun peerConfirmationUpdatesMetadataWithoutSessionSuppressingRemoteId() {
         val remoteId = "DRONE3"
 
         CaltopoClient.SaveDroneSpecConfirmation(
@@ -106,8 +106,6 @@ class CaltopoClientUnknownPromotionTest {
             "1SAR7m3"
         )
 
-        assertFalse(CaltopoClient.IsSessionDroneConfirmationIgnored(remoteId))
-
         CaltopoClient.ApplyPeerDroneSpecConfirmation(
             remoteId,
             "NCSSAR",
@@ -116,6 +114,31 @@ class CaltopoClientUnknownPromotionTest {
             "1SAR8m3"
         )
 
-        assertTrue(CaltopoClient.IsSessionDroneConfirmationIgnored(remoteId))
+        val drone = CaltopoClient.GetDroneSpec(remoteId)!!
+        assertFalse(CaltopoClient.IsSessionUnknownDrone(remoteId))
+        assertFalse(drone.isLocalArchiveOnly)
+        assertEquals("1SAR8m3", drone.mappedId)
+        assertEquals("1SAR8", drone.owner)
+    }
+
+    @Test
+    fun confirmationSavePromotesUnknownDroneBackToCooperativeHandling() {
+        val remoteId = "DRONE4"
+        CaltopoClient.SaveDroneSpecUnknownConfirmation(remoteId)
+        val drone = CaltopoClient.GetDroneSpec(remoteId)!!
+        assertTrue(CaltopoClient.IsSessionUnknownDrone(remoteId))
+        assertTrue(drone.isLocalArchiveOnly)
+
+        CaltopoClient.SaveDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Mavic 3",
+            "1SAR7",
+            "1SAR7m3"
+        )
+
+        assertFalse(CaltopoClient.IsSessionUnknownDrone(remoteId))
+        assertFalse(drone.isLocalArchiveOnly)
+        assertEquals("1SAR7m3", drone.mappedId)
     }
 }

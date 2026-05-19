@@ -117,6 +117,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     val activeScreen : StateFlow<ActiveScreen> = _activeScreen.asStateFlow()
     private val promptedCurrentFlightRemoteIds = linkedSetOf<String>()
     private val confirmedCurrentFlightRemoteIds = linkedSetOf<String>()
+    private var pendingDroneConfirmationRequestedByOperator = false
     private var screenBeforeConfirmation: ActiveScreen? = null
     private var screenBeforeConnectionOverlay: ActiveScreen? = null
 
@@ -373,6 +374,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             "requestDroneConfirmation(): remoteId=${drone.remoteId} active=${drone.isActive} mappedId='${drone.mappedId}'"
         )
         _pendingDroneConfirmation.value = buildConfirmationState(drone)
+        pendingDroneConfirmationRequestedByOperator = true
         screenBeforeConfirmation = null
     }
 
@@ -401,6 +403,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         CTDebug(tag, "markPendingDroneConfirmationUnknown(): remoteId=$remoteId")
         CaltopoClient.SaveDroneSpecUnknownConfirmation(remoteId)
         _pendingDroneConfirmation.value = null
+        pendingDroneConfirmationRequestedByOperator = false
         restoreScreenAfterConfirmation()
     }
 
@@ -459,6 +462,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             mappedId
         )
         _pendingDroneConfirmation.value = null
+        pendingDroneConfirmationRequestedByOperator = false
         restoreScreenAfterConfirmation()
     }
 
@@ -485,9 +489,14 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             .filter { CaltopoClient.IsCurrentPeerDroneConfirmed(it) }
             .forEach { confirmedCurrentFlightRemoteIds.add(it) }
         var pendingRemoteId = _pendingDroneConfirmation.value?.remoteId
-        if (pendingRemoteId != null && pendingRemoteId in confirmedCurrentFlightRemoteIds) {
+        if (
+            pendingRemoteId != null &&
+            pendingRemoteId in confirmedCurrentFlightRemoteIds &&
+            !pendingDroneConfirmationRequestedByOperator
+        ) {
             CTDebug(tag, "Clearing pending confirmation for $pendingRemoteId: confirmed by peer")
             _pendingDroneConfirmation.value = null
+            pendingDroneConfirmationRequestedByOperator = false
             restoreScreenAfterConfirmation()
             pendingRemoteId = null
         }
@@ -499,6 +508,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 CTDebug(tag, "Clearing pending confirmation for $pendingRemoteId: no longer active/eligible")
             }
             _pendingDroneConfirmation.value = null
+            pendingDroneConfirmationRequestedByOperator = false
         }
         if (_pendingDroneConfirmation.value == null) {
             val droneToConfirm = droneSpecs.firstOrNull { drone ->
@@ -521,6 +531,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                     )
                     promptedCurrentFlightRemoteIds.add(activeRemoteId)
                     _pendingDroneConfirmation.value = buildConfirmationState(droneToConfirm)
+                    pendingDroneConfirmationRequestedByOperator = false
                     if (_activeScreen.value == ActiveScreen.STREAMS) {
                         screenBeforeConfirmation = _activeScreen.value
                         CaltopoClient.ShowToast("New drone needs confirmation. Returning to main screen.")
@@ -563,6 +574,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         if (_pendingDroneConfirmation.value?.remoteId == trimmedRemoteId) {
             CTDebug(tag, "Clearing pending confirmation for $trimmedRemoteId: $reason")
             _pendingDroneConfirmation.value = null
+            pendingDroneConfirmationRequestedByOperator = false
             restoreScreenAfterConfirmation()
         } else if (removedPrompt || removedConfirmation) {
             CTDebug(tag, "Clearing confirmation prompt state for $trimmedRemoteId: $reason")

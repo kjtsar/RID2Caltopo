@@ -2203,18 +2203,27 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (RejectNonCanonicalRemoteId("ApplyPeerDroneSpecConfirmation()", remoteId)) return;
         CurrentPeerConfirmedDroneRemoteIds.add(remoteId);
 
+        String trimmedOrg = org.trim();
+        String trimmedModel = model.trim();
+        String trimmedOwner = owner.trim();
+        String trimmedMappedId = mappedId.trim();
+
         CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
-        if (activeDs != null) {
-            String trimmedOrg = org.trim();
-            String trimmedModel = model.trim();
-            String trimmedOwner = owner.trim();
-            String trimmedMappedId = mappedId.trim();
+        if (activeDs == null) {
+            activeDs = new CtDroneSpec(
+                    remoteId,
+                    trimmedMappedId,
+                    trimmedOrg,
+                    trimmedModel,
+                    trimmedOwner);
+            ccs.droneSpecTable.put(remoteId, activeDs);
+        } else {
             if (!trimmedOrg.isEmpty()) activeDs.setOrg(trimmedOrg);
             if (!trimmedModel.isEmpty()) activeDs.setModel(trimmedModel);
             if (!trimmedOwner.isEmpty()) activeDs.setOwner(trimmedOwner);
             if (!trimmedMappedId.isEmpty()) activeDs.setMappedId(trimmedMappedId);
-            activeDs.setLocalArchiveOnly(false);
         }
+        activeDs.setLocalArchiveOnly(false);
 
         UpdateDroneSpecs();
     }

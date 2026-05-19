@@ -122,6 +122,87 @@ class CaltopoClientUnknownPromotionTest {
     }
 
     @Test
+    fun peerConfirmationCreatesSessionOnlyDroneSpecWhenMissing() {
+        val remoteId = "DRONE5"
+
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            remoteId,
+            "MA-SAR",
+            "Autel Evo Max",
+            "MA12",
+            "MA12Autel"
+        )
+
+        val drone = CaltopoClient.GetDroneSpec(remoteId)!!
+        assertTrue(CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId))
+        assertFalse(drone.isLocalArchiveOnly)
+        assertEquals("MA12Autel", drone.mappedId)
+        assertEquals("MA-SAR", drone.org)
+        assertEquals("Autel Evo Max", drone.model)
+        assertEquals("MA12", drone.owner)
+        assertEquals(0, CaltopoClient.GetRidmapCount())
+        assertTrue(CaltopoClient.GetPersistedDroneSpecs().isEmpty())
+    }
+
+    @Test
+    fun peerConfirmationDoesNotMutatePersistedDroneSpecCache() {
+        val remoteId = "DRONE6"
+        CaltopoClient.ApplyRemoteDroneSpec(
+            remoteId,
+            "CachedMapped",
+            "CachedOrg",
+            "CachedModel",
+            "CachedOwner"
+        )
+
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            remoteId,
+            "PeerOrg",
+            "PeerModel",
+            "PeerOwner",
+            "PeerMapped"
+        )
+
+        val sessionDrone = CaltopoClient.GetDroneSpec(remoteId)!!
+        assertEquals("PeerMapped", sessionDrone.mappedId)
+        assertEquals("PeerOrg", sessionDrone.org)
+        assertEquals("PeerModel", sessionDrone.model)
+        assertEquals("PeerOwner", sessionDrone.owner)
+
+        val persistedDrone = CaltopoClient.GetPersistedDroneSpecs().single()
+        assertEquals("CachedMapped", persistedDrone.mappedId)
+        assertEquals("CachedOrg", persistedDrone.org)
+        assertEquals("CachedModel", persistedDrone.model)
+        assertEquals("CachedOwner", persistedDrone.owner)
+    }
+
+    @Test
+    fun peerConfirmationBlankFieldsDoNotEraseSessionValues() {
+        val remoteId = "DRONE7"
+        CaltopoClient.SaveDroneSpecConfirmation(
+            remoteId,
+            "LocalOrg",
+            "LocalModel",
+            "LocalOwner",
+            "LocalMapped"
+        )
+
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            remoteId,
+            "",
+            "",
+            "",
+            ""
+        )
+
+        val drone = CaltopoClient.GetDroneSpec(remoteId)!!
+        assertEquals("LocalMapped", drone.mappedId)
+        assertEquals("LocalOrg", drone.org)
+        assertEquals("LocalModel", drone.model)
+        assertEquals("LocalOwner", drone.owner)
+    }
+
+    @Test
     fun confirmationSavePromotesUnknownDroneBackToCooperativeHandling() {
         val remoteId = "DRONE4"
         CaltopoClient.SaveDroneSpecUnknownConfirmation(remoteId)

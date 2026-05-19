@@ -61,6 +61,33 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
+    fun operatorRequestedConfirmationStaysOpenAfterPeerSave() {
+        val remoteId = "DRONEINSPECT"
+        val drone = activeDrone(remoteId, waypointTimestampMsec = 4567L)
+        val viewModel = R2CViewModel(SimpleTimer())
+
+        viewModel.onDroneSpecsChanged(listOf(drone))
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        viewModel.markPendingDroneConfirmationUnknown()
+        assertNull(viewModel.pendingDroneConfirmation.value)
+
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Mavic 3",
+            "1SAR8",
+            "1SAR8m3"
+        )
+        viewModel.requestDroneConfirmation(drone)
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+
+        viewModel.onDroneSpecsChanged(listOf(drone))
+
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        assertEquals(remoteId, viewModel.pendingDroneConfirmation.value?.remoteId)
+    }
+
+    @Test
     fun trackerConfirmationDoesNotSuppressAfterTrackerLifecycleEnds() {
         val remoteId = "DRONEREUSE"
         val drone = activeDrone(remoteId, waypointTimestampMsec = 5678L)

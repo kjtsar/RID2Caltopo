@@ -55,6 +55,10 @@ class TrackerPeerCoordinatorTest {
             connected = false
             transportCallback?.onFailure(RuntimeException("HTTP $responseCode"), responseCode, responseMessage)
         }
+
+        fun receive(text: String) {
+            transportCallback?.onMessage(text)
+        }
     }
 
     private class FakeClock(var nowMs: Long = 1_000L) : TrackerPeerCoordinator.TimeSource {
@@ -100,10 +104,12 @@ class TrackerPeerCoordinatorTest {
         TrackerPeerCoordinator.setHandoffDelayMsForTesting(0L)
         TrackerPeerCoordinator.setTimeSourceForTesting(clock)
         coordinator = TrackerPeerCoordinator.getInstance()
+        CaltopoClient.ResetPersistedClientState()
     }
 
     @After
     fun tearDown() {
+        CaltopoClient.ResetPersistedClientState()
         TrackerPeerCoordinator.resetForTesting()
     }
 
@@ -191,6 +197,32 @@ class TrackerPeerCoordinatorTest {
             .filter { it.optString("type") == "drone_confirmed" }
         assertEquals(1, confirmations.size)
         assertEquals("RID-1", confirmations.single().optString("remoteId"))
+    }
+
+    @Test
+    fun incomingDroneConfirmedAppliesSessionOnlyDroneSpec() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        transport.receive(
+            JSONObject()
+                .put("type", "drone_confirmed")
+                .put("remoteId", "DRONE9")
+                .put("confirmedByGuid", "zone-bravo")
+                .put("mappedId", "MA12Autel")
+                .put("trackLabel", "MA12Autel")
+                .put("org", "MA-SAR")
+                .put("model", "Autel Evo Max")
+                .put("ownerName", "MA12")
+                .toString()
+        )
+
+        val drone = CaltopoClient.GetDroneSpec("DRONE9")!!
+        assertTrue(CaltopoClient.IsCurrentPeerDroneConfirmed("DRONE9"))
+        assertEquals("MA12Autel", drone.mappedId)
+        assertEquals("MA-SAR", drone.org)
+        assertEquals("Autel Evo Max", drone.model)
+        assertEquals("MA12", drone.owner)
+        assertEquals(0, CaltopoClient.GetRidmapCount())
     }
 
     @Test

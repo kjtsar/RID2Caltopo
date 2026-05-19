@@ -11,12 +11,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -41,11 +39,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -63,25 +59,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.launch
-import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
@@ -101,9 +91,6 @@ import org.ncssar.rid2caltopo.ui.SignalLossAlertButton
 import org.ncssar.rid2caltopo.ui.SignalLossAlertDialog
 import org.opendroneid.android.bluetooth.WiFiScanner
 import androidx.documentfile.provider.DocumentFile
-import kotlin.math.roundToInt
-import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
-import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 
 private const val EMPTY_STREAMS_SETTINGS_DESIGNATOR = "__empty_streams_defaults__"
 
@@ -863,6 +850,15 @@ private fun EmptyStreamsView(
                 expanded = anomalyMenuExpanded,
                 onDismissRequest = { anomalyMenuExpanded = false }
             ) {
+                onPlayCapturedVideo?.let { playCapturedVideo ->
+                    DropdownMenuItem(
+                        text = { Text("Play Captured Video") },
+                        onClick = {
+                            anomalyMenuExpanded = false
+                            playCapturedVideo()
+                        }
+                    )
+                }
                 AnomalySettingsMenuContent(
                     viewModel = viewModel,
                     streamDesignator = settingsDesignator,
@@ -884,12 +880,6 @@ private fun EmptyStreamsView(
         ) {
             val ssid = WiFiScanner.WiFiSSID(LocalContext.current)
             Text("Stream video to: 'rtmp://$myIpAddress/<droneDesig>' on $ssid network")
-            Spacer(modifier = Modifier.height(16.dp))
-            if (onPlayCapturedVideo != null) {
-                Button(onClick = onPlayCapturedVideo) {
-                    Text("Play Captured Video")
-                }
-            }
             Spacer(modifier = Modifier.height(12.dp))
             StreamsMapStatusButton(
                 mapName = mapName,

@@ -13,7 +13,6 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.LoggingLevelName;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
-import android.content.Intent;
 import android.content.UriPermission;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -421,6 +420,30 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static final Set<String> SessionUnknownDroneRemoteIds = new HashSet<>();
     private static final Set<String> CurrentPeerConfirmedDroneRemoteIds = new HashSet<>();
 
+    @NonNull
+    private static String CanonicalRemoteId(@NonNull String remoteId) {
+        return remoteId.replaceAll("[^A-Z0-9]", "");
+    }
+
+    private static boolean IsCanonicalRemoteId(@NonNull String remoteId) {
+        return !remoteId.isEmpty() && remoteId.equals(CanonicalRemoteId(remoteId));
+    }
+
+    private static boolean RejectNonCanonicalRemoteId(@NonNull String source, @NonNull String remoteId) {
+        if (IsCanonicalRemoteId(remoteId)) return false;
+        CTError(TAG, String.format(Locale.US,
+                "%s received non-canonical remoteId='%s' canonicalWouldBe='%s'",
+                source, remoteId, CanonicalRemoteId(remoteId)));
+        return true;
+    }
+
+    private static void RequireCanonicalRemoteId(@NonNull String source, @NonNull String remoteId) {
+        if (RejectNonCanonicalRemoteId(source, remoteId)) {
+            throw new RuntimeException(String.format(Locale.US,
+                    "%s requires canonical Remote ID but received '%s'", source, remoteId));
+        }
+    }
+
     private static final class DeferredLogOutputStream extends OutputStream {
         private final Object lock = new Object();
         private final int maxBufferedBytes;
@@ -503,6 +526,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (null == rid || rid.isEmpty()) {
             throw new RuntimeException("CaltopoClient() constructor missing/invalid remoteId");
         }
+        RequireCanonicalRemoteId("CaltopoClient()", rid);
         remoteId = rid;
         CtDroneSpec lDroneSpec = ccs.droneSpecTable.get(rid); // Is this one already active?
         if (null != lDroneSpec) { // already in the active table — re-use it directly
@@ -537,6 +561,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @Nullable
     public static CtDroneSpec GetDroneSpec(@NonNull String remoteId) {
         ClientClassState ccs = GetState();
+        if (RejectNonCanonicalRemoteId("GetDroneSpec()", remoteId)) return null;
         CtDroneSpec ds = ccs.droneSpecTable.get(remoteId);
         if (null == ds) {
             ds = ccs.cachedDroneSpecTable.get(remoteId);
@@ -587,6 +612,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                                             @NonNull String model,
                                             @NonNull String owner) {
         ClientClassState ccs = GetState();
+        if (RejectNonCanonicalRemoteId("ApplyRemoteDroneSpec()", remoteId)) return;
 
         // Case 1: drone is already in the active table — update it directly.
         CtDroneSpec active = ccs.droneSpecTable.get(remoteId);
@@ -1814,6 +1840,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         for (int i = 0; i < mapJson.length(); i++) {
             JSONObject entry = mapJson.getJSONObject(i);
             String rid = entry.optString("remoteId");
+            if (RejectNonCanonicalRemoteId("readRidmapFileContent()", rid)) {
+                throw new JSONException(String.format(Locale.US,
+                        "Illegal non-canonical remoteId '%s' at table offset %d - file contents ignored.", rid, i));
+            }
             String mid = entry.optString("mappedId");
             String org = entry.optString("org");
             String model = entry.optString("model");
@@ -2133,6 +2163,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             @NonNull String mappedId
     ) {
         ClientClassState ccs = GetState();
+        if (RejectNonCanonicalRemoteId("SaveDroneSpecConfirmation()", remoteId)) return;
         String trimmedOrg = org.trim();
         String trimmedModel = model.trim();
         String trimmedOwner = owner.trim();
@@ -2155,7 +2186,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (activeDs.isLocalArchiveOnly()) {
             PromoteLocalArchiveOnlyDrone(remoteId);
         } else {
-            SessionUnknownDroneRemoteIds.remove(remoteId.trim());
+            SessionUnknownDroneRemoteIds.remove(remoteId);
             activeDs.setLocalArchiveOnly(false);
             UpdateDroneSpecs();
         }
@@ -2169,11 +2200,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             @NonNull String mappedId
     ) {
         ClientClassState ccs = GetState();
-        String trimmedRemoteId = remoteId.trim();
-        if (trimmedRemoteId.isEmpty()) return;
-        CurrentPeerConfirmedDroneRemoteIds.add(trimmedRemoteId);
+        if (RejectNonCanonicalRemoteId("ApplyPeerDroneSpecConfirmation()", remoteId)) return;
+        CurrentPeerConfirmedDroneRemoteIds.add(remoteId);
 
-        CtDroneSpec activeDs = ccs.droneSpecTable.get(trimmedRemoteId);
+        CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
         if (activeDs != null) {
             String trimmedOrg = org.trim();
             String trimmedModel = model.trim();
@@ -2191,12 +2221,12 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
     public static void SaveDroneSpecUnknownConfirmation(@NonNull String remoteId) {
         ClientClassState ccs = GetState();
-        String trimmedRemoteId = remoteId.trim();
-        SessionUnknownDroneRemoteIds.add(trimmedRemoteId);
-        CtDroneSpec activeDs = ccs.droneSpecTable.get(trimmedRemoteId);
+        if (RejectNonCanonicalRemoteId("SaveDroneSpecUnknownConfirmation()", remoteId)) return;
+        SessionUnknownDroneRemoteIds.add(remoteId);
+        CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
         if (activeDs == null) {
-            activeDs = new CtDroneSpec(trimmedRemoteId);
-            ccs.droneSpecTable.put(trimmedRemoteId, activeDs);
+            activeDs = new CtDroneSpec(remoteId);
+            ccs.droneSpecTable.put(remoteId, activeDs);
         }
         activeDs.setLocalArchiveOnly(true);
 
@@ -2204,15 +2234,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static boolean IsSessionUnknownDrone(@NonNull String remoteId) {
-        return SessionUnknownDroneRemoteIds.contains(remoteId.trim());
+        if (RejectNonCanonicalRemoteId("IsSessionUnknownDrone()", remoteId)) return false;
+        return SessionUnknownDroneRemoteIds.contains(remoteId);
     }
 
     public static boolean IsCurrentPeerDroneConfirmed(@NonNull String remoteId) {
-        return CurrentPeerConfirmedDroneRemoteIds.contains(remoteId.trim());
+        if (RejectNonCanonicalRemoteId("IsCurrentPeerDroneConfirmed()", remoteId)) return false;
+        return CurrentPeerConfirmedDroneRemoteIds.contains(remoteId);
     }
 
     public static void ClearCurrentPeerDroneConfirmation(@NonNull String remoteId) {
-        CurrentPeerConfirmedDroneRemoteIds.remove(remoteId.trim());
+        if (RejectNonCanonicalRemoteId("ClearCurrentPeerDroneConfirmation()", remoteId)) return;
+        CurrentPeerConfirmedDroneRemoteIds.remove(remoteId);
     }
 
     public static void PromoteLocalArchiveOnlyDrone(@NonNull String remoteId) {
@@ -2222,10 +2255,11 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     static void promoteLocalArchiveOnlyDrone(@NonNull String remoteId,
                                              @Nullable LiveTrackOwnerDelegate liveTrackOverride) {
         ClientClassState ccs = GetState();
+        if (RejectNonCanonicalRemoteId("promoteLocalArchiveOnlyDrone()", remoteId)) return;
         CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
         if (activeDs == null || !activeDs.isLocalArchiveOnly()) return;
 
-        SessionUnknownDroneRemoteIds.remove(remoteId.trim());
+        SessionUnknownDroneRemoteIds.remove(remoteId);
         activeDs.setLocalArchiveOnly(false);
         UpdateDroneSpecs();
         R2CMqttManager.onDroneSpecChanged(remoteId);
@@ -2278,6 +2312,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (remoteId.isEmpty()) {
             throw new RuntimeException("CaltopoClient.ClientForRemoteId(): Invalid remoteId");
         }
+        RequireCanonicalRemoteId("ClientForRemoteId()", remoteId);
         CaltopoClient client = ClientMap.get(remoteId);
         if (null == client) {
             client = new CaltopoClient(remoteId);

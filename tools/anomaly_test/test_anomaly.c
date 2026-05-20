@@ -1071,6 +1071,30 @@ static void test_small_target_caps_sample_step(void) {
     anomaly_state_cleanup(&st);
 }
 
+static void test_explicit_detail_clamps_large_sample_grid(void) {
+    const int W = 1800, H = 1400;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.pixel_step = 1;
+    cfg.scan_zone = 1.0f;
+    cfg.small_target_screen_fraction = 1.0f / 200.0f;
+
+    uint8_t *frame = make_gray_frame(W, H, 96);
+    anomaly_result_t res;
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+
+    int expected_sample_step = 2;
+    EXPECT(res.scan_plan.sampled_width == (W + expected_sample_step - 1) / expected_sample_step,
+           "detail clamp: explicit 1px detail is coarsened on large frames");
+    EXPECT(res.scan_plan.sampled_height == (H + expected_sample_step - 1) / expected_sample_step,
+           "detail clamp: sampled height reflects memory guard");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
 static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(void) {
     const int W = 640, H = 480;
     anomaly_state_t st;
@@ -1139,6 +1163,7 @@ int main(void) {
     test_scan_planner_target_only_mode_with_active_track();
     test_color_target_track_uses_dense_candidate_geometry();
     test_small_target_caps_sample_step();
+    test_explicit_detail_clamps_large_sample_grid();
     test_periodic_full_refresh_replaces_indefinite_target_only_reuse();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);

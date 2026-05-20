@@ -1286,12 +1286,24 @@ static inline int effective_small_target_sample_step_cap(
 
 static inline int effective_sample_step(const anomaly_config_t *cfg, int width, int height) {
     int max_step = effective_small_target_sample_step_cap(cfg, width, height);
+    const size_t max_sampled_cells = 1500000u;
+    int min_memory_step = 1;
+    if (width > 0 && height > 0) {
+        float zone = cfg != NULL ? clampf(cfg->scan_zone, 0.5f, 1.0f) : 1.0f;
+        float zone_cells = (float)width * (float)height * zone * zone;
+        if (zone_cells > (float)max_sampled_cells) {
+            min_memory_step = (int)ceilf(sqrtf(zone_cells / (float)max_sampled_cells));
+            if (min_memory_step < 1) min_memory_step = 1;
+        }
+    }
+    if (max_step < min_memory_step) max_step = min_memory_step;
     if (cfg != NULL && cfg->pixel_step > 0) {
-        return clamp_i32(cfg->pixel_step, 1, max_step);
+        return clamp_i32(cfg->pixel_step, min_memory_step, max_step);
     }
     int sample_step = (width >= 1280 || height >= 720) ? 4 : 2;
     if (sample_step < 2) sample_step = 2;
     if (max_step < 2) max_step = 2;
+    if (sample_step < min_memory_step) sample_step = min_memory_step;
     if (sample_step > max_step) sample_step = max_step;
     if (sample_step < 1) sample_step = 1;
     return sample_step;

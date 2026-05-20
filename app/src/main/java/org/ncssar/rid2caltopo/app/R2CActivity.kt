@@ -10,13 +10,9 @@ package org.ncssar.rid2caltopo.app
 
 import StreamsViewModel
 import android.Manifest
-import android.app.PendingIntent
 import android.bluetooth.BluetoothAdapter
-import android.content.BroadcastReceiver
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.media.AudioManager
@@ -36,7 +32,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -44,7 +39,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
-import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModelProvider
 import androidx.savedstate.SavedStateRegistryOwner
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -87,7 +81,6 @@ import org.ncssar.rid2caltopo.ui.ProximityAlertHost
 import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
-import org.ncssar.rid2caltopo.ui.UIEvent
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
@@ -119,11 +112,6 @@ data class LogArchiveDayOption(
 )
 
 class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener  {
-    private data class PendingLogShareState(
-        val chooserLaunched: Boolean = false,
-        val chosenComponent: ComponentName? = null,
-    )
-
     var locationRequest: LocationRequest? = null
     var locationCallback: LocationCallback? = null
     var mFusedLocationClient: FusedLocationProviderClient? = null
@@ -134,24 +122,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     private var externalDisplayConnected by mutableStateOf(false)
     private var externalDisplayPresentation: ExternalDisplayPresentation? = null
     private var displayManager: DisplayManager? = null
-    private var pendingLogShareState = PendingLogShareState()
-    private val logShareChosenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val chosenComponent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent?.getParcelableExtra(Intent.EXTRA_CHOSEN_COMPONENT, ComponentName::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent?.getParcelableExtra(Intent.EXTRA_CHOSEN_COMPONENT)
-            }
-            if (pendingLogShareState.chooserLaunched) {
-                pendingLogShareState = pendingLogShareState.copy(chosenComponent = chosenComponent)
-                CTDebug(
-                    TAG,
-                    "logShareChosenReceiver(): chosenComponent=${chosenComponent?.flattenToShortString() ?: "<none>"}"
-                )
-            }
-        }
-    }
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {
             runOnUiThread { refreshExternalDisplay() }
@@ -291,42 +261,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        val chooserCallbackIntent = Intent(ACTION_LOG_SHARE_TARGET_CHOSEN).setPackage(packageName)
-        val chooserCallback = PendingIntent.getBroadcast(
-            this,
-            0,
-            chooserCallbackIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        pendingLogShareState = PendingLogShareState(chooserLaunched = true)
-        CaltopoClient.ShowToast("Choose an email app, then tap Send there to actually deliver the logs.")
-        startActivity(
-            Intent.createChooser(
-                intent,
-                "Send Logs via...",
-                chooserCallback.intentSender
-            )
-        )
-    }
-
-    private fun maybeReportPendingLogShareOutcome() {
-        val shareState = pendingLogShareState
-        if (!shareState.chooserLaunched) return
-        pendingLogShareState = PendingLogShareState()
-
-        val chosenComponent = shareState.chosenComponent
-        if (chosenComponent == null) {
-            CTDebug(TAG, "maybeReportPendingLogShareOutcome(): chooser returned without a chosen component; skipping outcome toast.")
-            return
-        }
-
-        val appName = runCatching {
-            packageManager.getApplicationLabel(
-                packageManager.getApplicationInfo(chosenComponent.packageName, 0)
-            ).toString()
-        }.getOrNull()
-        val destinationLabel = appName ?: chosenComponent.packageName
-        CaltopoClient.ShowToast("Logs were opened in $destinationLabel. They are not sent until you tap Send there.")
+        startActivity(Intent.createChooser(intent, "Send Logs via..."))
     }
 
     /**
@@ -376,7 +311,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     override fun onResume() {
         super.onResume()
         reloadExternalDisplayConfig()
-        maybeReportPendingLogShareOutcome()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -400,11 +334,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         displayManager?.registerDisplayListener(displayListener, null)
         reloadExternalDisplayConfig()
-        registerReceiver(
-            logShareChosenReceiver,
-            IntentFilter(ACTION_LOG_SHARE_TARGET_CHOSEN),
-            RECEIVER_NOT_EXPORTED
-        )
 
         setContent {
             RID2CaltopoTheme() {
@@ -824,11 +753,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     public override fun onDestroy() {
-        try {
-            unregisterReceiver(logShareChosenReceiver)
-        } catch (_: IllegalArgumentException) {
-            // Receiver was already unregistered or never registered.
-        }
         displayManager?.unregisterDisplayListener(displayListener)
         dismissExternalDisplay(returnPhoneToMain = false)
         val exitRequested = CaltopoClient.IsExitRequested()
@@ -878,8 +802,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
 
     companion object {
         const val TAG: String = "R2CActivity"
-        private const val ACTION_LOG_SHARE_TARGET_CHOSEN =
-            "org.ncssar.rid2caltopo.action.LOG_SHARE_TARGET_CHOSEN"
         private var AppActivity: R2CActivity? = null
         @JvmStatic
         fun getR2CActivity(): R2CActivity? {

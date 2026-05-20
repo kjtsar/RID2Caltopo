@@ -21,7 +21,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 5
-    def versionPatch = 3
+    def versionPatch = 4
 
     signingConfigs {
         register("release") {
@@ -36,7 +36,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 71
+        versionCode = 72
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -82,6 +82,9 @@ android {
             shrinkResources = true
             proguardFiles(getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
             signingConfig = signingConfigs.getByName("release")
+            firebaseCrashlytics {
+                nativeSymbolUploadEnabled true
+            }
             externalNativeBuild {
                 cmake {
                     arguments "-DANOMALY_DEBUG_TIMING=OFF"
@@ -90,6 +93,9 @@ android {
         }
         debug {
             testCoverageEnabled true
+            firebaseCrashlytics {
+                nativeSymbolUploadEnabled true
+            }
             externalNativeBuild {
                 cmake {
                     arguments "-DANOMALY_DEBUG_TIMING=OFF"
@@ -183,6 +189,7 @@ dependencies {
     implementation(libs.firebase.analytics)
     implementation(libs.firebase.auth)
     implementation(libs.firebase.firestore)
+    implementation("com.google.firebase:firebase-crashlytics-ndk:20.0.6")
     implementation("androidx.media3:media3-exoplayer:1.9.1")
     implementation("androidx.media3:media3-exoplayer-dash:1.9.1")
     implementation("androidx.media3:media3-exoplayer-rtsp:1.9.1")
@@ -274,12 +281,19 @@ tasks.register("releaseVerification") {
     // dependsOn("connectedDebugAndroidTest")
 }
 
+tasks.register("uploadReleaseCrashlyticsArtifacts") {
+    group = "publishing"
+    description = "Uploads release R8 mappings and native symbols to Crashlytics."
+    dependsOn("uploadCrashlyticsMappingFileRelease", "uploadCrashlyticsSymbolFileRelease")
+}
+
 tasks.matching {
     it.name == "assembleRelease" ||
             it.name == "bundleRelease" ||
             it.name.startsWith("publishRelease")
 }.configureEach {
     dependsOn("releaseVerification")
+    finalizedBy("uploadReleaseCrashlyticsArtifacts")
 }
 
 tasks.register("releaseCheck") {

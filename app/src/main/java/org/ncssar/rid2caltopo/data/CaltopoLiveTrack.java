@@ -571,6 +571,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         CTDebug(TAG, String.format(Locale.US,
                 "onPeerWaypoint(%s <- %s): %.6f,%.6f alt=%.1f ts=%d",
                 droneSpec.trackLabel(), sourceZoneId, lat, lng, altitudeMeters, timestampMsec));
+        droneSpec.notePeerTelemetryReceived(System.currentTimeMillis());
         queueWaypoint(lat, lng, altitudeMeters, timestampMsec, telemetry, false);
     }
 

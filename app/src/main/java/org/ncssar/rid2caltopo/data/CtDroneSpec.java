@@ -109,6 +109,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private String model; /* This is the concise text description of the drone. */
     public volatile transient long mostRecentMsecTimestamp; /* wall-clock time when the most recent good waypoint was received */
     private volatile transient long mostRecentSignalMsecTimestamp; /* wall-clock time when the most recent received RID position packet was seen */
+    private volatile transient long mostRecentMeshTelemetryMsecTimestamp; /* wall-clock time when the most recent peer-relayed position was seen */
     private volatile transient long learnedSignalIntervalMs; /* smoothed wall-clock interval between RID position packets */
     private volatile transient int learnedSignalIntervalSamples;
     private transient long startMsecTimestamp; /* timestamp carried by the first accepted waypoint in the current flight */
@@ -189,6 +190,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         localArchiveOnly = false;
         outOfRange = false;
         mostRecentSignalMsecTimestamp = 0;
+        mostRecentMeshTelemetryMsecTimestamp = 0;
         learnedSignalIntervalMs = 0;
         learnedSignalIntervalSamples = 0;
         impliedTakeoffAltM        = null;
@@ -241,6 +243,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         takeoffLat = 0.0F;
         takeoffLng = 0.0F;
         mostRecentSignalMsecTimestamp = 0;
+        mostRecentMeshTelemetryMsecTimestamp = 0;
         learnedSignalIntervalMs = 0;
         learnedSignalIntervalSamples = 0;
         int length = TransportTypeEnum.values().length;
@@ -748,6 +751,16 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         mostRecentSignalMsecTimestamp = nowWallMsec;
     }
 
+    /** notePeerTelemetryReceived()
+     *
+     * Record that another R2C instance relayed telemetry for this aircraft. This keeps the
+     * active track lifecycle tied to mesh-visible telemetry without changing local RID
+     * signal-loss semantics.
+     */
+    public void notePeerTelemetryReceived(long nowWallMsec) {
+        mostRecentMeshTelemetryMsecTimestamp = nowWallMsec;
+    }
+
     /** idleTimeInMsec()
      *
      * @param currentTimeInMsec current time in milliseconds.
@@ -767,6 +780,18 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         long referenceTimestamp = (mostRecentSignalMsecTimestamp > 0)
                 ? mostRecentSignalMsecTimestamp
                 : mostRecentMsecTimestamp;
+        return currentTimeInMsec - referenceTimestamp;
+    }
+
+    /** trackTelemetryIdleTimeInMsec()
+     *
+     * @param currentTimeInMsec current time in milliseconds.
+     * @return duration in milliseconds since this aircraft was last heard locally or via peer
+     *         telemetry. Unlike signalIdleTimeInMsec(), this includes mesh-relayed sightings.
+     */
+    public long trackTelemetryIdleTimeInMsec(long currentTimeInMsec) {
+        long referenceTimestamp = Math.max(mostRecentMsecTimestamp, mostRecentSignalMsecTimestamp);
+        referenceTimestamp = Math.max(referenceTimestamp, mostRecentMeshTelemetryMsecTimestamp);
         return currentTimeInMsec - referenceTimestamp;
     }
 

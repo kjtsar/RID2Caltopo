@@ -70,8 +70,48 @@ class CtDroneSpecTest {
 
         drone.noteRidPositionPacketReceived(nowMs)
 
-        assertEquals(nowMs, drone.mostRecentSignalMsecTimestamp)
+        assertEquals(nowMs, drone.getMostRecentSignalMsecTimestamp())
         assertEquals(1500L, drone.signalIdleTimeInMsec(nowMs + 1500L))
+    }
+
+    @Test
+    fun trackTelemetryIdleTime_usesSignalPacketsThatAreNotAcceptedWaypoints() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.checkNewWaypoint(
+            39.0,
+            -121.0,
+            100.0,
+            1_000L,
+            1_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        drone.noteRidPositionPacketReceived(10_000L)
+
+        assertEquals(9_500L, drone.idleTimeInMsec(10_500L))
+        assertEquals(500L, drone.signalIdleTimeInMsec(10_500L))
+        assertEquals(500L, drone.trackTelemetryIdleTimeInMsec(10_500L))
+    }
+
+    @Test
+    fun trackTelemetryIdleTime_usesPeerTelemetryWithoutClearingLocalSignalIdle() {
+        val drone = CtDroneSpec("RID123")
+
+        drone.checkNewWaypoint(
+            39.0,
+            -121.0,
+            100.0,
+            1_000L,
+            1_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        drone.notePeerTelemetryReceived(10_000L)
+
+        assertEquals(9_500L, drone.idleTimeInMsec(10_500L))
+        assertEquals(9_500L, drone.signalIdleTimeInMsec(10_500L))
+        assertEquals(500L, drone.trackTelemetryIdleTimeInMsec(10_500L))
     }
 
     @Test
@@ -98,7 +138,7 @@ class CtDroneSpecTest {
         drone.noteRidPositionPacketReceived(nowMs + 3_845L)
         drone.noteRidPositionPacketReceived(nowMs + 7_600L)
 
-        assertEquals(nowMs + 7_600L, drone.mostRecentSignalMsecTimestamp)
+        assertEquals(nowMs + 7_600L, drone.getMostRecentSignalMsecTimestamp())
         assertEquals(2, drone.learnedSignalIntervalSamples)
         assertEquals(3_761L, drone.learnedSignalIntervalMs)
     }

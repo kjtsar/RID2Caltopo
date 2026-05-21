@@ -2510,7 +2510,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      * ProcessSortedCurrentDroneSpecArray()
      * Sorts active droneSpecs by flight start Time, so oldest will appear first in
      * list while also checking for timeout and removing aged-out dronespecs that
-     * have stopped transmitting RemoteID updates.
+     * have stopped providing local or peer-relayed telemetry.
      *
      * @param changedFlag True if something has changed and we need to refresh the list.
      *                    If false, then check for inactive dronespecs.
@@ -2529,7 +2529,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 long trackDelayInMsec = ds.isOutOfRange()
                         ? OUT_OF_RANGE_TRACK_DELAY_SECONDS * 1000
                         : newTrackDelayInMsec;
-                long droneSpecIdleInMsec = ds.idleTimeInMsec(currentTimeInMsec);
+                long droneSpecIdleInMsec = ds.trackTelemetryIdleTimeInMsec(currentTimeInMsec);
                 if (ds.isActive() && droneSpecIdleInMsec > trackDelayInMsec) {
                     CaltopoClient client = (ClientMap != null) ? ClientMap.get(ds.getRemoteId()) : null;
                     String msg = String.format(Locale.US,

@@ -1219,6 +1219,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         sendHeartbeat();
     }
 
+    void stopBackgroundTimersForTesting() {
+        heartbeatTimer.stop();
+        reconnectTimer.stop();
+        ackWatchdogTimer.stop();
+        heartbeatCoalesceTimer.stop();
+        idleParkTimer.stop();
+    }
+
     @NonNull
     String getLastReconnectCauseForTesting() {
         return lastReconnectCause;

@@ -20,6 +20,7 @@ class TrackerPeerCoordinatorTest {
         var disconnectCount = 0
         var autoOpen = true
         var rejectNextSend = false
+        var rejectNextMessageType: String? = null
 
         override fun setCallback(callback: TrackerCoordinationTransport.Callback?) {
             this.transportCallback = callback
@@ -40,6 +41,12 @@ class TrackerPeerCoordinatorTest {
         override fun isConnected(): Boolean = connected
 
         override fun send(text: String): Boolean {
+            rejectNextMessageType?.let { type ->
+                if (JSONObject(text).optString("type") == type) {
+                    rejectNextMessageType = null
+                    return false
+                }
+            }
             if (rejectNextSend) {
                 rejectNextSend = false
                 return false
@@ -179,7 +186,7 @@ class TrackerPeerCoordinatorTest {
     fun rejectedDroneConfirmationSend_isRetriedAfterHeartbeatAck() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         transport.sentMessages.clear()
-        transport.rejectNextSend = true
+        transport.rejectNextMessageType = "drone_confirmed"
 
         coordinator.onDroneConfirmed(
             "RID-1",
@@ -383,10 +390,12 @@ class TrackerPeerCoordinatorTest {
     @Test
     fun ownerTelemetrySuppressesBackupHeartbeatUntilLivenessWindowAges() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.stopBackgroundTimersForTesting()
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
+        coordinator.markHeartbeatSentForTesting(1L, clock.now())
         coordinator.handleHeartbeatAckForTesting(1L, 0L)
         transport.sentMessages.clear()
 
@@ -420,10 +429,12 @@ class TrackerPeerCoordinatorTest {
     @Test
     fun peerOwnedDroneDoesNotSuppressTrackerLivenessHeartbeat() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.stopBackgroundTimersForTesting()
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-bravo", 4L)
+        coordinator.markHeartbeatSentForTesting(1L, clock.now())
         coordinator.handleHeartbeatAckForTesting(1L, 0L)
         transport.sentMessages.clear()
 

@@ -112,6 +112,31 @@ private class DroneSpecUiList(
     override fun hashCode(): Int = System.identityHashCode(this)
 }
 
+private fun normalizedDroneSpecUiList(
+    droneSpecs: List<CtDroneSpec>,
+    tag: String
+): List<CtDroneSpec> {
+    val duplicates = droneSpecs
+        .groupBy { it.remoteId }
+        .filterValues { it.size > 1 }
+    if (duplicates.isNotEmpty()) {
+        CTDebug(
+            tag,
+            "Normalizing duplicate DroneItem remoteIds: " +
+                duplicates.entries.joinToString { (remoteId, specs) ->
+                    "$remoteId=${specs.map { it.mappedId }}"
+                }
+        )
+    }
+    val normalized = droneSpecs.distinctBy { it.remoteId }
+    CTDebug(
+        tag,
+        "DroneItem list update: count=${normalized.size} ids=" +
+            normalized.joinToString { "${it.remoteId}:${it.mappedId}" }
+    )
+    return DroneSpecUiList(normalized)
+}
+
 class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     CtDroneSpec.DroneSpecsChangedListener, CaltopoMap.MapStatusListener,
     CtDroneSpec.DroneConfirmationCandidateListener,
@@ -514,7 +539,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
      * Once there are dronespecs, we will receive frequent updates.
      */
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
-        _drones.value = DroneSpecUiList(droneSpecs)
+        _drones.value = normalizedDroneSpecUiList(droneSpecs, tag)
         housekeeping()
         val activeRemoteIds = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
             currentFlightRemoteId(drone)

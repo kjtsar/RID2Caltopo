@@ -143,6 +143,27 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     learnedSamples = spec.learnedSignalIntervalSamples,
                     maxTrackDelayMs = newTrackDelayMs
                 )
+                val trackTelemetryIdleMs = spec.trackTelemetryIdleTimeInMsec(nowMs)
+                if (shouldSuppressForPeerVisibleTelemetry(
+                        signalIdleMs = signalIdleMs,
+                        trackTelemetryIdleMs = trackTelemetryIdleMs,
+                        thresholdMs = effectiveIdleThresholdMs
+                    )
+                ) {
+                    CTDebug(
+                        SIGNAL_LOSS_ALERT_TAG,
+                        "Suppressing LOS for peer-visible ${spec.mappedId} flightKey=$flightKey " +
+                            "signalIdleMs=$signalIdleMs trackTelemetryIdleMs=$trackTelemetryIdleMs " +
+                            "thresholdMs=$effectiveIdleThresholdMs"
+                    )
+                    flightMonitorState[flightKey] = FlightMonitorState(
+                        hasExceededDistanceThreshold = priorState.hasExceededDistanceThreshold,
+                        lossObservedWhileFar = false,
+                        alertStartedAtMs = null,
+                        outOfRangeNotified = priorState.outOfRangeNotified && spec.isOutOfRange
+                    )
+                    return@mapNotNull null
+                }
                 if (spec.isOutOfRange &&
                     (signalIdleMs <= effectiveIdleThresholdMs || oorReferenceDistanceFt < outOfRangeDistanceFt)
                 ) {
@@ -422,6 +443,12 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         bridgeCheckDistanceFt: Double
     ): Boolean = bridgeVerified && stationaryRidReports && referenceDistanceFt <= bridgeCheckDistanceFt
 
+    private fun shouldSuppressForPeerVisibleTelemetry(
+        signalIdleMs: Long,
+        trackTelemetryIdleMs: Long,
+        thresholdMs: Long
+    ): Boolean = signalIdleMs > thresholdMs && trackTelemetryIdleMs <= thresholdMs
+
     internal fun isReturnedToBridgeForTests(
         bridgeVerified: Boolean,
         distanceFt: Double,
@@ -448,6 +475,16 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         stationaryRidReports = stationaryRidReports,
         referenceDistanceFt = referenceDistanceFt,
         bridgeCheckDistanceFt = bridgeCheckDistanceFt
+    )
+
+    internal fun shouldSuppressForPeerVisibleTelemetryForTests(
+        signalIdleMs: Long,
+        trackTelemetryIdleMs: Long,
+        thresholdMs: Long
+    ): Boolean = shouldSuppressForPeerVisibleTelemetry(
+        signalIdleMs = signalIdleMs,
+        trackTelemetryIdleMs = trackTelemetryIdleMs,
+        thresholdMs = thresholdMs
     )
 
     internal fun effectiveIdleThresholdMsForTests(

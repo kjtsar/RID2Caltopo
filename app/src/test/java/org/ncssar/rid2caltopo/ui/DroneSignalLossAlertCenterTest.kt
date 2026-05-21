@@ -27,6 +27,30 @@ class DroneSignalLossAlertCenterTest {
     }
 
     @Test
+    fun peerVisibleTelemetry_suppressesLocalSignalGap() {
+        assertEquals(
+            true,
+            DroneSignalLossAlertCenter.shouldSuppressForPeerVisibleTelemetryForTests(
+                signalIdleMs = 15_000L,
+                trackTelemetryIdleMs = 1_000L,
+                thresholdMs = 10_000L
+            )
+        )
+    }
+
+    @Test
+    fun peerVisibleTelemetry_keepsTrueMeshSilenceEligible() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.shouldSuppressForPeerVisibleTelemetryForTests(
+                signalIdleMs = 15_000L,
+                trackTelemetryIdleMs = 15_000L,
+                thresholdMs = 10_000L
+            )
+        )
+    }
+
+    @Test
     fun returnedToBridge_requiresPriorBridgeVerification() {
         assertEquals(
             false,

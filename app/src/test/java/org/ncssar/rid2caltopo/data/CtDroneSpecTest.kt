@@ -28,7 +28,7 @@ class CtDroneSpecTest {
     }
 
     @Test
-    fun guessPilotCallsign_extractsPilotButClearsTeamPlaceholders() {
+    fun guessPilotCallsign_extractsPilotAndPreservesTeamSuffixes() {
         assertEquals(
             "1sar7",
             CtDroneSpec.GuessPilotCallsign(
@@ -38,7 +38,7 @@ class CtDroneSpecTest {
             )
         )
         assertEquals(
-            "",
+            "1sar1001-01",
             CtDroneSpec.GuessPilotCallsign(
                 "1sar1001DjMn4Pr-01",
                 "DJI Mini 4 Pro",
@@ -52,6 +52,14 @@ class CtDroneSpecTest {
                 "",
                 "1668BR40EA00Z5VX"
             )
+        )
+    }
+
+    @Test
+    fun buildMappedId_preservesTeamSuffixesInCallsign() {
+        assertEquals(
+            "1sar1002-02DjMtrc4td",
+            CtDroneSpec.BuildMappedId("1sar1002-02", "DJI Matrice 4TD", "1581F8HGX256G00A0JPU")
         )
     }
 

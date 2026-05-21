@@ -22,7 +22,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 11
+    const val SCHEMA_VERSION = 12
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -167,6 +167,8 @@ object AppConfigStore {
         if (config.newTrackDelaySeconds != 0L) return true
         if (config.maxFlatlineToneDurationSeconds != 0L) return true
         if (config.bridgeCheckDistanceFeet != 0L) return true
+        if (config.alarmVolumeConfigured) return true
+        if (config.alarmVolumePercent != 0) return true
         if (config.maxIdleTimeMinutes != 0L) return true
         if (config.debugLevel != 0) return true
         if (config.coordinateDisplayFormat.isNotBlank()) return true
@@ -239,6 +241,12 @@ object AppConfigStore {
         state.bridgeCheckDistanceFeet = when {
             config.bridgeCheckDistanceFeet > 0L -> config.bridgeCheckDistanceFeet
             else -> CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET
+        }
+        state.alarmVolumeConfigured = config.alarmVolumeConfigured
+        state.alarmVolumePercent = when {
+            config.alarmVolumeConfigured && config.alarmVolumePercent in 0..100 -> config.alarmVolumePercent
+            !config.alarmVolumeConfigured && config.alarmVolumePercent in 1..100 -> config.alarmVolumePercent
+            else -> CaltopoClient.DEFAULT_ALARM_VOLUME_PERCENT
         }
         state.debugLevel = config.debugLevel
         state.maxIdleTimeInMinutes = if (config.maxIdleTimeMinutes >= 0) config.maxIdleTimeMinutes else 120
@@ -333,6 +341,8 @@ object AppConfigStore {
                     CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET
                 }
             )
+            .setAlarmVolumePercent(state.alarmVolumePercent.coerceIn(0, 100))
+            .setAlarmVolumeConfigured(state.alarmVolumeConfigured)
             .setMaxIdleTimeMinutes(state.maxIdleTimeInMinutes)
             .setDebugLevel(state.debugLevel)
             .setCoordinateDisplayFormat(state.coordinateDisplayFormat ?: "decimal")

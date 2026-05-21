@@ -114,6 +114,8 @@ message AppConfig {
   int64 proximity_alert_spacing_feet = 34;
   bool proximity_alert_spacing_configured = 35;
   int64 bridge_check_distance_feet = 36;
+  int32 alarm_volume_percent = 37;
+  bool alarm_volume_configured = 38;
 
   string caltopo_track_folder = 40;
   string caltopo_domain_and_port = 41;

@@ -13,6 +13,7 @@ public interface PeerCoordinator {
 
     enum CoordinationIndicatorState {
         HEALTHY,
+        IDLE,
         DEGRADED,
         UNCONFIGURED
     }
@@ -50,6 +51,8 @@ public interface PeerCoordinator {
         switch (getCoordinationIndicatorState()) {
             case HEALTHY:
                 return "R2C link healthy";
+            case IDLE:
+                return "R2C link idle";
             case DEGRADED:
                 return "R2C link degraded";
             case UNCONFIGURED:

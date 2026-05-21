@@ -13,6 +13,8 @@ object AppConfigSerializer : Serializer<AppConfig> {
         .setNewTrackDelaySeconds(30)
         .setMaxFlatlineToneDurationSeconds(CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS)
         .setBridgeCheckDistanceFeet(CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET)
+        .setAlarmVolumePercent(CaltopoClient.DEFAULT_ALARM_VOLUME_PERCENT)
+        .setAlarmVolumeConfigured(false)
         .setMaxIdleTimeMinutes(120)
         .setDebugLevel(-1)
         .setCoordinateDisplayFormat("decimal")

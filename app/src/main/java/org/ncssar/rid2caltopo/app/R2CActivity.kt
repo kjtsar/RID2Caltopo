@@ -316,8 +316,18 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        setVolumeControlStream(AudioManager.STREAM_ALARM)
         CaltopoClient.MarkAppActive()
         CTDebug(TAG, "onCreate().")
+        if (AppActivity != null) {
+            CTDebug(TAG, "onCreate() with an existing activity.")
+            if (AppActivity !== this) {
+                RestartingFlag = true
+                /* prevent ScanningService's PendingIntent tap from starting a new instance. */
+                CTDebug(TAG, "onCreate() restarting with new activity.")
+            }
+        }
+        AppActivity = this
         R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.setPeerListChangedListener(this)
         localViewModel = ViewModelProvider(
             this,
@@ -326,9 +336,17 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
             ))[R2CViewModel::class.java]
         streamsViewModel = ViewModelProvider(this)[StreamsViewModel::class.java]
         CaltopoClient.AddDroneSpecsChangedListener(localViewModel)
+        CaltopoClient.AddDroneConfirmationCandidateListener(localViewModel)
         CaltopoClient.CheckIdle()
         if (CaltopoClient.IsExitRequested()) {
             CTDebug(TAG, "onCreate(): idle check requested app exit; skipping remaining initialization.")
+            if (!isFinishing) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    finishAndRemoveTask()
+                } else {
+                    finish()
+                }
+            }
             return
         }
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -345,14 +363,14 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     .pendingDroneConfirmation
                     .collectAsState()
                 val maPackageImportState by MutualAidPackageTransferManager.importState.collectAsState()
-                val confirmationToneGenerator = remember {
+                val confirmationToneGenerator = remember(pendingDroneConfirmation?.remoteId) {
                     try {
-                        ToneGenerator(AudioManager.STREAM_ALARM, 100)
+                        ToneGenerator(AudioManager.STREAM_ALARM, CaltopoClient.GetToneGeneratorAlarmVolumePercent())
                     } catch (_: Exception) {
                         null
                     }
                 }
-                DisposableEffect(Unit) {
+                DisposableEffect(confirmationToneGenerator) {
                     onDispose { confirmationToneGenerator?.release() }
                 }
                 LaunchedEffect(pendingDroneConfirmation?.remoteId) {
@@ -444,16 +462,6 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         refreshExternalDisplay()
         // Handle org-config QR scan that launched or re-launched this activity.
         handleR2cIntent(intent)
-
-        if (AppActivity != null) {
-            CTDebug(TAG, "onCreate() with an existing activity.")
-            if (AppActivity !== this) {
-                RestartingFlag = true
-                /* prevent ScanningService's PendingIntent tap from starting a new instance. */
-                CTDebug(TAG, "onCreate() restarting with new activity.")
-            }
-        }
-        AppActivity = this
         if (!InitializedCalled) {
 
 

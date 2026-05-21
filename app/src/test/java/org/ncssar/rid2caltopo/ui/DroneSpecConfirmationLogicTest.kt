@@ -26,20 +26,20 @@ class DroneSpecConfirmationLogicTest {
     }
 
     @Test
-    fun teamDrone_placeholderKeepsOrgAndModelButRequiresPilotCallsign() {
+    fun teamDrone_placeholderPrefillsOrgModelAndSuffixedCallsign() {
         val drone = CtDroneSpec(
             "1581F8HGX255W00A0H2W",
-            "1sar1001m4td-1",
+            "1sar1001DjMtrc4td-01",
             "NCSSAR",
-            "DJI Matrice 4TD 01",
-            "NCSSAR"
+            "DJI Matrice 4TD",
+            "NCSSAR Team"
         )
 
         val state = DroneSpecConfirmationLogic.buildInitialState(drone, defaultOrganization = "DEFAULT")
 
         assertEquals("NCSSAR", state.organization)
-        assertEquals("", state.pilotCallsign)
-        assertEquals("DJI Matrice 4TD 01", state.droneDescription)
+        assertEquals("1sar1001-01", state.pilotCallsign)
+        assertEquals("DJI Matrice 4TD", state.droneDescription)
         assertNull(state.warning)
     }
 

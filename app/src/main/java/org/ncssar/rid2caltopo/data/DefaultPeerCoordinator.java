@@ -255,8 +255,9 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
         }
 
         CoordinationIndicatorState activeState = activeCoordinator.getCoordinationIndicatorState();
-        if (activeState == CoordinationIndicatorState.HEALTHY) {
-            return CoordinationIndicatorState.HEALTHY;
+        if (activeState == CoordinationIndicatorState.HEALTHY ||
+                activeState == CoordinationIndicatorState.IDLE) {
+            return activeState;
         }
 
         if (trackerConfigured || mqttConfigured) {
@@ -274,6 +275,9 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
             return "R2C link not configured";
         }
         String channel = isTrackerConfiguredForCoordination() ? "Tracker" : "MQTT";
+        if (state == CoordinationIndicatorState.IDLE) {
+            return channel + " link idle";
+        }
         return channel + (state == CoordinationIndicatorState.HEALTHY
                 ? " link healthy"
                 : " link degraded");

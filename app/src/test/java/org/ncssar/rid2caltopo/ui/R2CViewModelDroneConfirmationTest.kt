@@ -127,6 +127,79 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
+    fun firstRidSightingOpensConfirmationBeforeAcceptedWaypoint() {
+        val remoteId = "DRONEFIRSTSEEN"
+        val drone = CtDroneSpec(remoteId)
+
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneConfirmationCandidate(drone)
+
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        assertEquals(remoteId, viewModel.pendingDroneConfirmation.value?.remoteId)
+    }
+
+    @Test
+    fun firstRidSightingPromptIsNotReopenedWhenFlightBecomesActive() {
+        val remoteId = "DRONEFIRSTSEENACTIVE"
+        val drone = CtDroneSpec(remoteId)
+
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneConfirmationCandidate(drone)
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        viewModel.markPendingDroneConfirmationUnknown()
+        assertNull(viewModel.pendingDroneConfirmation.value)
+
+        viewModel.onDroneSpecsChanged(listOf(activeDrone(remoteId, waypointTimestampMsec = 6789L)))
+
+        assertNull(viewModel.pendingDroneConfirmation.value)
+    }
+
+    @Test
+    fun peerConfirmedFirstRidSightingDoesNotOpenConfirmationPanel() {
+        val remoteId = "DRONEFIRSTSEENPEER"
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Mavic 3",
+            "1SAR8",
+            "1SAR8m3"
+        )
+
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneConfirmationCandidate(CtDroneSpec(remoteId))
+
+        assertNull(viewModel.pendingDroneConfirmation.value)
+    }
+
+    @Test
+    fun localTrackPointPublishesDroneToMainScreenList() {
+        val remoteId = "DRONESCREEN"
+        val viewModel = R2CViewModel(SimpleTimer())
+        val client = CaltopoClient.ClientForRemoteId(remoteId)
+        client.droneSpec.checkNewWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            1234L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+
+        client.newWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            CtDroneSpec.TransportTypeEnum.BT4,
+            true
+        )
+
+        assertEquals(remoteId, viewModel.drones.value.single().remoteId)
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+    }
+
+    @Test
     fun localStandalonePromptClearsWhenDroneLeavesActiveList() {
         val remoteId = "DRONESTANDALONE"
         val drone = activeDrone(remoteId, waypointTimestampMsec = 91011L)

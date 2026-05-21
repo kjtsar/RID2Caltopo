@@ -203,6 +203,8 @@ class ClientClassState {
     public long newTrackDelayInSeconds;
     public long maxFlatlineToneDurationInSeconds;
     public long bridgeCheckDistanceFeet;
+    public int alarmVolumePercent;
+    public boolean alarmVolumeConfigured;
     public int debugLevel;
     public long maxIdleTimeInMinutes;
     public String incident;
@@ -249,6 +251,8 @@ class ClientClassState {
         newTrackDelayInSeconds = 30;
         maxFlatlineToneDurationInSeconds = CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS;
         bridgeCheckDistanceFeet = CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET;
+        alarmVolumePercent = CaltopoClient.DEFAULT_ALARM_VOLUME_PERCENT;
+        alarmVolumeConfigured = false;
         maxIdleTimeInMinutes = 120;
         debugLevel = -1; // undefined.
         incident = "Training";
@@ -312,7 +316,7 @@ class ClientClassState {
         return String.format(Locale.US,
                 """
                         vers:'%d', minDist:'%d' ft, usePeersFlag:'%s', captureVideoStreamsFlag:'%s'
-                        newTrackDelayInSec:%d, maxFlatlineToneDurationInSec:%d, bridgeCheckDistanceFeet:%d, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
+                        newTrackDelayInSec:%d, maxFlatlineToneDurationInSec:%d, bridgeCheckDistanceFeet:%d, alarmVolumePercent:%d, alarmVolumeConfigured:%s, debugLevel:%s, maxIdleTimeInMinutes:%d, incident:%s, opPeriod:%s, coordinateDisplayFormat:%s
                         predictiveHeadEnabled:%s, proximityAlertSpacingFeet:%d
                         notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
                         notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
@@ -322,7 +326,7 @@ class ClientClassState {
                         teamId: '%s', credId: '%s' credSecret: '%s', dronespecs: %s,\n loaded configFiles:\n  %s""",
                 AppConfigStore.SCHEMA_VERSION, minDistanceInFeet, usePeersFlag, captureVideoStreamsFlag,
                 newTrackDelayInSeconds, maxFlatlineToneDurationInSeconds, bridgeCheckDistanceFeet,
-                LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
+                alarmVolumePercent, alarmVolumeConfigured, LoggingLevelName(debugLevel), maxIdleTimeInMinutes,
                 incident, opPeriod, coordinateDisplayFormat, predictiveHeadEnabled, proximityAlertSpacingFeet,
                 notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
                 notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
@@ -358,6 +362,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static final long OUT_OF_RANGE_DISTANCE_FEET = 300;
     public static final long OUT_OF_RANGE_TRACK_DELAY_SECONDS = 20 * 60;
     public static final long RETURN_TO_TAKEOFF_DISTANCE_FEET = 30;
+    public static final int DEFAULT_ALARM_VOLUME_PERCENT = 100;
     static final long DEFAULT_BRIDGE_CHECK_DISTANCE_FEET = 20;
     static final long MainThreadId = Process.myTid();
     static final long ProcessId = Process.myPid();
@@ -390,6 +395,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static long BytesWrittenToDebugOutputStream;
     private static final long MAX_SIZE_DEBUG_OUTPUT = 10000000;
     private static CopyOnWriteArrayList<CtDroneSpec.DroneSpecsChangedListener> DroneSpecsChangedListeners = new CopyOnWriteArrayList<>();
+    private static CopyOnWriteArrayList<CtDroneSpec.DroneConfirmationCandidateListener> DroneConfirmationCandidateListeners = new CopyOnWriteArrayList<>();
     private static Uri DebugLogPath = null;
     private static DelayedExec AppIdleDelay = new DelayedExec();
     private static FirebaseAnalytics FBAnalytics;
@@ -556,6 +562,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 "AddDroneSpecsChangedListener() Adding 0x%x:%s, count:%d",
                 newListener.hashCode(), newListener.getClass().getName(), DroneSpecsChangedListeners.size()));
         UpdateDroneSpecs();
+    }
+
+    public static void AddDroneConfirmationCandidateListener(CtDroneSpec.DroneConfirmationCandidateListener newListener) {
+        DroneConfirmationCandidateListeners.add(newListener);
+        if (false) CTDebug(TAG, String.format(Locale.US,
+                "AddDroneConfirmationCandidateListener() Adding 0x%x:%s, count:%d",
+                newListener.hashCode(), newListener.getClass().getName(), DroneConfirmationCandidateListeners.size()));
+    }
+
+    private static void NotifyDroneConfirmationCandidate(@NonNull CtDroneSpec droneSpec) {
+        for (CtDroneSpec.DroneConfirmationCandidateListener listener : DroneConfirmationCandidateListeners) {
+            listener.onDroneConfirmationCandidate(droneSpec);
+        }
     }
 
     @Nullable
@@ -2328,6 +2347,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ClientMap.put(remoteId, client);
             CTDebug(TAG, String.format(Locale.US,
                     "ClientForRemoteId(): Instantiating client for '%s'", remoteId));
+            NotifyDroneConfirmationCandidate(client.droneSpec);
         }
 
         if (null == client.droneSpec) {
@@ -2584,6 +2604,26 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ccs.bridgeCheckDistanceFeet = DEFAULT_BRIDGE_CHECK_DISTANCE_FEET;
         }
         return ccs.bridgeCheckDistanceFeet;
+    }
+
+    public static int GetAlarmVolumePercent() {
+        ClientClassState ccs = GetState();
+        return Math.max(0, Math.min(100, ccs.alarmVolumePercent));
+    }
+
+    public static boolean GetAlarmVolumeConfigured() {
+        return GetState().alarmVolumeConfigured;
+    }
+
+    public static float GetAlarmVolumeMultiplier() {
+        if (!GetAlarmVolumeConfigured()) {
+            return 1.0f;
+        }
+        return GetAlarmVolumePercent() / 100.0f;
+    }
+
+    public static int GetToneGeneratorAlarmVolumePercent() {
+        return Math.max(0, Math.min(100, Math.round(100.0f * GetAlarmVolumeMultiplier())));
     }
 
     public static long GetMinDistanceInFeet() {
@@ -3250,6 +3290,19 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             UpdateDroneSpecs();
         }
         return ccs.bridgeCheckDistanceFeet;
+    }
+
+    public static int SetAlarmVolumePercent(int percent) {
+        ClientClassState ccs = GetState();
+        int normalized = Math.max(0, Math.min(100, percent));
+
+        if (ccs.alarmVolumePercent != normalized || !ccs.alarmVolumeConfigured) {
+            ccs.alarmVolumePercent = normalized;
+            ccs.alarmVolumeConfigured = true;
+            ArchiveState("alarmVolumePercent changed");
+            UpdateDroneSpecs();
+        }
+        return ccs.alarmVolumePercent;
     }
 
 

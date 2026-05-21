@@ -30,6 +30,7 @@ fun CaltopoSettingsScreen(
     val minDistance by settingsViewModel.minDistance.collectAsState()
     val newTrackDelay by settingsViewModel.newTrackDelay.collectAsState()
     val bridgeCheckDistanceFeet by settingsViewModel.bridgeCheckDistanceFeet.collectAsState()
+    val alarmVolumePercent by settingsViewModel.alarmVolumePercent.collectAsState()
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
@@ -78,6 +79,20 @@ fun CaltopoSettingsScreen(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     label = { Text("Bridge Check Distance (ft)") }
                 )
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Audio Alarm Volume: $alarmVolumePercent%",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Slider(
+                        value = alarmVolumePercent.toFloat(),
+                        onValueChange = {
+                            settingsViewModel.onAlarmVolumePercentChanged(it.toInt())
+                        },
+                        valueRange = 0f..100f,
+                        steps = 19
+                    )
+                }
                 OutlinedTextField(
                     value = maxIdleTimeInMinutes,
                     onValueChange = { settingsViewModel.onMaxIdleTimeInMinutesChanged(it) },

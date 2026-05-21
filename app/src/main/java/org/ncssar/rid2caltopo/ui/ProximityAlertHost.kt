@@ -711,15 +711,15 @@ fun ProximityAlertHost(
 ) {
     val context = LocalContext.current
     val alert by ProximityAlertCenter.uiState.collectAsState()
-    val toneGenerator = remember {
+    val toneGenerator = remember(alert?.alertInstanceId) {
         try {
-            ToneGenerator(AudioManager.STREAM_ALARM, 100)
+            ToneGenerator(AudioManager.STREAM_ALARM, CaltopoClient.GetToneGeneratorAlarmVolumePercent())
         } catch (_: Exception) {
             null
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(toneGenerator) {
         onDispose { toneGenerator?.release() }
     }
 
@@ -758,15 +758,15 @@ fun ProximityAlertHost(
 fun ComplianceAlertHost() {
     val context = LocalContext.current
     val alert by ComplianceAlertCenter.uiState.collectAsState()
-    val toneGenerator = remember {
+    val toneGenerator = remember(alert?.alertInstanceId) {
         try {
-            ToneGenerator(AudioManager.STREAM_ALARM, 100)
+            ToneGenerator(AudioManager.STREAM_ALARM, CaltopoClient.GetToneGeneratorAlarmVolumePercent())
         } catch (_: Exception) {
             null
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(toneGenerator) {
         onDispose { toneGenerator?.release() }
     }
 

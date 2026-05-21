@@ -1569,11 +1569,14 @@ public class CaltopoMap {
     private static String getLocalDeviceMarkerColor() {
         PeerCoordinator.CoordinationIndicatorState state =
                 getCurrentRuntime().getPeerCoordinator().getCoordinationIndicatorState();
-        if (InitialMarkerPublishPending && state != PeerCoordinator.CoordinationIndicatorState.HEALTHY) {
+        if (InitialMarkerPublishPending &&
+                state != PeerCoordinator.CoordinationIndicatorState.HEALTHY &&
+                state != PeerCoordinator.CoordinationIndicatorState.IDLE) {
             return LOCAL_DEVICE_COLOR_STARTING;
         }
         switch (state) {
             case HEALTHY:
+            case IDLE:
                 return LOCAL_DEVICE_COLOR_HEALTHY;
             case DEGRADED:
                 return LOCAL_DEVICE_COLOR_DEGRADED;

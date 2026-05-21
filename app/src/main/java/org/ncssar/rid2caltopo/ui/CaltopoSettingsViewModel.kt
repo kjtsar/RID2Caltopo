@@ -35,6 +35,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _bridgeCheckDistanceFeet = MutableStateFlow(CaltopoClient.GetBridgeCheckDistanceFeet().toString())
     val bridgeCheckDistanceFeet = _bridgeCheckDistanceFeet.asStateFlow()
 
+    private val _alarmVolumePercent = MutableStateFlow(CaltopoClient.GetAlarmVolumePercent())
+    val alarmVolumePercent = _alarmVolumePercent.asStateFlow()
+
     private val _usePeers = MutableStateFlow(CaltopoClient.GetUsePeersFlag())
     val usePeers = _usePeers.asStateFlow()
 
@@ -102,6 +105,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _newTrackDelay.value = CaltopoClient.GetNewTrackDelayInSeconds().toString()
         _maxFlatlineToneDuration.value = CaltopoClient.GetMaxFlatlineToneDurationInSeconds().toString()
         _bridgeCheckDistanceFeet.value = CaltopoClient.GetBridgeCheckDistanceFeet().toString()
+        _alarmVolumePercent.value = CaltopoClient.GetAlarmVolumePercent()
         _minDistance.value = CaltopoClient.GetMinDistanceInFeet().toString()
         _maxIdleTimeInMinutes.value = CaltopoClient.GetMaxIdleTimeInMinutes().toString()
         _caltopoDomainAndPort.value = CaltopoClient.GetCaltopoDomainAndPort()
@@ -136,6 +140,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     fun onBridgeCheckDistanceFeetChanged(newDistance: String) {
         _bridgeCheckDistanceFeet.value = newDistance
+    }
+
+    fun onAlarmVolumePercentChanged(percent: Int) {
+        _alarmVolumePercent.value = CaltopoClient.SetAlarmVolumePercent(percent)
     }
 
     fun onMaxIdleTimeInMinutesChanged(newVal: String) {
@@ -207,6 +215,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
             CaltopoClient.SetMaxFlatlineToneDurationInSeconds(it)
         }
         _bridgeCheckDistanceFeet.value.toLongOrNull()?.let { CaltopoClient.SetBridgeCheckDistanceFeet(it) }
+        if (CaltopoClient.GetAlarmVolumeConfigured()) {
+            CaltopoClient.SetAlarmVolumePercent(_alarmVolumePercent.value)
+        }
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetUsePeers(_usePeers.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)

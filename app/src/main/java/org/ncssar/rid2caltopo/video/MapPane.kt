@@ -4250,11 +4250,13 @@ private fun artifactLogSummary(feature: JSONObject): String {
 private fun localDeviceMarkerColor(): String {
     val state = R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationIndicatorState
     if (CaltopoMap.IsInitialDeviceMarkerPublishPending() &&
-        state != PeerCoordinator.CoordinationIndicatorState.HEALTHY) {
+        state != PeerCoordinator.CoordinationIndicatorState.HEALTHY &&
+        state != PeerCoordinator.CoordinationIndicatorState.IDLE) {
         return LOCAL_DEVICE_COLOR_STARTING
     }
     return when (state) {
         PeerCoordinator.CoordinationIndicatorState.HEALTHY -> LOCAL_DEVICE_COLOR_HEALTHY
+        PeerCoordinator.CoordinationIndicatorState.IDLE -> LOCAL_DEVICE_COLOR_HEALTHY
         PeerCoordinator.CoordinationIndicatorState.DEGRADED -> LOCAL_DEVICE_COLOR_DEGRADED
         PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED -> LOCAL_DEVICE_COLOR_UNCONFIGURED
     }

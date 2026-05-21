@@ -368,13 +368,15 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                 MIN_VOLUME + (MAX_VOLUME - MIN_VOLUME) * progress.coerceIn(0f, 1f)
             }
         }
+        val adjustedVolumeFraction = (volumeFraction * CaltopoClient.GetAlarmVolumeMultiplier())
+            .coerceIn(0f, 1f)
         return DroneSignalLossAlertUiState(
             flightKey = flightKey,
             remoteId = remoteId,
             mappedId = mappedId,
             signalIdleMs = signalIdleMs,
             distanceFromTabletFt = distanceFromTabletFt,
-            volumeFraction = volumeFraction
+            volumeFraction = adjustedVolumeFraction
         )
     }
 

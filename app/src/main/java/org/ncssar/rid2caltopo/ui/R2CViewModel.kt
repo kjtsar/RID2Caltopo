@@ -100,8 +100,22 @@ data class PendingProfileSwitchUiState(
     val activeFlightCount: Int
 )
 
+private class DroneSpecUiList(
+    private val delegate: List<CtDroneSpec>
+) : java.util.AbstractList<CtDroneSpec>() {
+    override val size: Int
+        get() = delegate.size
+
+    override fun get(index: Int): CtDroneSpec = delegate[index]
+
+    override fun equals(other: Any?): Boolean = this === other
+    override fun hashCode(): Int = System.identityHashCode(this)
+}
+
 class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     CtDroneSpec.DroneSpecsChangedListener, CaltopoMap.MapStatusListener,
+    CtDroneSpec.DroneConfirmationCandidateListener,
+    CaltopoLiveTrack.LocalTrackListener,
     CaltopoLiveTrack.LocalTrackFinishedListener {
     private val tag = "R2CViewModel"
     private val _drones = MutableStateFlow<List<CtDroneSpec>>(emptyList())
@@ -144,6 +158,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
 
     init {
         CaltopoMap.AddMapStatusListener(this)
+        CaltopoLiveTrack.AddLocalTrackListener(this)
         CaltopoLiveTrack.AddLocalTrackFinishedListener(this)
         overlay = OverlayState.None
         connectionState = CaltopoConnectionState.StandAlone
@@ -356,8 +371,29 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     override fun onCleared() {
         super.onCleared()
         CaltopoMap.RemoveMapStatusListener(this)
+        CaltopoLiveTrack.RemoveLocalTrackListener(this)
         CaltopoLiveTrack.RemoveLocalTrackFinishedListener(this)
         delayedUptimePoll.stop()
+    }
+
+    override fun onLocalTrackPoint(
+        remoteId: String,
+        mappedId: String,
+        lat: Double,
+        lng: Double,
+        altitudeMeters: Double,
+        timestampMsec: Long
+    ) {
+        val drone = CaltopoClient.GetDroneSpec(remoteId) ?: return
+        val currentDrones = _drones.value
+        val nextDrones = (currentDrones.filterNot { it.remoteId == remoteId } + drone)
+            .sortedWith { left, right -> left.compareToAge(right) }
+        CTDebug(
+            tag,
+            "onLocalTrackPoint(): publishing screen update remoteId=$remoteId mappedId=$mappedId " +
+                "count=${nextDrones.size} droneTs=$timestampMsec"
+        )
+        onDroneSpecsChanged(nextDrones)
     }
 
     override fun onLocalTrackFinished(remoteId: String, mappedId: String, reason: String) {
@@ -478,7 +514,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
      * Once there are dronespecs, we will receive frequent updates.
      */
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
-        _drones.value = droneSpecs
+        _drones.value = DroneSpecUiList(droneSpecs)
         housekeeping()
         val activeRemoteIds = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
             currentFlightRemoteId(drone)
@@ -511,34 +547,11 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             pendingDroneConfirmationRequestedByOperator = false
         }
         if (_pendingDroneConfirmation.value == null) {
-            val droneToConfirm = droneSpecs.firstOrNull { drone ->
-                val activeRemoteId = currentFlightRemoteId(drone)
-                // Every new flight should prompt once, even for known drones, so the
-                // operator can confirm or update pilot/callsign ownership for this flight.
-                activeRemoteId != null &&
-                    activeRemoteId !in promptedCurrentFlightRemoteIds &&
-                    !CaltopoClient.IsSessionUnknownDrone(drone.remoteId) &&
-                    drone.remoteId !in confirmedCurrentFlightRemoteIds
-            }
-            if (droneToConfirm != null) {
-                val activeRemoteId = currentFlightRemoteId(droneToConfirm)
-                if (activeRemoteId != null) {
-                    CTDebug(
-                        tag,
-                        "Queueing confirmation for ${droneToConfirm.remoteId}: " +
-                            "mappedId=${droneToConfirm.mappedId} " +
-                            "org='${droneToConfirm.org}' model='${droneToConfirm.model}' owner='${droneToConfirm.owner}'"
-                    )
-                    promptedCurrentFlightRemoteIds.add(activeRemoteId)
-                    _pendingDroneConfirmation.value = buildConfirmationState(droneToConfirm)
-                    pendingDroneConfirmationRequestedByOperator = false
-                    if (_activeScreen.value == ActiveScreen.STREAMS) {
-                        screenBeforeConfirmation = _activeScreen.value
-                        CaltopoClient.ShowToast("New drone needs confirmation. Returning to main screen.")
-                        showMain()
-                    } else {
-                        screenBeforeConfirmation = null
-                    }
+            for (drone in droneSpecs) {
+                if (currentFlightRemoteId(drone) != null &&
+                    queueConfirmationIfNeeded(drone, "active flight")
+                ) {
+                    break
                 }
             }
         }
@@ -555,6 +568,10 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         housekeeping()
     }
 
+    override fun onDroneConfirmationCandidate(droneSpec: CtDroneSpec) {
+        queueConfirmationIfNeeded(droneSpec, "first RID sighting")
+    }
+
     /**
      * Current-flight local state is scoped by remoteId and retained only while the
      * drone remains active. Tracker mode can end that active lifecycle from peer
@@ -563,6 +580,37 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private fun currentFlightRemoteId(drone: CtDroneSpec): String? {
         if (!drone.isActive) return null
         return drone.remoteId.takeIf { it.isNotBlank() }
+    }
+
+    private fun queueConfirmationIfNeeded(drone: CtDroneSpec, reason: String): Boolean {
+        if (_pendingDroneConfirmation.value != null) return false
+        val remoteId = drone.remoteId.takeIf { it.isNotBlank() } ?: return false
+        // Every new flight should prompt once, even for known drones, so the
+        // operator can confirm or update pilot/callsign ownership for this flight.
+        if (remoteId in promptedCurrentFlightRemoteIds ||
+            CaltopoClient.IsSessionUnknownDrone(remoteId) ||
+            remoteId in confirmedCurrentFlightRemoteIds ||
+            CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId)
+        ) {
+            return false
+        }
+        CTDebug(
+            tag,
+            "Queueing confirmation for ${drone.remoteId}: " +
+                "mappedId=${drone.mappedId} " +
+                "org='${drone.org}' model='${drone.model}' owner='${drone.owner}' reason=$reason"
+        )
+        promptedCurrentFlightRemoteIds.add(remoteId)
+        _pendingDroneConfirmation.value = buildConfirmationState(drone)
+        pendingDroneConfirmationRequestedByOperator = false
+        if (_activeScreen.value == ActiveScreen.STREAMS) {
+            screenBeforeConfirmation = _activeScreen.value
+            CaltopoClient.ShowToast("New drone needs confirmation. Returning to main screen.")
+            showMain()
+        } else {
+            screenBeforeConfirmation = null
+        }
+        return true
     }
 
     private fun clearCurrentFlightPromptState(remoteId: String, reason: String) {

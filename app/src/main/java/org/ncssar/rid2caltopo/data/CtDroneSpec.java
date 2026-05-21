@@ -81,6 +81,10 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         // listener applies to receive bulk notification whenever one or more dronespecs change.
         void onDroneSpecsChanged(@NonNull List<CtDroneSpec> droneSpecs);
     }
+
+    public interface DroneConfirmationCandidateListener {
+        void onDroneConfirmationCandidate(@NonNull CtDroneSpec droneSpec);
+    }
     @Serial
     private static final long serialVersionUID = 2L;
     private static final String TAG = "CtDroneSpec";
@@ -91,10 +95,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final long MIN_SIGNAL_INTERVAL_LEARN_MS = 1000L;
     private static final String EMPTY_STRING = "";
     private static final String RID_FILTER_REGEX = "[^A-Z0-9]";
-    private static final String MAPPED_ID_FILTER_REGEX = "[^_a-zA-Z0-9]";
+    private static final String MAPPED_ID_FILTER_REGEX = "[^-_a-zA-Z0-9]";
     private static final String CALLSIGN_OPT_MODEL_REGEX = "^([0-9]?[a-zA-Z]+[0-9]+)([_a-zA-Z0-9]{1,8})?$";
     private static final Pattern CallsignOptModelPattern = Pattern.compile(CALLSIGN_OPT_MODEL_REGEX);
-    private static final Pattern TeamMappedIdSuffixPattern = Pattern.compile("-\\d+$");
     private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
     private static long InvalidWaypointCount = 0;
 
@@ -881,13 +884,24 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     ) {
         String mappedId = mappedIdIn.trim();
         if (mappedId.isEmpty() || mappedId.equals(remoteIdIn)) return EMPTY_STRING;
-        if (TeamMappedIdSuffixPattern.matcher(mappedId).find()) return EMPTY_STRING;
 
         String modelAbbrev = ModelAbbreviator(modelIn);
         String candidate = mappedId;
         if (!modelAbbrev.isEmpty() &&
                 candidate.toLowerCase(Locale.US).endsWith(modelAbbrev.toLowerCase(Locale.US))) {
             candidate = candidate.substring(0, candidate.length() - modelAbbrev.length());
+        } else if (!modelAbbrev.isEmpty()) {
+            String lowerCandidate = candidate.toLowerCase(Locale.US);
+            String lowerModelAbbrev = modelAbbrev.toLowerCase(Locale.US);
+            Matcher suffixedTeamMatch = Pattern.compile("(-\\d+)$").matcher(candidate);
+            if (suffixedTeamMatch.find()) {
+                int suffixStart = suffixedTeamMatch.start();
+                int modelStart = suffixStart - modelAbbrev.length();
+                if (modelStart >= 0 &&
+                        lowerCandidate.substring(modelStart, suffixStart).equals(lowerModelAbbrev)) {
+                    candidate = candidate.substring(0, modelStart) + candidate.substring(suffixStart);
+                }
+            }
         } else {
             Matcher match = CallsignOptModelPattern.matcher(candidate);
             if (match.matches() && match.group(1) != null) {

@@ -263,6 +263,62 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun firstSightingOmitsNonFiniteCoordinatesAndDistance() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.sentMessages.clear()
+
+        val drone = CtDroneSpec("DRONE1").apply {
+            lastLat = Double.NaN
+            lastLng = Double.POSITIVE_INFINITY
+            lastAlt = Double.NaN
+        }
+        val track = FakeLiveTrack("DRONE1")
+        coordinator.onLiveTrackCreated(track, drone, Double.NaN, 1234L)
+
+        val firstSighting = transport.sentMessages
+            .map { JSONObject(it) }
+            .single { it.optString("type") == "first_sighting" }
+        assertEquals("DRONE1", firstSighting.optString("remoteId"))
+        assertFalse(firstSighting.has("distanceFromZoneM"))
+        assertFalse(firstSighting.has("lat"))
+        assertFalse(firstSighting.has("lng"))
+        assertFalse(firstSighting.has("altM"))
+    }
+
+    @Test
+    fun sightingOmitsNonFiniteCoordinatesDistanceAndTelemetry() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1")
+        val track = FakeLiveTrack("DRONE1")
+        coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-bravo", 4L)
+        transport.sentMessages.clear()
+
+        coordinator.onWaypointReceived(
+            drone,
+            Double.NaN,
+            Double.POSITIVE_INFINITY,
+            Double.NaN,
+            Double.NaN,
+            2_000L,
+            CtDroneSpec.PositionTelemetry(Double.NaN, 12.5, Double.POSITIVE_INFINITY)
+        )
+
+        val sighting = transport.sentMessages
+            .map { JSONObject(it) }
+            .single { it.optString("type") == "sighting" }
+        assertEquals("DRONE1", sighting.optString("remoteId"))
+        assertFalse(sighting.has("distanceFromZoneM"))
+        assertFalse(sighting.has("lat"))
+        assertFalse(sighting.has("lng"))
+        assertFalse(sighting.has("altM"))
+        val telemetry = sighting.getJSONObject("telemetry")
+        assertEquals(12.5, telemetry.getDouble("groundSpeedKnots"), 0.0)
+        assertFalse(telemetry.has("verticalRateFpm"))
+        assertFalse(telemetry.has("headingDeg"))
+    }
+
+    @Test
     fun droneConfirmedWakesParkedCoordinatorAndFlushesSaveEvent() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         coordinator.parkIfIdleForTesting()
@@ -331,6 +387,7 @@ class TrackerPeerCoordinatorTest {
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
+        coordinator.handleHeartbeatAckForTesting(1L, 0L)
         transport.sentMessages.clear()
 
         coordinator.onWaypointReceived(drone, 39.1, -121.1, 120.0, 50.0, 2_000L, null)
@@ -358,6 +415,25 @@ class TrackerPeerCoordinatorTest {
             .map { JSONObject(it) }
             .filter { it.optString("type") == "heartbeat" }
         assertEquals(1, heartbeats.size)
+    }
+
+    @Test
+    fun peerOwnedDroneDoesNotSuppressTrackerLivenessHeartbeat() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1")
+        val track = FakeLiveTrack("DRONE1")
+        coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-bravo", 4L)
+        coordinator.handleHeartbeatAckForTesting(1L, 0L)
+        transport.sentMessages.clear()
+
+        coordinator.sendHeartbeatForTesting()
+
+        val heartbeats = transport.sentMessages
+            .map { JSONObject(it) }
+            .filter { it.optString("type") == "heartbeat" }
+        assertEquals(1, heartbeats.size)
+        assertFalse(track.localOwnerFlag)
     }
 
     @Test

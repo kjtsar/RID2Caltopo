@@ -334,10 +334,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("mappedId", droneSpec.getMappedId());
             jo.put("trackLabel", droneSpec.trackLabel());
             jo.put("droneTs", timestampMsec);
-            jo.put("lat", droneLat);
-            jo.put("lng", droneLon);
-            jo.put("altM", droneAlt);
-            jo.put("distanceFromZoneM", distMeters);
+            putFinite(jo, "lat", droneLat);
+            putFinite(jo, "lng", droneLon);
+            putFinite(jo, "altM", droneAlt);
+            putFinite(jo, "distanceFromZoneM", distMeters);
             putTelemetry(jo, telemetry);
             if (sendJson(jo)) {
                 lastSightingSentByRemoteId.put(remoteId, nowMs);
@@ -557,7 +557,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private boolean shouldSkipIntervalHeartbeat() {
-        if (!hasLocalOwnerLease()) return true;
+        if (!hasLocalOwnerLease()) return false;
         long lastOwnerActivity = lastOwnerActivityAtMs;
         long nowMs = nowMs();
         long lastTrackerLivenessMessage = Math.max(lastHeartbeatSentAtMs, helloSeqSentAtMs);
@@ -787,8 +787,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("zoneId", myGuid);
             jo.put("guid", myGuid);
             jo.put("name", myName);
-            jo.put("lat", myLat);
-            jo.put("lng", myLon);
+            putFinite(jo, "lat", myLat);
+            putFinite(jo, "lng", myLon);
             jo.put("appVersion", BuildConfig.VERSION_NAME);
             jo.put("caltopoRttMs", myCaltopoRttMs);
             CTDebug(TAG, String.format(Locale.US,
@@ -825,8 +825,8 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("zoneId", myGuid);
             jo.put("guid", myGuid);
             jo.put("name", myName);
-            jo.put("lat", myLat);
-            jo.put("lng", myLon);
+            putFinite(jo, "lat", myLat);
+            putFinite(jo, "lng", myLon);
             jo.put("caltopoRttMs", myCaltopoRttMs);
             CTDebug(TAG, String.format(Locale.US,
                     "sendHeartbeat(): mapId=%s zoneId=%s lat=%.6f lng=%.6f rttMs=%d",
@@ -872,10 +872,10 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             jo.put("mappedId", pending.droneSpec.getMappedId());
             jo.put("trackLabel", pending.droneSpec.trackLabel());
             jo.put("droneTs", pending.firstSeenTs);
-            jo.put("distanceFromZoneM", pending.distMeters);
-            jo.put("lat", pending.droneSpec.lastLat);
-            jo.put("lng", pending.droneSpec.lastLng);
-            jo.put("altM", pending.droneSpec.lastAlt);
+            putFinite(jo, "distanceFromZoneM", pending.distMeters);
+            putFinite(jo, "lat", pending.droneSpec.lastLat);
+            putFinite(jo, "lng", pending.droneSpec.lastLng);
+            putFinite(jo, "altM", pending.droneSpec.lastAlt);
             jo.put("org", pending.droneSpec.getOrg());
             jo.put("model", pending.droneSpec.getModel());
             jo.put("ownerName", pending.droneSpec.getOwner());
@@ -1316,11 +1316,17 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         if (telemetry == null) return;
         JSONObject t = new JSONObject();
         try {
-            if (telemetry.aircraftTrackDeg != null) t.put("headingDeg", telemetry.aircraftTrackDeg);
-            if (telemetry.aircraftGsKnots != null) t.put("groundSpeedKnots", telemetry.aircraftGsKnots);
-            if (telemetry.aircraftAltitudeRateFpm != null) t.put("verticalRateFpm", telemetry.aircraftAltitudeRateFpm);
+            if (telemetry.aircraftTrackDeg != null) putFinite(t, "headingDeg", telemetry.aircraftTrackDeg);
+            if (telemetry.aircraftGsKnots != null) putFinite(t, "groundSpeedKnots", telemetry.aircraftGsKnots);
+            if (telemetry.aircraftAltitudeRateFpm != null) putFinite(t, "verticalRateFpm", telemetry.aircraftAltitudeRateFpm);
             jo.put("telemetry", t);
         } catch (Exception ignored) {
+        }
+    }
+
+    private static void putFinite(@NonNull JSONObject jo, @NonNull String name, double value) throws Exception {
+        if (Double.isFinite(value)) {
+            jo.put(name, value);
         }
     }
 

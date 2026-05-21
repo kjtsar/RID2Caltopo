@@ -178,7 +178,7 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
                     bridgeVerified = bridgeVerified,
                     stationaryRidReports = spec.hasStationaryRidReports(),
                     referenceDistanceFt = oorReferenceDistanceFt,
-                    outOfRangeDistanceFt = outOfRangeDistanceFt
+                    bridgeCheckDistanceFt = bridgeCheckDistanceFt
                 )
                 if (returnedToBridge || returnedToTakeoff || stationaryNearBridge) {
                     if (priorState.lossObservedWhileFar) {
@@ -419,8 +419,8 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         bridgeVerified: Boolean,
         stationaryRidReports: Boolean,
         referenceDistanceFt: Double,
-        outOfRangeDistanceFt: Double
-    ): Boolean = bridgeVerified && stationaryRidReports && referenceDistanceFt < outOfRangeDistanceFt
+        bridgeCheckDistanceFt: Double
+    ): Boolean = bridgeVerified && stationaryRidReports && referenceDistanceFt <= bridgeCheckDistanceFt
 
     internal fun isReturnedToBridgeForTests(
         bridgeVerified: Boolean,
@@ -442,12 +442,12 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         bridgeVerified: Boolean,
         stationaryRidReports: Boolean,
         referenceDistanceFt: Double,
-        outOfRangeDistanceFt: Double
+        bridgeCheckDistanceFt: Double
     ): Boolean = isStationaryNearBridge(
         bridgeVerified = bridgeVerified,
         stationaryRidReports = stationaryRidReports,
         referenceDistanceFt = referenceDistanceFt,
-        outOfRangeDistanceFt = outOfRangeDistanceFt
+        bridgeCheckDistanceFt = bridgeCheckDistanceFt
     )
 
     internal fun effectiveIdleThresholdMsForTests(

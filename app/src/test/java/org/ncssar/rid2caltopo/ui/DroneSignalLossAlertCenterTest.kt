@@ -69,21 +69,34 @@ class DroneSignalLossAlertCenterTest {
             DroneSignalLossAlertCenter.isStationaryNearBridgeForTests(
                 bridgeVerified = false,
                 stationaryRidReports = true,
-                referenceDistanceFt = 44.0,
-                outOfRangeDistanceFt = 300.0
+                referenceDistanceFt = 20.0,
+                bridgeCheckDistanceFt = 20.0
             )
         )
     }
 
     @Test
-    fun stationaryNearBridge_suppressesVerifiedStationaryDroneInsideOorRadius() {
+    fun stationaryNearBridge_suppressesVerifiedStationaryDroneInsideBridgeRadius() {
         assertEquals(
             true,
             DroneSignalLossAlertCenter.isStationaryNearBridgeForTests(
                 bridgeVerified = true,
                 stationaryRidReports = true,
-                referenceDistanceFt = 44.0,
-                outOfRangeDistanceFt = 300.0
+                referenceDistanceFt = 20.0,
+                bridgeCheckDistanceFt = 20.0
+            )
+        )
+    }
+
+    @Test
+    fun stationaryNearBridge_keepsStationaryDroneEligibleOutsideBridgeRadius() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.isStationaryNearBridgeForTests(
+                bridgeVerified = true,
+                stationaryRidReports = true,
+                referenceDistanceFt = 56.7,
+                bridgeCheckDistanceFt = 20.0
             )
         )
     }
@@ -95,8 +108,8 @@ class DroneSignalLossAlertCenterTest {
             DroneSignalLossAlertCenter.isStationaryNearBridgeForTests(
                 bridgeVerified = true,
                 stationaryRidReports = false,
-                referenceDistanceFt = 44.0,
-                outOfRangeDistanceFt = 300.0
+                referenceDistanceFt = 20.0,
+                bridgeCheckDistanceFt = 20.0
             )
         )
     }

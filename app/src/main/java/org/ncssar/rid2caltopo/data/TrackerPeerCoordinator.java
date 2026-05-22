@@ -574,6 +574,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             idleParkTimer.stop();
             return;
         }
+        if (idleParkTimer.isRunning()) {
+            return;
+        }
         idleParkTimer.start(this::parkIfIdle, idleParkDelayMs, 0L);
     }
 

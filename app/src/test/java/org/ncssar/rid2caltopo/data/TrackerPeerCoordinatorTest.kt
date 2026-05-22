@@ -251,6 +251,21 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun heartbeatAckWhileIdleEligible_doesNotResetIdleParkDeadline() {
+        TrackerPeerCoordinator.setIdleParkDelayMsForTesting(200L)
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        assertTrue(transport.connected)
+
+        Thread.sleep(120L)
+        coordinator.markHeartbeatSentForTesting(1L, clock.now())
+        coordinator.handleHeartbeatAckForTesting(1L, 0L)
+        Thread.sleep(120L)
+
+        assertFalse(transport.connected)
+        assertEquals(PeerCoordinator.CoordinationIndicatorState.IDLE, coordinator.coordinationIndicatorState)
+    }
+
+    @Test
     fun firstSightingWakesParkedCoordinatorAndSendsClaim() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         coordinator.parkIfIdleForTesting()

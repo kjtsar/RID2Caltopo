@@ -593,9 +593,24 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         notifyPeerListChanged();
         TrackerCoordinationTransport activeTransport = transport;
         if (activeTransport != null) {
+            sendIdleNotice();
             activeTransport.disconnect();
         }
         notifyCoordinationIndicatorListener();
+    }
+
+    private void sendIdleNotice() {
+        JSONObject jo = new JSONObject();
+        try {
+            jo.put("type", "idle");
+            jo.put("mapId", mapId != null ? mapId : "");
+            jo.put("zoneId", myGuid != null ? myGuid : "");
+            jo.put("guid", myGuid != null ? myGuid : "");
+            jo.put("reason", "no_active_drones");
+            sendJson(jo);
+        } catch (Exception e) {
+            CTError(TAG, "sendIdleNotice() raised", e);
+        }
     }
 
     private synchronized void wakeForCoordinationActivity(@NonNull String reason) {

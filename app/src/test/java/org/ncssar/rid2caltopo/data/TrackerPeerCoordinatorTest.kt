@@ -242,6 +242,11 @@ class TrackerPeerCoordinatorTest {
 
         assertEquals(PeerCoordinator.CoordinationIndicatorState.IDLE, coordinator.coordinationIndicatorState)
         assertFalse(transport.connected)
+        val idleMessages = transport.sentMessages
+            .map { JSONObject(it) }
+            .filter { it.optString("type") == "idle" }
+        assertEquals(1, idleMessages.size)
+        assertEquals("no_active_drones", idleMessages.single().optString("reason"))
         val connectCountAfterPark = transport.connectCount
 
         coordinator.updateMyPosition(39.2, -121.2)

@@ -87,6 +87,36 @@ class CaltopoLiveTrackTest {
         assertEquals(0, fixture.calTopoSessionGateway.countOperations("addLine"))
     }
 
+    @Test
+    fun finishTrackAfterPeerOwnership_notifiesCoordinatorDroneLost() {
+        val drone = CtDroneSpec("RID-PEER-OWNED")
+        setDroneTrackLabel(drone, "RID-PEER-OWNED_121000Apr28")
+        val liveTrack = CaltopoLiveTrack(drone, 39.1, -121.1, 500.0, 1_000L)
+        liveTrack.mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus.up, null, null)
+        liveTrack.setLocalOwner(false)
+
+        liveTrack.finishTrack("test finished")
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertEquals(1, peerCoordinator.countEvents("onDroneLost"))
+        assertEquals(drone.remoteId, peerCoordinator.latestEventOfKind("onDroneLost")?.summary)
+    }
+
+    @Test
+    fun shutdownAfterPeerOwnershipWithoutLiveTrackId_notifiesCoordinatorDroneLost() {
+        val drone = CtDroneSpec("RID-NO-LIVE-ID")
+        setDroneTrackLabel(drone, "RID-NO-LIVE-ID_121500Apr28")
+        val liveTrack = CaltopoLiveTrack(drone, 39.1, -121.1, 500.0, 1_000L)
+        liveTrack.mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus.up, null, null)
+        liveTrack.setLocalOwner(false)
+
+        liveTrack.shutdown(0L)
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertEquals(1, peerCoordinator.countEvents("onDroneLost"))
+        assertEquals(drone.remoteId, peerCoordinator.latestEventOfKind("onDroneLost")?.summary)
+    }
+
     private fun setDroneTrackLabel(drone: CtDroneSpec, trackLabel: String) {
         val mappedId = trackLabel.substringBefore('_')
         CtDroneSpec::class.java.getDeclaredField("mappedId").apply {

@@ -278,16 +278,16 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
     public void shutdown(long maxWaitInMilliseconds) {
         shuttingDown = true;
+        boolean wasActive = active;
         if (active && null != liveTrackId) try {
             CTDebug(TAG, String.format(Locale.US, "shutdown(%d). Terminating '%s'",
                     maxWaitInMilliseconds, droneSpec.trackLabel()));
-            boolean wasOwner = localOwner;
             CaltopoMap.RemoveLiveTrack(liveTrackId);
             archiveTrackOnCaltopo(maxWaitInMilliseconds);
-            if (wasOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
         } catch (Exception e) {
             CTError(TAG, String.format(Locale.US, "shutdown(%s) failed:", droneSpec.trackLabel()), e);
         }
+        notifyPeerCoordinatorTrackEnded(wasActive);
         localOwner = false;
         active = false;
     }
@@ -491,7 +491,6 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
     public void finishTrack(@NonNull String reason) {
         if (!active) return;
-        boolean wasOwner = localOwner;
         CTDebug(TAG, String.format(Locale.US, "finishTrack(%s): %s", getTrackLabel(), reason));
         if (null != liveTrackId) try {
             CaltopoMap.RemoveLiveTrack(liveTrackId);
@@ -500,9 +499,14 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             CTError(TAG, String.format(Locale.US, "finishTrack(%s) '%s' Caltopo cleanup failed:", droneSpec.trackLabel(), reason), e);
         }
         NotifyLocalTrackFinished(droneSpec, reason);
-        if (wasOwner) runtime.getPeerCoordinator().onDroneLost(myRemoteId);
+        notifyPeerCoordinatorTrackEnded(true);
         localOwner = false;
         active = false;
+    }
+
+    private void notifyPeerCoordinatorTrackEnded(boolean wasActive) {
+        if (!wasActive || droneSpec.isLocalArchiveOnly()) return;
+        runtime.getPeerCoordinator().onDroneLost(myRemoteId);
     }
 
     public boolean isActive() {return active; }

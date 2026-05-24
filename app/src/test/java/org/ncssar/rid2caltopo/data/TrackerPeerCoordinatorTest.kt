@@ -8,6 +8,7 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.json.JSONObject
+import org.ncssar.rid2caltopo.BuildConfig
 import java.util.concurrent.CopyOnWriteArrayList
 
 class TrackerPeerCoordinatorTest {
@@ -65,6 +66,11 @@ class TrackerPeerCoordinatorTest {
             transportCallback?.onFailure(RuntimeException("HTTP $responseCode"), responseCode, responseMessage)
         }
 
+        fun close(code: Int, reason: String) {
+            connected = false
+            transportCallback?.onClosed(code, reason)
+        }
+
         fun receive(text: String) {
             transportCallback?.onMessage(text)
         }
@@ -112,6 +118,7 @@ class TrackerPeerCoordinatorTest {
         TrackerPeerCoordinator.setTrackerConfigForTesting("https://tracker.example.org", "tracker-token")
         TrackerPeerCoordinator.setHandoffDelayMsForTesting(0L)
         TrackerPeerCoordinator.setTimeSourceForTesting(clock)
+        AppUpdateAdvisory.resetForTesting()
         coordinator = TrackerPeerCoordinator.getInstance()
         CaltopoClient.ResetPersistedClientState()
     }
@@ -119,6 +126,7 @@ class TrackerPeerCoordinatorTest {
     @After
     fun tearDown() {
         CaltopoClient.ResetPersistedClientState()
+        AppUpdateAdvisory.resetForTesting()
         TrackerPeerCoordinator.resetForTesting()
     }
 
@@ -126,6 +134,46 @@ class TrackerPeerCoordinatorTest {
     fun start_connectsTransport() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         assertTrue(transport.connected)
+    }
+
+    @Test
+    fun hello_includesAppVersionCode() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        val hello = JSONObject(transport.sentMessages.first())
+
+        assertEquals("hello", hello.optString("type"))
+        assertEquals(BuildConfig.VERSION_CODE, hello.optInt("appVersionCode"))
+        assertEquals(BuildConfig.VERSION_NAME, hello.optString("appVersion"))
+    }
+
+    @Test
+    fun helloAckWithNewerRecommendedVersion_triggersUpdateAdvisory() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        coordinator.handleHelloAckForTesting(BuildConfig.VERSION_CODE + 1, "https://example.org/r2c.apk")
+
+        val state = AppUpdateAdvisory.state.value
+        assertEquals(BuildConfig.VERSION_CODE + 1, state.recommendedVersionCode)
+        assertEquals("https://example.org/r2c.apk", state.updateUrl)
+        assertTrue(state.updateRequired)
+
+        AppUpdateAdvisory.dismissForSession()
+        assertFalse(AppUpdateAdvisory.state.value.updateRequired)
+
+        coordinator.handleHelloAckForTesting(BuildConfig.VERSION_CODE + 1, "https://example.org/r2c.apk")
+        assertFalse(AppUpdateAdvisory.state.value.updateRequired)
+    }
+
+    @Test
+    fun helloAckWithCurrentRecommendedVersion_doesNotTriggerUpdateAdvisory() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        coordinator.handleHelloAckForTesting(BuildConfig.VERSION_CODE, null)
+
+        val state = AppUpdateAdvisory.state.value
+        assertEquals(BuildConfig.VERSION_CODE, state.recommendedVersionCode)
+        assertFalse(state.updateRequired)
     }
 
     @Test
@@ -506,6 +554,34 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun initialConnectFailureBeforeOpen_schedulesReconnectWithoutHardFailure() {
+        transport.autoOpen = false
+        var failureCount = 0
+        coordinator.setHardFailureListenerForTesting { _, _ -> failureCount++ }
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.fail(503, "Service Unavailable")
+
+        assertFalse(transport.connected)
+        assertEquals(1, transport.connectCount)
+        assertEquals(0, failureCount)
+        assertEquals("failure", coordinator.getLastReconnectCauseForTesting())
+        assertEquals(PeerCoordinator.CoordinationIndicatorState.DEGRADED, coordinator.coordinationIndicatorState)
+    }
+
+    @Test
+    fun websocketCloseAfterHelloBeforeAck_schedulesReconnect() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        transport.close(1006, "network interrupted")
+
+        assertFalse(transport.connected)
+        assertEquals(1, transport.connectCount)
+        assertEquals("closed", coordinator.getLastReconnectCauseForTesting())
+        assertEquals(PeerCoordinator.CoordinationIndicatorState.DEGRADED, coordinator.coordinationIndicatorState)
+    }
+
+    @Test
     fun staleOwnerAssignment_doesNotOverrideNewerLease() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         val drone = CtDroneSpec("DRONE1")
@@ -554,6 +630,51 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun delayedOwnerExpiredForPreviousPeer_doesNotClearNewerLocalOwner() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1")
+        val track = FakeLiveTrack("DRONE1")
+        coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+
+        coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-bravo", 4L)
+        assertFalse(track.localOwnerFlag)
+
+        coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 5L)
+        assertTrue(track.localOwnerFlag)
+
+        transport.receive(
+            JSONObject()
+                .put("type", "owner_expired")
+                .put("remoteId", "DRONE1")
+                .put("prevOwnerGuid", "zone-bravo")
+                .toString()
+        )
+
+        assertTrue(track.localOwnerFlag)
+        assertTrue(coordinator.isLocalOwner("DRONE1"))
+    }
+
+    @Test
+    fun delayedOwnerExpiredForCurrentOwner_clearsLocalOwner() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        val drone = CtDroneSpec("DRONE1")
+        val track = FakeLiveTrack("DRONE1")
+        coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 5L)
+
+        transport.receive(
+            JSONObject()
+                .put("type", "owner_expired")
+                .put("remoteId", "DRONE1")
+                .put("prevOwnerGuid", "zone-alpha")
+                .toString()
+        )
+
+        assertFalse(track.localOwnerFlag)
+        assertFalse(coordinator.isLocalOwner("DRONE1"))
+    }
+
+    @Test
     fun missedHelloAck_forcesReconnectDeterministically() {
         transport.autoOpen = false
 
@@ -570,6 +691,22 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun delayedHelloAckBeforeTimeout_doesNotForceReconnect() {
+        transport.autoOpen = false
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.open()
+        clock.advanceBy(9_999L)
+
+        coordinator.checkAckLivenessForTesting()
+        coordinator.handleHelloAckForTesting()
+
+        assertEquals(0L, coordinator.getForcedReconnectCountForTesting())
+        assertEquals(1, transport.connectCount)
+        assertEquals(PeerCoordinator.CoordinationIndicatorState.HEALTHY, coordinator.coordinationIndicatorState)
+    }
+
+    @Test
     fun missedHeartbeatAck_forcesReconnectDeterministically() {
         transport.autoOpen = false
 
@@ -583,6 +720,53 @@ class TrackerPeerCoordinatorTest {
 
         assertEquals(1L, coordinator.getForcedReconnectCountForTesting())
         awaitTrue("expected reconnect attempt after missed heartbeat ack") {
+            transport.connectCount >= 2
+        }
+    }
+
+    @Test
+    fun delayedHeartbeatAckBeforeTimeout_isAccepted() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        coordinator.markHeartbeatSentForTesting(7L, clock.now())
+        clock.advanceBy(9_999L)
+
+        coordinator.checkAckLivenessForTesting()
+        coordinator.handleHeartbeatAckForTesting(7L, 0L)
+
+        assertEquals(0L, coordinator.getForcedReconnectCountForTesting())
+        assertEquals(7L, coordinator.getLastHeartbeatSeqAckedForTesting())
+        assertEquals(1, transport.connectCount)
+    }
+
+    @Test
+    fun staleHeartbeatAck_isIgnoredWithoutReconnect() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.handleHelloAckForTesting()
+        coordinator.markHeartbeatSentForTesting(5L, clock.now())
+        coordinator.handleHeartbeatAckForTesting(5L, 0L)
+        coordinator.markHeartbeatSentForTesting(6L, clock.now())
+
+        coordinator.handleHeartbeatAckForTesting(4L, 0L)
+
+        assertEquals(0L, coordinator.getForcedReconnectCountForTesting())
+        assertEquals(5L, coordinator.getLastHeartbeatSeqAckedForTesting())
+        assertEquals(1, transport.connectCount)
+    }
+
+    @Test
+    fun mismatchedHeartbeatAck_forcesReconnectDeterministically() {
+        transport.autoOpen = false
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.open()
+        coordinator.handleHelloAckForTesting()
+        coordinator.markHeartbeatSentForTesting(9L, clock.now())
+
+        coordinator.handleHeartbeatAckForTesting(8L, 0L)
+
+        assertEquals(1L, coordinator.getForcedReconnectCountForTesting())
+        awaitTrue("expected reconnect attempt after mismatched heartbeat ack") {
             transport.connectCount >= 2
         }
     }
@@ -607,6 +791,64 @@ class TrackerPeerCoordinatorTest {
 
         assertEquals(forcedReconnectsAfterFirstCheck, coordinator.getForcedReconnectCountForTesting())
         assertEquals(2, transport.connectCount)
+    }
+
+    @Test
+    fun queuedDroneConfirmation_flushesAfterDelayedOpen() {
+        transport.autoOpen = false
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.sentMessages.clear()
+
+        coordinator.onDroneConfirmed("RID-QUEUED", "NCSSAR", "Mavic", "Pilot", "1SAR7DJ")
+
+        assertTrue(transport.sentMessages.none { JSONObject(it).optString("type") == "drone_confirmed" })
+        assertTrue(transport.connectCount >= 2)
+
+        transport.open()
+
+        val confirmations = transport.sentMessages
+            .map { JSONObject(it) }
+            .filter { it.optString("type") == "drone_confirmed" }
+        assertEquals(1, confirmations.size)
+        assertEquals("RID-QUEUED", confirmations.single().optString("remoteId"))
+    }
+
+    @Test
+    fun queuedFirstSighting_flushesAfterDelayedOpen() {
+        transport.autoOpen = false
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.sentMessages.clear()
+
+        val drone = CtDroneSpec("RID-FIRST")
+        val track = FakeLiveTrack("RID-FIRST")
+        coordinator.onLiveTrackCreated(track, drone, 42.0, 1234L)
+
+        assertTrue(transport.sentMessages.none { JSONObject(it).optString("type") == "first_sighting" })
+        assertTrue(transport.connectCount >= 2)
+
+        transport.open()
+
+        val firstSightings = transport.sentMessages
+            .map { JSONObject(it) }
+            .filter { it.optString("type") == "first_sighting" }
+        assertEquals(1, firstSightings.size)
+        assertEquals("RIDFIRST", firstSightings.single().optString("remoteId"))
+        assertEquals(42.0, firstSightings.single().optDouble("distanceFromZoneM"), 0.0)
+    }
+
+    @Test
+    fun unconfiguredTracker_staysStandaloneWithoutConnectingTransport() {
+        TrackerPeerCoordinator.setTrackerConfigForTesting("", "")
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        coordinator.updateMyPosition(39.2, -121.2)
+
+        assertEquals(0, transport.connectCount)
+        assertEquals(PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED, coordinator.coordinationIndicatorState)
+        assertEquals("Tracker link not configured", coordinator.coordinationStatusText)
+        assertTrue(coordinator.coordinationDiagnosticLines.contains("Tracker websocket not configured"))
     }
 
     private fun awaitTrue(message: String, timeoutMs: Long = 500L, condition: () -> Boolean) {

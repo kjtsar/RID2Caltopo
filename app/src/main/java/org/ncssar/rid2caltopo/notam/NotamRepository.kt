@@ -768,25 +768,18 @@ internal class NotamRepository {
         }
         val lastUpdatedMs = maxOf(CaltopoClient.GetNotamLastUpdatedEpochMs(), lastRefreshAtMs)
         val stale = if (lastUpdatedMs == 0L) false else System.currentTimeMillis() - lastUpdatedMs > 180_000L
-        val chipSeverity = when {
-            lastErrorMessage != null && visibleNotices.isEmpty() -> NotamChipSeverity.Neutral
-            visibleNotices.any { it.intersectsPilotBubble || it.severity == NotamChipSeverity.Danger } -> NotamChipSeverity.Danger
-            visibleNotices.any { it.severity == NotamChipSeverity.Caution } -> NotamChipSeverity.Caution
-            configured -> NotamChipSeverity.Normal
-            else -> NotamChipSeverity.Neutral
-        }
-        val chipLabel = when {
-            loading -> "NOTAMs updating..."
-            lastErrorMessage != null && visibleNotices.isEmpty() -> "NOTAMs unavailable"
-            visibleNotices.any { it.intersectsPilotBubble } -> {
-                val first = visibleNotices.first { it.intersectsPilotBubble }
-                val dist = first.distanceNm?.let { String.format(Locale.US, "%.1f NM", it) } ?: "pilot area"
-                "NOTAMs: RESTRICTED $dist"
-            }
-            visibleNotices.isNotEmpty() -> "NOTAMs: ${visibleNotices.size} nearby"
-            configured -> "NOTAMs clear"
-            else -> "NOTAMs pending"
-        }
+        val hasError = lastErrorMessage != null
+        val chipSeverity = NotamPolicy.effectiveChipSeverity(
+            notices = visibleNotices,
+            configured = configured,
+            hasError = hasError
+        )
+        val chipLabel = NotamPolicy.chipLabel(
+            notices = visibleNotices,
+            configured = configured,
+            loading = loading,
+            hasError = hasError
+        )
         val statusLine = buildString {
             if (lastErrorMessage != null) {
                 append(lastErrorMessage)

@@ -170,13 +170,13 @@ internal object NotamMapOverlayAdapter {
 
     private fun styleFor(notice: NearbyNotam): OverlayStyle {
         return when {
-            notice.intersectsPilotBubble || notice.severity == NotamChipSeverity.Danger ->
+            notice.severity == NotamChipSeverity.Danger ->
                 OverlayStyle(
                     strokeColor = Color.parseColor("#D32F2F"),
                     fillColor = Color.parseColor("#33D32F2F")
                 )
 
-            notice.severity == NotamChipSeverity.Caution ->
+            notice.intersectsPilotBubble || notice.severity == NotamChipSeverity.Caution ->
                 OverlayStyle(
                     strokeColor = Color.parseColor("#F57C00"),
                     fillColor = Color.parseColor("#33F57C00")
@@ -219,8 +219,8 @@ internal object NotamMapOverlayAdapter {
         String.format(Locale.US, "%.6f,%.6f", point.latitude, point.longitude)
 
     private fun severityRank(notice: NearbyNotam): Int = when {
-        notice.intersectsPilotBubble || notice.severity == NotamChipSeverity.Danger -> 0
-        notice.severity == NotamChipSeverity.Caution -> 1
+        notice.severity == NotamChipSeverity.Danger -> 0
+        notice.intersectsPilotBubble || notice.severity == NotamChipSeverity.Caution -> 1
         notice.severity == NotamChipSeverity.Normal -> 2
         else -> 3
     }

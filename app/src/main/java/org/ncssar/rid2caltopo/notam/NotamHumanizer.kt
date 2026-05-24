@@ -66,9 +66,11 @@ internal object NotamHumanizer {
     private fun categoryFor(text: String): String {
         val haystack = text.uppercase(Locale.US)
         return when {
+            haystack.contains("AIRSPACE") && isServiceAvailabilityNotice(haystack) -> "Airspace service notice"
             haystack.contains("AIRSPACE UAS") -> "UAS airspace restriction"
             haystack.contains(" TFR") || haystack.startsWith("TFR") -> "Temporary flight restriction"
-            haystack.contains("AIRSPACE") -> "Airspace restriction"
+            haystack.contains("AIRSPACE") && isRestrictiveAirspaceNotice(haystack) -> "Airspace restriction"
+            haystack.contains("AIRSPACE") -> "Airspace notice"
             haystack.contains("RWY") && (haystack.contains("CLSD") || haystack.contains("CLOSED")) -> "Runway closure"
             haystack.contains("RWY") -> "Runway notice"
             haystack.contains("NAV") -> "Navigation notice"
@@ -76,6 +78,22 @@ internal object NotamHumanizer {
             else -> "Operational notice"
         }
     }
+
+    private fun isServiceAvailabilityNotice(haystack: String): Boolean =
+        haystack.contains("UNUSABLE") ||
+            haystack.contains("UNAVAILABLE") ||
+            haystack.contains("UNAVBL") ||
+            haystack.contains("NOT AVBL") ||
+            haystack.contains("MAY NOT BE AVBL") ||
+            haystack.contains("ADS-B") ||
+            haystack.contains("TIS-B") ||
+            haystack.contains("FIS-B")
+
+    private fun isRestrictiveAirspaceNotice(haystack: String): Boolean =
+        haystack.contains("RESTRICT") ||
+            haystack.contains("PROHIBITED") ||
+            haystack.contains("AIRSPACE UAS") ||
+            haystack.contains("TEMPORARY FLIGHT RESTRICTION")
 
     private fun areaSummary(text: String): String? {
         val normalized = text.uppercase(Locale.US)

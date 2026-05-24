@@ -21,7 +21,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 5
-    def versionPatch = 5
+    def versionPatch = 6
 
     signingConfigs {
         register("release") {
@@ -36,7 +36,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 77
+        versionCode = 80
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -253,9 +253,15 @@ tasks.register("jacocoTestReport", JacocoReport) {
             '**/*_MembersInjector*.*'
     ]
 
-    def javaClasses = fileTree(
-            dir: "$buildDir/intermediates/javac/debug/classes",
-            excludes: fileFilter
+    def javaClasses = files(
+            fileTree(
+                    dir: "$buildDir/intermediates/javac/debug/classes",
+                    excludes: fileFilter
+            ),
+            fileTree(
+                    dir: "$buildDir/intermediates/javac/debug/compileDebugJavaWithJavac/classes",
+                    excludes: fileFilter
+            )
     )
     def kotlinClasses = fileTree(
             dir: "$buildDir/tmp/kotlin-classes/debug",
@@ -304,7 +310,7 @@ tasks.register("releaseCheck") {
 
 tasks.register("trackerCoordinationTests") {
     group = "verification"
-    description = "Runs r2c-tracker coordination tests when the sibling tracker repo is present."
+    description = "Runs r2c-tracker coordination and local instance smoke tests when the sibling tracker repo is present."
     doLast {
         def trackerDirPath = System.getenv("R2C_TRACKER_DIR") ?: "${rootDir}/../r2c-tracker"
         def trackerDir = file(trackerDirPath)
@@ -312,6 +318,15 @@ tasks.register("trackerCoordinationTests") {
             logger.lifecycle("Skipping trackerCoordinationTests: ${trackerDir} not found")
             return
         }
+        def releaseCheck = new File(trackerDir, "release_check.sh")
+        if (releaseCheck.exists() && releaseCheck.canExecute()) {
+            exec {
+                workingDir trackerDir
+                commandLine "./release_check.sh"
+            }
+            return
+        }
+        logger.lifecycle("trackerCoordinationTests: ${releaseCheck} not executable; falling back to Python unit tests only")
         exec {
             workingDir trackerDir
             commandLine "python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"

@@ -165,7 +165,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
 
     suspend fun listAvailableLogArchiveDays(): List<LogArchiveDayOption> = withContext(Dispatchers.IO) {
         val archiveDir = CaltopoClient.GetArchiveDir() ?: return@withContext emptyList()
-        val todayDirName = "tracks-" + SimpleDateFormat("ddMMMyyyy", Locale.US).format(Date())
+        val todayDirName = todayArchiveDirectoryName()
         archiveDir.listFiles()
             .asSequence()
             .filter { it.isDirectory }
@@ -186,6 +186,52 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                     .thenByDescending { it.directoryName }
             )
             .toList()
+    }
+
+    suspend fun listArchiveCleanupDirectories(): List<ArchiveCleanupDirectoryOption> = withContext(Dispatchers.IO) {
+        val archiveDir = CaltopoClient.GetArchiveDir() ?: return@withContext emptyList()
+        val nowMs = System.currentTimeMillis()
+        val todayDirName = todayArchiveDirectoryName()
+        archiveDir.listFiles()
+            .asSequence()
+            .filter { it.isDirectory && isDatedArchiveDirectoryName(it.name) }
+            .mapNotNull { dir ->
+                val dirName = dir.name ?: return@mapNotNull null
+                buildArchiveCleanupOption(
+                    directoryName = dirName,
+                    lastModifiedMs = dir.lastModified(),
+                    entries = dir.listFiles().map(::documentFileToArchiveEntry),
+                    nowMs = nowMs,
+                    todayName = todayDirName,
+                )
+            }
+            .sortedWith(
+                compareByDescending<ArchiveCleanupDirectoryOption> { it.ageMs }
+                    .thenBy { it.directoryName }
+            )
+            .toList()
+    }
+
+    suspend fun deleteArchiveCleanupDirectories(directoryNames: List<String>): ArchiveCleanupDeleteResult = withContext(Dispatchers.IO) {
+        val archiveDir = CaltopoClient.GetArchiveDir() ?: run {
+            CTError(TAG, "deleteArchiveCleanupDirectories(): archive dir unavailable")
+            return@withContext ArchiveCleanupDeleteResult(0, directoryNames.distinct())
+        }
+        val todayDirName = todayArchiveDirectoryName()
+        var deletedCount = 0
+        val failedNames = mutableListOf<String>()
+        directoryNames
+            .distinct()
+            .filter { it != todayDirName && isDatedArchiveDirectoryName(it) }
+            .forEach { dirName ->
+                val dir = archiveDir.findFile(dirName)
+                if (dir?.isDirectory == true && dir.delete()) {
+                    deletedCount++
+                } else {
+                    failedNames.add(dirName)
+                }
+            }
+        ArchiveCleanupDeleteResult(deletedCount, failedNames)
     }
 
     /**
@@ -388,6 +434,12 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                             },
                             onEmailLog = { selectedDirectoryNames ->
                                 zipAndEmailSelectedLogs(localContext, selectedDirectoryNames)
+                            },
+                            availableArchiveCleanupDirectoriesProvider = {
+                                listArchiveCleanupDirectories()
+                            },
+                            onDeleteArchiveDirectories = { selectedDirectoryNames ->
+                                deleteArchiveCleanupDirectories(selectedDirectoryNames)
                             },
                             onShowHelp = {showHelpMenu()},
                             externalDisplayConnected = externalDisplayConnected,

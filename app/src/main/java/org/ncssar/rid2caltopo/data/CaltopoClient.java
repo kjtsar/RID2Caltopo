@@ -398,6 +398,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static CopyOnWriteArrayList<CtDroneSpec.DroneConfirmationCandidateListener> DroneConfirmationCandidateListeners = new CopyOnWriteArrayList<>();
     private static Uri DebugLogPath = null;
     private static DelayedExec AppIdleDelay = new DelayedExec();
+    private static volatile long AppActiveStartedAtMsec = System.currentTimeMillis();
     private static FirebaseAnalytics FBAnalytics;
     private static final Object ShutdownLock = new Object();
     private static boolean ShutdownInProgress = false;
@@ -3233,6 +3234,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         synchronized (ShutdownLock) {
             AppExitRequested = false;
         }
+        AppActiveStartedAtMsec = System.currentTimeMillis();
         RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true);
     }
 
@@ -3348,18 +3350,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         AppIdleDelay.stop();
         if (maxIdleInMinutes <= 0) return;
         long maxIdleInMsec = maxIdleInMinutes * 1000 * 60;
-        long idleInMsec = CtDroneSpec.IdleTimeInMsec();
+        long appActiveStartedAtMsec = AppActiveStartedAtMsec;
+        long lastWaypointMsec = CtDroneSpec.LastWaypointUpdateTimestampMsec();
+        long idleBaselineMsec = Math.max(appActiveStartedAtMsec, lastWaypointMsec);
+        long idleInMsec = System.currentTimeMillis() - idleBaselineMsec;
         if (idleInMsec < maxIdleInMsec) {
             AppIdleDelay.start(CaltopoClient::CheckIdle,
                     maxIdleInMsec - idleInMsec, 0);
             return;
         }
         CaltopoClient.CTEvent(TAG, "MaxIdleExiting", null);
-        long lastWaypointMsec = CtDroneSpec.LastWaypointUpdateTimestampMsec();
         CTWarn(TAG, String.format(Locale.US,
-                "CheckIdle(): app idle timeout expired after %.3f/%.3f minutes without valid RID updates (lastWaypoint=%s). Shutting down app and map to save battery.",
+                "CheckIdle(): app idle timeout expired after %.3f/%.3f minutes without valid RID updates (appActiveStarted=%s lastWaypoint=%s). Shutting down app and map to save battery.",
                 idleInMsec / 60000.0,
                 (double) maxIdleInMinutes,
+                TimeDatestampString(appActiveStartedAtMsec),
                 TimeDatestampString(lastWaypointMsec)));
         QuitApplication();
     }

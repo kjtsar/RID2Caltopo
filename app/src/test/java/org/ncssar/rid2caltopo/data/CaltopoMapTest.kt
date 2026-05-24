@@ -151,4 +151,23 @@ class CaltopoMapTest {
         assertEquals("", peerCoordinator.getStartedMapId())
         assertEquals(1, peerCoordinator.countEvents("updateMyPosition"))
     }
+
+    @Test
+    fun ensureStandaloneTrackerCoordinationStarted_updatesPositionWithoutTrackerCredentials() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoClient.SetTrackerApiKey("")
+        CaltopoClient.SetTrackerUrlPfx("")
+        CaltopoMap.MyLocation = Location("cached").apply {
+            latitude = 39.153062
+            longitude = -121.132960
+            accuracy = 8.0f
+        }
+
+        CaltopoMap.EnsureStandaloneTrackerCoordinationStarted()
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertTrue(!peerCoordinator.isStarted())
+        assertEquals(1, peerCoordinator.countEvents("updateMyPosition"))
+    }
 }

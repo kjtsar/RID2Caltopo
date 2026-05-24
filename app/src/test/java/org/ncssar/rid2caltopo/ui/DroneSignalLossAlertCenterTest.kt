@@ -51,6 +51,30 @@ class DroneSignalLossAlertCenterTest {
     }
 
     @Test
+    fun peerVisibleTelemetry_suppressesAtPeerTelemetryThresholdBoundary() {
+        assertEquals(
+            true,
+            DroneSignalLossAlertCenter.shouldSuppressForPeerVisibleTelemetryForTests(
+                signalIdleMs = 15_000L,
+                trackTelemetryIdleMs = 10_000L,
+                thresholdMs = 10_000L
+            )
+        )
+    }
+
+    @Test
+    fun peerVisibleTelemetry_doesNotSuppressWhenLocalSignalIsAtThresholdBoundary() {
+        assertEquals(
+            false,
+            DroneSignalLossAlertCenter.shouldSuppressForPeerVisibleTelemetryForTests(
+                signalIdleMs = 10_000L,
+                trackTelemetryIdleMs = 1_000L,
+                thresholdMs = 10_000L
+            )
+        )
+    }
+
+    @Test
     fun returnedToBridge_requiresPriorBridgeVerification() {
         assertEquals(
             false,

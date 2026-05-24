@@ -1,5 +1,7 @@
 package org.ncssar.rid2caltopo.notam
 
+import java.util.Locale
+
 internal object NotamPolicy {
     private fun severityRank(severity: NotamChipSeverity): Int = when (severity) {
         NotamChipSeverity.Danger -> 0
@@ -27,4 +29,46 @@ internal object NotamPolicy {
         }
         return visible to (notices.size - visible.size)
     }
+
+    fun effectiveChipSeverity(
+        notices: List<NearbyNotam>,
+        configured: Boolean,
+        hasError: Boolean
+    ): NotamChipSeverity {
+        return when {
+            hasError && notices.isEmpty() -> NotamChipSeverity.Neutral
+            notices.any { it.severity == NotamChipSeverity.Danger } -> NotamChipSeverity.Danger
+            notices.any { it.intersectsPilotBubble || it.severity == NotamChipSeverity.Caution } -> NotamChipSeverity.Caution
+            configured -> NotamChipSeverity.Normal
+            else -> NotamChipSeverity.Neutral
+        }
+    }
+
+    fun chipLabel(
+        notices: List<NearbyNotam>,
+        configured: Boolean,
+        loading: Boolean,
+        hasError: Boolean
+    ): String {
+        if (loading) return "NOTAMs updating..."
+        if (hasError && notices.isEmpty()) return "NOTAMs unavailable"
+
+        val restrictiveHere = notices.firstOrNull {
+            it.intersectsPilotBubble && it.severity == NotamChipSeverity.Danger
+        }
+        if (restrictiveHere != null) {
+            return "NOTAMs: RESTRICTED ${formatDistance(restrictiveHere)}"
+        }
+
+        val noticeHere = notices.firstOrNull { it.intersectsPilotBubble }
+        if (noticeHere != null) {
+            return "NOTAMs: NOTICE ${formatDistance(noticeHere)}"
+        }
+
+        if (notices.isNotEmpty()) return "NOTAMs: ${notices.size} nearby"
+        return if (configured) "NOTAMs clear" else "NOTAMs pending"
+    }
+
+    private fun formatDistance(notice: NearbyNotam): String =
+        notice.distanceNm?.let { String.format(Locale.US, "%.1f NM", it) } ?: "pilot area"
 }

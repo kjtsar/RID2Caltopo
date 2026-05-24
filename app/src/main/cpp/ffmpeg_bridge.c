@@ -825,13 +825,7 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
     session->anomaly_rgba_height = height;
     session->anomaly_src_fmt = src_fmt;
 
-    if (session->anomaly_lock_ready) {
-        pthread_mutex_lock(&session->anomaly_lock);
-        anomaly_state_reset(&session->anomaly_state);
-        pthread_mutex_unlock(&session->anomaly_lock);
-    } else {
-        anomaly_state_reset(&session->anomaly_state);
-    }
+    anomaly_state_reset(&session->anomaly_state);
 }
 
 static void cleanup_anomaly_resources(ffmpeg_session_t *session) {
@@ -1093,13 +1087,13 @@ static const char *registration_invalid_reason_name(int value) {
     }
 }
 
-static bool analyze_rgba_frame(ffmpeg_session_t *session,
-                               const anomaly_config_t *cfg_override,
-                               int width,
-                               int height,
-                               uint8_t *rgba,
-                               int rgba_stride,
-                               int64_t source_ts_us) {
+static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
+                                      const anomaly_config_t *cfg_override,
+                                      int width,
+                                      int height,
+                                      uint8_t *rgba,
+                                      int rgba_stride,
+                                      int64_t source_ts_us) {
     anomaly_result_t result;
     memset(&result, 0, sizeof(result));
     anomaly_config_t cfg;
@@ -1109,9 +1103,6 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
         pthread_mutex_lock(&g_lock);
         cfg = session->anomaly_cfg;
         pthread_mutex_unlock(&g_lock);
-    }
-    if (session->anomaly_lock_ready) {
-        pthread_mutex_lock(&session->anomaly_lock);
     }
     int64_t started_at_us = monotonic_us();
     trace_begin_section("RID2C anomaly_process_frame");
@@ -1356,9 +1347,6 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                  session->latest_anomaly_debug_summary);
     }
 #endif
-    if (session->anomaly_lock_ready) {
-        pthread_mutex_unlock(&session->anomaly_lock);
-    }
     bool log_local_playback_summary =
             is_local_file_source(session) &&
             cfg.enabled &&
@@ -1445,6 +1433,30 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
                  result.color_debug.max_histogram_recent_count,
                  result.color_debug.history_recovery_frames_remaining,
                  result.color_debug.history_recent_scale);
+    }
+    return annotated;
+}
+
+static bool analyze_rgba_frame(ffmpeg_session_t *session,
+                               const anomaly_config_t *cfg_override,
+                               int width,
+                               int height,
+                               uint8_t *rgba,
+                               int rgba_stride,
+                               int64_t source_ts_us) {
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_lock(&session->anomaly_lock);
+    }
+    bool annotated = analyze_rgba_frame_locked(
+            session,
+            cfg_override,
+            width,
+            height,
+            rgba,
+            rgba_stride,
+            source_ts_us);
+    if (session->anomaly_lock_ready) {
+        pthread_mutex_unlock(&session->anomaly_lock);
     }
     return annotated;
 }
@@ -1635,13 +1647,27 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
     if (session == NULL || session_stopping(session) || !frame_looks_scalable(decoded)) return NULL;
     if (!anomaly_processing_enabled(session)) return NULL;
 
+    // The AD worker and render thread share these conversion resources. Keep
+    // reconfiguration, RGBA analysis, and overlay cloning in one critical section.
+    bool locked = session->anomaly_lock_ready;
+    if (locked) {
+        pthread_mutex_lock(&session->anomaly_lock);
+    }
     ensure_anomaly_rgba_resources(session, decoded->width, decoded->height, decoded->format);
     if (session->anomaly_sws == NULL || session->anomaly_rgba_frame == NULL ||
         session->anomaly_rgba_frame->data[0] == NULL || session->anomaly_rgba_frame->linesize[0] == 0) {
+        if (locked) {
+            pthread_mutex_unlock(&session->anomaly_lock);
+        }
         return NULL;
     }
 
-    if (session_stopping(session)) return NULL;
+    if (session_stopping(session)) {
+        if (locked) {
+            pthread_mutex_unlock(&session->anomaly_lock);
+        }
+        return NULL;
+    }
 
     trace_begin_section("RID2C anomaly_rgba_convert");
     sws_scale(
@@ -1664,7 +1690,7 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
         cfg_override_ptr = &cfg_override;
     }
 
-    bool frame_annotated = analyze_rgba_frame(
+    bool frame_annotated = analyze_rgba_frame_locked(
             session,
             cfg_override_ptr,
             decoded->width,
@@ -1673,8 +1699,11 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
             session->anomaly_rgba_frame->linesize[0],
             source_ts_us);
     if (out_analyzed != NULL) *out_analyzed = true;
-    if (!frame_annotated) return NULL;
-    return clone_rgba_frame(session->anomaly_rgba_frame);
+    AVFrame *overlay = frame_annotated ? clone_rgba_frame(session->anomaly_rgba_frame) : NULL;
+    if (locked) {
+        pthread_mutex_unlock(&session->anomaly_lock);
+    }
+    return overlay;
 }
 
 static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
@@ -1699,15 +1728,25 @@ static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
         return false;
     }
 
+    bool locked = session->anomaly_lock_ready;
+    if (locked) {
+        pthread_mutex_lock(&session->anomaly_lock);
+    }
     ensure_anomaly_rgba_resources(session, decoded->width, decoded->height, decoded->format);
     if (session->anomaly_back_sws == NULL) {
         ct_warn(TAG,
                 "overlay back-convert unavailable id=%lld designator=%s",
                 (long long) session->session_id,
                 session->designator);
+        if (locked) {
+            pthread_mutex_unlock(&session->anomaly_lock);
+        }
         return false;
     }
     if (session_stopping(session) || !frame_looks_scalable(decoded)) {
+        if (locked) {
+            pthread_mutex_unlock(&session->anomaly_lock);
+        }
         return false;
     }
     if (av_frame_make_writable(decoded) < 0) {
@@ -1715,9 +1754,15 @@ static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
                 "decoded frame not writable for overlay id=%lld designator=%s",
                 (long long) session->session_id,
                 session->designator);
+        if (locked) {
+            pthread_mutex_unlock(&session->anomaly_lock);
+        }
         return false;
     }
     if (session_stopping(session) || !frame_looks_scalable(decoded)) {
+        if (locked) {
+            pthread_mutex_unlock(&session->anomaly_lock);
+        }
         return false;
     }
 
@@ -1731,6 +1776,9 @@ static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
             decoded->data,
             decoded->linesize);
     trace_end_section();
+    if (locked) {
+        pthread_mutex_unlock(&session->anomaly_lock);
+    }
     return true;
 }
 

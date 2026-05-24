@@ -808,6 +808,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             putFinite(jo, "lat", myLat);
             putFinite(jo, "lng", myLon);
             jo.put("appVersion", BuildConfig.VERSION_NAME);
+            jo.put("appVersionCode", BuildConfig.VERSION_CODE);
             jo.put("caltopoRttMs", myCaltopoRttMs);
             CTDebug(TAG, String.format(Locale.US,
                     "sendHello(): mapId=%s zoneId=%s lat=%.6f lng=%.6f rttMs=%d",
@@ -997,6 +998,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             switch (type) {
                 case "hello_ack":
                     helloAckAtMs = nowMs();
+                    handleAppUpdateRecommendation(jo);
                     CTDebug(TAG, String.format(Locale.US,
                             "hello_ack received from tracker after %d ms",
                             helloAckAtMs - helloSeqSentAtMs));
@@ -1015,7 +1017,9 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                             jo.optLong("leaseExpireTs", 0L));
                     break;
                 case "owner_expired":
-                    clearOwner(jo.optString("remoteId"));
+                    clearOwner(
+                            jo.optString("remoteId"),
+                            firstNonEmpty(jo.optString("prevOwnerGuid"), jo.optString("prevOwnerZoneId")));
                     break;
                 case "relay_sighting":
                     onRelaySighting(jo);
@@ -1030,6 +1034,13 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         } catch (Exception e) {
             CTError(TAG, "handleIncomingMessage() raised for: " + text, e);
         }
+    }
+
+    private void handleAppUpdateRecommendation(@NonNull JSONObject jo) {
+        int recommendedVersionCode = jo.optInt("recommendedAppVersionCode", 0);
+        if (recommendedVersionCode <= 0) return;
+        String updateUrl = jo.optString("updateUrl", "");
+        AppUpdateAdvisory.onTrackerRecommendation(recommendedVersionCode, updateUrl);
     }
 
     private void onZoneUpdate(@Nullable JSONArray zones) {
@@ -1131,6 +1142,17 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private void clearOwner(@NonNull String remoteId) {
+        clearOwner(remoteId, "");
+    }
+
+    private void clearOwner(@NonNull String remoteId, @NonNull String expectedOwnerGuid) {
+        String currentOwnerGuid = ownerByRemoteId.get(remoteId);
+        if (!expectedOwnerGuid.isEmpty() && currentOwnerGuid != null && !expectedOwnerGuid.equals(currentOwnerGuid)) {
+            CTWarn(TAG, String.format(Locale.US,
+                    "clearOwner(%s): ignoring stale owner_expired prevOwnerGuid='%s' currentOwnerGuid='%s'",
+                    remoteId, expectedOwnerGuid, currentOwnerGuid));
+            return;
+        }
         ownerByRemoteId.remove(remoteId);
         leaseSeqByRemoteId.remove(remoteId);
         lastSightingSentByRemoteId.remove(remoteId);
@@ -1222,7 +1244,25 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     void handleHelloAckForTesting() {
-        helloAckAtMs = nowMs();
+        JSONObject jo = new JSONObject();
+        try {
+            jo.put("type", "hello_ack");
+        } catch (Exception ignored) {
+        }
+        handleIncomingMessage(jo.toString());
+    }
+
+    void handleHelloAckForTesting(int recommendedVersionCode, @Nullable String updateUrl) {
+        JSONObject jo = new JSONObject();
+        try {
+            jo.put("type", "hello_ack");
+            jo.put("recommendedAppVersionCode", recommendedVersionCode);
+            if (updateUrl != null) {
+                jo.put("updateUrl", updateUrl);
+            }
+        } catch (Exception ignored) {
+        }
+        handleIncomingMessage(jo.toString());
     }
 
     void checkAckLivenessForTesting() {

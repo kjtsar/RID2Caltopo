@@ -568,14 +568,14 @@ internal fun SplitMapPane(
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
     var lastRenderStats by remember { mutableStateOf("") }
     var lastAlignmentStats by remember { mutableStateOf("") }
-    var initialViewportApplied by remember(restoredViewport) { mutableStateOf(restoredViewport != null) }
+    var initialViewportApplied by remember { mutableStateOf(restoredViewport != null) }
     var initialViewportArtifactCount by remember { mutableStateOf(-1) }
-    var restoredViewportStartupCheckComplete by remember(restoredViewport) { mutableStateOf(restoredViewport == null) }
-    var restoredViewportStartupWaitLogged by remember(restoredViewport) { mutableStateOf(false) }
-    var restoredViewportStartupCheckStartedAtMs by remember(restoredViewport) { mutableStateOf(System.currentTimeMillis()) }
-    var operatorAdjustedViewport by remember(restoredViewport) { mutableStateOf(false) }
+    var restoredViewportStartupCheckComplete by remember { mutableStateOf(restoredViewport == null) }
+    var restoredViewportStartupWaitLogged by remember { mutableStateOf(false) }
+    var restoredViewportStartupCheckStartedAtMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var operatorAdjustedViewport by remember { mutableStateOf(false) }
     var lastLocalDeviceMarkerStats by remember { mutableStateOf("") }
-    var localDeviceViewportRescueApplied by remember(restoredViewport) { mutableStateOf(false) }
+    var localDeviceViewportRescueApplied by remember { mutableStateOf(false) }
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
     val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
     val caltopoMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
@@ -2657,12 +2657,14 @@ internal fun SplitMapPane(
                 }
 
                 val shouldApplyInitialViewport =
-                    !initialViewportApplied ||
+                    !operatorAdjustedViewport && (
+                        !initialViewportApplied ||
                         (
                             initialViewportArtifactCount == 0 &&
                                 artifactOverlayState.totalFeatures > 0 &&
                                 viewModel.mapViewportState() == null
-                            )
+                        )
+                    )
                 if (shouldApplyInitialViewport) {
                     val myLocation = CaltopoMap.GetMyLocation()
                     val artifactPoints = allArtifactGeoPoints(artifactOverlayState)

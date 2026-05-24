@@ -8,10 +8,12 @@
 package org.ncssar.rid2caltopo.ui
 
 import StreamsViewModel
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.location.Location
+import android.os.Build
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
@@ -45,9 +47,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
 import kotlinx.coroutines.launch
+import org.ncssar.rid2caltopo.BuildConfig
+import org.ncssar.rid2caltopo.app.ArchiveCleanupDeleteResult
+import org.ncssar.rid2caltopo.app.ArchiveCleanupDirectoryOption
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.LogArchiveDayOption
 import org.ncssar.rid2caltopo.app.R2CActivity
+import org.ncssar.rid2caltopo.app.canDeleteArchiveCleanupSelection
+import org.ncssar.rid2caltopo.app.defaultSelectedArchiveCleanupDirectories
+import org.ncssar.rid2caltopo.app.formatArchiveSize
+import org.ncssar.rid2caltopo.data.AppUpdateAdvisory
 import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
@@ -164,6 +173,49 @@ private fun restartMediaMtxServer(context: android.content.Context) {
     CTDebug("MainMenu", "User requested MediaMTXService restart from menu.")
 }
 
+private fun isInstalledFromGooglePlay(context: Context): Boolean {
+    return try {
+        val installerPackage = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            context.packageManager
+                .getInstallSourceInfo(context.packageName)
+                .installingPackageName
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getInstallerPackageName(context.packageName)
+        }
+        installerPackage == "com.android.vending"
+    } catch (_: Exception) {
+        false
+    }
+}
+
+private fun openAppUpgradeLocation(context: Context, updateUrl: String) {
+    val targetUrl = updateUrl.trim()
+    if (targetUrl.isNotEmpty()) {
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
+        } catch (_: ActivityNotFoundException) {
+            CaltopoClient.ShowToast("Update location unavailable.")
+        }
+        return
+    }
+
+    if (!isInstalledFromGooglePlay(context)) {
+        CaltopoClient.ShowToast("Update location unavailable.")
+        return
+    }
+
+    val packageId = BuildConfig.APPLICATION_ID
+    val marketIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageId"))
+    try {
+        context.startActivity(marketIntent)
+    } catch (_: ActivityNotFoundException) {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$packageId"))
+        )
+    }
+}
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -172,6 +224,8 @@ fun MainScreen(
     streamsViewModel: StreamsViewModel,
     availableLogArchiveDaysProvider: suspend () -> List<LogArchiveDayOption>,
     onEmailLog: suspend (List<String>) -> Unit,
+    availableArchiveCleanupDirectoriesProvider: suspend () -> List<ArchiveCleanupDirectoryOption>,
+    onDeleteArchiveDirectories: suspend (List<String>) -> ArchiveCleanupDeleteResult,
     onShowHelp: () -> Unit,
     externalDisplayConnected: Boolean = false,
     externalDisplayContentMode: ExternalDisplayContentMode? = null,
@@ -203,6 +257,8 @@ fun MainScreen(
     var showNotamPanel by remember { mutableStateOf(false) }
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLogArchiveDialog by remember { mutableStateOf(false) }
+    var showArchiveCleanupDialog by remember { mutableStateOf(false) }
+    var showArchiveDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showTestingToolsDialog by remember { mutableStateOf(false) }
     var showResetPersistentStateDialog by remember { mutableStateOf(false) }
     var forceArchiveDirPrompt by remember { mutableStateOf(false) }
@@ -211,6 +267,11 @@ fun MainScreen(
     var sendingLogArchive by remember { mutableStateOf(false) }
     var logArchiveDays by remember { mutableStateOf(emptyList<LogArchiveDayOption>()) }
     var selectedLogArchiveDays by remember { mutableStateOf(emptySet<String>()) }
+    var loadingArchiveCleanupDirs by remember { mutableStateOf(false) }
+    var deletingArchiveCleanupDirs by remember { mutableStateOf(false) }
+    var archiveCleanupDirs by remember { mutableStateOf(emptyList<ArchiveCleanupDirectoryOption>()) }
+    var selectedArchiveCleanupDirs by remember { mutableStateOf(defaultSelectedArchiveCleanupDirectories()) }
+    var archiveCleanupDeleteMessage by remember { mutableStateOf<String?>(null) }
     var showLocationOverrideDialog by remember { mutableStateOf(false) }
     var locationOverrideText by remember { mutableStateOf("") }
     var showCompliancePanel by remember { mutableStateOf(false) }
@@ -221,6 +282,7 @@ fun MainScreen(
     val overLimitDrones by streamsViewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
+    val appUpdateAdvisory by AppUpdateAdvisory.state.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
 
     fun refreshDriveState() {
@@ -367,6 +429,29 @@ fun MainScreen(
                     pendingFaaExport = true
                     driveSignInLauncher.launch(GoogleDriveConfigSync.createSignInIntent(context))
                     callback(false, "Signing in to Google Drive…", null)
+                }
+            }
+        )
+    }
+
+    if (appUpdateAdvisory.updateRequired) {
+        AlertDialog(
+            onDismissRequest = { },
+            text = {
+                Text("Update required. Continue with limited functionality.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    openAppUpgradeLocation(context, appUpdateAdvisory.updateUrl)
+                }) {
+                    Text("Upgrade")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    AppUpdateAdvisory.dismissForSession()
+                }) {
+                    Text("Continue")
                 }
             }
         )
@@ -884,6 +969,19 @@ fun MainScreen(
                                 loadingLogArchiveDays = false
                             }
                         })
+                        DropdownMenuItem(text = { Text("Delete Archive Folders...") }, onClick = {
+                            showArchiveCleanupDialog = true
+                            loadingArchiveCleanupDirs = true
+                            deletingArchiveCleanupDirs = false
+                            archiveCleanupDirs = emptyList()
+                            selectedArchiveCleanupDirs = defaultSelectedArchiveCleanupDirectories()
+                            archiveCleanupDeleteMessage = null
+                            menuExpanded = false
+                            coroutineScope.launch {
+                                archiveCleanupDirs = availableArchiveCleanupDirectoriesProvider()
+                                loadingArchiveCleanupDirs = false
+                            }
+                        })
                         if (externalDisplayConnected && onSetExternalDisplayContent != null && externalDisplayContentMode != null) {
                             DropdownMenuItem(
                                 text = { Text("External: Streams View") },
@@ -1081,6 +1179,165 @@ fun MainScreen(
                 TextButton(
                     onClick = { showLogArchiveDialog = false },
                     enabled = !loadingLogArchiveDays && !sendingLogArchive
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showArchiveCleanupDialog) {
+        val deleteEnabled = canDeleteArchiveCleanupSelection(archiveCleanupDirs, selectedArchiveCleanupDirs)
+        AlertDialog(
+            onDismissRequest = {
+                if (!loadingArchiveCleanupDirs && !deletingArchiveCleanupDirs) {
+                    showArchiveCleanupDialog = false
+                    showArchiveDeleteConfirmDialog = false
+                }
+            },
+            title = { Text("Delete Archive Folders") },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                ) {
+                    archiveCleanupDeleteMessage?.let { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
+                    if (loadingArchiveCleanupDirs) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
+                            Text("Scanning archive folders...")
+                        }
+                    } else if (deletingArchiveCleanupDirs) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
+                            Text("Deleting selected archive folders...")
+                        }
+                    } else if (archiveCleanupDirs.isEmpty()) {
+                        Text("No dated archive folders were found.")
+                    } else {
+                        archiveCleanupDirs.forEach { option ->
+                            val checked = selectedArchiveCleanupDirs.contains(option.directoryName)
+                            val enabled = !option.isToday
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Checkbox(
+                                    checked = checked,
+                                    enabled = enabled,
+                                    onCheckedChange = { isChecked ->
+                                        if (enabled) {
+                                            selectedArchiveCleanupDirs = selectedArchiveCleanupDirs.toMutableSet().apply {
+                                                if (isChecked) add(option.directoryName) else remove(option.directoryName)
+                                            }
+                                        }
+                                    }
+                                )
+                                Column(modifier = Modifier.padding(start = 8.dp)) {
+                                    Text(option.directoryName)
+                                    Text(
+                                        text = "Age ${option.ageLabel} • ${option.sizeLabel}${if (option.isToday) " • today" else ""}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        text = "${option.logFileCount} log${if (option.logFileCount == 1) "" else "s"} • ${option.kmzCount} KMZ • ${option.videoCount} video${if (option.videoCount == 1) "" else "s"}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showArchiveDeleteConfirmDialog = true },
+                    enabled = !loadingArchiveCleanupDirs && !deletingArchiveCleanupDirs && deleteEnabled
+                ) {
+                    Text("Delete...")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showArchiveCleanupDialog = false
+                        showArchiveDeleteConfirmDialog = false
+                    },
+                    enabled = !loadingArchiveCleanupDirs && !deletingArchiveCleanupDirs
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showArchiveDeleteConfirmDialog) {
+        val selectedOptions = archiveCleanupDirs
+            .filter { !it.isToday && selectedArchiveCleanupDirs.contains(it.directoryName) }
+        val selectedTotalBytes = selectedOptions.sumOf { it.totalBytes }
+        val selectedSizeLabel = selectedOptions.firstOrNull()?.let {
+            formatArchiveSize(selectedTotalBytes)
+        } ?: "0 B"
+        AlertDialog(
+            onDismissRequest = {
+                if (!deletingArchiveCleanupDirs) {
+                    showArchiveDeleteConfirmDialog = false
+                }
+            },
+            title = { Text("Confirm Archive Deletion") },
+            text = {
+                Column {
+                    Text(
+                        "Permanently delete ${selectedOptions.size} archive folder${if (selectedOptions.size == 1) "" else "s"} totaling $selectedSizeLabel?"
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    selectedOptions.forEach { option ->
+                        Text(
+                            text = option.directoryName,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val namesToDelete = selectedOptions.map { it.directoryName }
+                        showArchiveDeleteConfirmDialog = false
+                        deletingArchiveCleanupDirs = true
+                        archiveCleanupDeleteMessage = null
+                        coroutineScope.launch {
+                            val result = onDeleteArchiveDirectories(namesToDelete)
+                            archiveCleanupDirs = availableArchiveCleanupDirectoriesProvider()
+                            selectedArchiveCleanupDirs = defaultSelectedArchiveCleanupDirectories()
+                            archiveCleanupDeleteMessage = buildString {
+                                append("Deleted ${result.deletedCount} archive folder")
+                                append(if (result.deletedCount == 1) "." else "s.")
+                                if (result.failedDirectoryNames.isNotEmpty()) {
+                                    append(" Failed: ")
+                                    append(result.failedDirectoryNames.joinToString(", "))
+                                }
+                            }
+                            CaltopoClient.ShowToast(archiveCleanupDeleteMessage ?: "Archive cleanup complete.")
+                            CaltopoClient.CTEvent(tag, "ArchiveFoldersDeleted", null)
+                            deletingArchiveCleanupDirs = false
+                        }
+                    },
+                    enabled = !deletingArchiveCleanupDirs && selectedOptions.isNotEmpty()
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showArchiveDeleteConfirmDialog = false },
+                    enabled = !deletingArchiveCleanupDirs
                 ) {
                     Text("Cancel")
                 }

@@ -370,6 +370,7 @@ static const char *timing_stage_name(anomaly_timing_stage_t stage) {
     switch (stage) {
         case ANOMALY_TIMING_STAGE_REGISTRATION_PREP: return "registration_prep";
         case ANOMALY_TIMING_STAGE_REGISTRATION_SOLVE: return "registration_solve";
+        case ANOMALY_TIMING_STAGE_MOVEMENT_ESTIMATOR: return "movement_estimator";
         case ANOMALY_TIMING_STAGE_SCAN_PLANNING: return "scan_planning";
         case ANOMALY_TIMING_STAGE_REFRESH_MASK_BUILD: return "refresh_mask_build";
         case ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP: return "sampled_grid_prep";
@@ -382,6 +383,18 @@ static const char *timing_stage_name(anomaly_timing_stage_t stage) {
         case ANOMALY_TIMING_STAGE_COUNT:
         default:
             return "unknown";
+    }
+}
+
+static const char *movement_estimator_name(int mode) {
+    switch (mode) {
+        case ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW:
+            return "layered_shadow";
+        case ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE:
+            return "layered_active";
+        case ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE:
+        default:
+            return "legacy_affine";
     }
 }
 
@@ -1579,6 +1592,9 @@ static void usage(const char *prog) {
         "  -p <wh|bh>       Thermal polarity: wh=white-hot bh=black-hot (default: wh)\n"
         "  --registration <gmv|affine>\n"
         "                   Camera registration backend (default: gmv)\n"
+        "  --movement-estimator <legacy-affine|layered-shadow|layered-active>\n"
+        "                   Parallax-aware movement sidecar mode\n"
+        "                   (default: legacy-affine)\n"
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
         "  --pixel-step <n> Override appearance sampling step (default: 0=Auto)\n"
         "  --color-frontend <legacy|fresh-rgba|fresh-yuv>\n"
@@ -1650,6 +1666,7 @@ int main(int argc, char **argv) {
         .enabled           = true,
         .algorithm_mask    = ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION,
         .registration_mode = ANOMALY_REGISTRATION_GMV,
+        .movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
         .frame_stride      = 1,
         .pixel_step        = 0,
         .score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD,
@@ -1663,6 +1680,7 @@ int main(int argc, char **argv) {
         .color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
     };
     int requested_color_frontend_mode = cfg.color_frontend_mode;
+    int requested_movement_estimator_mode = cfg.movement_estimator_mode;
     bool color_frontend_overridden = false;
 
     // Probe state (--probe cx,cy).
@@ -1694,6 +1712,20 @@ int main(int argc, char **argv) {
             cfg.registration_mode = strcmp(mode, "affine") == 0
                                    ? ANOMALY_REGISTRATION_AFFINE
                                    : ANOMALY_REGISTRATION_GMV;
+        }
+        else if (!strcmp(argv[i], "--movement-estimator") && i+1 < argc) {
+            const char *mode = argv[++i];
+            if (strcmp(mode, "legacy-affine") == 0 || strcmp(mode, "legacy_affine") == 0) {
+                requested_movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+            } else if (strcmp(mode, "layered-shadow") == 0 || strcmp(mode, "layered_shadow") == 0) {
+                requested_movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
+            } else if (strcmp(mode, "layered-active") == 0 || strcmp(mode, "layered_active") == 0) {
+                requested_movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+            } else {
+                fprintf(stderr, "Error: --movement-estimator expects legacy-affine, layered-shadow, or layered-active\n");
+                return 1;
+            }
+            cfg.movement_estimator_mode = requested_movement_estimator_mode;
         }
         else if (!strcmp(argv[i], "--stride")    && i+1 < argc) cfg.frame_stride      = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pixel-step") && i+1 < argc) cfg.pixel_step       = atoi(argv[++i]);
@@ -1855,6 +1887,7 @@ int main(int argc, char **argv) {
         } else {
             cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
         }
+        cfg.movement_estimator_mode = requested_movement_estimator_mode;
     }
 
     // ── Auto-detect dimensions and fps with ffprobe ──────────────────────
@@ -1990,6 +2023,7 @@ int main(int argc, char **argv) {
         cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "black-hot" : "white-hot");
     fprintf(stderr, "  register   = %s\n",
         cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
+    fprintf(stderr, "  movement   = %s\n", movement_estimator_name(cfg.movement_estimator_mode));
     fprintf(stderr, "  stride     = %d\n",   cfg.frame_stride);
     fprintf(stderr, "  pixel_step = %d%s\n", cfg.pixel_step,
             cfg.pixel_step <= 0 ? " (Auto)" : "");
@@ -2032,13 +2066,14 @@ int main(int argc, char **argv) {
     }
     fprintf(csv, "# threshold: %.2f  min_hits: %d  scan_zone: %.2f  "
                  "algo: %d  polarity: %s  stride: %d  pixel_step: %d  registration: %s  "
-                 "color_frontend: %s  small_target_fraction: %.6f\n",
+                 "movement: %s  color_frontend: %s  small_target_fraction: %.6f\n",
             (double)cfg.score_threshold, cfg.min_hits, (double)cfg.scan_zone,
             cfg.algorithm_mask,
             cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh",
             cfg.frame_stride,
             cfg.pixel_step,
             cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv",
+            movement_estimator_name(cfg.movement_estimator_mode),
             color_frontend_name(cfg.color_frontend_mode),
             (double)cfg.small_target_screen_fraction);
     if (clip_time_end >= 0.0 || clip_duration_s > 0.0) {
@@ -2149,6 +2184,22 @@ int main(int argc, char **argv) {
     int64_t frame_timing_total_us = 0;
     int64_t frame_timing_max_us = 0;
     int    timing_frame_count = 0;
+    int    movement_frame_count = 0;
+    int64_t movement_background_count = 0;
+    int64_t movement_coherent_near_count = 0;
+    int64_t movement_unstable_count = 0;
+    int64_t movement_local_outlier_count = 0;
+    double movement_parallax_load_sum = 0.0;
+    double movement_local_outlier_load_sum = 0.0;
+    double movement_confidence_sum = 0.0;
+    double movement_suppression_scale_sum = 0.0;
+    int64_t movement_aoi_query_count = 0;
+    int64_t movement_aoi_valid_count = 0;
+    int64_t movement_aoi_independent_count = 0;
+    int64_t movement_aoi_parallax_count = 0;
+    int64_t movement_aoi_unstable_count = 0;
+    double movement_aoi_independent_score_sum = 0.0;
+    double movement_aoi_confidence_sum = 0.0;
     double wall_start_s     = monotonic_seconds();
 
     while (fread(rgba, 1, frame_bytes, in_pipe) == frame_bytes) {
@@ -2244,6 +2295,28 @@ int main(int argc, char **argv) {
                     stage_timing_max_us[stage] = result.timing.stage_us[stage];
                 }
             }
+        }
+        if (result.movement_debug.valid) {
+            movement_frame_count++;
+            movement_background_count += result.movement_debug.background_count;
+            movement_coherent_near_count += result.movement_debug.coherent_near_count;
+            movement_unstable_count += result.movement_debug.unstable_count;
+            movement_local_outlier_count += result.movement_debug.local_outlier_count;
+            movement_parallax_load_sum += result.movement_debug.parallax_load;
+            movement_local_outlier_load_sum += result.movement_debug.local_outlier_load;
+            movement_confidence_sum += result.movement_debug.confidence;
+            movement_suppression_scale_sum += result.movement_debug.parallax_suppression_scale;
+            movement_aoi_query_count += result.movement_debug.aoi_query_count;
+            movement_aoi_valid_count += result.movement_debug.aoi_valid_count;
+            movement_aoi_independent_count += result.movement_debug.aoi_independent_count;
+            movement_aoi_parallax_count += result.movement_debug.aoi_parallax_count;
+            movement_aoi_unstable_count += result.movement_debug.aoi_unstable_count;
+            movement_aoi_independent_score_sum +=
+                result.movement_debug.aoi_independent_score_mean *
+                (double)result.movement_debug.aoi_valid_count;
+            movement_aoi_confidence_sum +=
+                result.movement_debug.aoi_confidence_mean *
+                (double)result.movement_debug.aoi_valid_count;
         }
         int debug_this_frame = (debug_frame > 0 && frame_num == debug_frame);
         if (debug_window_active) {
@@ -2366,6 +2439,36 @@ int main(int argc, char **argv) {
                 registration_reason_counts[ri]);
     }
     fprintf(stderr, "\n");
+    if (movement_frame_count > 0) {
+        fprintf(stderr,
+                "  Movement sidecar : frames=%d bg=%lld coherent=%lld unstable=%lld outlier=%lld "
+                "parallax=%.3f outlier-load=%.3f confidence=%.3f suppress=%.3f\n",
+                movement_frame_count,
+                (long long)movement_background_count,
+                (long long)movement_coherent_near_count,
+                (long long)movement_unstable_count,
+                (long long)movement_local_outlier_count,
+                movement_parallax_load_sum / (double)movement_frame_count,
+                movement_local_outlier_load_sum / (double)movement_frame_count,
+                movement_confidence_sum / (double)movement_frame_count,
+                movement_suppression_scale_sum / (double)movement_frame_count);
+        if (movement_aoi_query_count > 0) {
+            fprintf(stderr,
+                    "  AOI movement     : queries=%lld valid=%lld independent=%lld parallax=%lld unstable=%lld "
+                    "ind-score=%.3f confidence=%.3f\n",
+                    (long long)movement_aoi_query_count,
+                    (long long)movement_aoi_valid_count,
+                    (long long)movement_aoi_independent_count,
+                    (long long)movement_aoi_parallax_count,
+                    (long long)movement_aoi_unstable_count,
+                    movement_aoi_valid_count > 0
+                        ? movement_aoi_independent_score_sum / (double)movement_aoi_valid_count
+                        : 0.0,
+                    movement_aoi_valid_count > 0
+                        ? movement_aoi_confidence_sum / (double)movement_aoi_valid_count
+                        : 0.0);
+        }
+    }
     if (timing_frame_count > 0) {
         fprintf(stderr, "  Stage timing     : avg-total=%.2f ms max-total=%.2f ms\n",
                 (double)frame_timing_total_us / (double)timing_frame_count / 1000.0,
@@ -2437,6 +2540,35 @@ int main(int argc, char **argv) {
                         registration_reason_counts[ri],
                         (ri + 1) < (sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0])) ? "," : "");
             }
+            fprintf(summary, "  },\n  \"movement_estimator\": {\n");
+            fprintf(summary, "    \"mode\": ");
+            json_write_string(summary, movement_estimator_name(cfg.movement_estimator_mode));
+            fprintf(summary, ",\n    \"frame_count\": %d,\n", movement_frame_count);
+            fprintf(summary, "    \"background_count\": %lld,\n", (long long)movement_background_count);
+            fprintf(summary, "    \"coherent_near_count\": %lld,\n", (long long)movement_coherent_near_count);
+            fprintf(summary, "    \"unstable_count\": %lld,\n", (long long)movement_unstable_count);
+            fprintf(summary, "    \"local_outlier_count\": %lld,\n", (long long)movement_local_outlier_count);
+            fprintf(summary, "    \"avg_parallax_load\": %.6f,\n",
+                    movement_frame_count > 0 ? movement_parallax_load_sum / (double)movement_frame_count : 0.0);
+            fprintf(summary, "    \"avg_local_outlier_load\": %.6f,\n",
+                    movement_frame_count > 0 ? movement_local_outlier_load_sum / (double)movement_frame_count : 0.0);
+            fprintf(summary, "    \"avg_confidence\": %.6f,\n",
+                    movement_frame_count > 0 ? movement_confidence_sum / (double)movement_frame_count : 0.0);
+            fprintf(summary, "    \"avg_parallax_suppression_scale\": %.6f,\n",
+                    movement_frame_count > 0 ? movement_suppression_scale_sum / (double)movement_frame_count : 1.0);
+            fprintf(summary, "    \"aoi_query_count\": %lld,\n", (long long)movement_aoi_query_count);
+            fprintf(summary, "    \"aoi_valid_count\": %lld,\n", (long long)movement_aoi_valid_count);
+            fprintf(summary, "    \"aoi_independent_count\": %lld,\n", (long long)movement_aoi_independent_count);
+            fprintf(summary, "    \"aoi_parallax_count\": %lld,\n", (long long)movement_aoi_parallax_count);
+            fprintf(summary, "    \"aoi_unstable_count\": %lld,\n", (long long)movement_aoi_unstable_count);
+            fprintf(summary, "    \"aoi_avg_independent_score\": %.6f,\n",
+                    movement_aoi_valid_count > 0
+                        ? movement_aoi_independent_score_sum / (double)movement_aoi_valid_count
+                        : 0.0);
+            fprintf(summary, "    \"aoi_avg_confidence\": %.6f\n",
+                    movement_aoi_valid_count > 0
+                        ? movement_aoi_confidence_sum / (double)movement_aoi_valid_count
+                        : 0.0);
             fprintf(summary, "  },\n  \"stage_timing\": {\n");
             fprintf(summary, "    \"compiled\": %s,\n", timing_frame_count > 0 ? "true" : "false");
             fprintf(summary, "    \"frame_count\": %d,\n", timing_frame_count);
@@ -2471,6 +2603,8 @@ int main(int argc, char **argv) {
             fprintf(summary, "    \"registration\": ");
             json_write_string(summary,
                               cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
+            fprintf(summary, ",\n    \"movement_estimator\": ");
+            json_write_string(summary, movement_estimator_name(cfg.movement_estimator_mode));
             fprintf(summary, ",\n    \"color_frontend\": ");
             json_write_string(summary, color_frontend_name(cfg.color_frontend_mode));
             fprintf(summary, ",\n    \"thermal_min_delta\": %.6f,\n", effective_min_delta);

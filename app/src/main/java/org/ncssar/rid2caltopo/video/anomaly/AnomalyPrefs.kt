@@ -19,6 +19,7 @@ object AnomalyPrefs {
     private const val KEY_MIN_AREA_FRACTION = "min_area_fraction"
     private const val KEY_THERMAL_POLARITY = "thermal_polarity"
     private const val KEY_REGISTRATION_MODE = "registration_mode"
+    private const val KEY_MOVEMENT_ESTIMATOR_MODE = "movement_estimator_mode"
     private const val KEY_SCAN_ZONE = "scan_zone"
     private const val KEY_MIN_HITS = "min_hits"
     private const val KEY_THERMAL_MIN_DELTA = "thermal_min_delta"
@@ -46,6 +47,7 @@ object AnomalyPrefs {
                 config.frameStride == 1 &&
                 config.pixelStep == 0 &&
                 config.registrationMode == MotionRegistrationMode.Affine &&
+                config.movementEstimatorMode == MovementEstimatorMode.LegacyAffine &&
                 config.scanZone >= 0.60f &&
                 config.minHits == 2 &&
                 kotlin.math.abs(config.thermalMinDelta - 10.0f) < 0.001f
@@ -76,6 +78,9 @@ object AnomalyPrefs {
         val registrationMode = prefs.getString(KEY_REGISTRATION_MODE, defaults.registrationMode.name)
             ?.let { name -> runCatching { MotionRegistrationMode.valueOf(name) }.getOrNull() }
             ?: defaults.registrationMode
+        val movementEstimatorMode = prefs.getString(KEY_MOVEMENT_ESTIMATOR_MODE, defaults.movementEstimatorMode.name)
+            ?.let { name -> runCatching { MovementEstimatorMode.valueOf(name) }.getOrNull() }
+            ?: defaults.movementEstimatorMode
 
         val loaded = AnomalyConfig(
             enabled = prefs.getBoolean(KEY_ENABLED, defaults.enabled),
@@ -96,6 +101,7 @@ object AnomalyPrefs {
                 .coerceIn(0.00005f, 0.03f),
             thermalPolarity = polarity,
             registrationMode = registrationMode,
+            movementEstimatorMode = movementEstimatorMode,
             scanZone = prefs.getFloat(KEY_SCAN_ZONE, defaults.scanZone).coerceIn(0.5f, 1.0f),
             minHits = prefs.getInt(KEY_MIN_HITS, defaults.minHits).coerceIn(1, 10),
             thermalMinDelta = prefs.getFloat(KEY_THERMAL_MIN_DELTA, defaults.thermalMinDelta).coerceIn(1.0f, 64.0f),
@@ -133,6 +139,7 @@ object AnomalyPrefs {
             .putFloat(KEY_MIN_AREA_FRACTION, normalized.minAreaFraction.coerceIn(0.00005f, 0.03f))
             .putString(KEY_THERMAL_POLARITY, normalized.thermalPolarity.name)
             .putString(KEY_REGISTRATION_MODE, normalized.registrationMode.name)
+            .putString(KEY_MOVEMENT_ESTIMATOR_MODE, normalized.movementEstimatorMode.name)
             .putFloat(KEY_SCAN_ZONE, normalized.scanZone.coerceIn(0.5f, 1.0f))
             .putInt(KEY_MIN_HITS, normalized.minHits.coerceIn(1, 10))
             .putFloat(KEY_THERMAL_MIN_DELTA, normalized.thermalMinDelta.coerceIn(1.0f, 64.0f))

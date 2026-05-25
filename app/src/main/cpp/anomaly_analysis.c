@@ -983,6 +983,17 @@ static inline float registration_health_confidence(anomaly_registration_health_t
     }
 }
 
+static inline int normalize_movement_estimator_mode(const anomaly_config_t *cfg) {
+    if (cfg == NULL) return ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+    if (cfg->movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE) {
+        return ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    }
+    if (cfg->movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW) {
+        return ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
+    }
+    return ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+}
+
 static inline int roi_grid_cell_span(int sample_step) {
     int step = sample_step > 0 ? sample_step : 1;
     int span = (ANOMALY_ROI_CELL_TARGET_SIZE_PX + step - 1) / step;
@@ -10071,6 +10082,320 @@ static anomaly_registration_health_t classify_registration_health(
     return ANOMALY_REG_HEALTH_HEALTHY;
 }
 
+static void estimate_layered_movement_sidecar(
+        const anomaly_config_t             *cfg,
+        const anomaly_registration_model_t *registration,
+        const uint8_t                      *curr_luma,
+        const uint8_t                      *prev_luma,
+        int                                 motion_w,
+        int                                 motion_h,
+        int                                 motion_step,
+        int                                 width,
+        int                                 height,
+        int                                 roi_x0,
+        int                                 roi_x1,
+        int                                 roi_y0,
+        int                                 roi_y1,
+        anomaly_debug_movement_t           *movement_out) {
+    if (movement_out == NULL) return;
+    memset(movement_out, 0, sizeof(*movement_out));
+    int mode = normalize_movement_estimator_mode(cfg);
+    movement_out->mode = mode;
+    movement_out->parallax_suppression_scale = 1.0f;
+    if (mode == ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE) {
+        return;
+    }
+    if (curr_luma == NULL || prev_luma == NULL || motion_w <= 2 || motion_h <= 2 ||
+        width <= 1 || height <= 1 || motion_step <= 0 ||
+        !registration_model_valid(registration)) {
+        return;
+    }
+
+    int roi_mgx0 = clamp_i32(roi_x0 / motion_step, 1, motion_w - 2);
+    int roi_mgx1 = clamp_i32((roi_x1 + motion_step - 1) / motion_step, 2, motion_w - 1);
+    int roi_mgy0 = clamp_i32(roi_y0 / motion_step, 1, motion_h - 2);
+    int roi_mgy1 = clamp_i32((roi_y1 + motion_step - 1) / motion_step, 2, motion_h - 1);
+    if (roi_mgx1 <= roi_mgx0 || roi_mgy1 <= roi_mgy0) return;
+
+    const int grid_cols = ANOMALY_MOVEMENT_GRID_COLS;
+    const int grid_rows = ANOMALY_MOVEMENT_GRID_ROWS;
+    const int disp_patch_half = 1;
+    const int disp_search_radius = 2;
+    float residual_sum = 0.0f;
+    float residual_sum2 = 0.0f;
+    float flow_sum = 0.0f;
+    float flow_sum2 = 0.0f;
+    int valid_count = 0;
+    int coherent_near = 0;
+    int unstable = 0;
+    int local_outlier = 0;
+    int background = 0;
+    float prev_dx = 0.0f;
+    float prev_dy = 0.0f;
+    bool have_prev_flow = false;
+
+    for (int gy = 0; gy < grid_rows; gy++) {
+        int my = roi_mgy0 + ((roi_mgy1 - roi_mgy0) * (gy * 2 + 1)) / (grid_rows * 2);
+        my = clamp_i32(my, 1, motion_h - 2);
+        for (int gx = 0; gx < grid_cols; gx++) {
+            int mx = roi_mgx0 + ((roi_mgx1 - roi_mgx0) * (gx * 2 + 1)) / (grid_cols * 2);
+            mx = clamp_i32(mx, 1, motion_w - 2);
+            int px_idx = 0;
+            int py_idx = 0;
+            if (!project_motion_cell(registration, width, height, motion_step, motion_w, motion_h,
+                                     mx, my, &px_idx, &py_idx)) {
+                unstable++;
+                continue;
+            }
+            int best_dx = 0;
+            int best_dy = 0;
+            int best_sad = 0;
+            if (!find_residual_motion_displacement(
+                    curr_luma, prev_luma, motion_w, motion_h,
+                    mx, my, px_idx, py_idx,
+                    disp_patch_half, disp_search_radius,
+                    &best_dx, &best_dy, &best_sad)) {
+                unstable++;
+                continue;
+            }
+            float residual_px = (float)abs(
+                (int)curr_luma[my * motion_w + mx] -
+                (int)prev_luma[py_idx * motion_w + px_idx]);
+            float flow_px = sqrtf((float)(best_dx * best_dx + best_dy * best_dy)) * (float)motion_step;
+            residual_sum += residual_px;
+            residual_sum2 += residual_px * residual_px;
+            flow_sum += flow_px;
+            flow_sum2 += flow_px * flow_px;
+            valid_count++;
+
+            float neighbor_delta = 0.0f;
+            if (have_prev_flow) {
+                float ddx = (float)best_dx - prev_dx;
+                float ddy = (float)best_dy - prev_dy;
+                neighbor_delta = sqrtf(ddx * ddx + ddy * ddy) * (float)motion_step;
+            }
+            prev_dx = (float)best_dx;
+            prev_dy = (float)best_dy;
+            have_prev_flow = true;
+
+            int layer_class = ANOMALY_MOVEMENT_LAYER_UNKNOWN;
+            if (flow_px <= (float)motion_step * 0.45f && residual_px <= 12.0f) {
+                background++;
+                layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+            } else if (neighbor_delta <= (float)motion_step * 1.25f && flow_px <= (float)motion_step * 2.75f) {
+                coherent_near++;
+                layer_class = ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR;
+            } else if (residual_px >= 18.0f && flow_px >= (float)motion_step * 0.75f) {
+                local_outlier++;
+                layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+            } else {
+                unstable++;
+                layer_class = ANOMALY_MOVEMENT_LAYER_UNSTABLE;
+            }
+
+            int tile_idx = gy * grid_cols + gx;
+            if (tile_idx >= 0 && tile_idx < ANOMALY_MOVEMENT_TILE_COUNT) {
+                anomaly_debug_movement_tile_t *tile = &movement_out->tiles[tile_idx];
+                tile->valid = true;
+                tile->center_x_norm = clamp01f((float)(mx * motion_step) / (float)width);
+                tile->center_y_norm = clamp01f((float)(my * motion_step) / (float)height);
+                tile->dx_px = (float)best_dx * (float)motion_step;
+                tile->dy_px = (float)best_dy * (float)motion_step;
+                tile->residual_px = residual_px;
+                tile->confidence = clampf(
+                    1.0f - (residual_px / 64.0f) + fminf(flow_px / ((float)motion_step * 8.0f), 0.25f),
+                    0.0f,
+                    1.0f);
+                tile->layer_class = layer_class;
+            }
+        }
+    }
+
+    movement_out->valid = valid_count > 0;
+    movement_out->sample_count = valid_count;
+    movement_out->tile_cols = grid_cols;
+    movement_out->tile_rows = grid_rows;
+    movement_out->background_count = background;
+    movement_out->coherent_near_count = coherent_near;
+    movement_out->unstable_count = unstable;
+    movement_out->local_outlier_count = local_outlier;
+    if (valid_count <= 0) return;
+
+    float inv_count = 1.0f / (float)valid_count;
+    movement_out->residual_mean_px = residual_sum * inv_count;
+    float residual_var = residual_sum2 * inv_count -
+        movement_out->residual_mean_px * movement_out->residual_mean_px;
+    movement_out->residual_std_px = sqrtf(fmaxf(residual_var, 0.0f));
+    movement_out->local_flow_mean_px = flow_sum * inv_count;
+    float flow_var = flow_sum2 * inv_count -
+        movement_out->local_flow_mean_px * movement_out->local_flow_mean_px;
+    movement_out->local_flow_std_px = sqrtf(fmaxf(flow_var, 0.0f));
+    movement_out->background_fraction = (float)background * inv_count;
+    movement_out->coherent_near_fraction = (float)coherent_near * inv_count;
+    movement_out->unstable_fraction = (float)unstable * inv_count;
+    movement_out->local_outlier_fraction = (float)local_outlier * inv_count;
+    movement_out->parallax_load = clampf(
+        movement_out->coherent_near_fraction + (0.5f * movement_out->unstable_fraction),
+        0.0f,
+        1.0f);
+    movement_out->local_outlier_load = clampf(movement_out->local_outlier_fraction, 0.0f, 1.0f);
+    movement_out->confidence = clampf(
+        movement_out->background_fraction + movement_out->coherent_near_fraction +
+            (0.5f * movement_out->local_outlier_fraction),
+        0.0f,
+        1.0f);
+    if (movement_out->parallax_load > 0.25f && movement_out->local_outlier_load < 0.20f) {
+        float t = (movement_out->parallax_load - 0.25f) / 0.45f;
+        movement_out->parallax_suppression_scale = 1.0f - (0.45f * clampf(t, 0.0f, 1.0f));
+    } else {
+        movement_out->parallax_suppression_scale = 1.0f;
+    }
+}
+
+static bool query_movement_tile_at_norm(
+        const anomaly_debug_movement_t      *movement,
+        float                                x_norm,
+        float                                y_norm,
+        anomaly_debug_movement_tile_t       *tile_out) {
+    if (movement == NULL || tile_out == NULL || !movement->valid ||
+        movement->sample_count <= 0 || movement->tile_cols <= 0 || movement->tile_rows <= 0) {
+        return false;
+    }
+    float best_dist2 = 1.0e9f;
+    int best_idx = -1;
+    for (int i = 0; i < ANOMALY_MOVEMENT_TILE_COUNT; i++) {
+        const anomaly_debug_movement_tile_t *tile = &movement->tiles[i];
+        if (!tile->valid) continue;
+        float dx = tile->center_x_norm - x_norm;
+        float dy = tile->center_y_norm - y_norm;
+        float d2 = dx * dx + dy * dy;
+        if (d2 < best_dist2) {
+            best_dist2 = d2;
+            best_idx = i;
+        }
+    }
+    if (best_idx < 0) return false;
+
+    float col_span = movement->tile_cols > 0 ? 1.0f / (float)movement->tile_cols : 1.0f;
+    float row_span = movement->tile_rows > 0 ? 1.0f / (float)movement->tile_rows : 1.0f;
+    float max_dist = fmaxf(col_span, row_span) * 1.75f;
+    if (best_dist2 > max_dist * max_dist) return false;
+    *tile_out = movement->tiles[best_idx];
+    return true;
+}
+
+static float movement_tile_independent_score(
+        const anomaly_debug_movement_tile_t *tile) {
+    if (tile == NULL || !tile->valid) return 0.0f;
+    float residual_score = clampf((tile->residual_px - 12.0f) / 28.0f, 0.0f, 1.0f);
+    float flow_px = sqrtf(tile->dx_px * tile->dx_px + tile->dy_px * tile->dy_px);
+    float flow_score = clampf(flow_px / 24.0f, 0.0f, 1.0f);
+    float layer_score = tile->layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER ? 1.0f :
+        (tile->layer_class == ANOMALY_MOVEMENT_LAYER_UNSTABLE ? 0.35f : 0.0f);
+    return clampf((0.45f * residual_score) + (0.35f * flow_score) +
+                  (0.20f * layer_score), 0.0f, 1.0f);
+}
+
+static void decay_track_movement_evidence(anomaly_target_track_t *track) {
+    if (track == NULL) return;
+    if (track->movement_window_frames > 0) track->movement_window_frames--;
+    if (track->movement_valid_frames > track->movement_window_frames) {
+        track->movement_valid_frames = track->movement_window_frames;
+    }
+    if (track->movement_independent_frames > track->movement_valid_frames) {
+        track->movement_independent_frames = track->movement_valid_frames;
+    }
+    if (track->movement_parallax_frames > track->movement_valid_frames) {
+        track->movement_parallax_frames = track->movement_valid_frames;
+    }
+    track->movement_independent_score_sum *= 0.90f;
+    track->movement_confidence_sum *= 0.90f;
+    track->last_movement_independent_score = 0.0f;
+}
+
+static void update_target_track_movement_evidence(
+        anomaly_state_t          *state,
+        anomaly_debug_movement_t *movement) {
+    if (state == NULL || movement == NULL) return;
+    movement->aoi_query_count = 0;
+    movement->aoi_valid_count = 0;
+    movement->aoi_independent_count = 0;
+    movement->aoi_parallax_count = 0;
+    movement->aoi_unstable_count = 0;
+    movement->aoi_independent_score_mean = 0.0f;
+    movement->aoi_confidence_mean = 0.0f;
+    if (!movement->valid) {
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            if (state->target_tracks[ti].active) decay_track_movement_evidence(&state->target_tracks[ti]);
+        }
+        return;
+    }
+
+    float independent_sum = 0.0f;
+    float confidence_sum = 0.0f;
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!track->active) continue;
+        movement->aoi_query_count++;
+        anomaly_debug_movement_tile_t tile;
+        if (!query_movement_tile_at_norm(
+                movement,
+                track->center_x_norm,
+                track->center_y_norm,
+                &tile)) {
+            decay_track_movement_evidence(track);
+            continue;
+        }
+        float independent_score = movement_tile_independent_score(&tile);
+        bool independent =
+            tile.layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER &&
+            independent_score >= 0.50f;
+        bool parallax =
+            tile.layer_class == ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR ||
+            tile.layer_class == ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+        bool unstable = tile.layer_class == ANOMALY_MOVEMENT_LAYER_UNSTABLE;
+
+        if (track->movement_window_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+            track->movement_window_frames++;
+        }
+        if (track->movement_valid_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+            track->movement_valid_frames++;
+        }
+        if (independent && track->movement_independent_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+            track->movement_independent_frames++;
+        } else if (!independent && track->movement_independent_frames > 0 &&
+                   track->movement_window_frames >= ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+            track->movement_independent_frames--;
+        }
+        if (parallax && track->movement_parallax_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+            track->movement_parallax_frames++;
+        } else if (!parallax && track->movement_parallax_frames > 0 &&
+                   track->movement_window_frames >= ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+            track->movement_parallax_frames--;
+        }
+        track->movement_independent_score_sum =
+            clampf(track->movement_independent_score_sum * 0.92f + independent_score, 0.0f, 30.0f);
+        track->movement_confidence_sum =
+            clampf(track->movement_confidence_sum * 0.92f + tile.confidence, 0.0f, 30.0f);
+        track->last_movement_dx_px = tile.dx_px;
+        track->last_movement_dy_px = tile.dy_px;
+        track->last_movement_residual_px = tile.residual_px;
+        track->last_movement_independent_score = independent_score;
+
+        movement->aoi_valid_count++;
+        if (independent) movement->aoi_independent_count++;
+        if (parallax) movement->aoi_parallax_count++;
+        if (unstable) movement->aoi_unstable_count++;
+        independent_sum += independent_score;
+        confidence_sum += tile.confidence;
+    }
+    if (movement->aoi_valid_count > 0) {
+        float inv = 1.0f / (float)movement->aoi_valid_count;
+        movement->aoi_independent_score_mean = independent_sum * inv;
+        movement->aoi_confidence_mean = confidence_sum * inv;
+    }
+}
+
 static void summarize_roi_cells(
         anomaly_roi_state_t          *roi_state,
         const float                  *motion_support_map,
@@ -11193,6 +11518,27 @@ int anomaly_process_frame(
     anomaly_registration_health_t registration_health_base =
         classify_registration_health(&registration, width, height);
     anomaly_registration_health_t registration_health = registration_health_base;
+    anomaly_debug_movement_t movement_sidecar;
+    memset(&movement_sidecar, 0, sizeof(movement_sidecar));
+    movement_sidecar.mode = normalize_movement_estimator_mode(cfg);
+    movement_sidecar.parallax_suppression_scale = 1.0f;
+    stage_started_us = anomaly_timing_now_us();
+    estimate_layered_movement_sidecar(
+        cfg,
+        &registration,
+        curr_luma,
+        state->prev_luma,
+        motion_w,
+        motion_h,
+        motion_step,
+        width,
+        height,
+        roi_x0,
+        roi_x1,
+        roi_y0,
+        roi_y1,
+        &movement_sidecar);
+    anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_MOVEMENT_ESTIMATOR, stage_started_us);
     int *prev_sample_lookup = NULL;
     anomaly_prev_sample_lookup_summary_t prev_sample_lookup_summary;
     memset(&prev_sample_lookup_summary, 0, sizeof(prev_sample_lookup_summary));
@@ -11296,6 +11642,7 @@ int anomaly_process_frame(
         result_out->rescan_mode = rescan_mode;
         result_out->scan_plan = scan_plan;
         populate_registration_debug(&registration, result_out);
+        result_out->movement_debug = movement_sidecar;
     }
 
     // ── Compensate accumulators for camera motion (or wipe on discontinuity)
@@ -14387,6 +14734,10 @@ int anomaly_process_frame(
             target_observations,
             target_observation_count,
             registration_health);
+    update_target_track_movement_evidence(state, &movement_sidecar);
+    if (result_out != NULL) {
+        result_out->movement_debug = movement_sidecar;
+    }
     if (state->roi_state.valid) {
         annotate_target_revisit_cells(&state->roi_state, state);
     }

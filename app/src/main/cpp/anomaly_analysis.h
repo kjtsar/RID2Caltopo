@@ -123,6 +123,10 @@
 #define ANOMALY_MOTION_HOMOGENEOUS_MASS_HARD_COUNT 20
 #define ANOMALY_MOTION_HOMOGENEOUS_MASS_SOFT_FRAC 0.32f
 #define ANOMALY_MOTION_HOMOGENEOUS_MASS_HARD_FRAC 0.50f
+#define ANOMALY_MOVEMENT_GRID_COLS 8
+#define ANOMALY_MOVEMENT_GRID_ROWS 6
+#define ANOMALY_MOVEMENT_TILE_COUNT (ANOMALY_MOVEMENT_GRID_COLS * ANOMALY_MOVEMENT_GRID_ROWS)
+#define ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES 30
 
 // ── Temporal accumulator tuning ────────────────────────────────────────────
 #define ANOMALY_ACC_EMA_ALPHA    0.30f
@@ -190,6 +194,7 @@ typedef struct {
     bool  show_candidate_blobs;
     int   algorithm_mask;
     int   registration_mode;
+    int   movement_estimator_mode;
     int   frame_stride;
     int   pixel_step;
     float score_threshold;
@@ -274,6 +279,16 @@ typedef struct {
     bool  forced_revisit;
     int   algorithm;
     bool  fresh_observation;
+    int   movement_window_frames;
+    int   movement_valid_frames;
+    int   movement_independent_frames;
+    int   movement_parallax_frames;
+    float movement_independent_score_sum;
+    float movement_confidence_sum;
+    float last_movement_dx_px;
+    float last_movement_dy_px;
+    float last_movement_residual_px;
+    float last_movement_independent_score;
 } anomaly_target_track_t;
 
 // Per-stream mutable state owned by the decode thread (no locking needed).
@@ -826,6 +841,63 @@ typedef struct {
 } anomaly_debug_gmv_t;
 
 typedef enum {
+    ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE = 0,
+    ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW = 1,
+    ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE = 2,
+} anomaly_movement_estimator_mode_t;
+
+typedef enum {
+    ANOMALY_MOVEMENT_LAYER_UNKNOWN = 0,
+    ANOMALY_MOVEMENT_LAYER_BACKGROUND = 1,
+    ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR = 2,
+    ANOMALY_MOVEMENT_LAYER_UNSTABLE = 3,
+    ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER = 4,
+} anomaly_movement_layer_class_t;
+
+typedef struct {
+    bool  valid;
+    float center_x_norm;
+    float center_y_norm;
+    float dx_px;
+    float dy_px;
+    float residual_px;
+    float confidence;
+    int   layer_class;
+} anomaly_debug_movement_tile_t;
+
+typedef struct {
+    bool  valid;
+    int   mode;
+    int   sample_count;
+    int   tile_cols;
+    int   tile_rows;
+    int   background_count;
+    int   coherent_near_count;
+    int   unstable_count;
+    int   local_outlier_count;
+    float background_fraction;
+    float coherent_near_fraction;
+    float unstable_fraction;
+    float local_outlier_fraction;
+    float residual_mean_px;
+    float residual_std_px;
+    float local_flow_mean_px;
+    float local_flow_std_px;
+    float parallax_load;
+    float local_outlier_load;
+    float confidence;
+    float parallax_suppression_scale;
+    int   aoi_query_count;
+    int   aoi_valid_count;
+    int   aoi_independent_count;
+    int   aoi_parallax_count;
+    int   aoi_unstable_count;
+    float aoi_independent_score_mean;
+    float aoi_confidence_mean;
+    anomaly_debug_movement_tile_t tiles[ANOMALY_MOVEMENT_TILE_COUNT];
+} anomaly_debug_movement_t;
+
+typedef enum {
     ANOMALY_REG_INVALID_REASON_NONE = 0,
     ANOMALY_REG_INVALID_REASON_DEBUG_INPUT_UNAVAILABLE = 1,
     ANOMALY_REG_INVALID_REASON_GMV_TOO_FEW_ANCHORS = 2,
@@ -897,16 +969,17 @@ typedef struct {
 typedef enum {
     ANOMALY_TIMING_STAGE_REGISTRATION_PREP = 0,
     ANOMALY_TIMING_STAGE_REGISTRATION_SOLVE = 1,
-    ANOMALY_TIMING_STAGE_SCAN_PLANNING = 2,
-    ANOMALY_TIMING_STAGE_REFRESH_MASK_BUILD = 3,
-    ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP = 4,
-    ANOMALY_TIMING_STAGE_THERMAL_SCORING = 5,
-    ANOMALY_TIMING_STAGE_COLOR_SCORING = 6,
-    ANOMALY_TIMING_STAGE_MOTION_SCORING = 7,
-    ANOMALY_TIMING_STAGE_SALIENCY_SCORING = 8,
-    ANOMALY_TIMING_STAGE_TARGET_TRACKING = 9,
-    ANOMALY_TIMING_STAGE_OVERLAY_DRAW = 10,
-    ANOMALY_TIMING_STAGE_COUNT = 11,
+    ANOMALY_TIMING_STAGE_MOVEMENT_ESTIMATOR = 2,
+    ANOMALY_TIMING_STAGE_SCAN_PLANNING = 3,
+    ANOMALY_TIMING_STAGE_REFRESH_MASK_BUILD = 4,
+    ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP = 5,
+    ANOMALY_TIMING_STAGE_THERMAL_SCORING = 6,
+    ANOMALY_TIMING_STAGE_COLOR_SCORING = 7,
+    ANOMALY_TIMING_STAGE_MOTION_SCORING = 8,
+    ANOMALY_TIMING_STAGE_SALIENCY_SCORING = 9,
+    ANOMALY_TIMING_STAGE_TARGET_TRACKING = 10,
+    ANOMALY_TIMING_STAGE_OVERLAY_DRAW = 11,
+    ANOMALY_TIMING_STAGE_COUNT = 12,
 } anomaly_timing_stage_t;
 
 typedef struct {
@@ -926,6 +999,7 @@ typedef struct {
     anomaly_rescan_mode_t rescan_mode;
     anomaly_scan_plan_t scan_plan;
     anomaly_debug_gmv_t gmv_debug;
+    anomaly_debug_movement_t movement_debug;
     anomaly_debug_motion_t motion_debug;
     anomaly_debug_thermal_t thermal_debug;
     anomaly_debug_color_t color_debug;

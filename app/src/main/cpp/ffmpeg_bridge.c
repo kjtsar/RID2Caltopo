@@ -263,6 +263,7 @@ typedef struct ffmpeg_session_t {
     int64_t local_playback_first_render_at_ms;
     int64_t local_playback_display_pts_us;
     int64_t local_playback_nominal_interval_ms;
+    int64_t local_playback_pts_repair_count;
     int64_t local_playback_timing_pts_us[LOCAL_PLAYBACK_HISTORY_CAPACITY];
     int64_t local_playback_timing_render_at_ms[LOCAL_PLAYBACK_HISTORY_CAPACITY];
     int local_playback_timing_count;
@@ -1927,6 +1928,40 @@ static int64_t pts_to_us(int64_t pts, AVRational tb) {
     return av_rescale_q(pts, tb, (AVRational) {1, 1000000});
 }
 
+static int64_t normalize_local_playback_pts_us(ffmpeg_session_t *session,
+                                               int64_t pts_us) {
+    if (session == NULL || !is_local_file_source(session)) return pts_us;
+
+    int64_t interval_us = session->local_playback_nominal_interval_ms > 0
+            ? session->local_playback_nominal_interval_ms * 1000
+            : session->source_render_interval_ms * 1000;
+    if (interval_us <= 0) {
+        interval_us = (1000000 + (RENDER_DEFAULT_FPS / 2)) / RENDER_DEFAULT_FPS;
+    }
+
+    int64_t last_pts_us = session->last_valid_pts_us;
+    if (pts_us <= 0) {
+        return last_pts_us > 0 ? last_pts_us + interval_us : pts_us;
+    }
+    if (last_pts_us > 0 && pts_us <= last_pts_us) {
+        int64_t repaired_pts_us = last_pts_us + interval_us;
+        session->local_playback_pts_repair_count += 1;
+        int64_t repair_count = session->local_playback_pts_repair_count;
+        if (repair_count <= 5 || (repair_count % 120) == 0) {
+            ct_debug(TAG,
+                     "local playback pts repaired id=%lld designator=%s raw=%.3fs last=%.3fs repaired=%.3fs count=%lld",
+                     (long long) session->session_id,
+                     session->designator,
+                     (double) pts_us / 1000000.0,
+                     (double) last_pts_us / 1000000.0,
+                     (double) repaired_pts_us / 1000000.0,
+                     (long long) repair_count);
+        }
+        return repaired_pts_us;
+    }
+    return pts_us;
+}
+
 static int64_t clamp_i64(int64_t value, int64_t min_value, int64_t max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
@@ -2678,6 +2713,7 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->local_playback_first_render_at_ms = 0;
         session->local_playback_display_pts_us = 0;
         session->local_playback_nominal_interval_ms = 0;
+        session->local_playback_pts_repair_count = 0;
         memset(session->local_playback_timing_pts_us, 0, sizeof(session->local_playback_timing_pts_us));
         memset(session->local_playback_timing_render_at_ms, 0, sizeof(session->local_playback_timing_render_at_ms));
         session->local_playback_timing_count = 0;
@@ -3706,6 +3742,9 @@ static void *ad_thread_main(void *arg) {
         pthread_mutex_lock(&g_lock);
         int64_t generation_id = session->anomaly_generation_id;
         bool process_enabled = anomaly_processing_enabled_locked(session);
+        int configured_frame_stride = session->anomaly_cfg.frame_stride < 1
+                                      ? 1
+                                      : session->anomaly_cfg.frame_stride;
         pthread_mutex_unlock(&g_lock);
 
         bool skipped = false;
@@ -3720,6 +3759,11 @@ static void *ad_thread_main(void *arg) {
         } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALTERNATE) {
             bypass_analysis = (pressure_frame_counter % 2) == 0;
         } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALL) {
+            bypass_analysis = true;
+        }
+        if (is_local_file_source(session) &&
+            configured_frame_stride > 1 &&
+            ((packet.frame_id - 1) % configured_frame_stride) != 0) {
             bypass_analysis = true;
         }
 
@@ -4113,7 +4157,7 @@ static int open_input_with_profile(ffmpeg_session_t *session, bool low_latency) 
 }
 
 static int open_decoder(ffmpeg_session_t *session) {
-    bool prefer_low_latency = true;
+    bool prefer_low_latency = !is_local_file_source(session);
     int64_t phase_started_at_ms = monotonic_ms();
     ct_debug(TAG,
              "open_decoder begin id=%lld designator=%s preferLowLatency=%d render=%d",
@@ -4650,6 +4694,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                 break;
             }
             int64_t pts_us = pts_to_us(frame->best_effort_timestamp, session->video_time_base);
+            pts_us = normalize_local_playback_pts_us(session, pts_us);
             AVFrame *clean_history_frame = local_file_source ? av_frame_clone(frame) : NULL;
 #if FFMPEG_TELEMETRY_ENABLED
             log_dict_keys_once(
@@ -4733,10 +4778,14 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                             pthread_cond_signal(&session->ad_cond);
                         }
                     } else {
-                        const char *bypass_reason = !ad_enabled ? "ad-disabled"
-                                : (!ad_thread_started ? "ad-thread-not-started"
-                                   : (!ad_sync_ready ? "ad-sync-not-ready"
-                                      : "inline-render"));
+                        const char *bypass_reason = "inline-render";
+                        if (!ad_enabled) {
+                            bypass_reason = "ad-disabled";
+                        } else if (!ad_thread_started) {
+                            bypass_reason = "ad-thread-not-started";
+                        } else if (!ad_sync_ready) {
+                            bypass_reason = "ad-sync-not-ready";
+                        }
                         update_local_playback_ad_decision_summary(
                                 session,
                                 frame_id,
@@ -5023,6 +5072,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.show_candidate_blobs = false;
     slot->anomaly_cfg.algorithm_mask    = ANOMALY_ALGO_THERMAL;
     slot->anomaly_cfg.registration_mode = ANOMALY_REGISTRATION_AFFINE;
+    slot->anomaly_cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
     slot->anomaly_cfg.frame_stride      = ANOMALY_DEFAULT_FRAME_STRIDE;
     slot->anomaly_cfg.pixel_step        = 0;
     slot->anomaly_cfg.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
@@ -5393,6 +5443,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jboolean troubleshooting_debug,
         jint algorithm_mask,
         jint registration_mode,
+        jint movement_estimator_mode,
         jint frame_stride,
         jint pixel_step,
         jfloat score_threshold,
@@ -5423,6 +5474,12 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         session->anomaly_cfg.registration_mode = ((int) registration_mode == ANOMALY_REGISTRATION_AFFINE)
                                                  ? ANOMALY_REGISTRATION_AFFINE
                                                  : ANOMALY_REGISTRATION_GMV;
+        session->anomaly_cfg.movement_estimator_mode =
+                (movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE)
+                ? ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE
+                : ((movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW)
+                    ? ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW
+                    : ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE);
         session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (((int) frame_stride > 10) ? 10 : (int) frame_stride);
         session->anomaly_cfg.pixel_step        = ((int) pixel_step < 0) ? 0 : (int) pixel_step;
         session->anomaly_cfg.score_threshold   = fmaxf(0.1f, score_threshold);
@@ -5448,13 +5505,14 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                 session->anomaly_cfg.algorithm_mask != 0;
         if (session->anomaly_troubleshooting_debug || log_local_config) {
             ct_debug(TAG,
-                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d thermalPause=%d runtimeDisabled=%d",
+                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d movement=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d thermalPause=%d runtimeDisabled=%d",
                      (long long) session->session_id,
                      session->designator,
                      is_local_file_source(session) ? 1 : 0,
                      session->anomaly_cfg.enabled ? 1 : 0,
                      session->anomaly_cfg.algorithm_mask,
                      session->anomaly_cfg.registration_mode,
+                     session->anomaly_cfg.movement_estimator_mode,
                      session->anomaly_cfg.frame_stride,
                      session->anomaly_cfg.pixel_step,
                      session->anomaly_cfg.score_threshold,

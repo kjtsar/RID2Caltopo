@@ -61,6 +61,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AnomalyPrefs
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MotionRegistrationMode
+import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
@@ -1707,6 +1708,18 @@ class StreamsViewModel(
                 MotionRegistrationMode.Affine -> MotionRegistrationMode.Gmv
             }
             current.copy(registrationMode = next)
+        }
+    }
+
+    fun cycleAnomalyMovementEstimatorMode(designator: String) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(movementEstimatorMode = current.movementEstimatorMode.next())
+        }
+    }
+
+    fun setAnomalyMovementEstimatorMode(designator: String, mode: MovementEstimatorMode) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(movementEstimatorMode = mode)
         }
     }
 

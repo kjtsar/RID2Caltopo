@@ -75,6 +75,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
+import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
 import org.ncssar.rid2caltopo.ui.StreamPlayerView
 import kotlin.math.roundToInt
 
@@ -1062,6 +1063,47 @@ internal fun AnomalySettingsDialogs(
                             Text(anomalyConfig.registrationMode.label)
                         }
                     }
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("Movement Estimator")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            AppearanceSelectionButton(
+                                label = "Legacy",
+                                selected = anomalyConfig.movementEstimatorMode == MovementEstimatorMode.LegacyAffine,
+                                onClick = {
+                                    viewModel.setAnomalyMovementEstimatorMode(
+                                        streamDesignator,
+                                        MovementEstimatorMode.LegacyAffine
+                                    )
+                                }
+                            )
+                            AppearanceSelectionButton(
+                                label = "Shadow",
+                                selected = anomalyConfig.movementEstimatorMode == MovementEstimatorMode.LayeredShadow,
+                                onClick = {
+                                    viewModel.setAnomalyMovementEstimatorMode(
+                                        streamDesignator,
+                                        MovementEstimatorMode.LayeredShadow
+                                    )
+                                }
+                            )
+                            AppearanceSelectionButton(
+                                label = "Active",
+                                selected = anomalyConfig.movementEstimatorMode == MovementEstimatorMode.LayeredActive,
+                                onClick = {
+                                    viewModel.setAnomalyMovementEstimatorMode(
+                                        streamDesignator,
+                                        MovementEstimatorMode.LayeredActive
+                                    )
+                                }
+                            )
+                        }
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1209,6 +1251,7 @@ internal fun AnomalySettingsDialogs(
                     Text("Saliency: Enables the unified saliency detector. Turn it off to match harness runs that omit the saliency algorithm.")
                     Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
                     Text("Registration: Chooses the motion-registration backend used to stabilize detections. Affine usually tracks camera motion more accurately; GMV is simpler and may be cheaper.")
+                    Text("Movement Estimator: Legacy keeps current behavior. Shadow computes layered parallax telemetry without changing detections. Active applies layered parallax suppression to motion scoring and is still experimental.")
                     Text("Infrared (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
                     Text("Thermal Min Delta: Minimum infrared contrast before thermal/saliency evidence is considered. Raise it to ignore weaker temperature differences.")
                     Text("Small: Maximum on-screen small-target box size. The cyan rectangle shows the largest blob the anomaly detector should treat as a 'small target' for the squinter. As the camera zooms in, targets larger than this are down-ranked and can disappear.")

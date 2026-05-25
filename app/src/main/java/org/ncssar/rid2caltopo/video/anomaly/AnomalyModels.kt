@@ -73,6 +73,21 @@ enum class MotionRegistrationMode(
     Affine(nativeValue = 2, label = "Affine");
 }
 
+enum class MovementEstimatorMode(
+    val nativeValue: Int,
+    val label: String,
+) {
+    LegacyAffine(nativeValue = 0, label = "Legacy"),
+    LayeredShadow(nativeValue = 1, label = "Layered Shadow"),
+    LayeredActive(nativeValue = 2, label = "Layered Active");
+
+    fun next(): MovementEstimatorMode = when (this) {
+        LegacyAffine -> LayeredShadow
+        LayeredShadow -> LayeredActive
+        LayeredActive -> LegacyAffine
+    }
+}
+
 data class NativeAnomalyConfig(
     val enabled: Boolean,
     val showHotOverlay: Boolean,
@@ -80,6 +95,7 @@ data class NativeAnomalyConfig(
     val troubleshootingDebug: Boolean,
     val algorithmMask: Int,
     val registrationMode: Int,
+    val movementEstimatorMode: Int,
     val frameStride: Int,
     val pixelStep: Int,
     val scoreThreshold: Float,
@@ -115,6 +131,7 @@ data class AnomalyConfig(
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.BlackHot,
     val registrationMode: MotionRegistrationMode = MotionRegistrationMode.Affine,
+    val movementEstimatorMode: MovementEstimatorMode = MovementEstimatorMode.LegacyAffine,
     val scanZone: Float = 0.80f,
     val minHits: Int = 2,
     val thermalMinDelta: Float = 10.0f,
@@ -215,6 +232,7 @@ data class AnomalyConfig(
             troubleshootingDebug = troubleshootingDebug,
             algorithmMask = mask,
             registrationMode = registrationMode.nativeValue,
+            movementEstimatorMode = movementEstimatorMode.nativeValue,
             frameStride = frameStride.coerceIn(1, 10),
             pixelStep = pixelStep.coerceIn(0, 8),
             scoreThreshold = scoreThreshold,

@@ -27,6 +27,7 @@ class AnomalyConfigTest {
         assertFalse(native.enabled)
         assertEquals(expectedMask, native.algorithmMask)
         assertEquals(MotionRegistrationMode.Affine.nativeValue, native.registrationMode)
+        assertEquals(AnomalyStrideMode.Fixed.nativeValue, native.strideMode)
         assertEquals(10, native.frameStride)
         assertTrue(native.scoreThreshold in 1.0f..15.0f)
         assertTrue(native.minAreaFraction in 0.00005f..0.03f)
@@ -101,11 +102,57 @@ class AnomalyConfigTest {
         assertEquals(setOf(AnomalyAlgorithm.Motion), config.algorithms)
         assertEquals(ThermalPolarity.BlackHot, config.thermalPolarity)
         assertEquals(MotionRegistrationMode.Affine, config.registrationMode)
+        assertEquals(AnomalyStrideMode.Fixed, config.strideMode)
         assertEquals(1, config.frameStride)
+        assertEquals(2, config.adaptiveMinStrideFrames)
+        assertEquals(1.0f, config.adaptiveMaxStrideSeconds)
         assertEquals(0.50f, config.scanZone)
         assertEquals(0.42f, config.sensitivity)
         assertEquals(2, config.minHits)
         assertEquals(10.0f, config.thermalMinDelta)
+    }
+
+    @Test
+    fun toNativeConfig_carriesAdaptiveStrideFieldsWithoutChangingFixedStride() {
+        val config = AnomalyConfig(
+            strideMode = AnomalyStrideMode.Adaptive,
+            frameStride = 7,
+            adaptiveMinStrideFrames = 1,
+            adaptiveMaxStrideSeconds = 1.0f,
+        )
+
+        val native = config.toNativeConfig(sourceFps = 29.97f)
+
+        assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
+        assertEquals(7, native.frameStride)
+        assertEquals(2, native.adaptiveMinStrideFrames)
+        assertEquals(30, native.adaptiveMaxStrideFrames)
+        assertEquals(1.0f, native.adaptiveMaxStrideSeconds)
+    }
+
+    @Test
+    fun toNativeConfig_clampsAdaptiveMaxFramesToSafetyCap() {
+        val native = AnomalyConfig(
+            strideMode = AnomalyStrideMode.Adaptive,
+            adaptiveMinStrideFrames = 40,
+            adaptiveMaxStrideSeconds = 2.0f,
+        ).toNativeConfig(sourceFps = 60.0f)
+
+        assertEquals(33, native.adaptiveMinStrideFrames)
+        assertEquals(33, native.adaptiveMaxStrideFrames)
+        assertEquals(2.0f, native.adaptiveMaxStrideSeconds)
+    }
+
+    @Test
+    fun toNativeConfig_mapsAdaptiveMaxFramesConservativelyWhenFpsUnknown() {
+        val native = AnomalyConfig(
+            strideMode = AnomalyStrideMode.Adaptive,
+            adaptiveMinStrideFrames = 4,
+            adaptiveMaxStrideSeconds = 1.0f,
+        ).toNativeConfig()
+
+        assertEquals(4, native.adaptiveMinStrideFrames)
+        assertEquals(33, native.adaptiveMaxStrideFrames)
     }
 
     @Test

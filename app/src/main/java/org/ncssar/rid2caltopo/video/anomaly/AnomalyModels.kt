@@ -1,8 +1,9 @@
 package org.ncssar.rid2caltopo.video.anomaly
 
 import java.util.Locale
-import kotlin.math.sqrt
 import kotlin.math.pow
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 enum class AnomalyAlgorithm(
     val nativeMask: Int,
@@ -88,6 +89,14 @@ enum class MovementEstimatorMode(
     }
 }
 
+enum class AnomalyStrideMode(
+    val nativeValue: Int,
+    val label: String,
+) {
+    Fixed(nativeValue = 0, label = "Fixed"),
+    Adaptive(nativeValue = 1, label = "Adaptive");
+}
+
 data class NativeAnomalyConfig(
     val enabled: Boolean,
     val showHotOverlay: Boolean,
@@ -96,7 +105,11 @@ data class NativeAnomalyConfig(
     val algorithmMask: Int,
     val registrationMode: Int,
     val movementEstimatorMode: Int,
+    val strideMode: Int,
     val frameStride: Int,
+    val adaptiveMinStrideFrames: Int,
+    val adaptiveMaxStrideFrames: Int,
+    val adaptiveMaxStrideSeconds: Float,
     val pixelStep: Int,
     val scoreThreshold: Float,
     val motionEvidenceScale: Float,
@@ -124,7 +137,10 @@ data class AnomalyConfig(
     val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.Motion),
     val saliencyEnabled: Boolean = false,
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
+    val strideMode: AnomalyStrideMode = AnomalyStrideMode.Fixed,
     val frameStride: Int = 1,
+    val adaptiveMinStrideFrames: Int = 2,
+    val adaptiveMaxStrideSeconds: Float = 1.0f,
     val pixelStep: Int = 0,
     val sensitivity: Float = 0.42f,
     val motionEvidenceSensitivity: Float = 0.60f,
@@ -209,6 +225,7 @@ data class AnomalyConfig(
     fun toNativeConfig(
         enabledOverride: Boolean? = null,
         detectedAppearanceMode: AppearanceAnomalyMode? = null,
+        sourceFps: Float? = null,
     ): NativeAnomalyConfig {
         val resolvedAppearanceMode = resolvedAppearanceMode(detectedAppearanceMode)
         val mask = resolvedAlgorithms(resolvedAppearanceMode).fold(0) { acc, algo -> acc or algo.nativeMask }
@@ -225,6 +242,16 @@ data class AnomalyConfig(
                 colorFrontendMode == ColorFrontendMode.Legacy -> ColorFrontendMode.FreshRgba.nativeValue
             else -> colorFrontendMode.nativeValue
         }
+        val fixedFrameStride = frameStride.coerceIn(1, 10)
+        val nativeStrideMode = strideMode
+        val adaptiveHardCap = 33
+        val adaptiveMinFrames = adaptiveMinStrideFrames.coerceIn(2, adaptiveHardCap)
+        val adaptiveMaxSeconds = adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f)
+        val derivedAdaptiveMaxFrames = sourceFps
+            ?.takeIf { it.isFinite() && it > 0.0f }
+            ?.let { (it * adaptiveMaxSeconds).roundToInt() }
+            ?: adaptiveHardCap
+        val adaptiveMaxFrames = derivedAdaptiveMaxFrames.coerceIn(adaptiveMinFrames, adaptiveHardCap)
         return NativeAnomalyConfig(
             enabled = enabledOverride ?: enabled,
             showHotOverlay = showHotOverlay,
@@ -233,7 +260,11 @@ data class AnomalyConfig(
             algorithmMask = mask,
             registrationMode = registrationMode.nativeValue,
             movementEstimatorMode = movementEstimatorMode.nativeValue,
-            frameStride = frameStride.coerceIn(1, 10),
+            strideMode = nativeStrideMode.nativeValue,
+            frameStride = fixedFrameStride,
+            adaptiveMinStrideFrames = adaptiveMinFrames,
+            adaptiveMaxStrideFrames = adaptiveMaxFrames,
+            adaptiveMaxStrideSeconds = adaptiveMaxSeconds,
             pixelStep = pixelStep.coerceIn(0, 8),
             scoreThreshold = scoreThreshold,
             motionEvidenceScale = motionEvidenceScale,

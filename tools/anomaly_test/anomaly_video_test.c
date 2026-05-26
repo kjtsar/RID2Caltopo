@@ -62,7 +62,10 @@ typedef struct {
     bool motion_algorithm_enabled;
     bool saliency_enabled;
     app_appearance_selection_t appearance_selection;
+    int stride_mode;
     int frame_stride;
+    int adaptive_min_stride_frames;
+    float adaptive_max_stride_seconds;
     int pixel_step;
     float sensitivity;
     float motion_evidence_sensitivity;
@@ -98,7 +101,10 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.motion_algorithm_enabled = true;
     cfg.saliency_enabled = false;
     cfg.appearance_selection = APP_APPEARANCE_AUTO;
+    cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
     cfg.frame_stride = 1;
+    cfg.adaptive_min_stride_frames = 2;
+    cfg.adaptive_max_stride_seconds = 1.0f;
     cfg.pixel_step = 0;
     cfg.sensitivity = APP_DEFAULT_SENSITIVITY;
     cfg.motion_evidence_sensitivity = APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY;
@@ -124,6 +130,10 @@ static const char *app_appearance_name(app_appearance_selection_t selection) {
 
 static const char *app_registration_name(app_registration_mode_t mode) {
     return mode == APP_REGISTRATION_AFFINE ? "affine" : "gmv";
+}
+
+static const char *stride_mode_name(int mode) {
+    return mode == ANOMALY_STRIDE_MODE_ADAPTIVE ? "adaptive" : "fixed";
 }
 
 static const char *color_frontend_name(int mode) {
@@ -192,7 +202,17 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
         app_cfg->registration_mode == APP_REGISTRATION_AFFINE
             ? ANOMALY_REGISTRATION_AFFINE
             : ANOMALY_REGISTRATION_GMV;
+    native_cfg->stride_mode =
+        app_cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE
+            ? ANOMALY_STRIDE_MODE_ADAPTIVE
+            : ANOMALY_STRIDE_MODE_FIXED;
     native_cfg->frame_stride = app_clampi(app_cfg->frame_stride, 1, 10);
+    native_cfg->adaptive_min_stride_frames =
+        app_clampi(app_cfg->adaptive_min_stride_frames, 2, 33);
+    native_cfg->adaptive_max_stride_frames =
+        app_clampi(33, native_cfg->adaptive_min_stride_frames, 33);
+    native_cfg->adaptive_max_stride_seconds =
+        app_clampf(app_cfg->adaptive_max_stride_seconds, 0.1f, 10.0f);
     native_cfg->pixel_step = app_clampi(app_cfg->pixel_step, 0, 8);
     native_cfg->score_threshold = score_threshold;
     native_cfg->motion_evidence_scale = motion_evidence_scale;
@@ -1596,6 +1616,12 @@ static void usage(const char *prog) {
         "                   Parallax-aware movement sidecar mode\n"
         "                   (default: legacy-affine)\n"
         "  --stride <int>   Analyze every Nth frame (default: 1)\n"
+        "  --stride-mode <fixed|adaptive>\n"
+        "                   Carry app stride mode through config plumbing\n"
+        "  --adaptive-min-stride-frames <int>\n"
+        "                   Adaptive stride minimum (default: 2)\n"
+        "  --adaptive-max-stride-seconds <float>\n"
+        "                   Adaptive stride max latency seconds (default: 1.0)\n"
         "  --pixel-step <n> Override appearance sampling step (default: 0=Auto)\n"
         "  --color-frontend <legacy|fresh-rgba|fresh-yuv>\n"
         "                   Visible-color frontend mode (default here: fresh-rgba)\n"
@@ -1633,6 +1659,9 @@ static void usage(const char *prog) {
         "  --app-saliency <on|off>\n"
         "  --app-sensitivity <0..1>\n"
         "  --app-motion-sensitivity <0..1>\n"
+        "  --app-stride-mode <fixed|adaptive>\n"
+        "  --app-adaptive-min-stride-frames <int>\n"
+        "  --app-adaptive-max-stride-seconds <float>\n"
         "                   These flags mirror the app-side config derivation in\n"
         "                   AnomalyModels.kt before the native bridge call.\n"
         "\n"
@@ -1667,7 +1696,11 @@ int main(int argc, char **argv) {
         .algorithm_mask    = ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION,
         .registration_mode = ANOMALY_REGISTRATION_GMV,
         .movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+        .stride_mode       = ANOMALY_STRIDE_MODE_FIXED,
         .frame_stride      = 1,
+        .adaptive_min_stride_frames = 2,
+        .adaptive_max_stride_frames = 33,
+        .adaptive_max_stride_seconds = 1.0f,
         .pixel_step        = 0,
         .score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD,
         .motion_evidence_scale = 1.0f,
@@ -1728,6 +1761,23 @@ int main(int argc, char **argv) {
             cfg.movement_estimator_mode = requested_movement_estimator_mode;
         }
         else if (!strcmp(argv[i], "--stride")    && i+1 < argc) cfg.frame_stride      = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stride-mode") && i+1 < argc) {
+            const char *mode = argv[++i];
+            if (strcmp(mode, "adaptive") == 0) {
+                cfg.stride_mode = ANOMALY_STRIDE_MODE_ADAPTIVE;
+            } else if (strcmp(mode, "fixed") == 0) {
+                cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
+            } else {
+                fprintf(stderr, "Error: --stride-mode expects fixed or adaptive\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--adaptive-min-stride-frames") && i+1 < argc) {
+            cfg.adaptive_min_stride_frames = app_clampi(atoi(argv[++i]), 2, 33);
+        }
+        else if (!strcmp(argv[i], "--adaptive-max-stride-seconds") && i+1 < argc) {
+            cfg.adaptive_max_stride_seconds = app_clampf((float)atof(argv[++i]), 0.1f, 10.0f);
+        }
         else if (!strcmp(argv[i], "--pixel-step") && i+1 < argc) cfg.pixel_step       = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--color-frontend") && i+1 < argc) {
             const char *mode = argv[++i];
@@ -1809,6 +1859,26 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--app-frame-stride") && i+1 < argc) {
             app_parity_mode = true;
             app_cfg.frame_stride = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-stride-mode") && i+1 < argc) {
+            app_parity_mode = true;
+            const char *mode = argv[++i];
+            if (strcmp(mode, "adaptive") == 0) {
+                app_cfg.stride_mode = ANOMALY_STRIDE_MODE_ADAPTIVE;
+            } else if (strcmp(mode, "fixed") == 0) {
+                app_cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
+            } else {
+                fprintf(stderr, "Error: --app-stride-mode expects fixed or adaptive\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--app-adaptive-min-stride-frames") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.adaptive_min_stride_frames = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-adaptive-max-stride-seconds") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.adaptive_max_stride_seconds = (float)atof(argv[++i]);
         }
         else if (!strcmp(argv[i], "--app-pixel-step") && i+1 < argc) {
             app_parity_mode = true;
@@ -1924,6 +1994,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: could not read video info from \"%s\"\n", input);
         return 1;
     }
+    cfg.adaptive_min_stride_frames = app_clampi(cfg.adaptive_min_stride_frames, 2, 33);
+    cfg.adaptive_max_stride_seconds = app_clampf(cfg.adaptive_max_stride_seconds, 0.1f, 10.0f);
+    cfg.adaptive_max_stride_frames = app_clampi(
+            (int)floor(fps * (double)cfg.adaptive_max_stride_seconds + 0.5),
+            cfg.adaptive_min_stride_frames,
+            33);
     if (clip_time_start < 0.0) clip_time_start = 0.0;
     if (full_duration_s > 0.0) {
         clip_time_start = clamp_double(clip_time_start, 0.0, full_duration_s);
@@ -2007,6 +2083,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  app motion sens= %.2f\n", (double)app_cfg.motion_evidence_sensitivity);
         fprintf(stderr, "  app register   = %s\n", app_registration_name(app_cfg.registration_mode));
         fprintf(stderr, "  app polarity   = %s\n", app_polarity_name(app_cfg.thermal_polarity));
+        fprintf(stderr, "  app stride mode= %s\n", stride_mode_name(app_cfg.stride_mode));
     }
     fprintf(stderr, "  threshold  = %.2f\n", (double)cfg.score_threshold);
     fprintf(stderr, "  min_hits   = %d\n",   cfg.min_hits);
@@ -2024,7 +2101,12 @@ int main(int argc, char **argv) {
     fprintf(stderr, "  register   = %s\n",
         cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv");
     fprintf(stderr, "  movement   = %s\n", movement_estimator_name(cfg.movement_estimator_mode));
-    fprintf(stderr, "  stride     = %d\n",   cfg.frame_stride);
+    fprintf(stderr, "  stride     = %s fixed=%d adaptive=%d..%d frames (%.1fs)\n",
+            stride_mode_name(cfg.stride_mode),
+            cfg.frame_stride,
+            cfg.adaptive_min_stride_frames,
+            cfg.adaptive_max_stride_frames,
+            (double)cfg.adaptive_max_stride_seconds);
     fprintf(stderr, "  pixel_step = %d%s\n", cfg.pixel_step,
             cfg.pixel_step <= 0 ? " (Auto)" : "");
     fprintf(stderr, "  color      = %s\n", color_frontend_name(cfg.color_frontend_mode));
@@ -2065,12 +2147,16 @@ int main(int argc, char **argv) {
                 app_polarity_name(app_cfg.thermal_polarity));
     }
     fprintf(csv, "# threshold: %.2f  min_hits: %d  scan_zone: %.2f  "
-                 "algo: %d  polarity: %s  stride: %d  pixel_step: %d  registration: %s  "
+                 "algo: %d  polarity: %s  stride_mode: %s  stride: %d  adaptive_min_stride_frames: %d  adaptive_max_stride_frames: %d  adaptive_max_stride_seconds: %.3f  pixel_step: %d  registration: %s  "
                  "movement: %s  color_frontend: %s  small_target_fraction: %.6f\n",
             (double)cfg.score_threshold, cfg.min_hits, (double)cfg.scan_zone,
             cfg.algorithm_mask,
             cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh",
+            stride_mode_name(cfg.stride_mode),
             cfg.frame_stride,
+            cfg.adaptive_min_stride_frames,
+            cfg.adaptive_max_stride_frames,
+            (double)cfg.adaptive_max_stride_seconds,
             cfg.pixel_step,
             cfg.registration_mode == ANOMALY_REGISTRATION_AFFINE ? "affine" : "gmv",
             movement_estimator_name(cfg.movement_estimator_mode),
@@ -2200,6 +2286,13 @@ int main(int argc, char **argv) {
     int64_t movement_aoi_unstable_count = 0;
     double movement_aoi_independent_score_sum = 0.0;
     double movement_aoi_confidence_sum = 0.0;
+    int64_t provisional_candidate_count = 0;
+    int64_t provisional_candidate_selected_count = 0;
+    int64_t revisit_confirmation_count = 0;
+    int64_t revisit_salience_boost_count = 0;
+    int64_t revisit_independent_motion_boost_count = 0;
+    int64_t revisit_global_motion_reject_count = 0;
+    int64_t suppressed_offgate_winner_count = 0;
     double wall_start_s     = monotonic_seconds();
 
     while (fread(rgba, 1, frame_bytes, in_pipe) == frame_bytes) {
@@ -2283,6 +2376,13 @@ int main(int argc, char **argv) {
                 break;
             }
         }
+        provisional_candidate_count += result.scan_plan.provisional_candidate_count;
+        provisional_candidate_selected_count += result.scan_plan.provisional_candidate_selected_count;
+        revisit_confirmation_count += result.scan_plan.revisit_confirmation_count;
+        revisit_salience_boost_count += result.scan_plan.revisit_salience_boost_count;
+        revisit_independent_motion_boost_count += result.scan_plan.revisit_independent_motion_boost_count;
+        revisit_global_motion_reject_count += result.scan_plan.revisit_global_motion_reject_count;
+        suppressed_offgate_winner_count += result.scan_plan.suppressed_offgate_winner_count;
         if (result.timing.compiled) {
             timing_frame_count++;
             frame_timing_total_us += result.timing.total_us;
@@ -2540,6 +2640,14 @@ int main(int argc, char **argv) {
                         registration_reason_counts[ri],
                         (ri + 1) < (sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0])) ? "," : "");
             }
+            fprintf(summary, "  },\n  \"selective_revisit\": {\n");
+            fprintf(summary, "    \"provisional_candidate_count\": %lld,\n", (long long)provisional_candidate_count);
+            fprintf(summary, "    \"provisional_candidate_selected_count\": %lld,\n", (long long)provisional_candidate_selected_count);
+            fprintf(summary, "    \"confirmation_count\": %lld,\n", (long long)revisit_confirmation_count);
+            fprintf(summary, "    \"salience_boost_count\": %lld,\n", (long long)revisit_salience_boost_count);
+            fprintf(summary, "    \"independent_motion_boost_count\": %lld,\n", (long long)revisit_independent_motion_boost_count);
+            fprintf(summary, "    \"global_motion_reject_count\": %lld,\n", (long long)revisit_global_motion_reject_count);
+            fprintf(summary, "    \"suppressed_offgate_winner_count\": %lld\n", (long long)suppressed_offgate_winner_count);
             fprintf(summary, "  },\n  \"movement_estimator\": {\n");
             fprintf(summary, "    \"mode\": ");
             json_write_string(summary, movement_estimator_name(cfg.movement_estimator_mode));
@@ -2598,7 +2706,15 @@ int main(int argc, char **argv) {
             fprintf(summary, "    \"polarity\": ");
             json_write_string(summary,
                               cfg.thermal_polarity == ANOMALY_THERMAL_BLACK_HOT ? "bh" : "wh");
+            fprintf(summary, ",\n    \"stride_mode\": ");
+            json_write_string(summary, stride_mode_name(cfg.stride_mode));
             fprintf(summary, ",\n    \"stride\": %d,\n", cfg.frame_stride);
+            fprintf(summary, "    \"adaptive_min_stride_frames\": %d,\n",
+                    cfg.adaptive_min_stride_frames);
+            fprintf(summary, "    \"adaptive_max_stride_frames\": %d,\n",
+                    cfg.adaptive_max_stride_frames);
+            fprintf(summary, "    \"adaptive_max_stride_seconds\": %.6f,\n",
+                    (double)cfg.adaptive_max_stride_seconds);
             fprintf(summary, "    \"pixel_step\": %d,\n", cfg.pixel_step);
             fprintf(summary, "    \"registration\": ");
             json_write_string(summary,

@@ -58,6 +58,7 @@ import org.ncssar.rid2caltopo.ui.ComplianceAlertCenter
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyPrefs
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyStrideMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MotionRegistrationMode
@@ -1623,9 +1624,28 @@ class StreamsViewModel(
         }
     }
 
+    fun setAnomalyStrideMode(designator: String, strideMode: AnomalyStrideMode) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(strideMode = strideMode)
+        }
+    }
+
     fun setAnomalyFrameStride(designator: String, frameStride: Int) {
         updateAnomalyConfig(designator) { current ->
             current.copy(frameStride = frameStride.coerceIn(1, 10))
+        }
+    }
+
+    fun setAnomalyAdaptiveStride(
+        designator: String,
+        minStrideFrames: Int,
+        maxStrideSeconds: Float,
+    ) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(
+                adaptiveMinStrideFrames = minStrideFrames.coerceIn(2, 33),
+                adaptiveMaxStrideSeconds = maxStrideSeconds.coerceIn(0.1f, 10.0f),
+            )
         }
     }
 

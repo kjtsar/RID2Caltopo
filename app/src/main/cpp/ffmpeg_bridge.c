@@ -5073,7 +5073,11 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.algorithm_mask    = ANOMALY_ALGO_THERMAL;
     slot->anomaly_cfg.registration_mode = ANOMALY_REGISTRATION_AFFINE;
     slot->anomaly_cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+    slot->anomaly_cfg.stride_mode       = ANOMALY_STRIDE_MODE_FIXED;
     slot->anomaly_cfg.frame_stride      = ANOMALY_DEFAULT_FRAME_STRIDE;
+    slot->anomaly_cfg.adaptive_min_stride_frames = 2;
+    slot->anomaly_cfg.adaptive_max_stride_frames = 33;
+    slot->anomaly_cfg.adaptive_max_stride_seconds = 1.0f;
     slot->anomaly_cfg.pixel_step        = 0;
     slot->anomaly_cfg.score_threshold   = ANOMALY_DEFAULT_SCORE_THRESHOLD;
     slot->anomaly_cfg.motion_evidence_scale = 1.0f;
@@ -5444,7 +5448,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jint algorithm_mask,
         jint registration_mode,
         jint movement_estimator_mode,
+        jint stride_mode,
         jint frame_stride,
+        jint adaptive_min_stride_frames,
+        jint adaptive_max_stride_frames,
+        jfloat adaptive_max_stride_seconds,
         jint pixel_step,
         jfloat score_threshold,
         jfloat motion_evidence_scale,
@@ -5466,6 +5474,12 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
     if (session != NULL && session->active) {
         float sz = (float) scan_zone;
         int   mh = (int)   min_hits;
+        int adaptive_min_frames = (int) adaptive_min_stride_frames;
+        int adaptive_max_frames = (int) adaptive_max_stride_frames;
+        if (adaptive_min_frames < 2) adaptive_min_frames = 2;
+        if (adaptive_min_frames > 33) adaptive_min_frames = 33;
+        if (adaptive_max_frames < adaptive_min_frames) adaptive_max_frames = adaptive_min_frames;
+        if (adaptive_max_frames > 33) adaptive_max_frames = 33;
         session->anomaly_cfg.enabled           = (enabled == JNI_TRUE);
         session->anomaly_cfg.show_hot_overlay  = (show_hot_overlay == JNI_TRUE);
         session->anomaly_cfg.show_candidate_blobs = (show_candidate_blobs == JNI_TRUE);
@@ -5480,7 +5494,16 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                 : ((movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW)
                     ? ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW
                     : ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE);
+        session->anomaly_cfg.stride_mode       =
+                (stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE)
+                ? ANOMALY_STRIDE_MODE_ADAPTIVE
+                : ANOMALY_STRIDE_MODE_FIXED;
         session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (((int) frame_stride > 10) ? 10 : (int) frame_stride);
+        session->anomaly_cfg.adaptive_min_stride_frames = adaptive_min_frames;
+        session->anomaly_cfg.adaptive_max_stride_frames = adaptive_max_frames;
+        session->anomaly_cfg.adaptive_max_stride_seconds =
+                adaptive_max_stride_seconds < 0.1f ? 0.1f
+                : (adaptive_max_stride_seconds > 10.0f ? 10.0f : adaptive_max_stride_seconds);
         session->anomaly_cfg.pixel_step        = ((int) pixel_step < 0) ? 0 : (int) pixel_step;
         session->anomaly_cfg.score_threshold   = fmaxf(0.1f, score_threshold);
         session->anomaly_cfg.motion_evidence_scale = fminf(fmaxf(motion_evidence_scale, 0.1f), 4.0f);
@@ -5505,7 +5528,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                 session->anomaly_cfg.algorithm_mask != 0;
         if (session->anomaly_troubleshooting_debug || log_local_config) {
             ct_debug(TAG,
-                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d movement=%d stride=%d pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d thermalPause=%d runtimeDisabled=%d",
+                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d movement=%d strideMode=%d stride=%d adaptiveMin=%d adaptiveMaxFrames=%d adaptiveMaxSec=%.1f pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d thermalPause=%d runtimeDisabled=%d",
                      (long long) session->session_id,
                      session->designator,
                      is_local_file_source(session) ? 1 : 0,
@@ -5513,7 +5536,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                      session->anomaly_cfg.algorithm_mask,
                      session->anomaly_cfg.registration_mode,
                      session->anomaly_cfg.movement_estimator_mode,
+                     session->anomaly_cfg.stride_mode,
                      session->anomaly_cfg.frame_stride,
+                     session->anomaly_cfg.adaptive_min_stride_frames,
+                     session->anomaly_cfg.adaptive_max_stride_frames,
+                     session->anomaly_cfg.adaptive_max_stride_seconds,
                      session->anomaly_cfg.pixel_step,
                      session->anomaly_cfg.score_threshold,
                      session->anomaly_cfg.min_hits,

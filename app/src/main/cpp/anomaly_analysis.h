@@ -53,6 +53,8 @@
 #define ANOMALY_COLOR_FRONTEND_LEGACY     0
 #define ANOMALY_COLOR_FRONTEND_FRESH_RGBA 1
 #define ANOMALY_COLOR_FRONTEND_FRESH_YUV  2
+#define ANOMALY_STRIDE_MODE_FIXED         0
+#define ANOMALY_STRIDE_MODE_ADAPTIVE      1
 
 // ── Local tile normalization ───────────────────────────────────────────────
 // The ROI is divided into a LOCAL_TILE_SIZE × LOCAL_TILE_SIZE grid.  Mean and
@@ -195,7 +197,11 @@ typedef struct {
     int   algorithm_mask;
     int   registration_mode;
     int   movement_estimator_mode;
+    int   stride_mode;
     int   frame_stride;
+    int   adaptive_min_stride_frames;
+    int   adaptive_max_stride_frames;
+    float adaptive_max_stride_seconds;
     int   pixel_step;
     float score_threshold;
     float motion_evidence_scale;
@@ -266,6 +272,7 @@ typedef struct {
 typedef struct {
     bool  active;
     int   id;
+    bool  publish_confirmed;
     float confidence;
     int   hit_count;
     int   miss_count;
@@ -964,6 +971,13 @@ typedef struct {
     uint32_t reason_flags;
     int   refresh_mask_selected_samples;
     float refresh_mask_selected_fraction;
+    int   provisional_candidate_count;
+    int   provisional_candidate_selected_count;
+    int   revisit_confirmation_count;
+    int   revisit_salience_boost_count;
+    int   revisit_independent_motion_boost_count;
+    int   revisit_global_motion_reject_count;
+    int   suppressed_offgate_winner_count;
 } anomaly_scan_plan_t;
 
 typedef enum {

@@ -250,6 +250,10 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
                 && !CaltopoClient.GetTrackerCoordinationApiKey().isEmpty();
         boolean mqttConfigured = peersEnabled;
 
+        if (isStandaloneTrackerCoordinationDisabled()) {
+            return CoordinationIndicatorState.UNCONFIGURED;
+        }
+
         if (!trackerConfigured && !mqttConfigured) {
             return CoordinationIndicatorState.UNCONFIGURED;
         }
@@ -270,6 +274,9 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @NonNull
     @Override
     public String getCoordinationStatusText() {
+        if (isStandaloneTrackerCoordinationDisabled()) {
+            return "Tracker link disabled";
+        }
         CoordinationIndicatorState state = getCoordinationIndicatorState();
         if (state == CoordinationIndicatorState.UNCONFIGURED) {
             return "R2C link not configured";
@@ -287,7 +294,9 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     @Override
     public List<String> getCoordinationDiagnosticLines() {
         ArrayList<String> lines = new ArrayList<>(activeCoordinator.getCoordinationDiagnosticLines());
-        if (isTrackerConfiguredForCoordination() && !trackerSelected) {
+        if (isStandaloneTrackerCoordinationDisabled()) {
+            lines.add("Standalone tracker coordination disabled");
+        } else if (isTrackerConfiguredForCoordination() && !trackerSelected) {
             lines.add("Tracker coordinator waiting for map connection");
         }
         lines.add(describePeers(getPeerList()));
@@ -340,6 +349,12 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     private boolean isTrackerConfiguredForCoordination() {
         return !CaltopoClient.GetTrackerApiKey().isEmpty()
                 && !CaltopoClient.GetTrackerUrlPfx().isEmpty();
+    }
+
+    private boolean isStandaloneTrackerCoordinationDisabled() {
+        return isTrackerConfiguredForCoordination()
+                && !trackerSelected
+                && !CaltopoClient.GetStandaloneR2cCoordinationEnabled();
     }
 
     private void handleTrackerHardFailure(int responseCode, @Nullable String responseMessage) {

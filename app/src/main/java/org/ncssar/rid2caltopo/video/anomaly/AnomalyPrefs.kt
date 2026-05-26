@@ -12,7 +12,10 @@ object AnomalyPrefs {
     private const val KEY_ALGORITHMS = "algorithms"
     private const val KEY_SALIENCY_ENABLED = "saliency_enabled"
     private const val KEY_APPEARANCE_SELECTION = "appearance_selection"
+    private const val KEY_STRIDE_MODE = "stride_mode"
     private const val KEY_FRAME_STRIDE = "frame_stride"
+    private const val KEY_ADAPTIVE_MIN_STRIDE_FRAMES = "adaptive_min_stride_frames"
+    private const val KEY_ADAPTIVE_MAX_STRIDE_SECONDS = "adaptive_max_stride_seconds"
     private const val KEY_PIXEL_STEP = "pixel_step"
     private const val KEY_SENSITIVITY = "sensitivity"
     private const val KEY_MOTION_EVIDENCE_SENSITIVITY = "motion_evidence_sensitivity"
@@ -88,6 +91,9 @@ object AnomalyPrefs {
         val movementEstimatorMode = prefs.getString(KEY_MOVEMENT_ESTIMATOR_MODE, defaults.movementEstimatorMode.name)
             ?.let { name -> runCatching { MovementEstimatorMode.valueOf(name) }.getOrNull() }
             ?: defaults.movementEstimatorMode
+        val strideMode = prefs.getString(KEY_STRIDE_MODE, defaults.strideMode.name)
+            ?.let { name -> runCatching { AnomalyStrideMode.valueOf(name) }.getOrNull() }
+            ?: defaults.strideMode
 
         val loaded = AnomalyConfig(
             enabled = prefs.getBoolean(KEY_ENABLED, defaults.enabled),
@@ -98,7 +104,14 @@ object AnomalyPrefs {
             algorithms = algorithms,
             saliencyEnabled = prefs.getBoolean(KEY_SALIENCY_ENABLED, defaults.saliencyEnabled),
             appearanceSelection = appearanceSelection,
+            strideMode = strideMode,
             frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 10),
+            adaptiveMinStrideFrames = prefs
+                .getInt(KEY_ADAPTIVE_MIN_STRIDE_FRAMES, defaults.adaptiveMinStrideFrames)
+                .coerceIn(2, 33),
+            adaptiveMaxStrideSeconds = prefs
+                .getFloat(KEY_ADAPTIVE_MAX_STRIDE_SECONDS, defaults.adaptiveMaxStrideSeconds)
+                .coerceIn(0.1f, 10.0f),
             pixelStep = prefs.getInt(KEY_PIXEL_STEP, defaults.pixelStep).coerceIn(0, 8),
             sensitivity = prefs.getFloat(KEY_SENSITIVITY, defaults.sensitivity).coerceIn(0f, 1f),
             motionEvidenceSensitivity = prefs
@@ -136,7 +149,13 @@ object AnomalyPrefs {
             .putStringSet(KEY_ALGORITHMS, normalized.algorithms.map { it.name }.toSet())
             .putBoolean(KEY_SALIENCY_ENABLED, normalized.saliencyEnabled)
             .putString(KEY_APPEARANCE_SELECTION, normalized.appearanceSelection.name)
+            .putString(KEY_STRIDE_MODE, normalized.strideMode.name)
             .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 10))
+            .putInt(KEY_ADAPTIVE_MIN_STRIDE_FRAMES, normalized.adaptiveMinStrideFrames.coerceIn(2, 33))
+            .putFloat(
+                KEY_ADAPTIVE_MAX_STRIDE_SECONDS,
+                normalized.adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f)
+            )
             .putInt(KEY_PIXEL_STEP, normalized.pixelStep.coerceIn(0, 8))
             .putFloat(KEY_SENSITIVITY, normalized.sensitivity.coerceIn(0f, 1f))
             .putFloat(

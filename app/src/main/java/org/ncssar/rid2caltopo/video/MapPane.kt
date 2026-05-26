@@ -1600,6 +1600,8 @@ internal fun SplitMapPane(
                 val props = feature.optJSONObject("properties")
                 if (props?.optString("class") == "Folder") {
                     viewModel.applyCaltopoFolderDefault(featureId, props.optBoolean("visible", true))
+                } else {
+                    applySyntheticArtifactFolderDefault(props, viewModel)
                 }
             }
         }
@@ -1894,6 +1896,8 @@ internal fun SplitMapPane(
                     val props = feature.optJSONObject("properties")
                     if (props?.optString("class") == "Folder") {
                         viewModel.applyCaltopoFolderDefault(featureId, props.optBoolean("visible", true))
+                    } else {
+                        applySyntheticArtifactFolderDefault(props, viewModel)
                     }
                 }
 
@@ -3504,6 +3508,32 @@ internal fun SplitMapPane(
         }
     }
 }
+
+private const val CALTOPO_ASSIGNMENTS_FOLDER_ID = "__caltopo_assignments__"
+private const val CALTOPO_ASSIGNMENTS_FOLDER_TITLE = "Assignments"
+private const val CALTOPO_RANGE_RINGS_FOLDER_ID = "__caltopo_range_rings__"
+private const val CALTOPO_RANGE_RINGS_FOLDER_TITLE = "Range Rings"
+private const val CALTOPO_MARKERS_FOLDER_ID = "__caltopo_markers__"
+private const val CALTOPO_MARKERS_FOLDER_TITLE = "Markers"
+private const val CALTOPO_LINES_POLYGONS_FOLDER_ID = "__caltopo_lines_polygons__"
+private const val CALTOPO_LINES_POLYGONS_FOLDER_TITLE = "Lines & Polygons"
+private const val CALTOPO_APP_TRACKS_FOLDER_ID = "__caltopo_app_tracks__"
+private const val CALTOPO_APP_TRACKS_FOLDER_TITLE = "App Tracks"
+
+private data class SyntheticArtifactFolder(
+    val id: String,
+    val title: String,
+    val initiallyVisible: Boolean
+)
+
+private val syntheticArtifactFoldersById = listOf(
+    SyntheticArtifactFolder(CALTOPO_ASSIGNMENTS_FOLDER_ID, CALTOPO_ASSIGNMENTS_FOLDER_TITLE, true),
+    SyntheticArtifactFolder(CALTOPO_RANGE_RINGS_FOLDER_ID, CALTOPO_RANGE_RINGS_FOLDER_TITLE, false),
+    SyntheticArtifactFolder(CALTOPO_MARKERS_FOLDER_ID, CALTOPO_MARKERS_FOLDER_TITLE, false),
+    SyntheticArtifactFolder(CALTOPO_LINES_POLYGONS_FOLDER_ID, CALTOPO_LINES_POLYGONS_FOLDER_TITLE, false),
+    SyntheticArtifactFolder(CALTOPO_APP_TRACKS_FOLDER_ID, CALTOPO_APP_TRACKS_FOLDER_TITLE, false)
+).associateBy { it.id }
+
 private fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapFolderUiState> {
     val folderItems = mutableMapOf<String, MutableList<MapItemUiState>>()
     val folderMeta = mutableMapOf<String, Pair<String, Boolean>>()  // id -> (title, visible)
@@ -3515,8 +3545,13 @@ private fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapF
         if (className == "Folder") {
             folderMeta[id] = Pair(title, props.optBoolean("visible", true))
         } else {
-            val folderId = props.optString("folderId").takeIf { it.isNotBlank() } ?: continue
+            val folderId = effectiveArtifactFolderId(props, className).takeIf { it.isNotBlank() } ?: continue
             folderItems.getOrPut(folderId) { mutableListOf() }.add(MapItemUiState(id, title))
+        }
+    }
+    for (folder in syntheticArtifactFoldersById.values) {
+        if (folderItems.containsKey(folder.id)) {
+            folderMeta.putIfAbsent(folder.id, Pair(folder.title, folder.initiallyVisible))
         }
     }
     return folderMeta.entries
@@ -3542,10 +3577,11 @@ internal fun buildArtifactOverlayState(
     var ignoredTrackLikeFeatures = 0
     val representedFolderIds = features.mapNotNull { feature ->
         val props = feature.optJSONObject("properties") ?: return@mapNotNull null
-        if (props.optString("class") == "Folder") {
+        val className = props.optString("class")
+        if (className == "Folder") {
             feature.optString("id").takeIf { it.isNotBlank() }
         } else {
-            null
+            syntheticArtifactFolderId(props, className).takeIf { it.isNotBlank() }
         }
     }.toSet()
 
@@ -3556,7 +3592,7 @@ internal fun buildArtifactOverlayState(
         if (className == "Folder") continue
 
         val featureId = feature.optString("id")
-        val folderId = properties?.optString("folderId").orEmpty()
+        val folderId = effectiveArtifactFolderId(properties, className)
         if (folderId.isBlank() || folderId !in representedFolderIds) continue
         if (folderId.isNotBlank() && folderId in hiddenFolderIds) continue
         if (featureId.isNotBlank() && featureId in hiddenItemIds) continue
@@ -3603,6 +3639,39 @@ internal fun buildArtifactOverlayState(
         lines = lines,
         polygons = polygons
     )
+}
+
+private fun effectiveArtifactFolderId(properties: JSONObject?, className: String): String {
+    val folderId = properties?.optString("folderId").orEmpty()
+    val syntheticFolderId = syntheticArtifactFolderId(properties, className)
+    if (syntheticFolderId.isNotBlank()) return syntheticFolderId
+    if (folderId.isNotBlank()) return folderId
+    return ""
+}
+
+private fun syntheticArtifactFolderId(properties: JSONObject?, className: String): String {
+    val folderId = properties?.optString("folderId").orEmpty()
+    return when {
+        className == "Assignment" -> CALTOPO_ASSIGNMENTS_FOLDER_ID
+        className == "RangeRing" || folderId == CALTOPO_RANGE_RINGS_FOLDER_TITLE -> CALTOPO_RANGE_RINGS_FOLDER_ID
+        className == "Marker" && folderId.isBlank() -> CALTOPO_MARKERS_FOLDER_ID
+        folderId == CALTOPO_MARKERS_FOLDER_TITLE -> CALTOPO_MARKERS_FOLDER_ID
+        className == "Shape" && (folderId.isBlank() || folderId == CALTOPO_LINES_POLYGONS_FOLDER_TITLE) ->
+            CALTOPO_LINES_POLYGONS_FOLDER_ID
+        className == "AppTrack" && folderId.isBlank() -> CALTOPO_APP_TRACKS_FOLDER_ID
+        folderId == CALTOPO_APP_TRACKS_FOLDER_TITLE -> CALTOPO_APP_TRACKS_FOLDER_ID
+        else -> ""
+    }
+}
+
+private fun applySyntheticArtifactFolderDefault(
+    properties: JSONObject?,
+    viewModel: StreamsViewModel
+) {
+    val className = properties?.optString("class").orEmpty()
+    val folderId = syntheticArtifactFolderId(properties, className)
+    val folder = syntheticArtifactFoldersById[folderId] ?: return
+    viewModel.applyCaltopoFolderDefault(folder.id, folder.initiallyVisible)
 }
 
 private fun estimateTileCountForBounds(

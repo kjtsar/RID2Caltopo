@@ -157,6 +157,7 @@ fun AppHeader(appUptime: String, hostName: String, viewModel: R2CViewModel?) {
 internal fun coordinatorStatusDisplayText(statusText: String): String = when (statusText) {
     "Tracker link healthy" -> "Tracker OK"
     "Tracker link degraded" -> "Tracker degraded"
+    "Tracker link disabled" -> "Disabled"
     "Tracker link not configured",
     "R2C link not configured" -> "Not configured"
     "MQTT link healthy" -> "MQTT OK"

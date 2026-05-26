@@ -8,6 +8,7 @@ class R2CViewCoordinatorStatusTest {
     fun coordinatorStatusDisplayText_compactsTrackerStatuses() {
         assertEquals("Tracker OK", coordinatorStatusDisplayText("Tracker link healthy"))
         assertEquals("Tracker degraded", coordinatorStatusDisplayText("Tracker link degraded"))
+        assertEquals("Disabled", coordinatorStatusDisplayText("Tracker link disabled"))
         assertEquals("Not configured", coordinatorStatusDisplayText("Tracker link not configured"))
     }
 

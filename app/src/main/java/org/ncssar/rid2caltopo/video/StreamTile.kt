@@ -73,6 +73,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyStrideMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
@@ -908,6 +909,12 @@ internal fun AnomalySettingsDialogs(
         var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
             mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 10))
         }
+        var adaptiveMinStrideValue by remember(streamDesignator, anomalyConfig.adaptiveMinStrideFrames) {
+            mutableStateOf(anomalyConfig.adaptiveMinStrideFrames.coerceAtLeast(2))
+        }
+        var adaptiveMaxStrideSecondsValue by remember(streamDesignator, anomalyConfig.adaptiveMaxStrideSeconds) {
+            mutableStateOf(anomalyConfig.adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f))
+        }
         var pixelStepValue by remember(streamDesignator, anomalyConfig.pixelStep) {
             mutableStateOf(anomalyConfig.pixelStep.coerceIn(0, 4))
         }
@@ -1128,12 +1135,46 @@ internal fun AnomalySettingsDialogs(
                         steps = 3
                     )
                     Text("Frame Stride ${frameStrideValue}x")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AppearanceSelectionButton(
+                            label = "Fixed",
+                            selected = anomalyConfig.strideMode == AnomalyStrideMode.Fixed,
+                            onClick = {
+                                viewModel.setAnomalyStrideMode(streamDesignator, AnomalyStrideMode.Fixed)
+                            }
+                        )
+                        AppearanceSelectionButton(
+                            label = "Adaptive",
+                            selected = anomalyConfig.strideMode == AnomalyStrideMode.Adaptive,
+                            onClick = {
+                                viewModel.setAnomalyStrideMode(streamDesignator, AnomalyStrideMode.Adaptive)
+                            }
+                        )
+                    }
                     Slider(
                         value = frameStrideValue.toFloat(),
                         onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 10) },
                         valueRange = 1f..10f,
                         steps = 8
                     )
+                    if (anomalyConfig.strideMode == AnomalyStrideMode.Adaptive) {
+                        Text("Adaptive Min ${adaptiveMinStrideValue} frames")
+                        Slider(
+                            value = adaptiveMinStrideValue.toFloat(),
+                            onValueChange = { adaptiveMinStrideValue = it.toInt().coerceIn(2, 10) },
+                            valueRange = 2f..10f,
+                            steps = 7
+                        )
+                        Text("Adaptive Max ${"%.1f".format(adaptiveMaxStrideSecondsValue)}s")
+                        Slider(
+                            value = adaptiveMaxStrideSecondsValue,
+                            onValueChange = { adaptiveMaxStrideSecondsValue = it.coerceIn(0.1f, 10.0f) },
+                            valueRange = 0.1f..10.0f,
+                        )
+                    }
                     Text(if (pixelStepValue <= 0) "Detail Auto" else "Detail ${pixelStepValue}px step")
                     Slider(
                         value = pixelStepValue.toFloat(),
@@ -1213,6 +1254,11 @@ internal fun AnomalySettingsDialogs(
                         viewModel.setScanZone(streamDesignator, scanZoneValue)
                         viewModel.setMinHits(streamDesignator, minHitsValue)
                         viewModel.setAnomalyFrameStride(streamDesignator, frameStrideValue)
+                        viewModel.setAnomalyAdaptiveStride(
+                            streamDesignator,
+                            adaptiveMinStrideValue,
+                            adaptiveMaxStrideSecondsValue
+                        )
                         viewModel.setAnomalyPixelStep(streamDesignator, pixelStepValue)
                         viewModel.setAnomalyThermalMinDelta(streamDesignator, thermalMinDeltaValue)
                         viewModel.setAnomalySmallTargetScreenFraction(streamDesignator, smallTargetFractionValue)

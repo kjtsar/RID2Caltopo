@@ -1,5 +1,10 @@
 # IR Anomaly Detector
 
+Current implementation note: for the consolidated current-state detector
+reference, including app defaults, FFmpeg threading, scan planning, visible
+color, motion, saliency, and runtime caveats, start with
+[Current_Anomaly_Detector.md](/Users/kjt/Projects/RID2Caltopo/docs/Current_Anomaly_Detector.md).
+
 ## Operator Summary
 
 RID2Caltopo's IR anomaly detector is designed to help an operator notice small,
@@ -332,13 +337,14 @@ The app-side `AnomalyConfig` defaults currently resolve to:
 
 - `Appearance`: `Thermal`
 - `Thermal Palette`: `Black Hot`
-- `Saliency`: enabled
+- `Motion`: enabled
+- `Saliency`: disabled
 - `Registration`: `Affine`
 - `Frame Stride`: `1`
-- `Sensitivity`: `60%`
+- `Sensitivity`: `42%`
 - `Motion Evidence Sensitivity`: `60%`
 - `Min Area Fraction`: `0.0015`
-- `Scan Zone`: `0.80`
+- `Scan Zone`: `0.50`
 - `Min Hits`: `2`
 - `Thermal Min Delta`: `10.0`
 

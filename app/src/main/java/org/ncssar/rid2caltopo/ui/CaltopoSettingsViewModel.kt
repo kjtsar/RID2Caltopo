@@ -41,6 +41,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _usePeers = MutableStateFlow(CaltopoClient.GetUsePeersFlag())
     val usePeers = _usePeers.asStateFlow()
 
+    private val _standaloneR2cCoordinationEnabled = MutableStateFlow(CaltopoClient.GetStandaloneR2cCoordinationEnabled())
+    val standaloneR2cCoordinationEnabled = _standaloneR2cCoordinationEnabled.asStateFlow()
+
     private val _captureIncomingVideo = MutableStateFlow(CaltopoClient.GetCaptureVideoStreamsFlag())
     val captureIncomingVideo = _captureIncomingVideo.asStateFlow()
     private val _predictiveHeadEnabled = MutableStateFlow(CaltopoClient.GetPredictiveHeadEnabled())
@@ -99,6 +102,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     override fun settingsChanged() {
         _usePeers.value = CaltopoClient.GetUsePeersFlag()
+        _standaloneR2cCoordinationEnabled.value = CaltopoClient.GetStandaloneR2cCoordinationEnabled()
         _captureIncomingVideo.value = CaltopoClient.GetCaptureVideoStreamsFlag()
         _predictiveHeadEnabled.value = CaltopoClient.GetPredictiveHeadEnabled()
         _proximityAlertSpacingFeet.value = CaltopoClient.GetProximityAlertSpacingFeet().toString()
@@ -152,6 +156,9 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
 
     fun onUsePeersChanged(usePeers: Boolean) {
         _usePeers.value = usePeers
+    }
+    fun onStandaloneR2cCoordinationEnabledChanged(enabled: Boolean) {
+        _standaloneR2cCoordinationEnabled.value = enabled
     }
     fun onCaptureIncomingVideoChanged(enabled: Boolean) {
         _captureIncomingVideo.value = enabled
@@ -220,6 +227,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         }
         _maxIdleTimeInMinutes.value.toLongOrNull()?.let { CaltopoClient.SetMaxIdleTimeInMinutes(it) }
         CaltopoClient.SetUsePeers(_usePeers.value)
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(_standaloneR2cCoordinationEnabled.value)
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
         CaltopoClient.SetPredictiveHeadEnabled(_predictiveHeadEnabled.value)
         _proximityAlertSpacingFeet.value.toLongOrNull()?.let { CaltopoClient.SetProximityAlertSpacingFeet(it) }

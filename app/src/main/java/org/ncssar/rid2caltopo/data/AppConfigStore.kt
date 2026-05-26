@@ -22,7 +22,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 12
+    const val SCHEMA_VERSION = 13
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -257,6 +257,7 @@ object AppConfigStore {
         state.coordinateDisplayFormat = config.coordinateDisplayFormat.ifBlank { "decimal" }
         state.captureVideoStreamsFlag = config.captureVideoStreams
         state.usePeersFlag = config.usePeers
+        state.standaloneR2cCoordinationEnabled = config.standaloneR2CCoordinationEnabled
         state.predictiveHeadEnabled = if (config.schemaVersion >= 3) config.predictiveHeadEnabled else true
         state.proximityAlertSpacingFeet = when {
             config.proximityAlertSpacingConfigured && config.proximityAlertSpacingFeet >= 0L ->
@@ -348,6 +349,7 @@ object AppConfigStore {
             .setCoordinateDisplayFormat(state.coordinateDisplayFormat ?: "decimal")
             .setCaptureVideoStreams(state.captureVideoStreamsFlag)
             .setUsePeers(state.usePeersFlag)
+            .setStandaloneR2CCoordinationEnabled(state.standaloneR2cCoordinationEnabled)
             .setPredictiveHeadEnabled(state.predictiveHeadEnabled)
             .setProximityAlertSpacingFeet(state.proximityAlertSpacingFeet)
             .setProximityAlertSpacingConfigured(true)

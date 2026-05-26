@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +37,8 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.CaltopoNode
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 
 @Composable
@@ -45,6 +48,22 @@ fun IncidentView() {
 
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+
+    DisposableEffect(Unit) {
+        val listener = object : CaltopoMap.MapStatusListener {
+            override fun mapStatusUpdate(
+                status: CaltopoMap.MapStatusListener.mapStatus,
+                mapNode: CaltopoNode.MapNode?,
+                optErrmsg: String?
+            ) {
+                incidentState = CaltopoClient.GetIncident()
+            }
+        }
+        CaltopoMap.AddMapStatusListener(listener)
+        onDispose {
+            CaltopoMap.RemoveMapStatusListener(listener)
+        }
+    }
 
     Row(
         modifier = Modifier

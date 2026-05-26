@@ -81,6 +81,7 @@ class AnomalyConfigTest {
     fun toNativeConfig_autoColorDetectionUsesFreshRgbaFrontend() {
         val config = AnomalyConfig(
             appearanceSelection = AppearanceAnomalySelection.Auto,
+            algorithms = emptySet(),
             colorFrontendMode = ColorFrontendMode.Legacy,
         )
 
@@ -97,10 +98,12 @@ class AnomalyConfigTest {
         val config = AnomalyConfig()
 
         assertEquals(AppearanceAnomalySelection.Auto, config.appearanceSelection)
+        assertEquals(setOf(AnomalyAlgorithm.Motion), config.algorithms)
         assertEquals(ThermalPolarity.BlackHot, config.thermalPolarity)
         assertEquals(MotionRegistrationMode.Affine, config.registrationMode)
-        assertEquals(10, config.frameStride)
-        assertEquals(0.80f, config.scanZone)
+        assertEquals(1, config.frameStride)
+        assertEquals(0.50f, config.scanZone)
+        assertEquals(0.42f, config.sensitivity)
         assertEquals(2, config.minHits)
         assertEquals(10.0f, config.thermalMinDelta)
     }

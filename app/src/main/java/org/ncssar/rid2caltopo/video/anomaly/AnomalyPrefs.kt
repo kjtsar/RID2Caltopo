@@ -38,13 +38,18 @@ object AnomalyPrefs {
         val colorOnlyAppearance =
             config.resolvedAppearanceMode() == AppearanceAnomalyMode.Color &&
                 persistedNonAppearanceAlgorithms.isEmpty()
+        val looksRealtimeStride =
+            config.frameStride == 1 ||
+                (config.frameStride == 10 &&
+                    kotlin.math.abs(config.scanZone - 0.80f) < 0.001f &&
+                    kotlin.math.abs(config.sensitivity - 0.60f) < 0.001f)
         val looksRealtimeDefault =
             (config.algorithms == legacyAlgorithms ||
                 config.algorithms == temporaryRealtimeAlgorithms ||
                 thermalOnlyAppearance ||
                 colorOnlyAppearance) &&
                 !config.saliencyEnabled &&
-                config.frameStride == 1 &&
+                looksRealtimeStride &&
                 config.pixelStep == 0 &&
                 config.registrationMode == MotionRegistrationMode.Affine &&
                 config.movementEstimatorMode == MovementEstimatorMode.LegacyAffine &&
@@ -53,8 +58,10 @@ object AnomalyPrefs {
                 kotlin.math.abs(config.thermalMinDelta - 10.0f) < 0.001f
         return if (looksRealtimeDefault) {
             config.copy(
-                scanZone = 0.80f,
-                frameStride = 10,
+                algorithms = setOf(AnomalyAlgorithm.Motion),
+                scanZone = 0.50f,
+                frameStride = 1,
+                sensitivity = 0.42f,
             )
         } else {
             config

@@ -911,6 +911,19 @@ fun MainScreen(
         add(MainScreenItem.LocalView(localViewModel))
     }
 
+    val openDebugTagDialog = {
+        val currentFilterTags = parseCsvTags(CaltopoClient.GetDebugTagFilterCsv())
+        val knownTags = (CaltopoClient.GetRegisteredDebugTags() + REQUIRED_MAP_CACHE_TAGS)
+            .distinct()
+            .sorted()
+        val knownSet = knownTags.toSet()
+        knownDebugTags = knownTags
+        selectedKnownTags = currentFilterTags.filter { knownSet.contains(it) }.toSet()
+        customDebugTagsText = currentFilterTags.filter { !knownSet.contains(it) }
+            .joinToString(",")
+        showDebugTagDialog = true
+    }
+
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
@@ -969,19 +982,6 @@ fun MainScreen(
                                 loadingLogArchiveDays = false
                             }
                         })
-                        DropdownMenuItem(text = { Text("Delete Archive Folders...") }, onClick = {
-                            showArchiveCleanupDialog = true
-                            loadingArchiveCleanupDirs = true
-                            deletingArchiveCleanupDirs = false
-                            archiveCleanupDirs = emptyList()
-                            selectedArchiveCleanupDirs = defaultSelectedArchiveCleanupDirectories()
-                            archiveCleanupDeleteMessage = null
-                            menuExpanded = false
-                            coroutineScope.launch {
-                                archiveCleanupDirs = availableArchiveCleanupDirectoriesProvider()
-                                loadingArchiveCleanupDirs = false
-                            }
-                        })
                         if (externalDisplayConnected && onSetExternalDisplayContent != null && externalDisplayContentMode != null) {
                             DropdownMenuItem(
                                 text = { Text("External: Streams View") },
@@ -1005,22 +1005,6 @@ fun MainScreen(
                             }
                             menuExpanded = true
                         })
-                        DropdownMenuItem(text = {
-                            val active = if (CaltopoClient.IsDebugTagFilterEnabled()) "on" else "off"
-                            Text("Debug Tags ($active)")
-                        }, onClick = {
-                            val currentFilterTags = parseCsvTags(CaltopoClient.GetDebugTagFilterCsv())
-                            val knownTags = (CaltopoClient.GetRegisteredDebugTags() + REQUIRED_MAP_CACHE_TAGS)
-                                .distinct()
-                                .sorted()
-                            val knownSet = knownTags.toSet()
-                            knownDebugTags = knownTags
-                            selectedKnownTags = currentFilterTags.filter { knownSet.contains(it) }.toSet()
-                            customDebugTagsText = currentFilterTags.filter { !knownSet.contains(it) }
-                                .joinToString(",")
-                            showDebugTagDialog = true
-                            menuExpanded = false
-                        })
                         DropdownMenuItem(text = { Text("Proximity Pairs") }, onClick = {
                             showProximityDebugDialog = true
                             menuExpanded = false
@@ -1037,6 +1021,19 @@ fun MainScreen(
                                 showImportConfigDialog = true
                             }
                         )
+                        DropdownMenuItem(text = { Text("Delete Archive Folders...") }, onClick = {
+                            showArchiveCleanupDialog = true
+                            loadingArchiveCleanupDirs = true
+                            deletingArchiveCleanupDirs = false
+                            archiveCleanupDirs = emptyList()
+                            selectedArchiveCleanupDirs = defaultSelectedArchiveCleanupDirectories()
+                            archiveCleanupDeleteMessage = null
+                            menuExpanded = false
+                            coroutineScope.launch {
+                                archiveCleanupDirs = availableArchiveCleanupDirectoriesProvider()
+                                loadingArchiveCleanupDirs = false
+                            }
+                        })
                         DropdownMenuItem(text = { Text("Settings") }, onClick = {
                             localViewModel.showSettings()
                             menuExpanded = false
@@ -1361,6 +1358,17 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Load Config File")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            showTestingToolsDialog = false
+                            openDebugTagDialog()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val active = if (CaltopoClient.IsDebugTagFilterEnabled()) "on" else "off"
+                        Text("Debug Tags ($active)")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(

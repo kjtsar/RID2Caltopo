@@ -33,6 +33,7 @@ fun CaltopoSettingsScreen(
     val alarmVolumePercent by settingsViewModel.alarmVolumePercent.collectAsState()
     val maxIdleTimeInMinutes by settingsViewModel.maxIdleTimeInMinutes.collectAsState()
     val captureIncomingVideo by settingsViewModel.captureIncomingVideo.collectAsState()
+    val standaloneR2cCoordinationEnabled by settingsViewModel.standaloneR2cCoordinationEnabled.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
     val proximityAlertSpacingFeet by settingsViewModel.proximityAlertSpacingFeet.collectAsState()
     val caltopoUrl by settingsViewModel.caltopoUrl.collectAsState()
@@ -116,6 +117,13 @@ fun CaltopoSettingsScreen(
                     )
                     Text(if (captureIncomingVideo) "Yes" else "No")
                 }
+
+                LabeledSwitch(
+                    label = "Standalone R2C coordination",
+                    checked = standaloneR2cCoordinationEnabled,
+                    onCheckedChange = settingsViewModel::onStandaloneR2cCoordinationEnabledChanged
+                )
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Predictive Head:")

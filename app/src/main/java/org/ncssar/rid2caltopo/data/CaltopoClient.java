@@ -239,6 +239,7 @@ class ClientClassState {
     public String activeCaltopoProfileId;
     transient public Hashtable<String, CtDroneSpec> droneSpecTable; // app lifespan only.
     transient public boolean usePeersFlag; // newline separated list of configfile specs that we're loaded.
+    public boolean standaloneR2cCoordinationEnabled;
 
     // Default/initial state for the caltopo client:
     ClientClassState() {
@@ -248,6 +249,7 @@ class ClientClassState {
         caltopoCredentials = new CaltopoCredentials();
         caltopoDomainAndPort = "caltopo.com";
         usePeersFlag = true;
+        standaloneR2cCoordinationEnabled = false;
         newTrackDelayInSeconds = 30;
         maxFlatlineToneDurationInSeconds = CaltopoClient.DEFAULT_MAX_FLATLINE_TONE_DURATION_SECONDS;
         bridgeCheckDistanceFeet = CaltopoClient.DEFAULT_BRIDGE_CHECK_DISTANCE_FEET;
@@ -1541,6 +1543,23 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return ccs.usePeersFlag;
     }
 
+    public static void SetStandaloneR2cCoordinationEnabled(boolean flag) {
+        ClientClassState ccs = GetState();
+        if (ccs.standaloneR2cCoordinationEnabled != flag) {
+            ccs.standaloneR2cCoordinationEnabled = flag;
+            if (!flag) {
+                CaltopoMap.StopStandaloneTrackerCoordinationIfActive();
+            }
+            NotifySettingsChanged();
+            ArchiveState("standalone r2c coordination changed to " + flag);
+        }
+    }
+
+    public static boolean GetStandaloneR2cCoordinationEnabled() {
+        ClientClassState ccs = GetState();
+        return ccs.standaloneR2cCoordinationEnabled;
+    }
+
     public static void SetCaptureVideoStreamsFlag(boolean flag) {
         ClientClassState ccs = GetState();
         if (ccs.captureVideoStreamsFlag != flag) {
@@ -2329,6 +2348,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void DroneSpecStatusChanged(@NonNull CtDroneSpec ds, boolean isActiveFlag) {
+        CaltopoMap.OnDroneSpecStatusChanged(isActiveFlag);
         UpdateDroneSpecs();
     }
 
@@ -2713,20 +2733,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static String GetIncident() {
-        ClientClassState ccs = GetState();
-        ensureProfileStateFresh(ccs, false);
-        CaltopoProfileRecord profile = GetActiveCaltopoProfile();
-        if (profile != null && profile.incident != null) {
-            return profile.incident;
+        if (CaltopoMap.GetMapStatus() == CaltopoMap.MapStatusListener.mapStatus.up) {
+            String mapName = CaltopoMap.GetMapName().trim();
+            if (!mapName.isEmpty()) return mapName;
         }
-        return ccs.incident;
+        return "Training";
     }
 
     public static void SetIncident(@NonNull String incident) {
         ClientClassState ccs = GetState();
-        if (!ccs.incident.equals(incident)) {
+        if (!incident.equals(ccs.incident)) {
             ccs.incident = incident;
-            ArchiveState("incident changed");
         }
     }
 

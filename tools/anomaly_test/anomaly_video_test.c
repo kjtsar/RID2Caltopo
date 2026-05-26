@@ -29,10 +29,10 @@
 #include <string.h>
 #include <time.h>
 
-#define APP_DEFAULT_SENSITIVITY 0.60f
+#define APP_DEFAULT_SENSITIVITY 0.42f
 #define APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY 0.60f
 #define APP_DEFAULT_MIN_AREA_FRACTION 0.0015f
-#define APP_DEFAULT_SCAN_ZONE 0.80f
+#define APP_DEFAULT_SCAN_ZONE 0.50f
 #define APP_DEFAULT_MIN_HITS 2
 #define APP_DEFAULT_THERMAL_MIN_DELTA 10.0f
 #define APP_DEFAULT_SMALL_TARGET_SCREEN_FRACTION (1.0f / 200.0f)
@@ -95,10 +95,10 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.show_candidate_blobs = false;
     cfg.troubleshooting_debug = false;
     cfg.color_algorithm_enabled = false;
-    cfg.motion_algorithm_enabled = false;
+    cfg.motion_algorithm_enabled = true;
     cfg.saliency_enabled = false;
     cfg.appearance_selection = APP_APPEARANCE_AUTO;
-    cfg.frame_stride = ANOMALY_DEFAULT_FRAME_STRIDE;
+    cfg.frame_stride = 1;
     cfg.pixel_step = 0;
     cfg.sensitivity = APP_DEFAULT_SENSITIVITY;
     cfg.motion_evidence_sensitivity = APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY;

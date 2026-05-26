@@ -116,6 +116,7 @@ message AppConfig {
   int64 bridge_check_distance_feet = 36;
   int32 alarm_volume_percent = 37;
   bool alarm_volume_configured = 38;
+  bool standalone_r2c_coordination_enabled = 39;
 
   string caltopo_track_folder = 40;
   string caltopo_domain_and_port = 41;

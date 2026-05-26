@@ -120,6 +120,7 @@ public class CaltopoMap {
     private static MapStatusListener.mapStatus MapStatus = MapStatusListener.mapStatus.down;
     private static String LastStandaloneCoordinationScopeId = "";
     private static boolean StandaloneCoordinationStarted = false;
+    @Nullable private static Boolean StandaloneCoordinationEnabledForActiveFlights = null;
     private static int WaitForGpsAccuracy;
     // NOTE: UsePeersFlag was removed as a static field.
     // MQTT peer coordination is now unconditional whenever the map is up.
@@ -679,8 +680,40 @@ public class CaltopoMap {
     private static void stopPeerCoordinationForMapDisconnect() {
         LastStandaloneCoordinationScopeId = "";
         StandaloneCoordinationStarted = false;
+        StandaloneCoordinationEnabledForActiveFlights = null;
         getCurrentRuntime().getPeerCoordinator().setCoordinationIndicatorListener(null);
         getCurrentRuntime().getPeerCoordinator().stop();
+    }
+
+    public static void StopStandaloneTrackerCoordinationIfActive() {
+        if (!StandaloneCoordinationStarted) return;
+        if (MapStatus == MapStatusListener.mapStatus.up && MapNode != null) return;
+        if (CaltopoClient.GetStandaloneR2cCoordinationEnabled()) return;
+        int activeFlightCount = CaltopoClient.GetActiveFlightCount();
+        if (activeFlightCount > 0) {
+            CTInfo(TAG, String.format(Locale.US,
+                    "StopStandaloneTrackerCoordinationIfActive(): deferring no-map tracker stop until %d active flight(s) finish.",
+                    activeFlightCount));
+            return;
+        }
+        CTInfo(TAG, "StopStandaloneTrackerCoordinationIfActive(): stopping no-map tracker coordination.");
+        LastStandaloneCoordinationScopeId = "";
+        StandaloneCoordinationStarted = false;
+        getCurrentRuntime().getPeerCoordinator().setCoordinationIndicatorListener(null);
+        getCurrentRuntime().getPeerCoordinator().stop();
+    }
+
+    public static void OnDroneSpecStatusChanged(boolean isActiveFlag) {
+        int activeFlightCount = CaltopoClient.GetActiveFlightCount();
+        if (isActiveFlag && activeFlightCount == 1 && StandaloneCoordinationEnabledForActiveFlights == null) {
+            StandaloneCoordinationEnabledForActiveFlights =
+                    CaltopoClient.GetStandaloneR2cCoordinationEnabled();
+            CTInfo(TAG, "OnDroneSpecStatusChanged(): standalone R2C coordination for active flight window is " +
+                    StandaloneCoordinationEnabledForActiveFlights);
+        } else if (!isActiveFlag && activeFlightCount == 0) {
+            StandaloneCoordinationEnabledForActiveFlights = null;
+            StopStandaloneTrackerCoordinationIfActive();
+        }
     }
 
     @NonNull
@@ -1008,6 +1041,9 @@ public class CaltopoMap {
                 // The developer-only peer-coordination toggle in Settings is the only gate;
                 // ownership arbitration is required whenever a map is connected.
                 if (CaltopoClient.GetUsePeersFlag()) {
+                    LastStandaloneCoordinationScopeId = "";
+                    StandaloneCoordinationStarted = false;
+                    StandaloneCoordinationEnabledForActiveFlights = null;
                     CTInfo(TAG, String.format(Locale.US,
                             "SetMapStatus(up): starting peer coordination. trackerConfigured=%s",
                             !CaltopoClient.GetTrackerApiKey().isEmpty() &&
@@ -1163,6 +1199,7 @@ public class CaltopoMap {
     private static void startTrackerCoordinationWithoutActiveMapIfNeeded(@NonNull Location location) {
         if (!CaltopoClient.GetUsePeersFlag()) return;
         if (MapStatus == MapStatusListener.mapStatus.up && MapNode != null) return;
+        if (!isStandaloneTrackerCoordinationAllowedForCurrentFlightWindow()) return;
         if (CaltopoClient.GetTrackerCoordinationUrlPfx().isEmpty() ||
                 CaltopoClient.GetTrackerCoordinationApiKey().isEmpty()) {
             return;
@@ -1190,6 +1227,24 @@ public class CaltopoMap {
                 null);
         getCurrentRuntime().getPeerCoordinator()
                 .setCoordinationIndicatorListener(CaltopoMap::onCoordinationIndicatorStateChanged);
+    }
+
+    private static boolean isStandaloneTrackerCoordinationAllowedForCurrentFlightWindow() {
+        if (StandaloneCoordinationStarted) return true;
+        int activeFlightCount = CaltopoClient.GetActiveFlightCount();
+        if (activeFlightCount <= 0) {
+            StandaloneCoordinationEnabledForActiveFlights = null;
+            return CaltopoClient.GetStandaloneR2cCoordinationEnabled();
+        }
+        if (StandaloneCoordinationEnabledForActiveFlights == null) {
+            StandaloneCoordinationEnabledForActiveFlights =
+                    CaltopoClient.GetStandaloneR2cCoordinationEnabled();
+            CTInfo(TAG, "isStandaloneTrackerCoordinationAllowedForCurrentFlightWindow(): " +
+                    "latching standalone R2C coordination to " +
+                    StandaloneCoordinationEnabledForActiveFlights +
+                    " for current active flight window.");
+        }
+        return StandaloneCoordinationEnabledForActiveFlights;
     }
 
     @NonNull

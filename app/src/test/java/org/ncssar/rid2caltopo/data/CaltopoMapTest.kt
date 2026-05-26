@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.data
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -22,6 +23,8 @@ class CaltopoMapTest {
     private lateinit var currentRuntimeField: Field
     private lateinit var lastStandaloneScopeField: Field
     private lateinit var standaloneStartedField: Field
+    private lateinit var standaloneEnabledForActiveFlightsField: Field
+    private lateinit var clientStateField: Field
 
     private lateinit var originalMapStatus: CaltopoMap.MapStatusListener.mapStatus
     private var originalMapNode: Any? = null
@@ -34,6 +37,8 @@ class CaltopoMapTest {
     private var originalCurrentRuntime: Any? = null
     private var originalLastStandaloneScope: String? = null
     private var originalStandaloneStarted: Boolean = false
+    private var originalStandaloneEnabledForActiveFlights: Any? = null
+    private var originalClientState: Any? = null
     private var originalTrackerApiKey: String = ""
     private var originalTrackerUrlPfx: String = ""
     private var originalMyLocation: Location? = null
@@ -54,6 +59,8 @@ class CaltopoMapTest {
         currentRuntimeField = CaltopoMap::class.java.getDeclaredField("CurrentRuntime").apply { isAccessible = true }
         lastStandaloneScopeField = CaltopoMap::class.java.getDeclaredField("LastStandaloneCoordinationScopeId").apply { isAccessible = true }
         standaloneStartedField = CaltopoMap::class.java.getDeclaredField("StandaloneCoordinationStarted").apply { isAccessible = true }
+        standaloneEnabledForActiveFlightsField = CaltopoMap::class.java.getDeclaredField("StandaloneCoordinationEnabledForActiveFlights").apply { isAccessible = true }
+        clientStateField = CaltopoClient::class.java.getDeclaredField("Ccstate").apply { isAccessible = true }
 
         originalMapStatus = mapStatusField.get(null) as CaltopoMap.MapStatusListener.mapStatus
         originalMapNode = mapNodeField.get(null)
@@ -66,6 +73,9 @@ class CaltopoMapTest {
         originalCurrentRuntime = currentRuntimeField.get(null)
         originalLastStandaloneScope = lastStandaloneScopeField.get(null) as String?
         originalStandaloneStarted = standaloneStartedField.getBoolean(null)
+        originalStandaloneEnabledForActiveFlights = standaloneEnabledForActiveFlightsField.get(null)
+        originalClientState = clientStateField.get(null)
+        clientStateField.set(null, ClientClassState())
         originalTrackerApiKey = CaltopoClient.GetTrackerApiKey()
         originalTrackerUrlPfx = CaltopoClient.GetTrackerUrlPfx()
         originalMyLocation = CaltopoMap.MyLocation
@@ -81,6 +91,7 @@ class CaltopoMapTest {
         currentRuntimeField.set(null, fixture.runtime)
         lastStandaloneScopeField.set(null, "")
         standaloneStartedField.setBoolean(null, false)
+        standaloneEnabledForActiveFlightsField.set(null, null)
     }
 
     @After
@@ -96,9 +107,11 @@ class CaltopoMapTest {
         currentRuntimeField.set(null, originalCurrentRuntime)
         lastStandaloneScopeField.set(null, originalLastStandaloneScope)
         standaloneStartedField.setBoolean(null, originalStandaloneStarted)
+        standaloneEnabledForActiveFlightsField.set(null, originalStandaloneEnabledForActiveFlights)
         CaltopoMap.MyLocation = originalMyLocation
         CaltopoClient.SetTrackerApiKey(originalTrackerApiKey)
         CaltopoClient.SetTrackerUrlPfx(originalTrackerUrlPfx)
+        clientStateField.set(null, originalClientState)
         R2cRuntimeRegistry.resetDefaultRuntimeForTesting()
     }
 
@@ -118,6 +131,7 @@ class CaltopoMapTest {
         mapNodeField.set(null, null)
         CaltopoClient.SetTrackerApiKey("tracker-token")
         CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(true)
 
         val location = Location("test").apply {
             latitude = 39.153061
@@ -133,11 +147,32 @@ class CaltopoMapTest {
     }
 
     @Test
+    fun updateMyLocation_doesNotStartStandaloneTrackerWhenToggleOff() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoClient.SetTrackerApiKey("tracker-token")
+        CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(false)
+
+        val location = Location("test").apply {
+            latitude = 39.153061
+            longitude = -121.132946
+            accuracy = 5.0f
+        }
+
+        CaltopoMap.UpdateMyLocation(location)
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertFalse(peerCoordinator.isStarted())
+    }
+
+    @Test
     fun ensureStandaloneTrackerCoordinationStarted_usesCachedLocation() {
         mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
         mapNodeField.set(null, null)
         CaltopoClient.SetTrackerApiKey("tracker-token")
         CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(true)
         CaltopoMap.MyLocation = Location("cached").apply {
             latitude = 39.153062
             longitude = -121.132960
@@ -150,6 +185,58 @@ class CaltopoMapTest {
         assertTrue(peerCoordinator.isStarted())
         assertEquals("", peerCoordinator.getStartedMapId())
         assertEquals(1, peerCoordinator.countEvents("updateMyPosition"))
+    }
+
+    @Test
+    fun disablingStandaloneToggleStopsActiveNoMapTrackerCoordination() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoClient.SetTrackerApiKey("tracker-token")
+        CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(true)
+        CaltopoMap.MyLocation = Location("cached").apply {
+            latitude = 39.153062
+            longitude = -121.132960
+            accuracy = 8.0f
+        }
+        CaltopoMap.EnsureStandaloneTrackerCoordinationStarted()
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertTrue(peerCoordinator.isStarted())
+        val drone = activateDrone("RIDTOGGLE1")
+
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(false)
+
+        assertTrue(peerCoordinator.isStarted())
+
+        drone.reset()
+
+        assertFalse(peerCoordinator.isStarted())
+    }
+
+    @Test
+    fun enablingStandaloneToggleMidFlightDoesNotStartNoMapTrackerUntilFlightWindowEnds() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoClient.SetTrackerApiKey("tracker-token")
+        CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(false)
+        val drone = activateDrone("RIDTOGGLE2")
+        CaltopoMap.MyLocation = Location("cached").apply {
+            latitude = 39.153062
+            longitude = -121.132960
+            accuracy = 8.0f
+        }
+
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(true)
+        CaltopoMap.EnsureStandaloneTrackerCoordinationStarted()
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertFalse(peerCoordinator.isStarted())
+
+        drone.reset()
+        CaltopoMap.EnsureStandaloneTrackerCoordinationStarted()
+
+        assertTrue(peerCoordinator.isStarted())
     }
 
     @Test
@@ -169,5 +256,70 @@ class CaltopoMapTest {
         val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
         assertTrue(!peerCoordinator.isStarted())
         assertEquals(1, peerCoordinator.countEvents("updateMyPosition"))
+    }
+
+    @Test
+    fun getIncident_defaultsToTrainingWhenNotConnectedToMap() {
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoClient.SetIncident("Old Incident")
+
+        assertEquals("Training", CaltopoClient.GetIncident())
+    }
+
+    @Test
+    fun getIncident_usesConnectedMapNameWithoutPersistingIt() {
+        CaltopoClient.UpsertCaltopoProfile(
+            CaltopoProfileRecord(
+                "home-default",
+                "Default",
+                "HOME",
+                CaltopoCredentials(),
+                "caltopo.com",
+                "Drone Tracks",
+                "Old Incident",
+                "1",
+                "",
+                "",
+                false,
+                0L,
+                false,
+                "",
+                "",
+                "",
+                "",
+                0L,
+                ""
+            ),
+            true,
+            false
+        )
+        mapNodeField.set(null, CaltopoNode.MapNode("map-test", "Search Alpha", 0L))
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.up)
+
+        assertEquals("Search Alpha", CaltopoClient.GetIncident())
+        assertEquals("Old Incident", CaltopoClient.GetCaltopoProfileById("home-default")!!.incident)
+
+        mapNodeField.set(null, CaltopoNode.MapNode("map-test-2", "Search Bravo", 0L))
+
+        assertEquals("Search Bravo", CaltopoClient.GetIncident())
+        assertEquals("Old Incident", CaltopoClient.GetCaltopoProfileById("home-default")!!.incident)
+
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+
+        assertEquals("Training", CaltopoClient.GetIncident())
+    }
+
+    private fun activateDrone(remoteId: String): CtDroneSpec {
+        val drone = CtDroneSpec(remoteId)
+        val trackLabelField = CtDroneSpec::class.java.getDeclaredField("trackLabel").apply {
+            isAccessible = true
+        }
+        trackLabelField.set(drone, "${remoteId}_active")
+        val state = clientStateField.get(null) as ClientClassState
+        state.droneSpecTable[drone.remoteId] = drone
+        CaltopoMap.OnDroneSpecStatusChanged(true)
+        return drone
     }
 }

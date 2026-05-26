@@ -55,6 +55,7 @@ class DefaultPeerCoordinatorTest {
         TrackerPeerCoordinator.setTransportFactoryForTesting { transport }
         DefaultPeerCoordinator.setMqttCoordinatorOverrideForTesting(mqttFallback)
         CaltopoClient.SetUsePeers(true)
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(false)
         CaltopoClient.SetTrackerApiKey("tracker-token")
         CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
     }
@@ -64,6 +65,7 @@ class DefaultPeerCoordinatorTest {
         DefaultPeerCoordinator.getInstance().stop()
         TrackerPeerCoordinator.resetForTesting()
         DefaultPeerCoordinator.setMqttCoordinatorOverrideForTesting(null)
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(false)
         CaltopoClient.SetUsePeers(false)
         CaltopoClient.SetTrackerApiKey("")
         CaltopoClient.SetTrackerUrlPfx("")
@@ -73,6 +75,23 @@ class DefaultPeerCoordinatorTest {
     fun start_usesTrackerCoordinatorWhenConfigured() {
         DefaultPeerCoordinator.getInstance().start("MAP1", "zone-alpha", "Alpha", null)
 
+        assertTrue(transport.connected)
+    }
+
+    @Test
+    fun standaloneR2cCoordinationDefaultsOff() {
+        CaltopoClient.ResetPersistedClientState()
+
+        assertFalse(CaltopoClient.GetStandaloneR2cCoordinationEnabled())
+    }
+
+    @Test
+    fun mapConnectedStartStillUsesTrackerWhenStandaloneToggleOff() {
+        CaltopoClient.SetStandaloneR2cCoordinationEnabled(false)
+
+        DefaultPeerCoordinator.getInstance().start("MAP1", "zone-alpha", "Alpha", null)
+
+        assertEquals(1, transport.connectCount)
         assertTrue(transport.connected)
     }
 
@@ -160,4 +179,5 @@ class DefaultPeerCoordinatorTest {
         assertEquals(1, transport.connectCount)
         assertFalse(transport.connected)
     }
+
 }

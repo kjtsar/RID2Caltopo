@@ -484,6 +484,22 @@ typedef struct {
     float motion_support;
     float singleton_score_scale;
     float retention_rank;
+    float raw_delta_rescue_score;
+    float movement_residual_px;
+    float movement_independent_score;
+    float movement_confidence;
+    int   movement_layer_class;
+    float nearest_track_distance;
+    int   nearest_track_index;
+    int   nearest_track_id;
+    int   nearest_track_hit_count;
+    bool  raw_delta_rescue_eligible;
+    bool  movement_tile_valid;
+    bool  movement_independent;
+    bool  movement_parallax;
+    bool  would_promote_movement_rescue;
+    bool  near_tracked_target;
+    bool  near_debug_target;
     bool  singleton_blob;
     bool  above_threshold;
 } anomaly_debug_thermal_candidate_t;
@@ -653,6 +669,35 @@ typedef enum {
     ANOMALY_THERMAL_TARGET_GATE_ZERO_QUALITY = 6,
 } anomaly_debug_thermal_target_gate_t;
 
+typedef enum {
+    ANOMALY_THERMAL_MICRO_REJECT_NONE = 0,
+    ANOMALY_THERMAL_MICRO_REJECT_NO_HOT_PEAK = 1,
+    ANOMALY_THERMAL_MICRO_REJECT_NOT_LOCAL_MAX = 2,
+    ANOMALY_THERMAL_MICRO_REJECT_WEAK_PROMINENCE = 3,
+    ANOMALY_THERMAL_MICRO_REJECT_RING_HOT = 4,
+    ANOMALY_THERMAL_MICRO_REJECT_TOO_MANY_HOT = 5,
+    ANOMALY_THERMAL_MICRO_REJECT_LOW_COMPACTNESS = 6,
+    ANOMALY_THERMAL_MICRO_REJECT_EDGE_LIKE = 7,
+    ANOMALY_THERMAL_MICRO_REJECT_CENTROID_DRIFT = 8,
+    ANOMALY_THERMAL_MICRO_REJECT_TOO_FAR = 9,
+} anomaly_debug_thermal_micro_reject_t;
+
+typedef enum {
+    ANOMALY_MOVEMENT_SHADOW_REJECT_NONE = 0,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOVEMENT_TILE = 1,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_PARALLAX = 2,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_NOT_INDEPENDENT = 3,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_WEAK_THERMAL = 4,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_RING_HOT = 5,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_LOCAL_MEAN_HOT = 6,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_TOO_MANY_HOT = 7,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_LOW_COMPACTNESS = 8,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_EDGE_LIKE = 9,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_CENTROID_DRIFT = 10,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_NO_LOCAL_SHAPE = 11,
+    ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOTION_SUPPORT = 12,
+} anomaly_debug_movement_shadow_reject_t;
+
 typedef struct {
     bool  enabled;
     bool  valid;
@@ -665,9 +710,54 @@ typedef struct {
     float y_norm;
     float target_delta;
     float target_score;
+    float target_raw_delta;
+    float target_raw_score;
+    float target_temporal_margin;
+    float target_spatial_abs_delta;
+    float target_spatial_std;
+    float target_spatial_score;
     bool  hot_eligible;
     bool  started_component;
     bool  local_max;
+    int   local_peak_radius;
+    int   local_peak_sample_x;
+    int   local_peak_sample_y;
+    float local_peak_delta;
+    float local_peak_score;
+    float local_peak_distance;
+    int   local_peak_raw_sample_x;
+    int   local_peak_raw_sample_y;
+    float local_peak_raw_delta;
+    float local_peak_raw_score;
+    float local_peak_raw_distance;
+    float local_peak_raw_temporal_margin;
+    float local_peak_raw_spatial_abs_delta;
+    float local_peak_raw_spatial_std;
+    float local_peak_raw_spatial_score;
+    bool  local_peak_is_component_seed;
+    int   local_window_sample_count;
+    int   local_window_hot_count;
+    float local_window_raw_delta_sum;
+    float local_window_raw_delta_mean;
+    float local_window_weighted_centroid_dx;
+    float local_window_weighted_centroid_dy;
+    bool  micro_candidate_would_create;
+    anomaly_debug_thermal_micro_reject_t micro_candidate_reject_reason;
+    int   micro_candidate_peak_sample_x;
+    int   micro_candidate_peak_sample_y;
+    float micro_candidate_peak_delta;
+    float micro_candidate_peak_score;
+    float micro_candidate_prominence;
+    float micro_candidate_ring_mean;
+    float micro_candidate_ring_hot_fraction;
+    int   micro_candidate_hot_count;
+    int   micro_candidate_sample_count;
+    float micro_candidate_compactness;
+    float micro_candidate_centroid_dx;
+    float micro_candidate_centroid_dy;
+    float micro_candidate_centroid_offset;
+    float micro_candidate_one_sided_support;
+    float micro_candidate_distance_to_debug_target;
     int   suppressor_sample_x;
     int   suppressor_sample_y;
     float suppressor_delta;
@@ -684,12 +774,30 @@ typedef struct {
     float component_quality;
     bool  component_rejected;
     anomaly_debug_thermal_target_gate_t rejection_gate;
+    bool  nearby_rejected_component_valid;
+    bool  nearby_rejected_component_contains_target;
+    anomaly_debug_thermal_target_gate_t nearby_rejected_component_gate;
+    int   nearby_rejected_component_seed_x;
+    int   nearby_rejected_component_seed_y;
+    int   nearby_rejected_component_peak_x;
+    int   nearby_rejected_component_peak_y;
+    float nearby_rejected_component_area;
+    float nearby_rejected_component_span;
+    float nearby_rejected_component_fill;
+    float nearby_rejected_component_peak_delta;
+    float nearby_rejected_component_mean_delta;
+    float nearby_rejected_component_quality;
+    float nearby_rejected_component_distance;
     bool  dropped_by_cap;
     bool  dropped_by_nms;
     bool  replaced_by_nms;
     int   nms_conflict_rank;
     int   nms_conflict_sample_x;
     int   nms_conflict_sample_y;
+    int   pre_cap_rank;
+    int   pre_cap_candidate_count;
+    int   pre_cap_limit;
+    float pre_cap_retention_rank;
     int   extracted_rank;
     int   winning_rank;
     int   provisional_candidate_index;
@@ -701,6 +809,32 @@ typedef struct {
     int   provisional_selected_rank;
     float provisional_selected_score;
     bool  provisional_near_existing_skip;
+    float raw_delta_rescue_score;
+    float movement_residual_px;
+    float movement_independent_score;
+    float movement_confidence;
+    float movement_motion_support;
+    int   movement_layer_class;
+    float local_peak_movement_residual_px;
+    float local_peak_movement_independent_score;
+    float local_peak_movement_confidence;
+    float local_peak_movement_motion_support;
+    int   local_peak_movement_layer_class;
+    bool  raw_delta_rescue_eligible;
+    bool  movement_tile_valid;
+    bool  movement_independent;
+    bool  movement_parallax;
+    bool  would_promote_movement_rescue;
+    bool  local_peak_movement_tile_valid;
+    bool  local_peak_movement_independent;
+    bool  local_peak_movement_parallax;
+    bool  movement_shadow_motion_support;
+    bool  movement_shadow_parallax_penalty;
+    bool  movement_shadow_thermal_support;
+    bool  movement_shadow_clutter_veto;
+    bool  movement_rescue_would_publish;
+    bool  movement_boost_would_publish;
+    anomaly_debug_movement_shadow_reject_t movement_rescue_reject_reason;
     int   matched_track_index;
     int   matched_track_id;
     int   matched_track_hit_count;
@@ -736,6 +870,10 @@ typedef struct {
     float raw_score;
     float raw_x_norm;
     float raw_y_norm;
+    float frame_delta_mean;
+    float frame_delta_norm;
+    float frame_blob_contrast_mean;
+    float frame_blob_contrast_std;
     int   winning_candidate_index;
     int   candidate_count;
     anomaly_debug_thermal_candidate_t candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES];

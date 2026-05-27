@@ -429,6 +429,22 @@ static const char *movement_estimator_name(int mode) {
     }
 }
 
+static const char *movement_layer_name(int layer) {
+    switch (layer) {
+        case ANOMALY_MOVEMENT_LAYER_BACKGROUND:
+            return "background";
+        case ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR:
+            return "coherent_near";
+        case ANOMALY_MOVEMENT_LAYER_UNSTABLE:
+            return "unstable";
+        case ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER:
+            return "local_outlier";
+        case ANOMALY_MOVEMENT_LAYER_UNKNOWN:
+        default:
+            return "unknown";
+    }
+}
+
 // Draw a single scaled pixel at (px,py) with RGBA colour; clips to frame.
 static void put_pixel(uint8_t *rgba, int stride, int W, int H,
                       int px, int py, uint8_t r, uint8_t g, uint8_t b) {
@@ -1174,6 +1190,41 @@ static const char *thermal_target_gate_name(anomaly_debug_thermal_target_gate_t 
     }
 }
 
+static const char *thermal_micro_reject_name(anomaly_debug_thermal_micro_reject_t reason) {
+    switch (reason) {
+        case ANOMALY_THERMAL_MICRO_REJECT_NO_HOT_PEAK: return "no_hot_peak";
+        case ANOMALY_THERMAL_MICRO_REJECT_NOT_LOCAL_MAX: return "not_local_max";
+        case ANOMALY_THERMAL_MICRO_REJECT_WEAK_PROMINENCE: return "weak_prominence";
+        case ANOMALY_THERMAL_MICRO_REJECT_RING_HOT: return "ring_hot";
+        case ANOMALY_THERMAL_MICRO_REJECT_TOO_MANY_HOT: return "too_many_hot";
+        case ANOMALY_THERMAL_MICRO_REJECT_LOW_COMPACTNESS: return "low_compactness";
+        case ANOMALY_THERMAL_MICRO_REJECT_EDGE_LIKE: return "edge_like";
+        case ANOMALY_THERMAL_MICRO_REJECT_CENTROID_DRIFT: return "centroid_drift";
+        case ANOMALY_THERMAL_MICRO_REJECT_TOO_FAR: return "too_far";
+        case ANOMALY_THERMAL_MICRO_REJECT_NONE:
+        default: return "none";
+    }
+}
+
+static const char *movement_shadow_reject_name(anomaly_debug_movement_shadow_reject_t reason) {
+    switch (reason) {
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOVEMENT_TILE: return "no_movement_tile";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_PARALLAX: return "parallax";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_NOT_INDEPENDENT: return "not_independent";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_WEAK_THERMAL: return "weak_thermal";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_RING_HOT: return "ring_hot";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_LOCAL_MEAN_HOT: return "local_mean_hot";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_TOO_MANY_HOT: return "too_many_hot";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_LOW_COMPACTNESS: return "low_compactness";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_EDGE_LIKE: return "edge_like";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_CENTROID_DRIFT: return "centroid_drift";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_NO_LOCAL_SHAPE: return "no_local_shape";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOTION_SUPPORT: return "no_motion_support";
+        case ANOMALY_MOVEMENT_SHADOW_REJECT_NONE:
+        default: return "none";
+    }
+}
+
 static const char *color_target_stage_name(anomaly_debug_color_target_stage_t stage) {
     switch (stage) {
         case ANOMALY_COLOR_TARGET_STAGE_OUTSIDE_SCAN_ZONE: return "outside_scan_zone";
@@ -1196,6 +1247,8 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
     fprintf(out,
             "{\"frame\":%d,\"time_s\":%.3f,\"bg_ready\":%s,\"raw_candidate_valid\":%s,"
             "\"raw_score\":%.6f,\"raw_x_norm\":%.6f,\"raw_y_norm\":%.6f,"
+            "\"frame_delta_mean\":%.6f,\"frame_delta_norm\":%.6f,"
+            "\"frame_blob_contrast_mean\":%.6f,\"frame_blob_contrast_std\":%.6f,"
             "\"winning_candidate_index\":%d,\"candidate_count\":%d,\"candidates\":[",
             frame_num,
             time_s,
@@ -1204,6 +1257,10 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             (double)dbg->raw_score,
             (double)dbg->raw_x_norm,
             (double)dbg->raw_y_norm,
+            (double)dbg->frame_delta_mean,
+            (double)dbg->frame_delta_norm,
+            (double)dbg->frame_blob_contrast_mean,
+            (double)dbg->frame_blob_contrast_std,
             dbg->winning_candidate_index,
             dbg->candidate_count);
     for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES; i++) {
@@ -1223,6 +1280,14 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
                 "\"area_rank\":%.6f,\"span_rank\":%.6f,\"center_rank\":%.6f,"
                 "\"quality_rank\":%.6f,\"patch_support\":%.6f,\"motion_support\":%.6f,"
                 "\"singleton_score_scale\":%.6f,\"retention_rank\":%.6f,"
+                "\"raw_delta_rescue_eligible\":%s,\"raw_delta_rescue_score\":%.6f,"
+                "\"movement_tile_valid\":%s,\"movement_layer\":\"%s\","
+                "\"movement_residual_px\":%.6f,\"movement_independent_score\":%.6f,"
+                "\"movement_confidence\":%.6f,\"movement_independent\":%s,"
+                "\"movement_parallax\":%s,\"would_promote_movement_rescue\":%s,"
+                "\"near_tracked_target\":%s,\"nearest_track_distance\":%.6f,"
+                "\"nearest_track_index\":%d,\"nearest_track_id\":%d,"
+                "\"nearest_track_hit_count\":%d,\"near_debug_target\":%s,"
                 "\"singleton_blob\":%s,\"above_threshold\":%s}",
                 (i == 0) ? "" : ",",
                 i,
@@ -1260,6 +1325,22 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
                 (double)c->motion_support,
                 (double)c->singleton_score_scale,
                 (double)c->retention_rank,
+                c->raw_delta_rescue_eligible ? "true" : "false",
+                (double)c->raw_delta_rescue_score,
+                c->movement_tile_valid ? "true" : "false",
+                movement_layer_name(c->movement_layer_class),
+                (double)c->movement_residual_px,
+                (double)c->movement_independent_score,
+                (double)c->movement_confidence,
+                c->movement_independent ? "true" : "false",
+                c->movement_parallax ? "true" : "false",
+                c->would_promote_movement_rescue ? "true" : "false",
+                c->near_tracked_target ? "true" : "false",
+                (double)c->nearest_track_distance,
+                c->nearest_track_index,
+                c->nearest_track_id,
+                c->nearest_track_hit_count,
+                c->near_debug_target ? "true" : "false",
                 c->singleton_blob ? "true" : "false",
                 c->above_threshold ? "true" : "false");
     }
@@ -1268,7 +1349,41 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             "\"pixel_x\":%d,\"pixel_y\":%d,\"sample_x\":%d,\"sample_y\":%d,"
             "\"x_norm\":%.6f,\"y_norm\":%.6f,"
             "\"target_delta\":%.6f,\"target_score\":%.6f,"
+            "\"target_raw_delta\":%.6f,\"target_raw_score\":%.6f,"
+            "\"target_temporal_margin\":%.6f,"
+            "\"target_spatial_abs_delta\":%.6f,"
+            "\"target_spatial_std\":%.6f,\"target_spatial_score\":%.6f,"
             "\"hot_eligible\":%s,\"started_component\":%s,\"local_max\":%s,"
+            "\"local_peak_radius\":%d,\"local_peak_sample_x\":%d,\"local_peak_sample_y\":%d,"
+            "\"local_peak_delta\":%.6f,\"local_peak_score\":%.6f,"
+            "\"local_peak_distance\":%.6f,"
+            "\"local_peak_raw_sample_x\":%d,\"local_peak_raw_sample_y\":%d,"
+            "\"local_peak_raw_delta\":%.6f,\"local_peak_raw_score\":%.6f,"
+            "\"local_peak_raw_distance\":%.6f,"
+            "\"local_peak_raw_temporal_margin\":%.6f,"
+            "\"local_peak_raw_spatial_abs_delta\":%.6f,"
+            "\"local_peak_raw_spatial_std\":%.6f,"
+            "\"local_peak_raw_spatial_score\":%.6f,"
+            "\"local_peak_is_component_seed\":%s,"
+            "\"local_window_sample_count\":%d,\"local_window_hot_count\":%d,"
+            "\"local_window_raw_delta_sum\":%.6f,\"local_window_raw_delta_mean\":%.6f,"
+            "\"local_window_weighted_centroid_dx\":%.6f,"
+            "\"local_window_weighted_centroid_dy\":%.6f,"
+            "\"micro_candidate_would_create\":%s,"
+            "\"micro_candidate_reject_reason\":\"%s\","
+            "\"micro_candidate_peak_sample_x\":%d,\"micro_candidate_peak_sample_y\":%d,"
+            "\"micro_candidate_peak_delta\":%.6f,\"micro_candidate_peak_score\":%.6f,"
+            "\"micro_candidate_prominence\":%.6f,"
+            "\"micro_candidate_ring_mean\":%.6f,"
+            "\"micro_candidate_ring_hot_fraction\":%.6f,"
+            "\"micro_candidate_hot_count\":%d,"
+            "\"micro_candidate_sample_count\":%d,"
+            "\"micro_candidate_compactness\":%.6f,"
+            "\"micro_candidate_centroid_dx\":%.6f,"
+            "\"micro_candidate_centroid_dy\":%.6f,"
+            "\"micro_candidate_centroid_offset\":%.6f,"
+            "\"micro_candidate_one_sided_support\":%.6f,"
+            "\"micro_candidate_distance_to_debug_target\":%.6f,"
             "\"suppressor_sample_x\":%d,\"suppressor_sample_y\":%d,"
             "\"suppressor_delta\":%.6f,\"suppressor_score\":%.6f,"
             "\"component_seed_x\":%d,\"component_seed_y\":%d,"
@@ -1277,14 +1392,51 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             "\"component_peak_delta\":%.6f,\"component_mean_delta\":%.6f,"
             "\"component_quality\":%.6f,\"component_rejected\":%s,"
             "\"rejection_gate\":\"%s\",\"stage\":\"%s\","
+            "\"nearby_rejected_component_valid\":%s,"
+            "\"nearby_rejected_component_contains_target\":%s,"
+            "\"nearby_rejected_component_gate\":\"%s\","
+            "\"nearby_rejected_component_seed_x\":%d,"
+            "\"nearby_rejected_component_seed_y\":%d,"
+            "\"nearby_rejected_component_peak_x\":%d,"
+            "\"nearby_rejected_component_peak_y\":%d,"
+            "\"nearby_rejected_component_area\":%.6f,"
+            "\"nearby_rejected_component_span\":%.6f,"
+            "\"nearby_rejected_component_fill\":%.6f,"
+            "\"nearby_rejected_component_peak_delta\":%.6f,"
+            "\"nearby_rejected_component_mean_delta\":%.6f,"
+            "\"nearby_rejected_component_quality\":%.6f,"
+            "\"nearby_rejected_component_distance\":%.6f,"
             "\"dropped_by_cap\":%s,\"dropped_by_nms\":%s,\"replaced_by_nms\":%s,"
             "\"nms_conflict_rank\":%d,\"nms_conflict_sample_x\":%d,\"nms_conflict_sample_y\":%d,"
+            "\"pre_cap_rank\":%d,\"pre_cap_candidate_count\":%d,"
+            "\"pre_cap_limit\":%d,\"pre_cap_retention_rank\":%.6f,"
             "\"extracted_rank\":%d,\"winning_rank\":%d,"
             "\"provisional_candidate_index\":%d,"
             "\"provisional_score_floor\":%.6f,\"provisional_final_score\":%.6f,"
             "\"provisional_score_eligible\":%s,\"provisional_shape_eligible\":%s,"
             "\"provisional_candidate_rank\":%.6f,\"provisional_selected_rank\":%d,"
             "\"provisional_selected_score\":%.6f,\"provisional_near_existing_skip\":%s,"
+            "\"raw_delta_rescue_eligible\":%s,\"raw_delta_rescue_score\":%.6f,"
+            "\"movement_tile_valid\":%s,\"movement_layer\":\"%s\","
+            "\"movement_residual_px\":%.6f,\"movement_independent_score\":%.6f,"
+            "\"movement_confidence\":%.6f,\"movement_motion_support\":%.6f,"
+            "\"movement_independent\":%s,"
+            "\"movement_parallax\":%s,\"would_promote_movement_rescue\":%s,"
+            "\"local_peak_movement_tile_valid\":%s,"
+            "\"local_peak_movement_layer\":\"%s\","
+            "\"local_peak_movement_residual_px\":%.6f,"
+            "\"local_peak_movement_independent_score\":%.6f,"
+            "\"local_peak_movement_confidence\":%.6f,"
+            "\"local_peak_movement_motion_support\":%.6f,"
+            "\"local_peak_movement_independent\":%s,"
+            "\"local_peak_movement_parallax\":%s,"
+            "\"movement_shadow_motion_support\":%s,"
+            "\"movement_shadow_parallax_penalty\":%s,"
+            "\"movement_shadow_thermal_support\":%s,"
+            "\"movement_shadow_clutter_veto\":%s,"
+            "\"movement_rescue_would_publish\":%s,"
+            "\"movement_boost_would_publish\":%s,"
+            "\"movement_rescue_reject_reason\":\"%s\","
             "\"matched_track_index\":%d,\"matched_track_id\":%d,"
             "\"matched_track_hit_count\":%d,\"matched_track_miss_count\":%d,"
             "\"matched_track_hold_count\":%d,\"matched_track_publish_confirmed\":%s}}\n",
@@ -1299,9 +1451,54 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             (double)dbg->target.y_norm,
             (double)dbg->target.target_delta,
             (double)dbg->target.target_score,
+            (double)dbg->target.target_raw_delta,
+            (double)dbg->target.target_raw_score,
+            (double)dbg->target.target_temporal_margin,
+            (double)dbg->target.target_spatial_abs_delta,
+            (double)dbg->target.target_spatial_std,
+            (double)dbg->target.target_spatial_score,
             dbg->target.hot_eligible ? "true" : "false",
             dbg->target.started_component ? "true" : "false",
             dbg->target.local_max ? "true" : "false",
+            dbg->target.local_peak_radius,
+            dbg->target.local_peak_sample_x,
+            dbg->target.local_peak_sample_y,
+            (double)dbg->target.local_peak_delta,
+            (double)dbg->target.local_peak_score,
+            (double)dbg->target.local_peak_distance,
+            dbg->target.local_peak_raw_sample_x,
+            dbg->target.local_peak_raw_sample_y,
+            (double)dbg->target.local_peak_raw_delta,
+            (double)dbg->target.local_peak_raw_score,
+            (double)dbg->target.local_peak_raw_distance,
+            (double)dbg->target.local_peak_raw_temporal_margin,
+            (double)dbg->target.local_peak_raw_spatial_abs_delta,
+            (double)dbg->target.local_peak_raw_spatial_std,
+            (double)dbg->target.local_peak_raw_spatial_score,
+            dbg->target.local_peak_is_component_seed ? "true" : "false",
+            dbg->target.local_window_sample_count,
+            dbg->target.local_window_hot_count,
+            (double)dbg->target.local_window_raw_delta_sum,
+            (double)dbg->target.local_window_raw_delta_mean,
+            (double)dbg->target.local_window_weighted_centroid_dx,
+            (double)dbg->target.local_window_weighted_centroid_dy,
+            dbg->target.micro_candidate_would_create ? "true" : "false",
+            thermal_micro_reject_name(dbg->target.micro_candidate_reject_reason),
+            dbg->target.micro_candidate_peak_sample_x,
+            dbg->target.micro_candidate_peak_sample_y,
+            (double)dbg->target.micro_candidate_peak_delta,
+            (double)dbg->target.micro_candidate_peak_score,
+            (double)dbg->target.micro_candidate_prominence,
+            (double)dbg->target.micro_candidate_ring_mean,
+            (double)dbg->target.micro_candidate_ring_hot_fraction,
+            dbg->target.micro_candidate_hot_count,
+            dbg->target.micro_candidate_sample_count,
+            (double)dbg->target.micro_candidate_compactness,
+            (double)dbg->target.micro_candidate_centroid_dx,
+            (double)dbg->target.micro_candidate_centroid_dy,
+            (double)dbg->target.micro_candidate_centroid_offset,
+            (double)dbg->target.micro_candidate_one_sided_support,
+            (double)dbg->target.micro_candidate_distance_to_debug_target,
             dbg->target.suppressor_sample_x,
             dbg->target.suppressor_sample_y,
             (double)dbg->target.suppressor_delta,
@@ -1319,12 +1516,30 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             dbg->target.component_rejected ? "true" : "false",
             thermal_target_gate_name(dbg->target.rejection_gate),
             thermal_target_stage_name(dbg->target.stage),
+            dbg->target.nearby_rejected_component_valid ? "true" : "false",
+            dbg->target.nearby_rejected_component_contains_target ? "true" : "false",
+            thermal_target_gate_name(dbg->target.nearby_rejected_component_gate),
+            dbg->target.nearby_rejected_component_seed_x,
+            dbg->target.nearby_rejected_component_seed_y,
+            dbg->target.nearby_rejected_component_peak_x,
+            dbg->target.nearby_rejected_component_peak_y,
+            (double)dbg->target.nearby_rejected_component_area,
+            (double)dbg->target.nearby_rejected_component_span,
+            (double)dbg->target.nearby_rejected_component_fill,
+            (double)dbg->target.nearby_rejected_component_peak_delta,
+            (double)dbg->target.nearby_rejected_component_mean_delta,
+            (double)dbg->target.nearby_rejected_component_quality,
+            (double)dbg->target.nearby_rejected_component_distance,
             dbg->target.dropped_by_cap ? "true" : "false",
             dbg->target.dropped_by_nms ? "true" : "false",
             dbg->target.replaced_by_nms ? "true" : "false",
             dbg->target.nms_conflict_rank,
             dbg->target.nms_conflict_sample_x,
             dbg->target.nms_conflict_sample_y,
+            dbg->target.pre_cap_rank,
+            dbg->target.pre_cap_candidate_count,
+            dbg->target.pre_cap_limit,
+            (double)dbg->target.pre_cap_retention_rank,
             dbg->target.extracted_rank,
             dbg->target.winning_rank,
             dbg->target.provisional_candidate_index,
@@ -1336,6 +1551,32 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             dbg->target.provisional_selected_rank,
             (double)dbg->target.provisional_selected_score,
             dbg->target.provisional_near_existing_skip ? "true" : "false",
+            dbg->target.raw_delta_rescue_eligible ? "true" : "false",
+            (double)dbg->target.raw_delta_rescue_score,
+            dbg->target.movement_tile_valid ? "true" : "false",
+            movement_layer_name(dbg->target.movement_layer_class),
+            (double)dbg->target.movement_residual_px,
+            (double)dbg->target.movement_independent_score,
+            (double)dbg->target.movement_confidence,
+            (double)dbg->target.movement_motion_support,
+            dbg->target.movement_independent ? "true" : "false",
+            dbg->target.movement_parallax ? "true" : "false",
+            dbg->target.would_promote_movement_rescue ? "true" : "false",
+            dbg->target.local_peak_movement_tile_valid ? "true" : "false",
+            movement_layer_name(dbg->target.local_peak_movement_layer_class),
+            (double)dbg->target.local_peak_movement_residual_px,
+            (double)dbg->target.local_peak_movement_independent_score,
+            (double)dbg->target.local_peak_movement_confidence,
+            (double)dbg->target.local_peak_movement_motion_support,
+            dbg->target.local_peak_movement_independent ? "true" : "false",
+            dbg->target.local_peak_movement_parallax ? "true" : "false",
+            dbg->target.movement_shadow_motion_support ? "true" : "false",
+            dbg->target.movement_shadow_parallax_penalty ? "true" : "false",
+            dbg->target.movement_shadow_thermal_support ? "true" : "false",
+            dbg->target.movement_shadow_clutter_veto ? "true" : "false",
+            dbg->target.movement_rescue_would_publish ? "true" : "false",
+            dbg->target.movement_boost_would_publish ? "true" : "false",
+            movement_shadow_reject_name(dbg->target.movement_rescue_reject_reason),
             dbg->target.matched_track_index,
             dbg->target.matched_track_id,
             dbg->target.matched_track_hit_count,

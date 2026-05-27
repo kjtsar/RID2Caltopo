@@ -1629,9 +1629,54 @@ typedef struct {
     float target_y_norm;
     float target_delta;
     float target_score;
+    float target_raw_delta;
+    float target_raw_score;
+    float target_temporal_margin;
+    float target_spatial_abs_delta;
+    float target_spatial_std;
+    float target_spatial_score;
     bool hot_eligible;
     bool started_component;
     bool local_max;
+    int local_peak_radius;
+    int local_peak_sx;
+    int local_peak_sy;
+    float local_peak_delta;
+    float local_peak_score;
+    float local_peak_distance;
+    int local_peak_raw_sx;
+    int local_peak_raw_sy;
+    float local_peak_raw_delta;
+    float local_peak_raw_score;
+    float local_peak_raw_distance;
+    float local_peak_raw_temporal_margin;
+    float local_peak_raw_spatial_abs_delta;
+    float local_peak_raw_spatial_std;
+    float local_peak_raw_spatial_score;
+    bool local_peak_is_component_seed;
+    int local_window_sample_count;
+    int local_window_hot_count;
+    float local_window_raw_delta_sum;
+    float local_window_raw_delta_mean;
+    float local_window_weighted_centroid_dx;
+    float local_window_weighted_centroid_dy;
+    bool micro_candidate_would_create;
+    anomaly_debug_thermal_micro_reject_t micro_candidate_reject_reason;
+    int micro_candidate_peak_sx;
+    int micro_candidate_peak_sy;
+    float micro_candidate_peak_delta;
+    float micro_candidate_peak_score;
+    float micro_candidate_prominence;
+    float micro_candidate_ring_mean;
+    float micro_candidate_ring_hot_fraction;
+    int micro_candidate_hot_count;
+    int micro_candidate_sample_count;
+    float micro_candidate_compactness;
+    float micro_candidate_centroid_dx;
+    float micro_candidate_centroid_dy;
+    float micro_candidate_centroid_offset;
+    float micro_candidate_one_sided_support;
+    float micro_candidate_distance_to_debug_target;
     int suppressor_sx;
     int suppressor_sy;
     float suppressor_delta;
@@ -1648,12 +1693,30 @@ typedef struct {
     float component_quality;
     bool component_rejected;
     anomaly_debug_thermal_target_gate_t rejection_gate;
+    bool nearby_rejected_component_valid;
+    bool nearby_rejected_component_contains_target;
+    anomaly_debug_thermal_target_gate_t nearby_rejected_component_gate;
+    int nearby_rejected_component_seed_x;
+    int nearby_rejected_component_seed_y;
+    int nearby_rejected_component_peak_x;
+    int nearby_rejected_component_peak_y;
+    float nearby_rejected_component_area;
+    float nearby_rejected_component_span;
+    float nearby_rejected_component_fill;
+    float nearby_rejected_component_peak_delta;
+    float nearby_rejected_component_mean_delta;
+    float nearby_rejected_component_quality;
+    float nearby_rejected_component_distance;
     bool dropped_by_cap;
     bool dropped_by_nms;
     bool replaced_by_nms;
     int nms_conflict_rank;
     int nms_conflict_sample_x;
     int nms_conflict_sample_y;
+    int pre_cap_rank;
+    int pre_cap_candidate_count;
+    int pre_cap_limit;
+    float pre_cap_retention_rank;
     int extracted_rank;
     int winning_rank;
     int provisional_candidate_index;
@@ -1671,8 +1734,47 @@ typedef struct {
     int matched_track_miss_count;
     int matched_track_hold_count;
     bool matched_track_publish_confirmed;
+    float raw_delta_rescue_score;
+    float movement_residual_px;
+    float movement_independent_score;
+    float movement_confidence;
+    float movement_motion_support;
+    int movement_layer_class;
+    float local_peak_movement_residual_px;
+    float local_peak_movement_independent_score;
+    float local_peak_movement_confidence;
+    float local_peak_movement_motion_support;
+    int local_peak_movement_layer_class;
+    bool raw_delta_rescue_eligible;
+    bool movement_tile_valid;
+    bool movement_independent;
+    bool movement_parallax;
+    bool would_promote_movement_rescue;
+    bool local_peak_movement_tile_valid;
+    bool local_peak_movement_independent;
+    bool local_peak_movement_parallax;
+    bool movement_shadow_motion_support;
+    bool movement_shadow_parallax_penalty;
+    bool movement_shadow_thermal_support;
+    bool movement_shadow_clutter_veto;
+    bool movement_rescue_would_publish;
+    bool movement_boost_would_publish;
+    anomaly_debug_movement_shadow_reject_t movement_rescue_reject_reason;
     anomaly_debug_thermal_target_stage_t stage;
 } anomaly_thermal_target_trace_t;
+
+static void evaluate_thermal_micro_candidate_shadow(
+        const float *thermal_score_map,
+        const float *thermal_delta_map,
+        const float *bg_luma,
+        const float *sg_luma,
+        int sg_w,
+        int sg_h,
+        bool bg_valid,
+        bool black_hot,
+        float thermal_min_delta,
+        const float *thermal_value_map,
+        anomaly_thermal_target_trace_t *target_trace);
 
 typedef struct {
     int mode;
@@ -1709,6 +1811,20 @@ static int find_target_blob_rank(
         }
     }
     return -1;
+}
+
+static void record_thermal_target_pre_cap_rank(
+        anomaly_thermal_target_trace_t *target_trace,
+        const anomaly_thermal_blob_candidate_t *candidate,
+        int candidate_count,
+        int rank) {
+    if (target_trace == NULL || candidate == NULL) return;
+    target_trace->pre_cap_rank = rank;
+    target_trace->pre_cap_candidate_count = candidate_count;
+    target_trace->pre_cap_limit = ANOMALY_MAX_THERMAL_CANDIDATES;
+    target_trace->pre_cap_retention_rank = candidate->retention_rank_valid
+        ? candidate->retention_rank
+        : -1.0f;
 }
 
 static int compare_thermal_blob_rank(
@@ -1755,6 +1871,13 @@ static void insert_thermal_blob_candidate(
         int ddy = abs(top[i].candidate.sg_y - candidate->candidate.sg_y);
         if (ddx <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS &&
             ddy <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS) {
+            if (target_trace != NULL && candidate_is_target) {
+                record_thermal_target_pre_cap_rank(
+                        target_trace,
+                        candidate,
+                        *top_count,
+                        i);
+            }
             if (compare_thermal_blob_rank(candidate, &top[i]) < 0) {
                 if (target_trace != NULL && target_rank_before == i && !candidate_is_target) {
                     target_trace->dropped_by_nms = true;
@@ -1782,6 +1905,13 @@ static void insert_thermal_blob_candidate(
             break;
         }
     }
+    if (target_trace != NULL && candidate_is_target) {
+        record_thermal_target_pre_cap_rank(
+                target_trace,
+                candidate,
+                *top_count,
+                insert_at);
+    }
     if (insert_at >= ANOMALY_MAX_THERMAL_CANDIDATES) {
         if (target_trace != NULL && candidate_is_target) {
             target_trace->dropped_by_cap = true;
@@ -1805,6 +1935,66 @@ static void insert_thermal_blob_candidate(
     }
     if (*top_count < ANOMALY_MAX_THERMAL_CANDIDATES) (*top_count)++;
     top[insert_at] = *candidate;
+}
+
+static void record_thermal_target_rejected_component_probe(
+        anomaly_thermal_target_trace_t *target_trace,
+        anomaly_debug_thermal_target_gate_t gate,
+        int seed_x,
+        int seed_y,
+        int peak_x,
+        int peak_y,
+        int min_x,
+        int min_y,
+        int max_x,
+        int max_y,
+        int area,
+        float span,
+        float fill,
+        float peak_delta,
+        float mean_delta,
+        float quality) {
+    if (target_trace == NULL || !target_trace->enabled || !target_trace->valid) return;
+
+    bool contains_target =
+        target_trace->target_sx >= min_x &&
+        target_trace->target_sx <= max_x &&
+        target_trace->target_sy >= min_y &&
+        target_trace->target_sy <= max_y;
+    int dx = 0;
+    if (target_trace->target_sx < min_x) dx = min_x - target_trace->target_sx;
+    else if (target_trace->target_sx > max_x) dx = target_trace->target_sx - max_x;
+    int dy = 0;
+    if (target_trace->target_sy < min_y) dy = min_y - target_trace->target_sy;
+    else if (target_trace->target_sy > max_y) dy = target_trace->target_sy - max_y;
+    float distance = sqrtf((float)(dx * dx + dy * dy));
+    bool near_target = contains_target || distance <= 3.0f;
+    if (!near_target) return;
+    if (target_trace->nearby_rejected_component_valid &&
+        !contains_target &&
+        target_trace->nearby_rejected_component_contains_target) {
+        return;
+    }
+    if (target_trace->nearby_rejected_component_valid &&
+        contains_target == target_trace->nearby_rejected_component_contains_target &&
+        distance >= target_trace->nearby_rejected_component_distance) {
+        return;
+    }
+
+    target_trace->nearby_rejected_component_valid = true;
+    target_trace->nearby_rejected_component_contains_target = contains_target;
+    target_trace->nearby_rejected_component_gate = gate;
+    target_trace->nearby_rejected_component_seed_x = seed_x;
+    target_trace->nearby_rejected_component_seed_y = seed_y;
+    target_trace->nearby_rejected_component_peak_x = peak_x;
+    target_trace->nearby_rejected_component_peak_y = peak_y;
+    target_trace->nearby_rejected_component_area = (float)area;
+    target_trace->nearby_rejected_component_span = span;
+    target_trace->nearby_rejected_component_fill = fill;
+    target_trace->nearby_rejected_component_peak_delta = peak_delta;
+    target_trace->nearby_rejected_component_mean_delta = mean_delta;
+    target_trace->nearby_rejected_component_quality = quality;
+    target_trace->nearby_rejected_component_distance = distance;
 }
 
 static inline float color_blob_compact_rank(float area, float span) {
@@ -4694,6 +4884,52 @@ static void extract_color_blob_candidates(
     if (strongest_reject_quality_out != NULL) *strongest_reject_quality_out = strongest_reject_quality;
 }
 
+static void compute_thermal_spatial_probe_at_sample(
+        const float *sg_luma,
+        int sg_w,
+        int sg_h,
+        int sx,
+        int sy,
+        int sample_step,
+        bool black_hot,
+        float *abs_delta_out,
+        float *std_out,
+        float *score_out) {
+    if (abs_delta_out != NULL) *abs_delta_out = -1.0f;
+    if (std_out != NULL) *std_out = -1.0f;
+    if (score_out != NULL) *score_out = -1.0f;
+    if (sg_luma == NULL || sg_w <= 0 || sg_h <= 0 ||
+        sx < 0 || sx >= sg_w || sy < 0 || sy >= sg_h) {
+        return;
+    }
+
+    int radius = effective_thermal_window_radius_cells(sample_step);
+    int wx0 = sx - radius; if (wx0 < 0) wx0 = 0;
+    int wx1 = sx + radius; if (wx1 >= sg_w) wx1 = sg_w - 1;
+    int wy0 = sy - radius; if (wy0 < 0) wy0 = 0;
+    int wy1 = sy + radius; if (wy1 >= sg_h) wy1 = sg_h - 1;
+    double sum = 0.0;
+    double sum2 = 0.0;
+    int count = 0;
+    for (int ny = wy0; ny <= wy1; ny++) {
+        for (int nx = wx0; nx <= wx1; nx++) {
+            float v = sg_luma[(size_t)ny * (size_t)sg_w + (size_t)nx];
+            sum += (double)v;
+            sum2 += (double)v * (double)v;
+            count++;
+        }
+    }
+    if (count <= 0) return;
+    float mean = (float)(sum / (double)count);
+    double variance = fmax(sum2 / (double)count - (double)mean * (double)mean, 1.0);
+    float std = (float)sqrt(variance);
+    float lum = sg_luma[(size_t)sy * (size_t)sg_w + (size_t)sx];
+    float abs_delta = black_hot ? (mean - lum) : (lum - mean);
+    if (abs_delta_out != NULL) *abs_delta_out = abs_delta;
+    if (std_out != NULL) *std_out = std;
+    if (score_out != NULL) *score_out = abs_delta / std;
+}
+
 static void extract_thermal_blob_candidates(
         const anomaly_config_t *cfg,
         const float *thermal_score_map,
@@ -4710,6 +4946,8 @@ static void extract_thermal_blob_candidates(
         bool         bg_valid,
         bool         black_hot,
         float        thermal_min_delta,
+        float        delta_mean,
+        float        delta_norm,
         float        frame_contrast_mean,
         float        frame_contrast_std,
         uint8_t     *visited,
@@ -4719,6 +4957,7 @@ static void extract_thermal_blob_candidates(
         anomaly_thermal_blob_candidate_t *out_candidates,
         int         *out_count,
         anomaly_thermal_target_trace_t *target_trace) {
+    (void)delta_norm;
     if (out_count != NULL) *out_count = 0;
     if (thermal_score_map == NULL || thermal_value_map == NULL || candidate_seed_map == NULL ||
         visited == NULL || queue == NULL || out_candidates == NULL || out_count == NULL ||
@@ -4753,15 +4992,60 @@ static void extract_thermal_blob_candidates(
     if (target_trace != NULL) {
         memset(target_trace, 0, sizeof(*target_trace));
         target_trace->enabled = cfg != NULL && cfg->thermal_debug_target_enabled;
+        target_trace->local_peak_radius = 3;
+        target_trace->local_peak_sx = -1;
+        target_trace->local_peak_sy = -1;
+        target_trace->local_peak_delta = -1.0f;
+        target_trace->local_peak_score = -1.0f;
+        target_trace->local_peak_distance = -1.0f;
+        target_trace->local_peak_raw_sx = -1;
+        target_trace->local_peak_raw_sy = -1;
+        target_trace->local_peak_raw_delta = -1.0f;
+        target_trace->local_peak_raw_score = -1.0f;
+        target_trace->local_peak_raw_distance = -1.0f;
+        target_trace->target_temporal_margin = -999.0f;
+        target_trace->target_spatial_abs_delta = -1.0f;
+        target_trace->target_spatial_std = -1.0f;
+        target_trace->target_spatial_score = -1.0f;
+        target_trace->local_peak_raw_temporal_margin = -999.0f;
+        target_trace->local_peak_raw_spatial_abs_delta = -1.0f;
+        target_trace->local_peak_raw_spatial_std = -1.0f;
+        target_trace->local_peak_raw_spatial_score = -1.0f;
+        target_trace->local_window_weighted_centroid_dx = -1.0f;
+        target_trace->local_window_weighted_centroid_dy = -1.0f;
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_NO_HOT_PEAK;
+        target_trace->micro_candidate_peak_sx = -1;
+        target_trace->micro_candidate_peak_sy = -1;
+        target_trace->micro_candidate_peak_delta = -1.0f;
+        target_trace->micro_candidate_peak_score = -1.0f;
+        target_trace->micro_candidate_prominence = -1.0f;
+        target_trace->micro_candidate_ring_mean = -1.0f;
+        target_trace->micro_candidate_ring_hot_fraction = -1.0f;
+        target_trace->micro_candidate_compactness = -1.0f;
+        target_trace->micro_candidate_centroid_dx = -9.0f;
+        target_trace->micro_candidate_centroid_dy = -9.0f;
+        target_trace->micro_candidate_centroid_offset = -1.0f;
+        target_trace->micro_candidate_one_sided_support = -1.0f;
+        target_trace->micro_candidate_distance_to_debug_target = -1.0f;
         target_trace->suppressor_sx = -1;
         target_trace->suppressor_sy = -1;
         target_trace->component_seed_x = -1;
         target_trace->component_seed_y = -1;
         target_trace->component_peak_x = -1;
         target_trace->component_peak_y = -1;
+        target_trace->nearby_rejected_component_gate = ANOMALY_THERMAL_TARGET_GATE_NONE;
+        target_trace->nearby_rejected_component_seed_x = -1;
+        target_trace->nearby_rejected_component_seed_y = -1;
+        target_trace->nearby_rejected_component_peak_x = -1;
+        target_trace->nearby_rejected_component_peak_y = -1;
+        target_trace->nearby_rejected_component_distance = -1.0f;
         target_trace->nms_conflict_rank = -1;
         target_trace->nms_conflict_sample_x = -1;
         target_trace->nms_conflict_sample_y = -1;
+        target_trace->pre_cap_rank = -1;
+        target_trace->pre_cap_candidate_count = -1;
+        target_trace->pre_cap_limit = ANOMALY_MAX_THERMAL_CANDIDATES;
+        target_trace->pre_cap_retention_rank = -1.0f;
         target_trace->extracted_rank = -1;
         target_trace->winning_rank = -1;
         target_trace->provisional_candidate_index = -1;
@@ -4775,6 +5059,15 @@ static void extract_thermal_blob_candidates(
         target_trace->matched_track_hit_count = -1;
         target_trace->matched_track_miss_count = -1;
         target_trace->matched_track_hold_count = -1;
+        target_trace->movement_motion_support = -1.0f;
+        target_trace->movement_layer_class = ANOMALY_MOVEMENT_LAYER_UNKNOWN;
+        target_trace->local_peak_movement_residual_px = -1.0f;
+        target_trace->local_peak_movement_independent_score = -1.0f;
+        target_trace->local_peak_movement_confidence = -1.0f;
+        target_trace->local_peak_movement_motion_support = -1.0f;
+        target_trace->local_peak_movement_layer_class = ANOMALY_MOVEMENT_LAYER_UNKNOWN;
+        target_trace->movement_rescue_reject_reason =
+            ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOVEMENT_TILE;
         if (target_trace->enabled) {
             int px = clamp_i32((int)lroundf(cfg->thermal_debug_target_x_norm * (float)(frame_w - 1)), 0, frame_w - 1);
             int py = clamp_i32((int)lroundf(cfg->thermal_debug_target_y_norm * (float)(frame_h - 1)), 0, frame_h - 1);
@@ -4801,11 +5094,122 @@ static void extract_thermal_blob_candidates(
         size_t tidx = (size_t)target_trace->target_idx;
         target_trace->target_delta = thermal_value_map[tidx];
         target_trace->target_score = thermal_score_map[tidx];
+        target_trace->target_raw_delta = bg_valid
+            ? thermal_delta_from_maps(
+                thermal_delta_map,
+                bg_luma,
+                sg_luma,
+                tidx,
+                black_hot)
+            : target_trace->target_score;
+        target_trace->target_raw_score = target_trace->target_score;
+        target_trace->target_temporal_margin = bg_valid
+            ? (target_trace->target_raw_delta - delta_mean)
+            : target_trace->target_raw_score;
+        compute_thermal_spatial_probe_at_sample(
+                sg_luma,
+                sg_w,
+                sg_h,
+                target_trace->target_sx,
+                target_trace->target_sy,
+                sample_step,
+                black_hot,
+                &target_trace->target_spatial_abs_delta,
+                &target_trace->target_spatial_std,
+                &target_trace->target_spatial_score);
         target_trace->hot_eligible = target_trace->target_delta > 0.0f;
         target_trace->stage = target_trace->hot_eligible
             ? ANOMALY_THERMAL_TARGET_STAGE_MERGED_INTO_COMPONENT
             : ANOMALY_THERMAL_TARGET_STAGE_NOT_HOT;
         target_trace->local_max = true;
+        int local_peak_radius = target_trace->local_peak_radius > 0
+            ? target_trace->local_peak_radius
+            : 3;
+        double raw_delta_sum = 0.0;
+        double weighted_dx_sum = 0.0;
+        double weighted_dy_sum = 0.0;
+        double weight_sum = 0.0;
+        for (int ny = target_trace->target_sy - local_peak_radius;
+             ny <= target_trace->target_sy + local_peak_radius;
+             ny++) {
+            if (ny < 0 || ny >= sg_h) continue;
+            for (int nx = target_trace->target_sx - local_peak_radius;
+                 nx <= target_trace->target_sx + local_peak_radius;
+                 nx++) {
+                if (nx < 0 || nx >= sg_w) continue;
+                int ddx = nx - target_trace->target_sx;
+                int ddy = ny - target_trace->target_sy;
+                if (ddx * ddx + ddy * ddy > local_peak_radius * local_peak_radius) continue;
+                size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+                float raw_delta = bg_valid
+                    ? thermal_delta_from_maps(
+                        thermal_delta_map,
+                        bg_luma,
+                        sg_luma,
+                        nidx,
+                        black_hot)
+                    : thermal_score_map[nidx];
+                float nscore = thermal_score_map[nidx];
+                target_trace->local_window_sample_count++;
+                raw_delta_sum += (double)raw_delta;
+                if (raw_delta > 0.0f) {
+                    double w = (double)raw_delta;
+                    weight_sum += w;
+                    weighted_dx_sum += w * (double)ddx;
+                    weighted_dy_sum += w * (double)ddy;
+                }
+                if (raw_delta > target_trace->local_peak_raw_delta ||
+                    (raw_delta == target_trace->local_peak_raw_delta &&
+                     nscore > target_trace->local_peak_raw_score)) {
+                    target_trace->local_peak_raw_sx = nx;
+                    target_trace->local_peak_raw_sy = ny;
+                    target_trace->local_peak_raw_delta = raw_delta;
+                    target_trace->local_peak_raw_score = nscore;
+                    target_trace->local_peak_raw_distance =
+                        sqrtf((float)(ddx * ddx + ddy * ddy));
+                }
+                float ndelta = thermal_value_map[nidx];
+                if (ndelta <= 0.0f) continue;
+                target_trace->local_window_hot_count++;
+                if (ndelta > target_trace->local_peak_delta ||
+                    (ndelta == target_trace->local_peak_delta &&
+                     nscore > target_trace->local_peak_score)) {
+                    target_trace->local_peak_sx = nx;
+                    target_trace->local_peak_sy = ny;
+                    target_trace->local_peak_delta = ndelta;
+                    target_trace->local_peak_score = nscore;
+                    target_trace->local_peak_distance =
+                        sqrtf((float)(ddx * ddx + ddy * ddy));
+                }
+            }
+        }
+        target_trace->local_window_raw_delta_sum = (float)raw_delta_sum;
+        if (target_trace->local_window_sample_count > 0) {
+            target_trace->local_window_raw_delta_mean =
+                (float)(raw_delta_sum / (double)target_trace->local_window_sample_count);
+        }
+        if (weight_sum > 0.0) {
+            target_trace->local_window_weighted_centroid_dx =
+                (float)(weighted_dx_sum / weight_sum);
+            target_trace->local_window_weighted_centroid_dy =
+                (float)(weighted_dy_sum / weight_sum);
+        }
+        if (target_trace->local_peak_raw_sx >= 0 && target_trace->local_peak_raw_sy >= 0) {
+            target_trace->local_peak_raw_temporal_margin = bg_valid
+                ? (target_trace->local_peak_raw_delta - delta_mean)
+                : target_trace->local_peak_raw_score;
+            compute_thermal_spatial_probe_at_sample(
+                    sg_luma,
+                    sg_w,
+                    sg_h,
+                    target_trace->local_peak_raw_sx,
+                    target_trace->local_peak_raw_sy,
+                    sample_step,
+                    black_hot,
+                    &target_trace->local_peak_raw_spatial_abs_delta,
+                    &target_trace->local_peak_raw_spatial_std,
+                    &target_trace->local_peak_raw_spatial_score);
+        }
         for (int ny = target_trace->target_sy - 1; ny <= target_trace->target_sy + 1; ny++) {
             if (ny < 0 || ny >= sg_h) continue;
             for (int nx = target_trace->target_sx - 1; nx <= target_trace->target_sx + 1; nx++) {
@@ -4830,6 +5234,18 @@ static void extract_thermal_blob_candidates(
         if (!target_trace->local_max && target_trace->hot_eligible) {
             target_trace->stage = ANOMALY_THERMAL_TARGET_STAGE_SUPPRESSED_BY_NEIGHBOR;
         }
+        evaluate_thermal_micro_candidate_shadow(
+                thermal_score_map,
+                thermal_delta_map,
+                bg_luma,
+                sg_luma,
+                sg_w,
+                sg_h,
+                bg_valid,
+                black_hot,
+                thermal_min_delta,
+                thermal_value_map,
+                target_trace);
     }
 
     float contrast_band = frame_contrast_mean + 1.25f * frame_contrast_std;
@@ -4841,6 +5257,11 @@ static void extract_thermal_blob_candidates(
             if (visited[seed_idx] != 0u) continue;
             float seed_delta = thermal_value_map[seed_idx];
             if (seed_delta <= 0.0f) continue;
+            if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
+                target_trace->local_peak_raw_sx == sx &&
+                target_trace->local_peak_raw_sy == sy) {
+                target_trace->local_peak_is_component_seed = true;
+            }
             if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                 (int)seed_idx == target_trace->target_idx) {
                 target_trace->started_component = true;
@@ -5033,6 +5454,23 @@ static void extract_thermal_blob_candidates(
             }
 
             if (bg_valid && area > ANOMALY_THERMAL_MAX_BLOB_AREA_SAMPLES) {
+                record_thermal_target_rejected_component_probe(
+                        target_trace,
+                        ANOMALY_THERMAL_TARGET_GATE_MAX_AREA,
+                        sx,
+                        sy,
+                        peak_x,
+                        peak_y,
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        area,
+                        span,
+                        fill,
+                        peak_delta,
+                        mean_delta,
+                        0.0f);
                 if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                     target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
                     target_trace->component_rejected = true;
@@ -5042,6 +5480,23 @@ static void extract_thermal_blob_candidates(
                 continue;
             }
             if (bg_valid && ring_hot_fraction >= 0.22f) {
+                record_thermal_target_rejected_component_probe(
+                        target_trace,
+                        ANOMALY_THERMAL_TARGET_GATE_RING_HOT,
+                        sx,
+                        sy,
+                        peak_x,
+                        peak_y,
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        area,
+                        span,
+                        fill,
+                        peak_delta,
+                        mean_delta,
+                        0.0f);
                 if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                     target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
                     target_trace->component_rejected = true;
@@ -5051,6 +5506,23 @@ static void extract_thermal_blob_candidates(
                 continue;
             }
             if (bg_valid && max_side_hot_fraction >= 0.60f) {
+                record_thermal_target_rejected_component_probe(
+                        target_trace,
+                        ANOMALY_THERMAL_TARGET_GATE_SIDE_HOT,
+                        sx,
+                        sy,
+                        peak_x,
+                        peak_y,
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        area,
+                        span,
+                        fill,
+                        peak_delta,
+                        mean_delta,
+                        0.0f);
                 if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                     target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
                     target_trace->component_rejected = true;
@@ -5063,6 +5535,23 @@ static void extract_thermal_blob_candidates(
                 support_mass_ratio >= 1.85f &&
                 support_hot_fraction >= 0.14f &&
                 support_near_fraction >= 0.18f) {
+                record_thermal_target_rejected_component_probe(
+                        target_trace,
+                        ANOMALY_THERMAL_TARGET_GATE_SUPPORT_MASS,
+                        sx,
+                        sy,
+                        peak_x,
+                        peak_y,
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        area,
+                        span,
+                        fill,
+                        peak_delta,
+                        mean_delta,
+                        0.0f);
                 if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                     target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
                     target_trace->component_rejected = true;
@@ -5074,6 +5563,23 @@ static void extract_thermal_blob_candidates(
             if (bg_valid &&
                 support_mass_ratio >= 2.40f &&
                 support_near_fraction >= 0.12f) {
+                record_thermal_target_rejected_component_probe(
+                        target_trace,
+                        ANOMALY_THERMAL_TARGET_GATE_SUPPORT_NEAR,
+                        sx,
+                        sy,
+                        peak_x,
+                        peak_y,
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        area,
+                        span,
+                        fill,
+                        peak_delta,
+                        mean_delta,
+                        0.0f);
                 if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                     target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
                     target_trace->component_rejected = true;
@@ -5119,6 +5625,23 @@ static void extract_thermal_blob_candidates(
                 target_trace->component_quality = quality;
             }
             if (quality <= 0.0f) {
+                record_thermal_target_rejected_component_probe(
+                        target_trace,
+                        ANOMALY_THERMAL_TARGET_GATE_ZERO_QUALITY,
+                        sx,
+                        sy,
+                        peak_x,
+                        peak_y,
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        area,
+                        span,
+                        fill,
+                        peak_delta,
+                        mean_delta,
+                        quality);
                 if (target_trace != NULL && target_trace->enabled && target_trace->valid &&
                     target_trace->component_seed_x == sx && target_trace->component_seed_y == sy) {
                     target_trace->component_rejected = true;
@@ -5202,6 +5725,193 @@ static void extract_thermal_blob_candidates(
         target_trace->valid &&
         target_trace->stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED) {
         target_trace->extracted_rank = find_target_blob_rank(out_candidates, *out_count, target_trace);
+    }
+}
+
+static void evaluate_thermal_micro_candidate_shadow(
+        const float *thermal_score_map,
+        const float *thermal_delta_map,
+        const float *bg_luma,
+        const float *sg_luma,
+        int sg_w,
+        int sg_h,
+        bool bg_valid,
+        bool black_hot,
+        float thermal_min_delta,
+        const float *thermal_value_map,
+        anomaly_thermal_target_trace_t *target_trace) {
+    if (thermal_score_map == NULL || thermal_value_map == NULL ||
+        target_trace == NULL || !target_trace->enabled || !target_trace->valid ||
+        sg_w <= 0 || sg_h <= 0) {
+        return;
+    }
+
+    target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_NO_HOT_PEAK;
+    target_trace->micro_candidate_peak_sx = target_trace->local_peak_sx;
+    target_trace->micro_candidate_peak_sy = target_trace->local_peak_sy;
+    target_trace->micro_candidate_peak_delta = -1.0f;
+    target_trace->micro_candidate_peak_score = -1.0f;
+    target_trace->micro_candidate_prominence = -1.0f;
+    target_trace->micro_candidate_ring_mean = -1.0f;
+    target_trace->micro_candidate_ring_hot_fraction = -1.0f;
+    target_trace->micro_candidate_compactness = -1.0f;
+    target_trace->micro_candidate_centroid_dx = -9.0f;
+    target_trace->micro_candidate_centroid_dy = -9.0f;
+    target_trace->micro_candidate_centroid_offset = -1.0f;
+    target_trace->micro_candidate_one_sided_support = -1.0f;
+    target_trace->micro_candidate_distance_to_debug_target = -1.0f;
+
+    int peak_sx = target_trace->local_peak_sx;
+    int peak_sy = target_trace->local_peak_sy;
+    if (peak_sx < 0 || peak_sy < 0 || peak_sx >= sg_w || peak_sy >= sg_h) return;
+
+    size_t peak_idx = (size_t)peak_sy * (size_t)sg_w + (size_t)peak_sx;
+    float peak_value = thermal_value_map[peak_idx];
+    if (peak_value <= 0.0f) return;
+
+    float peak_delta = bg_valid
+        ? thermal_delta_from_maps(thermal_delta_map, bg_luma, sg_luma, peak_idx, black_hot)
+        : peak_value;
+    float peak_score = thermal_score_map[peak_idx];
+    target_trace->micro_candidate_peak_delta = peak_delta;
+    target_trace->micro_candidate_peak_score = peak_score;
+    target_trace->micro_candidate_distance_to_debug_target =
+        sqrtf((float)((peak_sx - target_trace->target_sx) * (peak_sx - target_trace->target_sx) +
+                      (peak_sy - target_trace->target_sy) * (peak_sy - target_trace->target_sy)));
+
+    if (target_trace->micro_candidate_distance_to_debug_target > 3.05f) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_TOO_FAR;
+        return;
+    }
+
+    bool strict_local_max = true;
+    for (int ny = peak_sy - 1; ny <= peak_sy + 1 && strict_local_max; ny++) {
+        if (ny < 0 || ny >= sg_h) continue;
+        for (int nx = peak_sx - 1; nx <= peak_sx + 1; nx++) {
+            if (nx < 0 || nx >= sg_w) continue;
+            if (nx == peak_sx && ny == peak_sy) continue;
+            size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+            float nvalue = thermal_value_map[nidx];
+            if (nvalue <= 0.0f) continue;
+            float ndelta = bg_valid
+                ? thermal_delta_from_maps(thermal_delta_map, bg_luma, sg_luma, nidx, black_hot)
+                : nvalue;
+            float nscore = thermal_score_map[nidx];
+            if (ndelta > peak_delta || (ndelta == peak_delta && nscore > peak_score)) {
+                strict_local_max = false;
+                break;
+            }
+        }
+    }
+
+    double core_sum = 0.0;
+    double weighted_dx_sum = 0.0;
+    double weighted_dy_sum = 0.0;
+    double weight_sum = 0.0;
+    int sample_count = 0;
+    int hot_count = 0;
+    for (int ny = peak_sy - 1; ny <= peak_sy + 1; ny++) {
+        if (ny < 0 || ny >= sg_h) continue;
+        for (int nx = peak_sx - 1; nx <= peak_sx + 1; nx++) {
+            if (nx < 0 || nx >= sg_w) continue;
+            size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+            float nvalue = thermal_value_map[nidx];
+            float ndelta = bg_valid
+                ? thermal_delta_from_maps(thermal_delta_map, bg_luma, sg_luma, nidx, black_hot)
+                : nvalue;
+            sample_count++;
+            if (nvalue > 0.0f) hot_count++;
+            if (ndelta > 0.0f) {
+                core_sum += (double)ndelta;
+                weight_sum += (double)ndelta;
+                weighted_dx_sum += (double)(nx - peak_sx) * (double)ndelta;
+                weighted_dy_sum += (double)(ny - peak_sy) * (double)ndelta;
+            }
+        }
+    }
+
+    double ring_sum = 0.0;
+    int ring_count = 0;
+    int ring_hot = 0;
+    int side_total[4] = {0, 0, 0, 0};
+    int side_hot[4] = {0, 0, 0, 0};
+    for (int ny = peak_sy - 2; ny <= peak_sy + 2; ny++) {
+        if (ny < 0 || ny >= sg_h) continue;
+        for (int nx = peak_sx - 2; nx <= peak_sx + 2; nx++) {
+            if (nx < 0 || nx >= sg_w) continue;
+            int dx = nx - peak_sx;
+            int dy = ny - peak_sy;
+            int cheb = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
+            if (cheb != 2) continue;
+            size_t nidx = (size_t)ny * (size_t)sg_w + (size_t)nx;
+            float nvalue = thermal_value_map[nidx];
+            float ndelta = bg_valid
+                ? thermal_delta_from_maps(thermal_delta_map, bg_luma, sg_luma, nidx, black_hot)
+                : nvalue;
+            ring_count++;
+            ring_sum += (double)ndelta;
+            bool is_hot = nvalue > 0.0f;
+            if (is_hot) ring_hot++;
+            if (dx < 0) {
+                side_total[0]++;
+                if (is_hot) side_hot[0]++;
+            }
+            if (dx > 0) {
+                side_total[1]++;
+                if (is_hot) side_hot[1]++;
+            }
+            if (dy < 0) {
+                side_total[2]++;
+                if (is_hot) side_hot[2]++;
+            }
+            if (dy > 0) {
+                side_total[3]++;
+                if (is_hot) side_hot[3]++;
+            }
+        }
+    }
+
+    float ring_mean = ring_count > 0 ? (float)(ring_sum / (double)ring_count) : 0.0f;
+    float ring_hot_fraction = ring_count > 0 ? ((float)ring_hot / (float)ring_count) : 0.0f;
+    float compactness = core_sum > 0.0 ? peak_delta / (float)core_sum : 0.0f;
+    float centroid_dx = weight_sum > 0.0 ? (float)(weighted_dx_sum / weight_sum) : 0.0f;
+    float centroid_dy = weight_sum > 0.0 ? (float)(weighted_dy_sum / weight_sum) : 0.0f;
+    float centroid_offset = sqrtf(centroid_dx * centroid_dx + centroid_dy * centroid_dy);
+    float one_sided_support = 0.0f;
+    for (int si = 0; si < 4; si++) {
+        if (side_total[si] <= 0) continue;
+        float side_fraction = (float)side_hot[si] / (float)side_total[si];
+        if (side_fraction > one_sided_support) one_sided_support = side_fraction;
+    }
+
+    target_trace->micro_candidate_hot_count = hot_count;
+    target_trace->micro_candidate_sample_count = sample_count;
+    target_trace->micro_candidate_prominence = peak_delta - ring_mean;
+    target_trace->micro_candidate_ring_mean = ring_mean;
+    target_trace->micro_candidate_ring_hot_fraction = ring_hot_fraction;
+    target_trace->micro_candidate_compactness = compactness;
+    target_trace->micro_candidate_centroid_dx = centroid_dx;
+    target_trace->micro_candidate_centroid_dy = centroid_dy;
+    target_trace->micro_candidate_centroid_offset = centroid_offset;
+    target_trace->micro_candidate_one_sided_support = one_sided_support;
+
+    if (!strict_local_max) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_NOT_LOCAL_MAX;
+    } else if (target_trace->micro_candidate_prominence < fmaxf(1.4f, 0.25f * thermal_min_delta)) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_WEAK_PROMINENCE;
+    } else if (ring_hot_fraction > 0.30f) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_RING_HOT;
+    } else if (hot_count <= 0 || hot_count > 6) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_TOO_MANY_HOT;
+    } else if (compactness < 0.22f) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_LOW_COMPACTNESS;
+    } else if (one_sided_support > 0.62f) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_EDGE_LIKE;
+    } else if (centroid_offset > 0.95f) {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_CENTROID_DRIFT;
+    } else {
+        target_trace->micro_candidate_reject_reason = ANOMALY_THERMAL_MICRO_REJECT_NONE;
+        target_trace->micro_candidate_would_create = true;
     }
 }
 
@@ -10638,6 +11348,158 @@ static bool query_movement_snapshot_at_norm(
     return query_movement_tile_at_norm(snapshot->movement, x_norm, y_norm, tile_out);
 }
 
+static bool movement_tile_is_parallax_like(const anomaly_debug_movement_tile_t *tile) {
+    if (tile == NULL || !tile->valid) return false;
+    return tile->layer_class == ANOMALY_MOVEMENT_LAYER_BACKGROUND ||
+           tile->layer_class == ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR;
+}
+
+static bool movement_tile_is_independent(const anomaly_debug_movement_tile_t *tile,
+                                         float independent_score) {
+    if (tile == NULL || !tile->valid) return false;
+    return tile->layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER &&
+           independent_score >= 0.50f;
+}
+
+static float thermal_shadow_raw_delta_rescue_score(
+        float peak_delta,
+        float mean_delta,
+        float area,
+        float span,
+        float fill,
+        float quality,
+        float final_score,
+        float threshold,
+        float thermal_min_delta,
+        float delta_norm,
+        float movement_independent_score,
+        bool  movement_independent,
+        bool  near_tracked_target) {
+    float raw_rank = clampf((peak_delta - thermal_min_delta) / fmaxf(delta_norm * 1.35f, 1.0f), 0.0f, 1.0f);
+    float mean_rank = clampf((mean_delta - thermal_min_delta) / fmaxf(delta_norm * 1.15f, 1.0f), 0.0f, 1.0f);
+    float area_rank = area <= 0.0f ? 0.0f
+        : (area <= 1.0f ? 1.0f
+        : (area <= 4.0f ? 0.82f
+        : (area <= 6.0f ? 0.45f : 0.0f)));
+    float span_rank = span <= 0.0f ? 0.0f
+        : (span <= 1.0f ? 1.0f
+        : (span <= 3.0f ? 0.82f
+        : (span <= 5.0f ? 0.46f : 0.0f)));
+    float fill_rank = clampf((fill - 0.18f) / 0.62f, 0.0f, 1.0f);
+    float quality_rank = clampf(quality / 1.10f, 0.0f, 1.0f);
+    float score_gap_rank = clampf((threshold - final_score) / 2.0f, 0.0f, 1.0f);
+    float movement_rank = movement_independent ? fmaxf(movement_independent_score, 0.50f)
+                                               : movement_independent_score * 0.35f;
+    float track_rank = near_tracked_target ? 1.0f : 0.0f;
+    return clampf(
+        0.24f * raw_rank +
+        0.10f * mean_rank +
+        0.16f * area_rank +
+        0.12f * span_rank +
+        0.08f * fill_rank +
+        0.10f * quality_rank +
+        0.14f * movement_rank +
+        0.10f * track_rank +
+        0.06f * score_gap_rank,
+        0.0f,
+        1.0f);
+}
+
+static bool thermal_shadow_raw_delta_rescue_eligible(
+        float peak_delta,
+        float area,
+        float span,
+        float quality,
+        float final_score,
+        float threshold,
+        float thermal_min_delta,
+        bool movement_independent) {
+    return final_score < threshold &&
+           peak_delta >= fmaxf(thermal_min_delta + 1.0f, thermal_min_delta * 1.25f) &&
+           area > 0.0f && area <= 4.0f &&
+           span > 0.0f && span <= 3.0f &&
+           quality >= 0.25f &&
+	           movement_independent;
+}
+
+static float nearest_motion_candidate_support_norm(
+        const float *support,
+        const int   *support_x,
+        const int   *support_y,
+        int          count,
+        int          frame_w,
+        int          frame_h,
+        float        x_norm,
+        float        y_norm,
+        float        max_dist_norm) {
+    if (support == NULL || support_x == NULL || support_y == NULL ||
+        count <= 0 || frame_w <= 0 || frame_h <= 0) {
+        return -1.0f;
+    }
+    float best = -1.0f;
+    float fw = fmaxf((float)frame_w, 1.0f);
+    float fh = fmaxf((float)frame_h, 1.0f);
+    float max_dist2 = max_dist_norm * max_dist_norm;
+    for (int i = 0; i < count; i++) {
+        if (support[i] <= 0.0f) continue;
+        float cx = (float)support_x[i] / fw;
+        float cy = (float)support_y[i] / fh;
+        float dx = cx - x_norm;
+        float dy = cy - y_norm;
+        if ((dx * dx + dy * dy) > max_dist2) continue;
+        if (support[i] > best) best = support[i];
+    }
+    return best;
+}
+
+static anomaly_debug_movement_shadow_reject_t thermal_target_movement_shadow_reason(
+        const anomaly_thermal_target_trace_t *trace,
+        const anomaly_config_t               *cfg,
+        float                                 thermal_min_delta) {
+    if (trace == NULL || cfg == NULL) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOVEMENT_TILE;
+    }
+    if (!trace->local_peak_movement_tile_valid) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOVEMENT_TILE;
+    }
+    float motion_support = fmaxf(trace->movement_motion_support,
+                                 trace->local_peak_movement_motion_support);
+    if (motion_support < 1.0f) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_NO_MOTION_SUPPORT;
+    }
+    float spatial_score = fmaxf(trace->target_spatial_score,
+                                trace->local_peak_raw_spatial_score);
+    if (spatial_score < cfg->score_threshold) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_WEAK_THERMAL;
+    }
+    if (trace->micro_candidate_ring_hot_fraction < 0.0f ||
+        trace->micro_candidate_compactness < 0.0f ||
+        trace->micro_candidate_one_sided_support < 0.0f) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_NO_LOCAL_SHAPE;
+    }
+    if (trace->micro_candidate_ring_hot_fraction > 0.25f) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_RING_HOT;
+    }
+    if (trace->local_window_raw_delta_mean > 10.0f) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_LOCAL_MEAN_HOT;
+    }
+    if (trace->micro_candidate_hot_count > 10 ||
+        trace->local_window_hot_count > 10) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_TOO_MANY_HOT;
+    }
+    if (trace->micro_candidate_compactness >= 0.0f &&
+        trace->micro_candidate_compactness < 0.40f) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_LOW_COMPACTNESS;
+    }
+    if (trace->micro_candidate_one_sided_support > 0.60f) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_EDGE_LIKE;
+    }
+    if (trace->micro_candidate_centroid_offset > 3.0f) {
+        return ANOMALY_MOVEMENT_SHADOW_REJECT_CENTROID_DRIFT;
+    }
+    return ANOMALY_MOVEMENT_SHADOW_REJECT_NONE;
+}
+
 static void summarize_roi_cells(
         anomaly_roi_state_t          *roi_state,
         const float                  *motion_support_map,
@@ -13616,12 +14478,28 @@ int anomaly_process_frame(
     int motion_candidate_support_y[ANOMALY_MAX_MOTION_CANDIDATES];
     anomaly_thermal_target_trace_t thermal_target_trace;
     memset(&thermal_target_trace, 0, sizeof(thermal_target_trace));
+    thermal_target_trace.local_peak_radius = 3;
+    thermal_target_trace.local_peak_sx = -1;
+    thermal_target_trace.local_peak_sy = -1;
+    thermal_target_trace.local_peak_delta = -1.0f;
+    thermal_target_trace.local_peak_score = -1.0f;
+    thermal_target_trace.local_peak_distance = -1.0f;
     thermal_target_trace.suppressor_sx = -1;
     thermal_target_trace.suppressor_sy = -1;
     thermal_target_trace.component_seed_x = -1;
     thermal_target_trace.component_seed_y = -1;
     thermal_target_trace.component_peak_x = -1;
     thermal_target_trace.component_peak_y = -1;
+    thermal_target_trace.nearby_rejected_component_gate = ANOMALY_THERMAL_TARGET_GATE_NONE;
+    thermal_target_trace.nearby_rejected_component_seed_x = -1;
+    thermal_target_trace.nearby_rejected_component_seed_y = -1;
+    thermal_target_trace.nearby_rejected_component_peak_x = -1;
+    thermal_target_trace.nearby_rejected_component_peak_y = -1;
+    thermal_target_trace.nearby_rejected_component_distance = -1.0f;
+    thermal_target_trace.pre_cap_rank = -1;
+    thermal_target_trace.pre_cap_candidate_count = -1;
+    thermal_target_trace.pre_cap_limit = ANOMALY_MAX_THERMAL_CANDIDATES;
+    thermal_target_trace.pre_cap_retention_rank = -1.0f;
     thermal_target_trace.extracted_rank = -1;
     thermal_target_trace.winning_rank = -1;
     thermal_target_trace.provisional_candidate_index = -1;
@@ -13635,6 +14513,7 @@ int anomaly_process_frame(
     thermal_target_trace.matched_track_hit_count = -1;
     thermal_target_trace.matched_track_miss_count = -1;
     thermal_target_trace.matched_track_hold_count = -1;
+    thermal_target_trace.movement_layer_class = ANOMALY_MOVEMENT_LAYER_UNKNOWN;
     for (int i = 0; i < ANOMALY_MAX_THERMAL_CANDIDATES; i++) {
         thermal_candidate_area[i] = 0.0f;
         thermal_candidate_span[i] = 0.0f;
@@ -13837,6 +14716,8 @@ int anomaly_process_frame(
                     bg_valid,
                     black_hot != 0,
                     thermal_min_delta,
+                    delta_mean,
+                    delta_norm,
                     frame_blob_contrast_mean,
                     frame_blob_contrast_std,
                     thermal_visited,
@@ -14905,7 +15786,11 @@ int anomaly_process_frame(
         raw_cx[0] = (float)best_color_x   / fw;
         raw_cy[0] = (float)best_color_y   / fh;
     }
-    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) && best_thermal >= cfg->score_threshold) {
+    bool thermal_raw_publishable = best_thermal >= cfg->score_threshold;
+    if (thermal_candidate_count > 0 && best_thermal_candidate_idx < 0) {
+        thermal_raw_publishable = false;
+    }
+    if (anomaly_detection_active && (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) && thermal_raw_publishable) {
         raw_cx[1] = (float)best_thermal_x / fw;
         raw_cy[1] = (float)best_thermal_y / fh;
     }
@@ -15560,6 +16445,86 @@ int anomaly_process_frame(
             target_observation_count,
             registration_health);
     if (thermal_target_trace.enabled && thermal_target_trace.valid) {
+        anomaly_debug_movement_tile_t target_tile;
+        if (query_movement_snapshot_at_norm(
+                &movement_snapshot,
+                thermal_target_trace.target_x_norm,
+                thermal_target_trace.target_y_norm,
+                &target_tile)) {
+            thermal_target_trace.movement_tile_valid = true;
+            thermal_target_trace.movement_residual_px = target_tile.residual_px;
+            thermal_target_trace.movement_independent_score =
+                movement_tile_independent_score(&target_tile);
+            thermal_target_trace.movement_confidence = target_tile.confidence;
+            thermal_target_trace.movement_layer_class = target_tile.layer_class;
+            thermal_target_trace.movement_independent =
+                movement_tile_is_independent(
+                        &target_tile,
+                        thermal_target_trace.movement_independent_score);
+            thermal_target_trace.movement_parallax =
+                movement_tile_is_parallax_like(&target_tile);
+        }
+        if (thermal_target_trace.target_sx >= 0 &&
+            thermal_target_trace.target_sy >= 0 &&
+            thermal_target_trace.target_sx < sg_w &&
+            thermal_target_trace.target_sy < sg_h) {
+            thermal_target_trace.movement_motion_support =
+                nearest_motion_candidate_support_norm(
+                        motion_candidate_support,
+                        motion_candidate_support_x,
+                        motion_candidate_support_y,
+                        motion_candidate_count,
+                        width,
+                        height,
+                        thermal_target_trace.target_x_norm,
+                        thermal_target_trace.target_y_norm,
+                        0.045f);
+        }
+        if (thermal_target_trace.local_peak_raw_sx >= 0 &&
+            thermal_target_trace.local_peak_raw_sy >= 0) {
+            float local_peak_x_norm =
+                (float)(roi_x0 + thermal_target_trace.local_peak_raw_sx * sample_step) /
+                fmaxf((float)fw, 1.0f);
+            float local_peak_y_norm =
+                (float)(roi_y0 + thermal_target_trace.local_peak_raw_sy * sample_step) /
+                fmaxf((float)fh, 1.0f);
+            anomaly_debug_movement_tile_t local_peak_tile;
+            if (query_movement_snapshot_at_norm(
+                    &movement_snapshot,
+                    local_peak_x_norm,
+                    local_peak_y_norm,
+                    &local_peak_tile)) {
+                thermal_target_trace.local_peak_movement_tile_valid = true;
+                thermal_target_trace.local_peak_movement_residual_px =
+                    local_peak_tile.residual_px;
+                thermal_target_trace.local_peak_movement_independent_score =
+                    movement_tile_independent_score(&local_peak_tile);
+                thermal_target_trace.local_peak_movement_confidence =
+                    local_peak_tile.confidence;
+                thermal_target_trace.local_peak_movement_layer_class =
+                    local_peak_tile.layer_class;
+                thermal_target_trace.local_peak_movement_independent =
+                    movement_tile_is_independent(
+                            &local_peak_tile,
+                            thermal_target_trace.local_peak_movement_independent_score);
+                thermal_target_trace.local_peak_movement_parallax =
+                    movement_tile_is_parallax_like(&local_peak_tile);
+            }
+            if (thermal_target_trace.local_peak_raw_sx < sg_w &&
+                thermal_target_trace.local_peak_raw_sy < sg_h) {
+                thermal_target_trace.local_peak_movement_motion_support =
+                    nearest_motion_candidate_support_norm(
+                            motion_candidate_support,
+                            motion_candidate_support_x,
+                            motion_candidate_support_y,
+                            motion_candidate_count,
+                            width,
+                            height,
+                            local_peak_x_norm,
+                            local_peak_y_norm,
+                            0.045f);
+            }
+        }
         float best_dist = 1.0e9f;
         int best_track_idx = -1;
         for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
@@ -15584,6 +16549,80 @@ int anomaly_process_frame(
             thermal_target_trace.matched_track_hold_count = track->hold_count;
             thermal_target_trace.matched_track_publish_confirmed = track->publish_confirmed;
         }
+        thermal_target_trace.raw_delta_rescue_score =
+            thermal_shadow_raw_delta_rescue_score(
+                    thermal_target_trace.component_peak_delta,
+                    thermal_target_trace.component_mean_delta,
+                    thermal_target_trace.component_area,
+                    thermal_target_trace.component_span,
+                    thermal_target_trace.component_fill,
+                    thermal_target_trace.component_quality,
+                    thermal_target_trace.provisional_final_score >= 0.0f
+                        ? thermal_target_trace.provisional_final_score
+                        : thermal_target_trace.target_score,
+                    cfg->score_threshold,
+                    thermal_min_delta,
+                    delta_norm,
+                    thermal_target_trace.movement_independent_score,
+                    thermal_target_trace.movement_independent,
+                    thermal_target_trace.matched_track_index >= 0);
+        thermal_target_trace.raw_delta_rescue_eligible =
+            thermal_shadow_raw_delta_rescue_eligible(
+                    thermal_target_trace.component_peak_delta,
+                    thermal_target_trace.component_area,
+                    thermal_target_trace.component_span,
+                    thermal_target_trace.component_quality,
+                    thermal_target_trace.provisional_final_score >= 0.0f
+                        ? thermal_target_trace.provisional_final_score
+                        : thermal_target_trace.target_score,
+                    cfg->score_threshold,
+                    thermal_min_delta,
+                    thermal_target_trace.movement_independent);
+        thermal_target_trace.would_promote_movement_rescue =
+            thermal_target_trace.raw_delta_rescue_eligible &&
+            thermal_target_trace.raw_delta_rescue_score >= 0.62f;
+        thermal_target_trace.movement_rescue_reject_reason =
+            thermal_target_movement_shadow_reason(
+                    &thermal_target_trace,
+                    cfg,
+                    thermal_min_delta);
+        float movement_shadow_motion_score =
+            fmaxf(thermal_target_trace.movement_motion_support,
+                  thermal_target_trace.local_peak_movement_motion_support);
+        float movement_shadow_spatial_score =
+            fmaxf(thermal_target_trace.target_spatial_score,
+                  thermal_target_trace.local_peak_raw_spatial_score);
+        thermal_target_trace.movement_shadow_motion_support =
+            movement_shadow_motion_score >= 1.0f;
+        thermal_target_trace.movement_shadow_parallax_penalty =
+            thermal_target_trace.local_peak_movement_parallax &&
+            !thermal_target_trace.local_peak_movement_independent;
+        thermal_target_trace.movement_shadow_thermal_support =
+            movement_shadow_spatial_score >= cfg->score_threshold;
+        thermal_target_trace.movement_shadow_clutter_veto =
+            thermal_target_trace.micro_candidate_ring_hot_fraction > 0.25f ||
+            thermal_target_trace.local_window_raw_delta_mean > 10.0f ||
+            thermal_target_trace.micro_candidate_hot_count > 10 ||
+            thermal_target_trace.local_window_hot_count > 10 ||
+            thermal_target_trace.micro_candidate_ring_hot_fraction < 0.0f ||
+            thermal_target_trace.micro_candidate_compactness < 0.0f ||
+            thermal_target_trace.micro_candidate_one_sided_support < 0.0f ||
+            (thermal_target_trace.micro_candidate_compactness >= 0.0f &&
+             thermal_target_trace.micro_candidate_compactness < 0.40f) ||
+            thermal_target_trace.micro_candidate_one_sided_support > 0.60f ||
+            thermal_target_trace.micro_candidate_centroid_offset > 3.0f;
+        bool movement_shadow_pass =
+            thermal_target_trace.movement_rescue_reject_reason ==
+            ANOMALY_MOVEMENT_SHADOW_REJECT_NONE;
+        bool target_already_publishable =
+            thermal_target_trace.provisional_final_score >= cfg->score_threshold ||
+            thermal_target_trace.target_score >= cfg->score_threshold;
+        thermal_target_trace.movement_rescue_would_publish =
+            movement_shadow_pass && !target_already_publishable;
+        thermal_target_trace.movement_boost_would_publish =
+            movement_shadow_pass &&
+            !thermal_target_trace.movement_rescue_would_publish &&
+            !thermal_target_trace.matched_track_publish_confirmed;
     }
     if (cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE) {
         bool target_rich_full_scan =
@@ -15787,6 +16826,10 @@ int anomaly_process_frame(
             ? ((float)best_thermal_x / fw) : 0.0f;
         result_out->thermal_debug.raw_y_norm = (best_thermal_x > 0 || best_thermal_y > 0)
             ? ((float)best_thermal_y / fh) : 0.0f;
+        result_out->thermal_debug.frame_delta_mean = delta_mean;
+        result_out->thermal_debug.frame_delta_norm = delta_norm;
+        result_out->thermal_debug.frame_blob_contrast_mean = frame_blob_contrast_mean;
+        result_out->thermal_debug.frame_blob_contrast_std = frame_blob_contrast_std;
         result_out->thermal_debug.winning_candidate_index = best_thermal_candidate_idx;
         result_out->thermal_debug.candidate_count = thermal_candidate_count;
         memset(&result_out->thermal_debug.target, 0, sizeof(result_out->thermal_debug.target));
@@ -15801,9 +16844,86 @@ int anomaly_process_frame(
         result_out->thermal_debug.target.y_norm = thermal_target_trace.target_y_norm;
         result_out->thermal_debug.target.target_delta = thermal_target_trace.target_delta;
         result_out->thermal_debug.target.target_score = thermal_target_trace.target_score;
+        result_out->thermal_debug.target.target_raw_delta = thermal_target_trace.target_raw_delta;
+        result_out->thermal_debug.target.target_raw_score = thermal_target_trace.target_raw_score;
+        result_out->thermal_debug.target.target_temporal_margin =
+            thermal_target_trace.target_temporal_margin;
+        result_out->thermal_debug.target.target_spatial_abs_delta =
+            thermal_target_trace.target_spatial_abs_delta;
+        result_out->thermal_debug.target.target_spatial_std =
+            thermal_target_trace.target_spatial_std;
+        result_out->thermal_debug.target.target_spatial_score =
+            thermal_target_trace.target_spatial_score;
         result_out->thermal_debug.target.hot_eligible = thermal_target_trace.hot_eligible;
         result_out->thermal_debug.target.started_component = thermal_target_trace.started_component;
         result_out->thermal_debug.target.local_max = thermal_target_trace.local_max;
+        result_out->thermal_debug.target.local_peak_radius = thermal_target_trace.local_peak_radius;
+        result_out->thermal_debug.target.local_peak_sample_x = thermal_target_trace.local_peak_sx;
+        result_out->thermal_debug.target.local_peak_sample_y = thermal_target_trace.local_peak_sy;
+        result_out->thermal_debug.target.local_peak_delta = thermal_target_trace.local_peak_delta;
+        result_out->thermal_debug.target.local_peak_score = thermal_target_trace.local_peak_score;
+        result_out->thermal_debug.target.local_peak_distance = thermal_target_trace.local_peak_distance;
+        result_out->thermal_debug.target.local_peak_raw_sample_x = thermal_target_trace.local_peak_raw_sx;
+        result_out->thermal_debug.target.local_peak_raw_sample_y = thermal_target_trace.local_peak_raw_sy;
+        result_out->thermal_debug.target.local_peak_raw_delta = thermal_target_trace.local_peak_raw_delta;
+        result_out->thermal_debug.target.local_peak_raw_score = thermal_target_trace.local_peak_raw_score;
+        result_out->thermal_debug.target.local_peak_raw_distance = thermal_target_trace.local_peak_raw_distance;
+        result_out->thermal_debug.target.local_peak_raw_temporal_margin =
+            thermal_target_trace.local_peak_raw_temporal_margin;
+        result_out->thermal_debug.target.local_peak_raw_spatial_abs_delta =
+            thermal_target_trace.local_peak_raw_spatial_abs_delta;
+        result_out->thermal_debug.target.local_peak_raw_spatial_std =
+            thermal_target_trace.local_peak_raw_spatial_std;
+        result_out->thermal_debug.target.local_peak_raw_spatial_score =
+            thermal_target_trace.local_peak_raw_spatial_score;
+        result_out->thermal_debug.target.local_peak_is_component_seed =
+            thermal_target_trace.local_peak_is_component_seed;
+        result_out->thermal_debug.target.local_window_sample_count =
+            thermal_target_trace.local_window_sample_count;
+        result_out->thermal_debug.target.local_window_hot_count =
+            thermal_target_trace.local_window_hot_count;
+        result_out->thermal_debug.target.local_window_raw_delta_sum =
+            thermal_target_trace.local_window_raw_delta_sum;
+        result_out->thermal_debug.target.local_window_raw_delta_mean =
+            thermal_target_trace.local_window_raw_delta_mean;
+        result_out->thermal_debug.target.local_window_weighted_centroid_dx =
+            thermal_target_trace.local_window_weighted_centroid_dx;
+        result_out->thermal_debug.target.local_window_weighted_centroid_dy =
+            thermal_target_trace.local_window_weighted_centroid_dy;
+        result_out->thermal_debug.target.micro_candidate_would_create =
+            thermal_target_trace.micro_candidate_would_create;
+        result_out->thermal_debug.target.micro_candidate_reject_reason =
+            thermal_target_trace.micro_candidate_reject_reason;
+        result_out->thermal_debug.target.micro_candidate_peak_sample_x =
+            thermal_target_trace.micro_candidate_peak_sx;
+        result_out->thermal_debug.target.micro_candidate_peak_sample_y =
+            thermal_target_trace.micro_candidate_peak_sy;
+        result_out->thermal_debug.target.micro_candidate_peak_delta =
+            thermal_target_trace.micro_candidate_peak_delta;
+        result_out->thermal_debug.target.micro_candidate_peak_score =
+            thermal_target_trace.micro_candidate_peak_score;
+        result_out->thermal_debug.target.micro_candidate_prominence =
+            thermal_target_trace.micro_candidate_prominence;
+        result_out->thermal_debug.target.micro_candidate_ring_mean =
+            thermal_target_trace.micro_candidate_ring_mean;
+        result_out->thermal_debug.target.micro_candidate_ring_hot_fraction =
+            thermal_target_trace.micro_candidate_ring_hot_fraction;
+        result_out->thermal_debug.target.micro_candidate_hot_count =
+            thermal_target_trace.micro_candidate_hot_count;
+        result_out->thermal_debug.target.micro_candidate_sample_count =
+            thermal_target_trace.micro_candidate_sample_count;
+        result_out->thermal_debug.target.micro_candidate_compactness =
+            thermal_target_trace.micro_candidate_compactness;
+        result_out->thermal_debug.target.micro_candidate_centroid_dx =
+            thermal_target_trace.micro_candidate_centroid_dx;
+        result_out->thermal_debug.target.micro_candidate_centroid_dy =
+            thermal_target_trace.micro_candidate_centroid_dy;
+        result_out->thermal_debug.target.micro_candidate_centroid_offset =
+            thermal_target_trace.micro_candidate_centroid_offset;
+        result_out->thermal_debug.target.micro_candidate_one_sided_support =
+            thermal_target_trace.micro_candidate_one_sided_support;
+        result_out->thermal_debug.target.micro_candidate_distance_to_debug_target =
+            thermal_target_trace.micro_candidate_distance_to_debug_target;
         result_out->thermal_debug.target.suppressor_sample_x = thermal_target_trace.suppressor_sx;
         result_out->thermal_debug.target.suppressor_sample_y = thermal_target_trace.suppressor_sy;
         result_out->thermal_debug.target.suppressor_delta = thermal_target_trace.suppressor_delta;
@@ -15820,12 +16940,46 @@ int anomaly_process_frame(
         result_out->thermal_debug.target.component_quality = thermal_target_trace.component_quality;
         result_out->thermal_debug.target.component_rejected = thermal_target_trace.component_rejected;
         result_out->thermal_debug.target.rejection_gate = thermal_target_trace.rejection_gate;
+        result_out->thermal_debug.target.nearby_rejected_component_valid =
+            thermal_target_trace.nearby_rejected_component_valid;
+        result_out->thermal_debug.target.nearby_rejected_component_contains_target =
+            thermal_target_trace.nearby_rejected_component_contains_target;
+        result_out->thermal_debug.target.nearby_rejected_component_gate =
+            thermal_target_trace.nearby_rejected_component_gate;
+        result_out->thermal_debug.target.nearby_rejected_component_seed_x =
+            thermal_target_trace.nearby_rejected_component_seed_x;
+        result_out->thermal_debug.target.nearby_rejected_component_seed_y =
+            thermal_target_trace.nearby_rejected_component_seed_y;
+        result_out->thermal_debug.target.nearby_rejected_component_peak_x =
+            thermal_target_trace.nearby_rejected_component_peak_x;
+        result_out->thermal_debug.target.nearby_rejected_component_peak_y =
+            thermal_target_trace.nearby_rejected_component_peak_y;
+        result_out->thermal_debug.target.nearby_rejected_component_area =
+            thermal_target_trace.nearby_rejected_component_area;
+        result_out->thermal_debug.target.nearby_rejected_component_span =
+            thermal_target_trace.nearby_rejected_component_span;
+        result_out->thermal_debug.target.nearby_rejected_component_fill =
+            thermal_target_trace.nearby_rejected_component_fill;
+        result_out->thermal_debug.target.nearby_rejected_component_peak_delta =
+            thermal_target_trace.nearby_rejected_component_peak_delta;
+        result_out->thermal_debug.target.nearby_rejected_component_mean_delta =
+            thermal_target_trace.nearby_rejected_component_mean_delta;
+        result_out->thermal_debug.target.nearby_rejected_component_quality =
+            thermal_target_trace.nearby_rejected_component_quality;
+        result_out->thermal_debug.target.nearby_rejected_component_distance =
+            thermal_target_trace.nearby_rejected_component_distance;
         result_out->thermal_debug.target.dropped_by_cap = thermal_target_trace.dropped_by_cap;
         result_out->thermal_debug.target.dropped_by_nms = thermal_target_trace.dropped_by_nms;
         result_out->thermal_debug.target.replaced_by_nms = thermal_target_trace.replaced_by_nms;
         result_out->thermal_debug.target.nms_conflict_rank = thermal_target_trace.nms_conflict_rank;
         result_out->thermal_debug.target.nms_conflict_sample_x = thermal_target_trace.nms_conflict_sample_x;
         result_out->thermal_debug.target.nms_conflict_sample_y = thermal_target_trace.nms_conflict_sample_y;
+        result_out->thermal_debug.target.pre_cap_rank = thermal_target_trace.pre_cap_rank;
+        result_out->thermal_debug.target.pre_cap_candidate_count =
+            thermal_target_trace.pre_cap_candidate_count;
+        result_out->thermal_debug.target.pre_cap_limit = thermal_target_trace.pre_cap_limit;
+        result_out->thermal_debug.target.pre_cap_retention_rank =
+            thermal_target_trace.pre_cap_retention_rank;
         result_out->thermal_debug.target.extracted_rank = thermal_target_trace.extracted_rank;
         result_out->thermal_debug.target.winning_rank = thermal_target_trace.winning_rank;
         result_out->thermal_debug.target.provisional_candidate_index =
@@ -15846,6 +17000,58 @@ int anomaly_process_frame(
             thermal_target_trace.provisional_selected_score;
         result_out->thermal_debug.target.provisional_near_existing_skip =
             thermal_target_trace.provisional_near_existing_skip;
+        result_out->thermal_debug.target.raw_delta_rescue_score =
+            thermal_target_trace.raw_delta_rescue_score;
+        result_out->thermal_debug.target.movement_residual_px =
+            thermal_target_trace.movement_residual_px;
+        result_out->thermal_debug.target.movement_independent_score =
+            thermal_target_trace.movement_independent_score;
+        result_out->thermal_debug.target.movement_confidence =
+            thermal_target_trace.movement_confidence;
+        result_out->thermal_debug.target.movement_motion_support =
+            thermal_target_trace.movement_motion_support;
+        result_out->thermal_debug.target.movement_layer_class =
+            thermal_target_trace.movement_layer_class;
+        result_out->thermal_debug.target.local_peak_movement_residual_px =
+            thermal_target_trace.local_peak_movement_residual_px;
+        result_out->thermal_debug.target.local_peak_movement_independent_score =
+            thermal_target_trace.local_peak_movement_independent_score;
+        result_out->thermal_debug.target.local_peak_movement_confidence =
+            thermal_target_trace.local_peak_movement_confidence;
+        result_out->thermal_debug.target.local_peak_movement_motion_support =
+            thermal_target_trace.local_peak_movement_motion_support;
+        result_out->thermal_debug.target.local_peak_movement_layer_class =
+            thermal_target_trace.local_peak_movement_layer_class;
+        result_out->thermal_debug.target.raw_delta_rescue_eligible =
+            thermal_target_trace.raw_delta_rescue_eligible;
+        result_out->thermal_debug.target.movement_tile_valid =
+            thermal_target_trace.movement_tile_valid;
+        result_out->thermal_debug.target.movement_independent =
+            thermal_target_trace.movement_independent;
+        result_out->thermal_debug.target.movement_parallax =
+            thermal_target_trace.movement_parallax;
+        result_out->thermal_debug.target.would_promote_movement_rescue =
+            thermal_target_trace.would_promote_movement_rescue;
+        result_out->thermal_debug.target.local_peak_movement_tile_valid =
+            thermal_target_trace.local_peak_movement_tile_valid;
+        result_out->thermal_debug.target.local_peak_movement_independent =
+            thermal_target_trace.local_peak_movement_independent;
+        result_out->thermal_debug.target.local_peak_movement_parallax =
+            thermal_target_trace.local_peak_movement_parallax;
+        result_out->thermal_debug.target.movement_shadow_motion_support =
+            thermal_target_trace.movement_shadow_motion_support;
+        result_out->thermal_debug.target.movement_shadow_parallax_penalty =
+            thermal_target_trace.movement_shadow_parallax_penalty;
+        result_out->thermal_debug.target.movement_shadow_thermal_support =
+            thermal_target_trace.movement_shadow_thermal_support;
+        result_out->thermal_debug.target.movement_shadow_clutter_veto =
+            thermal_target_trace.movement_shadow_clutter_veto;
+        result_out->thermal_debug.target.movement_rescue_would_publish =
+            thermal_target_trace.movement_rescue_would_publish;
+        result_out->thermal_debug.target.movement_boost_would_publish =
+            thermal_target_trace.movement_boost_would_publish;
+        result_out->thermal_debug.target.movement_rescue_reject_reason =
+            thermal_target_trace.movement_rescue_reject_reason;
         result_out->thermal_debug.target.matched_track_index =
             thermal_target_trace.matched_track_index;
         result_out->thermal_debug.target.matched_track_id =
@@ -15895,6 +17101,89 @@ int anomaly_process_frame(
             dbg->motion_support = thermal_candidate_motion_support[i];
             dbg->singleton_score_scale = thermal_candidate_singleton_score_scale[i];
             dbg->retention_rank = thermal_candidate_retention_rank_debug[i];
+            dbg->movement_layer_class = ANOMALY_MOVEMENT_LAYER_UNKNOWN;
+            dbg->nearest_track_index = -1;
+            dbg->nearest_track_id = -1;
+            dbg->nearest_track_hit_count = -1;
+            float cand_x_norm = dbg->x_norm;
+            float cand_y_norm = dbg->y_norm;
+            anomaly_debug_movement_tile_t cand_tile;
+            if (query_movement_snapshot_at_norm(
+                    &movement_snapshot,
+                    cand_x_norm,
+                    cand_y_norm,
+                    &cand_tile)) {
+                dbg->movement_tile_valid = true;
+                dbg->movement_residual_px = cand_tile.residual_px;
+                dbg->movement_independent_score =
+                    movement_tile_independent_score(&cand_tile);
+                dbg->movement_confidence = cand_tile.confidence;
+                dbg->movement_layer_class = cand_tile.layer_class;
+                dbg->movement_independent =
+                    movement_tile_is_independent(
+                            &cand_tile,
+                            dbg->movement_independent_score);
+                dbg->movement_parallax = movement_tile_is_parallax_like(&cand_tile);
+            }
+            float nearest_track_distance = 1.0e9f;
+            for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+                const anomaly_target_track_t *track = &state->target_tracks[ti];
+                if (!track->active) continue;
+                float dx = track->center_x_norm - cand_x_norm;
+                float dy = track->center_y_norm - cand_y_norm;
+                float dist = sqrtf(dx * dx + dy * dy);
+                if (dist < nearest_track_distance) {
+                    nearest_track_distance = dist;
+                    dbg->nearest_track_index = ti;
+                    dbg->nearest_track_id = track->id;
+                    dbg->nearest_track_hit_count = track->hit_count;
+                }
+            }
+            if (dbg->nearest_track_index >= 0) {
+                dbg->nearest_track_distance = nearest_track_distance;
+                dbg->near_tracked_target = nearest_track_distance <=
+                    fmaxf(ANOMALY_TARGET_MATCH_GATE, 0.018f);
+            }
+            if (thermal_target_trace.enabled && thermal_target_trace.valid) {
+                bool contains_debug_target =
+                    thermal_target_trace.target_x_norm >= dbg->bbox_left_norm &&
+                    thermal_target_trace.target_x_norm <= dbg->bbox_right_norm &&
+                    thermal_target_trace.target_y_norm >= dbg->bbox_top_norm &&
+                    thermal_target_trace.target_y_norm <= dbg->bbox_bottom_norm;
+                float dx = thermal_target_trace.target_x_norm - cand_x_norm;
+                float dy = thermal_target_trace.target_y_norm - cand_y_norm;
+                dbg->near_debug_target =
+                    contains_debug_target ||
+                    sqrtf(dx * dx + dy * dy) <= fmaxf(ANOMALY_TARGET_MATCH_GATE, 0.018f);
+            }
+            dbg->raw_delta_rescue_score =
+                thermal_shadow_raw_delta_rescue_score(
+                        dbg->peak_delta,
+                        dbg->mean_delta,
+                        dbg->area,
+                        dbg->span,
+                        dbg->fill,
+                        dbg->quality,
+                        dbg->final_score,
+                        cfg->score_threshold,
+                        thermal_min_delta,
+                        delta_norm,
+                        dbg->movement_independent_score,
+                        dbg->movement_independent,
+                        dbg->near_tracked_target);
+            dbg->raw_delta_rescue_eligible =
+                thermal_shadow_raw_delta_rescue_eligible(
+                        dbg->peak_delta,
+                        dbg->area,
+                        dbg->span,
+                        dbg->quality,
+                        dbg->final_score,
+                        cfg->score_threshold,
+                        thermal_min_delta,
+                        dbg->movement_independent);
+            dbg->would_promote_movement_rescue =
+                dbg->raw_delta_rescue_eligible &&
+                dbg->raw_delta_rescue_score >= 0.62f;
             dbg->singleton_blob = thermal_candidate_singleton_blob_debug[i];
             dbg->above_threshold = thermal_candidate_above_threshold[i];
         }

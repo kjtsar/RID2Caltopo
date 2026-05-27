@@ -140,8 +140,8 @@ fun StreamTile(
     val currentFrameTimestampUs = localRuntimeSnapshot?.currentSourceTimestampUs
     val currentFrameAnnotations = viewModel.localPlaybackFrameAnnotations(streamDesignator, currentFrameTimestampUs)
     val currentFrameAnnotationSummary = viewModel.localPlaybackFrameAnnotationSummary(streamDesignator, currentFrameTimestampUs)
-    val currentFrameCounterText = if (isLocalPlayback && currentFrameTimestampUs != null) {
-        "T ${formatPlaybackTimestampUs(currentFrameTimestampUs)}"
+    val currentFrameCounterText = if (isLocalPlayback) {
+        currentFrameTimestampUs?.let { "T ${formatPlaybackTimestampUs(it)}" } ?: "T --:--.--"
     } else {
         null
     }
@@ -431,37 +431,46 @@ fun StreamTile(
                                 text = frameText,
                                 color = Color.White,
                                 fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.width(76.dp),
                             )
                         }
                         Text(
                             text = "Back",
                             color = Color.White,
                             fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator) {
-                                detectTapGestures(onTap = { viewModel.stepLocalPlaybackBack(streamDesignator) })
-                            }
+                            modifier = Modifier
+                                .width(34.dp)
+                                .pointerInput(streamDesignator) {
+                                    detectTapGestures(onTap = { viewModel.stepLocalPlaybackBack(streamDesignator) })
+                                }
                         )
                         Text(
                             text = if (isLocalPlaybackPaused) "Run" else "Pause",
                             color = Color.White,
                             fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, isLocalPlaybackPaused) {
-                                detectTapGestures(onTap = { viewModel.toggleLocalPlaybackPaused(streamDesignator) })
-                            }
+                            modifier = Modifier
+                                .width(42.dp)
+                                .pointerInput(streamDesignator, isLocalPlaybackPaused) {
+                                    detectTapGestures(onTap = { viewModel.toggleLocalPlaybackPaused(streamDesignator) })
+                                }
                         )
                         Text(
                             text = "Step",
                             color = Color.White,
                             fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator) {
-                                detectTapGestures(onTap = { viewModel.stepLocalPlaybackFrame(streamDesignator) })
-                            }
+                            modifier = Modifier
+                                .width(32.dp)
+                                .pointerInput(streamDesignator) {
+                                    detectTapGestures(onTap = { viewModel.stepLocalPlaybackFrame(streamDesignator) })
+                                }
                         )
                         if (showAnomalyReviewLegendControls) {
                             Text(
                                 text = currentFrameAnnotationSummary ?: "0 notes",
                                 color = Color.White,
                                 fontSize = 11.sp,
+                                modifier = Modifier.width(52.dp),
                             )
                         }
                     }

@@ -650,7 +650,7 @@ class StreamsViewModel(
     private val _focusedPath = MutableStateFlow<String?>(null)
     val focusedPath: StateFlow<String?> = _focusedPath.asStateFlow()
     private val localPlaybackPausedState = mutableStateMapOf<String, Boolean>()
-    private var localPlaybackPauseOnOpenEnabled by mutableStateOf(false)
+    private var localPlaybackPauseOnOpenEnabled by mutableStateOf(true)
     private val localPlaybackReviewByDesignator = mutableStateMapOf<String, LocalPlaybackReviewFile>()
     private var pendingLocalPlaybackReviewExport by mutableStateOf<PendingLocalPlaybackReviewExport?>(null)
     private val dirtyLocalPlaybackReviews = mutableStateSetOf<String>()

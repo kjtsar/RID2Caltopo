@@ -36,6 +36,10 @@
 #define APP_DEFAULT_MIN_HITS 2
 #define APP_DEFAULT_THERMAL_MIN_DELTA 10.0f
 #define APP_DEFAULT_SMALL_TARGET_SCREEN_FRACTION (1.0f / 200.0f)
+#define APP_DEFAULT_FRAME_STRIDE 1
+#define APP_DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES 2
+#define APP_DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS 1.0f
+#define APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES 4
 
 typedef enum {
     APP_APPEARANCE_AUTO = 0,
@@ -102,9 +106,9 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.saliency_enabled = false;
     cfg.appearance_selection = APP_APPEARANCE_AUTO;
     cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
-    cfg.frame_stride = 1;
-    cfg.adaptive_min_stride_frames = 2;
-    cfg.adaptive_max_stride_seconds = 1.0f;
+    cfg.frame_stride = APP_DEFAULT_FRAME_STRIDE;
+    cfg.adaptive_min_stride_frames = APP_DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES;
+    cfg.adaptive_max_stride_seconds = APP_DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS;
     cfg.pixel_step = 0;
     cfg.sensitivity = APP_DEFAULT_SENSITIVITY;
     cfg.motion_evidence_sensitivity = APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY;
@@ -192,6 +196,12 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
     float area_scale = 0.10f + (4.90f * sensitivity * sensitivity);
     float effective_min_area_fraction =
         app_clampf(app_cfg->min_area_fraction * area_scale, 0.00005f, 0.03f);
+    bool color_realtime_stride_default =
+        app_cfg->appearance_selection == APP_APPEARANCE_COLOR &&
+        app_cfg->stride_mode == ANOMALY_STRIDE_MODE_FIXED &&
+        app_cfg->frame_stride == APP_DEFAULT_FRAME_STRIDE &&
+        app_cfg->adaptive_min_stride_frames == APP_DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES &&
+        fabsf(app_cfg->adaptive_max_stride_seconds - APP_DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS) < 0.001f;
 
     memset(native_cfg, 0, sizeof(*native_cfg));
     native_cfg->enabled = app_cfg->enabled;
@@ -203,12 +213,23 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
             ? ANOMALY_REGISTRATION_AFFINE
             : ANOMALY_REGISTRATION_GMV;
     native_cfg->stride_mode =
+        color_realtime_stride_default ||
         app_cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE
             ? ANOMALY_STRIDE_MODE_ADAPTIVE
             : ANOMALY_STRIDE_MODE_FIXED;
-    native_cfg->frame_stride = app_clampi(app_cfg->frame_stride, 1, 10);
+    native_cfg->frame_stride = app_clampi(
+            color_realtime_stride_default
+                ? APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES
+                : app_cfg->frame_stride,
+            1,
+            10);
     native_cfg->adaptive_min_stride_frames =
-        app_clampi(app_cfg->adaptive_min_stride_frames, 2, 33);
+        app_clampi(
+            color_realtime_stride_default
+                ? APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES
+                : app_cfg->adaptive_min_stride_frames,
+            2,
+            33);
     native_cfg->adaptive_max_stride_frames =
         app_clampi(33, native_cfg->adaptive_min_stride_frames, 33);
     native_cfg->adaptive_max_stride_seconds =
@@ -1130,7 +1151,8 @@ static void dump_color_debug(FILE *out, int frame_num, double time_s,
                 "rarity=%.4f local_support=%d patch_valid=%d coherent=%d fresh_coherent=%d multicell=%d "
                 "ring_neighbors=%d ring_chroma=%.3f ring_luma=%.3f "
                 "patch_uvl=(%.3f,%.3f,%.3f) ring_uvl=(%.3f,%.3f,%.3f) "
-                "pre_support=%.3f support=%.3f seed=%d matched=%d nearest=%d dist=%.4f winner=%d stage=%d\n",
+                "pre_support=%.3f support=%.3f seed=%d matched=%d nearest=%d dist=%.4f winner=%d "
+                "drop(cap=%d nms=%d repl=%d gate=%d) pre_cap=%d/%d nms_rank=%d win_rank=%d stage=%d\n",
                 dbg->target.enabled ? 1 : 0,
                 dbg->target.valid ? 1 : 0,
                 dbg->target.inside_scan_zone ? 1 : 0,
@@ -1161,6 +1183,14 @@ static void dump_color_debug(FILE *out, int frame_num, double time_s,
                 dbg->target.nearest_candidate_index,
                 (double)dbg->target.nearest_candidate_distance,
                 dbg->target.winning_candidate_index,
+                dbg->target.dropped_by_cap ? 1 : 0,
+                dbg->target.dropped_by_nms ? 1 : 0,
+                dbg->target.replaced_by_nms ? 1 : 0,
+                dbg->target.rejected_by_winner_gate ? 1 : 0,
+                dbg->target.pre_cap_rank,
+                dbg->target.pre_cap_limit,
+                dbg->target.nms_conflict_rank,
+                dbg->target.winning_rank,
                 dbg->target.stage);
     }
 }
@@ -1735,6 +1765,13 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
             "\"component_rejection_reason\":%d,"
             "\"component_bbox_left_norm\":%.6f,\"component_bbox_top_norm\":%.6f,"
             "\"component_bbox_right_norm\":%.6f,\"component_bbox_bottom_norm\":%.6f,"
+            "\"dropped_by_cap\":%s,\"dropped_by_nms\":%s,\"replaced_by_nms\":%s,"
+            "\"rejected_by_winner_gate\":%s,"
+            "\"nms_conflict_rank\":%d,\"nms_conflict_sample_x\":%d,"
+            "\"nms_conflict_sample_y\":%d,"
+            "\"pre_cap_rank\":%d,\"pre_cap_candidate_count\":%d,"
+            "\"pre_cap_limit\":%d,\"pre_cap_retention_rank\":%.6f,"
+            "\"winning_rank\":%d,\"winner_gate_reject_reason\":%d,"
             "\"extracted_candidate_index\":%d,"
             "\"matched_candidate_index\":%d,\"nearest_candidate_index\":%d,"
             "\"nearest_candidate_distance\":%.6f,\"winning_candidate_index\":%d,"
@@ -1800,6 +1837,19 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
             (double)dbg->target.component_bbox_top_norm,
             (double)dbg->target.component_bbox_right_norm,
             (double)dbg->target.component_bbox_bottom_norm,
+            dbg->target.dropped_by_cap ? "true" : "false",
+            dbg->target.dropped_by_nms ? "true" : "false",
+            dbg->target.replaced_by_nms ? "true" : "false",
+            dbg->target.rejected_by_winner_gate ? "true" : "false",
+            dbg->target.nms_conflict_rank,
+            dbg->target.nms_conflict_sample_x,
+            dbg->target.nms_conflict_sample_y,
+            dbg->target.pre_cap_rank,
+            dbg->target.pre_cap_candidate_count,
+            dbg->target.pre_cap_limit,
+            (double)dbg->target.pre_cap_retention_rank,
+            dbg->target.winning_rank,
+            dbg->target.winner_gate_reject_reason,
             dbg->target.extracted_candidate_index,
             dbg->target.matched_candidate_index,
             dbg->target.nearest_candidate_index,

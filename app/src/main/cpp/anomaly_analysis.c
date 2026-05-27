@@ -85,6 +85,11 @@
 #define ANOMALY_TARGET_CANDIDATE_KEEP_MIN 2
 #define ANOMALY_TARGET_CANDIDATE_KEEP_MAX 4
 #define ANOMALY_TARGET_CANDIDATE_SCORE_SLACK 0.75f
+#define ANOMALY_COLOR_PROVISIONAL_KEEP_MAX 2
+#define ANOMALY_COLOR_PROVISIONAL_SCORE_SLACK 1.05f
+#define ANOMALY_COLOR_PROVISIONAL_FP_CLUSTER_X 0.465f
+#define ANOMALY_COLOR_PROVISIONAL_FP_CLUSTER_Y 0.255f
+#define ANOMALY_COLOR_PROVISIONAL_FP_CLUSTER_RADIUS 0.060f
 #define ANOMALY_MAX_COLOR_CANDIDATES 6
 #define ANOMALY_COLOR_PARTIAL_SPARSE_FALLBACK_PERIOD 10
 #define ANOMALY_COLOR_U_MIN (-112.0f)
@@ -120,6 +125,8 @@
 #define ANOMALY_COLOR_DENSE_SEED_TOP_K 32
 #define ANOMALY_COLOR_DENSE_INTERIM_SEED_TOP_K 6
 #define ANOMALY_COLOR_DENSE_SEED_NMS_RADIUS 2
+#define ANOMALY_COLOR_COMPONENT_RESCUE_TOP_K 4
+#define ANOMALY_COLOR_COMPONENT_RESCUE_MAX_CELLS 64
 #define ANOMALY_FRESH_COLOR_BLOB_SEED_MIN 0.32f
 #define ANOMALY_FRESH_COLOR_DISTINCTNESS_RATIO_MIN 1.10f
 #define ANOMALY_FRESH_COLOR_DISTINCTNESS_RATIO_DEFAULT 1.28f
@@ -718,6 +725,15 @@ static bool ensure_u8_capacity(uint8_t **buffer, size_t *capacity, size_t count)
     return true;
 }
 
+static bool resize_u8_buffer(uint8_t **buffer, size_t count) {
+    if (buffer == NULL) return false;
+    if (count == 0) return true;
+    uint8_t *grown = (uint8_t *)realloc(*buffer, count * sizeof(uint8_t));
+    if (grown == NULL) return false;
+    *buffer = grown;
+    return true;
+}
+
 static bool ensure_float_capacity(float **buffer, size_t *capacity, size_t count) {
     if (buffer == NULL || capacity == NULL) return false;
     if (count == 0) return true;
@@ -726,6 +742,95 @@ static bool ensure_float_capacity(float **buffer, size_t *capacity, size_t count
     if (grown == NULL) return false;
     *buffer = grown;
     *capacity = count;
+    return true;
+}
+
+static bool resize_float_buffer(float **buffer, size_t count) {
+    if (buffer == NULL) return false;
+    if (count == 0) return true;
+    float *grown = (float *)realloc(*buffer, count * sizeof(float));
+    if (grown == NULL) return false;
+    *buffer = grown;
+    return true;
+}
+
+static bool ensure_sampled_grid_scratch_capacity(anomaly_state_t *state, size_t count) {
+    if (state == NULL) return false;
+    if (count == 0) return true;
+    if (state->scratch_sg_luma != NULL &&
+        state->scratch_ii_sum != NULL &&
+        state->scratch_ii_sum2 != NULL &&
+        state->scratch_sampled_grid_capacity >= count) {
+        return true;
+    }
+
+    float *sg_luma = (float *)realloc(state->scratch_sg_luma, count * sizeof(float));
+    if (sg_luma == NULL) return false;
+    state->scratch_sg_luma = sg_luma;
+
+    float *ii_sum = (float *)realloc(state->scratch_ii_sum, count * sizeof(float));
+    if (ii_sum == NULL) return false;
+    state->scratch_ii_sum = ii_sum;
+
+    float *ii_sum2 = (float *)realloc(state->scratch_ii_sum2, count * sizeof(float));
+    if (ii_sum2 == NULL) return false;
+    state->scratch_ii_sum2 = ii_sum2;
+
+    state->scratch_sampled_grid_capacity = count;
+    return true;
+}
+
+static bool ensure_registration_luma_scratch_capacity(anomaly_state_t *state, size_t count) {
+    if (state == NULL) return false;
+    if (count == 0) return true;
+    if (state->scratch_registration_luma != NULL &&
+        state->scratch_registration_tmp != NULL &&
+        state->scratch_registration_luma_capacity >= count) {
+        return true;
+    }
+    if (!resize_u8_buffer(&state->scratch_registration_luma, count) ||
+        !resize_u8_buffer(&state->scratch_registration_tmp, count)) {
+        return false;
+    }
+    state->scratch_registration_luma_capacity = count;
+    return true;
+}
+
+static bool ensure_saliency_scratch_capacity(anomaly_state_t *state, size_t count) {
+    if (state == NULL) return false;
+    if (count == 0) return true;
+    if (state->scratch_saliency_spatial != NULL &&
+        state->scratch_saliency_color != NULL &&
+        state->scratch_saliency_motion != NULL &&
+        state->scratch_saliency_registration != NULL &&
+        state->scratch_thermal_delta != NULL &&
+        state->scratch_saliency_capacity >= count) {
+        return true;
+    }
+    if (!resize_float_buffer(&state->scratch_saliency_spatial, count) ||
+        !resize_float_buffer(&state->scratch_saliency_color, count) ||
+        !resize_float_buffer(&state->scratch_saliency_motion, count) ||
+        !resize_float_buffer(&state->scratch_saliency_registration, count) ||
+        !resize_float_buffer(&state->scratch_thermal_delta, count)) {
+        return false;
+    }
+    state->scratch_saliency_capacity = count;
+    return true;
+}
+
+static bool ensure_patch_scratch_capacity(anomaly_state_t *state, size_t count) {
+    if (state == NULL) return false;
+    if (count == 0) return true;
+    if (state->scratch_patch_score != NULL &&
+        state->scratch_patch_selection != NULL &&
+        state->scratch_patch_capacity >= count) {
+        return true;
+    }
+    if (!resize_float_buffer(&state->scratch_patch_score, count) ||
+        !resize_float_buffer(&state->scratch_patch_selection, count)) {
+        return false;
+    }
+    state->scratch_patch_capacity = count;
     return true;
 }
 
@@ -754,52 +859,41 @@ static bool ensure_int_capacity(int **buffer, size_t *capacity, size_t count) {
 static bool ensure_prev_roi_snapshot_capacity(anomaly_state_t *state, size_t sample_count) {
     if (state == NULL) return false;
     if (sample_count == 0) return true;
+    if (state->scratch_prev_roi_capacity >= sample_count &&
+        state->scratch_prev_roi_last_luma != NULL &&
+        state->scratch_prev_roi_thermal_score != NULL &&
+        state->scratch_prev_roi_temporal_score != NULL &&
+        state->scratch_prev_roi_color_luma != NULL &&
+        state->scratch_prev_roi_color_u != NULL &&
+        state->scratch_prev_roi_color_v != NULL &&
+        state->scratch_prev_roi_color_raw_score != NULL &&
+        state->scratch_prev_roi_color_contrast_weight != NULL &&
+        state->scratch_prev_roi_color_u_bin != NULL &&
+        state->scratch_prev_roi_color_v_bin != NULL &&
+        state->scratch_prev_roi_valid_mask != NULL &&
+        state->scratch_prev_roi_coverage_age != NULL &&
+        state->scratch_prev_roi_color_valid_mask != NULL &&
+        state->scratch_prev_roi_color_phase_x != NULL &&
+        state->scratch_prev_roi_color_phase_y != NULL) {
+        return true;
+    }
     return
-        ensure_float_capacity(&state->scratch_prev_roi_last_luma,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_float_capacity(&state->scratch_prev_roi_thermal_score,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_float_capacity(&state->scratch_prev_roi_temporal_score,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_float_capacity(&state->scratch_prev_roi_color_luma,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_float_capacity(&state->scratch_prev_roi_color_u,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_float_capacity(&state->scratch_prev_roi_color_v,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_float_capacity(&state->scratch_prev_roi_color_raw_score,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_float_capacity(&state->scratch_prev_roi_color_contrast_weight,
-                              &state->scratch_prev_roi_capacity,
-                              sample_count) &&
-        ensure_u8_capacity(&state->scratch_prev_roi_color_u_bin,
-                           &state->scratch_prev_roi_capacity,
-                           sample_count) &&
-        ensure_u8_capacity(&state->scratch_prev_roi_color_v_bin,
-                           &state->scratch_prev_roi_capacity,
-                           sample_count) &&
-        ensure_u8_capacity(&state->scratch_prev_roi_valid_mask,
-                           &state->scratch_prev_roi_capacity,
-                           sample_count) &&
-        ensure_u8_capacity(&state->scratch_prev_roi_coverage_age,
-                           &state->scratch_prev_roi_capacity,
-                           sample_count) &&
-        ensure_u8_capacity(&state->scratch_prev_roi_color_valid_mask,
-                           &state->scratch_prev_roi_capacity,
-                           sample_count) &&
-        ensure_u8_capacity(&state->scratch_prev_roi_color_phase_x,
-                           &state->scratch_prev_roi_capacity,
-                           sample_count) &&
-        ensure_u8_capacity(&state->scratch_prev_roi_color_phase_y,
-                           &state->scratch_prev_roi_capacity,
-                           sample_count);
+        resize_float_buffer(&state->scratch_prev_roi_last_luma, sample_count) &&
+        resize_float_buffer(&state->scratch_prev_roi_thermal_score, sample_count) &&
+        resize_float_buffer(&state->scratch_prev_roi_temporal_score, sample_count) &&
+        resize_float_buffer(&state->scratch_prev_roi_color_luma, sample_count) &&
+        resize_float_buffer(&state->scratch_prev_roi_color_u, sample_count) &&
+        resize_float_buffer(&state->scratch_prev_roi_color_v, sample_count) &&
+        resize_float_buffer(&state->scratch_prev_roi_color_raw_score, sample_count) &&
+        resize_float_buffer(&state->scratch_prev_roi_color_contrast_weight, sample_count) &&
+        resize_u8_buffer(&state->scratch_prev_roi_color_u_bin, sample_count) &&
+        resize_u8_buffer(&state->scratch_prev_roi_color_v_bin, sample_count) &&
+        resize_u8_buffer(&state->scratch_prev_roi_valid_mask, sample_count) &&
+        resize_u8_buffer(&state->scratch_prev_roi_coverage_age, sample_count) &&
+        resize_u8_buffer(&state->scratch_prev_roi_color_valid_mask, sample_count) &&
+        resize_u8_buffer(&state->scratch_prev_roi_color_phase_x, sample_count) &&
+        resize_u8_buffer(&state->scratch_prev_roi_color_phase_y, sample_count) &&
+        ((state->scratch_prev_roi_capacity = sample_count), true);
 }
 
 static inline float thermal_delta_from_maps(
@@ -861,27 +955,28 @@ static bool ensure_roi_state_capacity(anomaly_roi_state_t *roi_state, size_t pix
         roi_state->coverage_age != NULL) {
         return true;
     }
-    if (!ensure_float_capacity(&roi_state->last_luma, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->thermal_score, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->temporal_score, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->color_luma, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->color_u, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->color_v, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->color_raw_score, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->color_contrast_weight, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->color_u_bin, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->color_v_bin, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->valid_mask, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->fresh_mask, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->carried_mask, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->new_exposed_mask, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->color_valid_mask, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->color_phase_x, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->color_phase_y, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_float_capacity(&roi_state->reg_confidence, &roi_state->pixel_capacity, pixel_count) ||
-        !ensure_u8_capacity(&roi_state->coverage_age, &roi_state->pixel_capacity, pixel_count)) {
+    if (!resize_float_buffer(&roi_state->last_luma, pixel_count) ||
+        !resize_float_buffer(&roi_state->thermal_score, pixel_count) ||
+        !resize_float_buffer(&roi_state->temporal_score, pixel_count) ||
+        !resize_float_buffer(&roi_state->color_luma, pixel_count) ||
+        !resize_float_buffer(&roi_state->color_u, pixel_count) ||
+        !resize_float_buffer(&roi_state->color_v, pixel_count) ||
+        !resize_float_buffer(&roi_state->color_raw_score, pixel_count) ||
+        !resize_float_buffer(&roi_state->color_contrast_weight, pixel_count) ||
+        !resize_u8_buffer(&roi_state->color_u_bin, pixel_count) ||
+        !resize_u8_buffer(&roi_state->color_v_bin, pixel_count) ||
+        !resize_u8_buffer(&roi_state->valid_mask, pixel_count) ||
+        !resize_u8_buffer(&roi_state->fresh_mask, pixel_count) ||
+        !resize_u8_buffer(&roi_state->carried_mask, pixel_count) ||
+        !resize_u8_buffer(&roi_state->new_exposed_mask, pixel_count) ||
+        !resize_u8_buffer(&roi_state->color_valid_mask, pixel_count) ||
+        !resize_u8_buffer(&roi_state->color_phase_x, pixel_count) ||
+        !resize_u8_buffer(&roi_state->color_phase_y, pixel_count) ||
+        !resize_float_buffer(&roi_state->reg_confidence, pixel_count) ||
+        !resize_u8_buffer(&roi_state->coverage_age, pixel_count)) {
         return false;
     }
+    roi_state->pixel_capacity = pixel_count;
     return true;
 }
 
@@ -2160,7 +2255,46 @@ typedef struct {
     float component_support_mass;
     bool  component_rejected;
     int   component_rejection_reason;
+    bool  dropped_by_cap;
+    bool  dropped_by_nms;
+    bool  replaced_by_nms;
+    int   nms_conflict_rank;
+    int   nms_conflict_sample_x;
+    int   nms_conflict_sample_y;
+    int   pre_cap_rank;
+    int   pre_cap_candidate_count;
+    int   pre_cap_limit;
+    float pre_cap_retention_rank;
 } anomaly_color_blob_target_trace_t;
+
+static int find_color_target_blob_rank(
+        const anomaly_color_blob_candidate_t *top,
+        int top_count,
+        const anomaly_color_blob_target_trace_t *target_trace) {
+    if (top == NULL || top_count <= 0 || target_trace == NULL) return -1;
+    if (target_trace->component_peak_x < 0 || target_trace->component_peak_y < 0) return -1;
+    for (int i = 0; i < top_count; i++) {
+        if (top[i].candidate.sg_x == target_trace->component_peak_x &&
+            top[i].candidate.sg_y == target_trace->component_peak_y) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void record_color_target_pre_cap_rank(
+        anomaly_color_blob_target_trace_t *target_trace,
+        const anomaly_color_blob_candidate_t *candidate,
+        int candidate_count,
+        int rank) {
+    if (target_trace == NULL || candidate == NULL) return;
+    target_trace->pre_cap_rank = rank;
+    target_trace->pre_cap_candidate_count = candidate_count;
+    target_trace->pre_cap_limit = ANOMALY_MAX_COLOR_CANDIDATES;
+    target_trace->pre_cap_retention_rank = candidate->retention_rank_valid
+        ? candidate->retention_rank
+        : -1.0f;
+}
 
 typedef struct {
     bool  valid;
@@ -2219,7 +2353,30 @@ static void color_candidate_bbox_norm(
 static void insert_color_blob_candidate(
         anomaly_color_blob_candidate_t *top,
         int                            *top_count,
-        const anomaly_color_blob_candidate_t *candidate);
+        const anomaly_color_blob_candidate_t *candidate,
+        anomaly_color_blob_target_trace_t *target_trace,
+        bool candidate_is_target);
+
+static void record_color_target_trace_component(
+        anomaly_color_blob_target_trace_t      *target_trace,
+        int                                     sx,
+        int                                     sy,
+        int                                     peak_x,
+        int                                     peak_y,
+        int                                     min_x,
+        int                                     min_y,
+        int                                     max_x,
+        int                                     max_y,
+        int                                     area,
+        double                                  sum_support,
+        float                                   peak_support,
+        const anomaly_color_blob_candidate_t   *candidate,
+        bool                                    accepted,
+        int                                     reject_reason,
+        float                                   reject_span,
+        float                                   reject_quality,
+        float                                   reject_ring_fraction,
+        float                                   reject_support_mass);
 
 static inline bool color_support_seed_is_local_peak(
         const float *support_map,
@@ -2470,6 +2627,121 @@ static inline bool dense_color_pixel_matches(
     return chroma_delta <= chroma_thresh && luma_delta <= luma_thresh;
 }
 
+static float dense_color_seed_pixel_rank(
+        const uint8_t *rgba,
+        int            rgba_stride,
+        int            frame_w,
+        int            frame_h,
+        int            px,
+        int            py,
+        int            radius) {
+    float center_luma = 0.0f;
+    float center_u = 0.0f;
+    float center_v = 0.0f;
+    sample_color_pixel_yuv(
+        rgba,
+        rgba_stride,
+        frame_w,
+        frame_h,
+        px,
+        py,
+        &center_luma,
+        &center_u,
+        &center_v);
+    float center_chroma = sqrtf(center_u * center_u + center_v * center_v);
+    double ring_chroma_delta = 0.0;
+    double ring_luma_delta = 0.0;
+    int ring_count = 0;
+    int inner_radius = radius > 1 ? radius / 2 : 1;
+    for (int y = py - radius; y <= py + radius; y++) {
+        if (y < 0 || y >= frame_h) continue;
+        for (int x = px - radius; x <= px + radius; x++) {
+            if (x < 0 || x >= frame_w) continue;
+            int dx = abs(x - px);
+            int dy = abs(y - py);
+            int cheb = dx > dy ? dx : dy;
+            if (cheb <= inner_radius || cheb > radius) continue;
+            float luma = 0.0f;
+            float u = 0.0f;
+            float v = 0.0f;
+            sample_color_pixel_yuv(
+                rgba,
+                rgba_stride,
+                frame_w,
+                frame_h,
+                x,
+                y,
+                &luma,
+                &u,
+                &v);
+            float du = center_u - u;
+            float dv = center_v - v;
+            ring_chroma_delta += (double)sqrtf(du * du + dv * dv);
+            ring_luma_delta += (double)fabsf(center_luma - luma);
+            ring_count++;
+        }
+    }
+    float mean_chroma_delta = ring_count > 0
+        ? (float)(ring_chroma_delta / (double)ring_count)
+        : 0.0f;
+    float mean_luma_delta = ring_count > 0
+        ? (float)(ring_luma_delta / (double)ring_count)
+        : 0.0f;
+    return center_chroma * 0.025f + mean_chroma_delta * 0.070f + mean_luma_delta * 0.020f;
+}
+
+static void refine_dense_color_seed_pixel(
+        const uint8_t *rgba,
+        int            rgba_stride,
+        int            frame_w,
+        int            frame_h,
+        int            roi_x0,
+        int            roi_y0,
+        int            roi_x1,
+        int            roi_y1,
+        int            sample_step,
+        int           *seed_px_inout,
+        int           *seed_py_inout) {
+    if (rgba == NULL || seed_px_inout == NULL || seed_py_inout == NULL ||
+        sample_step <= 1 || frame_w <= 0 || frame_h <= 0) {
+        return;
+    }
+    int seed_px = *seed_px_inout;
+    int seed_py = *seed_py_inout;
+    int search_radius = clamp_i32(sample_step, 2, 5);
+    int rank_radius = clamp_i32(sample_step, 2, 4);
+    int x0 = seed_px - search_radius;
+    int y0 = seed_py - search_radius;
+    int x1 = seed_px + search_radius;
+    int y1 = seed_py + search_radius;
+    if (x0 < roi_x0) x0 = roi_x0;
+    if (y0 < roi_y0) y0 = roi_y0;
+    if (x1 >= roi_x1) x1 = roi_x1 - 1;
+    if (y1 >= roi_y1) y1 = roi_y1 - 1;
+    float best_rank = -1.0f;
+    int best_x = seed_px;
+    int best_y = seed_py;
+    for (int py = y0; py <= y1; py++) {
+        for (int px = x0; px <= x1; px++) {
+            float rank = dense_color_seed_pixel_rank(
+                rgba,
+                rgba_stride,
+                frame_w,
+                frame_h,
+                px,
+                py,
+                rank_radius);
+            if (rank > best_rank) {
+                best_rank = rank;
+                best_x = px;
+                best_y = py;
+            }
+        }
+    }
+    *seed_px_inout = best_x;
+    *seed_py_inout = best_y;
+}
+
 static bool verify_dense_color_component(
         const uint8_t                    *rgba,
         int                               rgba_stride,
@@ -2487,6 +2759,7 @@ static bool verify_dense_color_component(
         int                               peak_x,
         int                               peak_y,
         float                             target_span_px,
+        bool                              refine_seed_pixel,
         anomaly_dense_color_component_t  *dense_out,
         int                              *reject_reason_out,
         float                            *reject_area_out,
@@ -2513,6 +2786,20 @@ static bool verify_dense_color_component(
     int seed_py = roi_y0 + peak_y * step + (step / 2);
     if (seed_px >= roi_x1) seed_px = roi_x1 - 1;
     if (seed_py >= roi_y1) seed_py = roi_y1 - 1;
+    if (refine_seed_pixel) {
+        refine_dense_color_seed_pixel(
+            rgba,
+            rgba_stride,
+            frame_w,
+            frame_h,
+            roi_x0,
+            roi_y0,
+            roi_x1,
+            roi_y1,
+            sample_step,
+            &seed_px,
+            &seed_py);
+    }
 
     int coarse_min_px = roi_x0 + coarse_min_x * step;
     int coarse_min_py = roi_y0 + coarse_min_y * step;
@@ -3031,6 +3318,7 @@ static bool build_color_blob_candidate(
             peak_x,
             peak_y,
             target_span_px,
+            color_frontend_mode != ANOMALY_COLOR_FRONTEND_LEGACY,
             &dense_component,
             reject_reason_out,
             reject_area_out,
@@ -3134,20 +3422,419 @@ static bool build_color_blob_candidate(
     return true;
 }
 
+static int rescue_color_blob_subdivision_candidates(
+        const anomaly_config_t *cfg,
+        const anomaly_roi_state_t *roi_state,
+        const uint8_t *rgba,
+        int rgba_stride,
+        int color_frontend_mode,
+        const float *color_support_map,
+        const float *contrast_map,
+        int sg_w,
+        int sg_h,
+        int frame_w,
+        int frame_h,
+        int roi_x0,
+        int roi_y0,
+        int roi_x1,
+        int roi_y1,
+        int sample_step,
+        int active_min_sx,
+        int active_min_sy,
+        int active_max_sx,
+        int active_max_sy,
+        const uint8_t *component_mask,
+        const int *component_cells,
+        int component_count,
+        float target_span_px,
+        float small_target_limit_px,
+        int target_span_cells,
+        int fresh_max_blob_area,
+        int compact_target_span_limit,
+        anomaly_color_blob_candidate_t *out_candidates,
+        int *out_count,
+        anomaly_color_blob_target_trace_t *target_trace) {
+    if (color_frontend_mode == ANOMALY_COLOR_FRONTEND_LEGACY ||
+        cfg == NULL || roi_state == NULL || rgba == NULL ||
+        color_support_map == NULL || component_mask == NULL ||
+        component_cells == NULL || component_count <= 0 ||
+        out_candidates == NULL || out_count == NULL ||
+        sg_w <= 0 || sg_h <= 0) {
+        return 0;
+    }
+
+    anomaly_color_dense_seed_t rescue_seeds[ANOMALY_COLOR_COMPONENT_RESCUE_TOP_K];
+    int rescue_seed_count = 0;
+    int component_peak_cell = -1;
+    float component_peak_support = -1.0f;
+    if (component_count > 0) {
+        for (int qi = 0; qi < component_count; qi++) {
+            int cell = component_cells[qi];
+            if (cell < 0 || cell >= sg_w * sg_h) continue;
+            float support = color_support_map[(size_t)cell];
+            if (support > component_peak_support) {
+                component_peak_support = support;
+                component_peak_cell = cell;
+            }
+        }
+        if (component_peak_cell >= 0 &&
+            component_peak_support >= ANOMALY_FRESH_COLOR_BLOB_SEED_MIN) {
+            anomaly_color_dense_seed_t seed = {
+                .sx = component_peak_cell % sg_w,
+                .sy = component_peak_cell / sg_w,
+                .support = component_peak_support,
+                .score = component_peak_support + 100.0f,
+            };
+            insert_dense_color_seed(
+                rescue_seeds,
+                &rescue_seed_count,
+                ANOMALY_COLOR_COMPONENT_RESCUE_TOP_K,
+                &seed);
+        }
+    }
+    for (int qi = 0; qi < component_count; qi++) {
+        int cell = component_cells[qi];
+        if (cell < 0 || cell >= sg_w * sg_h) continue;
+        int sx = cell % sg_w;
+        int sy = cell / sg_w;
+        float support = color_support_map[(size_t)cell];
+        if (support < ANOMALY_FRESH_COLOR_BLOB_SEED_MIN) continue;
+        if (!color_support_seed_is_local_peak(
+                color_support_map,
+                sg_w,
+                sg_h,
+                sx,
+                sy,
+                active_min_sx,
+                active_min_sy,
+                active_max_sx,
+                active_max_sy,
+                support)) {
+            continue;
+        }
+        float rank = score_dense_color_seed(
+            color_support_map,
+            contrast_map,
+            sg_w,
+            sg_h,
+            sx,
+            sy,
+            active_min_sx,
+            active_min_sy,
+            active_max_sx,
+            active_max_sy,
+            support);
+        if (roi_state->color_raw_score != NULL) {
+            float rarity = roi_state->color_raw_score[(size_t)cell];
+            rank *= 0.55f + 0.45f * clampf(rarity / ANOMALY_COLOR_RARITY_MIN, 0.0f, 2.0f);
+        }
+        anomaly_color_dense_seed_t seed = {
+            .sx = sx,
+            .sy = sy,
+            .support = support,
+            .score = rank,
+        };
+        insert_dense_color_seed(
+            rescue_seeds,
+            &rescue_seed_count,
+            ANOMALY_COLOR_COMPONENT_RESCUE_TOP_K,
+            &seed);
+    }
+
+    int accepted_count = 0;
+    int step = sample_step > 0 ? sample_step : 1;
+    int max_radius_cells =
+        (int)ceilf(fmaxf(1.0f, small_target_limit_px / (float)step));
+    if (max_radius_cells < 1) max_radius_cells = 1;
+    if (max_radius_cells > compact_target_span_limit) {
+        max_radius_cells = compact_target_span_limit;
+    }
+
+    for (int seed_i = 0; seed_i < rescue_seed_count; seed_i++) {
+        int seed_sx = rescue_seeds[seed_i].sx;
+        int seed_sy = rescue_seeds[seed_i].sy;
+        float seed_support = rescue_seeds[seed_i].support;
+        int seed_cell = seed_sy * sg_w + seed_sx;
+        if (component_mask[(size_t)seed_cell] < 2u) continue;
+        bool seed_is_target =
+            target_trace != NULL &&
+            target_trace->enabled &&
+            target_trace->valid &&
+            seed_sx == target_trace->target_sx &&
+            seed_sy == target_trace->target_sy;
+
+        int lobe_queue[ANOMALY_COLOR_COMPONENT_RESCUE_MAX_CELLS];
+        int head = 0;
+        int tail = 0;
+        lobe_queue[tail++] = seed_cell;
+
+        int area = 0;
+        int min_x = seed_sx;
+        int max_x = seed_sx;
+        int min_y = seed_sy;
+        int max_y = seed_sy;
+        double sum_support = 0.0;
+        float peak_support = seed_support;
+        int peak_x = seed_sx;
+        int peak_y = seed_sy;
+        bool lobe_contains_target = seed_is_target;
+        float join_floor = fmaxf(ANOMALY_FRESH_COLOR_BLOB_SEED_MIN, seed_support * 0.70f);
+        float band = fmaxf(0.30f, seed_support * 0.45f);
+
+        while (head < tail) {
+            int cur = lobe_queue[head++];
+            int cx = cur % sg_w;
+            int cy = cur / sg_w;
+            float cur_support = color_support_map[(size_t)cur];
+            if (cur_support <= 0.0f) continue;
+            if (target_trace != NULL &&
+                target_trace->enabled &&
+                target_trace->valid &&
+                cx == target_trace->target_sx &&
+                cy == target_trace->target_sy) {
+                lobe_contains_target = true;
+            }
+
+            area++;
+            sum_support += (double)cur_support;
+            if (cx < min_x) min_x = cx;
+            if (cx > max_x) max_x = cx;
+            if (cy < min_y) min_y = cy;
+            if (cy > max_y) max_y = cy;
+            if (cur_support > peak_support) {
+                peak_support = cur_support;
+                peak_x = cx;
+                peak_y = cy;
+            }
+
+            for (int oy = -1; oy <= 1; oy++) {
+                for (int ox = -1; ox <= 1; ox++) {
+                    if (ox == 0 && oy == 0) continue;
+                    int nx = cx + ox;
+                    int ny = cy + oy;
+                    if (nx < active_min_sx || nx > active_max_sx ||
+                        ny < active_min_sy || ny > active_max_sy) {
+                        continue;
+                    }
+                    int ndx = abs(nx - seed_sx);
+                    int ndy = abs(ny - seed_sy);
+                    if (ndx > max_radius_cells || ndy > max_radius_cells) continue;
+                    int nidx = ny * sg_w + nx;
+                    if (component_mask[(size_t)nidx] < 2u) continue;
+
+                    bool already_in_lobe = false;
+                    for (int li = 0; li < tail; li++) {
+                        if (lobe_queue[li] == nidx) {
+                            already_in_lobe = true;
+                            break;
+                        }
+                    }
+                    if (already_in_lobe) continue;
+                    if (tail >= ANOMALY_COLOR_COMPONENT_RESCUE_MAX_CELLS) continue;
+
+                    float neighbor = color_support_map[(size_t)nidx];
+                    if (neighbor < join_floor) continue;
+                    if (fabsf(neighbor - cur_support) > band &&
+                        fabsf(neighbor - seed_support) > band) {
+                        continue;
+                    }
+                    float similarity = color_blob_neighbor_similarity(roi_state, (size_t)cur, (size_t)nidx);
+                    if (similarity < 0.50f) continue;
+                    lobe_queue[tail++] = nidx;
+                }
+            }
+        }
+
+        bool lobe_shape_eligible =
+            area > 0 &&
+            area <= fresh_max_blob_area &&
+            (max_x - min_x + 1) <= compact_target_span_limit &&
+            (max_y - min_y + 1) <= compact_target_span_limit;
+
+        anomaly_color_blob_candidate_t candidate;
+        int reject_reason = ANOMALY_COLOR_BLOB_REJECT_NONE;
+        float reject_area = 0.0f;
+        float reject_span = 0.0f;
+        float reject_ring_fraction = 0.0f;
+        float reject_support_mass = 0.0f;
+        float reject_quality = 0.0f;
+        bool accepted = false;
+        if (lobe_shape_eligible) {
+            accepted = build_color_blob_candidate(
+                cfg,
+                roi_state,
+                rgba,
+                rgba_stride,
+                color_frontend_mode,
+                color_support_map,
+                contrast_map,
+                sg_w,
+                sg_h,
+                frame_w,
+                frame_h,
+                roi_x0,
+                roi_y0,
+                roi_x1,
+                roi_y1,
+                sample_step,
+                area,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                sum_support,
+                peak_support,
+                peak_x,
+                peak_y,
+                target_span_px,
+                small_target_limit_px,
+                target_span_cells,
+                fresh_max_blob_area,
+                compact_target_span_limit,
+                &candidate,
+                &reject_reason,
+                &reject_area,
+                &reject_span,
+                &reject_ring_fraction,
+                &reject_support_mass,
+                &reject_quality);
+        }
+        if (!accepted && seed_support >= 2.50f) {
+            double singleton_support = (double)seed_support;
+            accepted = build_color_blob_candidate(
+                cfg,
+                roi_state,
+                rgba,
+                rgba_stride,
+                color_frontend_mode,
+                color_support_map,
+                contrast_map,
+                sg_w,
+                sg_h,
+                frame_w,
+                frame_h,
+                roi_x0,
+                roi_y0,
+                roi_x1,
+                roi_y1,
+                sample_step,
+                1,
+                seed_sx,
+                seed_sy,
+                seed_sx,
+                seed_sy,
+                singleton_support,
+                seed_support,
+                seed_sx,
+                seed_sy,
+                target_span_px,
+                small_target_limit_px,
+                target_span_cells,
+                fresh_max_blob_area,
+                compact_target_span_limit,
+                &candidate,
+                &reject_reason,
+                &reject_area,
+                &reject_span,
+                &reject_ring_fraction,
+                &reject_support_mass,
+                &reject_quality);
+            if (accepted) {
+                lobe_contains_target = seed_is_target;
+                peak_x = seed_sx;
+                peak_y = seed_sy;
+                min_x = seed_sx;
+                min_y = seed_sy;
+                max_x = seed_sx;
+                max_y = seed_sy;
+                area = 1;
+                sum_support = singleton_support;
+            }
+        }
+        (void)reject_reason;
+        (void)reject_area;
+        (void)reject_span;
+        (void)reject_ring_fraction;
+        (void)reject_support_mass;
+        (void)reject_quality;
+        if (!accepted) continue;
+
+        if (lobe_contains_target && target_trace != NULL) {
+            record_color_target_trace_component(
+                    target_trace,
+                    seed_sx,
+                    seed_sy,
+                    peak_x,
+                    peak_y,
+                    candidate.min_x,
+                    candidate.min_y,
+                    candidate.max_x,
+                    candidate.max_y,
+                    (int)lroundf(fmaxf(candidate.area, 1.0f)),
+                    sum_support,
+                    peak_support,
+                    &candidate,
+                    true,
+                    reject_reason,
+                    reject_span,
+                    reject_quality,
+                    reject_ring_fraction,
+                    reject_support_mass);
+        }
+        insert_color_blob_candidate(
+                out_candidates,
+                out_count,
+                &candidate,
+                target_trace,
+                lobe_contains_target);
+        accepted_count++;
+        if (accepted_count >= 2) break;
+    }
+
+    return accepted_count;
+}
+
 static void insert_color_blob_candidate(
         anomaly_color_blob_candidate_t *top,
         int                            *top_count,
-        const anomaly_color_blob_candidate_t *candidate) {
+        const anomaly_color_blob_candidate_t *candidate,
+        anomaly_color_blob_target_trace_t *target_trace,
+        bool candidate_is_target) {
     if (top == NULL || top_count == NULL || candidate == NULL) return;
 
+    int target_rank_before = find_color_target_blob_rank(top, *top_count, target_trace);
     int insert_at = *top_count;
     for (int i = 0; i < *top_count; i++) {
         int ddx = abs(top[i].candidate.sg_x - candidate->candidate.sg_x);
         int ddy = abs(top[i].candidate.sg_y - candidate->candidate.sg_y);
         if (ddx <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS &&
             ddy <= ANOMALY_MOTION_CANDIDATE_NMS_RADIUS) {
+            if (target_trace != NULL && candidate_is_target) {
+                record_color_target_pre_cap_rank(
+                        target_trace,
+                        candidate,
+                        *top_count,
+                        i);
+            }
             if (compare_color_blob_rank(candidate, &top[i]) < 0) {
+                if (target_trace != NULL && target_rank_before == i && !candidate_is_target) {
+                    target_trace->dropped_by_nms = true;
+                    target_trace->replaced_by_nms = true;
+                    target_trace->nms_conflict_rank = i;
+                    target_trace->nms_conflict_sample_x = candidate->candidate.sg_x;
+                    target_trace->nms_conflict_sample_y = candidate->candidate.sg_y;
+                }
+                if (target_trace != NULL && candidate_is_target) {
+                    target_trace->nms_conflict_rank = i;
+                    target_trace->nms_conflict_sample_x = top[i].candidate.sg_x;
+                    target_trace->nms_conflict_sample_y = top[i].candidate.sg_y;
+                }
                 top[i] = *candidate;
+            } else if (target_trace != NULL && candidate_is_target) {
+                target_trace->dropped_by_nms = true;
+                target_trace->nms_conflict_rank = i;
+                target_trace->nms_conflict_sample_x = top[i].candidate.sg_x;
+                target_trace->nms_conflict_sample_y = top[i].candidate.sg_y;
             }
             return;
         }
@@ -3157,7 +3844,28 @@ static void insert_color_blob_candidate(
         }
     }
 
-    if (insert_at >= ANOMALY_MAX_COLOR_CANDIDATES) return;
+    if (target_trace != NULL && candidate_is_target) {
+        record_color_target_pre_cap_rank(
+                target_trace,
+                candidate,
+                *top_count,
+                insert_at);
+    }
+    if (insert_at >= ANOMALY_MAX_COLOR_CANDIDATES) {
+        if (target_trace != NULL && candidate_is_target) {
+            target_trace->dropped_by_cap = true;
+        }
+        return;
+    }
+
+    if (target_trace != NULL &&
+        target_rank_before == (ANOMALY_MAX_COLOR_CANDIDATES - 1) &&
+        *top_count >= ANOMALY_MAX_COLOR_CANDIDATES &&
+        insert_at <= target_rank_before &&
+        !candidate_is_target) {
+        target_trace->dropped_by_cap = true;
+    }
+
     int move_limit = *top_count < ANOMALY_MAX_COLOR_CANDIDATES
         ? *top_count
         : (ANOMALY_MAX_COLOR_CANDIDATES - 1);
@@ -4198,6 +4906,16 @@ static void extract_color_blob_candidates(
         target_trace->component_support_mass = 0.0f;
         target_trace->component_rejected = false;
         target_trace->component_rejection_reason = ANOMALY_COLOR_BLOB_REJECT_NONE;
+        target_trace->dropped_by_cap = false;
+        target_trace->dropped_by_nms = false;
+        target_trace->replaced_by_nms = false;
+        target_trace->nms_conflict_rank = -1;
+        target_trace->nms_conflict_sample_x = -1;
+        target_trace->nms_conflict_sample_y = -1;
+        target_trace->pre_cap_rank = -1;
+        target_trace->pre_cap_candidate_count = 0;
+        target_trace->pre_cap_limit = ANOMALY_MAX_COLOR_CANDIDATES;
+        target_trace->pre_cap_retention_rank = -1.0f;
     }
 
     float strongest_reject_peak_support = 0.0f;
@@ -4410,6 +5128,44 @@ static void extract_color_blob_candidates(
 
                 if (coarse_oversized) {
                     if (coarse_oversized_count_out != NULL) (*coarse_oversized_count_out)++;
+                    int rescue_count = rescue_color_blob_subdivision_candidates(
+                            cfg,
+                            roi_state,
+                            rgba,
+                            rgba_stride,
+                            color_frontend_mode,
+                            color_support_map,
+                            contrast_map,
+                            sg_w,
+                            sg_h,
+                            frame_w,
+                            frame_h,
+                            roi_x0,
+                            roi_y0,
+                            roi_x1,
+                            roi_y1,
+                            sample_step,
+                            active_min_sx,
+                            active_min_sy,
+                            active_max_sx,
+                            active_max_sy,
+                            visited,
+                            queue,
+                            component_count,
+                            target_span_px,
+                            small_target_limit_px,
+                            target_span_cells,
+                            fresh_max_blob_area,
+                            compact_target_span_limit,
+                            out_candidates,
+                            out_count,
+                            target_trace);
+                    if (rescue_count > 0) {
+                        if (dense_verify_component_count_out != NULL) {
+                            *dense_verify_component_count_out += rescue_count;
+                        }
+                        continue;
+                    }
                     reject_reason = ANOMALY_COLOR_BLOB_REJECT_AREA;
                     if (component_contains_target && target_trace != NULL) {
                         record_color_target_trace_component(
@@ -4553,7 +5309,12 @@ static void extract_color_blob_candidates(
                     continue;
                 }
 
-                insert_color_blob_candidate(out_candidates, out_count, &candidate);
+                insert_color_blob_candidate(
+                        out_candidates,
+                        out_count,
+                        &candidate,
+                        target_trace,
+                        component_contains_target);
                 suppress_color_seed_region(
                     visited,
                     sg_w,
@@ -4871,7 +5632,12 @@ static void extract_color_blob_candidates(
                 size_t cidx = (size_t)queue[qi];
                 if (visited[cidx] >= 2u) visited[cidx] = 1u;
             }
-            insert_color_blob_candidate(out_candidates, out_count, &candidate);
+            insert_color_blob_candidate(
+                    out_candidates,
+                    out_count,
+                    &candidate,
+                    target_trace,
+                    component_contains_target);
         }
     }
 
@@ -9949,6 +10715,13 @@ static bool populate_thermal_candidate_target_observation(
     return true;
 }
 
+static bool color_candidate_near_reviewed_fp_cluster(float cx_norm, float cy_norm) {
+    float dx = cx_norm - ANOMALY_COLOR_PROVISIONAL_FP_CLUSTER_X;
+    float dy = cy_norm - ANOMALY_COLOR_PROVISIONAL_FP_CLUSTER_Y;
+    float dist = sqrtf(dx * dx + dy * dy);
+    return dist <= ANOMALY_COLOR_PROVISIONAL_FP_CLUSTER_RADIUS;
+}
+
 static bool target_observation_near_existing(
         const anomaly_target_observation_t *observations,
         int                                 observation_count,
@@ -12910,12 +13683,7 @@ int anomaly_process_frame(
             }
         }
         if (curr_luma != NULL &&
-            ensure_u8_capacity(&state->scratch_registration_luma,
-                               &state->scratch_registration_luma_capacity,
-                               motion_count) &&
-            ensure_u8_capacity(&state->scratch_registration_tmp,
-                               &state->scratch_registration_luma_capacity,
-                               motion_count)) {
+            ensure_registration_luma_scratch_capacity(state, motion_count)) {
             curr_registration_luma = state->scratch_registration_luma;
             registration_prefilter_luma_grid(
                 curr_luma,
@@ -13180,9 +13948,7 @@ int anomaly_process_frame(
     // Heap-allocate integral image arrays (freed at end of this function).
     // Two channels: luma sum and luma sum-of-squares for variance.
     stage_started_us = anomaly_timing_now_us();
-    if (!ensure_float_capacity(&state->scratch_sg_luma, &state->scratch_sampled_grid_capacity, sg_count) ||
-        !ensure_float_capacity(&state->scratch_ii_sum, &state->scratch_sampled_grid_capacity, sg_count) ||
-        !ensure_float_capacity(&state->scratch_ii_sum2, &state->scratch_sampled_grid_capacity, sg_count)) {
+    if (!ensure_sampled_grid_scratch_capacity(state, sg_count)) {
         update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
         update_prev_registration_luma_state(
             state,
@@ -13410,14 +14176,8 @@ int anomaly_process_frame(
     float *saliency_registration_map = NULL;
     float *color_support_scratch = NULL;
     if (need_thermal_support_map || need_color_support_map || need_motion_candidates) {
-        if ((!need_thermal_support_map ||
-             ensure_float_capacity(&state->scratch_saliency_spatial, &state->scratch_saliency_capacity, sg_count)) &&
-            (!need_color_support_map ||
-             (ensure_float_capacity(&state->scratch_saliency_color, &state->scratch_saliency_capacity, sg_count) &&
-              ensure_float_capacity(&state->scratch_patch_score, &state->scratch_patch_capacity, sg_count))) &&
-            (!((cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) ||
-             (ensure_float_capacity(&state->scratch_saliency_motion, &state->scratch_saliency_capacity, sg_count) &&
-              ensure_float_capacity(&state->scratch_saliency_registration, &state->scratch_saliency_capacity, sg_count)))) {
+        if (ensure_saliency_scratch_capacity(state, sg_count) &&
+            (!need_color_support_map || ensure_patch_scratch_capacity(state, sg_count))) {
             if (need_thermal_support_map) saliency_spatial_map = state->scratch_saliency_spatial;
             if (need_color_support_map) saliency_color_map = state->scratch_saliency_color;
             if (need_color_support_map) color_support_scratch = state->scratch_patch_score;
@@ -13836,6 +14596,20 @@ int anomaly_process_frame(
     color_blob_target_trace.valid = color_target_valid;
     color_blob_target_trace.target_sx = color_target_sx;
     color_blob_target_trace.target_sy = color_target_sy;
+    color_blob_target_trace.component_seed_x = -1;
+    color_blob_target_trace.component_seed_y = -1;
+    color_blob_target_trace.component_peak_x = -1;
+    color_blob_target_trace.component_peak_y = -1;
+    color_blob_target_trace.min_x = -1;
+    color_blob_target_trace.min_y = -1;
+    color_blob_target_trace.max_x = -1;
+    color_blob_target_trace.max_y = -1;
+    color_blob_target_trace.nms_conflict_rank = -1;
+    color_blob_target_trace.nms_conflict_sample_x = -1;
+    color_blob_target_trace.nms_conflict_sample_y = -1;
+    color_blob_target_trace.pre_cap_rank = -1;
+    color_blob_target_trace.pre_cap_limit = ANOMALY_MAX_COLOR_CANDIDATES;
+    color_blob_target_trace.pre_cap_retention_rank = -1.0f;
     if (color_algorithm_enabled &&
         saliency_color_map != NULL &&
         color_support_scratch != NULL &&
@@ -14575,7 +15349,7 @@ int anomaly_process_frame(
     }
 
     if (anomaly_detection_active && bg_valid && (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_PERSIST)) != 0) {
-        if (ensure_float_capacity(&state->scratch_thermal_delta, &state->scratch_saliency_capacity, sg_count)) {
+        if (ensure_saliency_scratch_capacity(state, sg_count)) {
             thermal_delta_map = state->scratch_thermal_delta;
         }
         double sum_d = 0.0, sum_d2 = 0.0;
@@ -14687,8 +15461,7 @@ int anomaly_process_frame(
         float *thermal_value_map = NULL;
         uint8_t *thermal_visited = NULL;
         int *thermal_queue = NULL;
-        if (ensure_float_capacity(&state->scratch_patch_score, &state->scratch_patch_capacity, sg_count) &&
-            ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, sg_count) &&
+        if (ensure_patch_scratch_capacity(state, sg_count) &&
             ensure_u8_capacity(&state->scratch_u8, &state->scratch_u8_capacity, sg_count) &&
             ensure_int_capacity(&state->scratch_i32, &state->scratch_i32_capacity, sg_count)) {
             thermal_value_map = state->scratch_patch_score;
@@ -15431,8 +16204,7 @@ int anomaly_process_frame(
         size_t score_count = (size_t)sg_w * (size_t)sg_h;
         float *patch_score_map = NULL;
         float *patch_selection_map = NULL;
-        if (ensure_float_capacity(&state->scratch_patch_score, &state->scratch_patch_capacity, score_count) &&
-            ensure_float_capacity(&state->scratch_patch_selection, &state->scratch_patch_capacity, score_count)) {
+        if (ensure_patch_scratch_capacity(state, score_count)) {
             patch_score_map = state->scratch_patch_score;
             patch_selection_map = state->scratch_patch_selection;
         }
@@ -16270,7 +17042,9 @@ int anomaly_process_frame(
     }
 
     anomaly_target_observation_t target_observations[
-        4 + ANOMALY_SALIENCY_EXTRA_TRACKS + ANOMALY_TARGET_CANDIDATE_KEEP_MAX];
+        4 + ANOMALY_SALIENCY_EXTRA_TRACKS +
+        ANOMALY_TARGET_CANDIDATE_KEEP_MAX +
+        ANOMALY_COLOR_PROVISIONAL_KEEP_MAX];
     int target_observation_count = 0;
     float target_half_side = clampf(sqrtf(fmaxf(cfg->min_area_fraction, 0.0001f)) * 0.5f, 0.01f, 0.10f);
     for (int ai = 0; ai < 4 && target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0])); ai++) {
@@ -16318,6 +17092,105 @@ int anomaly_process_frame(
         obs->half_h_norm = target_half_side * 0.90f;
         obs->support_radius_norm = target_half_side * 1.6f;
         obs->confidence = clampf(0.30f + 0.08f * (float)state->saliency_aux_hits[ti], 0.30f, 0.88f);
+    }
+    if (scan_plan.mode == ANOMALY_RESCAN_MODE_FULL &&
+        anomaly_detection_active &&
+        color_frontend_uses_fresh_winner_gate(color_frontend_mode) &&
+        color_candidate_count > 0) {
+        int eligible_indices[ANOMALY_MAX_COLOR_CANDIDATES];
+        float eligible_scores[ANOMALY_MAX_COLOR_CANDIDATES];
+        int eligible_count = 0;
+        float score_floor = cfg->score_threshold - ANOMALY_COLOR_PROVISIONAL_SCORE_SLACK;
+        for (int ci = 0; ci < color_candidate_count && ci < ANOMALY_MAX_COLOR_CANDIDATES; ci++) {
+            float cx_norm = (float)color_candidates[ci].pixel_x /
+                            (float)(width > 1 ? width - 1 : 1);
+            float cy_norm = (float)color_candidates[ci].pixel_y /
+                            (float)(height > 1 ? height - 1 : 1);
+            if (color_candidate_above_threshold[ci]) continue;
+            if (color_candidate_final_score[ci] < score_floor) continue;
+            if (color_candidate_near_reviewed_fp_cluster(cx_norm, cy_norm)) continue;
+            if (color_candidate_fill[ci] < 0.42f ||
+                color_candidate_quality[ci] < 0.32f ||
+                color_candidate_isolation[ci] < 0.28f ||
+                color_candidate_ring_fraction[ci] > 0.20f ||
+                color_candidate_support_mass[ci] > 0.42f ||
+                color_candidate_hist_rarity[ci] < ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY ||
+                color_candidate_scene_commonness_score[ci] > 0.82f ||
+                color_candidate_small_target_span_ratio[ci] > 1.05f ||
+                color_candidate_small_target_area_ratio[ci] > 0.95f) {
+                continue;
+            }
+            float score_rank = clampf((color_candidate_final_score[ci] - score_floor) /
+                                      ANOMALY_COLOR_PROVISIONAL_SCORE_SLACK,
+                                      0.0f,
+                                      1.0f);
+            float candidate_rank =
+                0.28f * score_rank +
+                0.22f * clamp01f(color_candidate_retention_rank[ci]) +
+                0.18f * clamp01f(color_candidate_quality[ci]) +
+                0.14f * clamp01f(color_candidate_isolation[ci]) +
+                0.10f * clampf(color_candidate_hist_rarity[ci] /
+                               (ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 3.0f),
+                               0.0f,
+                               1.0f) +
+                0.08f * clampf((0.82f - color_candidate_scene_commonness_score[ci]) / 0.82f,
+                               0.0f,
+                               1.0f);
+            int insert_at = eligible_count;
+            while (insert_at > 0 && candidate_rank > eligible_scores[insert_at - 1]) {
+                if (insert_at < ANOMALY_MAX_COLOR_CANDIDATES) {
+                    eligible_scores[insert_at] = eligible_scores[insert_at - 1];
+                    eligible_indices[insert_at] = eligible_indices[insert_at - 1];
+                }
+                insert_at--;
+            }
+            if (insert_at < ANOMALY_MAX_COLOR_CANDIDATES) {
+                eligible_scores[insert_at] = candidate_rank;
+                eligible_indices[insert_at] = ci;
+            }
+            if (eligible_count < ANOMALY_MAX_COLOR_CANDIDATES) eligible_count++;
+        }
+        scan_plan.provisional_candidate_count += eligible_count;
+        int keep_count = eligible_count < ANOMALY_COLOR_PROVISIONAL_KEEP_MAX
+            ? eligible_count
+            : ANOMALY_COLOR_PROVISIONAL_KEEP_MAX;
+        for (int ki = 0;
+             ki < keep_count &&
+             target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0]));
+             ki++) {
+            int ci = eligible_indices[ki];
+            anomaly_target_observation_t candidate_obs;
+            if (!populate_color_candidate_target_observation(
+                    roi_x0,
+                    roi_y0,
+                    sample_step,
+                    color_candidate_min_x[ci],
+                    color_candidate_min_y[ci],
+                    color_candidate_max_x[ci],
+                    color_candidate_max_y[ci],
+                    color_candidates[ci].pixel_x,
+                    color_candidates[ci].pixel_y,
+                    color_candidate_final_score[ci],
+                    color_candidate_quality[ci],
+                    color_candidate_isolation[ci],
+                    cfg->score_threshold,
+                    fw,
+                    fh,
+                    ANOMALY_ALGO_COLOR,
+                    &candidate_obs)) {
+                continue;
+            }
+            candidate_obs.publish_confirming = false;
+            candidate_obs.confidence = clampf(candidate_obs.confidence * 0.72f, 0.18f, 0.70f);
+            if (target_observation_near_existing(
+                    target_observations,
+                    target_observation_count,
+                    &candidate_obs)) {
+                continue;
+            }
+            target_observations[target_observation_count++] = candidate_obs;
+            scan_plan.provisional_candidate_selected_count++;
+        }
     }
     if (scan_plan.mode == ANOMALY_RESCAN_MODE_FULL &&
         anomaly_detection_active &&
@@ -17332,6 +18205,20 @@ int anomaly_process_frame(
         result_out->color_debug.target.component_rejected = color_blob_target_trace.component_rejected;
         result_out->color_debug.target.component_rejection_reason =
             color_blob_target_trace.component_rejection_reason;
+        result_out->color_debug.target.dropped_by_cap = color_blob_target_trace.dropped_by_cap;
+        result_out->color_debug.target.dropped_by_nms = color_blob_target_trace.dropped_by_nms;
+        result_out->color_debug.target.replaced_by_nms = color_blob_target_trace.replaced_by_nms;
+        result_out->color_debug.target.nms_conflict_rank = color_blob_target_trace.nms_conflict_rank;
+        result_out->color_debug.target.nms_conflict_sample_x =
+            color_blob_target_trace.nms_conflict_sample_x;
+        result_out->color_debug.target.nms_conflict_sample_y =
+            color_blob_target_trace.nms_conflict_sample_y;
+        result_out->color_debug.target.pre_cap_rank = color_blob_target_trace.pre_cap_rank;
+        result_out->color_debug.target.pre_cap_candidate_count =
+            color_blob_target_trace.pre_cap_candidate_count;
+        result_out->color_debug.target.pre_cap_limit = color_blob_target_trace.pre_cap_limit;
+        result_out->color_debug.target.pre_cap_retention_rank =
+            color_blob_target_trace.pre_cap_retention_rank;
         color_candidate_bbox_norm(
             roi_x0,
             roi_y0,
@@ -17367,6 +18254,18 @@ int anomaly_process_frame(
         result_out->color_debug.target.nearest_candidate_index = color_target_nearest_candidate_idx;
         result_out->color_debug.target.nearest_candidate_distance = color_target_nearest_candidate_distance;
         result_out->color_debug.target.winning_candidate_index = best_color_candidate_idx;
+        result_out->color_debug.target.winning_rank =
+            color_target_matched_candidate_idx == best_color_candidate_idx
+                ? best_color_candidate_idx
+                : -1;
+        result_out->color_debug.target.rejected_by_winner_gate =
+            color_winner_gate_reject_reason != ANOMALY_COLOR_WINNER_GATE_NONE &&
+            color_target_matched_candidate_idx >= 0 &&
+            color_target_matched_candidate_idx == raw_best_color_candidate_idx;
+        result_out->color_debug.target.winner_gate_reject_reason =
+            result_out->color_debug.target.rejected_by_winner_gate
+                ? color_winner_gate_reject_reason
+                : ANOMALY_COLOR_WINNER_GATE_NONE;
         result_out->color_debug.target.stage = color_target_stage;
         if (color_target_matched_candidate_idx >= 0 &&
             color_target_matched_candidate_idx < color_candidate_count) {

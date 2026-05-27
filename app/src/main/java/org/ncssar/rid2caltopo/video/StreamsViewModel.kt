@@ -130,6 +130,7 @@ data class ProximityMapFocusTarget(
 )
 
 private const val COMPLIANCE_ALERT_AGL_LIMIT_FT = 200.0
+private const val LOCAL_PLAYBACK_STAGE_BUFFER_BYTES = 1024 * 1024
 
 data class OverLimitDroneUiState(
     val mappedId: String,
@@ -1569,7 +1570,13 @@ class StreamsViewModel(
                 enabled = current.enabled,
                 appearanceSelection = current.appearanceSelection,
                 thermalPolarity = current.thermalPolarity,
-            )
+            ).let { defaults ->
+                if (current.appearanceSelection == AppearanceAnomalySelection.Color) {
+                    defaults.withColorRealtimeStrideDefaultsIfUnmodified()
+                } else {
+                    defaults
+                }
+            }
         }
     }
 
@@ -2497,6 +2504,7 @@ class StreamsViewModel(
 
     private fun stageCapturedVideoForPlayback(designator: String, sourceUri: Uri, displayName: String): Uri {
         val context = getApplication<Application>().applicationContext
+        val startedAtMs = System.currentTimeMillis()
         val sanitizedBase = displayName
             .substringBeforeLast('.', displayName)
             .replace(Regex("[^A-Za-z0-9._-]+"), "_")
@@ -2509,9 +2517,22 @@ class StreamsViewModel(
         )
         context.contentResolver.openInputStream(sourceUri)?.use { input ->
             targetFile.outputStream().use { output ->
-                input.copyTo(output)
+                input.copyTo(output, LOCAL_PLAYBACK_STAGE_BUFFER_BYTES)
             }
         } ?: error("Unable to read selected video")
+        val elapsedMs = System.currentTimeMillis() - startedAtMs
+        val sizeMb = targetFile.length().toDouble() / (1024.0 * 1024.0)
+        CTDebug(
+            tag,
+            String.format(
+                Locale.US,
+                "Staged captured video for %s: %.1f MB in %d ms uri=%s",
+                designator,
+                sizeMb,
+                elapsedMs,
+                targetFile.toURI(),
+            )
+        )
         return Uri.fromFile(targetFile)
     }
 

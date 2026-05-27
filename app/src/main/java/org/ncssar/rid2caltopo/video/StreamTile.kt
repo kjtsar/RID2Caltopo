@@ -148,6 +148,9 @@ fun StreamTile(
     val showLocalPlaybackLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyReviewLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyLegendControls = anomalyConfig.enabled
+    val showLocalPlaybackShell = isLocalPlayback && streamState != StreamState.ERROR
+    val showOverlayControls = (isFocused || isLocalPlayback) &&
+        (streamState == StreamState.LIVE || showLocalPlaybackShell)
     var streamTileSize by remember(streamDesignator) { mutableStateOf(IntSize.Zero) }
     val togglePlaybackAnomalyEnabled = {
         viewModel.toggleAnomalyEnabled(streamDesignator)
@@ -379,7 +382,7 @@ fun StreamTile(
                     }
                 )
         )
-        if ((isFocused || isLocalPlayback) && streamState == StreamState.LIVE) {
+        if (showOverlayControls) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)

@@ -92,6 +92,47 @@ class AnomalyConfigTest {
 
         assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask, native.algorithmMask)
         assertEquals(ColorFrontendMode.FreshRgba.nativeValue, native.colorFrontendMode)
+        assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
+        assertEquals(4, native.frameStride)
+        assertEquals(4, native.adaptiveMinStrideFrames)
+    }
+
+    @Test
+    fun toNativeConfig_colorRealtimeDefaultsUseAdaptiveStride() {
+        val native = AnomalyConfig(
+            appearanceSelection = AppearanceAnomalySelection.Color,
+            algorithms = emptySet(),
+        ).toNativeConfig(sourceFps = 29.97f)
+
+        assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask, native.algorithmMask)
+        assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
+        assertEquals(4, native.frameStride)
+        assertEquals(4, native.adaptiveMinStrideFrames)
+        assertEquals(30, native.adaptiveMaxStrideFrames)
+    }
+
+    @Test
+    fun toNativeConfig_colorStrideOverrideRemainsManual() {
+        val native = AnomalyConfig(
+            appearanceSelection = AppearanceAnomalySelection.Color,
+            algorithms = emptySet(),
+            strideMode = AnomalyStrideMode.Fixed,
+            frameStride = 3,
+        ).toNativeConfig(sourceFps = 29.97f)
+
+        assertEquals(AnomalyStrideMode.Fixed.nativeValue, native.strideMode)
+        assertEquals(3, native.frameStride)
+        assertEquals(2, native.adaptiveMinStrideFrames)
+    }
+
+    @Test
+    fun withAppearanceSelection_colorAdoptsRealtimeStrideDefaults() {
+        val config = AnomalyConfig().withAppearanceSelection(AppearanceAnomalySelection.Color)
+
+        assertEquals(AppearanceAnomalySelection.Color, config.appearanceSelection)
+        assertEquals(AnomalyStrideMode.Adaptive, config.strideMode)
+        assertEquals(4, config.frameStride)
+        assertEquals(4, config.adaptiveMinStrideFrames)
     }
 
     @Test

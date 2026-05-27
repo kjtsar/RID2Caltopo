@@ -1125,6 +1125,39 @@ static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(voi
     anomaly_state_cleanup(&st);
 }
 
+static void test_scan_zone_growth_reallocates_scratch_buffers(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(
+        ANOMALY_ALGO_COLOR |
+        ANOMALY_ALGO_THERMAL |
+        ANOMALY_ALGO_MOTION |
+        ANOMALY_ALGO_PERSIST);
+    cfg.score_threshold = 2.0f;
+    cfg.scan_zone = 0.50f;
+    cfg.pixel_step = 1;
+
+    uint8_t *frame = make_gray_frame(W, H, 96);
+    stamp_texture_field(frame, W * 4, W, H, 0);
+    stamp_color_patch(frame, W * 4, W, H, W / 2, H / 2, 3, 250, 32, 32);
+
+    anomaly_result_t small, large;
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 1000, &small);
+
+    cfg.scan_zone = 0.80f;
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 33333, &large);
+
+    EXPECT(large.scan_plan.sampled_width > small.scan_plan.sampled_width,
+           "scan-zone growth: sampled width expands without crashing");
+    EXPECT(large.scan_plan.sampled_height > small.scan_plan.sampled_height,
+           "scan-zone growth: sampled height expands without crashing");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -1165,6 +1198,7 @@ int main(void) {
     test_small_target_caps_sample_step();
     test_explicit_detail_clamps_large_sample_grid();
     test_periodic_full_refresh_replaces_indefinite_target_only_reuse();
+    test_scan_zone_growth_reallocates_scratch_buffers();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

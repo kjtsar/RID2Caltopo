@@ -386,6 +386,17 @@ static const registration_reason_counter_desc_t kRegistrationReasonCounters[] = 
     { ANOMALY_REG_INVALID_REASON_AFFINE_NEGATIVE_DET, "affine-negative-det" },
 };
 
+static const scan_reason_counter_desc_t kAdaptiveStrideReasonCounters[] = {
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_REG_INVALID, "reg-invalid" },
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_REG_DEGRADED, "reg-degraded" },
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_SCENE_DISCONTINUITY, "scene-discontinuity" },
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_MOVEMENT_LOAD, "movement-load" },
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_TARGET_TRACK, "target-track" },
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_WEAK_TARGET_LOCK, "weak-target-lock" },
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_TARGET_RICH_RECENT, "target-rich-recent" },
+    { ANOMALY_ADAPTIVE_STRIDE_REASON_STABLE_WINDOW, "stable-window" },
+};
+
 static const char *timing_stage_name(anomaly_timing_stage_t stage) {
     switch (stage) {
         case ANOMALY_TIMING_STAGE_REGISTRATION_PREP: return "registration_prep";
@@ -1268,7 +1279,15 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             "\"rejection_gate\":\"%s\",\"stage\":\"%s\","
             "\"dropped_by_cap\":%s,\"dropped_by_nms\":%s,\"replaced_by_nms\":%s,"
             "\"nms_conflict_rank\":%d,\"nms_conflict_sample_x\":%d,\"nms_conflict_sample_y\":%d,"
-            "\"extracted_rank\":%d,\"winning_rank\":%d}}\n",
+            "\"extracted_rank\":%d,\"winning_rank\":%d,"
+            "\"provisional_candidate_index\":%d,"
+            "\"provisional_score_floor\":%.6f,\"provisional_final_score\":%.6f,"
+            "\"provisional_score_eligible\":%s,\"provisional_shape_eligible\":%s,"
+            "\"provisional_candidate_rank\":%.6f,\"provisional_selected_rank\":%d,"
+            "\"provisional_selected_score\":%.6f,\"provisional_near_existing_skip\":%s,"
+            "\"matched_track_index\":%d,\"matched_track_id\":%d,"
+            "\"matched_track_hit_count\":%d,\"matched_track_miss_count\":%d,"
+            "\"matched_track_hold_count\":%d,\"matched_track_publish_confirmed\":%s}}\n",
             dbg->target.enabled ? "true" : "false",
             dbg->target.valid ? "true" : "false",
             dbg->target.inside_scan_zone ? "true" : "false",
@@ -1307,7 +1326,22 @@ static void write_thermal_debug_jsonl(FILE *out, int frame_num, double time_s,
             dbg->target.nms_conflict_sample_x,
             dbg->target.nms_conflict_sample_y,
             dbg->target.extracted_rank,
-            dbg->target.winning_rank);
+            dbg->target.winning_rank,
+            dbg->target.provisional_candidate_index,
+            (double)dbg->target.provisional_score_floor,
+            (double)dbg->target.provisional_final_score,
+            dbg->target.provisional_score_eligible ? "true" : "false",
+            dbg->target.provisional_shape_eligible ? "true" : "false",
+            (double)dbg->target.provisional_candidate_rank,
+            dbg->target.provisional_selected_rank,
+            (double)dbg->target.provisional_selected_score,
+            dbg->target.provisional_near_existing_skip ? "true" : "false",
+            dbg->target.matched_track_index,
+            dbg->target.matched_track_id,
+            dbg->target.matched_track_hit_count,
+            dbg->target.matched_track_miss_count,
+            dbg->target.matched_track_hold_count,
+            dbg->target.matched_track_publish_confirmed ? "true" : "false");
 }
 
 static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
@@ -2265,6 +2299,12 @@ int main(int argc, char **argv) {
     int    rescan_stride_skip_frames = 0;
     int    scan_reason_counts[sizeof(kScanReasonCounters) / sizeof(kScanReasonCounters[0])] = {0};
     int    registration_reason_counts[sizeof(kRegistrationReasonCounters) / sizeof(kRegistrationReasonCounters[0])] = {0};
+    int    adaptive_stride_reason_counts[sizeof(kAdaptiveStrideReasonCounters) / sizeof(kAdaptiveStrideReasonCounters[0])] = {0};
+    int64_t adaptive_stride_sum = 0;
+    int    adaptive_stride_min = 0;
+    int    adaptive_stride_max = 0;
+    int    adaptive_stride_frame_count = 0;
+    double adaptive_motion_load_sum = 0.0;
     int64_t stage_timing_total_us[ANOMALY_TIMING_STAGE_COUNT] = {0};
     int64_t stage_timing_max_us[ANOMALY_TIMING_STAGE_COUNT] = {0};
     int64_t frame_timing_total_us = 0;
@@ -2374,6 +2414,22 @@ int main(int argc, char **argv) {
             if (result.gmv_debug.invalid_reason == kRegistrationReasonCounters[ri].code) {
                 registration_reason_counts[ri]++;
                 break;
+            }
+        }
+        if (result.adaptive_effective_stride > 0) {
+            adaptive_stride_frame_count++;
+            adaptive_stride_sum += result.adaptive_effective_stride;
+            if (adaptive_stride_min == 0 || result.adaptive_effective_stride < adaptive_stride_min) {
+                adaptive_stride_min = result.adaptive_effective_stride;
+            }
+            if (result.adaptive_effective_stride > adaptive_stride_max) {
+                adaptive_stride_max = result.adaptive_effective_stride;
+            }
+            adaptive_motion_load_sum += result.adaptive_motion_load;
+        }
+        for (size_t ri = 0; ri < sizeof(kAdaptiveStrideReasonCounters) / sizeof(kAdaptiveStrideReasonCounters[0]); ri++) {
+            if ((result.adaptive_reason_flags & kAdaptiveStrideReasonCounters[ri].flag) != 0u) {
+                adaptive_stride_reason_counts[ri]++;
             }
         }
         provisional_candidate_count += result.scan_plan.provisional_candidate_count;
@@ -2626,6 +2682,26 @@ int main(int argc, char **argv) {
             fprintf(summary, "    \"partial\": %d,\n", rescan_partial_frames);
             fprintf(summary, "    \"target_only\": %d,\n", rescan_target_only_frames);
             fprintf(summary, "    \"appearance_stride_skip\": %d\n", rescan_stride_skip_frames);
+            fprintf(summary, "  },\n  \"adaptive_stride\": {\n");
+            fprintf(summary, "    \"frame_count\": %d,\n", adaptive_stride_frame_count);
+            fprintf(summary, "    \"min\": %d,\n", adaptive_stride_min);
+            fprintf(summary, "    \"max\": %d,\n", adaptive_stride_max);
+            fprintf(summary, "    \"avg\": %.6f,\n",
+                    adaptive_stride_frame_count > 0
+                        ? (double)adaptive_stride_sum / (double)adaptive_stride_frame_count
+                        : 0.0);
+            fprintf(summary, "    \"avg_motion_load\": %.6f,\n",
+                    adaptive_stride_frame_count > 0
+                        ? adaptive_motion_load_sum / (double)adaptive_stride_frame_count
+                        : 0.0);
+            fprintf(summary, "    \"reason_counts\": {\n");
+            for (size_t ri = 0; ri < sizeof(kAdaptiveStrideReasonCounters) / sizeof(kAdaptiveStrideReasonCounters[0]); ri++) {
+                fprintf(summary, "      \"%s\": %d%s\n",
+                        kAdaptiveStrideReasonCounters[ri].name,
+                        adaptive_stride_reason_counts[ri],
+                        (ri + 1) < sizeof(kAdaptiveStrideReasonCounters) / sizeof(kAdaptiveStrideReasonCounters[0]) ? "," : "");
+            }
+            fprintf(summary, "    }\n");
             fprintf(summary, "  },\n  \"scan_reason_counts\": {\n");
             for (size_t ri = 0; ri < sizeof(kScanReasonCounters) / sizeof(kScanReasonCounters[0]); ri++) {
                 fprintf(summary, "    \"%s\": %d%s\n",

@@ -428,6 +428,14 @@ typedef struct {
     int64_t  last_full_refresh_frame_counter;
     int      last_color_full_scan_coarse_count;
     float    fresh_color_distinctness_ratio;
+    int      adaptive_effective_stride;
+    int      adaptive_stable_frames;
+    int      adaptive_drop_hold_frames;
+    int      adaptive_target_rich_frames;
+    float    adaptive_motion_load_ema;
+    int64_t  adaptive_last_source_ts_us;
+    float    adaptive_frame_interval_ema_us;
+    uint32_t adaptive_reason_flags;
 } anomaly_state_t;
 
 typedef struct {
@@ -684,6 +692,21 @@ typedef struct {
     int   nms_conflict_sample_y;
     int   extracted_rank;
     int   winning_rank;
+    int   provisional_candidate_index;
+    float provisional_score_floor;
+    float provisional_final_score;
+    bool  provisional_score_eligible;
+    bool  provisional_shape_eligible;
+    float provisional_candidate_rank;
+    int   provisional_selected_rank;
+    float provisional_selected_score;
+    bool  provisional_near_existing_skip;
+    int   matched_track_index;
+    int   matched_track_id;
+    int   matched_track_hit_count;
+    int   matched_track_miss_count;
+    int   matched_track_hold_count;
+    bool  matched_track_publish_confirmed;
     anomaly_debug_thermal_target_stage_t stage;
 } anomaly_debug_thermal_target_t;
 
@@ -955,6 +978,15 @@ typedef enum {
 #define ANOMALY_SCAN_REASON_MASK_TOO_BROAD         0x4000u
 #define ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH  0x8000u
 
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_REG_INVALID         0x0001u
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_REG_DEGRADED        0x0002u
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_SCENE_DISCONTINUITY 0x0004u
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_MOVEMENT_LOAD       0x0008u
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_TARGET_TRACK        0x0010u
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_WEAK_TARGET_LOCK    0x0020u
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_TARGET_RICH_RECENT  0x0040u
+#define ANOMALY_ADAPTIVE_STRIDE_REASON_STABLE_WINDOW       0x0080u
+
 typedef struct {
     bool  valid;
     anomaly_rescan_mode_t mode;
@@ -1012,6 +1044,11 @@ typedef struct {
     anomaly_registration_health_t registration_health;
     anomaly_rescan_mode_t rescan_mode;
     anomaly_scan_plan_t scan_plan;
+    int adaptive_effective_stride;
+    int adaptive_stable_frames;
+    int adaptive_drop_hold_frames;
+    float adaptive_motion_load;
+    uint32_t adaptive_reason_flags;
     anomaly_debug_gmv_t gmv_debug;
     anomaly_debug_movement_t movement_debug;
     anomaly_debug_motion_t motion_debug;

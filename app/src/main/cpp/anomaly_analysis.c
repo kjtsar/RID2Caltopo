@@ -1141,6 +1141,37 @@ static inline int target_revisit_track_count(const anomaly_state_t *state) {
     return count;
 }
 
+static void adaptive_target_track_risk(
+        const anomaly_state_t *state,
+        int                    min_hits,
+        bool                  *has_track_risk_out,
+        bool                  *has_weak_lock_out) {
+    bool has_track_risk = false;
+    bool has_weak_lock = false;
+    if (state != NULL) {
+        int required_hits = min_hits > 1 ? min_hits : 1;
+        for (int i = 0; i < ANOMALY_MAX_TARGET_TRACKS; i++) {
+            const anomaly_target_track_t *track = &state->target_tracks[i];
+            if (!track->active) continue;
+            if (!track->publish_confirmed ||
+                track->hit_count < required_hits ||
+                track->forced_revisit ||
+                track->miss_count > 0) {
+                has_track_risk = true;
+            }
+            if (track->confidence < 0.55f ||
+                track->miss_count > 0 ||
+                track->movement_parallax_frames > 0 ||
+                (track->movement_window_frames > 0 &&
+                 track->movement_valid_frames < track->movement_window_frames / 2)) {
+                has_weak_lock = true;
+            }
+        }
+    }
+    if (has_track_risk_out != NULL) *has_track_risk_out = has_track_risk;
+    if (has_weak_lock_out != NULL) *has_weak_lock_out = has_weak_lock;
+}
+
 static float target_revisit_radius_for_track(
         const anomaly_target_track_t *track,
         int                           min_hits) {
@@ -1625,6 +1656,21 @@ typedef struct {
     int nms_conflict_sample_y;
     int extracted_rank;
     int winning_rank;
+    int provisional_candidate_index;
+    float provisional_score_floor;
+    float provisional_final_score;
+    bool provisional_score_eligible;
+    bool provisional_shape_eligible;
+    float provisional_candidate_rank;
+    int provisional_selected_rank;
+    float provisional_selected_score;
+    bool provisional_near_existing_skip;
+    int matched_track_index;
+    int matched_track_id;
+    int matched_track_hit_count;
+    int matched_track_miss_count;
+    int matched_track_hold_count;
+    bool matched_track_publish_confirmed;
     anomaly_debug_thermal_target_stage_t stage;
 } anomaly_thermal_target_trace_t;
 
@@ -4718,6 +4764,17 @@ static void extract_thermal_blob_candidates(
         target_trace->nms_conflict_sample_y = -1;
         target_trace->extracted_rank = -1;
         target_trace->winning_rank = -1;
+        target_trace->provisional_candidate_index = -1;
+        target_trace->provisional_score_floor = -1.0f;
+        target_trace->provisional_final_score = -1.0f;
+        target_trace->provisional_candidate_rank = -1.0f;
+        target_trace->provisional_selected_rank = -1;
+        target_trace->provisional_selected_score = -1.0f;
+        target_trace->matched_track_index = -1;
+        target_trace->matched_track_id = -1;
+        target_trace->matched_track_hit_count = -1;
+        target_trace->matched_track_miss_count = -1;
+        target_trace->matched_track_hold_count = -1;
         if (target_trace->enabled) {
             int px = clamp_i32((int)lroundf(cfg->thermal_debug_target_x_norm * (float)(frame_w - 1)), 0, frame_w - 1);
             int py = clamp_i32((int)lroundf(cfg->thermal_debug_target_y_norm * (float)(frame_h - 1)), 0, frame_h - 1);
@@ -11131,6 +11188,195 @@ static bool periodic_full_refresh_due(
     return false;
 }
 
+static int adaptive_max_stride_frames_for_source(
+        anomaly_state_t        *state,
+        const anomaly_config_t *cfg,
+        int64_t                 source_ts_us,
+        int                     min_stride) {
+    int max_stride = cfg != NULL && cfg->adaptive_max_stride_frames > 0
+        ? cfg->adaptive_max_stride_frames
+        : 33;
+    if (source_ts_us > 0 && state != NULL) {
+        if (state->adaptive_last_source_ts_us > 0 &&
+            source_ts_us > state->adaptive_last_source_ts_us) {
+            float dt_us = (float)(source_ts_us - state->adaptive_last_source_ts_us);
+            if (dt_us > 1000.0f && dt_us < 1000000.0f) {
+                if (state->adaptive_frame_interval_ema_us <= 0.0f) {
+                    state->adaptive_frame_interval_ema_us = dt_us;
+                } else {
+                    state->adaptive_frame_interval_ema_us =
+                        0.85f * state->adaptive_frame_interval_ema_us + 0.15f * dt_us;
+                }
+            }
+        }
+        state->adaptive_last_source_ts_us = source_ts_us;
+    }
+    if (cfg != NULL &&
+        isfinite(cfg->adaptive_max_stride_seconds) &&
+        cfg->adaptive_max_stride_seconds > 0.0f &&
+        state != NULL &&
+        state->adaptive_frame_interval_ema_us > 1000.0f) {
+        int seconds_limited = (int)floorf(
+                (cfg->adaptive_max_stride_seconds * 1000000.0f) /
+                state->adaptive_frame_interval_ema_us + 0.5f);
+        if (seconds_limited >= min_stride && seconds_limited < max_stride) {
+            max_stride = seconds_limited;
+        }
+    }
+    return clamp_i32(max_stride, min_stride, 120);
+}
+
+static int compute_adaptive_effective_stride(
+        anomaly_state_t                    *state,
+        const anomaly_config_t             *cfg,
+        anomaly_registration_health_t       registration_health,
+        bool                                scene_discontinuity,
+        const anomaly_debug_movement_t     *movement,
+        int64_t                             source_ts_us,
+        uint32_t                           *reason_flags_out,
+        float                              *motion_load_out) {
+    if (reason_flags_out != NULL) *reason_flags_out = 0u;
+    if (motion_load_out != NULL) *motion_load_out = 0.0f;
+    if (cfg == NULL) return 1;
+
+    int fixed_stride = cfg->frame_stride < 1 ? 1 : cfg->frame_stride;
+    if (cfg->stride_mode != ANOMALY_STRIDE_MODE_ADAPTIVE || state == NULL) {
+        return fixed_stride;
+    }
+
+    int min_stride = cfg->adaptive_min_stride_frames > 0
+        ? cfg->adaptive_min_stride_frames
+        : fixed_stride;
+    min_stride = clamp_i32(min_stride, 1, 120);
+    int max_stride = adaptive_max_stride_frames_for_source(
+            state,
+            cfg,
+            source_ts_us,
+            min_stride);
+    fixed_stride = clamp_i32(fixed_stride, min_stride, max_stride);
+
+    if (state->adaptive_effective_stride < min_stride ||
+        state->adaptive_effective_stride > max_stride) {
+        state->adaptive_effective_stride = fixed_stride;
+    }
+
+    float instant_motion_load = 0.0f;
+    if (movement != NULL && movement->valid) {
+        instant_motion_load =
+            fmaxf(movement->parallax_load,
+                  fmaxf(movement->local_outlier_load,
+                        (float)movement->unstable_count / 8.0f));
+    }
+    if (state->adaptive_motion_load_ema <= 0.0f) {
+        state->adaptive_motion_load_ema = instant_motion_load;
+    } else {
+        state->adaptive_motion_load_ema =
+            0.70f * state->adaptive_motion_load_ema + 0.30f * instant_motion_load;
+    }
+    float motion_load = fmaxf(instant_motion_load, state->adaptive_motion_load_ema);
+
+    bool target_track_risk = false;
+    bool weak_target_lock = false;
+    adaptive_target_track_risk(
+            state,
+            cfg->min_hits,
+            &target_track_risk,
+            &weak_target_lock);
+    bool target_rich_recent =
+        state->adaptive_target_rich_frames > 0 ||
+        state->last_color_full_scan_coarse_count >= 4;
+
+    uint32_t reasons = 0u;
+    int desired_stride = state->adaptive_effective_stride;
+    if (desired_stride <= 0) desired_stride = fixed_stride;
+
+    if (scene_discontinuity) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_SCENE_DISCONTINUITY;
+        desired_stride = min_stride;
+        state->adaptive_drop_hold_frames = 8;
+    }
+    if (registration_health == ANOMALY_REG_HEALTH_INVALID ||
+        registration_health == ANOMALY_REG_HEALTH_UNKNOWN) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_REG_INVALID;
+        desired_stride = min_stride;
+        if (state->adaptive_drop_hold_frames < 6) state->adaptive_drop_hold_frames = 6;
+    } else if (registration_health == ANOMALY_REG_HEALTH_HARD_DEGRADED ||
+               registration_health == ANOMALY_REG_HEALTH_SOFT_DEGRADED) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_REG_DEGRADED;
+        desired_stride = min_stride;
+        if (state->adaptive_drop_hold_frames < 4) state->adaptive_drop_hold_frames = 4;
+    }
+    if (motion_load >= 0.24f ||
+        (movement != NULL && movement->valid &&
+         (movement->unstable_count >= 3 ||
+          movement->aoi_parallax_count > 0 ||
+          movement->aoi_unstable_count > 0))) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_MOVEMENT_LOAD;
+        desired_stride = min_stride;
+        if (state->adaptive_drop_hold_frames < 4) state->adaptive_drop_hold_frames = 4;
+    }
+    if (target_track_risk) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_TARGET_TRACK;
+        desired_stride = min_stride;
+        if (state->adaptive_drop_hold_frames < 4) state->adaptive_drop_hold_frames = 4;
+    }
+    if (weak_target_lock) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_WEAK_TARGET_LOCK;
+        desired_stride = min_stride;
+        if (state->adaptive_drop_hold_frames < 4) state->adaptive_drop_hold_frames = 4;
+    }
+    if (target_rich_recent) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_TARGET_RICH_RECENT;
+        int target_rich_stride = min_stride + 1;
+        if (target_rich_stride > max_stride) target_rich_stride = max_stride;
+        if (desired_stride > target_rich_stride) desired_stride = target_rich_stride;
+        if (state->adaptive_drop_hold_frames < 2) state->adaptive_drop_hold_frames = 2;
+    }
+
+    bool low_motion = movement == NULL || !movement->valid ||
+        (motion_load < 0.08f &&
+         movement->unstable_count == 0 &&
+         movement->local_outlier_count <= 1 &&
+         movement->aoi_parallax_count == 0 &&
+         movement->aoi_unstable_count == 0);
+    bool stable_window =
+        reasons == 0u &&
+        registration_health == ANOMALY_REG_HEALTH_HEALTHY &&
+        !scene_discontinuity &&
+        low_motion &&
+        state->roi_state.valid &&
+        state->adaptive_drop_hold_frames <= 0;
+
+    if (desired_stride < state->adaptive_effective_stride) {
+        state->adaptive_effective_stride = desired_stride;
+        state->adaptive_stable_frames = 0;
+    } else if (stable_window) {
+        reasons |= ANOMALY_ADAPTIVE_STRIDE_REASON_STABLE_WINDOW;
+        state->adaptive_stable_frames++;
+        if (state->adaptive_stable_frames >= 8 &&
+            state->adaptive_effective_stride < max_stride) {
+            state->adaptive_effective_stride++;
+            state->adaptive_stable_frames = 0;
+        }
+    } else {
+        state->adaptive_stable_frames = 0;
+        if (state->adaptive_drop_hold_frames > 0 &&
+            state->adaptive_effective_stride > min_stride) {
+            state->adaptive_effective_stride--;
+        }
+    }
+
+    if (state->adaptive_drop_hold_frames > 0) {
+        state->adaptive_drop_hold_frames--;
+    }
+    state->adaptive_effective_stride =
+        clamp_i32(state->adaptive_effective_stride, min_stride, max_stride);
+    state->adaptive_reason_flags = reasons;
+    if (reason_flags_out != NULL) *reason_flags_out = reasons;
+    if (motion_load_out != NULL) *motion_load_out = motion_load;
+    return state->adaptive_effective_stride;
+}
+
 static anomaly_scan_plan_t build_scan_plan(
         const anomaly_state_t               *state,
         const anomaly_registration_model_t  *model,
@@ -11523,6 +11769,14 @@ void anomaly_state_reset(anomaly_state_t *state) {
     state->last_full_refresh_frame_counter = 0;
     state->last_color_full_scan_coarse_count = 0;
     state->fresh_color_distinctness_ratio = default_fresh_color_distinctness_ratio();
+    state->adaptive_effective_stride = 0;
+    state->adaptive_stable_frames = 0;
+    state->adaptive_drop_hold_frames = 0;
+    state->adaptive_target_rich_frames = 0;
+    state->adaptive_motion_load_ema = 0.0f;
+    state->adaptive_last_source_ts_us = 0;
+    state->adaptive_frame_interval_ema_us = 0.0f;
+    state->adaptive_reason_flags = 0u;
     state->color_history_recovery_frames = 0;
     memset(state->acc_cx,     0, sizeof(state->acc_cx));
     memset(state->acc_cy,     0, sizeof(state->acc_cy));
@@ -11683,6 +11937,13 @@ int anomaly_process_frame(
         result_out->registration_health = ANOMALY_REG_HEALTH_UNKNOWN;
         result_out->rescan_mode = ANOMALY_RESCAN_MODE_UNSET;
         result_out->scan_plan.mode = ANOMALY_RESCAN_MODE_UNSET;
+        result_out->adaptive_effective_stride = cfg != NULL && cfg->frame_stride > 0
+            ? cfg->frame_stride
+            : 1;
+        result_out->adaptive_stable_frames = 0;
+        result_out->adaptive_drop_hold_frames = 0;
+        result_out->adaptive_motion_load = 0.0f;
+        result_out->adaptive_reason_flags = 0u;
     }
 
     if (cfg == NULL) {
@@ -11720,9 +11981,10 @@ int anomaly_process_frame(
         state->prev_luma != NULL &&
         !bg_publish_ready;
     bool publish_hold_active = use_publish_transition_gating && state->publish_hold_frames > 0;
-    bool full_refresh_cadence_due =
+    bool fixed_full_refresh_cadence_due =
         state->frame_counter <= 1 || ((state->frame_counter % frame_stride) == 0);
-    if (!full_refresh_cadence_due) {
+    if (cfg->stride_mode != ANOMALY_STRIDE_MODE_ADAPTIVE &&
+        !fixed_full_refresh_cadence_due) {
         age_roi_tracks_one_frame(state);
     }
 
@@ -11860,6 +12122,35 @@ int anomaly_process_frame(
         &movement_sidecar);
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_MOVEMENT_ESTIMATOR, stage_started_us);
     anomaly_movement_snapshot_t movement_snapshot = make_movement_snapshot(&movement_sidecar);
+    uint32_t adaptive_reason_flags = 0u;
+    float adaptive_motion_load = 0.0f;
+    int effective_frame_stride = frame_stride;
+    bool full_refresh_cadence_due = fixed_full_refresh_cadence_due;
+    if (cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE) {
+        effective_frame_stride = compute_adaptive_effective_stride(
+                state,
+                cfg,
+                registration_health,
+                scene_discontinuity,
+                &movement_sidecar,
+                source_ts_us,
+                &adaptive_reason_flags,
+                &adaptive_motion_load);
+        int64_t frames_since_full = state->last_full_refresh_frame_counter > 0
+            ? state->frame_counter - state->last_full_refresh_frame_counter
+            : effective_frame_stride;
+        full_refresh_cadence_due =
+            state->frame_counter <= 1 ||
+            frames_since_full >= effective_frame_stride;
+        if (!full_refresh_cadence_due) {
+            age_roi_tracks_one_frame(state);
+        }
+    } else {
+        state->adaptive_effective_stride = frame_stride;
+        state->adaptive_stable_frames = 0;
+        state->adaptive_drop_hold_frames = 0;
+        state->adaptive_reason_flags = 0u;
+    }
     int *prev_sample_lookup = NULL;
     anomaly_prev_sample_lookup_summary_t prev_sample_lookup_summary;
     memset(&prev_sample_lookup_summary, 0, sizeof(prev_sample_lookup_summary));
@@ -11962,6 +12253,11 @@ int anomaly_process_frame(
         result_out->registration_health = registration_health;
         result_out->rescan_mode = rescan_mode;
         result_out->scan_plan = scan_plan;
+        result_out->adaptive_effective_stride = effective_frame_stride;
+        result_out->adaptive_stable_frames = state->adaptive_stable_frames;
+        result_out->adaptive_drop_hold_frames = state->adaptive_drop_hold_frames;
+        result_out->adaptive_motion_load = adaptive_motion_load;
+        result_out->adaptive_reason_flags = adaptive_reason_flags;
         populate_registration_debug(&registration, result_out);
         result_out->movement_debug = movement_sidecar;
     }
@@ -13328,6 +13624,17 @@ int anomaly_process_frame(
     thermal_target_trace.component_peak_y = -1;
     thermal_target_trace.extracted_rank = -1;
     thermal_target_trace.winning_rank = -1;
+    thermal_target_trace.provisional_candidate_index = -1;
+    thermal_target_trace.provisional_score_floor = -1.0f;
+    thermal_target_trace.provisional_final_score = -1.0f;
+    thermal_target_trace.provisional_candidate_rank = -1.0f;
+    thermal_target_trace.provisional_selected_rank = -1;
+    thermal_target_trace.provisional_selected_score = -1.0f;
+    thermal_target_trace.matched_track_index = -1;
+    thermal_target_trace.matched_track_id = -1;
+    thermal_target_trace.matched_track_hit_count = -1;
+    thermal_target_trace.matched_track_miss_count = -1;
+    thermal_target_trace.matched_track_hold_count = -1;
     for (int i = 0; i < ANOMALY_MAX_THERMAL_CANDIDATES; i++) {
         thermal_candidate_area[i] = 0.0f;
         thermal_candidate_span[i] = 0.0f;
@@ -15143,7 +15450,6 @@ int anomaly_process_frame(
                 thermal_candidate_isolation_rank[ci] >= 0.30f ||
                 thermal_candidate_patch_support[ci] >= 0.08f ||
                 thermal_candidate_motion_support[ci] >= 0.08f;
-            if (!score_eligible || !shape_eligible) continue;
             float span_px = thermal_candidate_span[ci] * (float)sample_step;
             float compact_rank = 0.0f;
             if (span_px > 0.0f && small_target_limit_px > 0.0f) {
@@ -15160,6 +15466,17 @@ int anomaly_process_frame(
                 0.12f * clamp01f(thermal_candidate_patch_support[ci]) +
                 0.10f * clamp01f(thermal_candidate_motion_support[ci]) +
                 0.08f * compact_rank;
+            if (thermal_target_trace.enabled &&
+                thermal_target_trace.extracted_rank >= 0 &&
+                ci == thermal_target_trace.extracted_rank) {
+                thermal_target_trace.provisional_candidate_index = ci;
+                thermal_target_trace.provisional_score_floor = score_floor;
+                thermal_target_trace.provisional_final_score = final_score;
+                thermal_target_trace.provisional_score_eligible = score_eligible;
+                thermal_target_trace.provisional_shape_eligible = shape_eligible;
+                thermal_target_trace.provisional_candidate_rank = candidate_rank;
+            }
+            if (!score_eligible || !shape_eligible) continue;
             int insert_at = eligible_count;
             while (insert_at > 0 && candidate_rank > eligible_scores[insert_at - 1]) {
                 if (insert_at < ANOMALY_MAX_THERMAL_CANDIDATES) {
@@ -15219,10 +15536,19 @@ int anomaly_process_frame(
                     target_observations,
                     target_observation_count,
                     &candidate_obs)) {
+                if (thermal_target_trace.enabled &&
+                    ci == thermal_target_trace.provisional_candidate_index) {
+                    thermal_target_trace.provisional_near_existing_skip = true;
+                }
                 continue;
             }
             target_observations[target_observation_count++] = candidate_obs;
             scan_plan.provisional_candidate_selected_count++;
+            if (thermal_target_trace.enabled &&
+                ci == thermal_target_trace.provisional_candidate_index) {
+                thermal_target_trace.provisional_selected_rank = ki;
+                thermal_target_trace.provisional_selected_score = eligible_scores[ki];
+            }
         }
     }
     if (result_out != NULL) {
@@ -15233,6 +15559,46 @@ int anomaly_process_frame(
             target_observations,
             target_observation_count,
             registration_health);
+    if (thermal_target_trace.enabled && thermal_target_trace.valid) {
+        float best_dist = 1.0e9f;
+        int best_track_idx = -1;
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            const anomaly_target_track_t *track = &state->target_tracks[ti];
+            if (!track->active) continue;
+            float dx = track->center_x_norm - thermal_target_trace.target_x_norm;
+            float dy = track->center_y_norm - thermal_target_trace.target_y_norm;
+            float dist = sqrtf(dx * dx + dy * dy);
+            float gate = fmaxf(ANOMALY_TARGET_MATCH_GATE,
+                               fmaxf(track->support_radius_norm, 0.012f) * 1.75f);
+            if (dist <= gate && dist < best_dist) {
+                best_dist = dist;
+                best_track_idx = ti;
+            }
+        }
+        if (best_track_idx >= 0) {
+            const anomaly_target_track_t *track = &state->target_tracks[best_track_idx];
+            thermal_target_trace.matched_track_index = best_track_idx;
+            thermal_target_trace.matched_track_id = track->id;
+            thermal_target_trace.matched_track_hit_count = track->hit_count;
+            thermal_target_trace.matched_track_miss_count = track->miss_count;
+            thermal_target_trace.matched_track_hold_count = track->hold_count;
+            thermal_target_trace.matched_track_publish_confirmed = track->publish_confirmed;
+        }
+    }
+    if (cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE) {
+        bool target_rich_full_scan =
+            rescan_mode == ANOMALY_RESCAN_MODE_FULL &&
+            (thermal_candidate_count >= 3 ||
+             color_coarse_component_count >= 4 ||
+             target_observation_count >= 2);
+        if (target_rich_full_scan) {
+            state->adaptive_target_rich_frames = 12;
+        } else if (state->adaptive_target_rich_frames > 0) {
+            state->adaptive_target_rich_frames--;
+        }
+    } else {
+        state->adaptive_target_rich_frames = 0;
+    }
     update_target_track_movement_evidence(state, &movement_sidecar);
     if (result_out != NULL) {
         result_out->movement_debug = movement_sidecar;
@@ -15462,6 +15828,36 @@ int anomaly_process_frame(
         result_out->thermal_debug.target.nms_conflict_sample_y = thermal_target_trace.nms_conflict_sample_y;
         result_out->thermal_debug.target.extracted_rank = thermal_target_trace.extracted_rank;
         result_out->thermal_debug.target.winning_rank = thermal_target_trace.winning_rank;
+        result_out->thermal_debug.target.provisional_candidate_index =
+            thermal_target_trace.provisional_candidate_index;
+        result_out->thermal_debug.target.provisional_score_floor =
+            thermal_target_trace.provisional_score_floor;
+        result_out->thermal_debug.target.provisional_final_score =
+            thermal_target_trace.provisional_final_score;
+        result_out->thermal_debug.target.provisional_score_eligible =
+            thermal_target_trace.provisional_score_eligible;
+        result_out->thermal_debug.target.provisional_shape_eligible =
+            thermal_target_trace.provisional_shape_eligible;
+        result_out->thermal_debug.target.provisional_candidate_rank =
+            thermal_target_trace.provisional_candidate_rank;
+        result_out->thermal_debug.target.provisional_selected_rank =
+            thermal_target_trace.provisional_selected_rank;
+        result_out->thermal_debug.target.provisional_selected_score =
+            thermal_target_trace.provisional_selected_score;
+        result_out->thermal_debug.target.provisional_near_existing_skip =
+            thermal_target_trace.provisional_near_existing_skip;
+        result_out->thermal_debug.target.matched_track_index =
+            thermal_target_trace.matched_track_index;
+        result_out->thermal_debug.target.matched_track_id =
+            thermal_target_trace.matched_track_id;
+        result_out->thermal_debug.target.matched_track_hit_count =
+            thermal_target_trace.matched_track_hit_count;
+        result_out->thermal_debug.target.matched_track_miss_count =
+            thermal_target_trace.matched_track_miss_count;
+        result_out->thermal_debug.target.matched_track_hold_count =
+            thermal_target_trace.matched_track_hold_count;
+        result_out->thermal_debug.target.matched_track_publish_confirmed =
+            thermal_target_trace.matched_track_publish_confirmed;
         result_out->thermal_debug.target.stage = thermal_target_trace.stage;
         for (int i = 0; i < thermal_candidate_count && i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES; i++) {
             anomaly_debug_thermal_candidate_t *dbg = &result_out->thermal_debug.candidates[i];

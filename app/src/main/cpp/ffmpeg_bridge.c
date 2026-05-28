@@ -5700,6 +5700,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetLocalPlaybackPaus
         pthread_mutex_lock(&session->render_lock);
         if (should_clear_render_queue) {
             clear_render_queue(session);
+        } else {
+            reset_render_timing_state_locked(session, false, false);
         }
         session->next_render_due_ms = 0;
         pthread_cond_signal(&session->render_cond);

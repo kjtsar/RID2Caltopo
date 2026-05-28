@@ -73,6 +73,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyStrideMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
@@ -145,9 +146,10 @@ fun StreamTile(
     } else {
         null
     }
-    val showLocalPlaybackLegendControls = isLocalPlayback && anomalyConfig.enabled
+    val showLocalPlaybackLegendControls = isLocalPlayback
     val showAnomalyReviewLegendControls = isLocalPlayback && anomalyConfig.enabled
     val showAnomalyLegendControls = anomalyConfig.enabled
+    val showLegendControls = showLocalPlaybackLegendControls || showAnomalyLegendControls
     val showLocalPlaybackShell = isLocalPlayback && streamState != StreamState.ERROR
     val showOverlayControls = (isFocused || isLocalPlayback) &&
         (streamState == StreamState.LIVE || showLocalPlaybackShell)
@@ -417,7 +419,7 @@ fun StreamTile(
                     )
                 }
             }
-            if (showAnomalyLegendControls) {
+            if (showLegendControls) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
@@ -898,7 +900,7 @@ internal fun AnomalySettingsMenuContent(
 internal fun AnomalySettingsDialogs(
     viewModel: StreamsViewModel,
     streamDesignator: String,
-    anomalyConfig: org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig,
+    anomalyConfig: AnomalyConfig,
     isLocalPlayback: Boolean,
     showAnomalySettingsDialog: Boolean,
     onDismissAnomalySettingsDialog: () -> Unit,
@@ -936,6 +938,18 @@ internal fun AnomalySettingsDialogs(
         var smallTargetFractionValue by remember(streamDesignator, anomalyConfig.smallTargetScreenFraction) {
             mutableStateOf(anomalyConfig.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f))
         }
+        fun syncDialogValues(config: AnomalyConfig) {
+            sensitivityValue = config.sensitivity.coerceIn(0f, 1f)
+            scanZoneValue = config.scanZone.coerceIn(0.5f, 1f)
+            motionEvidenceSensitivityValue = config.motionEvidenceSensitivity.coerceIn(0f, 1f)
+            minHitsValue = config.minHits.coerceIn(1, 5)
+            frameStrideValue = config.frameStride.coerceIn(1, 10)
+            adaptiveMinStrideValue = config.adaptiveMinStrideFrames.coerceAtLeast(2)
+            adaptiveMaxStrideSecondsValue = config.adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f)
+            pixelStepValue = config.pixelStep.coerceIn(0, 4)
+            thermalMinDeltaValue = config.thermalMinDelta.coerceIn(1.0f, 64.0f)
+            smallTargetFractionValue = config.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)
+        }
         AlertDialog(
             onDismissRequest = onDismissAnomalySettingsDialog,
             title = { Text("Anomaly Detector") },
@@ -971,6 +985,18 @@ internal fun AnomalySettingsDialogs(
                     ) {
                         Text("Reset to Realtime Defaults")
                         TextButton(onClick = {
+                            val defaults = AnomalyConfig().copy(
+                                enabled = anomalyConfig.enabled,
+                                appearanceSelection = anomalyConfig.appearanceSelection,
+                                thermalPolarity = anomalyConfig.thermalPolarity,
+                            ).let { defaults ->
+                                if (anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Color) {
+                                    defaults.withColorRealtimeStrideDefaultsIfUnmodified()
+                                } else {
+                                    defaults
+                                }
+                            }
+                            syncDialogValues(defaults)
                             viewModel.resetAnomalyRealtimeDefaults(streamDesignator)
                             CaltopoClient.ShowToast("Anomaly detector reset to realtime defaults.")
                         }) {

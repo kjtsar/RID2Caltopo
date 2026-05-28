@@ -789,7 +789,7 @@ static void test_accumulator_hold_after_miss(void) {
 }
 
 static void test_frame_stride_gates_full_refresh_only(void) {
-    // frame_stride=3: every frame is analyzed, but only cadence frames force full refresh.
+    // frame_stride=3: Color only admits fresh ROI evidence on cadence frames.
     const int W = 160, H = 120;
     anomaly_state_t st;
     anomaly_state_init(&st);
@@ -804,14 +804,53 @@ static void test_frame_stride_gates_full_refresh_only(void) {
 
     anomaly_result_t res;
     int b1 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=1, full
-    int b2 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=2, selective
+    int b2 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=2, hold
+    anomaly_rescan_mode_t frame2_mode = res.rescan_mode;
+    bool frame2_refreshed = res.appearance_refresh_ran_this_frame;
     int b3 = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res); // counter=3, full
 
     EXPECT(b1 > 0, "stride=3: frame 1 full-refresh analyzes");
-    EXPECT(b2 >= 0, "stride=3: frame 2 remains analyzable");
+    EXPECT(b2 >= 0, "stride=3: frame 2 may carry existing boxes");
+    EXPECT(frame2_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP ||
+           frame2_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "stride=3: Color frame 2 avoids broad partial refresh");
+    EXPECT(!frame2_refreshed, "stride=3: Color frame 2 skips appearance refresh");
     EXPECT(b3 > 0, "stride=3: frame 3 cadence full-refresh analyzes");
 
     free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_stride_hold_blocks_new_non_cadence_roi(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 1.2f;
+    cfg.min_hits = 1;
+    cfg.frame_stride = 3;
+
+    uint8_t *plain_frame = make_gray_frame(W, H, 64);
+    uint8_t *color_frame = make_gray_frame(W, H, 64);
+    stamp_color_rect(color_frame, W * 4, W, H, W / 2 - 1, H / 2 - 1, 4, 4, 220, 20, 20);
+
+    anomaly_result_t res;
+    int b1 = anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res); // full
+    int b2 = anomaly_process_frame(&st, &cfg, color_frame, W * 4, W, H, 0, &res); // hold
+    anomaly_rescan_mode_t frame2_mode = res.rescan_mode;
+    bool frame2_refreshed = res.appearance_refresh_ran_this_frame;
+    int b3 = anomaly_process_frame(&st, &cfg, color_frame, W * 4, W, H, 0, &res); // full
+
+    EXPECT(b1 == 0, "color stride hold: plain full-refresh has no ROI");
+    EXPECT(b2 == 0, "color stride hold: new non-cadence color ROI is ignored");
+    EXPECT(frame2_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+           "color stride hold: non-cadence frame reports stride skip");
+    EXPECT(!frame2_refreshed, "color stride hold: non-cadence frame does not refresh appearance");
+    EXPECT(b3 > 0, "color stride hold: cadence frame can acquire color ROI");
+
+    free(plain_frame);
+    free(color_frame);
     anomaly_state_cleanup(&st);
 }
 
@@ -983,8 +1022,8 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     EXPECT(b2 >= 0, "target-only mode: follow-up frame processes successfully");
     EXPECT(r2.scan_plan.target_revisit_track_count > 0,
            "target-only mode: planner sees an active target revisit hint");
-    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
-           "target-only mode: stable carry with active track maps to target-only");
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+           "target-only mode: Color stride gap holds instead of refreshing target-only");
     EXPECT(st.target_tracks[0].active,
            "target-only mode: explicit target track stays active");
     EXPECT(st.target_tracks[0].hit_count > 0,
@@ -993,10 +1032,10 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     int target_fresh = count_mask_set(st.roi_state.fresh_mask, target_total);
     int target_carried = count_mask_set(st.roi_state.carried_mask, target_total);
     EXPECT(target_total > 0, "target-only mode: roi state populated");
-    EXPECT(target_fresh > 0 && target_fresh < target_total,
-           "target-only mode: analyzed refresh stays localized to revisit samples");
-    EXPECT(target_carried > 0,
-           "target-only mode: untouched ROI samples are carried forward");
+    EXPECT(target_fresh == target_total,
+           "target-only mode: Color stride hold leaves previous full-refresh ROI mask intact");
+    EXPECT(target_carried == 0,
+           "target-only mode: Color stride hold avoids selective ROI mutation");
 
     free(frame1);
     free(frame2);
@@ -1114,8 +1153,8 @@ static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(voi
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 100000, &r2);
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 400000, &r3);
 
-    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
-           "periodic refresh: stable follow-up frame still uses target-only revisit");
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+           "periodic refresh: stable follow-up frame holds Color ROI state");
     EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
            "periodic refresh: ~333ms cadence forces a full refresh");
     EXPECT((r3.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) != 0u,
@@ -1189,6 +1228,7 @@ int main(void) {
     test_motion_moving_patch_affine_registration();
     test_accumulator_hold_after_miss();
     test_frame_stride_gates_full_refresh_only();
+    test_color_stride_hold_blocks_new_non_cadence_roi();
     test_frame_stride_selective_frames_age_tracks();
     test_frame_stride_selective_still_runs_registration();
     test_large_motion_discontinuity_clears_rois();

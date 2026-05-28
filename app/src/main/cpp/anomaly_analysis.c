@@ -13587,6 +13587,9 @@ int anomaly_process_frame(
     }
     bool show_hot_overlay = cfg->show_hot_overlay;
     bool anomaly_detection_active = cfg->enabled && cfg->algorithm_mask != 0;
+    bool color_algorithm_configured =
+        anomaly_detection_active &&
+        (cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0;
     if (!anomaly_detection_active && !show_hot_overlay) {
         finalize_result_timing(result_out, &timing, frame_started_us);
         return 0;
@@ -13827,6 +13830,22 @@ int anomaly_process_frame(
         &registration_health);
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SCAN_PLANNING, stage_started_us);
     anomaly_rescan_mode_t rescan_mode = scan_plan.mode;
+    bool color_stride_hold_frame =
+        color_algorithm_configured &&
+        effective_frame_stride > 1 &&
+        !full_refresh_cadence_due &&
+        !force_periodic_full_refresh;
+    if (color_stride_hold_frame) {
+        rescan_mode = ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP;
+        scan_plan.mode = ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP;
+        scan_plan.reason_flags |= ANOMALY_SCAN_REASON_NO_APPEARANCE_REFRESH;
+        if (!scene_discontinuity &&
+            registration_model_valid(&registration) &&
+            state->acc_active[0] &&
+            state->acc_hold[0] < ANOMALY_ACC_HOLD_FRAMES) {
+            state->acc_hold[0] += 1;
+        }
+    }
     if (rescan_mode == ANOMALY_RESCAN_MODE_FULL) {
         if (source_ts_us > 0) {
             state->last_full_refresh_source_ts_us = source_ts_us;
@@ -13930,6 +13949,39 @@ int anomaly_process_frame(
             scene_discontinuity);
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_TARGET_TRACKING, stage_started_us);
 
+    if (color_stride_hold_frame) {
+        update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
+        update_prev_registration_luma_state(
+                state,
+                curr_registration_luma != NULL ? curr_registration_luma : curr_luma,
+                motion_count,
+                motion_w,
+                motion_h);
+        int box_count = 0;
+        bool publish_allowed =
+            !transition_warmup_block &&
+            !publish_hold_active &&
+            !scene_discontinuity &&
+            registration_model_valid(&registration) &&
+            registration_health != ANOMALY_REG_HEALTH_INVALID &&
+            registration_health != ANOMALY_REG_HEALTH_HARD_DEGRADED;
+        if (anomaly_detection_active && publish_allowed && result_out != NULL) {
+            anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+            box_count = assemble_anomaly_boxes(
+                    state,
+                    cfg,
+                    ANOMALY_ALGO_MOTION,
+                    boxes,
+                    ANOMALY_MAX_BOXES_PER_FRAME);
+            result_out->box_count = box_count;
+            for (int i = 0; i < box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++) {
+                result_out->boxes[i] = boxes[i];
+            }
+        }
+        finalize_result_timing(result_out, &timing, frame_started_us);
+        return box_count;
+    }
+
     // ── Statistics pass ──────────────────────────────────────────────────
     // Thermal detection uses integral-image local statistics so each sample
     // point is compared against its immediate pixel neighbourhood rather than
@@ -13964,14 +14016,13 @@ int anomaly_process_frame(
     float *ii_sum   = state->scratch_ii_sum;
     float *ii_sum2  = state->scratch_ii_sum2;
 
-    bool color_algorithm_enabled =
-        anomaly_detection_active &&
-        (cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0;
-    bool need_color_support = color_algorithm_enabled;
+    bool color_algorithm_enabled = color_algorithm_configured;
+    bool need_color_support = color_algorithm_enabled && !color_stride_hold_frame;
     bool need_thermal_support_map =
         anomaly_detection_active &&
+        !color_stride_hold_frame &&
         (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
-    bool need_color_support_map = color_algorithm_enabled;
+    bool need_color_support_map = color_algorithm_enabled && !color_stride_hold_frame;
 
     int color_phase_index = 0;
     int color_phase_x = 0;
@@ -16415,7 +16466,7 @@ int anomaly_process_frame(
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SALIENCY_SCORING, stage_started_us);
 
     bool roi_state_updated = false;
-    if (selective_refresh_active) {
+    if (!color_stride_hold_frame && selective_refresh_active) {
         roi_state_updated = update_roi_state_selective_refresh(
                 state,
                 roi_x0,
@@ -16447,7 +16498,7 @@ int anomaly_process_frame(
             }
         }
     }
-    if (!roi_state_updated) {
+    if (!color_stride_hold_frame && !roi_state_updated) {
         update_roi_state_full_refresh(
                 state,
                 roi_x0,
@@ -17018,6 +17069,12 @@ int anomaly_process_frame(
             }
         } else if (state->acc_active[ai]) {
             state->acc_presence_mask[ai] = prior_presence;
+            if (color_stride_hold_frame &&
+                ai == 0 &&
+                registration_model_valid(&registration) &&
+                !scene_discontinuity) {
+                continue;
+            }
             int hold = state->acc_hold[ai] - 1;
             if (hold <= 0) {
                 state->acc_active[ai] = false;

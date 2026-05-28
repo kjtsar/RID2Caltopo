@@ -854,7 +854,9 @@ class FfmpegProbeService(
             val elapsedMs = (nowMs - session.createdAtMs).coerceAtLeast(1L)
             val decodedFps = (session.decodedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
             val renderedFps = (session.renderedFrameCount.toDouble() * 1000.0) / elapsedMs.toDouble()
-            val debugEnabled = anomalyConfigByDesignator[designator]?.troubleshootingDebug == true
+            val debugEnabled = anomalyConfigByDesignator[designator]?.let { config ->
+                config.enabled && config.troubleshootingDebug
+            } == true
             RuntimeSnapshotSeed(
                 sessionId = sessionId,
                 session = session.copy(),

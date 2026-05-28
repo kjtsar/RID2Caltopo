@@ -83,12 +83,13 @@ object FfmpegBridge {
 
     fun updateAnomalyConfig(sessionId: Long, config: NativeAnomalyConfig) {
         if (!nativeLoaded || sessionId <= 0L) return
+        val nativeTroubleshootingDebug = config.enabled && config.troubleshootingDebug
         nativeUpdateAnomalyConfig(
             sessionId = sessionId,
             enabled = config.enabled,
             showHotOverlay = config.showHotOverlay,
             showCandidateBlobs = config.showCandidateBlobs,
-            troubleshootingDebug = config.troubleshootingDebug,
+            troubleshootingDebug = nativeTroubleshootingDebug,
             algorithmMask = config.algorithmMask,
             registrationMode = config.registrationMode,
             movementEstimatorMode = config.movementEstimatorMode,

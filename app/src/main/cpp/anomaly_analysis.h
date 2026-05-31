@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "anomaly_thermal_state.h"
+
 // ── Algorithm selector bits ────────────────────────────────────────────────
 #define ANOMALY_ALGO_COLOR    0x01
 #define ANOMALY_ALGO_THERMAL  0x02
@@ -220,6 +222,14 @@ typedef struct {
     float color_debug_target_y_norm;
 } anomaly_config_t;
 
+typedef enum {
+    ANOMALY_CONFIG_TRANSITION_UNCHANGED = 0,
+    ANOMALY_CONFIG_TRANSITION_DISPLAY_ONLY = 1,
+    ANOMALY_CONFIG_TRANSITION_DEBUG_ONLY = 2,
+    ANOMALY_CONFIG_TRANSITION_LIVE_UPDATE = 3,
+    ANOMALY_CONFIG_TRANSITION_RESET_DETECTOR_STATE = 4
+} anomaly_config_transition_t;
+
 typedef struct {
     int   valid_count;
     int   fresh_count;
@@ -327,18 +337,7 @@ typedef struct {
     float   *motion_persist;
     int      motion_persist_w;
     int      motion_persist_h;
-    // One-sided EMA thermal background model.
-    // Stored at sampled-grid resolution (one float per sample point).
-    // Adapts fast toward colder, slowly toward warmer — subjects are never
-    // absorbed.  Score = (bg - current) / ANOMALY_THERMAL_BG_NORM.
-    float   *bg_luma;
-    int      bg_sg_w;       // sampled-grid width matching bg_luma
-    int      bg_sg_h;       // sampled-grid height matching bg_luma
-    int      bg_warmup;     // analyzed frames since last background reset
-    // Short-lived prior for compact thermal candidates at sampled-grid resolution.
-    float   *thermal_target_persist;
-    int      thermal_target_persist_w;
-    int      thermal_target_persist_h;
+    anomaly_thermal_state_t thermal;
     uint8_t *color_recent_hist;
     size_t   color_recent_hist_bins;
     uint8_t *scratch_color_hist;
@@ -1250,6 +1249,13 @@ void anomaly_state_reset(anomaly_state_t *state);
 
 // Full cleanup — same as reset but intended for final teardown.
 void anomaly_state_cleanup(anomaly_state_t *state);
+
+// Classify the strongest detector lifecycle transition needed between configs.
+// Intended for adapters/API callers; runtime reset behavior remains explicit.
+anomaly_config_transition_t anomaly_config_transition_classify(
+    const anomaly_config_t *before,
+    const anomaly_config_t *after
+);
 
 // Process one RGBA frame.
 //   - Increments internal frame counter; skips stride-gated frames.

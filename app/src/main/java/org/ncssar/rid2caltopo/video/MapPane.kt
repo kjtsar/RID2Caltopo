@@ -1881,6 +1881,9 @@ internal fun SplitMapPane(
     DisposableEffect(Unit) {
         hydrateArtifactsFromCaltopoSnapshot("listener-init")
         val listener = CaltopoMap.ArtifactListener { feature, source, _ ->
+            if (source == "full") {
+                return@ArtifactListener
+            }
             uiScope.launch(Dispatchers.Main.immediate) {
                 val featureId = feature.optString("id")
                 if (featureId.isBlank()) {
@@ -3519,6 +3522,8 @@ private const val CALTOPO_LINES_POLYGONS_FOLDER_ID = "__caltopo_lines_polygons__
 private const val CALTOPO_LINES_POLYGONS_FOLDER_TITLE = "Lines & Polygons"
 private const val CALTOPO_APP_TRACKS_FOLDER_ID = "__caltopo_app_tracks__"
 private const val CALTOPO_APP_TRACKS_FOLDER_TITLE = "App Tracks"
+private const val CALTOPO_OTHER_MAP_ITEMS_FOLDER_ID = "__caltopo_other_map_items__"
+private const val CALTOPO_OTHER_MAP_ITEMS_FOLDER_TITLE = "Other Map Items"
 
 private data class SyntheticArtifactFolder(
     val id: String,
@@ -3531,21 +3536,23 @@ private val syntheticArtifactFoldersById = listOf(
     SyntheticArtifactFolder(CALTOPO_RANGE_RINGS_FOLDER_ID, CALTOPO_RANGE_RINGS_FOLDER_TITLE, false),
     SyntheticArtifactFolder(CALTOPO_MARKERS_FOLDER_ID, CALTOPO_MARKERS_FOLDER_TITLE, false),
     SyntheticArtifactFolder(CALTOPO_LINES_POLYGONS_FOLDER_ID, CALTOPO_LINES_POLYGONS_FOLDER_TITLE, false),
-    SyntheticArtifactFolder(CALTOPO_APP_TRACKS_FOLDER_ID, CALTOPO_APP_TRACKS_FOLDER_TITLE, false)
+    SyntheticArtifactFolder(CALTOPO_APP_TRACKS_FOLDER_ID, CALTOPO_APP_TRACKS_FOLDER_TITLE, false),
+    SyntheticArtifactFolder(CALTOPO_OTHER_MAP_ITEMS_FOLDER_ID, CALTOPO_OTHER_MAP_ITEMS_FOLDER_TITLE, true)
 ).associateBy { it.id }
 
-private fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapFolderUiState> {
+internal fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapFolderUiState> {
     val folderItems = mutableMapOf<String, MutableList<MapItemUiState>>()
     val folderMeta = mutableMapOf<String, Pair<String, Boolean>>()  // id -> (title, visible)
     for (feature in features.values) {
         val props = feature.optJSONObject("properties") ?: continue
         val id = feature.optString("id").takeIf { it.isNotBlank() } ?: continue
-        val title = props.optString("title").ifBlank { id }
         val className = props.optString("class")
         if (className == "Folder") {
+            val title = artifactDisplayTitle(props, id, className)
             folderMeta[id] = Pair(title, props.optBoolean("visible", true))
         } else {
             val folderId = effectiveArtifactFolderId(props, className).takeIf { it.isNotBlank() } ?: continue
+            val title = artifactDisplayTitle(props, id, className)
             folderItems.getOrPut(folderId) { mutableListOf() }.add(MapItemUiState(id, title))
         }
     }
@@ -3553,6 +3560,9 @@ private fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<MapF
         if (folderItems.containsKey(folder.id)) {
             folderMeta.putIfAbsent(folder.id, Pair(folder.title, folder.initiallyVisible))
         }
+    }
+    for (folderId in folderItems.keys) {
+        folderMeta.putIfAbsent(folderId, Pair(orphanFolderTitle(folderId), true))
     }
     return folderMeta.entries
         .sortedBy { it.value.first }
@@ -3581,7 +3591,7 @@ internal fun buildArtifactOverlayState(
         if (className == "Folder") {
             feature.optString("id").takeIf { it.isNotBlank() }
         } else {
-            syntheticArtifactFolderId(props, className).takeIf { it.isNotBlank() }
+            effectiveArtifactFolderId(props, className).takeIf { it.isNotBlank() }
         }
     }.toSet()
 
@@ -3596,9 +3606,7 @@ internal fun buildArtifactOverlayState(
         if (folderId.isBlank() || folderId !in representedFolderIds) continue
         if (folderId.isNotBlank() && folderId in hiddenFolderIds) continue
         if (featureId.isNotBlank() && featureId in hiddenItemIds) continue
-        val featureTitle = properties?.optString("title")
-            ?.takeIf { it.isNotBlank() }
-            ?: "$className:$featureId"
+        val featureTitle = artifactDisplayTitle(properties, featureId, className)
         val markerSymbol = properties?.optString("marker-symbol", "point").orEmpty().ifBlank { "point" }
         val markerColor = properties?.optString("marker-color")
         val trackLikeFeature = isTrackLikeFeature(properties, className)
@@ -3660,8 +3668,20 @@ private fun syntheticArtifactFolderId(properties: JSONObject?, className: String
             CALTOPO_LINES_POLYGONS_FOLDER_ID
         className == "AppTrack" && folderId.isBlank() -> CALTOPO_APP_TRACKS_FOLDER_ID
         folderId == CALTOPO_APP_TRACKS_FOLDER_TITLE -> CALTOPO_APP_TRACKS_FOLDER_ID
+        folderId.isBlank() -> CALTOPO_OTHER_MAP_ITEMS_FOLDER_ID
         else -> ""
     }
+}
+
+private fun artifactDisplayTitle(properties: JSONObject?, featureId: String, className: String): String {
+    properties?.optString("title")?.takeIf { it.isNotBlank() }?.let { return it }
+    val typeLabel = className.ifBlank { "Map item" }
+    return if (featureId.isBlank()) typeLabel else "$typeLabel:$featureId"
+}
+
+private fun orphanFolderTitle(folderId: String): String {
+    val suffix = folderId.take(8).ifBlank { "unknown" }
+    return "Unlisted Folder $suffix"
 }
 
 private fun applySyntheticArtifactFolderDefault(

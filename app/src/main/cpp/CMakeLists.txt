@@ -11,7 +11,28 @@ add_library(
     ffmpeg_bridge
     SHARED
     ffmpeg_bridge.c
+    anomaly_detector.c
     anomaly_analysis.c
+    anomaly_buffer.c
+    anomaly_roi_tracks.c
+    anomaly_roi_state.c
+    anomaly_saliency_tracks.c
+    anomaly_scratch.c
+    anomaly_color_detector.c
+    anomaly_debug_helpers.c
+    anomaly_grid_region.c
+    anomaly_linear_solve.c
+    anomaly_appearance_candidates.c
+    anomaly_motion_estimator.c
+    anomaly_registration_cache.c
+    anomaly_registration_image.c
+    anomaly_result_builder.c
+    anomaly_scan_planner.c
+    anomaly_target_observations.c
+    anomaly_target_revisit.c
+    anomaly_target_tracks.c
+    anomaly_thermal_detector.c
+    anomaly_thermal_state.c
 )
 
 set(FFMPEG_LIB_DIR "${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")

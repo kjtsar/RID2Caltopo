@@ -45,6 +45,48 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun buildArtifactOverlayState_rendersUnnamedItemsInUnlistedFolders() {
+        val line = lineFeature("assignment-shape", "", "folder-only-in-feature")
+
+        val state = buildArtifactOverlayState(listOf(line))
+
+        assertEquals(listOf("assignment-shape"), state.lines.map { it.id })
+        assertEquals(listOf("Shape:assignment-shape"), state.lines.map { it.title })
+    }
+
+    @Test
+    fun buildArtifactOverlayState_preservesFolderlessUnknownGeometry() {
+        val line = unknownLineFeature("field-geometry", "")
+
+        val state = buildArtifactOverlayState(listOf(line))
+
+        assertEquals(listOf("field-geometry"), state.lines.map { it.id })
+        assertEquals(listOf("FieldGeometry:field-geometry"), state.lines.map { it.title })
+    }
+
+    @Test
+    fun buildMapFolderUiStates_listsUnnamedItemsInUnlistedFolders() {
+        val line = lineFeature("assignment-shape", "", "folder-only-in-feature")
+
+        val folders = buildMapFolderUiStates(mapOf("assignment-shape" to line))
+
+        assertEquals(listOf("Unlisted Folder folder-o"), folders.map { it.title })
+        assertEquals(true, folders.single().initiallyVisible)
+        assertEquals(listOf("Shape:assignment-shape"), folders.single().items.map { it.title })
+    }
+
+    @Test
+    fun buildMapFolderUiStates_listsFolderlessUnknownGeometry() {
+        val line = unknownLineFeature("field-geometry", "")
+
+        val folders = buildMapFolderUiStates(mapOf("field-geometry" to line))
+
+        assertEquals(listOf("Other Map Items"), folders.map { it.title })
+        assertEquals(true, folders.single().initiallyVisible)
+        assertEquals(listOf("FieldGeometry:field-geometry"), folders.single().items.map { it.title })
+    }
+
+    @Test
     fun buildArtifactOverlayState_honorsHiddenAssignmentsGroup() {
         val assignment = assignmentPolygonFeature("assignment-aa", "AA")
 
@@ -109,6 +151,28 @@ class MapPaneArtifactOverlayStateTest {
                     .put("class", "Shape")
                     .put("title", title)
                     .put("folderId", folderId)
+                    .put("stroke", "#FF5A1F")
+            )
+            .put(
+                "geometry",
+                JSONObject()
+                    .put("type", "LineString")
+                    .put(
+                        "coordinates",
+                        JSONArray()
+                            .put(JSONArray().put(-122.0).put(37.0))
+                            .put(JSONArray().put(-122.1).put(37.1))
+                    )
+            )
+
+    private fun unknownLineFeature(id: String, title: String): JSONObject =
+        JSONObject()
+            .put("id", id)
+            .put(
+                "properties",
+                JSONObject()
+                    .put("class", "FieldGeometry")
+                    .put("title", title)
                     .put("stroke", "#FF5A1F")
             )
             .put(

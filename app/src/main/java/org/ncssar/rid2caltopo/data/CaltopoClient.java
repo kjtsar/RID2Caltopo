@@ -548,6 +548,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 droneSpec = lDroneSpec;
             } else { // new - never seen before - make a working version.
                 lDroneSpec = new CtDroneSpec(rid);
+                lDroneSpec.setLocalArchiveOnly(true);
                 ccs.droneSpecTable.put(rid, lDroneSpec);
                 droneSpec = lDroneSpec;
             }
@@ -2281,6 +2282,15 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         UpdateDroneSpecs();
     }
 
+    private static boolean shouldSuppressMapTracking(@NonNull CtDroneSpec droneSpec) {
+        String remoteId = droneSpec.getRemoteId().trim();
+        String mappedId = droneSpec.getMappedId().trim();
+        return droneSpec.isLocalArchiveOnly()
+                || SessionUnknownDroneRemoteIds.contains(remoteId)
+                || mappedId.isEmpty()
+                || mappedId.equals(remoteId);
+    }
+
     public static boolean IsSessionUnknownDrone(@NonNull String remoteId) {
         if (RejectNonCanonicalRemoteId("IsSessionUnknownDrone()", remoteId)) return false;
         return SessionUnknownDroneRemoteIds.contains(remoteId);
@@ -3558,6 +3568,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ArrayList<CtDroneSpec> proximityDrones = new ArrayList<>(GetState().droneSpecTable.values());
         if (SessionUnknownDroneRemoteIds.contains(remoteId)) {
             droneSpec.setLocalArchiveOnly(true);
+        }
+
+        if (shouldSuppressMapTracking(droneSpec)) {
+            droneSpec.setLocalArchiveOnly(true);
+            ProximityAlertCenter.INSTANCE.updateDrones(proximityDrones);
+            if (CTDebugEnabled(TAG)) {
+                CTDebug(TAG, String.format(Locale.US,
+                        "newWaypoint(): map-suppressed non-team drone remoteId=%s mappedId=%s",
+                        droneSpec.getRemoteId(), droneSpec.getMappedId()));
+            }
+            return true;
         }
 
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);

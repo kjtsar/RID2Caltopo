@@ -11,6 +11,7 @@ internal object MapCacheSettings {
     private const val MAX_CACHE_BYTES_KEY = "max_cache_bytes_v1"
     private const val MAX_TILE_AGE_DAYS_KEY = "max_tile_age_days_v1"
     private const val BASE_LAYER_KEY = "base_layer_v1"
+    private const val DYNAMIC_ZOOM_FACTOR_KEY = "dynamic_zoom_factor_v1"
 
     private const val DECIMAL_GB_BYTES = 1_000_000_000L
     private const val MIN_CACHE_BYTES = 100_000_000L
@@ -62,6 +63,23 @@ internal object MapCacheSettings {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(BASE_LAYER_KEY, baseLayer.name)
+            .apply()
+    }
+
+    fun dynamicZoomFactor(context: Context): String {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(DYNAMIC_ZOOM_FACTOR_KEY, null) ?: "Medium"
+    }
+
+    fun setDynamicZoomFactor(context: Context, factor: String) {
+        val normalized = when (factor) {
+            "High", "Medium", "Low" -> factor
+            else -> "Medium"
+        }
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(DYNAMIC_ZOOM_FACTOR_KEY, normalized)
             .apply()
     }
 

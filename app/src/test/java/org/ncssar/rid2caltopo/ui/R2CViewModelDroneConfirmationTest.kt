@@ -139,6 +139,29 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
+    fun suppressedFirstRidSightingDoesNotOpenConfirmationPanel() {
+        val remoteId = "ELDORADOFIRSTSEEN"
+        val drone = CaltopoClient.ClientForRemoteId(remoteId).droneSpec
+
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneConfirmationCandidate(drone)
+
+        assertNull(viewModel.pendingDroneConfirmation.value)
+    }
+
+    @Test
+    fun suppressedActiveDroneDoesNotOpenConfirmationPanel() {
+        val remoteId = "ELDORADOACTIVE"
+        val drone = activeDrone(remoteId, waypointTimestampMsec = 6789L)
+        drone.setLocalArchiveOnly(true)
+
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneSpecsChanged(listOf(drone))
+
+        assertNull(viewModel.pendingDroneConfirmation.value)
+    }
+
+    @Test
     fun firstRidSightingPromptIsNotReopenedWhenFlightBecomesActive() {
         val remoteId = "DRONEFIRSTSEENACTIVE"
         val drone = CtDroneSpec(remoteId)
@@ -174,6 +197,13 @@ class R2CViewModelDroneConfirmationTest {
     @Test
     fun localTrackPointPublishesDroneToMainScreenList() {
         val remoteId = "DRONESCREEN"
+        CaltopoClient.SaveDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Mavic 3",
+            "1SAR7",
+            "1SAR7m3"
+        )
         val viewModel = R2CViewModel(SimpleTimer())
         val client = CaltopoClient.ClientForRemoteId(remoteId)
         client.droneSpec.checkNewWaypoint(

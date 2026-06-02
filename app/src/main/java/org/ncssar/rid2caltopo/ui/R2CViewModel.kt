@@ -614,6 +614,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         // operator can confirm or update pilot/callsign ownership for this flight.
         if (remoteId in promptedCurrentFlightRemoteIds ||
             CaltopoClient.IsSessionUnknownDrone(remoteId) ||
+            drone.isLocalArchiveOnly ||
             remoteId in confirmedCurrentFlightRemoteIds ||
             CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId)
         ) {

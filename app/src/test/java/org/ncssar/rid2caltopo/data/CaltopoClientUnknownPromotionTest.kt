@@ -95,6 +95,74 @@ class CaltopoClientUnknownPromotionTest {
     }
 
     @Test
+    fun neverSeenRemoteIdIsSuppressedFromWaypointTrackByDefault() {
+        val remoteId = "ELDORADO1"
+        val client = CaltopoClient.ClientForRemoteId(remoteId)
+        val drone = client.droneSpec
+
+        assertTrue(drone.isLocalArchiveOnly)
+        drone.checkNewWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            1234L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        client.newWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            CtDroneSpec.TransportTypeEnum.BT4,
+            true
+        )
+
+        assertTrue(drone.isActive)
+        assertTrue(drone.isLocalArchiveOnly)
+        assertTrue(WaypointTrack.GetTrackPointsSnapshot(drone).isEmpty())
+        assertEquals(0, peerCoordinator.countEvents("onLiveTrackCreated"))
+    }
+
+    @Test
+    fun confirmationSavePromotesNeverSeenRemoteIdToWaypointTrackLogging() {
+        val remoteId = "ELDORADO2"
+        val client = CaltopoClient.ClientForRemoteId(remoteId)
+        val drone = client.droneSpec
+
+        assertTrue(drone.isLocalArchiveOnly)
+        CaltopoClient.SaveDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Matrice 4TD",
+            "1SAR83",
+            "1SAR83M4TD"
+        )
+
+        assertFalse(drone.isLocalArchiveOnly)
+        drone.checkNewWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            1234L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        client.newWaypoint(
+            39.1,
+            -121.2,
+            120.0,
+            1234L,
+            CtDroneSpec.TransportTypeEnum.BT4,
+            true
+        )
+
+        assertEquals(1, WaypointTrack.GetTrackPointsSnapshot(drone).size)
+    }
+
+    @Test
     fun peerConfirmationUpdatesMetadataWithoutSessionSuppressingRemoteId() {
         val remoteId = "DRONE3"
 

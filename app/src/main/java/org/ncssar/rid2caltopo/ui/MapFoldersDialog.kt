@@ -18,12 +18,18 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import java.util.Locale
 
 /** One folder fetched from the Caltopo map, with its contained items. */
 data class MapFolderUiState(
@@ -61,6 +67,10 @@ fun MapFoldersDialog(
     onAllItemsToggled: (itemIds: List<String>, visible: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var searchText by remember { mutableStateOf("") }
+    val searchActive = searchText.isNotBlank()
+    val displayedFolders = filterMapFoldersForSearch(folders, searchText)
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Map Folders") },
@@ -68,67 +78,84 @@ fun MapFoldersDialog(
             if (folders.isEmpty()) {
                 Text("No map folders found.")
             } else {
-                LazyColumn {
-                    items(folders) { folder ->
-                        val folderVisible = folder.folderId !in hiddenFolderIds
-                        val allItemsVisible = folder.items.none { it.featureId in hiddenItemIds }
-                        // Folder row
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Checkbox(
-                                checked = folderVisible,
-                                onCheckedChange = { checked ->
-                                    onFolderVisibilityChanged(folder.folderId, checked)
-                                }
-                            )
-                            Text(
-                                text = folder.title,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = if (folderVisible && folder.items.isNotEmpty()) {
-                                    Modifier.clickable {
-                                        // All visible → hide all; any hidden → show all
-                                        onAllItemsToggled(
-                                            folder.items.map { it.featureId },
-                                            !allItemsVisible
-                                        )
+                Column {
+                    OutlinedTextField(
+                        value = searchText,
+                        onValueChange = { searchText = it },
+                        singleLine = true,
+                        label = { Text("Search folders and shapes") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (displayedFolders.isEmpty()) {
+                        Text(
+                            text = "No matching folders or shapes.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    LazyColumn {
+                        items(displayedFolders) { folder ->
+                            val folderVisible = folder.folderId !in hiddenFolderIds
+                            val allItemsVisible = folder.items.none { it.featureId in hiddenItemIds }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Checkbox(
+                                    checked = folderVisible,
+                                    onCheckedChange = { checked ->
+                                        onFolderVisibilityChanged(folder.folderId, checked)
                                     }
-                                } else Modifier
-                            )
-                        }
-                        // Item rows — only shown when folder is visible
-                        if (folderVisible) {
-                            Column(modifier = Modifier.padding(start = 24.dp)) {
-                                folder.items.forEach { item ->
-                                    val itemVisible = item.featureId !in hiddenItemIds
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Checkbox(
-                                            checked = itemVisible,
-                                            onCheckedChange = { checked ->
-                                                onItemVisibilityChanged(item.featureId, checked)
-                                            }
-                                        )
+                                )
+                                Text(
+                                    text = folder.title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = if (folderVisible && folder.items.isNotEmpty()) {
+                                        Modifier.clickable {
+                                            onAllItemsToggled(
+                                                folder.items.map { it.featureId },
+                                                !allItemsVisible
+                                            )
+                                        }
+                                    } else Modifier
+                                )
+                            }
+                            if (folderVisible || searchActive) {
+                                Column(modifier = Modifier.padding(start = 24.dp)) {
+                                    folder.items.forEach { item ->
+                                        val itemVisible = folderVisible && item.featureId !in hiddenItemIds
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Checkbox(
+                                                checked = itemVisible,
+                                                onCheckedChange = { checked ->
+                                                    if (checked && !folderVisible) {
+                                                        onFolderVisibilityChanged(folder.folderId, true)
+                                                    }
+                                                    onItemVisibilityChanged(item.featureId, checked)
+                                                }
+                                            )
+                                            Text(
+                                                text = item.title,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                    if (folder.items.isEmpty()) {
                                         Text(
-                                            text = item.title,
-                                            style = MaterialTheme.typography.bodySmall
+                                            text = "(no items)",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(start = 12.dp, bottom = 4.dp)
                                         )
                                     }
-                                }
-                                if (folder.items.isEmpty()) {
-                                    Text(
-                                        text = "(no items)",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(start = 12.dp, bottom = 4.dp)
-                                    )
                                 }
                             }
+                            Spacer(modifier = Modifier.height(4.dp))
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
                     }
                 }
             }
@@ -137,4 +164,23 @@ fun MapFoldersDialog(
             TextButton(onClick = onDismiss) { Text("Close") }
         }
     )
+}
+
+internal fun filterMapFoldersForSearch(
+    folders: List<MapFolderUiState>,
+    searchText: String
+): List<MapFolderUiState> {
+    val query = searchText.trim().lowercase(Locale.US)
+    if (query.isEmpty()) return folders
+    return folders.mapNotNull { folder ->
+        val folderMatches = folder.title.lowercase(Locale.US).contains(query)
+        val matchingItems = folder.items.filter { item ->
+            item.title.lowercase(Locale.US).contains(query)
+        }
+        when {
+            folderMatches -> folder
+            matchingItems.isNotEmpty() -> folder.copy(items = matchingItems)
+            else -> null
+        }
+    }
 }

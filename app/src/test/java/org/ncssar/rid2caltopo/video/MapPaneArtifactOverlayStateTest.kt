@@ -4,8 +4,78 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import org.osmdroid.util.BoundingBox
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.util.MapTileIndex
 
 class MapPaneArtifactOverlayStateTest {
+    @Test
+    fun orderedTileIndexesForOfflinePrep_prioritizesTabletMediumZoomTile() {
+        val tablet = GeoPoint(38.9000, -120.0000)
+        val bounds = BoundingBox(39.0000, -119.9000, 38.8000, -120.1000)
+        val ordered = orderedTileIndexesForOfflinePrep(
+            bounds = bounds,
+            minZoom = 12,
+            maxZoom = 16,
+            tabletLocation = tablet
+        )
+
+        assertEquals(tileIndexForTestPoint(tablet, 14), ordered.first())
+    }
+
+    @Test
+    fun orderedTileIndexesForOfflinePrep_prioritizesDronePathTilesBeforeAreaSweep() {
+        val tablet = GeoPoint(38.9000, -120.0000)
+        val droneStart = GeoPoint(38.8850, -120.0700)
+        val droneEnd = GeoPoint(38.9500, -119.9300)
+        val bounds = BoundingBox(39.0000, -119.9000, 38.8000, -120.1000)
+        val ordered = orderedTileIndexesForOfflinePrep(
+            bounds = bounds,
+            minZoom = 12,
+            maxZoom = 16,
+            tabletLocation = tablet,
+            dronePathPoints = listOf(droneStart, droneEnd)
+        )
+
+        assertEquals(tileIndexForTestPoint(tablet, 14), ordered[0])
+        assertEquals(tileIndexForTestPoint(droneStart, 14), ordered[1])
+        assertEquals(tileIndexForTestPoint(droneEnd, 14), ordered.take(8).last())
+    }
+
+    @Test
+    fun orderedTileIndexesForOfflinePrep_usesPreferredDynamicZoomWhenProvided() {
+        val tablet = GeoPoint(38.9000, -120.0000)
+        val bounds = BoundingBox(39.0000, -119.9000, 38.8000, -120.1000)
+        val ordered = orderedTileIndexesForOfflinePrep(
+            bounds = bounds,
+            minZoom = 12,
+            maxZoom = 16,
+            tabletLocation = tablet,
+            preferredZoom = DynamicZoomFactor.High.zoom
+        )
+
+        assertEquals(tileIndexForTestPoint(tablet, 16), ordered.first())
+    }
+
+    @Test
+    fun dynamicDroneTileRequests_ordersAllCurrentDroneTilesBeforeHeadingTiles() {
+        val westDrone = dronePoint("drone-west", 38.9000, -120.0000, headingDeg = 90.0)
+        val northDrone = dronePoint("drone-north", 38.9300, -119.9600, headingDeg = 0.0)
+        val requests = dynamicDroneTileRequests(listOf(westDrone, northDrone), DynamicZoomFactor.Medium.zoom)
+
+        val westCurrent = tileIndexForTestPoint(GeoPoint(westDrone.lat, westDrone.lng), 14)
+        val northCurrent = tileIndexForTestPoint(GeoPoint(northDrone.lat, northDrone.lng), 14)
+
+        assertEquals(westCurrent, requests[0].tileIndex)
+        assertEquals(false, requests[0].requiresCurrentCached)
+        assertEquals(northCurrent, requests[1].tileIndex)
+        assertEquals(false, requests[1].requiresCurrentCached)
+        assertEquals(true, requests[2].requiresCurrentCached)
+        assertEquals(westCurrent, requests[2].currentTileIndex)
+        assertEquals(true, requests[3].requiresCurrentCached)
+        assertEquals(northCurrent, requests[3].currentTileIndex)
+    }
+
     @Test
     fun buildArtifactOverlayState_ignoresItemsOutsideRepresentedFoldersAndHiddenBuiltIns() {
         val representedFolder = folderFeature("folder-visible", "Search Segment")
@@ -141,6 +211,43 @@ class MapPaneArtifactOverlayStateTest {
                     .put("class", "Folder")
                     .put("title", title)
             )
+
+    private fun dronePoint(
+        designator: String,
+        lat: Double,
+        lng: Double,
+        headingDeg: Double?
+    ): DroneMapPoint =
+        DroneMapPoint(
+            designator = designator,
+            remoteId = designator,
+            lat = lat,
+            lng = lng,
+            altitudeM = 0.0,
+            timestampMsec = 1L,
+            headingDeg = headingDeg
+        )
+
+    private fun tileIndexForTestPoint(point: GeoPoint, zoom: Int): Long {
+        val maxTile = (1 shl zoom) - 1
+        val x = lonToTileXForTest(point.longitude, zoom).coerceIn(0, maxTile)
+        val y = latToTileYForTest(point.latitude, zoom).coerceIn(0, maxTile)
+        return MapTileIndex.getTileIndex(zoom, x, y)
+    }
+
+    private fun lonToTileXForTest(lon: Double, zoom: Int): Int {
+        val n = 1 shl zoom
+        return kotlin.math.floor((lon + 180.0) / 360.0 * n).toInt()
+    }
+
+    private fun latToTileYForTest(lat: Double, zoom: Int): Int {
+        val clamped = lat.coerceIn(-85.05112878, 85.05112878)
+        val latRad = Math.toRadians(clamped)
+        val n = 1 shl zoom
+        return kotlin.math.floor(
+            (1.0 - kotlin.math.ln(kotlin.math.tan(latRad) + 1.0 / kotlin.math.cos(latRad)) / Math.PI) / 2.0 * n
+        ).toInt()
+    }
 
     private fun lineFeature(id: String, title: String, folderId: String): JSONObject =
         JSONObject()

@@ -199,6 +199,7 @@ internal const val DRONE_STATUS_LABEL_ANCHOR_Y = 3.75f
 internal const val LABEL_MAX_ABS_FEET = 1000.0
 internal const val DEFAULT_CAMERA_FOV_WIDTH_DEG = 80.0
 internal const val OSM_MAX_ZOOM = 19.0
+internal const val MAP_DISPLAY_MAX_ZOOM = 22.0
 internal const val MAP_CACHE_PREFS_NAME = "map_cache"
 internal const val MAP_CACHE_PREWARM_SIG_KEY = "prewarm_signature_v1"
 internal const val OSM_TILE_DOWNLOAD_THREADS: Short = 1
@@ -2317,7 +2318,7 @@ internal fun SplitMapPane(
                     setTileSource(OsmStandardTileSource)
                     setUseDataConnection(true)
                     tileMapProvider.setUseDataConnection(true)
-                    setMaxZoomLevel(OSM_MAX_ZOOM)
+                    setMaxZoomLevel(MAP_DISPLAY_MAX_ZOOM)
                     setOnTouchListener { _, event ->
                         when (event?.actionMasked) {
                             MotionEvent.ACTION_DOWN,
@@ -2375,7 +2376,7 @@ internal fun SplitMapPane(
                     BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
                     BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
                 }
-                val maxZoom = if (baseLayer == BaseLayerOption.OpenStreetMap) OSM_MAX_ZOOM else 19.0
+                val maxZoom = MAP_DISPLAY_MAX_ZOOM
                 if (mapView.maxZoomLevel != maxZoom) {
                     mapView.setMaxZoomLevel(maxZoom)
                 }
@@ -3079,7 +3080,7 @@ internal fun SplitMapPane(
                                 kotlin.math.abs(focusTarget.firstLng - focusTarget.secondLng) < 1e-7
                         if (samePoint) {
                             mapView.controller.setCenter(focusPoints.first())
-                            mapView.controller.setZoom(OSM_MAX_ZOOM)
+                            mapView.controller.setZoom(MAP_DISPLAY_MAX_ZOOM)
                         } else {
                             mapView.zoomToBoundingBox(boundingBoxFromPoints(focusPoints), true, 96)
                         }
@@ -4247,9 +4248,10 @@ internal fun liveTilePriorityRequests(
     dronePoints: List<DroneMapPoint>,
     visibleZoom: Int
 ): List<LiveTileRequest> {
+    val tileZoom = visibleZoom.coerceIn(0, OSM_MAX_ZOOM.toInt())
     val requests = ArrayList<LiveTileRequest>()
     tabletLocation?.let { location ->
-        tileIndexForPoint(location, visibleZoom)?.let { tileIndex ->
+        tileIndexForPoint(location, tileZoom)?.let { tileIndex ->
             requests += LiveTileRequest(
                 tileIndex = tileIndex,
                 currentTileIndex = tileIndex,
@@ -4257,7 +4259,7 @@ internal fun liveTilePriorityRequests(
             )
         }
     }
-    requests += droneTilePriorityRequests(dronePoints, visibleZoom, existingTileIndexes = requests.map { it.tileIndex }.toSet())
+    requests += droneTilePriorityRequests(dronePoints, tileZoom, existingTileIndexes = requests.map { it.tileIndex }.toSet())
     return requests
 }
 

@@ -82,6 +82,23 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun liveTilePriorityRequests_clampsDisplayZoomToFetchableSourceZoom() {
+        val tablet = GeoPoint(38.9000, -120.0000)
+        val drone = dronePoint("rid-drone-zoomed", 38.9300, -119.9600, headingDeg = 90.0)
+
+        val requests = liveTilePriorityRequests(
+            tabletLocation = tablet,
+            dronePoints = listOf(drone),
+            visibleZoom = 22
+        )
+
+        assertEquals(tileIndexForTestPoint(tablet, 19), requests[0].tileIndex)
+        assertEquals(19, MapTileIndex.getZoom(requests[0].tileIndex))
+        assertEquals(tileIndexForTestPoint(GeoPoint(drone.lat, drone.lng), 19), requests[1].tileIndex)
+        assertEquals(19, MapTileIndex.getZoom(requests[1].tileIndex))
+    }
+
+    @Test
     fun droneTilePriorityRequests_ordersAllCurrentDroneTilesBeforeHeadingTiles() {
         val westDrone = dronePoint("drone-west", 38.9000, -120.0000, headingDeg = 90.0)
         val northDrone = dronePoint("drone-north", 38.9300, -119.9600, headingDeg = 0.0)

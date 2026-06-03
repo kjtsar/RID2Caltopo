@@ -164,6 +164,7 @@ import org.ncssar.rid2caltopo.video.mapcache.MapCacheRoot
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheRootResolver
 import org.ncssar.rid2caltopo.video.mapcache.TileCacheMapProvider
 import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
+import org.ncssar.rid2caltopo.video.mapcache.TileFetchPriorityScheduler
 
 // Constants
 internal const val MAP_PANE_TAG = "SplitMapPane"
@@ -298,6 +299,15 @@ internal data class OfflinePrepCacheStatus(
         get() = checked && tileMissing == 0 && demMissing == 0
 }
 
+internal data class MapPaneBackgroundWorkStatus(
+    val label: String,
+    val completed: Int = 0,
+    val total: Int = 0
+) {
+    val progress: Float?
+        get() = if (total > 0) (completed.toFloat() / total.toFloat()).coerceIn(0f, 1f) else null
+}
+
 internal data class LiveTileRequest(
     val tileIndex: Long,
     val currentTileIndex: Long,
@@ -360,6 +370,22 @@ internal data class ArtifactOverlayState(
     val points: List<ArtifactPointSpec> = emptyList(),
     val lines: List<ArtifactLineSpec> = emptyList(),
     val polygons: List<ArtifactPolygonSpec> = emptyList()
+)
+
+internal data class ArtifactHydrationProgress(
+    val completed: Int,
+    val total: Int
+)
+
+internal data class ArtifactFolderDefault(
+    val folderId: String,
+    val initiallyVisible: Boolean
+)
+
+internal data class ArtifactHydrationResult(
+    val featuresById: LinkedHashMap<String, JSONObject>,
+    val overlayState: ArtifactOverlayState,
+    val folderDefaults: List<ArtifactFolderDefault>
 )
 
 internal data class LocalTrackPoint(
@@ -675,6 +701,11 @@ internal fun SplitMapPane(
     var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
+    var mapBackgroundWorkStatus by remember { mutableStateOf<MapPaneBackgroundWorkStatus?>(null) }
+    var artifactHydrationJob by remember { mutableStateOf<Job?>(null) }
+    var artifactHydrationRunId by remember { mutableIntStateOf(0) }
+    var artifactOverlayRebuildJob by remember { mutableStateOf<Job?>(null) }
+    var artifactOverlayRebuildRunId by remember { mutableIntStateOf(0) }
     var lastRenderStats by remember { mutableStateOf("") }
     var lastAlignmentStats by remember { mutableStateOf("") }
     var initialViewportApplied by remember { mutableStateOf(restoredViewport != null) }
@@ -699,10 +730,12 @@ internal fun SplitMapPane(
         onDispose { removeConsumer() }
     }
     val tileCacheWriter = remember(context) { TileDiskCacheWriter(context) }
+    val tileFetchPriorityScheduler = remember { TileFetchPriorityScheduler() }
     var tileMapProvider by remember(context) {
         mutableStateOf(buildTileMapProvider(context, OsmStandardTileSource, tileCacheWriter))
     }
     val latestTileMapProvider by rememberUpdatedState(tileMapProvider)
+    val latestTileFetchPriorityScheduler by rememberUpdatedState(tileFetchPriorityScheduler)
     val offlineHttpClient = remember {
         OkHttpClient.Builder()
             .connectTimeout(6, TimeUnit.SECONDS)
@@ -897,8 +930,20 @@ internal fun SplitMapPane(
     val neededDemTileNames: Set<String> = remember(dronePoints) {
         dronePoints.mapTo(LinkedHashSet()) { tileNameForLocation(it.lat, it.lng) }
     }
-    val offlineBoundaryOptions = remember(artifactOverlayState) {
-        buildOfflineBoundaryOptions(artifactOverlayState)
+    var offlineBoundaryOptions by remember { mutableStateOf<List<OfflineBoundaryOption>>(emptyList()) }
+    LaunchedEffect(artifactOverlayState) {
+        if (artifactOverlayState.totalFeatures == 0) {
+            offlineBoundaryOptions = emptyList()
+            return@LaunchedEffect
+        }
+        mapBackgroundWorkStatus = MapPaneBackgroundWorkStatus("Preparing map boundaries")
+        val computed = withContext(Dispatchers.Default) {
+            buildOfflineBoundaryOptions(artifactOverlayState)
+        }
+        offlineBoundaryOptions = computed
+        if (mapBackgroundWorkStatus?.label == "Preparing map boundaries") {
+            mapBackgroundWorkStatus = null
+        }
     }
     LaunchedEffect(offlineBoundaryOptions) {
         val selectedStillExists = offlineBoundaryOptions.any { it.id == offlinePrepBoundaryId }
@@ -973,7 +1018,6 @@ internal fun SplitMapPane(
         }
     }
     LaunchedEffect(baseLayer, visibleTileZoom, localDeviceRefreshToken, dronePoints, offlinePrepInFlight) {
-        if (offlinePrepInFlight) return@LaunchedEffect
         val tabletLocation = CaltopoMap.GetMyLocation()?.takeIf {
             it.latitude.isFinite() && it.longitude.isFinite()
         }?.let { GeoPoint(it.latitude, it.longitude) }
@@ -1001,13 +1045,15 @@ internal fun SplitMapPane(
                     }
                     val key = "${source.name()}:${request.tileIndex}"
                     if (key in autoPrefetchedMapTiles) continue
-                    val available = prefetchMapTileIfMissing(
-                        source,
-                        request.tileIndex,
-                        tileCacheWriter,
-                        offlineHttpClient,
-                        reason = "live-priority"
-                    )
+                    val available = tileFetchPriorityScheduler.highPriority {
+                        prefetchMapTileIfMissing(
+                            source,
+                            request.tileIndex,
+                            tileCacheWriter,
+                            offlineHttpClient,
+                            reason = "live-priority"
+                        )
+                    }
                     if (available) {
                         autoPrefetchedMapTiles.add(key)
                     }
@@ -1388,25 +1434,27 @@ internal fun SplitMapPane(
                                 val call = offlineHttpClient.newCall(req)
                                 offlinePrepActiveCalls += call
                                 try {
-                                    call.execute().use { resp ->
-                                        if (!resp.isSuccessful) {
-                                            failureDetail = "http=${resp.code} z=$z x=$x y=$y source=${tileSource.name()}"
-                                            return@use false
+                                    tileFetchPriorityScheduler.lowPriority {
+                                        call.execute().use { resp ->
+                                            if (!resp.isSuccessful) {
+                                                failureDetail = "http=${resp.code} z=$z x=$x y=$y source=${tileSource.name()}"
+                                                return@use false
+                                            }
+                                            val body = resp.body ?: return@use false
+                                            val bytes = body.bytes()
+                                            val saved = tileCacheWriter.saveFile(
+                                                tileSource,
+                                                tileIndex,
+                                                ByteArrayInputStream(bytes),
+                                                null
+                                            )
+                                            if (!saved && failureDetail.isBlank()) {
+                                                val rejection = tileCacheWriter.describeRejectedWrite(tileSource, tileIndex, bytes)
+                                                failureDetail =
+                                                    (rejection ?: "save-rejected") + " z=$z x=$x y=$y source=${tileSource.name()}"
+                                            }
+                                            saved
                                         }
-                                        val body = resp.body ?: return@use false
-                                        val bytes = body.bytes()
-                                        val saved = tileCacheWriter.saveFile(
-                                            tileSource,
-                                            tileIndex,
-                                            ByteArrayInputStream(bytes),
-                                            null
-                                        )
-                                        if (!saved && failureDetail.isBlank()) {
-                                            val rejection = tileCacheWriter.describeRejectedWrite(tileSource, tileIndex, bytes)
-                                            failureDetail =
-                                                (rejection ?: "save-rejected") + " z=$z x=$x y=$y source=${tileSource.name()}"
-                                        }
-                                        saved
                                     }
                                 } finally {
                                     offlinePrepActiveCalls.remove(call)
@@ -1764,39 +1812,115 @@ internal fun SplitMapPane(
         }
     }
 
-    fun hydrateArtifactsFromCaltopoSnapshot(reason: String) {
-        val snapshot = CaltopoMap.GetArtifactFeatureSnapshot()
-        val shouldReplace = snapshot.isNotEmpty() || artifactStoreById.isEmpty()
-        if (!shouldReplace) {
-            return
-        }
-        artifactStoreById.clear()
-        snapshot.forEach { feature ->
-            val featureId = feature.optString("id")
-            if (featureId.isNotBlank()) {
-                artifactStoreById[featureId] = feature
-                // Auto-hide folders the server marks as not visible, on first encounter.
-                // Delegates to ViewModel so the choice persists across navigation.
-                val props = feature.optJSONObject("properties")
-                if (props?.optString("class") == "Folder") {
-                    viewModel.applyCaltopoFolderDefault(featureId, props.optBoolean("visible", true))
-                } else {
-                    applySyntheticArtifactFolderDefault(props, viewModel)
+    fun startArtifactHydration(reason: String, onComplete: (() -> Unit)? = null) {
+        artifactHydrationJob?.cancel()
+        val runId = artifactHydrationRunId + 1
+        artifactHydrationRunId = runId
+        val replaceIfEmpty = artifactStoreById.isEmpty()
+        val hiddenFoldersSnapshot = hiddenFolderIds.toSet()
+        val hiddenItemsSnapshot = hiddenItemIds.toSet()
+        mapBackgroundWorkStatus = MapPaneBackgroundWorkStatus("Reading map items")
+        artifactHydrationJob = uiScope.launch {
+            try {
+                val result = withContext(Dispatchers.Default) {
+                    val snapshot = CaltopoMap.GetArtifactFeatureSnapshot()
+                    val shouldReplace = snapshot.isNotEmpty() || replaceIfEmpty
+                    if (!shouldReplace) {
+                        return@withContext null
+                    }
+                    buildArtifactHydrationResult(
+                        snapshot = snapshot,
+                        hiddenFolderIds = hiddenFoldersSnapshot,
+                        hiddenItemIds = hiddenItemsSnapshot
+                    ) { progress ->
+                        uiScope.launch(Dispatchers.Main.immediate) {
+                            if (artifactHydrationRunId == runId) {
+                                mapBackgroundWorkStatus = MapPaneBackgroundWorkStatus(
+                                    label = "Hydrating map items",
+                                    completed = progress.completed,
+                                    total = progress.total
+                                )
+                            }
+                        }
+                    }
+                }
+                if (artifactHydrationRunId != runId) return@launch
+                if (result != null) {
+                    artifactStoreById.clear()
+                    artifactStoreById.putAll(result.featuresById)
+                    result.folderDefaults.forEach { folderDefault ->
+                        viewModel.applyCaltopoFolderDefault(
+                            folderDefault.folderId,
+                            folderDefault.initiallyVisible
+                        )
+                    }
+                    artifactOverlayState = result.overlayState
+                    if (MAP_PANE_VERBOSE_LOGS || result.featuresById.isNotEmpty() || artifactOverlayState.totalFeatures > 0) {
+                        if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
+                            MAP_PANE_TAG,
+                            "Hydrated artifacts from snapshot ($reason): cached=${result.featuresById.size}, renderable=${artifactOverlayState.totalFeatures}"
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MapCacheDebug.log("artifact hydration failed reason=$reason err=${e.javaClass.simpleName}:${e.message}")
+            } finally {
+                if (artifactHydrationRunId == runId && mapBackgroundWorkStatus?.label?.contains("map items") == true) {
+                    mapBackgroundWorkStatus = null
+                }
+                if (artifactHydrationRunId == runId) {
+                    artifactHydrationJob = null
+                    onComplete?.invoke()
+                    artifactHydrationRunId = runId + 1
                 }
             }
         }
-        artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
-        if (MAP_PANE_VERBOSE_LOGS || snapshot.isNotEmpty() || artifactOverlayState.totalFeatures > 0) {
-            if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
-                MAP_PANE_TAG,
-                "Hydrated artifacts from snapshot ($reason): cached=${snapshot.size}, renderable=${artifactOverlayState.totalFeatures}"
-            )
+    }
+
+    fun startArtifactOverlayRebuild(reason: String) {
+        artifactOverlayRebuildJob?.cancel()
+        val runId = artifactOverlayRebuildRunId + 1
+        artifactOverlayRebuildRunId = runId
+        val featuresSnapshot = artifactStoreById.values.toList()
+        val hiddenFoldersSnapshot = hiddenFolderIds.toSet()
+        val hiddenItemsSnapshot = hiddenItemIds.toSet()
+        mapBackgroundWorkStatus = MapPaneBackgroundWorkStatus("Updating map display")
+        artifactOverlayRebuildJob = uiScope.launch {
+            try {
+                val computed = withContext(Dispatchers.Default) {
+                    buildArtifactOverlayState(
+                        featuresSnapshot,
+                        hiddenFoldersSnapshot,
+                        hiddenItemsSnapshot
+                    )
+                }
+                if (artifactOverlayRebuildRunId != runId) return@launch
+                artifactOverlayState = computed
+                if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) CTInfo(
+                    MAP_PANE_TAG,
+                    "Artifact overlay rebuilt reason=$reason total=${artifactOverlayState.totalFeatures} " +
+                        "points=${artifactOverlayState.points.size} lines=${artifactOverlayState.lines.size} " +
+                        "polygons=${artifactOverlayState.polygons.size} ignoredTrackLike=${artifactOverlayState.ignoredTrackLikeFeatures}"
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MapCacheDebug.log("artifact overlay rebuild failed reason=$reason err=${e.javaClass.simpleName}:${e.message}")
+            } finally {
+                if (artifactOverlayRebuildRunId == runId && mapBackgroundWorkStatus?.label == "Updating map display") {
+                    mapBackgroundWorkStatus = null
+                }
+                if (artifactOverlayRebuildRunId == runId) {
+                    artifactOverlayRebuildJob = null
+                }
+            }
         }
     }
 
     LaunchedEffect(mapName) {
         val persistedViewport = viewModel.mapViewportState()
-        hydrateArtifactsFromCaltopoSnapshot("mapName=$mapName")
         localTrackPointsByMappedId.clear()
         currentFlightTrackPointsByMappedId.clear()
         trackOverlayRefreshToken++
@@ -1814,6 +1938,7 @@ internal fun SplitMapPane(
         restoredViewportStartupWaitLogged = false
         restoredViewportStartupCheckStartedAtMs = System.currentTimeMillis()
         operatorAdjustedViewport = false
+        startArtifactHydration("mapName=$mapName")
     }
     LaunchedEffect(Unit) {
         while (isActive) {
@@ -1824,7 +1949,10 @@ internal fun SplitMapPane(
 
     DisposableEffect(Unit) {
         onDispose {
+            artifactHydrationJob?.cancel()
+            artifactOverlayRebuildJob?.cancel()
             latestTileMapProvider.detach()
+            latestTileFetchPriorityScheduler.close()
         }
     }
 
@@ -1874,19 +2002,16 @@ internal fun SplitMapPane(
             hiddenItemIds = hiddenItemIds,
             onFolderVisibilityChanged = { folderId, visible ->
                 if (visible) hiddenFolderIds.remove(folderId) else hiddenFolderIds.add(folderId)
-                artifactOverlayState = buildArtifactOverlayState(
-                    artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
+                startArtifactOverlayRebuild("folder-visibility")
             },
             onItemVisibilityChanged = { itemId, visible ->
                 if (visible) hiddenItemIds.remove(itemId) else hiddenItemIds.add(itemId)
-                artifactOverlayState = buildArtifactOverlayState(
-                    artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
+                startArtifactOverlayRebuild("item-visibility")
             },
             onAllItemsToggled = { itemIds, visible ->
                 if (visible) hiddenItemIds.removeAll(itemIds.toSet())
                 else hiddenItemIds.addAll(itemIds)
-                artifactOverlayState = buildArtifactOverlayState(
-                    artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
+                startArtifactOverlayRebuild("bulk-item-visibility")
             },
             onDismiss = { showMapFoldersDialog = false }
         )
@@ -2059,7 +2184,7 @@ internal fun SplitMapPane(
     }
 
     DisposableEffect(Unit) {
-        hydrateArtifactsFromCaltopoSnapshot("listener-init")
+        startArtifactHydration("listener-init")
         val listener = CaltopoMap.ArtifactListener { feature, source, _ ->
             if (source == "full") {
                 return@ArtifactListener
@@ -2084,12 +2209,10 @@ internal fun SplitMapPane(
                     }
                 }
 
-                artifactOverlayState = buildArtifactOverlayState(artifactStoreById.values, hiddenFolderIds, hiddenItemIds)
+                startArtifactOverlayRebuild("ingest-$source")
                 if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) CTInfo(
                     MAP_PANE_TAG,
-                    "Artifact ingest source=$source ${artifactLogSummary(feature)} total=${artifactOverlayState.totalFeatures} " +
-                        "points=${artifactOverlayState.points.size} lines=${artifactOverlayState.lines.size} " +
-                        "polygons=${artifactOverlayState.polygons.size} ignoredTrackLike=${artifactOverlayState.ignoredTrackLikeFeatures}"
+                    "Artifact ingest source=$source ${artifactLogSummary(feature)} queued overlay rebuild"
                 )
             }
         }
@@ -3021,6 +3144,40 @@ internal fun SplitMapPane(
             }
         )
 
+        mapBackgroundWorkStatus?.let { status ->
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .fillMaxWidth(0.58f)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.82f))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val countText = if (status.total > 0) {
+                    " ${status.completed}/${status.total}"
+                } else {
+                    ""
+                }
+                Text(
+                    text = status.label + countText,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val progress = status.progress
+                if (progress == null) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -3099,9 +3256,10 @@ internal fun SplitMapPane(
                         CaltopoMap.ReloadMapArtifactsNow(
                             Runnable {
                                 uiScope.launch(Dispatchers.Main.immediate) {
-                                    hydrateArtifactsFromCaltopoSnapshot("manual-reload")
-                                    mapReloadInFlight = false
-                                    CaltopoClient.ShowToast("Map reloaded.")
+                                    startArtifactHydration("manual-reload") {
+                                        mapReloadInFlight = false
+                                        CaltopoClient.ShowToast("Map reloaded.")
+                                    }
                                 }
                             }
                         )
@@ -3855,6 +4013,48 @@ internal fun buildArtifactOverlayState(
     )
 }
 
+internal fun buildArtifactHydrationResult(
+    snapshot: Collection<JSONObject>,
+    hiddenFolderIds: Set<String> = emptySet(),
+    hiddenItemIds: Set<String> = emptySet(),
+    progressInterval: Int = 100,
+    onProgress: (ArtifactHydrationProgress) -> Unit = {}
+): ArtifactHydrationResult {
+    val featuresById = LinkedHashMap<String, JSONObject>()
+    val folderDefaultsById = LinkedHashMap<String, ArtifactFolderDefault>()
+    val total = snapshot.size
+    val checkpoint = progressInterval.coerceAtLeast(1)
+    snapshot.forEachIndexed { index, feature ->
+        val featureId = feature.optString("id")
+        if (featureId.isNotBlank()) {
+            featuresById[featureId] = feature
+            val props = feature.optJSONObject("properties")
+            if (props?.optString("class") == "Folder") {
+                folderDefaultsById.putIfAbsent(
+                    featureId,
+                    ArtifactFolderDefault(featureId, props.optBoolean("visible", true))
+                )
+            } else {
+                syntheticArtifactFolderDefault(props)?.let { folderDefault ->
+                    folderDefaultsById.putIfAbsent(folderDefault.folderId, folderDefault)
+                }
+            }
+        }
+        val completed = index + 1
+        if (completed == total || completed % checkpoint == 0) {
+            onProgress(ArtifactHydrationProgress(completed = completed, total = total))
+        }
+    }
+    if (total == 0) {
+        onProgress(ArtifactHydrationProgress(completed = 0, total = 0))
+    }
+    return ArtifactHydrationResult(
+        featuresById = featuresById,
+        overlayState = buildArtifactOverlayState(featuresById.values, hiddenFolderIds, hiddenItemIds),
+        folderDefaults = folderDefaultsById.values.toList()
+    )
+}
+
 private fun effectiveArtifactFolderId(properties: JSONObject?, className: String): String {
     val folderId = properties?.optString("folderId").orEmpty()
     val syntheticFolderId = syntheticArtifactFolderId(properties, className)
@@ -3894,10 +4094,16 @@ private fun applySyntheticArtifactFolderDefault(
     properties: JSONObject?,
     viewModel: StreamsViewModel
 ) {
+    syntheticArtifactFolderDefault(properties)?.let {
+        viewModel.applyCaltopoFolderDefault(it.folderId, it.initiallyVisible)
+    }
+}
+
+private fun syntheticArtifactFolderDefault(properties: JSONObject?): ArtifactFolderDefault? {
     val className = properties?.optString("class").orEmpty()
     val folderId = syntheticArtifactFolderId(properties, className)
-    val folder = syntheticArtifactFoldersById[folderId] ?: return
-    viewModel.applyCaltopoFolderDefault(folder.id, folder.initiallyVisible)
+    val folder = syntheticArtifactFoldersById[folderId] ?: return null
+    return ArtifactFolderDefault(folder.id, folder.initiallyVisible)
 }
 
 private fun estimateTileCountForBounds(

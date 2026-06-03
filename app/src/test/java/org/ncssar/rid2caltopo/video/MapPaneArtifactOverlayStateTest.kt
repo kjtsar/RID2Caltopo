@@ -60,6 +60,28 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun liveTilePriorityRequests_prioritizesRidBroadcastCurrentTileThenHeadingAdjacentTile() {
+        val drone = dronePoint("rid-drone-ne", 38.9300, -119.9600, headingDeg = 45.0)
+        val zoom = 16
+
+        val requests = liveTilePriorityRequests(
+            tabletLocation = null,
+            dronePoints = listOf(drone),
+            visibleZoom = zoom
+        )
+
+        val current = tileIndexForTestPoint(GeoPoint(drone.lat, drone.lng), zoom)
+        val headingAdjacent = adjacentTileIndexForTestTile(current, dx = 1, dy = -1)
+
+        assertEquals(current, requests[0].tileIndex)
+        assertEquals(current, requests[0].currentTileIndex)
+        assertEquals(false, requests[0].requiresCurrentCached)
+        assertEquals(headingAdjacent, requests[1].tileIndex)
+        assertEquals(current, requests[1].currentTileIndex)
+        assertEquals(true, requests[1].requiresCurrentCached)
+    }
+
+    @Test
     fun droneTilePriorityRequests_ordersAllCurrentDroneTilesBeforeHeadingTiles() {
         val westDrone = dronePoint("drone-west", 38.9000, -120.0000, headingDeg = 90.0)
         val northDrone = dronePoint("drone-north", 38.9300, -119.9600, headingDeg = 0.0)
@@ -204,6 +226,28 @@ class MapPaneArtifactOverlayStateTest {
         assertEquals(0, state.lines.size)
     }
 
+    @Test
+    fun buildArtifactHydrationResult_preservesFeaturesAndReportsProgress() {
+        val features = (1..25).map { index ->
+            markerFeature("marker-$index", "Marker $index", "")
+        }
+        val progress = mutableListOf<ArtifactHydrationProgress>()
+
+        val result = buildArtifactHydrationResult(
+            snapshot = features,
+            hiddenFolderIds = emptySet(),
+            hiddenItemIds = emptySet(),
+            progressInterval = 10,
+            onProgress = progress::add
+        )
+
+        assertEquals(25, result.featuresById.size)
+        assertEquals((1..25).map { "marker-$it" }, result.featuresById.keys.toList())
+        assertEquals(25, result.overlayState.points.size)
+        assertEquals(listOf(10, 20, 25), progress.map { it.completed })
+        assertEquals(listOf(25, 25, 25), progress.map { it.total })
+    }
+
     private fun folderFeature(id: String, title: String): JSONObject =
         JSONObject()
             .put("id", id)
@@ -234,6 +278,14 @@ class MapPaneArtifactOverlayStateTest {
         val maxTile = (1 shl zoom) - 1
         val x = lonToTileXForTest(point.longitude, zoom).coerceIn(0, maxTile)
         val y = latToTileYForTest(point.latitude, zoom).coerceIn(0, maxTile)
+        return MapTileIndex.getTileIndex(zoom, x, y)
+    }
+
+    private fun adjacentTileIndexForTestTile(tileIndex: Long, dx: Int, dy: Int): Long {
+        val zoom = MapTileIndex.getZoom(tileIndex)
+        val maxTile = (1 shl zoom) - 1
+        val x = (MapTileIndex.getX(tileIndex) + dx).coerceIn(0, maxTile)
+        val y = (MapTileIndex.getY(tileIndex) + dy).coerceIn(0, maxTile)
         return MapTileIndex.getTileIndex(zoom, x, y)
     }
 

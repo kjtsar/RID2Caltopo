@@ -780,7 +780,8 @@ class StreamsViewModel(
                 _droneStates.remove(key)
             }
         }
-        val overLimit = _droneStates.mapNotNull { (designator, _) ->
+        val overLimit = _droneStates.mapNotNull { (designator, state) ->
+            if (state.source.isLocalArchiveOnly) return@mapNotNull null
             val displayState = altitudeCoordinator.displayStateByDesignator[designator] ?: return@mapNotNull null
             val aglFt = displayState.aglFt ?: return@mapNotNull null
             if (aglFt < COMPLIANCE_ALERT_AGL_LIMIT_FT) return@mapNotNull null

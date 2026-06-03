@@ -2,6 +2,7 @@
 #include "anomaly_motion_estimator.h"
 
 #include "anomaly_analysis_internal.h"
+#include "anomaly_registration_model.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -91,10 +92,195 @@ bool anomaly_motion_estimator_find_residual_displacement(
     return true;
 }
 
+bool anomaly_motion_estimator_project_cell(
+        const anomaly_motion_estimator_registration_t *registration,
+        int                                            width,
+        int                                            height,
+        int                                            motion_step,
+        int                                            motion_w,
+        int                                            motion_h,
+        int                                            mx,
+        int                                            my,
+        int                                           *px_idx_out,
+        int                                           *py_idx_out) {
+    if (registration == NULL || width <= 1 || height <= 1 || motion_step <= 0 ||
+        motion_w <= 0 || motion_h <= 0) {
+        return false;
+    }
+    float fw = (float)(width - 1);
+    float fh = (float)(height - 1);
+    float cx_n = (float)(mx * motion_step) / fw;
+    float cy_n = (float)(my * motion_step) / fh;
+    float px_n = 0.0f;
+    float py_n = 0.0f;
+    anomaly_registration_apply_point(registration, cx_n, cy_n, &px_n, &py_n);
+    int px_idx = (int)(px_n * fw / (float)motion_step + 0.5f);
+    int py_idx = (int)(py_n * fh / (float)motion_step + 0.5f);
+    if (px_idx < 0 || px_idx >= motion_w || py_idx < 0 || py_idx >= motion_h) return false;
+    if (px_idx_out != NULL) *px_idx_out = px_idx;
+    if (py_idx_out != NULL) *py_idx_out = py_idx;
+    return true;
+}
+
+static bool default_registration_valid(
+        const anomaly_motion_estimator_registration_t *registration) {
+    return anomaly_registration_model_valid(registration);
+}
+
+static const anomaly_motion_estimator_sidecar_ops_t default_sidecar_ops = {
+    .project_cell = anomaly_motion_estimator_project_cell,
+    .find_residual_displacement = anomaly_motion_estimator_find_residual_displacement,
+    .registration_valid = default_registration_valid,
+};
+
+const anomaly_motion_estimator_sidecar_ops_t *anomaly_motion_estimator_default_sidecar_ops(void) {
+    return &default_sidecar_ops;
+}
+
 float anomaly_motion_estimator_texture_scale(int texture_score) {
     if (texture_score <= 8) return 0.0f;
     if (texture_score >= 24) return 1.0f;
     return (float)(texture_score - 8) / 16.0f;
+}
+
+float anomaly_motion_estimator_appearance_zoom_motion_scale(float registration_scale) {
+    float zoom_delta = fabsf(registration_scale - 1.0f);
+    float zoom_motion_scale = 1.0f;
+    if (zoom_delta > 0.004f) {
+        zoom_motion_scale = 1.0f - ((zoom_delta - 0.004f) / 0.014f);
+        if (zoom_motion_scale < 0.0f) zoom_motion_scale = 0.0f;
+    }
+    return zoom_motion_scale;
+}
+
+float anomaly_motion_estimator_appearance_broad_motion_scale(float global_motion_load) {
+    float broad_motion_scale = 1.0f;
+    if (global_motion_load > 0.12f) {
+        broad_motion_scale = 1.0f - ((global_motion_load - 0.12f) / 0.18f);
+        if (broad_motion_scale < 0.20f) broad_motion_scale = 0.20f;
+    }
+    return broad_motion_scale;
+}
+
+float anomaly_motion_estimator_appearance_global_motion_load(
+        int strong_global_samples,
+        int global_count) {
+    return global_count > 0
+        ? ((float)strong_global_samples / (float)global_count)
+        : 0.0f;
+}
+
+void anomaly_motion_estimator_appearance_global_stats(
+        double                                    global_sum,
+        double                                    global_sum2,
+        int                                       global_count,
+        int                                       motion_step,
+        anomaly_motion_appearance_global_stats_t *out) {
+    if (out == NULL) return;
+
+    out->mean = 0.0f;
+    out->std = (float)motion_step * 0.5f;
+    out->motion_floor_px = (float)motion_step;
+    if (global_count <= 0) return;
+
+    out->mean = (float)(global_sum / (double)global_count);
+    double variance = (global_sum2 / (double)global_count) -
+        ((double)out->mean * (double)out->mean);
+    out->std = sqrtf((float)fmax(variance, 0.04));
+    if (out->std < (float)motion_step * 0.35f) {
+        out->std = (float)motion_step * 0.35f;
+    }
+    out->motion_floor_px = out->mean + (0.75f * out->std);
+    if (out->motion_floor_px < (float)motion_step * 0.85f) {
+        out->motion_floor_px = (float)motion_step * 0.85f;
+    }
+}
+
+void anomaly_motion_estimator_sync_appearance_scorer_state(
+        anomaly_motion_appearance_scorer_state_t *state,
+        float                                    *persist,
+        int                                       persist_w,
+        int                                       persist_h) {
+    if (state == NULL) return;
+    state->persist = persist;
+    state->persist_w = persist_w;
+    state->persist_h = persist_h;
+}
+
+void anomaly_motion_estimator_populate_appearance_debug_summary(
+        anomaly_debug_motion_t *debug,
+        bool                    scene_discontinuity,
+        int                     sample_step,
+        int                     motion_step,
+        int                     global_count,
+        int                     motion_candidate_count,
+        float                   global_motion_mean,
+        float                   global_motion_std,
+        float                   zoom_motion_scale,
+        float                   broad_motion_scale,
+        float                   global_motion_load) {
+    if (debug == NULL) return;
+    debug->valid = global_count > 0 || motion_candidate_count > 0;
+    debug->scene_discontinuity = scene_discontinuity;
+    debug->sample_step = sample_step;
+    debug->motion_step = motion_step;
+    debug->sample_count = global_count;
+    debug->residual_mean = global_motion_mean;
+    debug->residual_std = global_motion_std;
+    debug->zoom_motion_scale = zoom_motion_scale;
+    debug->broad_motion_scale = broad_motion_scale;
+    debug->global_motion_load = global_motion_load;
+}
+
+void anomaly_motion_estimator_populate_appearance_debug_result(
+        anomaly_debug_motion_t          *debug,
+        float                            raw_score,
+        int                              raw_x,
+        int                              raw_y,
+        float                            frame_w,
+        float                            frame_h,
+        float                            winner_component_area_frac,
+        float                            winner_component_span_frac,
+        float                            winner_component_fill_ratio,
+        float                            zoom_motion_scale,
+        float                            broad_motion_scale,
+        float                            global_motion_load,
+        float                            winner_texture_scale,
+        float                            winner_structure_scale,
+        float                            winner_support_scale,
+        float                            winner_persistence_scale,
+        const anomaly_debug_candidate_t *top_candidates,
+        int                              top_candidate_count) {
+    if (debug == NULL) return;
+    debug->raw_candidate_valid = raw_score >= 0.0f;
+    debug->raw_score = raw_score;
+    debug->raw_x_norm = (raw_x > 0 || raw_y > 0) && frame_w != 0.0f
+        ? ((float)raw_x / frame_w)
+        : 0.0f;
+    debug->raw_y_norm = (raw_x > 0 || raw_y > 0) && frame_h != 0.0f
+        ? ((float)raw_y / frame_h)
+        : 0.0f;
+    debug->winner_component_area_frac = winner_component_area_frac;
+    debug->winner_component_span_frac = winner_component_span_frac;
+    debug->winner_component_fill_ratio = winner_component_fill_ratio;
+    debug->zoom_motion_scale = zoom_motion_scale;
+    debug->broad_motion_scale = broad_motion_scale;
+    debug->global_motion_load = global_motion_load;
+    debug->winner_texture_scale = winner_texture_scale;
+    debug->winner_structure_scale = winner_structure_scale;
+    debug->winner_support_scale = winner_support_scale;
+    debug->winner_persistence_scale = winner_persistence_scale;
+
+    int clamped_count = top_candidate_count;
+    if (clamped_count < 0) clamped_count = 0;
+    if (clamped_count > ANOMALY_DEBUG_TOP_CANDIDATES) {
+        clamped_count = ANOMALY_DEBUG_TOP_CANDIDATES;
+    }
+    debug->top_candidate_count = clamped_count;
+    if (top_candidates == NULL) return;
+    for (int i = 0; i < clamped_count; i++) {
+        debug->top_candidates[i] = top_candidates[i];
+    }
 }
 
 float anomaly_motion_estimator_structure_scale(
@@ -277,6 +463,105 @@ void anomaly_motion_estimator_init_appearance_scorer_output(
     memset(out, 0, sizeof(*out));
     out->zoom_motion_scale = 1.0f;
     out->broad_motion_scale = 1.0f;
+}
+
+void anomaly_motion_estimator_init_appearance_scorer_input(
+        anomaly_motion_appearance_scorer_input_t              *input,
+        anomaly_motion_appearance_scorer_state_t              *state,
+        const anomaly_motion_appearance_scorer_input_args_t   *args) {
+    if (state != NULL) {
+        memset(state, 0, sizeof(*state));
+    }
+    if (input == NULL) return;
+    memset(input, 0, sizeof(*input));
+    input->state = state;
+    if (args == NULL) return;
+
+    anomaly_motion_estimator_sync_appearance_scorer_state(
+            state,
+            args->persist,
+            args->persist_w,
+            args->persist_h);
+
+    input->cfg = args->cfg;
+    input->registration = args->registration;
+    input->curr_luma = args->curr_luma;
+    input->prev_luma = args->prev_luma;
+    input->prev_luma_width = args->prev_luma_width;
+    input->prev_luma_height = args->prev_luma_height;
+    input->width = args->width;
+    input->height = args->height;
+    input->motion_w = args->motion_w;
+    input->motion_h = args->motion_h;
+    input->motion_step = args->motion_step;
+    input->motion_count = args->motion_count;
+    input->roi_x0 = args->roi_x0;
+    input->roi_x1 = args->roi_x1;
+    input->roi_y0 = args->roi_y0;
+    input->roi_y1 = args->roi_y1;
+    input->anomaly_detection_active = args->anomaly_detection_active;
+    input->scene_discontinuity = args->scene_discontinuity;
+    input->use_motion_tolerance =
+            args->cfg != NULL &&
+            (args->cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0;
+    input->use_stable_motion =
+            args->cfg != NULL &&
+            (args->cfg->algorithm_mask & ANOMALY_ALGO_MOTION) != 0 &&
+            !input->use_motion_tolerance;
+    input->motion_evidence_scale = args->motion_evidence_scale;
+    input->saliency_motion_map = args->saliency_motion_map;
+    input->saliency_registration_map = args->saliency_registration_map;
+    input->sg_w = args->sg_w;
+    input->sg_h = args->sg_h;
+    input->sample_step = args->sample_step;
+    input->proposal_count = args->proposal_count;
+    input->proposals = args->proposals;
+}
+
+bool anomaly_motion_estimator_appearance_scorer_ready(
+        const anomaly_motion_appearance_scorer_input_t *input) {
+    if (input == NULL || input->cfg == NULL) return false;
+    if (!input->anomaly_detection_active) return false;
+    if ((input->cfg->algorithm_mask &
+         (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) == 0) {
+        return false;
+    }
+    if (input->curr_luma == NULL || input->prev_luma == NULL) return false;
+    if (input->prev_luma_width != input->motion_w ||
+        input->prev_luma_height != input->motion_h) {
+        return false;
+    }
+    if (input->scene_discontinuity) return false;
+    return true;
+}
+
+bool anomaly_motion_estimator_appearance_grid_bounds(
+        const anomaly_motion_appearance_scorer_input_t *input,
+        anomaly_motion_appearance_grid_bounds_t        *out) {
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (input == NULL || out == NULL ||
+        input->motion_step <= 0 ||
+        input->motion_w <= 0 ||
+        input->motion_h <= 0) {
+        return false;
+    }
+
+    int roi_mgx0 = input->roi_x0 / input->motion_step;
+    int roi_mgx1 = (input->roi_x1 + input->motion_step - 1) / input->motion_step;
+    int roi_mgy0 = input->roi_y0 / input->motion_step;
+    int roi_mgy1 = (input->roi_y1 + input->motion_step - 1) / input->motion_step;
+    roi_mgx0 = roi_mgx0 < 0 ? 0 : roi_mgx0;
+    roi_mgx1 = roi_mgx1 > input->motion_w ? input->motion_w : roi_mgx1;
+    roi_mgy0 = roi_mgy0 < 0 ? 0 : roi_mgy0;
+    roi_mgy1 = roi_mgy1 > input->motion_h ? input->motion_h : roi_mgy1;
+
+    out->x0 = roi_mgx0;
+    out->x1 = roi_mgx1;
+    out->y0 = roi_mgy0;
+    out->y1 = roi_mgy1;
+    return true;
 }
 
 bool anomaly_motion_estimator_appearance_score_is_winner_eligible(

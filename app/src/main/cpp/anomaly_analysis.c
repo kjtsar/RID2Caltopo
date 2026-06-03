@@ -6,6 +6,7 @@
 #include "anomaly_color_detector.h"
 #include "anomaly_debug_helpers.h"
 #include "anomaly_frame_geometry.h"
+#include "anomaly_frame_history.h"
 #include "anomaly_grid_region.h"
 #include "anomaly_linear_solve.h"
 #include "anomaly_motion_estimator.h"
@@ -4016,134 +4017,6 @@ static void evaluate_thermal_micro_candidate_shadow(
     }
 }
 
-#define ANOMALY_PREV_SAMPLE_LOOKUP_INVALID (-1)
-
-typedef struct {
-    int carried_samples;
-    int newly_exposed_samples;
-    int stale_samples;
-} anomaly_prev_sample_lookup_summary_t;
-
-static bool build_prev_sample_lookup_map(
-        const anomaly_roi_state_t              *prev,
-        const anomaly_registration_model_t     *model,
-        int                                     frame_width,
-        int                                     frame_height,
-        int                                     roi_x0,
-        int                                     roi_y0,
-        int                                     roi_x1,
-        int                                     roi_y1,
-        int                                     sample_step,
-        int                                     sg_w,
-        int                                     sg_h,
-        int                                     stale_limit,
-        int                                    *prev_lookup_out,
-        anomaly_prev_sample_lookup_summary_t   *summary_out) {
-    if (summary_out != NULL) {
-        summary_out->carried_samples = 0;
-        summary_out->newly_exposed_samples = 0;
-        summary_out->stale_samples = 0;
-    }
-    if (prev == NULL || model == NULL || prev_lookup_out == NULL ||
-        frame_width <= 0 || frame_height <= 0 ||
-        sample_step <= 0 || sg_w <= 0 || sg_h <= 0 ||
-        !prev->valid || prev->sample_step <= 0 ||
-        prev->width <= 0 || prev->height <= 0 ||
-        prev->valid_mask == NULL ||
-        !anomaly_registration_model_valid(model)) {
-        return false;
-    }
-
-    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
-    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
-    anomaly_inverse_affine_t inv = anomaly_registration_inverse_affine(model);
-    if (!inv.valid) return false;
-
-    int carried_samples = 0;
-    int newly_exposed_samples = 0;
-    int stale_samples = 0;
-    for (int sy = 0; sy < sg_h; sy++) {
-        int y = roi_y0 + sy * sample_step + sample_step / 2;
-        if (y >= roi_y1) y = roi_y1 - 1;
-        for (int sx = 0; sx < sg_w; sx++) {
-            int x = roi_x0 + sx * sample_step + sample_step / 2;
-            if (x >= roi_x1) x = roi_x1 - 1;
-            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
-            prev_lookup_out[idx] = ANOMALY_PREV_SAMPLE_LOOKUP_INVALID;
-
-            float nx = clamp01f((float)x / fw);
-            float ny = clamp01f((float)y / fh);
-            float px = 0.0f;
-            float py = 0.0f;
-            if (!anomaly_registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
-                newly_exposed_samples++;
-                continue;
-            }
-            int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
-            int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
-            if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||
-                prev_py < prev->roi_y0 || prev_py >= prev->roi_y1) {
-                newly_exposed_samples++;
-                continue;
-            }
-            int prev_sx = (prev_px - prev->roi_x0) / prev->sample_step;
-            int prev_sy = (prev_py - prev->roi_y0) / prev->sample_step;
-            if (prev_sx < 0 || prev_sy < 0 ||
-                prev_sx >= prev->width || prev_sy >= prev->height) {
-                newly_exposed_samples++;
-                continue;
-            }
-            size_t prev_idx = (size_t)prev_sy * (size_t)prev->width + (size_t)prev_sx;
-            if (!prev->valid_mask[prev_idx]) {
-                newly_exposed_samples++;
-                continue;
-            }
-
-            prev_lookup_out[idx] = (int)prev_idx;
-            carried_samples++;
-            int age = (int)prev->coverage_age[prev_idx] + 1;
-            if (age > stale_limit) stale_samples++;
-        }
-    }
-
-    if (summary_out != NULL) {
-        summary_out->carried_samples = carried_samples;
-        summary_out->newly_exposed_samples = newly_exposed_samples;
-        summary_out->stale_samples = stale_samples;
-    }
-    return true;
-}
-
-static bool project_motion_cell(
-        const anomaly_registration_model_t *model,
-        int             width,
-        int             height,
-        int             motion_step,
-        int             motion_w,
-        int             motion_h,
-        int             mx,
-        int             my,
-        int            *px_idx_out,
-        int            *py_idx_out) {
-    if (model == NULL || width <= 1 || height <= 1 || motion_step <= 0 ||
-        motion_w <= 0 || motion_h <= 0) {
-        return false;
-    }
-    float fw = (float)(width - 1);
-    float fh = (float)(height - 1);
-    float cx_n = (float)(mx * motion_step) / fw;
-    float cy_n = (float)(my * motion_step) / fh;
-    float px_n = 0.0f;
-    float py_n = 0.0f;
-    anomaly_registration_apply_point(model, cx_n, cy_n, &px_n, &py_n);
-    int px_idx = (int)(px_n * fw / (float)motion_step + 0.5f);
-    int py_idx = (int)(py_n * fh / (float)motion_step + 0.5f);
-    if (px_idx < 0 || px_idx >= motion_w || py_idx < 0 || py_idx >= motion_h) return false;
-    if (px_idx_out != NULL) *px_idx_out = px_idx;
-    if (py_idx_out != NULL) *py_idx_out = py_idx;
-    return true;
-}
-
 static bool estimate_local_motion_region(
         const float   *motion_dx_map,
         const float   *motion_dy_map,
@@ -4286,41 +4159,6 @@ static void sample_local_motion_field(
     *out_confidence = sum_w;
 }
 
-static bool motion_estimator_project_cell(
-        const anomaly_motion_estimator_registration_t *registration,
-        int                                            width,
-        int                                            height,
-        int                                            motion_step,
-        int                                            motion_w,
-        int                                            motion_h,
-        int                                            mx,
-        int                                            my,
-        int                                           *px_idx_out,
-        int                                           *py_idx_out) {
-    return project_motion_cell(
-        registration,
-        width,
-        height,
-        motion_step,
-        motion_w,
-        motion_h,
-        mx,
-        my,
-        px_idx_out,
-        py_idx_out);
-}
-
-static bool motion_estimator_registration_valid(
-        const anomaly_motion_estimator_registration_t *registration) {
-    return anomaly_registration_model_valid(registration);
-}
-
-static const anomaly_motion_estimator_sidecar_ops_t movement_estimator_sidecar_ops = {
-    .project_cell = motion_estimator_project_cell,
-    .find_residual_displacement = anomaly_motion_estimator_find_residual_displacement,
-    .registration_valid = motion_estimator_registration_valid,
-};
-
 static bool bilinear_sample_u8(
         const uint8_t *grid,
         int            w,
@@ -4412,22 +4250,6 @@ static float registration_residual_standout_score(
     float ring_std = sqrtf(ring_var);
     if (ring_std < 1.0f) ring_std = 1.0f;
     return (center_mean - ring_mean) / ring_std;
-}
-
-static int gmv_feature_score(const uint8_t *luma, int w, int h, int x, int y) {
-    if (luma == NULL || w <= 0 || h <= 0) return 0;
-    if (x <= 0 || x >= w - 1 || y <= 0 || y >= h - 1) return 0;
-    int c = luma[y * w + x];
-    int score = 0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            int v = luma[(y + dy) * w + (x + dx)];
-            int d = c - v;
-            score += d < 0 ? -d : d;
-        }
-    }
-    return score;
 }
 
 typedef struct {
@@ -4695,7 +4517,7 @@ static int detect_affine_corners(
         if (y <= 1 || y >= h - 2) continue;
         for (int x = roi_x0; x <= roi_x1; x++) {
             if (x <= 1 || x >= w - 2) continue;
-            int score = gmv_feature_score(luma, w, h, x, y);
+            int score = anomaly_registration_feature_score(luma, w, h, x, y);
             if (score < ANOMALY_GMV_MIN_TEXTURE_SCORE) continue;
             bool too_close = false;
             for (int i = 0; i < count; i++) {
@@ -6376,7 +6198,7 @@ static anomaly_registration_model_t estimate_gmv_registration_model(
             int best_feature = -1;
             for (int cy = zy0; cy <= zy1; cy++) {
                 for (int cx = zx0; cx <= zx1; cx++) {
-                    int feature = gmv_feature_score(curr_luma, motion_w, motion_h, cx, cy);
+                    int feature = anomaly_registration_feature_score(curr_luma, motion_w, motion_h, cx, cy);
                     if (feature > best_feature) {
                         best_feature = feature;
                         ax = cx;
@@ -6805,52 +6627,6 @@ static anomaly_registration_model_t estimate_registration_model(
     }
 }
 
-static bool scan_planner_registration_valid(
-        const anomaly_scan_planner_registration_t *registration) {
-    return anomaly_registration_model_valid(registration);
-}
-
-static int scan_planner_target_revisit_track_count(
-        const anomaly_state_t *state) {
-    return anomaly_target_revisit_track_count(state);
-}
-
-static void scan_planner_adaptive_target_track_risk(
-        const anomaly_state_t *state,
-        int                    min_hits,
-        bool                  *has_track_risk_out,
-        bool                  *has_weak_lock_out) {
-    anomaly_target_revisit_adaptive_track_risk(
-            state,
-            min_hits,
-            has_track_risk_out,
-            has_weak_lock_out);
-}
-
-static bool scan_planner_ensure_refresh_mask_capacity(
-        anomaly_state_t *state,
-        size_t           sample_count,
-        uint8_t        **refresh_mask_out) {
-    if (refresh_mask_out != NULL) *refresh_mask_out = NULL;
-    if (state == NULL || refresh_mask_out == NULL) return false;
-    if (!anomaly_buffer_ensure_u8_capacity(
-            &state->scratch_refresh_mask,
-            &state->scratch_refresh_mask_capacity,
-            sample_count)) {
-        return false;
-    }
-    *refresh_mask_out = state->scratch_refresh_mask;
-    return true;
-}
-
-static const anomaly_scan_planner_ops_t scan_planner_ops = {
-    .registration_valid = scan_planner_registration_valid,
-    .target_revisit_track_count = scan_planner_target_revisit_track_count,
-    .adaptive_target_track_risk = scan_planner_adaptive_target_track_risk,
-    .age_roi_tracks_one_frame = anomaly_roi_tracks_age_one_frame,
-    .ensure_refresh_mask_capacity = scan_planner_ensure_refresh_mask_capacity,
-};
-
 typedef struct {
     bool  valid;
     int   sx;
@@ -7233,52 +7009,6 @@ static void age_roi_state_one_frame(
     anomaly_target_revisit_annotate_roi_cells(roi_state, state, ANOMALY_DEFAULT_MIN_HITS);
 }
 
-static void update_prev_luma_state(
-        anomaly_state_t *state,
-        const uint8_t   *curr_luma,
-        size_t           motion_count,
-        int              motion_w,
-        int              motion_h) {
-    if (state == NULL || curr_luma == NULL) return;
-    if (anomaly_buffer_ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
-        memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
-        state->prev_luma_width = motion_w;
-        state->prev_luma_height = motion_h;
-    } else {
-        if (state->prev_luma != NULL) {
-            free(state->prev_luma);
-            state->prev_luma = NULL;
-        }
-        state->prev_luma_capacity = 0;
-        state->prev_luma_width = 0;
-        state->prev_luma_height = 0;
-    }
-}
-
-static void update_prev_registration_luma_state(
-        anomaly_state_t *state,
-        const uint8_t   *curr_luma,
-        size_t           motion_count,
-        int              motion_w,
-        int              motion_h) {
-    if (state == NULL || curr_luma == NULL) return;
-    if (anomaly_buffer_ensure_u8_capacity(&state->prev_registration_luma,
-                                          &state->prev_registration_luma_capacity,
-                                          motion_count)) {
-        memcpy(state->prev_registration_luma, curr_luma, motion_count * sizeof(uint8_t));
-        state->prev_registration_luma_width = motion_w;
-        state->prev_registration_luma_height = motion_h;
-    } else {
-        if (state->prev_registration_luma != NULL) {
-            free(state->prev_registration_luma);
-            state->prev_registration_luma = NULL;
-        }
-        state->prev_registration_luma_capacity = 0;
-        state->prev_registration_luma_width = 0;
-        state->prev_registration_luma_height = 0;
-    }
-}
-
 bool anomaly_probe_thermal_point(
         const anomaly_state_t  *state,
         const anomaly_config_t *cfg,
@@ -7467,20 +7197,7 @@ void anomaly_state_reset(anomaly_state_t *state) {
     memset(state->acc_hold,   0, sizeof(state->acc_hold));
     memset(state->acc_presence_mask, 0, sizeof(state->acc_presence_mask));
     memset(state->acc_active, 0, sizeof(state->acc_active));
-    if (state->prev_luma != NULL) {
-        free(state->prev_luma);
-        state->prev_luma = NULL;
-    }
-    state->prev_luma_width  = 0;
-    state->prev_luma_height = 0;
-    state->prev_luma_capacity = 0;
-    if (state->prev_registration_luma != NULL) {
-        free(state->prev_registration_luma);
-        state->prev_registration_luma = NULL;
-    }
-    state->prev_registration_luma_width = 0;
-    state->prev_registration_luma_height = 0;
-    state->prev_registration_luma_capacity = 0;
+    anomaly_frame_history_clear(state);
     state->cached_registration_valid = false;
     state->cached_registration_reuse_budget = 0;
     if (state->motion_persist != NULL) {
@@ -7771,14 +7488,14 @@ int anomaly_process_frame(
         .roi_x1 = roi_x1,
         .roi_y0 = roi_y0,
         .roi_y1 = roi_y1,
-        .ops = &movement_estimator_sidecar_ops,
+        .ops = anomaly_motion_estimator_default_sidecar_ops(),
     };
     stage_started_us = anomaly_timing_now_us();
     anomaly_motion_estimator_estimate_sidecar(&movement_input, &movement_sidecar);
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_MOVEMENT_ESTIMATOR, stage_started_us);
     anomaly_motion_movement_snapshot_t movement_snapshot = anomaly_motion_estimator_make_movement_snapshot(&movement_sidecar);
     int *prev_sample_lookup = NULL;
-    anomaly_prev_sample_lookup_summary_t prev_sample_lookup_summary;
+    anomaly_scan_planner_prev_lookup_summary_t prev_sample_lookup_summary;
     memset(&prev_sample_lookup_summary, 0, sizeof(prev_sample_lookup_summary));
     if (sg_w > 0 && sg_h > 0 &&
         state->roi_state.valid &&
@@ -7789,7 +7506,7 @@ int anomaly_process_frame(
             &state->scratch_prev_sample_lookup,
             &state->scratch_prev_sample_lookup_capacity,
             (size_t)sg_w * (size_t)sg_h)) {
-        if (build_prev_sample_lookup_map(
+        if (anomaly_scan_planner_build_prev_sample_lookup(
                 &state->roi_state,
                 &registration,
                 width,
@@ -7807,11 +7524,6 @@ int anomaly_process_frame(
             prev_sample_lookup = state->scratch_prev_sample_lookup;
         }
     }
-    anomaly_scan_planner_prev_lookup_summary_t planner_prev_lookup_summary = {
-        .carried_samples = prev_sample_lookup_summary.carried_samples,
-        .newly_exposed_samples = prev_sample_lookup_summary.newly_exposed_samples,
-        .stale_samples = prev_sample_lookup_summary.stale_samples,
-    };
     bool allow_sparse_refresh_fallback =
         (cfg->algorithm_mask &
          (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
@@ -7820,7 +7532,7 @@ int anomaly_process_frame(
         .cfg = cfg,
         .registration = &registration,
         .movement = &movement_sidecar,
-        .ops = &scan_planner_ops,
+        .ops = anomaly_scan_planner_default_ops(),
         .frame_source_ts_us = source_ts_us,
         .frame_counter = state->frame_counter,
         .frame_width = width,
@@ -7838,7 +7550,7 @@ int anomaly_process_frame(
         .color_algorithm_configured = color_algorithm_configured,
         .color_stride_hold_eligible = true,
         .prev_sample_lookup = prev_sample_lookup,
-        .prev_lookup_summary = &planner_prev_lookup_summary,
+        .prev_lookup_summary = &prev_sample_lookup_summary,
         .adaptive = {
             .adaptive_enabled = cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE,
             .fixed_frame_stride = frame_stride,
@@ -7866,21 +7578,22 @@ int anomaly_process_frame(
     uint8_t *appearance_refresh_mask = scan_planner_output.appearance_refresh_mask;
     bool selective_refresh_active = scan_planner_output.selective_refresh_active;
 
-    if (result_out != NULL) {
-        result_out->had_discontinuity = scene_discontinuity;
-        result_out->registration_ran_this_frame = true;
-        result_out->appearance_refresh_ran_this_frame = (rescan_mode == ANOMALY_RESCAN_MODE_FULL);
-        result_out->registration_health = registration_health;
-        result_out->rescan_mode = rescan_mode;
-        result_out->scan_plan = scan_plan;
-        result_out->adaptive_effective_stride = scan_planner_output.adaptive.effective_frame_stride;
-        result_out->adaptive_stable_frames = scan_planner_output.adaptive.stable_frames;
-        result_out->adaptive_drop_hold_frames = scan_planner_output.adaptive.drop_hold_frames;
-        result_out->adaptive_motion_load = scan_planner_output.adaptive.motion_load;
-        result_out->adaptive_reason_flags = scan_planner_output.adaptive.reason_flags;
-        anomaly_debug_populate_registration_model(&registration, result_out);
-        result_out->movement_debug = movement_sidecar;
-    }
+    anomaly_result_frame_metadata_t frame_metadata = {
+        .had_discontinuity = scene_discontinuity,
+        .registration_ran_this_frame = true,
+        .appearance_refresh_ran_this_frame = (rescan_mode == ANOMALY_RESCAN_MODE_FULL),
+        .registration_health = registration_health,
+        .rescan_mode = rescan_mode,
+        .scan_plan = scan_plan,
+        .adaptive_effective_stride = scan_planner_output.adaptive.effective_frame_stride,
+        .adaptive_stable_frames = scan_planner_output.adaptive.stable_frames,
+        .adaptive_drop_hold_frames = scan_planner_output.adaptive.drop_hold_frames,
+        .adaptive_motion_load = scan_planner_output.adaptive.motion_load,
+        .adaptive_reason_flags = scan_planner_output.adaptive.reason_flags,
+        .registration = &registration,
+        .movement_debug = &movement_sidecar,
+    };
+    anomaly_result_publish_frame_metadata(result_out, &frame_metadata);
 
     // ── Compensate accumulators for camera motion (or wipe on discontinuity)
     // T⁻¹(p) = Aᵀ * (p - t) / (a²+b²)  where Aᵀ = [[a,b],[-b,a]]
@@ -7925,8 +7638,8 @@ int anomaly_process_frame(
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_TARGET_TRACKING, stage_started_us);
 
     if (color_stride_hold_frame) {
-        update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
-        update_prev_registration_luma_state(
+        anomaly_frame_history_update_motion_luma(state, curr_luma, motion_count, motion_w, motion_h);
+        anomaly_frame_history_update_registration_luma(
                 state,
                 curr_registration_luma != NULL ? curr_registration_luma : curr_luma,
                 motion_count,
@@ -7948,10 +7661,7 @@ int anomaly_process_frame(
                     ANOMALY_ALGO_MOTION,
                     boxes,
                     ANOMALY_MAX_BOXES_PER_FRAME);
-            result_out->box_count = box_count;
-            for (int i = 0; i < box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++) {
-                result_out->boxes[i] = boxes[i];
-            }
+            anomaly_result_publish_boxes(result_out, boxes, box_count);
         }
         anomaly_result_finalize_timing(result_out, &timing, frame_started_us);
         return box_count;
@@ -7976,8 +7686,8 @@ int anomaly_process_frame(
     // Two channels: luma sum and luma sum-of-squares for variance.
     stage_started_us = anomaly_timing_now_us();
     if (!anomaly_scratch_ensure_sampled_grid_capacity(state, sg_count)) {
-        update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
-        update_prev_registration_luma_state(
+        anomaly_frame_history_update_motion_luma(state, curr_luma, motion_count, motion_w, motion_h);
+        anomaly_frame_history_update_registration_luma(
             state,
             curr_registration_luma != NULL ? curr_registration_luma : curr_luma,
             motion_count,
@@ -8043,19 +7753,7 @@ int anomaly_process_frame(
     }
 
     if (sample_count <= 1) {
-        if (curr_luma != NULL) {
-            if (anomaly_buffer_ensure_u8_capacity(&state->prev_luma, &state->prev_luma_capacity, motion_count)) {
-                memcpy(state->prev_luma, curr_luma, motion_count * sizeof(uint8_t));
-                state->prev_luma_width  = motion_w;
-                state->prev_luma_height = motion_h;
-            } else {
-                free(state->prev_luma);
-                state->prev_luma = NULL;
-                state->prev_luma_capacity = 0;
-                state->prev_luma_width = 0;
-                state->prev_luma_height = 0;
-            }
-        }
+        anomaly_frame_history_update_motion_luma(state, curr_luma, motion_count, motion_w, motion_h);
         anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP, stage_started_us);
         anomaly_result_finalize_timing(result_out, &timing, frame_started_us);
         return 0;
@@ -9855,18 +9553,13 @@ int anomaly_process_frame(
     anomaly_motion_appearance_scorer_output_t motion_appearance_output;
     anomaly_motion_estimator_init_appearance_scorer_output(&motion_appearance_output);
 
-    bool use_motion_tolerance = (cfg->algorithm_mask & ANOMALY_ALGO_MOTION_TOLERANCE) != 0;
-    bool use_stable_motion = ((cfg->algorithm_mask & ANOMALY_ALGO_MOTION) != 0) && !use_motion_tolerance;
-    anomaly_motion_appearance_scorer_state_t motion_appearance_state = {
-        .persist = state->motion_persist,
-        .persist_w = state->motion_persist_w,
-        .persist_h = state->motion_persist_h,
-    };
-    anomaly_motion_appearance_scorer_input_t motion_appearance_input = {
+    anomaly_motion_appearance_scorer_input_args_t motion_appearance_args = {
         .cfg = cfg,
         .registration = (const anomaly_motion_estimator_registration_t *)&registration,
         .curr_luma = curr_luma,
         .prev_luma = state->prev_luma,
+        .prev_luma_width = state->prev_luma_width,
+        .prev_luma_height = state->prev_luma_height,
         .width = width,
         .height = height,
         .motion_w = motion_w,
@@ -9879,8 +9572,6 @@ int anomaly_process_frame(
         .roi_y1 = roi_y1,
         .anomaly_detection_active = anomaly_detection_active,
         .scene_discontinuity = scene_discontinuity,
-        .use_motion_tolerance = use_motion_tolerance,
-        .use_stable_motion = use_stable_motion,
         .motion_evidence_scale = motion_evidence_scale,
         .saliency_motion_map = saliency_motion_map,
         .saliency_registration_map = saliency_registration_map,
@@ -9889,35 +9580,36 @@ int anomaly_process_frame(
         .sample_step = sample_step,
         .proposal_count = motion_appearance_proposal_count,
         .proposals = motion_appearance_proposals,
-        .state = &motion_appearance_state,
+        .persist = state->motion_persist,
+        .persist_w = state->motion_persist_w,
+        .persist_h = state->motion_persist_h,
     };
-    (void)motion_appearance_input;
+    anomaly_motion_appearance_scorer_state_t motion_appearance_state;
+    anomaly_motion_appearance_scorer_input_t motion_appearance_input;
+    anomaly_motion_estimator_init_appearance_scorer_input(
+            &motion_appearance_input,
+            &motion_appearance_state,
+            &motion_appearance_args);
+    bool use_motion_tolerance = motion_appearance_input.use_motion_tolerance;
+    bool use_stable_motion = motion_appearance_input.use_stable_motion;
     stage_started_us = anomaly_timing_now_us();
-    if (anomaly_detection_active &&
-        (cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0 &&
-        curr_luma != NULL &&
-        state->prev_luma != NULL &&
-        state->prev_luma_width  == motion_w &&
-        state->prev_luma_height == motion_h &&
-        !scene_discontinuity) {
-        int roi_mgx0 = roi_x0 / motion_step;
-        int roi_mgx1 = (roi_x1 + motion_step - 1) / motion_step;
-        int roi_mgy0 = roi_y0 / motion_step;
-        int roi_mgy1 = (roi_y1 + motion_step - 1) / motion_step;
-        roi_mgx0 = roi_mgx0 < 0 ? 0 : roi_mgx0;
-        roi_mgx1 = roi_mgx1 > motion_w ? motion_w : roi_mgx1;
-        roi_mgy0 = roi_mgy0 < 0 ? 0 : roi_mgy0;
-        roi_mgy1 = roi_mgy1 > motion_h ? motion_h : roi_mgy1;
+    if (anomaly_motion_estimator_appearance_scorer_ready(&motion_appearance_input)) {
+        anomaly_motion_appearance_grid_bounds_t motion_grid_bounds;
+        if (!anomaly_motion_estimator_appearance_grid_bounds(
+                &motion_appearance_input,
+                &motion_grid_bounds)) {
+            goto motion_appearance_scoring_done;
+        }
+        int roi_mgx0 = motion_grid_bounds.x0;
+        int roi_mgx1 = motion_grid_bounds.x1;
+        int roi_mgy0 = motion_grid_bounds.y0;
+        int roi_mgy1 = motion_grid_bounds.y1;
 
         float fw_m = (float)(width > 1 ? width - 1 : 1);
         float fh_m = (float)(height > 1 ? height - 1 : 1);
-        float gmv_scale = anomaly_registration_model_scale(&registration);
-        float zoom_delta = fabsf(gmv_scale - 1.0f);
-        float zoom_motion_scale = 1.0f;
-        if (zoom_delta > 0.004f) {
-            zoom_motion_scale = 1.0f - ((zoom_delta - 0.004f) / 0.014f);
-            if (zoom_motion_scale < 0.0f) zoom_motion_scale = 0.0f;
-        }
+        float zoom_motion_scale =
+            anomaly_motion_estimator_appearance_zoom_motion_scale(
+                    anomaly_registration_model_scale(&registration));
 
         if (state->motion_persist == NULL ||
             state->motion_persist_w != motion_w ||
@@ -9927,9 +9619,11 @@ int anomaly_process_frame(
             state->motion_persist_w = state->motion_persist != NULL ? motion_w : 0;
             state->motion_persist_h = state->motion_persist != NULL ? motion_h : 0;
         }
-        motion_appearance_state.persist = state->motion_persist;
-        motion_appearance_state.persist_w = state->motion_persist_w;
-        motion_appearance_state.persist_h = state->motion_persist_h;
+        anomaly_motion_estimator_sync_appearance_scorer_state(
+                &motion_appearance_state,
+                state->motion_persist,
+                state->motion_persist_w,
+                state->motion_persist_h);
 
         const int disp_patch_half = 1;
         const int disp_search_radius = 2;
@@ -9941,8 +9635,8 @@ int anomaly_process_frame(
             for (int mx = roi_mgx0 + 1; mx < roi_mgx1 - 1; mx += global_stride) {
                 int px_idx = 0;
                 int py_idx = 0;
-                if (!project_motion_cell(&registration, width, height, motion_step, motion_w, motion_h,
-                                         mx, my, &px_idx, &py_idx)) {
+                if (!anomaly_motion_estimator_project_cell(&registration, width, height, motion_step, motion_w, motion_h,
+                                                           mx, my, &px_idx, &py_idx)) {
                     continue;
                 }
                 float metric_value = 0.0f;
@@ -9969,22 +9663,16 @@ int anomaly_process_frame(
             }
         }
 
-        float global_motion_mean = 0.0f;
-        float global_motion_std = (float)motion_step * 0.5f;
-        float motion_floor_px = (float)motion_step;
-        if (global_count > 0) {
-            global_motion_mean = (float)(global_sum / (double)global_count);
-            double variance = (global_sum2 / (double)global_count) -
-                ((double)global_motion_mean * (double)global_motion_mean);
-            global_motion_std = sqrtf((float)fmax(variance, 0.04));
-            if (global_motion_std < (float)motion_step * 0.35f) {
-                global_motion_std = (float)motion_step * 0.35f;
-            }
-            motion_floor_px = global_motion_mean + (0.75f * global_motion_std);
-            if (motion_floor_px < (float)motion_step * 0.85f) {
-                motion_floor_px = (float)motion_step * 0.85f;
-            }
-        }
+        anomaly_motion_appearance_global_stats_t global_stats;
+        anomaly_motion_estimator_appearance_global_stats(
+                global_sum,
+                global_sum2,
+                global_count,
+                motion_step,
+                &global_stats);
+        float global_motion_mean = global_stats.mean;
+        float global_motion_std = global_stats.std;
+        float motion_floor_px = global_stats.motion_floor_px;
 
         int strong_global_samples = 0;
         if (global_count > 0) {
@@ -9992,8 +9680,8 @@ int anomaly_process_frame(
                 for (int mx = roi_mgx0 + 1; mx < roi_mgx1 - 1; mx += global_stride) {
                     int px_idx = 0;
                     int py_idx = 0;
-                    if (!project_motion_cell(&registration, width, height, motion_step, motion_w, motion_h,
-                                             mx, my, &px_idx, &py_idx)) {
+                    if (!anomaly_motion_estimator_project_cell(&registration, width, height, motion_step, motion_w, motion_h,
+                                                               mx, my, &px_idx, &py_idx)) {
                         continue;
                     }
                     float metric_value = 0.0f;
@@ -10020,14 +9708,12 @@ int anomaly_process_frame(
                 }
             }
         }
-        debug_global_motion_load = global_count > 0
-            ? ((float)strong_global_samples / (float)global_count)
-            : 0.0f;
-        float broad_motion_scale = 1.0f;
-        if (debug_global_motion_load > 0.12f) {
-            broad_motion_scale = 1.0f - ((debug_global_motion_load - 0.12f) / 0.18f);
-            if (broad_motion_scale < 0.20f) broad_motion_scale = 0.20f;
-        }
+        debug_global_motion_load =
+            anomaly_motion_estimator_appearance_global_motion_load(
+                    strong_global_samples,
+                    global_count);
+        float broad_motion_scale =
+            anomaly_motion_estimator_appearance_broad_motion_scale(debug_global_motion_load);
         best_motion_zoom_scale = zoom_motion_scale;
         best_motion_broad_scale = broad_motion_scale;
         motion_appearance_global_motion_mean = global_motion_mean;
@@ -10037,16 +9723,18 @@ int anomaly_process_frame(
         motion_appearance_broad_motion_scale = broad_motion_scale;
 
         if (result_out != NULL) {
-            result_out->motion_debug.valid = global_count > 0 || motion_candidate_count > 0;
-            result_out->motion_debug.scene_discontinuity = scene_discontinuity;
-            result_out->motion_debug.sample_step = motion_sample_step;
-            result_out->motion_debug.motion_step = motion_step;
-            result_out->motion_debug.sample_count = global_count;
-            result_out->motion_debug.residual_mean = global_motion_mean;
-            result_out->motion_debug.residual_std = global_motion_std;
-            result_out->motion_debug.zoom_motion_scale = zoom_motion_scale;
-            result_out->motion_debug.broad_motion_scale = broad_motion_scale;
-            result_out->motion_debug.global_motion_load = debug_global_motion_load;
+            anomaly_motion_estimator_populate_appearance_debug_summary(
+                    &result_out->motion_debug,
+                    scene_discontinuity,
+                    motion_sample_step,
+                    motion_step,
+                    global_count,
+                    motion_candidate_count,
+                    global_motion_mean,
+                    global_motion_std,
+                    zoom_motion_scale,
+                    broad_motion_scale,
+                    debug_global_motion_load);
         }
 
         if (state->motion_persist != NULL) {
@@ -10080,8 +9768,8 @@ int anomaly_process_frame(
                     if (mx <= roi_mgx0 || mx >= roi_mgx1 - 1) continue;
                     int px_idx = 0;
                     int py_idx = 0;
-                    if (!project_motion_cell(&registration, width, height, motion_step, motion_w, motion_h,
-                                             mx, my, &px_idx, &py_idx)) {
+                    if (!anomaly_motion_estimator_project_cell(&registration, width, height, motion_step, motion_w, motion_h,
+                                                               mx, my, &px_idx, &py_idx)) {
                         continue;
                     }
                     float residual_metric = 0.0f;
@@ -10113,7 +9801,7 @@ int anomaly_process_frame(
                     my_samples[sample_count_local] = my;
                     sample_count_local++;
 
-                    int texture_score = gmv_feature_score(curr_luma, motion_w, motion_h, mx, my);
+                    int texture_score = anomaly_registration_feature_score(curr_luma, motion_w, motion_h, mx, my);
                     float texture_scale = anomaly_motion_estimator_texture_scale(texture_score);
                     float structure_scale = anomaly_motion_estimator_structure_scale(curr_luma, motion_w, motion_h, mx, my);
                     float support_scale = texture_scale < structure_scale ? texture_scale : structure_scale;
@@ -10262,6 +9950,7 @@ int anomaly_process_frame(
             motion_appearance_broad_motion_scale,
             &motion_appearance_output);
     (void)motion_appearance_output;
+motion_appearance_scoring_done:
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_MOTION_SCORING, stage_started_us);
 
     stage_started_us = anomaly_timing_now_us();
@@ -10541,8 +10230,8 @@ int anomaly_process_frame(
     }
 
     // ── Update prev_luma ────────────────────────────────────────────────
-    update_prev_luma_state(state, curr_luma, motion_count, motion_w, motion_h);
-    update_prev_registration_luma_state(
+    anomaly_frame_history_update_motion_luma(state, curr_luma, motion_count, motion_w, motion_h);
+    anomaly_frame_history_update_registration_luma(
             state,
             curr_registration_luma != NULL ? curr_registration_luma : curr_luma,
             motion_count,
@@ -11762,42 +11451,41 @@ int anomaly_process_frame(
     }
 
     if (result_out != NULL) {
-        result_out->box_count = box_count;
-        for (int i = 0; i < box_count && i < ANOMALY_MAX_BOXES_PER_FRAME; i++)
-            result_out->boxes[i] = boxes[i];
-        result_out->motion_debug.raw_candidate_valid = (best_motion >= 0.0f);
-        result_out->motion_debug.raw_score = best_motion;
-        result_out->motion_debug.raw_x_norm = (best_motion_x > 0 || best_motion_y > 0)
-            ? ((float)best_motion_x / fw) : 0.0f;
-        result_out->motion_debug.raw_y_norm = (best_motion_x > 0 || best_motion_y > 0)
-            ? ((float)best_motion_y / fh) : 0.0f;
-        result_out->motion_debug.winner_component_area_frac = best_motion_component_area_frac;
-        result_out->motion_debug.winner_component_span_frac = best_motion_component_span_frac;
-        result_out->motion_debug.winner_component_fill_ratio = best_motion_component_fill_ratio;
-        result_out->motion_debug.zoom_motion_scale = best_motion_zoom_scale;
-        result_out->motion_debug.broad_motion_scale = best_motion_broad_scale;
-        result_out->motion_debug.global_motion_load = debug_global_motion_load;
-        result_out->motion_debug.winner_texture_scale = best_motion_texture_scale;
-        result_out->motion_debug.winner_structure_scale = best_motion_structure_scale;
-        result_out->motion_debug.winner_support_scale = best_motion_support_scale;
-        result_out->motion_debug.winner_persistence_scale = best_motion_persistence_scale;
-        result_out->motion_debug.top_candidate_count = motion_top_count;
-        for (int i = 0; i < motion_top_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
-            result_out->motion_debug.top_candidates[i] = motion_top[i];
-        }
-        result_out->thermal_debug.bg_ready = bg_valid;
-        result_out->thermal_debug.raw_candidate_valid = (best_thermal >= 0.0f);
-        result_out->thermal_debug.raw_score = best_thermal;
-        result_out->thermal_debug.raw_x_norm = (best_thermal_x > 0 || best_thermal_y > 0)
-            ? ((float)best_thermal_x / fw) : 0.0f;
-        result_out->thermal_debug.raw_y_norm = (best_thermal_x > 0 || best_thermal_y > 0)
-            ? ((float)best_thermal_y / fh) : 0.0f;
-        result_out->thermal_debug.frame_delta_mean = delta_mean;
-        result_out->thermal_debug.frame_delta_norm = delta_norm;
-        result_out->thermal_debug.frame_blob_contrast_mean = frame_blob_contrast_mean;
-        result_out->thermal_debug.frame_blob_contrast_std = frame_blob_contrast_std;
-        result_out->thermal_debug.winning_candidate_index = best_thermal_candidate_idx;
-        result_out->thermal_debug.candidate_count = thermal_candidate_count;
+        anomaly_result_publish_boxes(result_out, boxes, box_count);
+        anomaly_motion_estimator_populate_appearance_debug_result(
+                &result_out->motion_debug,
+                best_motion,
+                best_motion_x,
+                best_motion_y,
+                fw,
+                fh,
+                best_motion_component_area_frac,
+                best_motion_component_span_frac,
+                best_motion_component_fill_ratio,
+                best_motion_zoom_scale,
+                best_motion_broad_scale,
+                debug_global_motion_load,
+                best_motion_texture_scale,
+                best_motion_structure_scale,
+                best_motion_support_scale,
+                best_motion_persistence_scale,
+                motion_top,
+                motion_top_count);
+        anomaly_result_thermal_debug_summary_publication_t thermal_debug_summary = {
+            .bg_ready = bg_valid,
+            .raw_score = best_thermal,
+            .raw_x = best_thermal_x,
+            .raw_y = best_thermal_y,
+            .frame_w = fw,
+            .frame_h = fh,
+            .frame_delta_mean = delta_mean,
+            .frame_delta_norm = delta_norm,
+            .frame_blob_contrast_mean = frame_blob_contrast_mean,
+            .frame_blob_contrast_std = frame_blob_contrast_std,
+            .winning_candidate_index = best_thermal_candidate_idx,
+            .candidate_count = thermal_candidate_count,
+        };
+        anomaly_result_publish_thermal_debug_summary(result_out, &thermal_debug_summary);
         memset(&result_out->thermal_debug.target, 0, sizeof(result_out->thermal_debug.target));
         result_out->thermal_debug.target.enabled = thermal_target_trace.enabled;
         result_out->thermal_debug.target.valid = thermal_target_trace.valid;
@@ -12153,235 +11841,203 @@ int anomaly_process_frame(
             dbg->singleton_blob = thermal_candidate_singleton_blob_debug[i];
             dbg->above_threshold = thermal_candidate_above_threshold[i];
         }
-        memset(&result_out->color_debug, 0, sizeof(result_out->color_debug));
-        result_out->color_debug.raw_candidate_valid =
-            raw_best_color_candidate_idx >= 0 || best_color >= 0.0f;
-        result_out->color_debug.raw_score =
-            raw_best_color_candidate_idx >= 0 ? raw_best_color : best_color;
-        result_out->color_debug.raw_x_norm =
-            (raw_best_color_candidate_idx >= 0 && (raw_best_color_x > 0 || raw_best_color_y > 0))
-            ? ((float)raw_best_color_x / fw)
-            : ((best_color_x > 0 || best_color_y > 0) ? ((float)best_color_x / fw) : 0.0f);
-        result_out->color_debug.raw_y_norm =
-            (raw_best_color_candidate_idx >= 0 && (raw_best_color_x > 0 || raw_best_color_y > 0))
-            ? ((float)raw_best_color_y / fh)
-            : ((best_color_x > 0 || best_color_y > 0) ? ((float)best_color_y / fh) : 0.0f);
-        result_out->color_debug.target_span_px = color_blob_target_span_px;
-        result_out->color_debug.target_span_cells = color_blob_target_span_cells;
-        result_out->color_debug.max_blob_area_budget = color_blob_max_area_budget;
-        result_out->color_debug.active_phase_index = color_phase_index;
-        result_out->color_debug.active_phase_x = color_phase_x;
-        result_out->color_debug.active_phase_y = color_phase_y;
-        result_out->color_debug.selective_reuse_active = selective_refresh_active && !color_forced_full_refresh;
-        result_out->color_debug.forced_full_refresh = color_forced_full_refresh;
-        result_out->color_debug.fallback_reason_flags = color_fallback_reason_flags;
-        result_out->color_debug.fresh_sample_count = color_fresh_sample_count;
-        result_out->color_debug.carried_sample_count = color_carried_sample_count;
-        result_out->color_debug.unsampled_new_exposed_count = color_unsampled_new_count;
-        if (sg_count > 0) {
-        result_out->color_debug.fresh_sample_fraction = (float)color_fresh_sample_count / (float)sg_count;
-        result_out->color_debug.carried_sample_fraction = (float)color_carried_sample_count / (float)sg_count;
-        result_out->color_debug.unsampled_new_exposed_fraction = (float)color_unsampled_new_count / (float)sg_count;
+        anomaly_result_color_debug_summary_publication_t color_debug_summary = {
+            .raw_candidate_index = raw_best_color_candidate_idx,
+            .raw_best_score = raw_best_color,
+            .raw_best_x = raw_best_color_x,
+            .raw_best_y = raw_best_color_y,
+            .best_score = best_color,
+            .best_x = best_color_x,
+            .best_y = best_color_y,
+            .frame_w = fw,
+            .frame_h = fh,
+            .target_span_px = color_blob_target_span_px,
+            .target_span_cells = color_blob_target_span_cells,
+            .max_blob_area_budget = color_blob_max_area_budget,
+            .active_phase_index = color_phase_index,
+            .active_phase_x = color_phase_x,
+            .active_phase_y = color_phase_y,
+            .selective_refresh_active = selective_refresh_active,
+            .forced_full_refresh = color_forced_full_refresh,
+            .fallback_reason_flags = color_fallback_reason_flags,
+            .fresh_sample_count = color_fresh_sample_count,
+            .carried_sample_count = color_carried_sample_count,
+            .unsampled_new_exposed_count = color_unsampled_new_count,
+            .sample_grid_count = sg_count,
+            .histogram_valid_sample_count = color_hist_valid_samples,
+            .history_reset_applied = color_history_reset_applied,
+            .history_recovery_frames_remaining = color_history_recovery_frames_remaining,
+            .history_recent_scale = color_history_recent_scale,
+            .nonzero_histogram_bins = color_hist_nonzero_bins,
+            .max_histogram_current_count = color_hist_max_current_count,
+            .max_histogram_recent_count = color_hist_max_recent_count,
+            .rarity_seed_count = color_rarity_seed_count,
+            .support_seed_count = color_support_seed_count,
+            .support_peak_score = color_support_peak,
+            .coarse_component_count = color_coarse_component_count,
+            .coarse_oversized_count = color_coarse_oversized_count,
+            .dense_verify_component_count = color_dense_verify_component_count,
+            .adaptive_source_coarse_count = color_adaptive_source_coarse_count,
+            .fresh_distinctness_ratio = color_fresh_distinctness_ratio,
+            .blob_reject_area_count = color_blob_reject_area_count,
+            .blob_reject_ring_count = color_blob_reject_ring_count,
+            .blob_reject_support_mass_count = color_blob_reject_support_mass_count,
+            .blob_reject_quality_count = color_blob_reject_quality_count,
+            .blob_examined_count = color_blob_examined_count,
+            .strongest_reject_reason = color_blob_strongest_reject_reason,
+            .strongest_reject_peak_support = color_blob_strongest_reject_peak_support,
+            .strongest_reject_area = color_blob_strongest_reject_area,
+            .strongest_reject_span = color_blob_strongest_reject_span,
+            .strongest_reject_ring_fraction = color_blob_strongest_reject_ring_fraction,
+            .strongest_reject_support_mass = color_blob_strongest_reject_support_mass,
+            .strongest_reject_quality = color_blob_strongest_reject_quality,
+            .strongest_seed_sample_x = color_strongest_seed_sx,
+            .strongest_seed_sample_y = color_strongest_seed_sy,
+            .strongest_seed_score = color_strongest_seed_score,
+            .strongest_seed_hist_key = color_strongest_seed_hist_key,
+            .strongest_seed_hist_current_count = color_strongest_seed_hist_current_count,
+            .strongest_seed_hist_recent_count = color_strongest_seed_hist_recent_count,
+            .strongest_seed_hist_rarity_score = color_strongest_seed_hist_rarity,
+            .strongest_seed_local_support_count = color_strongest_seed_local_support,
+            .winner_gate_active = color_winner_gate_active,
+            .winner_gate_reject_reason = color_winner_gate_reject_reason,
+            .winner_gate_max_span = color_winner_gate_max_span,
+            .winner_gate_max_area = color_winner_gate_max_area,
+            .winner_gate_min_rarity = color_winner_gate_min_rarity,
+            .winner_gate_max_commonness = color_winner_gate_max_commonness,
+            .winning_candidate_index = best_color_candidate_idx,
+            .candidate_count = color_candidate_count,
+        };
+        anomaly_result_publish_color_debug_summary(result_out, &color_debug_summary);
+        anomaly_result_color_debug_target_base_publication_t color_target_base = {
+            .enabled = color_target_enabled,
+            .valid = color_target_valid,
+            .inside_scan_zone = color_target_inside_scan_zone,
+            .refresh_skipped = color_target_refresh_skipped,
+            .sampled_this_frame = color_target_sampled_this_frame,
+            .carried_from_history = color_target_carried_from_history,
+            .pixel_x = color_target_px,
+            .pixel_y = color_target_py,
+            .sample_x = color_target_sx,
+            .sample_y = color_target_sy,
+            .configured_x_norm = cfg->color_debug_target_x_norm,
+            .configured_y_norm = cfg->color_debug_target_y_norm,
+            .hist_key = color_target_hist_key,
+            .hist_current_count = color_target_hist_current_count,
+            .hist_recent_count = color_target_hist_recent_count,
+            .hist_rarity_score = color_target_hist_rarity,
+            .local_support_count = color_target_local_support,
+            .patch_valid_count = color_target_telemetry.patch_valid_count,
+            .coherent_patch_cell_count = color_target_telemetry.coherent_patch_cell_count,
+            .coherent_patch_fresh_cell_count =
+                color_target_telemetry.coherent_patch_fresh_cell_count,
+            .coherent_patch_multicell = color_target_telemetry.coherent_patch_multicell,
+            .patch_mean_u = color_target_telemetry.patch_mean_u,
+            .patch_mean_v = color_target_telemetry.patch_mean_v,
+            .patch_mean_luma = color_target_telemetry.patch_mean_luma,
+            .ring_mean_u = color_target_telemetry.ring_mean_u,
+            .ring_mean_v = color_target_telemetry.ring_mean_v,
+            .ring_mean_luma = color_target_telemetry.ring_mean_luma,
+            .ring_chroma_contrast = color_target_telemetry.ring_chroma_contrast,
+            .ring_luma_contrast = color_target_telemetry.ring_luma_contrast,
+            .ring_neighbor_count = color_target_telemetry.ring_neighbor_count,
+            .pre_support_score = color_target_pre_support_score,
+            .support_score = color_target_support_score,
+            .support_map_local_peak = color_target_support_map_local_peak,
+            .support_map_ring_mean = color_target_support_map_ring_mean,
+            .support_map_density = color_target_support_map_density,
+            .support_map_distinctness_ratio = color_target_support_map_distinctness_ratio,
+            .support_map_compact_prominence = color_target_support_map_compact_prominence,
+            .support_map_core_share = color_target_support_map_core_share,
+            .support_map_seed_floor = color_target_support_map_seed_floor,
+            .support_seed_eligible = color_target_support_seed_eligible,
+        };
+        anomaly_result_publish_color_debug_target_base(result_out, &color_target_base);
+        anomaly_result_color_debug_target_component_trace_publication_t color_target_component = {
+            .component_seed_x = color_blob_target_trace.component_seed_x,
+            .component_seed_y = color_blob_target_trace.component_seed_y,
+            .component_peak_x = color_blob_target_trace.component_peak_x,
+            .component_peak_y = color_blob_target_trace.component_peak_y,
+            .component_area = color_blob_target_trace.component_area,
+            .component_span = color_blob_target_trace.component_span,
+            .component_fill = color_blob_target_trace.component_fill,
+            .component_peak_support = color_blob_target_trace.component_peak_support,
+            .component_mean_support = color_blob_target_trace.component_mean_support,
+            .component_quality = color_blob_target_trace.component_quality,
+            .component_ring_fraction = color_blob_target_trace.component_ring_fraction,
+            .component_support_mass = color_blob_target_trace.component_support_mass,
+            .component_rejected = color_blob_target_trace.component_rejected,
+            .component_rejection_reason = color_blob_target_trace.component_rejection_reason,
+            .dropped_by_cap = color_blob_target_trace.dropped_by_cap,
+            .dropped_by_nms = color_blob_target_trace.dropped_by_nms,
+            .replaced_by_nms = color_blob_target_trace.replaced_by_nms,
+            .nms_conflict_rank = color_blob_target_trace.nms_conflict_rank,
+            .nms_conflict_sample_x = color_blob_target_trace.nms_conflict_sample_x,
+            .nms_conflict_sample_y = color_blob_target_trace.nms_conflict_sample_y,
+            .pre_cap_rank = color_blob_target_trace.pre_cap_rank,
+            .pre_cap_candidate_count = color_blob_target_trace.pre_cap_candidate_count,
+            .pre_cap_limit = color_blob_target_trace.pre_cap_limit,
+            .pre_cap_retention_rank = color_blob_target_trace.pre_cap_retention_rank,
+        };
+        anomaly_result_publish_color_debug_target_component_trace(
+            result_out,
+            &color_target_component);
+        anomaly_result_color_debug_target_component_bbox_publication_t color_target_bbox = {
+            .roi_x0 = roi_x0,
+            .roi_y0 = roi_y0,
+            .sample_step = sample_step,
+            .min_x = color_blob_target_trace.min_x,
+            .min_y = color_blob_target_trace.min_y,
+            .max_x = color_blob_target_trace.max_x,
+            .max_y = color_blob_target_trace.max_y,
+            .frame_w = fw,
+            .frame_h = fh,
+        };
+        anomaly_result_publish_color_debug_target_component_bbox(result_out, &color_target_bbox);
+        anomaly_result_candidate_sample_t color_candidate_samples[ANOMALY_MAX_COLOR_CANDIDATES];
+        for (int ci = 0; ci < color_candidate_count; ci++) {
+            color_candidate_samples[ci].sample_x = color_candidates[ci].sg_x;
+            color_candidate_samples[ci].sample_y = color_candidates[ci].sg_y;
         }
-        result_out->color_debug.histogram_valid_sample_count = color_hist_valid_samples;
-        result_out->color_debug.history_reset_applied = color_history_reset_applied;
-        result_out->color_debug.history_recovery_frames_remaining = color_history_recovery_frames_remaining;
-        result_out->color_debug.history_recent_scale = color_history_recent_scale;
-        result_out->color_debug.nonzero_histogram_bins = color_hist_nonzero_bins;
-        result_out->color_debug.max_histogram_current_count = color_hist_max_current_count;
-        result_out->color_debug.max_histogram_recent_count = color_hist_max_recent_count;
-        result_out->color_debug.rarity_seed_count = color_rarity_seed_count;
-        result_out->color_debug.support_seed_count = color_support_seed_count;
-        result_out->color_debug.support_peak_score = color_support_peak;
-        result_out->color_debug.coarse_component_count = color_coarse_component_count;
-        result_out->color_debug.coarse_oversized_count = color_coarse_oversized_count;
-        result_out->color_debug.dense_verify_component_count = color_dense_verify_component_count;
-        result_out->color_debug.adaptive_source_coarse_count = color_adaptive_source_coarse_count;
-        result_out->color_debug.fresh_distinctness_ratio = color_fresh_distinctness_ratio;
-        result_out->color_debug.blob_reject_area_count = color_blob_reject_area_count;
-        result_out->color_debug.blob_reject_ring_count = color_blob_reject_ring_count;
-        result_out->color_debug.blob_reject_support_mass_count = color_blob_reject_support_mass_count;
-        result_out->color_debug.blob_reject_quality_count = color_blob_reject_quality_count;
-        result_out->color_debug.blob_examined_count = color_blob_examined_count;
-        result_out->color_debug.strongest_reject_reason = color_blob_strongest_reject_reason;
-        result_out->color_debug.strongest_reject_peak_support = color_blob_strongest_reject_peak_support;
-        result_out->color_debug.strongest_reject_area = color_blob_strongest_reject_area;
-        result_out->color_debug.strongest_reject_span = color_blob_strongest_reject_span;
-        result_out->color_debug.strongest_reject_ring_fraction = color_blob_strongest_reject_ring_fraction;
-        result_out->color_debug.strongest_reject_support_mass = color_blob_strongest_reject_support_mass;
-        result_out->color_debug.strongest_reject_quality = color_blob_strongest_reject_quality;
-        memset(&result_out->color_debug.strongest_seed, 0, sizeof(result_out->color_debug.strongest_seed));
-        result_out->color_debug.strongest_seed.valid = color_strongest_seed_score > 0.0f;
-        result_out->color_debug.strongest_seed.sample_x = color_strongest_seed_sx;
-        result_out->color_debug.strongest_seed.sample_y = color_strongest_seed_sy;
-        result_out->color_debug.strongest_seed.score = color_strongest_seed_score;
-        result_out->color_debug.strongest_seed.hist_key = color_strongest_seed_hist_key;
-        result_out->color_debug.strongest_seed.hist_current_count = color_strongest_seed_hist_current_count;
-        result_out->color_debug.strongest_seed.hist_recent_count = color_strongest_seed_hist_recent_count;
-        result_out->color_debug.strongest_seed.hist_rarity_score = color_strongest_seed_hist_rarity;
-        result_out->color_debug.strongest_seed.local_support_count = color_strongest_seed_local_support;
-        result_out->color_debug.raw_candidate_index = raw_best_color_candidate_idx;
-        result_out->color_debug.winner_gate_active = color_winner_gate_active;
-        result_out->color_debug.winner_gate_reject_reason = color_winner_gate_reject_reason;
-        result_out->color_debug.winner_gate_max_span = color_winner_gate_max_span;
-        result_out->color_debug.winner_gate_max_area = color_winner_gate_max_area;
-        result_out->color_debug.winner_gate_min_rarity = color_winner_gate_min_rarity;
-        result_out->color_debug.winner_gate_max_commonness = color_winner_gate_max_commonness;
-        result_out->color_debug.winning_candidate_index = best_color_candidate_idx;
-        result_out->color_debug.candidate_count = color_candidate_count;
-        memset(&result_out->color_debug.target, 0, sizeof(result_out->color_debug.target));
-        result_out->color_debug.target.enabled = color_target_enabled;
-        result_out->color_debug.target.valid = color_target_valid;
-        result_out->color_debug.target.inside_scan_zone = color_target_inside_scan_zone;
-        result_out->color_debug.target.refresh_skipped = color_target_refresh_skipped;
-        result_out->color_debug.target.sampled_this_frame = color_target_sampled_this_frame;
-        result_out->color_debug.target.carried_from_history = color_target_carried_from_history;
-        result_out->color_debug.target.pixel_x = color_target_px;
-        result_out->color_debug.target.pixel_y = color_target_py;
-        result_out->color_debug.target.sample_x = color_target_sx;
-        result_out->color_debug.target.sample_y = color_target_sy;
-        result_out->color_debug.target.x_norm = color_target_enabled ? cfg->color_debug_target_x_norm : 0.0f;
-        result_out->color_debug.target.y_norm = color_target_enabled ? cfg->color_debug_target_y_norm : 0.0f;
-        result_out->color_debug.target.hist_key = color_target_hist_key;
-        result_out->color_debug.target.hist_current_count = color_target_hist_current_count;
-        result_out->color_debug.target.hist_recent_count = color_target_hist_recent_count;
-        result_out->color_debug.target.hist_rarity_score = color_target_hist_rarity;
-        result_out->color_debug.target.local_support_count = color_target_local_support;
-        result_out->color_debug.target.patch_valid_count = color_target_telemetry.patch_valid_count;
-        result_out->color_debug.target.coherent_patch_cell_count =
-            color_target_telemetry.coherent_patch_cell_count;
-        result_out->color_debug.target.coherent_patch_fresh_cell_count =
-            color_target_telemetry.coherent_patch_fresh_cell_count;
-        result_out->color_debug.target.coherent_patch_multicell =
-            color_target_telemetry.coherent_patch_multicell;
-        result_out->color_debug.target.patch_mean_u = color_target_telemetry.patch_mean_u;
-        result_out->color_debug.target.patch_mean_v = color_target_telemetry.patch_mean_v;
-        result_out->color_debug.target.patch_mean_luma = color_target_telemetry.patch_mean_luma;
-        result_out->color_debug.target.ring_mean_u = color_target_telemetry.ring_mean_u;
-        result_out->color_debug.target.ring_mean_v = color_target_telemetry.ring_mean_v;
-        result_out->color_debug.target.ring_mean_luma = color_target_telemetry.ring_mean_luma;
-        result_out->color_debug.target.ring_chroma_contrast =
-            color_target_telemetry.ring_chroma_contrast;
-        result_out->color_debug.target.ring_luma_contrast =
-            color_target_telemetry.ring_luma_contrast;
-        result_out->color_debug.target.ring_neighbor_count =
-            color_target_telemetry.ring_neighbor_count;
-        result_out->color_debug.target.pre_support_score = color_target_pre_support_score;
-        result_out->color_debug.target.support_score = color_target_support_score;
-        result_out->color_debug.target.support_map_local_peak =
-            color_target_support_map_local_peak;
-        result_out->color_debug.target.support_map_ring_mean =
-            color_target_support_map_ring_mean;
-        result_out->color_debug.target.support_map_density =
-            color_target_support_map_density;
-        result_out->color_debug.target.support_map_distinctness_ratio =
-            color_target_support_map_distinctness_ratio;
-        result_out->color_debug.target.support_map_compact_prominence =
-            color_target_support_map_compact_prominence;
-        result_out->color_debug.target.support_map_core_share =
-            color_target_support_map_core_share;
-        result_out->color_debug.target.support_map_seed_floor =
-            color_target_support_map_seed_floor;
-        result_out->color_debug.target.support_seed_eligible = color_target_support_seed_eligible;
-        result_out->color_debug.target.component_seed_x = color_blob_target_trace.component_seed_x;
-        result_out->color_debug.target.component_seed_y = color_blob_target_trace.component_seed_y;
-        result_out->color_debug.target.component_peak_x = color_blob_target_trace.component_peak_x;
-        result_out->color_debug.target.component_peak_y = color_blob_target_trace.component_peak_y;
-        result_out->color_debug.target.component_area = color_blob_target_trace.component_area;
-        result_out->color_debug.target.component_span = color_blob_target_trace.component_span;
-        result_out->color_debug.target.component_fill = color_blob_target_trace.component_fill;
-        result_out->color_debug.target.component_peak_support = color_blob_target_trace.component_peak_support;
-        result_out->color_debug.target.component_mean_support = color_blob_target_trace.component_mean_support;
-        result_out->color_debug.target.component_quality = color_blob_target_trace.component_quality;
-        result_out->color_debug.target.component_ring_fraction = color_blob_target_trace.component_ring_fraction;
-        result_out->color_debug.target.component_support_mass = color_blob_target_trace.component_support_mass;
-        result_out->color_debug.target.component_rejected = color_blob_target_trace.component_rejected;
-        result_out->color_debug.target.component_rejection_reason =
-            color_blob_target_trace.component_rejection_reason;
-        result_out->color_debug.target.dropped_by_cap = color_blob_target_trace.dropped_by_cap;
-        result_out->color_debug.target.dropped_by_nms = color_blob_target_trace.dropped_by_nms;
-        result_out->color_debug.target.replaced_by_nms = color_blob_target_trace.replaced_by_nms;
-        result_out->color_debug.target.nms_conflict_rank = color_blob_target_trace.nms_conflict_rank;
-        result_out->color_debug.target.nms_conflict_sample_x =
-            color_blob_target_trace.nms_conflict_sample_x;
-        result_out->color_debug.target.nms_conflict_sample_y =
-            color_blob_target_trace.nms_conflict_sample_y;
-        result_out->color_debug.target.pre_cap_rank = color_blob_target_trace.pre_cap_rank;
-        result_out->color_debug.target.pre_cap_candidate_count =
-            color_blob_target_trace.pre_cap_candidate_count;
-        result_out->color_debug.target.pre_cap_limit = color_blob_target_trace.pre_cap_limit;
-        result_out->color_debug.target.pre_cap_retention_rank =
-            color_blob_target_trace.pre_cap_retention_rank;
-        anomaly_color_candidate_bbox_norm(
-            roi_x0,
-            roi_y0,
-            sample_step,
-            color_blob_target_trace.min_x,
-            color_blob_target_trace.min_y,
-            color_blob_target_trace.max_x,
-            color_blob_target_trace.max_y,
-            fw,
-            fh,
-            &result_out->color_debug.target.component_bbox_left_norm,
-            &result_out->color_debug.target.component_bbox_top_norm,
-            &result_out->color_debug.target.component_bbox_right_norm,
-            &result_out->color_debug.target.component_bbox_bottom_norm);
-        result_out->color_debug.target.extracted_candidate_index = -1;
-        if (color_blob_target_trace.component_peak_x >= 0 &&
-            color_blob_target_trace.component_peak_y >= 0) {
-            for (int ci = 0; ci < color_candidate_count; ci++) {
-                if (color_candidates[ci].sg_x == color_blob_target_trace.component_peak_x &&
-                    color_candidates[ci].sg_y == color_blob_target_trace.component_peak_y) {
-                    result_out->color_debug.target.extracted_candidate_index = ci;
-                    break;
-                }
-            }
-        }
-        result_out->color_debug.target.matched_candidate_index = color_target_matched_candidate_idx;
-        if (result_out->color_debug.target.extracted_candidate_index < 0 &&
-            color_target_matched_candidate_idx >= 0 &&
-            color_target_matched_candidate_idx < color_candidate_count) {
-            result_out->color_debug.target.extracted_candidate_index =
-                color_target_matched_candidate_idx;
-        }
-        result_out->color_debug.target.nearest_candidate_index = color_target_nearest_candidate_idx;
-        result_out->color_debug.target.nearest_candidate_distance = color_target_nearest_candidate_distance;
-        result_out->color_debug.target.winning_candidate_index = best_color_candidate_idx;
-        result_out->color_debug.target.winning_rank =
-            color_target_matched_candidate_idx == best_color_candidate_idx
-                ? best_color_candidate_idx
-                : -1;
-        result_out->color_debug.target.rejected_by_winner_gate =
-            color_winner_gate_reject_reason != ANOMALY_COLOR_WINNER_GATE_NONE &&
-            color_target_matched_candidate_idx >= 0 &&
-            color_target_matched_candidate_idx == raw_best_color_candidate_idx;
-        result_out->color_debug.target.winner_gate_reject_reason =
-            result_out->color_debug.target.rejected_by_winner_gate
-                ? color_winner_gate_reject_reason
-                : ANOMALY_COLOR_WINNER_GATE_NONE;
-        result_out->color_debug.target.stage = color_target_stage;
+        anomaly_result_color_debug_target_candidate_indices_publication_t color_target_indices = {
+            .component_peak_x = color_blob_target_trace.component_peak_x,
+            .component_peak_y = color_blob_target_trace.component_peak_y,
+            .candidates = color_candidate_samples,
+            .candidate_count = color_candidate_count,
+            .matched_candidate_index = color_target_matched_candidate_idx,
+            .nearest_candidate_index = color_target_nearest_candidate_idx,
+            .nearest_candidate_distance = color_target_nearest_candidate_distance,
+            .winning_candidate_index = best_color_candidate_idx,
+        };
+        anomaly_result_publish_color_debug_target_candidate_indices(result_out, &color_target_indices);
+        anomaly_result_color_debug_target_gate_stage_publication_t color_target_gate_stage = {
+            .winner_gate_reject_reason = color_winner_gate_reject_reason,
+            .matched_candidate_index = color_target_matched_candidate_idx,
+            .raw_best_color_candidate_index = raw_best_color_candidate_idx,
+            .stage = color_target_stage,
+        };
+        anomaly_result_publish_color_debug_target_gate_stage(result_out, &color_target_gate_stage);
         if (color_target_matched_candidate_idx >= 0 &&
             color_target_matched_candidate_idx < color_candidate_count) {
             int ci = color_target_matched_candidate_idx;
-            result_out->color_debug.target.matched_candidate_score = color_candidate_final_score[ci];
-            result_out->color_debug.target.matched_candidate_x_norm =
-                (float)color_candidates[ci].pixel_x / fw;
-            result_out->color_debug.target.matched_candidate_y_norm =
-                (float)color_candidates[ci].pixel_y / fh;
-            anomaly_color_candidate_bbox_norm(
-                roi_x0,
-                roi_y0,
-                sample_step,
-                color_candidate_min_x[ci],
-                color_candidate_min_y[ci],
-                color_candidate_max_x[ci],
-                color_candidate_max_y[ci],
-                fw,
-                fh,
-                &result_out->color_debug.target.matched_bbox_left_norm,
-                &result_out->color_debug.target.matched_bbox_top_norm,
-                &result_out->color_debug.target.matched_bbox_right_norm,
-                &result_out->color_debug.target.matched_bbox_bottom_norm);
+            anomaly_result_color_debug_target_matched_candidate_publication_t color_target_matched = {
+                .valid = true,
+                .score = color_candidate_final_score[ci],
+                .pixel_x = color_candidates[ci].pixel_x,
+                .pixel_y = color_candidates[ci].pixel_y,
+                .roi_x0 = roi_x0,
+                .roi_y0 = roi_y0,
+                .sample_step = sample_step,
+                .min_x = color_candidate_min_x[ci],
+                .min_y = color_candidate_min_y[ci],
+                .max_x = color_candidate_max_x[ci],
+                .max_y = color_candidate_max_y[ci],
+                .frame_w = fw,
+                .frame_h = fh,
+            };
+            anomaly_result_publish_color_debug_target_matched_candidate(
+                result_out,
+                &color_target_matched);
         }
         for (int i = 0; i < color_candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
             anomaly_debug_color_candidate_t *dbg = &result_out->color_debug.candidates[i];
@@ -12426,26 +12082,26 @@ int anomaly_process_frame(
             dbg->retention_rank = color_candidate_retention_rank[i];
             dbg->above_threshold = color_candidate_above_threshold[i];
         }
-        result_out->saliency_debug.raw_candidate_valid = (best_persist >= 0.0f);
-        result_out->saliency_debug.raw_score = best_persist;
-        result_out->saliency_debug.raw_x_norm = (best_persist_x > 0 || best_persist_y > 0)
-            ? ((float)best_persist_x / fw) : 0.0f;
-        result_out->saliency_debug.raw_y_norm = (best_persist_x > 0 || best_persist_y > 0)
-            ? ((float)best_persist_y / fh) : 0.0f;
-        result_out->saliency_debug.tracked_score_pre = saliency_tracked_score_pre;
-        result_out->saliency_debug.acc_pre_active = saliency_acc_pre_active;
-        result_out->saliency_debug.acc_pre_hits = saliency_acc_pre_hits;
-        result_out->saliency_debug.acc_pre_x_norm = saliency_acc_pre_x;
-        result_out->saliency_debug.acc_pre_y_norm = saliency_acc_pre_y;
-        result_out->saliency_debug.acc_post_active = state->acc_active[3];
-        result_out->saliency_debug.acc_post_hits = state->acc_hits[3];
-        result_out->saliency_debug.acc_post_x_norm = state->acc_cx[3];
-        result_out->saliency_debug.acc_post_y_norm = state->acc_cy[3];
-        result_out->saliency_debug.switch_suppressed = saliency_switch_suppressed;
-        result_out->saliency_debug.top_candidate_count = saliency_top_count;
-        for (int i = 0; i < saliency_top_count && i < ANOMALY_DEBUG_TOP_CANDIDATES; i++) {
-            result_out->saliency_debug.top_candidates[i] = saliency_top[i];
-        }
+        anomaly_result_saliency_debug_publication_t saliency_debug = {
+            .raw_score = best_persist,
+            .raw_x = best_persist_x,
+            .raw_y = best_persist_y,
+            .frame_w = fw,
+            .frame_h = fh,
+            .tracked_score_pre = saliency_tracked_score_pre,
+            .acc_pre_active = saliency_acc_pre_active,
+            .acc_pre_hits = saliency_acc_pre_hits,
+            .acc_pre_x_norm = saliency_acc_pre_x,
+            .acc_pre_y_norm = saliency_acc_pre_y,
+            .acc_post_active = state->acc_active[3],
+            .acc_post_hits = state->acc_hits[3],
+            .acc_post_x_norm = state->acc_cx[3],
+            .acc_post_y_norm = state->acc_cy[3],
+            .switch_suppressed = saliency_switch_suppressed,
+            .top_candidates = saliency_top,
+            .top_candidate_count = saliency_top_count,
+        };
+        anomaly_result_publish_saliency_debug(result_out, &saliency_debug);
     }
 
     stage_started_us = anomaly_timing_now_us();

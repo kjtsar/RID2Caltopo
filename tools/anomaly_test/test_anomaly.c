@@ -13,6 +13,7 @@
 #include "anomaly_debug_helpers.h"
 #include "anomaly_detector.h"
 #include "anomaly_frame_geometry.h"
+#include "anomaly_frame_history.h"
 #include "anomaly_grid_region.h"
 #include "anomaly_linear_solve.h"
 #include "anomaly_motion_estimator.h"
@@ -232,6 +233,117 @@ static void test_anomaly_buffer_resize_allocates_without_capacity(void) {
 
     free(u8);
     free(f32);
+}
+
+static void test_frame_history_update_motion_luma_noops_null_inputs(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.prev_luma_width = 11;
+    state.prev_luma_height = 7;
+    uint8_t luma[4] = {1, 2, 3, 4};
+
+    anomaly_frame_history_update_motion_luma(NULL, luma, 4, 2, 2);
+    anomaly_frame_history_update_motion_luma(&state, NULL, 4, 2, 2);
+
+    EXPECT(state.prev_luma == NULL &&
+           state.prev_luma_capacity == 0 &&
+           state.prev_luma_width == 11 &&
+           state.prev_luma_height == 7,
+           "frame history motion luma: null inputs are no-op");
+}
+
+static void test_frame_history_update_motion_luma_copies_and_grows(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    uint8_t first[4] = {10, 20, 30, 40};
+    uint8_t second[6] = {1, 2, 3, 4, 5, 6};
+
+    anomaly_frame_history_update_motion_luma(&state, first, 4, 2, 2);
+    EXPECT(state.prev_luma != NULL &&
+           state.prev_luma_capacity >= 4 &&
+           state.prev_luma_width == 2 &&
+           state.prev_luma_height == 2 &&
+           memcmp(state.prev_luma, first, sizeof(first)) == 0,
+           "frame history motion luma: first update copies buffer and dimensions");
+
+    anomaly_frame_history_update_motion_luma(&state, second, 6, 3, 2);
+    EXPECT(state.prev_luma != NULL &&
+           state.prev_luma_capacity >= 6 &&
+           state.prev_luma_width == 3 &&
+           state.prev_luma_height == 2 &&
+           memcmp(state.prev_luma, second, sizeof(second)) == 0,
+           "frame history motion luma: larger update grows and replaces contents");
+
+    free(state.prev_luma);
+}
+
+static void test_frame_history_update_registration_luma_copies_separate_snapshot(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    uint8_t motion_luma[4] = {7, 8, 9, 10};
+    uint8_t registration_luma[4] = {70, 80, 90, 100};
+
+    anomaly_frame_history_update_motion_luma(&state, motion_luma, 4, 2, 2);
+    anomaly_frame_history_update_registration_luma(&state, registration_luma, 4, 2, 2);
+
+    EXPECT(state.prev_luma != NULL &&
+           state.prev_registration_luma != NULL &&
+           state.prev_luma != state.prev_registration_luma,
+           "frame history registration luma: registration snapshot uses separate storage");
+    EXPECT(state.prev_registration_luma_capacity >= 4 &&
+           state.prev_registration_luma_width == 2 &&
+           state.prev_registration_luma_height == 2 &&
+           memcmp(state.prev_registration_luma, registration_luma, sizeof(registration_luma)) == 0,
+           "frame history registration luma: copies buffer and dimensions");
+    EXPECT(memcmp(state.prev_luma, motion_luma, sizeof(motion_luma)) == 0,
+           "frame history registration luma: does not alter motion snapshot");
+
+    free(state.prev_luma);
+    free(state.prev_registration_luma);
+}
+
+static void test_frame_history_clear_noop_null_and_empty_state(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.prev_luma_width = 5;
+    state.prev_registration_luma_height = 9;
+
+    anomaly_frame_history_clear(NULL);
+    anomaly_frame_history_clear(&state);
+
+    EXPECT(state.prev_luma == NULL &&
+           state.prev_registration_luma == NULL &&
+           state.prev_luma_capacity == 0 &&
+           state.prev_registration_luma_capacity == 0 &&
+           state.prev_luma_width == 0 &&
+           state.prev_luma_height == 0 &&
+           state.prev_registration_luma_width == 0 &&
+           state.prev_registration_luma_height == 0,
+           "frame history clear: null and empty state are safe and zero dimensions");
+}
+
+static void test_frame_history_clear_releases_motion_and_registration_snapshots(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    uint8_t motion_luma[4] = {1, 2, 3, 4};
+    uint8_t registration_luma[4] = {5, 6, 7, 8};
+
+    anomaly_frame_history_update_motion_luma(&state, motion_luma, 4, 2, 2);
+    anomaly_frame_history_update_registration_luma(&state, registration_luma, 4, 2, 2);
+    EXPECT(state.prev_luma != NULL && state.prev_registration_luma != NULL,
+           "frame history clear: test setup allocated both snapshots");
+
+    anomaly_frame_history_clear(&state);
+
+    EXPECT(state.prev_luma == NULL &&
+           state.prev_registration_luma == NULL &&
+           state.prev_luma_capacity == 0 &&
+           state.prev_registration_luma_capacity == 0 &&
+           state.prev_luma_width == 0 &&
+           state.prev_luma_height == 0 &&
+           state.prev_registration_luma_width == 0 &&
+           state.prev_registration_luma_height == 0,
+           "frame history clear: releases buffers and zeroes dimensions/capacities");
 }
 
 static void test_grid_region_active_mask_bounds_rejects_invalid_and_empty(void) {
@@ -1072,6 +1184,1499 @@ static void test_result_build_boxes_invalid_inputs_return_zero(void) {
            "result builder: NULL boxes returns zero");
     EXPECT(anomaly_result_build_boxes(&state, &cfg, ANOMALY_ALGO_MOTION, boxes, 0) == 0,
            "result builder: nonpositive capacity returns zero");
+}
+
+static void test_result_publish_boxes_null_result_safe(void) {
+    anomaly_box_t boxes[1];
+    memset(boxes, 0, sizeof(boxes));
+    boxes[0].left_norm = 0.10f;
+    anomaly_result_publish_boxes(NULL, boxes, 1);
+    EXPECT(true, "result builder publish boxes: NULL result is safe");
+}
+
+static void test_result_publish_boxes_zero_count(void) {
+    anomaly_result_t result;
+    anomaly_box_t boxes[1];
+    memset(&result, 0x5A, sizeof(result));
+    memset(boxes, 0, sizeof(boxes));
+
+    anomaly_result_publish_boxes(&result, boxes, 0);
+
+    EXPECT(result.box_count == 0,
+           "result builder publish boxes: zero count is published");
+}
+
+static void test_result_publish_boxes_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_box_t boxes[2];
+    memset(&result, 0, sizeof(result));
+    memset(boxes, 0, sizeof(boxes));
+    result.had_discontinuity = true;
+    boxes[0].left_norm = 0.10f;
+    boxes[0].top_norm = 0.20f;
+    boxes[0].right_norm = 0.30f;
+    boxes[0].bottom_norm = 0.40f;
+    boxes[0].r = 0x12;
+    boxes[0].g = 0x34;
+    boxes[0].b = 0x56;
+    boxes[0].weight = 0.70f;
+    boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    boxes[0].draw_crosshair = 1u;
+    boxes[1].left_norm = 0.50f;
+    boxes[1].top_norm = 0.60f;
+    boxes[1].right_norm = 0.70f;
+    boxes[1].bottom_norm = 0.80f;
+    boxes[1].r = 0x78;
+    boxes[1].g = 0x9A;
+    boxes[1].b = 0xBC;
+    boxes[1].weight = 0.90f;
+    boxes[1].algorithm = ANOMALY_ALGO_THERMAL;
+
+    anomaly_result_publish_boxes(&result, boxes, 2);
+
+    EXPECT(result.box_count == 2,
+           "result builder publish boxes: caller count is stored");
+    EXPECT(result.had_discontinuity,
+           "result builder publish boxes: unrelated result fields are preserved");
+    EXPECT(memcmp(&result.boxes[0], &boxes[0], sizeof(boxes[0])) == 0 &&
+           memcmp(&result.boxes[1], &boxes[1], sizeof(boxes[1])) == 0,
+           "result builder publish boxes: boxes are copied exactly");
+}
+
+static void test_result_publish_boxes_preserves_oversized_count_and_clamps_copy(void) {
+    anomaly_result_t result;
+    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME + 2];
+    memset(&result, 0, sizeof(result));
+    memset(boxes, 0, sizeof(boxes));
+    for (int i = 0; i < ANOMALY_MAX_BOXES_PER_FRAME + 2; i++) {
+        boxes[i].left_norm = 0.01f * (float)i;
+        boxes[i].right_norm = 0.02f * (float)i;
+        boxes[i].algorithm = ANOMALY_ALGO_COLOR + i;
+    }
+    result.boxes[ANOMALY_MAX_BOXES_PER_FRAME - 1].algorithm = -77;
+
+    anomaly_result_publish_boxes(
+            &result,
+            boxes,
+            ANOMALY_MAX_BOXES_PER_FRAME + 2);
+
+    EXPECT(result.box_count == ANOMALY_MAX_BOXES_PER_FRAME + 2,
+           "result builder publish boxes: oversized caller count is preserved");
+    EXPECT(memcmp(&result.boxes[ANOMALY_MAX_BOXES_PER_FRAME - 1],
+                  &boxes[ANOMALY_MAX_BOXES_PER_FRAME - 1],
+                  sizeof(boxes[0])) == 0,
+           "result builder publish boxes: copy reaches the final public slot");
+}
+
+static void test_result_publish_frame_metadata_null_inputs_noop(void) {
+    anomaly_result_t result;
+    memset(&result, 0x5A, sizeof(result));
+    anomaly_result_t saved = result;
+    anomaly_result_frame_metadata_t metadata;
+    memset(&metadata, 0, sizeof(metadata));
+
+    anomaly_result_publish_frame_metadata(NULL, &metadata);
+    anomaly_result_publish_frame_metadata(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder frame metadata: null inputs are no-ops");
+}
+
+static void test_result_publish_frame_metadata_copies_scalars_and_preserves_unrelated_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_frame_metadata_t metadata;
+    memset(&result, 0, sizeof(result));
+    memset(&metadata, 0, sizeof(metadata));
+    result.box_count = 2;
+    result.boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    result.timing.compiled = true;
+    result.motion_debug.raw_score = 0.42f;
+    metadata.had_discontinuity = true;
+    metadata.registration_ran_this_frame = true;
+    metadata.appearance_refresh_ran_this_frame = false;
+    metadata.registration_health = ANOMALY_REG_HEALTH_SOFT_DEGRADED;
+    metadata.rescan_mode = ANOMALY_RESCAN_MODE_TARGET_ONLY;
+    metadata.scan_plan.reason_flags = ANOMALY_SCAN_REASON_TARGET_ONLY_ELIGIBLE;
+    metadata.scan_plan.total_samples = 17;
+    metadata.scan_plan.sampled_width = 5;
+    metadata.scan_plan.sampled_height = 6;
+    metadata.adaptive_effective_stride = 3;
+    metadata.adaptive_stable_frames = 7;
+    metadata.adaptive_drop_hold_frames = 2;
+    metadata.adaptive_motion_load = 0.33f;
+    metadata.adaptive_reason_flags = 0xA5u;
+
+    anomaly_result_publish_frame_metadata(&result, &metadata);
+
+    EXPECT(result.had_discontinuity &&
+           result.registration_ran_this_frame &&
+           !result.appearance_refresh_ran_this_frame,
+           "result builder frame metadata: boolean flags are copied");
+    EXPECT(result.registration_health == ANOMALY_REG_HEALTH_SOFT_DEGRADED &&
+           result.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "result builder frame metadata: mode and health are copied");
+    EXPECT(memcmp(&result.scan_plan, &metadata.scan_plan, sizeof(metadata.scan_plan)) == 0,
+           "result builder frame metadata: scan plan is copied exactly");
+    EXPECT(result.adaptive_effective_stride == 3 &&
+           result.adaptive_stable_frames == 7 &&
+           result.adaptive_drop_hold_frames == 2 &&
+           result.adaptive_reason_flags == 0xA5u,
+           "result builder frame metadata: adaptive integer fields are copied");
+    EXPECT_NEAR(result.adaptive_motion_load, 0.33f, 0.0001f,
+                "result builder frame metadata: adaptive motion load is copied");
+    EXPECT(result.box_count == 2 &&
+           result.boxes[0].algorithm == ANOMALY_ALGO_COLOR &&
+           result.timing.compiled &&
+           fabsf(result.motion_debug.raw_score - 0.42f) < 0.0001f,
+           "result builder frame metadata: unrelated result fields are preserved");
+}
+
+static void test_result_publish_frame_metadata_copies_registration_and_movement_debug(void) {
+    anomaly_result_t result;
+    anomaly_result_frame_metadata_t metadata;
+    anomaly_registration_model_t model =
+        anomaly_registration_model_make(ANOMALY_REGISTRATION_AFFINE, 4, 8);
+    anomaly_debug_movement_t movement;
+    memset(&result, 0, sizeof(result));
+    memset(&metadata, 0, sizeof(metadata));
+    memset(&movement, 0, sizeof(movement));
+
+    model.debug_valid = true;
+    model.scene_discontinuity = true;
+    model.anchor_count = 1;
+    model.similarity.a = 6.0f;
+    model.similarity.b = 8.0f;
+    model.similarity.mean_residual = 0.25f;
+    model.anchors[0].valid = true;
+    model.anchors[0].pixel_x = 42;
+    movement.valid = true;
+    movement.sample_count = 9;
+    movement.tile_cols = 3;
+    movement.tile_rows = 4;
+    movement.tiles[0].valid = true;
+    movement.tiles[0].residual_px = 1.25f;
+    metadata.registration = &model;
+    metadata.movement_debug = &movement;
+
+    anomaly_result_publish_frame_metadata(&result, &metadata);
+
+    EXPECT(result.gmv_debug.valid &&
+           result.gmv_debug.scene_discontinuity &&
+           result.gmv_debug.sample_step == 4 &&
+           result.gmv_debug.motion_step == 8 &&
+           result.gmv_debug.anchor_count == 1,
+           "result builder frame metadata: registration debug is delegated");
+    EXPECT_NEAR(result.gmv_debug.fit_scale, 10.0f, 0.0001f,
+                "result builder frame metadata: registration debug scale is populated");
+    EXPECT(result.gmv_debug.anchors[0].pixel_x == 42,
+           "result builder frame metadata: registration anchors are copied");
+    EXPECT(memcmp(&result.movement_debug, &movement, sizeof(movement)) == 0,
+           "result builder frame metadata: movement debug is copied exactly");
+}
+
+static void test_result_publish_saliency_debug_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_saliency_debug_publication_t debug;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_saliency_debug(NULL, &debug);
+    anomaly_result_publish_saliency_debug(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder saliency debug: null inputs are no-ops");
+}
+
+static void test_result_publish_saliency_debug_raw_and_accumulator_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_saliency_debug_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    result.box_count = 2;
+    result.timing.compiled = true;
+    result.motion_debug.raw_score = 0.25f;
+    debug.raw_score = -0.50f;
+    debug.raw_x = 0;
+    debug.raw_y = 27;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+    debug.tracked_score_pre = 0.61f;
+    debug.acc_pre_active = true;
+    debug.acc_pre_hits = 4;
+    debug.acc_pre_x_norm = 0.33f;
+    debug.acc_pre_y_norm = 0.44f;
+    debug.acc_post_active = true;
+    debug.acc_post_hits = 5;
+    debug.acc_post_x_norm = 0.55f;
+    debug.acc_post_y_norm = 0.66f;
+    debug.switch_suppressed = true;
+
+    anomaly_result_publish_saliency_debug(&result, &debug);
+
+    EXPECT(!result.saliency_debug.raw_candidate_valid,
+           "result builder saliency debug: negative raw score is invalid");
+    EXPECT_NEAR(result.saliency_debug.raw_score, -0.50f, 0.0001f,
+                "result builder saliency debug: raw score is copied");
+    EXPECT_NEAR(result.saliency_debug.raw_x_norm, 0.0f, 0.0001f,
+                "result builder saliency debug: zero x keeps legacy normalization");
+    EXPECT_NEAR(result.saliency_debug.raw_y_norm, 0.25f, 0.0001f,
+                "result builder saliency debug: nonzero y normalizes by frame height");
+    EXPECT_NEAR(result.saliency_debug.tracked_score_pre, 0.61f, 0.0001f,
+                "result builder saliency debug: tracked score is copied");
+    EXPECT(result.saliency_debug.acc_pre_active &&
+           result.saliency_debug.acc_pre_hits == 4 &&
+           result.saliency_debug.acc_post_active &&
+           result.saliency_debug.acc_post_hits == 5 &&
+           result.saliency_debug.switch_suppressed,
+           "result builder saliency debug: accumulator flags and hits are copied");
+    EXPECT_NEAR(result.saliency_debug.acc_pre_x_norm, 0.33f, 0.0001f,
+                "result builder saliency debug: pre x is copied");
+    EXPECT_NEAR(result.saliency_debug.acc_pre_y_norm, 0.44f, 0.0001f,
+                "result builder saliency debug: pre y is copied");
+    EXPECT_NEAR(result.saliency_debug.acc_post_x_norm, 0.55f, 0.0001f,
+                "result builder saliency debug: post x is copied");
+    EXPECT_NEAR(result.saliency_debug.acc_post_y_norm, 0.66f, 0.0001f,
+                "result builder saliency debug: post y is copied");
+    EXPECT(result.box_count == 2 &&
+           result.timing.compiled &&
+           fabsf(result.motion_debug.raw_score - 0.25f) < 0.0001f,
+           "result builder saliency debug: unrelated result fields are preserved");
+}
+
+static void test_result_publish_saliency_debug_valid_raw_and_top_candidates(void) {
+    anomaly_result_t result;
+    anomaly_result_saliency_debug_publication_t debug;
+    anomaly_debug_candidate_t top[ANOMALY_DEBUG_TOP_CANDIDATES + 2];
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    memset(top, 0, sizeof(top));
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_CANDIDATES + 2; i++) {
+        top[i].valid = true;
+        top[i].pixel_x = 100 + i;
+        top[i].pixel_y = 200 + i;
+        top[i].combined_score = 1.0f - (float)i * 0.05f;
+    }
+    debug.raw_score = 0.75f;
+    debug.raw_x = 96;
+    debug.raw_y = 54;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+    debug.top_candidates = top;
+    debug.top_candidate_count = ANOMALY_DEBUG_TOP_CANDIDATES + 2;
+
+    anomaly_result_publish_saliency_debug(&result, &debug);
+
+    EXPECT(result.saliency_debug.raw_candidate_valid,
+           "result builder saliency debug: nonnegative raw score is valid");
+    EXPECT_NEAR(result.saliency_debug.raw_x_norm, 0.50f, 0.0001f,
+                "result builder saliency debug: valid raw x normalizes");
+    EXPECT_NEAR(result.saliency_debug.raw_y_norm, 0.50f, 0.0001f,
+                "result builder saliency debug: valid raw y normalizes");
+    EXPECT(result.saliency_debug.top_candidate_count ==
+           ANOMALY_DEBUG_TOP_CANDIDATES + 2,
+           "result builder saliency debug: oversized top count is stored exactly");
+    EXPECT(result.saliency_debug.top_candidates[0].pixel_x == 100 &&
+           result.saliency_debug.top_candidates[ANOMALY_DEBUG_TOP_CANDIDATES - 1].pixel_x ==
+               100 + ANOMALY_DEBUG_TOP_CANDIDATES - 1,
+           "result builder saliency debug: top candidate copy is bounded and ordered");
+}
+
+static void test_result_publish_thermal_debug_summary_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_summary_publication_t debug;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_summary(NULL, &debug);
+    anomaly_result_publish_thermal_debug_summary(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal summary: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_summary_copies_scalars_and_preserves_detail(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_summary_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    result.thermal_debug.target.valid = true;
+    result.thermal_debug.target.pixel_x = 77;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 88;
+    result.color_debug.raw_score = 0.44f;
+    debug.bg_ready = true;
+    debug.raw_score = 0.91f;
+    debug.raw_x = 48;
+    debug.raw_y = 27;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+    debug.frame_delta_mean = 1.25f;
+    debug.frame_delta_norm = 2.50f;
+    debug.frame_blob_contrast_mean = 3.75f;
+    debug.frame_blob_contrast_std = 4.50f;
+    debug.winning_candidate_index = 3;
+    debug.candidate_count = 9;
+
+    anomaly_result_publish_thermal_debug_summary(&result, &debug);
+
+    EXPECT(result.thermal_debug.bg_ready &&
+           result.thermal_debug.raw_candidate_valid,
+           "result builder thermal summary: bg and raw validity are copied");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal summary: raw score is copied");
+    EXPECT_NEAR(result.thermal_debug.raw_x_norm, 0.25f, 0.0001f,
+                "result builder thermal summary: raw x normalizes by frame width");
+    EXPECT_NEAR(result.thermal_debug.raw_y_norm, 0.25f, 0.0001f,
+                "result builder thermal summary: raw y normalizes by frame height");
+    EXPECT_NEAR(result.thermal_debug.frame_delta_mean, 1.25f, 0.0001f,
+                "result builder thermal summary: frame delta mean is copied");
+    EXPECT_NEAR(result.thermal_debug.frame_delta_norm, 2.50f, 0.0001f,
+                "result builder thermal summary: frame delta norm is copied");
+    EXPECT_NEAR(result.thermal_debug.frame_blob_contrast_mean, 3.75f, 0.0001f,
+                "result builder thermal summary: blob contrast mean is copied");
+    EXPECT_NEAR(result.thermal_debug.frame_blob_contrast_std, 4.50f, 0.0001f,
+                "result builder thermal summary: blob contrast std is copied");
+    EXPECT(result.thermal_debug.winning_candidate_index == 3 &&
+           result.thermal_debug.candidate_count == 9,
+           "result builder thermal summary: candidate indices are copied");
+    EXPECT(result.thermal_debug.target.valid &&
+           result.thermal_debug.target.pixel_x == 77 &&
+           result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 88 &&
+           fabsf(result.color_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder thermal summary: target, candidates, and unrelated fields are preserved");
+}
+
+static void test_result_publish_thermal_debug_summary_legacy_raw_normalization(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_summary_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    debug.raw_score = -0.10f;
+    debug.raw_x = 0;
+    debug.raw_y = 27;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+
+    anomaly_result_publish_thermal_debug_summary(&result, &debug);
+
+    EXPECT(!result.thermal_debug.raw_candidate_valid,
+           "result builder thermal summary: negative raw score is invalid");
+    EXPECT_NEAR(result.thermal_debug.raw_x_norm, 0.0f, 0.0001f,
+                "result builder thermal summary: zero x keeps legacy normalization");
+    EXPECT_NEAR(result.thermal_debug.raw_y_norm, 0.25f, 0.0001f,
+                "result builder thermal summary: nonzero y normalizes by frame height");
+}
+
+static void test_result_publish_color_debug_summary_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_summary_publication_t debug;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_summary(NULL, &debug);
+    anomaly_result_publish_color_debug_summary(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color summary: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_summary_raw_phase_and_samples(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_summary_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    result.color_debug.target.valid = true;
+    result.color_debug.target.pixel_x = 77;
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.thermal_debug.raw_score = 0.44f;
+    debug.raw_candidate_index = 2;
+    debug.raw_best_score = 0.91f;
+    debug.raw_best_x = 48;
+    debug.raw_best_y = 27;
+    debug.best_score = 0.72f;
+    debug.best_x = 96;
+    debug.best_y = 54;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+    debug.target_span_px = 18.0f;
+    debug.target_span_cells = 5;
+    debug.max_blob_area_budget = 100;
+    debug.active_phase_index = 3;
+    debug.active_phase_x = 1;
+    debug.active_phase_y = 2;
+    debug.selective_refresh_active = true;
+    debug.forced_full_refresh = false;
+    debug.fallback_reason_flags = 0x25u;
+    debug.fresh_sample_count = 6;
+    debug.carried_sample_count = 3;
+    debug.unsampled_new_exposed_count = 1;
+    debug.sample_grid_count = 10;
+
+    anomaly_result_publish_color_debug_summary(&result, &debug);
+
+    EXPECT(result.color_debug.raw_candidate_valid &&
+           result.color_debug.raw_candidate_index == 2,
+           "result builder color summary: raw candidate index drives validity");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.91f, 0.0001f,
+                "result builder color summary: explicit raw score is preferred");
+    EXPECT_NEAR(result.color_debug.raw_x_norm, 0.25f, 0.0001f,
+                "result builder color summary: raw x normalizes by frame width");
+    EXPECT_NEAR(result.color_debug.raw_y_norm, 0.25f, 0.0001f,
+                "result builder color summary: raw y normalizes by frame height");
+    EXPECT_NEAR(result.color_debug.target_span_px, 18.0f, 0.0001f,
+                "result builder color summary: target span px is copied");
+    EXPECT(result.color_debug.target_span_cells == 5 &&
+           result.color_debug.max_blob_area_budget == 100 &&
+           result.color_debug.active_phase_index == 3 &&
+           result.color_debug.active_phase_x == 1 &&
+           result.color_debug.active_phase_y == 2,
+           "result builder color summary: phase and budget fields are copied");
+    EXPECT(result.color_debug.selective_reuse_active &&
+           !result.color_debug.forced_full_refresh &&
+           result.color_debug.fallback_reason_flags == 0x25u,
+           "result builder color summary: reuse and fallback fields are copied");
+    EXPECT(result.color_debug.fresh_sample_count == 6 &&
+           result.color_debug.carried_sample_count == 3 &&
+           result.color_debug.unsampled_new_exposed_count == 1,
+           "result builder color summary: sample counts are copied");
+    EXPECT_NEAR(result.color_debug.fresh_sample_fraction, 0.60f, 0.0001f,
+                "result builder color summary: fresh fraction is computed");
+    EXPECT_NEAR(result.color_debug.carried_sample_fraction, 0.30f, 0.0001f,
+                "result builder color summary: carried fraction is computed");
+    EXPECT_NEAR(result.color_debug.unsampled_new_exposed_fraction, 0.10f, 0.0001f,
+                "result builder color summary: unsampled fraction is computed");
+    EXPECT(!result.color_debug.target.valid &&
+           result.color_debug.target.pixel_x == 0 &&
+           !result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 0 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color summary: color detail is reset and unrelated fields are preserved");
+}
+
+static void test_result_publish_color_debug_summary_histogram_rejects_and_winner_gate(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_summary_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    debug.raw_candidate_index = -1;
+    debug.raw_best_score = -1.0f;
+    debug.best_score = 0.62f;
+    debug.best_x = 0;
+    debug.best_y = 27;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+    debug.histogram_valid_sample_count = 77;
+    debug.history_reset_applied = true;
+    debug.history_recovery_frames_remaining = 4;
+    debug.history_recent_scale = 0.75f;
+    debug.nonzero_histogram_bins = 9;
+    debug.max_histogram_current_count = 12.0f;
+    debug.max_histogram_recent_count = 13.0f;
+    debug.rarity_seed_count = 14;
+    debug.support_seed_count = 15;
+    debug.support_peak_score = 0.84f;
+    debug.coarse_component_count = 16;
+    debug.coarse_oversized_count = 2;
+    debug.dense_verify_component_count = 5;
+    debug.adaptive_source_coarse_count = 3;
+    debug.fresh_distinctness_ratio = 0.53f;
+    debug.blob_reject_area_count = 6;
+    debug.blob_reject_ring_count = 7;
+    debug.blob_reject_support_mass_count = 8;
+    debug.blob_reject_quality_count = 9;
+    debug.blob_examined_count = 10;
+    debug.strongest_reject_reason = ANOMALY_COLOR_BLOB_REJECT_AREA;
+    debug.strongest_reject_peak_support = 0.41f;
+    debug.strongest_reject_area = 22.0f;
+    debug.strongest_reject_span = 6.0f;
+    debug.strongest_reject_ring_fraction = 0.32f;
+    debug.strongest_reject_support_mass = 0.43f;
+    debug.strongest_reject_quality = 0.54f;
+    debug.strongest_seed_sample_x = 11;
+    debug.strongest_seed_sample_y = 12;
+    debug.strongest_seed_score = 0.71f;
+    debug.strongest_seed_hist_key = 0x12345678u;
+    debug.strongest_seed_hist_current_count = 2.0f;
+    debug.strongest_seed_hist_recent_count = 3.0f;
+    debug.strongest_seed_hist_rarity_score = 0.64f;
+    debug.strongest_seed_local_support_count = 17;
+    debug.winner_gate_active = true;
+    debug.winner_gate_reject_reason = 4;
+    debug.winner_gate_max_span = 20.0f;
+    debug.winner_gate_max_area = 300.0f;
+    debug.winner_gate_min_rarity = 0.66f;
+    debug.winner_gate_max_commonness = 0.22f;
+    debug.winning_candidate_index = 5;
+    debug.candidate_count = 6;
+
+    anomaly_result_publish_color_debug_summary(&result, &debug);
+
+    EXPECT(result.color_debug.raw_candidate_valid,
+           "result builder color summary: nonnegative fallback score is valid");
+    EXPECT_NEAR(result.color_debug.raw_x_norm, 0.0f, 0.0001f,
+                "result builder color summary: fallback zero x keeps legacy normalization");
+    EXPECT_NEAR(result.color_debug.raw_y_norm, 0.25f, 0.0001f,
+                "result builder color summary: fallback nonzero y normalizes");
+    EXPECT(result.color_debug.histogram_valid_sample_count == 77 &&
+           result.color_debug.history_reset_applied &&
+           result.color_debug.history_recovery_frames_remaining == 4 &&
+           result.color_debug.nonzero_histogram_bins == 9,
+           "result builder color summary: histogram scalars are copied");
+    EXPECT_NEAR(result.color_debug.history_recent_scale, 0.75f, 0.0001f,
+                "result builder color summary: history scale is copied");
+    EXPECT_NEAR(result.color_debug.max_histogram_current_count, 12.0f, 0.0001f,
+                "result builder color summary: current histogram max is copied");
+    EXPECT_NEAR(result.color_debug.max_histogram_recent_count, 13.0f, 0.0001f,
+                "result builder color summary: recent histogram max is copied");
+    EXPECT(result.color_debug.rarity_seed_count == 14 &&
+           result.color_debug.support_seed_count == 15 &&
+           result.color_debug.coarse_component_count == 16 &&
+           result.color_debug.coarse_oversized_count == 2 &&
+           result.color_debug.dense_verify_component_count == 5 &&
+           result.color_debug.adaptive_source_coarse_count == 3,
+           "result builder color summary: support and component counts are copied");
+    EXPECT_NEAR(result.color_debug.support_peak_score, 0.84f, 0.0001f,
+                "result builder color summary: support peak is copied");
+    EXPECT_NEAR(result.color_debug.fresh_distinctness_ratio, 0.53f, 0.0001f,
+                "result builder color summary: distinctness ratio is copied");
+    EXPECT(result.color_debug.blob_reject_area_count == 6 &&
+           result.color_debug.blob_reject_ring_count == 7 &&
+           result.color_debug.blob_reject_support_mass_count == 8 &&
+           result.color_debug.blob_reject_quality_count == 9 &&
+           result.color_debug.blob_examined_count == 10 &&
+           result.color_debug.strongest_reject_reason == ANOMALY_COLOR_BLOB_REJECT_AREA,
+           "result builder color summary: reject counts and reason are copied");
+    EXPECT_NEAR(result.color_debug.strongest_reject_peak_support, 0.41f, 0.0001f,
+                "result builder color summary: reject peak support is copied");
+    EXPECT_NEAR(result.color_debug.strongest_reject_area, 22.0f, 0.0001f,
+                "result builder color summary: reject area is copied");
+    EXPECT_NEAR(result.color_debug.strongest_reject_span, 6.0f, 0.0001f,
+                "result builder color summary: reject span is copied");
+    EXPECT_NEAR(result.color_debug.strongest_reject_ring_fraction, 0.32f, 0.0001f,
+                "result builder color summary: reject ring fraction is copied");
+    EXPECT_NEAR(result.color_debug.strongest_reject_support_mass, 0.43f, 0.0001f,
+                "result builder color summary: reject support mass is copied");
+    EXPECT_NEAR(result.color_debug.strongest_reject_quality, 0.54f, 0.0001f,
+                "result builder color summary: reject quality is copied");
+    EXPECT(result.color_debug.strongest_seed.valid &&
+           result.color_debug.strongest_seed.sample_x == 11 &&
+           result.color_debug.strongest_seed.sample_y == 12 &&
+           result.color_debug.strongest_seed.hist_key == 0x12345678u &&
+           result.color_debug.strongest_seed.local_support_count == 17,
+           "result builder color summary: strongest seed fields are copied");
+    EXPECT_NEAR(result.color_debug.strongest_seed.score, 0.71f, 0.0001f,
+                "result builder color summary: strongest seed score is copied");
+    EXPECT_NEAR(result.color_debug.strongest_seed.hist_current_count, 2.0f, 0.0001f,
+                "result builder color summary: strongest seed current count is copied");
+    EXPECT_NEAR(result.color_debug.strongest_seed.hist_recent_count, 3.0f, 0.0001f,
+                "result builder color summary: strongest seed recent count is copied");
+    EXPECT_NEAR(result.color_debug.strongest_seed.hist_rarity_score, 0.64f, 0.0001f,
+                "result builder color summary: strongest seed rarity is copied");
+    EXPECT(result.color_debug.winner_gate_active &&
+           result.color_debug.winner_gate_reject_reason == 4 &&
+           result.color_debug.winning_candidate_index == 5 &&
+           result.color_debug.candidate_count == 6,
+           "result builder color summary: winner gate and candidate counts are copied");
+    EXPECT_NEAR(result.color_debug.winner_gate_max_span, 20.0f, 0.0001f,
+                "result builder color summary: gate max span is copied");
+    EXPECT_NEAR(result.color_debug.winner_gate_max_area, 300.0f, 0.0001f,
+                "result builder color summary: gate max area is copied");
+    EXPECT_NEAR(result.color_debug.winner_gate_min_rarity, 0.66f, 0.0001f,
+                "result builder color summary: gate min rarity is copied");
+    EXPECT_NEAR(result.color_debug.winner_gate_max_commonness, 0.22f, 0.0001f,
+                "result builder color summary: gate max commonness is copied");
+}
+
+static void test_result_publish_color_debug_summary_zero_sample_grid_resets_fractions(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_summary_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    result.color_debug.fresh_sample_fraction = 0.12f;
+    result.color_debug.carried_sample_fraction = 0.34f;
+    result.color_debug.unsampled_new_exposed_fraction = 0.56f;
+    debug.fresh_sample_count = 6;
+    debug.carried_sample_count = 3;
+    debug.unsampled_new_exposed_count = 1;
+    debug.sample_grid_count = 0;
+
+    anomaly_result_publish_color_debug_summary(&result, &debug);
+
+    EXPECT(result.color_debug.fresh_sample_count == 6 &&
+           result.color_debug.carried_sample_count == 3 &&
+           result.color_debug.unsampled_new_exposed_count == 1,
+           "result builder color summary: sample counts are copied for zero grid");
+    EXPECT_NEAR(result.color_debug.fresh_sample_fraction, 0.0f, 0.0001f,
+                "result builder color summary: zero grid leaves reset fresh fraction");
+    EXPECT_NEAR(result.color_debug.carried_sample_fraction, 0.0f, 0.0001f,
+                "result builder color summary: zero grid leaves reset carried fraction");
+    EXPECT_NEAR(result.color_debug.unsampled_new_exposed_fraction, 0.0f, 0.0001f,
+                "result builder color summary: zero grid leaves reset unsampled fraction");
+}
+
+static void test_result_publish_color_debug_target_base_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_base_publication_t target;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&target, 0, sizeof(target));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_target_base(NULL, &target);
+    anomaly_result_publish_color_debug_target_base(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color target base: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_target_base_resets_target_and_preserves_other_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_base_publication_t target;
+    memset(&result, 0, sizeof(result));
+    memset(&target, 0, sizeof(target));
+    result.color_debug.raw_score = 0.77f;
+    result.color_debug.candidate_count = 3;
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.color_debug.target.component_seed_x = 91;
+    result.color_debug.target.extracted_candidate_index = 4;
+    result.thermal_debug.raw_score = 0.44f;
+    target.enabled = true;
+    target.valid = true;
+    target.inside_scan_zone = true;
+    target.refresh_skipped = true;
+    target.sampled_this_frame = true;
+    target.carried_from_history = true;
+    target.pixel_x = 101;
+    target.pixel_y = 202;
+    target.sample_x = 11;
+    target.sample_y = 22;
+    target.configured_x_norm = 0.31f;
+    target.configured_y_norm = 0.42f;
+    target.hist_key = 0x1234;
+    target.hist_current_count = 2.0f;
+    target.hist_recent_count = 3.0f;
+    target.hist_rarity_score = 0.64f;
+    target.local_support_count = 5;
+
+    anomaly_result_publish_color_debug_target_base(&result, &target);
+
+    EXPECT(result.color_debug.target.enabled &&
+           result.color_debug.target.valid &&
+           result.color_debug.target.inside_scan_zone &&
+           result.color_debug.target.refresh_skipped &&
+           result.color_debug.target.sampled_this_frame &&
+           result.color_debug.target.carried_from_history,
+           "result builder color target base: flags are copied");
+    EXPECT(result.color_debug.target.pixel_x == 101 &&
+           result.color_debug.target.pixel_y == 202 &&
+           result.color_debug.target.sample_x == 11 &&
+           result.color_debug.target.sample_y == 22,
+           "result builder color target base: pixel and sample coords are copied");
+    EXPECT_NEAR(result.color_debug.target.x_norm, 0.31f, 0.0001f,
+                "result builder color target base: enabled target x norm is copied");
+    EXPECT_NEAR(result.color_debug.target.y_norm, 0.42f, 0.0001f,
+                "result builder color target base: enabled target y norm is copied");
+    EXPECT(result.color_debug.target.hist_key == 0x1234 &&
+           result.color_debug.target.local_support_count == 5,
+           "result builder color target base: hist key and support count are copied");
+    EXPECT_NEAR(result.color_debug.target.hist_current_count, 2.0f, 0.0001f,
+                "result builder color target base: current hist count is copied");
+    EXPECT_NEAR(result.color_debug.target.hist_recent_count, 3.0f, 0.0001f,
+                "result builder color target base: recent hist count is copied");
+    EXPECT_NEAR(result.color_debug.target.hist_rarity_score, 0.64f, 0.0001f,
+                "result builder color target base: rarity score is copied");
+    EXPECT(result.color_debug.target.component_seed_x == 0 &&
+           result.color_debug.target.extracted_candidate_index == 0,
+           "result builder color target base: later target detail fields are reset only");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.77f, 0.0001f,
+                "result builder color target base: color summary is preserved");
+    EXPECT(result.color_debug.candidate_count == 3 &&
+           result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 88 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color target base: candidates and unrelated fields are preserved");
+}
+
+static void test_result_publish_color_debug_target_base_telemetry_and_disabled_norms(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_base_publication_t target;
+    memset(&result, 0, sizeof(result));
+    memset(&target, 0, sizeof(target));
+    target.enabled = false;
+    target.configured_x_norm = 0.31f;
+    target.configured_y_norm = 0.42f;
+    target.patch_valid_count = 13;
+    target.coherent_patch_cell_count = 7;
+    target.coherent_patch_fresh_cell_count = 4;
+    target.coherent_patch_multicell = true;
+    target.patch_mean_u = 1.1f;
+    target.patch_mean_v = 1.2f;
+    target.patch_mean_luma = 1.3f;
+    target.ring_mean_u = 2.1f;
+    target.ring_mean_v = 2.2f;
+    target.ring_mean_luma = 2.3f;
+    target.ring_chroma_contrast = 3.1f;
+    target.ring_luma_contrast = 3.2f;
+    target.ring_neighbor_count = 8;
+    target.pre_support_score = 0.25f;
+    target.support_score = 0.35f;
+    target.support_map_local_peak = 0.45f;
+    target.support_map_ring_mean = 0.55f;
+    target.support_map_density = 0.65f;
+    target.support_map_distinctness_ratio = 0.75f;
+    target.support_map_compact_prominence = 0.85f;
+    target.support_map_core_share = 0.95f;
+    target.support_map_seed_floor = 0.15f;
+    target.support_seed_eligible = true;
+
+    anomaly_result_publish_color_debug_target_base(&result, &target);
+
+    EXPECT_NEAR(result.color_debug.target.x_norm, 0.0f, 0.0001f,
+                "result builder color target base: disabled target clears x norm");
+    EXPECT_NEAR(result.color_debug.target.y_norm, 0.0f, 0.0001f,
+                "result builder color target base: disabled target clears y norm");
+    EXPECT(result.color_debug.target.patch_valid_count == 13 &&
+           result.color_debug.target.coherent_patch_cell_count == 7 &&
+           result.color_debug.target.coherent_patch_fresh_cell_count == 4 &&
+           result.color_debug.target.coherent_patch_multicell,
+           "result builder color target base: patch coherence fields are copied");
+    EXPECT_NEAR(result.color_debug.target.patch_mean_u, 1.1f, 0.0001f,
+                "result builder color target base: patch mean u is copied");
+    EXPECT_NEAR(result.color_debug.target.patch_mean_v, 1.2f, 0.0001f,
+                "result builder color target base: patch mean v is copied");
+    EXPECT_NEAR(result.color_debug.target.patch_mean_luma, 1.3f, 0.0001f,
+                "result builder color target base: patch luma is copied");
+    EXPECT_NEAR(result.color_debug.target.ring_mean_u, 2.1f, 0.0001f,
+                "result builder color target base: ring mean u is copied");
+    EXPECT_NEAR(result.color_debug.target.ring_mean_v, 2.2f, 0.0001f,
+                "result builder color target base: ring mean v is copied");
+    EXPECT_NEAR(result.color_debug.target.ring_mean_luma, 2.3f, 0.0001f,
+                "result builder color target base: ring luma is copied");
+    EXPECT_NEAR(result.color_debug.target.ring_chroma_contrast, 3.1f, 0.0001f,
+                "result builder color target base: ring chroma contrast is copied");
+    EXPECT_NEAR(result.color_debug.target.ring_luma_contrast, 3.2f, 0.0001f,
+                "result builder color target base: ring luma contrast is copied");
+    EXPECT(result.color_debug.target.ring_neighbor_count == 8,
+           "result builder color target base: ring neighbor count is copied");
+    EXPECT_NEAR(result.color_debug.target.pre_support_score, 0.25f, 0.0001f,
+                "result builder color target base: pre support is copied");
+    EXPECT_NEAR(result.color_debug.target.support_score, 0.35f, 0.0001f,
+                "result builder color target base: support score is copied");
+    EXPECT_NEAR(result.color_debug.target.support_map_local_peak, 0.45f, 0.0001f,
+                "result builder color target base: support local peak is copied");
+    EXPECT_NEAR(result.color_debug.target.support_map_ring_mean, 0.55f, 0.0001f,
+                "result builder color target base: support ring mean is copied");
+    EXPECT_NEAR(result.color_debug.target.support_map_density, 0.65f, 0.0001f,
+                "result builder color target base: support density is copied");
+    EXPECT_NEAR(result.color_debug.target.support_map_distinctness_ratio, 0.75f, 0.0001f,
+                "result builder color target base: support distinctness is copied");
+    EXPECT_NEAR(result.color_debug.target.support_map_compact_prominence, 0.85f, 0.0001f,
+                "result builder color target base: support compact prominence is copied");
+    EXPECT_NEAR(result.color_debug.target.support_map_core_share, 0.95f, 0.0001f,
+                "result builder color target base: support core share is copied");
+    EXPECT_NEAR(result.color_debug.target.support_map_seed_floor, 0.15f, 0.0001f,
+                "result builder color target base: support seed floor is copied");
+    EXPECT(result.color_debug.target.support_seed_eligible,
+           "result builder color target base: support seed eligible is copied");
+}
+
+static void test_result_publish_color_debug_target_component_trace_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_component_trace_publication_t trace;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&trace, 0, sizeof(trace));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_target_component_trace(NULL, &trace);
+    anomaly_result_publish_color_debug_target_component_trace(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color target component trace: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_target_component_trace_copies_scalars(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_component_trace_publication_t trace;
+    memset(&result, 0, sizeof(result));
+    memset(&trace, 0, sizeof(trace));
+    trace.component_seed_x = 11;
+    trace.component_seed_y = 12;
+    trace.component_peak_x = 13;
+    trace.component_peak_y = 14;
+    trace.component_area = 21.0f;
+    trace.component_span = 22.0f;
+    trace.component_fill = 0.31f;
+    trace.component_peak_support = 0.41f;
+    trace.component_mean_support = 0.42f;
+    trace.component_quality = 0.51f;
+    trace.component_ring_fraction = 0.61f;
+    trace.component_support_mass = 0.71f;
+    trace.component_rejected = true;
+    trace.component_rejection_reason = ANOMALY_COLOR_BLOB_REJECT_SUPPORT_MASS;
+    trace.dropped_by_cap = true;
+    trace.dropped_by_nms = true;
+    trace.replaced_by_nms = true;
+    trace.nms_conflict_rank = 3;
+    trace.nms_conflict_sample_x = 23;
+    trace.nms_conflict_sample_y = 24;
+    trace.pre_cap_rank = 4;
+    trace.pre_cap_candidate_count = 17;
+    trace.pre_cap_limit = 8;
+    trace.pre_cap_retention_rank = 0.82f;
+
+    anomaly_result_publish_color_debug_target_component_trace(&result, &trace);
+
+    EXPECT(result.color_debug.target.component_seed_x == 11 &&
+           result.color_debug.target.component_seed_y == 12 &&
+           result.color_debug.target.component_peak_x == 13 &&
+           result.color_debug.target.component_peak_y == 14,
+           "result builder color target component trace: component positions are copied");
+    EXPECT_NEAR(result.color_debug.target.component_area, 21.0f, 0.0001f,
+                "result builder color target component trace: area is copied");
+    EXPECT_NEAR(result.color_debug.target.component_span, 22.0f, 0.0001f,
+                "result builder color target component trace: span is copied");
+    EXPECT_NEAR(result.color_debug.target.component_fill, 0.31f, 0.0001f,
+                "result builder color target component trace: fill is copied");
+    EXPECT_NEAR(result.color_debug.target.component_peak_support, 0.41f, 0.0001f,
+                "result builder color target component trace: peak support is copied");
+    EXPECT_NEAR(result.color_debug.target.component_mean_support, 0.42f, 0.0001f,
+                "result builder color target component trace: mean support is copied");
+    EXPECT_NEAR(result.color_debug.target.component_quality, 0.51f, 0.0001f,
+                "result builder color target component trace: quality is copied");
+    EXPECT_NEAR(result.color_debug.target.component_ring_fraction, 0.61f, 0.0001f,
+                "result builder color target component trace: ring fraction is copied");
+    EXPECT_NEAR(result.color_debug.target.component_support_mass, 0.71f, 0.0001f,
+                "result builder color target component trace: support mass is copied");
+    EXPECT(result.color_debug.target.component_rejected &&
+           result.color_debug.target.component_rejection_reason ==
+               ANOMALY_COLOR_BLOB_REJECT_SUPPORT_MASS,
+           "result builder color target component trace: rejection fields are copied");
+    EXPECT(result.color_debug.target.dropped_by_cap &&
+           result.color_debug.target.dropped_by_nms &&
+           result.color_debug.target.replaced_by_nms,
+           "result builder color target component trace: cap and nms flags are copied");
+    EXPECT(result.color_debug.target.nms_conflict_rank == 3 &&
+           result.color_debug.target.nms_conflict_sample_x == 23 &&
+           result.color_debug.target.nms_conflict_sample_y == 24,
+           "result builder color target component trace: nms conflict fields are copied");
+    EXPECT(result.color_debug.target.pre_cap_rank == 4 &&
+           result.color_debug.target.pre_cap_candidate_count == 17 &&
+           result.color_debug.target.pre_cap_limit == 8,
+           "result builder color target component trace: pre-cap counts are copied");
+    EXPECT_NEAR(result.color_debug.target.pre_cap_retention_rank, 0.82f, 0.0001f,
+                "result builder color target component trace: pre-cap retention is copied");
+}
+
+static void test_result_publish_color_debug_target_component_trace_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_component_trace_publication_t trace;
+    memset(&result, 0, sizeof(result));
+    memset(&trace, 0, sizeof(trace));
+    result.color_debug.raw_score = 0.77f;
+    result.color_debug.candidate_count = 3;
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.color_debug.target.enabled = true;
+    result.color_debug.target.pixel_x = 101;
+    result.color_debug.target.x_norm = 0.31f;
+    result.color_debug.target.component_bbox_left_norm = 0.11f;
+    result.color_debug.target.extracted_candidate_index = 4;
+    result.color_debug.target.stage = ANOMALY_COLOR_TARGET_STAGE_WINNER;
+    result.color_debug.target.matched_candidate_score = 0.91f;
+    result.thermal_debug.raw_score = 0.44f;
+    trace.component_seed_x = 11;
+    trace.component_seed_y = 12;
+
+    anomaly_result_publish_color_debug_target_component_trace(&result, &trace);
+
+    EXPECT(result.color_debug.target.component_seed_x == 11 &&
+           result.color_debug.target.component_seed_y == 12,
+           "result builder color target component trace: requested fields are published");
+    EXPECT(result.color_debug.target.enabled &&
+           result.color_debug.target.pixel_x == 101,
+           "result builder color target component trace: base target fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.x_norm, 0.31f, 0.0001f,
+                "result builder color target component trace: base target norm is preserved");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_left_norm, 0.11f, 0.0001f,
+                "result builder color target component trace: bbox fields are preserved");
+    EXPECT(result.color_debug.target.extracted_candidate_index == 4 &&
+           result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_WINNER,
+           "result builder color target component trace: index and stage fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 0.91f, 0.0001f,
+                "result builder color target component trace: matched candidate fields are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.77f, 0.0001f,
+                "result builder color target component trace: color summary is preserved");
+    EXPECT(result.color_debug.candidate_count == 3 &&
+           result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 88 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color target component trace: candidates and unrelated fields are preserved");
+}
+
+static void test_result_publish_color_debug_target_component_bbox_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_component_bbox_publication_t bbox;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&bbox, 0, sizeof(bbox));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_target_component_bbox(NULL, &bbox);
+    anomaly_result_publish_color_debug_target_component_bbox(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color target component bbox: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_target_component_bbox_normalizes_and_clamps(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_component_bbox_publication_t bbox;
+    memset(&result, 0, sizeof(result));
+    memset(&bbox, 0, sizeof(bbox));
+    bbox.roi_x0 = 10;
+    bbox.roi_y0 = 20;
+    bbox.sample_step = 4;
+    bbox.min_x = -3;
+    bbox.min_y = -5;
+    bbox.max_x = 70;
+    bbox.max_y = 60;
+    bbox.frame_w = 100.0f;
+    bbox.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_target_component_bbox(&result, &bbox);
+
+    EXPECT_NEAR(result.color_debug.target.component_bbox_left_norm, 0.0f, 0.0001f,
+                "result builder color target component bbox: left clamps to frame");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_top_norm, 0.0f, 0.0001f,
+                "result builder color target component bbox: top clamps to frame");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_right_norm, 1.0f, 0.0001f,
+                "result builder color target component bbox: right clamps to frame");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_bottom_norm, 1.0f, 0.0001f,
+                "result builder color target component bbox: bottom clamps to frame");
+}
+
+static void test_result_publish_color_debug_target_component_bbox_invalid_bounds_zeroes(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_component_bbox_publication_t bbox;
+    memset(&result, 0, sizeof(result));
+    memset(&bbox, 0, sizeof(bbox));
+    result.color_debug.target.component_bbox_left_norm = 0.11f;
+    result.color_debug.target.component_bbox_top_norm = 0.22f;
+    result.color_debug.target.component_bbox_right_norm = 0.33f;
+    result.color_debug.target.component_bbox_bottom_norm = 0.44f;
+    bbox.roi_x0 = 10;
+    bbox.roi_y0 = 20;
+    bbox.sample_step = 4;
+    bbox.min_x = 5;
+    bbox.min_y = 6;
+    bbox.max_x = 4;
+    bbox.max_y = 6;
+    bbox.frame_w = 100.0f;
+    bbox.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_target_component_bbox(&result, &bbox);
+
+    EXPECT_NEAR(result.color_debug.target.component_bbox_left_norm, 0.0f, 0.0001f,
+                "result builder color target component bbox: invalid left zeroes");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_top_norm, 0.0f, 0.0001f,
+                "result builder color target component bbox: invalid top zeroes");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_right_norm, 0.0f, 0.0001f,
+                "result builder color target component bbox: invalid right zeroes");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_bottom_norm, 0.0f, 0.0001f,
+                "result builder color target component bbox: invalid bottom zeroes");
+}
+
+static void test_result_publish_color_debug_target_component_bbox_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_component_bbox_publication_t bbox;
+    memset(&result, 0, sizeof(result));
+    memset(&bbox, 0, sizeof(bbox));
+    result.color_debug.raw_score = 0.77f;
+    result.color_debug.candidate_count = 3;
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.color_debug.target.enabled = true;
+    result.color_debug.target.pixel_x = 101;
+    result.color_debug.target.component_seed_x = 11;
+    result.color_debug.target.extracted_candidate_index = 4;
+    result.color_debug.target.stage = ANOMALY_COLOR_TARGET_STAGE_WINNER;
+    result.color_debug.target.matched_candidate_score = 0.91f;
+    result.thermal_debug.raw_score = 0.44f;
+    bbox.roi_x0 = 10;
+    bbox.roi_y0 = 20;
+    bbox.sample_step = 4;
+    bbox.min_x = 5;
+    bbox.min_y = 6;
+    bbox.max_x = 7;
+    bbox.max_y = 8;
+    bbox.frame_w = 100.0f;
+    bbox.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_target_component_bbox(&result, &bbox);
+
+    EXPECT_NEAR(result.color_debug.target.component_bbox_left_norm, 0.28f, 0.0001f,
+                "result builder color target component bbox: left normalizes");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_top_norm, 0.525f, 0.0001f,
+                "result builder color target component bbox: top normalizes");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_right_norm, 0.44f, 0.0001f,
+                "result builder color target component bbox: right normalizes");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_bottom_norm, 0.725f, 0.0001f,
+                "result builder color target component bbox: bottom normalizes");
+    EXPECT(result.color_debug.target.enabled &&
+           result.color_debug.target.pixel_x == 101 &&
+           result.color_debug.target.component_seed_x == 11,
+           "result builder color target component bbox: base and component fields are preserved");
+    EXPECT(result.color_debug.target.extracted_candidate_index == 4 &&
+           result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_WINNER,
+           "result builder color target component bbox: index and stage fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 0.91f, 0.0001f,
+                "result builder color target component bbox: matched candidate fields are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.77f, 0.0001f,
+                "result builder color target component bbox: color summary is preserved");
+    EXPECT(result.color_debug.candidate_count == 3 &&
+           result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 88 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color target component bbox: candidates and unrelated fields are preserved");
+}
+
+static void test_result_publish_color_debug_target_candidate_indices_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_candidate_indices_publication_t indices;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&indices, 0, sizeof(indices));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_target_candidate_indices(NULL, &indices);
+    anomaly_result_publish_color_debug_target_candidate_indices(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color target candidate indices: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_target_candidate_indices_extracts_from_peak(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_candidate_indices_publication_t indices;
+    anomaly_result_candidate_sample_t samples[3] = {
+        { .sample_x = 1, .sample_y = 2 },
+        { .sample_x = 7, .sample_y = 8 },
+        { .sample_x = 9, .sample_y = 10 },
+    };
+    memset(&result, 0, sizeof(result));
+    memset(&indices, 0, sizeof(indices));
+    indices.component_peak_x = 7;
+    indices.component_peak_y = 8;
+    indices.candidates = samples;
+    indices.candidate_count = 3;
+    indices.matched_candidate_index = 2;
+    indices.nearest_candidate_index = 1;
+    indices.nearest_candidate_distance = 3.5f;
+    indices.winning_candidate_index = 2;
+
+    anomaly_result_publish_color_debug_target_candidate_indices(&result, &indices);
+
+    EXPECT(result.color_debug.target.extracted_candidate_index == 1,
+           "result builder color target candidate indices: extracted index is found by peak sample");
+    EXPECT(result.color_debug.target.matched_candidate_index == 2,
+           "result builder color target candidate indices: matched index is copied");
+    EXPECT(result.color_debug.target.nearest_candidate_index == 1,
+           "result builder color target candidate indices: nearest index is copied");
+    EXPECT_NEAR(result.color_debug.target.nearest_candidate_distance, 3.5f, 0.0001f,
+                "result builder color target candidate indices: nearest distance is copied");
+    EXPECT(result.color_debug.target.winning_candidate_index == 2 &&
+           result.color_debug.target.winning_rank == 2,
+           "result builder color target candidate indices: winning index and rank are copied");
+}
+
+static void test_result_publish_color_debug_target_candidate_indices_fallback_and_invalid_match(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_candidate_indices_publication_t indices;
+    anomaly_result_candidate_sample_t samples[2] = {
+        { .sample_x = 1, .sample_y = 2 },
+        { .sample_x = 3, .sample_y = 4 },
+    };
+    memset(&result, 0, sizeof(result));
+    memset(&indices, 0, sizeof(indices));
+    indices.component_peak_x = -1;
+    indices.component_peak_y = -1;
+    indices.candidates = samples;
+    indices.candidate_count = 2;
+    indices.matched_candidate_index = 1;
+    indices.winning_candidate_index = 0;
+
+    anomaly_result_publish_color_debug_target_candidate_indices(&result, &indices);
+
+    EXPECT(result.color_debug.target.extracted_candidate_index == 1,
+           "result builder color target candidate indices: valid matched index becomes fallback extraction");
+    EXPECT(result.color_debug.target.winning_rank == -1,
+           "result builder color target candidate indices: winning rank is -1 when matched is not winner");
+
+    indices.matched_candidate_index = 2;
+    result.color_debug.target.extracted_candidate_index = 9;
+    anomaly_result_publish_color_debug_target_candidate_indices(&result, &indices);
+
+    EXPECT(result.color_debug.target.extracted_candidate_index == -1,
+           "result builder color target candidate indices: out-of-range matched index does not extract");
+}
+
+static void test_result_publish_color_debug_target_candidate_indices_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_candidate_indices_publication_t indices;
+    anomaly_result_candidate_sample_t samples[1] = {
+        { .sample_x = 5, .sample_y = 6 },
+    };
+    memset(&result, 0, sizeof(result));
+    memset(&indices, 0, sizeof(indices));
+    result.color_debug.raw_score = 0.77f;
+    result.color_debug.candidate_count = 3;
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.color_debug.target.enabled = true;
+    result.color_debug.target.pixel_x = 101;
+    result.color_debug.target.component_bbox_left_norm = 0.11f;
+    result.color_debug.target.rejected_by_winner_gate = true;
+    result.color_debug.target.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_SIZE;
+    result.color_debug.target.stage = ANOMALY_COLOR_TARGET_STAGE_WINNER;
+    result.color_debug.target.matched_candidate_score = 0.91f;
+    result.thermal_debug.raw_score = 0.44f;
+    indices.component_peak_x = 5;
+    indices.component_peak_y = 6;
+    indices.candidates = samples;
+    indices.candidate_count = 1;
+    indices.matched_candidate_index = 0;
+    indices.winning_candidate_index = 0;
+
+    anomaly_result_publish_color_debug_target_candidate_indices(&result, &indices);
+
+    EXPECT(result.color_debug.target.extracted_candidate_index == 0 &&
+           result.color_debug.target.matched_candidate_index == 0 &&
+           result.color_debug.target.winning_rank == 0,
+           "result builder color target candidate indices: requested index fields are published");
+    EXPECT(result.color_debug.target.enabled &&
+           result.color_debug.target.pixel_x == 101,
+           "result builder color target candidate indices: base target fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_left_norm, 0.11f, 0.0001f,
+                "result builder color target candidate indices: component bbox fields are preserved");
+    EXPECT(result.color_debug.target.rejected_by_winner_gate &&
+           result.color_debug.target.winner_gate_reject_reason == ANOMALY_COLOR_WINNER_GATE_SIZE,
+           "result builder color target candidate indices: winner gate fields are preserved");
+    EXPECT(result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_WINNER,
+           "result builder color target candidate indices: stage is preserved");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 0.91f, 0.0001f,
+                "result builder color target candidate indices: matched candidate fields are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.77f, 0.0001f,
+                "result builder color target candidate indices: color summary is preserved");
+    EXPECT(result.color_debug.candidate_count == 3 &&
+           result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 88 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color target candidate indices: candidates and unrelated fields are preserved");
+}
+
+static void test_result_publish_color_debug_target_gate_stage_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_gate_stage_publication_t gate;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&gate, 0, sizeof(gate));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_target_gate_stage(NULL, &gate);
+    anomaly_result_publish_color_debug_target_gate_stage(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color target gate stage: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_target_gate_stage_rejects_on_matching_raw(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_gate_stage_publication_t gate;
+    memset(&result, 0, sizeof(result));
+    memset(&gate, 0, sizeof(gate));
+    gate.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_COMMONNESS;
+    gate.matched_candidate_index = 2;
+    gate.raw_best_color_candidate_index = 2;
+    gate.stage = ANOMALY_COLOR_TARGET_STAGE_EXTRACTED;
+
+    anomaly_result_publish_color_debug_target_gate_stage(&result, &gate);
+
+    EXPECT(result.color_debug.target.rejected_by_winner_gate,
+           "result builder color target gate stage: matching raw candidate rejects");
+    EXPECT(result.color_debug.target.winner_gate_reject_reason ==
+           ANOMALY_COLOR_WINNER_GATE_COMMONNESS,
+           "result builder color target gate stage: rejection reason is copied");
+    EXPECT(result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_EXTRACTED,
+           "result builder color target gate stage: stage is copied");
+}
+
+static void test_result_publish_color_debug_target_gate_stage_clears_nonrejecting_cases(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_gate_stage_publication_t gate;
+    memset(&result, 0, sizeof(result));
+    memset(&gate, 0, sizeof(gate));
+    result.color_debug.target.rejected_by_winner_gate = true;
+    result.color_debug.target.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_SIZE;
+    gate.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_COMMONNESS;
+    gate.matched_candidate_index = 3;
+    gate.raw_best_color_candidate_index = 2;
+    gate.stage = ANOMALY_COLOR_TARGET_STAGE_NO_CANDIDATE;
+
+    anomaly_result_publish_color_debug_target_gate_stage(&result, &gate);
+
+    EXPECT(!result.color_debug.target.rejected_by_winner_gate &&
+           result.color_debug.target.winner_gate_reject_reason == ANOMALY_COLOR_WINNER_GATE_NONE,
+           "result builder color target gate stage: nonmatching candidate clears rejection");
+    EXPECT(result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_NO_CANDIDATE,
+           "result builder color target gate stage: stage is copied for nonmatch");
+
+    result.color_debug.target.rejected_by_winner_gate = true;
+    result.color_debug.target.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_SIZE;
+    gate.matched_candidate_index = -1;
+    anomaly_result_publish_color_debug_target_gate_stage(&result, &gate);
+
+    EXPECT(!result.color_debug.target.rejected_by_winner_gate &&
+           result.color_debug.target.winner_gate_reject_reason == ANOMALY_COLOR_WINNER_GATE_NONE,
+           "result builder color target gate stage: negative matched index clears rejection");
+
+    result.color_debug.target.rejected_by_winner_gate = true;
+    result.color_debug.target.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_SIZE;
+    gate.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_NONE;
+    gate.matched_candidate_index = 2;
+    gate.raw_best_color_candidate_index = 2;
+    anomaly_result_publish_color_debug_target_gate_stage(&result, &gate);
+
+    EXPECT(!result.color_debug.target.rejected_by_winner_gate &&
+           result.color_debug.target.winner_gate_reject_reason == ANOMALY_COLOR_WINNER_GATE_NONE,
+           "result builder color target gate stage: none reason clears rejection");
+}
+
+static void test_result_publish_color_debug_target_gate_stage_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_gate_stage_publication_t gate;
+    memset(&result, 0, sizeof(result));
+    memset(&gate, 0, sizeof(gate));
+    result.color_debug.raw_score = 0.77f;
+    result.color_debug.candidate_count = 3;
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.color_debug.target.extracted_candidate_index = 1;
+    result.color_debug.target.matched_candidate_index = 2;
+    result.color_debug.target.nearest_candidate_index = 3;
+    result.color_debug.target.component_bbox_left_norm = 0.11f;
+    result.color_debug.target.matched_candidate_score = 0.91f;
+    result.thermal_debug.raw_score = 0.44f;
+    gate.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_SIZE_AND_COMMONNESS;
+    gate.matched_candidate_index = 2;
+    gate.raw_best_color_candidate_index = 2;
+    gate.stage = ANOMALY_COLOR_TARGET_STAGE_WINNER;
+
+    anomaly_result_publish_color_debug_target_gate_stage(&result, &gate);
+
+    EXPECT(result.color_debug.target.rejected_by_winner_gate &&
+           result.color_debug.target.winner_gate_reject_reason ==
+               ANOMALY_COLOR_WINNER_GATE_SIZE_AND_COMMONNESS &&
+           result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_WINNER,
+           "result builder color target gate stage: requested fields are published");
+    EXPECT(result.color_debug.target.extracted_candidate_index == 1 &&
+           result.color_debug.target.matched_candidate_index == 2 &&
+           result.color_debug.target.nearest_candidate_index == 3,
+           "result builder color target gate stage: candidate index fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_left_norm, 0.11f, 0.0001f,
+                "result builder color target gate stage: component bbox fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 0.91f, 0.0001f,
+                "result builder color target gate stage: matched candidate fields are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.77f, 0.0001f,
+                "result builder color target gate stage: color summary is preserved");
+    EXPECT(result.color_debug.candidate_count == 3 &&
+           result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 88 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color target gate stage: candidates and unrelated fields are preserved");
+}
+
+static void test_result_publish_color_debug_target_matched_candidate_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_matched_candidate_publication_t matched;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&matched, 0, sizeof(matched));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_target_matched_candidate(NULL, &matched);
+    anomaly_result_publish_color_debug_target_matched_candidate(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color target matched candidate: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_target_matched_candidate_publishes_detail(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_matched_candidate_publication_t matched;
+    memset(&result, 0, sizeof(result));
+    memset(&matched, 0, sizeof(matched));
+    matched.valid = true;
+    matched.score = 3.25f;
+    matched.pixel_x = 50;
+    matched.pixel_y = 40;
+    matched.roi_x0 = 10;
+    matched.roi_y0 = 20;
+    matched.sample_step = 4;
+    matched.min_x = 5;
+    matched.min_y = 6;
+    matched.max_x = 7;
+    matched.max_y = 8;
+    matched.frame_w = 100.0f;
+    matched.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_target_matched_candidate(&result, &matched);
+
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 3.25f, 0.0001f,
+                "result builder color target matched candidate: score is copied");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_x_norm, 0.5f, 0.0001f,
+                "result builder color target matched candidate: x norm is copied");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_y_norm, 0.5f, 0.0001f,
+                "result builder color target matched candidate: y norm is copied");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_left_norm, 0.28f, 0.0001f,
+                "result builder color target matched candidate: bbox left normalizes");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_top_norm, 0.525f, 0.0001f,
+                "result builder color target matched candidate: bbox top normalizes");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_right_norm, 0.44f, 0.0001f,
+                "result builder color target matched candidate: bbox right normalizes");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_bottom_norm, 0.725f, 0.0001f,
+                "result builder color target matched candidate: bbox bottom normalizes");
+}
+
+static void test_result_publish_color_debug_target_matched_candidate_invalid_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_matched_candidate_publication_t matched;
+    memset(&result, 0, sizeof(result));
+    memset(&matched, 0, sizeof(matched));
+    result.color_debug.target.matched_candidate_score = 0.91f;
+    result.color_debug.target.matched_candidate_x_norm = 0.12f;
+    result.color_debug.target.matched_candidate_y_norm = 0.34f;
+    result.color_debug.target.matched_bbox_left_norm = 0.11f;
+    result.color_debug.target.matched_bbox_top_norm = 0.22f;
+    result.color_debug.target.matched_bbox_right_norm = 0.33f;
+    result.color_debug.target.matched_bbox_bottom_norm = 0.44f;
+    matched.valid = false;
+    matched.score = 4.0f;
+    matched.pixel_x = 60;
+    matched.pixel_y = 32;
+    matched.frame_w = 100.0f;
+    matched.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_target_matched_candidate(&result, &matched);
+
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 0.91f, 0.0001f,
+                "result builder color target matched candidate: invalid publication preserves score");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_x_norm, 0.12f, 0.0001f,
+                "result builder color target matched candidate: invalid publication preserves x norm");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_y_norm, 0.34f, 0.0001f,
+                "result builder color target matched candidate: invalid publication preserves y norm");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_left_norm, 0.11f, 0.0001f,
+                "result builder color target matched candidate: invalid publication preserves bbox left");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_bottom_norm, 0.44f, 0.0001f,
+                "result builder color target matched candidate: invalid publication preserves bbox bottom");
+}
+
+static void test_result_publish_color_debug_target_matched_candidate_invalid_bbox_zeroes(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_matched_candidate_publication_t matched;
+    memset(&result, 0, sizeof(result));
+    memset(&matched, 0, sizeof(matched));
+    result.color_debug.target.matched_bbox_left_norm = 0.11f;
+    result.color_debug.target.matched_bbox_top_norm = 0.22f;
+    result.color_debug.target.matched_bbox_right_norm = 0.33f;
+    result.color_debug.target.matched_bbox_bottom_norm = 0.44f;
+    matched.valid = true;
+    matched.score = 1.5f;
+    matched.pixel_x = 25;
+    matched.pixel_y = 30;
+    matched.roi_x0 = 10;
+    matched.roi_y0 = 20;
+    matched.sample_step = 4;
+    matched.min_x = 5;
+    matched.min_y = 6;
+    matched.max_x = 4;
+    matched.max_y = 6;
+    matched.frame_w = 100.0f;
+    matched.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_target_matched_candidate(&result, &matched);
+
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 1.5f, 0.0001f,
+                "result builder color target matched candidate: score still copies for invalid bbox");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_left_norm, 0.0f, 0.0001f,
+                "result builder color target matched candidate: invalid bbox left zeroes");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_top_norm, 0.0f, 0.0001f,
+                "result builder color target matched candidate: invalid bbox top zeroes");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_right_norm, 0.0f, 0.0001f,
+                "result builder color target matched candidate: invalid bbox right zeroes");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_bottom_norm, 0.0f, 0.0001f,
+                "result builder color target matched candidate: invalid bbox bottom zeroes");
+}
+
+static void test_result_publish_color_debug_target_matched_candidate_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_target_matched_candidate_publication_t matched;
+    memset(&result, 0, sizeof(result));
+    memset(&matched, 0, sizeof(matched));
+    result.color_debug.raw_score = 0.77f;
+    result.color_debug.candidate_count = 3;
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.color_debug.target.enabled = true;
+    result.color_debug.target.pixel_x = 101;
+    result.color_debug.target.component_bbox_left_norm = 0.11f;
+    result.color_debug.target.extracted_candidate_index = 1;
+    result.color_debug.target.matched_candidate_index = 2;
+    result.color_debug.target.nearest_candidate_index = 3;
+    result.color_debug.target.rejected_by_winner_gate = true;
+    result.color_debug.target.winner_gate_reject_reason = ANOMALY_COLOR_WINNER_GATE_COMMONNESS;
+    result.color_debug.target.stage = ANOMALY_COLOR_TARGET_STAGE_WINNER;
+    result.thermal_debug.raw_score = 0.44f;
+    matched.valid = true;
+    matched.score = 4.5f;
+    matched.pixel_x = 60;
+    matched.pixel_y = 32;
+    matched.roi_x0 = 10;
+    matched.roi_y0 = 20;
+    matched.sample_step = 4;
+    matched.min_x = 5;
+    matched.min_y = 6;
+    matched.max_x = 7;
+    matched.max_y = 8;
+    matched.frame_w = 100.0f;
+    matched.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_target_matched_candidate(&result, &matched);
+
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 4.5f, 0.0001f,
+                "result builder color target matched candidate: requested score is published");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_x_norm, 0.6f, 0.0001f,
+                "result builder color target matched candidate: requested x norm is published");
+    EXPECT_NEAR(result.color_debug.target.matched_bbox_left_norm, 0.28f, 0.0001f,
+                "result builder color target matched candidate: requested bbox is published");
+    EXPECT(result.color_debug.target.enabled &&
+           result.color_debug.target.pixel_x == 101 &&
+           result.color_debug.target.extracted_candidate_index == 1 &&
+           result.color_debug.target.matched_candidate_index == 2 &&
+           result.color_debug.target.nearest_candidate_index == 3,
+           "result builder color target matched candidate: base and index fields are preserved");
+    EXPECT(result.color_debug.target.rejected_by_winner_gate &&
+           result.color_debug.target.winner_gate_reject_reason ==
+               ANOMALY_COLOR_WINNER_GATE_COMMONNESS &&
+           result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_WINNER,
+           "result builder color target matched candidate: winner gate and stage fields are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.77f, 0.0001f,
+                "result builder color target matched candidate: color summary is preserved");
+    EXPECT(result.color_debug.candidate_count == 3 &&
+           result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 88 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color target matched candidate: candidates and unrelated fields are preserved");
 }
 
 static void test_result_build_boxes_target_tracks_take_priority(void) {
@@ -6474,6 +8079,58 @@ static void test_detector_facade_rejects_unsupported_format(void) {
 
 // ── MotionEstimator movement snapshot tests ───────────────────────────────
 
+static void test_motion_estimator_default_sidecar_ops_contract(void) {
+    const anomaly_motion_estimator_sidecar_ops_t *ops =
+        anomaly_motion_estimator_default_sidecar_ops();
+    EXPECT(ops != NULL && ops == anomaly_motion_estimator_default_sidecar_ops(),
+           "motion estimator default ops: accessor returns stable singleton");
+    EXPECT(ops->project_cell != NULL &&
+           ops->find_residual_displacement != NULL &&
+           ops->registration_valid != NULL,
+           "motion estimator default ops: all callback slots are populated");
+
+    anomaly_registration_model_t model =
+        anomaly_registration_model_make(ANOMALY_REGISTRATION_AFFINE, 3, 4);
+    EXPECT(!ops->registration_valid(NULL),
+           "motion estimator default ops: null registration is invalid");
+    EXPECT(!ops->registration_valid(&model),
+           "motion estimator default ops: model without valid similarity is invalid");
+    model.similarity.valid = true;
+    EXPECT(ops->registration_valid(&model),
+           "motion estimator default ops: valid model is accepted");
+
+    int px = -1;
+    int py = -1;
+    EXPECT(!anomaly_motion_estimator_project_cell(NULL, 100, 80, 5, 20, 16, 4, 3, &px, &py),
+           "motion estimator default ops: null registration projection is rejected");
+    EXPECT(!anomaly_motion_estimator_project_cell(&model, 1, 80, 5, 20, 16, 4, 3, &px, &py),
+           "motion estimator default ops: invalid frame dimensions reject projection");
+
+    model.affine[0] = 1.0f;
+    model.affine[1] = 0.0f;
+    model.affine[2] = 0.0f;
+    model.affine[3] = 0.0f;
+    model.affine[4] = 1.0f;
+    model.affine[5] = 0.0f;
+    EXPECT(anomaly_motion_estimator_project_cell(&model, 101, 81, 5, 21, 17, 4, 3, &px, &py),
+           "motion estimator project cell: identity projection succeeds in bounds");
+    EXPECT(px == 4 && py == 3,
+           "motion estimator project cell: identity projection maps to same motion cell");
+    px = -1;
+    py = -1;
+    EXPECT(ops->project_cell(&model, 101, 81, 5, 21, 17, 4, 3, &px, &py),
+           "motion estimator default ops: project callback forwards public helper");
+    EXPECT(px == 4 && py == 3,
+           "motion estimator default ops: project callback preserves helper output");
+
+    model.affine[2] = 0.10f;
+    model.affine[5] = -0.125f;
+    EXPECT(anomaly_motion_estimator_project_cell(&model, 101, 81, 5, 21, 17, 4, 3, &px, &py),
+           "motion estimator project cell: translated projection succeeds in bounds");
+    EXPECT(px == 6 && py == 1,
+           "motion estimator project cell: translated projection uses registration affine");
+}
+
 static void test_motion_estimator_texture_scale_boundaries(void) {
     EXPECT_NEAR(anomaly_motion_estimator_texture_scale(8), 0.0f, 0.0001f,
                 "motion texture scale: score <= 8 returns zero");
@@ -6523,6 +8180,390 @@ static void test_motion_estimator_structure_scale_strong_corner(void) {
 
     EXPECT(scale > 0.0f, "motion structure scale: strong corner scores positive");
     EXPECT(scale <= 1.0f, "motion structure scale: strong corner remains clamped");
+}
+
+static void test_motion_estimator_appearance_zoom_motion_scale_contract(void) {
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_zoom_motion_scale(1.0f), 1.0f, 0.0001f,
+                "motion appearance zoom scale: identity scale stays unsuppressed");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_zoom_motion_scale(1.003f), 1.0f, 0.0001f,
+                "motion appearance zoom scale: tiny zoom delta stays unsuppressed");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_zoom_motion_scale(1.011f), 0.5f, 0.0001f,
+                "motion appearance zoom scale: positive midpoint delta matches legacy ramp");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_zoom_motion_scale(0.989f), 0.5f, 0.0001f,
+                "motion appearance zoom scale: negative midpoint delta uses absolute scale delta");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_zoom_motion_scale(1.018f), 0.0f, 0.0001f,
+                "motion appearance zoom scale: ramp floor reaches zero");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_zoom_motion_scale(1.040f), 0.0f, 0.0001f,
+                "motion appearance zoom scale: larger zoom delta remains clamped at zero");
+}
+
+static void test_motion_estimator_appearance_broad_motion_scale_contract(void) {
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_broad_motion_scale(0.0f), 1.0f, 0.0001f,
+                "motion appearance broad scale: zero load stays unsuppressed");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_broad_motion_scale(0.12f), 1.0f, 0.0001f,
+                "motion appearance broad scale: threshold load stays unsuppressed");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_broad_motion_scale(0.21f), 0.5f, 0.0001f,
+                "motion appearance broad scale: midpoint load matches legacy ramp");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_broad_motion_scale(0.30f), 0.20f, 0.0001f,
+                "motion appearance broad scale: ramp floor clamps to legacy minimum");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_broad_motion_scale(0.60f), 0.20f, 0.0001f,
+                "motion appearance broad scale: high load remains clamped to legacy minimum");
+}
+
+static void test_motion_estimator_appearance_global_stats_defaults(void) {
+    anomaly_motion_appearance_global_stats_t stats = {
+        .mean = 10.0f,
+        .std = 11.0f,
+        .motion_floor_px = 12.0f,
+    };
+
+    anomaly_motion_estimator_appearance_global_stats(0.0, 0.0, 0, 4, &stats);
+
+    EXPECT_NEAR(stats.mean, 0.0f, 0.0001f,
+                "motion appearance global stats: no samples default mean zero");
+    EXPECT_NEAR(stats.std, 2.0f, 0.0001f,
+                "motion appearance global stats: no samples default std half motion step");
+    EXPECT_NEAR(stats.motion_floor_px, 4.0f, 0.0001f,
+                "motion appearance global stats: no samples default floor motion step");
+}
+
+static void test_motion_estimator_appearance_global_stats_variance_floor(void) {
+    anomaly_motion_appearance_global_stats_t stats;
+
+    anomaly_motion_estimator_appearance_global_stats(20.0, 100.0, 4, 4, &stats);
+
+    EXPECT_NEAR(stats.mean, 5.0f, 0.0001f,
+                "motion appearance global stats: mean follows sum/count");
+    EXPECT_NEAR(stats.std, 1.4f, 0.0001f,
+                "motion appearance global stats: std clamps to motion-step floor");
+    EXPECT_NEAR(stats.motion_floor_px, 6.05f, 0.0001f,
+                "motion appearance global stats: floor follows mean plus std multiplier");
+}
+
+static void test_motion_estimator_appearance_global_stats_motion_floor_minimum(void) {
+    anomaly_motion_appearance_global_stats_t stats;
+
+    anomaly_motion_estimator_appearance_global_stats(2.0, 2.0, 2, 4, &stats);
+
+    EXPECT_NEAR(stats.mean, 1.0f, 0.0001f,
+                "motion appearance global stats: low residual mean copied");
+    EXPECT_NEAR(stats.std, 1.4f, 0.0001f,
+                "motion appearance global stats: low variance still clamps std");
+    EXPECT_NEAR(stats.motion_floor_px, 3.4f, 0.0001f,
+                "motion appearance global stats: floor clamps to motion-step minimum");
+}
+
+static void test_motion_estimator_appearance_global_stats_null_out_safe(void) {
+    anomaly_motion_estimator_appearance_global_stats(8.0, 16.0, 2, 4, NULL);
+}
+
+static void test_motion_estimator_appearance_global_motion_load_contract(void) {
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_global_motion_load(0, 0), 0.0f, 0.0001f,
+                "motion appearance global load: zero count defaults to zero");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_global_motion_load(3, 0), 0.0f, 0.0001f,
+                "motion appearance global load: positive strong count with zero total defaults to zero");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_global_motion_load(0, 4), 0.0f, 0.0001f,
+                "motion appearance global load: no strong samples returns zero");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_global_motion_load(2, 8), 0.25f, 0.0001f,
+                "motion appearance global load: normal ratio matches legacy fraction");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_global_motion_load(9, 6), 1.5f, 0.0001f,
+                "motion appearance global load: helper preserves unclamped ratio behavior");
+}
+
+static void test_motion_estimator_populate_appearance_debug_summary_null_safe(void) {
+    anomaly_motion_estimator_populate_appearance_debug_summary(
+            NULL,
+            true,
+            3,
+            4,
+            5,
+            6,
+            1.25f,
+            2.5f,
+            0.75f,
+            0.65f,
+            0.35f);
+}
+
+static void test_motion_estimator_populate_appearance_debug_summary_fields(void) {
+    anomaly_debug_motion_t debug;
+    memset(&debug, 0, sizeof(debug));
+
+    anomaly_motion_estimator_populate_appearance_debug_summary(
+            &debug,
+            true,
+            3,
+            4,
+            5,
+            0,
+            1.25f,
+            2.5f,
+            0.75f,
+            0.65f,
+            0.35f);
+
+    EXPECT(debug.valid,
+           "motion appearance debug summary: global samples make debug valid");
+    EXPECT(debug.scene_discontinuity,
+           "motion appearance debug summary: scene discontinuity copied");
+    EXPECT(debug.sample_step == 3 && debug.motion_step == 4,
+           "motion appearance debug summary: step fields copied");
+    EXPECT(debug.sample_count == 5,
+           "motion appearance debug summary: sample count copied");
+    EXPECT_NEAR(debug.residual_mean, 1.25f, 0.0001f,
+                "motion appearance debug summary: residual mean copied");
+    EXPECT_NEAR(debug.residual_std, 2.5f, 0.0001f,
+                "motion appearance debug summary: residual std copied");
+    EXPECT_NEAR(debug.zoom_motion_scale, 0.75f, 0.0001f,
+                "motion appearance debug summary: zoom scale copied");
+    EXPECT_NEAR(debug.broad_motion_scale, 0.65f, 0.0001f,
+                "motion appearance debug summary: broad scale copied");
+    EXPECT_NEAR(debug.global_motion_load, 0.35f, 0.0001f,
+                "motion appearance debug summary: global load copied");
+
+    memset(&debug, 0, sizeof(debug));
+    anomaly_motion_estimator_populate_appearance_debug_summary(
+            &debug,
+            false,
+            3,
+            4,
+            0,
+            2,
+            1.25f,
+            2.5f,
+            0.75f,
+            0.65f,
+            0.35f);
+    EXPECT(debug.valid,
+           "motion appearance debug summary: motion candidates make debug valid");
+
+    memset(&debug, 0, sizeof(debug));
+    anomaly_motion_estimator_populate_appearance_debug_summary(
+            &debug,
+            false,
+            3,
+            4,
+            0,
+            0,
+            1.25f,
+            2.5f,
+            0.75f,
+            0.65f,
+            0.35f);
+    EXPECT(!debug.valid,
+           "motion appearance debug summary: no samples or candidates leaves debug invalid");
+}
+
+static void test_motion_estimator_populate_appearance_debug_summary_preserves_later_fields(void) {
+    anomaly_debug_motion_t debug;
+    memset(&debug, 0, sizeof(debug));
+    debug.raw_candidate_valid = true;
+    debug.raw_score = 9.0f;
+    debug.raw_x_norm = 0.25f;
+    debug.raw_y_norm = 0.75f;
+    debug.winner_texture_scale = 0.44f;
+    debug.winner_structure_scale = 0.55f;
+    debug.winner_support_scale = 0.66f;
+    debug.winner_persistence_scale = 0.77f;
+    debug.top_candidate_count = 1;
+    debug.top_candidates[0].pixel_x = 12;
+    debug.top_candidates[0].pixel_y = 34;
+
+    anomaly_motion_estimator_populate_appearance_debug_summary(
+            &debug,
+            false,
+            3,
+            4,
+            5,
+            6,
+            1.25f,
+            2.5f,
+            0.75f,
+            0.65f,
+            0.35f);
+
+    EXPECT(debug.raw_candidate_valid,
+           "motion appearance debug summary: raw candidate flag preserved");
+    EXPECT_NEAR(debug.raw_score, 9.0f, 0.0001f,
+                "motion appearance debug summary: raw score preserved");
+    EXPECT_NEAR(debug.raw_x_norm, 0.25f, 0.0001f,
+                "motion appearance debug summary: raw x preserved");
+    EXPECT_NEAR(debug.raw_y_norm, 0.75f, 0.0001f,
+                "motion appearance debug summary: raw y preserved");
+    EXPECT_NEAR(debug.winner_texture_scale, 0.44f, 0.0001f,
+                "motion appearance debug summary: winner texture preserved");
+    EXPECT_NEAR(debug.winner_structure_scale, 0.55f, 0.0001f,
+                "motion appearance debug summary: winner structure preserved");
+    EXPECT_NEAR(debug.winner_support_scale, 0.66f, 0.0001f,
+                "motion appearance debug summary: winner support preserved");
+    EXPECT_NEAR(debug.winner_persistence_scale, 0.77f, 0.0001f,
+                "motion appearance debug summary: winner persistence preserved");
+    EXPECT(debug.top_candidate_count == 1 &&
+           debug.top_candidates[0].pixel_x == 12 &&
+           debug.top_candidates[0].pixel_y == 34,
+           "motion appearance debug summary: top candidates preserved");
+}
+
+static void test_motion_estimator_populate_appearance_debug_result_null_safe(void) {
+    anomaly_debug_candidate_t top[1];
+    memset(top, 0, sizeof(top));
+    anomaly_motion_estimator_populate_appearance_debug_result(
+            NULL,
+            0.25f,
+            12,
+            24,
+            192.0f,
+            108.0f,
+            0.10f,
+            0.20f,
+            0.30f,
+            0.40f,
+            0.50f,
+            0.60f,
+            0.70f,
+            0.80f,
+            0.90f,
+            1.00f,
+            top,
+            1);
+    EXPECT(true, "motion appearance debug result: NULL debug is safe");
+}
+
+static void test_motion_estimator_populate_appearance_debug_result_raw_candidate(void) {
+    anomaly_debug_motion_t debug;
+    memset(&debug, 0x5A, sizeof(debug));
+    debug.valid = true;
+    debug.scene_discontinuity = true;
+    debug.sample_step = 6;
+    debug.motion_step = 12;
+    debug.sample_count = 34;
+    debug.residual_mean = 1.25f;
+    debug.residual_std = 2.50f;
+
+    anomaly_motion_estimator_populate_appearance_debug_result(
+            &debug,
+            -0.01f,
+            12,
+            24,
+            192.0f,
+            108.0f,
+            0.11f,
+            0.22f,
+            0.33f,
+            0.44f,
+            0.55f,
+            0.66f,
+            0.77f,
+            0.88f,
+            0.99f,
+            1.09f,
+            NULL,
+            0);
+
+    EXPECT(!debug.raw_candidate_valid,
+           "motion appearance debug result: negative raw score is invalid");
+    EXPECT_NEAR(debug.raw_x_norm, 0.0625f, 0.0001f,
+                "motion appearance debug result: raw x follows legacy coordinate convention");
+    EXPECT_NEAR(debug.raw_y_norm, 0.2222f, 0.0001f,
+                "motion appearance debug result: raw y follows legacy coordinate convention");
+    EXPECT(debug.valid && debug.scene_discontinuity &&
+           debug.sample_step == 6 &&
+           debug.motion_step == 12 &&
+           debug.sample_count == 34,
+           "motion appearance debug result: early summary metadata is preserved");
+    EXPECT_NEAR(debug.residual_mean, 1.25f, 0.0001f,
+                "motion appearance debug result: residual mean is preserved");
+    EXPECT_NEAR(debug.residual_std, 2.50f, 0.0001f,
+                "motion appearance debug result: residual std is preserved");
+
+    anomaly_motion_estimator_populate_appearance_debug_result(
+            &debug,
+            0.81f,
+            96,
+            54,
+            192.0f,
+            108.0f,
+            0.12f,
+            0.23f,
+            0.34f,
+            0.45f,
+            0.56f,
+            0.67f,
+            0.78f,
+            0.89f,
+            0.91f,
+            0.92f,
+            NULL,
+            0);
+
+    EXPECT(debug.raw_candidate_valid,
+           "motion appearance debug result: nonnegative raw score is valid");
+    EXPECT_NEAR(debug.raw_score, 0.81f, 0.0001f,
+                "motion appearance debug result: raw score is copied");
+    EXPECT_NEAR(debug.raw_x_norm, 0.50f, 0.0001f,
+                "motion appearance debug result: raw x normalizes by frame width");
+    EXPECT_NEAR(debug.raw_y_norm, 0.50f, 0.0001f,
+                "motion appearance debug result: raw y normalizes by frame height");
+}
+
+static void test_motion_estimator_populate_appearance_debug_result_fields_and_top(void) {
+    anomaly_debug_motion_t debug;
+    anomaly_debug_candidate_t top[ANOMALY_DEBUG_TOP_CANDIDATES + 2];
+    memset(&debug, 0, sizeof(debug));
+    memset(top, 0, sizeof(top));
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_CANDIDATES + 2; i++) {
+        top[i].valid = true;
+        top[i].pixel_x = 10 + i;
+        top[i].pixel_y = 20 + i;
+        top[i].combined_score = 0.90f - (float)i * 0.05f;
+    }
+
+    anomaly_motion_estimator_populate_appearance_debug_result(
+            &debug,
+            0.42f,
+            8,
+            16,
+            64.0f,
+            32.0f,
+            0.10f,
+            0.20f,
+            0.30f,
+            0.40f,
+            1.10f,
+            1.20f,
+            1.30f,
+            1.40f,
+            1.50f,
+            1.60f,
+            top,
+            ANOMALY_DEBUG_TOP_CANDIDATES + 2);
+
+    EXPECT_NEAR(debug.winner_component_area_frac, 0.10f, 0.0001f,
+                "motion appearance debug result: winner area is copied");
+    EXPECT_NEAR(debug.winner_component_span_frac, 0.20f, 0.0001f,
+                "motion appearance debug result: winner span is copied");
+    EXPECT_NEAR(debug.winner_component_fill_ratio, 0.30f, 0.0001f,
+                "motion appearance debug result: winner fill is copied");
+    EXPECT_NEAR(debug.zoom_motion_scale, 0.40f, 0.0001f,
+                "motion appearance debug result: zoom scale is copied");
+    EXPECT_NEAR(debug.broad_motion_scale, 1.10f, 0.0001f,
+                "motion appearance debug result: broad scale is copied");
+    EXPECT_NEAR(debug.global_motion_load, 1.20f, 0.0001f,
+                "motion appearance debug result: global load is copied");
+    EXPECT_NEAR(debug.winner_texture_scale, 1.30f, 0.0001f,
+                "motion appearance debug result: texture scale is copied");
+    EXPECT_NEAR(debug.winner_structure_scale, 1.40f, 0.0001f,
+                "motion appearance debug result: structure scale is copied");
+    EXPECT_NEAR(debug.winner_support_scale, 1.50f, 0.0001f,
+                "motion appearance debug result: support scale is copied");
+    EXPECT_NEAR(debug.winner_persistence_scale, 1.60f, 0.0001f,
+                "motion appearance debug result: persistence scale is copied");
+    EXPECT(debug.top_candidate_count == ANOMALY_DEBUG_TOP_CANDIDATES,
+           "motion appearance debug result: top candidate count is clamped");
+    EXPECT(debug.top_candidates[0].pixel_x == 10 &&
+           debug.top_candidates[ANOMALY_DEBUG_TOP_CANDIDATES - 1].pixel_x ==
+               10 + ANOMALY_DEBUG_TOP_CANDIDATES - 1,
+           "motion appearance debug result: top candidates are copied in order");
 }
 
 static void test_motion_estimator_residual_displacement_rejects_invalid_and_miss(void) {
@@ -6644,6 +8685,346 @@ static void test_motion_estimator_appearance_scorer_output_init_clears_scores(vo
         EXPECT(out.scores[i].pixel_x == 0 && out.scores[i].pixel_y == 0,
                "motion appearance output init: prefilled score pixels cleared");
     }
+}
+
+static anomaly_motion_appearance_scorer_input_t motion_appearance_ready_input(
+        int algorithm_mask) {
+    static uint8_t curr_luma[16];
+    static uint8_t prev_luma[16];
+    static anomaly_config_t cfg;
+    static anomaly_motion_appearance_scorer_state_t scorer_state;
+    anomaly_motion_appearance_scorer_input_t input;
+    cfg = default_cfg(algorithm_mask);
+    memset(&input, 0, sizeof(input));
+    memset(&scorer_state, 0, sizeof(scorer_state));
+    input.cfg = &cfg;
+    input.curr_luma = curr_luma;
+    input.prev_luma = prev_luma;
+    input.prev_luma_width = 4;
+    input.prev_luma_height = 4;
+    input.motion_w = 4;
+    input.motion_h = 4;
+    input.anomaly_detection_active = true;
+    input.scene_discontinuity = false;
+    input.state = &scorer_state;
+    return input;
+}
+
+static anomaly_motion_appearance_scorer_input_args_t motion_appearance_input_args(
+        int algorithm_mask) {
+    static uint8_t curr_luma[16];
+    static uint8_t prev_luma[16];
+    static anomaly_config_t cfg;
+    static float saliency_motion_map[4];
+    static float saliency_registration_map[4];
+    static float persist[16];
+    static anomaly_motion_appearance_proposal_t proposals[2];
+    anomaly_motion_appearance_scorer_input_args_t args;
+    cfg = default_cfg(algorithm_mask);
+    memset(&args, 0, sizeof(args));
+    args.cfg = &cfg;
+    args.registration = (const anomaly_motion_estimator_registration_t *)&cfg;
+    args.curr_luma = curr_luma;
+    args.prev_luma = prev_luma;
+    args.prev_luma_width = 4;
+    args.prev_luma_height = 4;
+    args.width = 8;
+    args.height = 8;
+    args.motion_w = 4;
+    args.motion_h = 4;
+    args.motion_step = 2;
+    args.motion_count = 16;
+    args.roi_x0 = 1;
+    args.roi_x1 = 7;
+    args.roi_y0 = 2;
+    args.roi_y1 = 8;
+    args.anomaly_detection_active = true;
+    args.scene_discontinuity = false;
+    args.motion_evidence_scale = 1.25f;
+    args.saliency_motion_map = saliency_motion_map;
+    args.saliency_registration_map = saliency_registration_map;
+    args.sg_w = 2;
+    args.sg_h = 2;
+    args.sample_step = 4;
+    args.proposal_count = 2;
+    args.proposals = proposals;
+    args.persist = persist;
+    args.persist_w = 4;
+    args.persist_h = 4;
+    return args;
+}
+
+static void test_motion_estimator_init_appearance_scorer_input_null_safe(void) {
+    anomaly_motion_estimator_init_appearance_scorer_input(NULL, NULL, NULL);
+
+    anomaly_motion_appearance_scorer_input_t input;
+    anomaly_motion_appearance_scorer_state_t scorer_state;
+    memset(&input, 0x7F, sizeof(input));
+    memset(&scorer_state, 0x7F, sizeof(scorer_state));
+
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, NULL);
+
+    EXPECT(input.cfg == NULL,
+           "motion appearance input init: null args clear input config");
+    EXPECT(input.state == &scorer_state,
+           "motion appearance input init: null args still attach caller state");
+    EXPECT(scorer_state.persist == NULL,
+           "motion appearance input init: null args clear state persist pointer");
+    EXPECT(scorer_state.persist_w == 0 && scorer_state.persist_h == 0,
+           "motion appearance input init: null args clear state dimensions");
+}
+
+static void test_motion_estimator_init_appearance_scorer_input_copies_contract_fields(void) {
+    anomaly_motion_appearance_scorer_input_args_t args =
+        motion_appearance_input_args(ANOMALY_ALGO_MOTION);
+    anomaly_motion_appearance_scorer_input_t input;
+    anomaly_motion_appearance_scorer_state_t scorer_state;
+
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+
+    EXPECT(input.cfg == args.cfg,
+           "motion appearance input init: copies config pointer");
+    EXPECT(input.registration == args.registration,
+           "motion appearance input init: copies registration pointer");
+    EXPECT(input.curr_luma == args.curr_luma && input.prev_luma == args.prev_luma,
+           "motion appearance input init: copies luma pointers");
+    EXPECT(input.prev_luma_width == args.prev_luma_width &&
+           input.prev_luma_height == args.prev_luma_height,
+           "motion appearance input init: copies previous luma dimensions");
+    EXPECT(input.width == args.width && input.height == args.height,
+           "motion appearance input init: copies frame dimensions");
+    EXPECT(input.motion_w == args.motion_w && input.motion_h == args.motion_h &&
+           input.motion_step == args.motion_step && input.motion_count == args.motion_count,
+           "motion appearance input init: copies motion-grid dimensions");
+    EXPECT(input.roi_x0 == args.roi_x0 && input.roi_x1 == args.roi_x1 &&
+           input.roi_y0 == args.roi_y0 && input.roi_y1 == args.roi_y1,
+           "motion appearance input init: copies ROI bounds");
+    EXPECT(input.anomaly_detection_active == args.anomaly_detection_active &&
+           input.scene_discontinuity == args.scene_discontinuity,
+           "motion appearance input init: copies lifecycle gates");
+    EXPECT_NEAR(input.motion_evidence_scale, args.motion_evidence_scale, 0.0001f,
+                "motion appearance input init: copies motion evidence scale");
+    EXPECT(input.saliency_motion_map == args.saliency_motion_map &&
+           input.saliency_registration_map == args.saliency_registration_map,
+           "motion appearance input init: copies saliency maps");
+    EXPECT(input.sg_w == args.sg_w && input.sg_h == args.sg_h &&
+           input.sample_step == args.sample_step,
+           "motion appearance input init: copies saliency-grid dimensions");
+    EXPECT(input.proposal_count == args.proposal_count && input.proposals == args.proposals,
+           "motion appearance input init: copies proposals");
+    EXPECT(input.state == &scorer_state,
+           "motion appearance input init: attaches caller-owned state");
+    EXPECT(scorer_state.persist == args.persist &&
+           scorer_state.persist_w == args.persist_w &&
+           scorer_state.persist_h == args.persist_h,
+           "motion appearance input init: initializes caller-owned persist state");
+}
+
+static void test_motion_estimator_sync_appearance_scorer_state_null_safe(void) {
+    anomaly_motion_estimator_sync_appearance_scorer_state(NULL, NULL, 0, 0);
+
+    anomaly_motion_appearance_scorer_state_t scorer_state = {
+        .persist = (float *)0x1,
+        .persist_w = 7,
+        .persist_h = 8,
+    };
+
+    anomaly_motion_estimator_sync_appearance_scorer_state(&scorer_state, NULL, 0, 0);
+
+    EXPECT(scorer_state.persist == NULL,
+           "motion appearance state sync: null persist clears pointer");
+    EXPECT(scorer_state.persist_w == 0 && scorer_state.persist_h == 0,
+           "motion appearance state sync: null persist dimensions copied");
+}
+
+static void test_motion_estimator_sync_appearance_scorer_state_copies_metadata(void) {
+    float persist[16];
+    anomaly_motion_appearance_scorer_state_t scorer_state;
+    memset(&scorer_state, 0, sizeof(scorer_state));
+
+    anomaly_motion_estimator_sync_appearance_scorer_state(&scorer_state, persist, 4, 4);
+
+    EXPECT(scorer_state.persist == persist,
+           "motion appearance state sync: persist pointer copied");
+    EXPECT(scorer_state.persist_w == 4 && scorer_state.persist_h == 4,
+           "motion appearance state sync: persist dimensions copied");
+}
+
+static void test_motion_estimator_init_appearance_scorer_input_derives_motion_modes(void) {
+    anomaly_motion_appearance_scorer_input_args_t args =
+        motion_appearance_input_args(ANOMALY_ALGO_MOTION);
+    anomaly_motion_appearance_scorer_input_t input;
+    anomaly_motion_appearance_scorer_state_t scorer_state;
+
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+    EXPECT(input.use_stable_motion && !input.use_motion_tolerance,
+           "motion appearance input init: motion-only mask enables stable motion");
+
+    args = motion_appearance_input_args(ANOMALY_ALGO_MOTION_TOLERANCE);
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+    EXPECT(!input.use_stable_motion && input.use_motion_tolerance,
+           "motion appearance input init: tolerance mask disables stable motion");
+
+    args = motion_appearance_input_args(ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE);
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+    EXPECT(!input.use_stable_motion && input.use_motion_tolerance,
+           "motion appearance input init: tolerance wins over stable motion");
+
+    args = motion_appearance_input_args(ANOMALY_ALGO_PERSIST);
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+    EXPECT(!input.use_stable_motion && !input.use_motion_tolerance,
+           "motion appearance input init: persist-only mask uses neither motion mode");
+}
+
+static void test_motion_estimator_init_appearance_scorer_input_feeds_ready_contract(void) {
+    anomaly_motion_appearance_scorer_input_args_t args =
+        motion_appearance_input_args(ANOMALY_ALGO_MOTION);
+    anomaly_motion_appearance_scorer_input_t input;
+    anomaly_motion_appearance_scorer_state_t scorer_state;
+
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+    EXPECT(anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance input init: initialized motion input is ready");
+
+    args.prev_luma_height = 3;
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance input init: initialized mismatch remains not ready");
+}
+
+static anomaly_motion_appearance_scorer_input_t motion_appearance_grid_bounds_input(
+        int roi_x0,
+        int roi_x1,
+        int roi_y0,
+        int roi_y1,
+        int motion_step,
+        int motion_w,
+        int motion_h) {
+    anomaly_motion_appearance_scorer_input_args_t args =
+        motion_appearance_input_args(ANOMALY_ALGO_MOTION);
+    static anomaly_motion_appearance_scorer_input_t input;
+    static anomaly_motion_appearance_scorer_state_t scorer_state;
+    args.roi_x0 = roi_x0;
+    args.roi_x1 = roi_x1;
+    args.roi_y0 = roi_y0;
+    args.roi_y1 = roi_y1;
+    args.motion_step = motion_step;
+    args.motion_w = motion_w;
+    args.motion_h = motion_h;
+    anomaly_motion_estimator_init_appearance_scorer_input(&input, &scorer_state, &args);
+    return input;
+}
+
+static void test_motion_estimator_appearance_grid_bounds_invalid_inputs(void) {
+    anomaly_motion_appearance_grid_bounds_t bounds = {
+        .x0 = 7,
+        .x1 = 8,
+        .y0 = 9,
+        .y1 = 10,
+    };
+
+    EXPECT(!anomaly_motion_estimator_appearance_grid_bounds(NULL, &bounds),
+           "motion appearance grid bounds: null input rejected");
+    EXPECT(bounds.x0 == 0 && bounds.x1 == 0 && bounds.y0 == 0 && bounds.y1 == 0,
+           "motion appearance grid bounds: null input clears output");
+
+    anomaly_motion_appearance_scorer_input_t input =
+        motion_appearance_grid_bounds_input(0, 8, 0, 8, 0, 4, 4);
+    bounds.x0 = 7;
+    bounds.x1 = 8;
+    bounds.y0 = 9;
+    bounds.y1 = 10;
+    EXPECT(!anomaly_motion_estimator_appearance_grid_bounds(&input, &bounds),
+           "motion appearance grid bounds: nonpositive motion step rejected");
+    EXPECT(bounds.x0 == 0 && bounds.x1 == 0 && bounds.y0 == 0 && bounds.y1 == 0,
+           "motion appearance grid bounds: invalid dimensions clear output");
+
+    input = motion_appearance_grid_bounds_input(0, 8, 0, 8, 2, 0, 4);
+    EXPECT(!anomaly_motion_estimator_appearance_grid_bounds(&input, NULL),
+           "motion appearance grid bounds: null output rejected");
+}
+
+static void test_motion_estimator_appearance_grid_bounds_normal_roi(void) {
+    anomaly_motion_appearance_scorer_input_t input =
+        motion_appearance_grid_bounds_input(2, 10, 4, 14, 2, 8, 8);
+    anomaly_motion_appearance_grid_bounds_t bounds;
+
+    EXPECT(anomaly_motion_estimator_appearance_grid_bounds(&input, &bounds),
+           "motion appearance grid bounds: valid ROI accepted");
+    EXPECT(bounds.x0 == 1 && bounds.x1 == 5 && bounds.y0 == 2 && bounds.y1 == 7,
+           "motion appearance grid bounds: normal ROI follows truncating/ceil conversion");
+}
+
+static void test_motion_estimator_appearance_grid_bounds_clamps_edges(void) {
+    anomaly_motion_appearance_scorer_input_t input =
+        motion_appearance_grid_bounds_input(-6, 30, -4, 28, 2, 8, 9);
+    anomaly_motion_appearance_grid_bounds_t bounds;
+
+    EXPECT(anomaly_motion_estimator_appearance_grid_bounds(&input, &bounds),
+           "motion appearance grid bounds: oversized ROI accepted");
+    EXPECT(bounds.x0 == 0 && bounds.x1 == 8 && bounds.y0 == 0 && bounds.y1 == 9,
+           "motion appearance grid bounds: oversized ROI clamps to motion grid");
+}
+
+static void test_motion_estimator_appearance_grid_bounds_partial_edge_ceil(void) {
+    anomaly_motion_appearance_scorer_input_t input =
+        motion_appearance_grid_bounds_input(1, 5, 3, 8, 4, 5, 5);
+    anomaly_motion_appearance_grid_bounds_t bounds;
+
+    EXPECT(anomaly_motion_estimator_appearance_grid_bounds(&input, &bounds),
+           "motion appearance grid bounds: partial edge ROI accepted");
+    EXPECT(bounds.x0 == 0 && bounds.x1 == 2 && bounds.y0 == 0 && bounds.y1 == 2,
+           "motion appearance grid bounds: upper bounds preserve ceil behavior");
+}
+
+static void test_motion_estimator_appearance_scorer_ready_contract(void) {
+    anomaly_motion_appearance_scorer_input_t input =
+        motion_appearance_ready_input(ANOMALY_ALGO_MOTION);
+
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(NULL),
+           "motion appearance scorer ready: null input is not ready");
+    EXPECT(anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: active motion input is ready");
+
+    input.anomaly_detection_active = false;
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: inactive detector is not ready");
+
+    input = motion_appearance_ready_input(ANOMALY_ALGO_COLOR);
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: non-motion algorithm mask is not ready");
+
+    input = motion_appearance_ready_input(ANOMALY_ALGO_MOTION_TOLERANCE);
+    EXPECT(anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: motion tolerance algorithm is ready");
+
+    input = motion_appearance_ready_input(ANOMALY_ALGO_PERSIST);
+    EXPECT(anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: persist algorithm is ready");
+
+    input.curr_luma = NULL;
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: missing current luma is not ready");
+
+    input = motion_appearance_ready_input(ANOMALY_ALGO_MOTION);
+    input.prev_luma = NULL;
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: missing previous luma is not ready");
+
+    input = motion_appearance_ready_input(ANOMALY_ALGO_MOTION);
+    input.prev_luma_width = 3;
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: previous luma width mismatch is not ready");
+
+    input = motion_appearance_ready_input(ANOMALY_ALGO_MOTION);
+    input.prev_luma_height = 3;
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: previous luma height mismatch is not ready");
+
+    input = motion_appearance_ready_input(ANOMALY_ALGO_MOTION);
+    input.scene_discontinuity = true;
+    EXPECT(!anomaly_motion_estimator_appearance_scorer_ready(&input),
+           "motion appearance scorer ready: scene discontinuity is not ready");
 }
 
 static void test_motion_estimator_appearance_score_winner_eligibility(void) {
@@ -7517,6 +9898,21 @@ static void test_registration_prefilter_luma_grid_invalid_inputs_noop(void) {
            "registration prefilter: invalid inputs leave scratch unchanged");
     EXPECT(dst[0] == 20 && dst[3] == 23,
            "registration prefilter: invalid inputs leave output unchanged");
+}
+
+static void test_registration_feature_score_contract(void) {
+    uint8_t luma[9] = {
+        9, 10, 11,
+        7, 20, 15,
+        8, 10, 12,
+    };
+
+    EXPECT(anomaly_registration_feature_score(NULL, 3, 3, 1, 1) == 0,
+           "registration feature score: null luma returns zero");
+    EXPECT(anomaly_registration_feature_score(luma, 3, 3, 0, 1) == 0,
+           "registration feature score: border sample returns zero");
+    EXPECT(anomaly_registration_feature_score(luma, 3, 3, 1, 1) == 78,
+           "registration feature score: sums absolute center-neighbor deltas");
 }
 
 static void test_registration_health_confidence_values(void) {
@@ -8875,6 +11271,196 @@ static void test_scan_planner_roi_grid_cell_span_contract(void) {
            "scan planner ROI grid span: span never drops below one");
 }
 
+static void test_scan_planner_default_ops_contract(void) {
+    const anomaly_scan_planner_ops_t *ops = anomaly_scan_planner_default_ops();
+    EXPECT(ops != NULL && ops == anomaly_scan_planner_default_ops(),
+           "scan planner default ops: accessor returns stable singleton");
+    EXPECT(ops->registration_valid != NULL &&
+           ops->target_revisit_track_count != NULL &&
+           ops->adaptive_target_track_risk != NULL &&
+           ops->age_roi_tracks_one_frame != NULL &&
+           ops->ensure_refresh_mask_capacity != NULL,
+           "scan planner default ops: all callback slots are populated");
+
+    anomaly_registration_model_t model =
+        anomaly_registration_model_make(ANOMALY_REGISTRATION_AFFINE, 3, 5);
+    EXPECT(!ops->registration_valid(NULL),
+           "scan planner default ops: null registration is invalid");
+    EXPECT(!ops->registration_valid(&model),
+           "scan planner default ops: model without valid similarity is invalid");
+    model.similarity.valid = true;
+    EXPECT(ops->registration_valid(&model),
+           "scan planner default ops: valid registration model is accepted");
+
+    uint8_t *refresh_mask = (uint8_t *)0x1;
+    EXPECT(!ops->ensure_refresh_mask_capacity(NULL, 4, &refresh_mask) &&
+           refresh_mask == NULL,
+           "scan planner default ops: null state refresh-mask allocation fails and clears output");
+    EXPECT(!ops->ensure_refresh_mask_capacity(NULL, 4, NULL),
+           "scan planner default ops: null refresh-mask output is rejected");
+
+    anomaly_state_t state;
+    anomaly_state_init(&state);
+    refresh_mask = NULL;
+    EXPECT(ops->ensure_refresh_mask_capacity(&state, 9, &refresh_mask),
+           "scan planner default ops: refresh-mask allocation succeeds");
+    EXPECT(refresh_mask == state.scratch_refresh_mask &&
+           state.scratch_refresh_mask_capacity >= 9,
+           "scan planner default ops: refresh-mask callback publishes scratch buffer");
+
+    EXPECT(ops->target_revisit_track_count(&state) == 0,
+           "scan planner default ops: empty state has no revisit tracks");
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].hit_count = 2;
+    state.target_tracks[0].confidence = 0.72f;
+    EXPECT(ops->target_revisit_track_count(&state) == 1,
+           "scan planner default ops: target revisit count forwards active track count");
+
+    bool has_track_risk = false;
+    bool has_weak_lock = false;
+    state.target_tracks[0].forced_revisit = true;
+    ops->adaptive_target_track_risk(&state, 2, &has_track_risk, &has_weak_lock);
+    EXPECT(has_track_risk,
+           "scan planner default ops: adaptive risk callback forwards forced revisit risk");
+
+    ops->age_roi_tracks_one_frame(&state);
+    anomaly_state_cleanup(&state);
+}
+
+static anomaly_registration_model_t scan_planner_identity_registration(void) {
+    anomaly_registration_model_t model =
+        anomaly_registration_model_make(ANOMALY_REGISTRATION_AFFINE, 10, 10);
+    model.similarity.valid = true;
+    model.similarity.a = 1.0f;
+    model.similarity.b = 0.0f;
+    return model;
+}
+
+static anomaly_roi_state_t scan_planner_prev_lookup_roi(
+        uint8_t *valid_mask,
+        uint8_t *coverage_age) {
+    anomaly_roi_state_t prev;
+    memset(&prev, 0, sizeof(prev));
+    prev.valid = true;
+    prev.roi_x0 = 0;
+    prev.roi_y0 = 0;
+    prev.roi_x1 = 40;
+    prev.roi_y1 = 40;
+    prev.width = 4;
+    prev.height = 4;
+    prev.sample_step = 10;
+    prev.valid_mask = valid_mask;
+    prev.coverage_age = coverage_age;
+    memset(valid_mask, 1, 16 * sizeof(*valid_mask));
+    memset(coverage_age, 0, 16 * sizeof(*coverage_age));
+    return prev;
+}
+
+static void test_scan_planner_prev_sample_lookup_invalid_input(void) {
+    int lookup[4] = {17, 18, 19, 20};
+    anomaly_scan_planner_prev_lookup_summary_t summary = {
+        .carried_samples = 7,
+        .newly_exposed_samples = 8,
+        .stale_samples = 9,
+    };
+
+    bool ok = anomaly_scan_planner_build_prev_sample_lookup(
+            NULL,
+            NULL,
+            40,
+            40,
+            0,
+            0,
+            20,
+            20,
+            10,
+            2,
+            2,
+            3,
+            lookup,
+            &summary);
+
+    EXPECT(!ok, "scan planner prev lookup: invalid inputs are rejected");
+    EXPECT(summary.carried_samples == 0 &&
+           summary.newly_exposed_samples == 0 &&
+           summary.stale_samples == 0,
+           "scan planner prev lookup: rejected inputs clear summary counts");
+}
+
+static void test_scan_planner_prev_sample_lookup_identity_mapping(void) {
+    uint8_t valid_mask[16];
+    uint8_t coverage_age[16];
+    anomaly_roi_state_t prev =
+        scan_planner_prev_lookup_roi(valid_mask, coverage_age);
+    anomaly_registration_model_t model = scan_planner_identity_registration();
+    int lookup[16];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+
+    bool ok = anomaly_scan_planner_build_prev_sample_lookup(
+            &prev,
+            &model,
+            40,
+            40,
+            0,
+            0,
+            40,
+            40,
+            10,
+            4,
+            4,
+            3,
+            lookup,
+            &summary);
+
+    EXPECT(ok, "scan planner prev lookup: identity registration builds lookup");
+    EXPECT(summary.carried_samples == 16 &&
+           summary.newly_exposed_samples == 0 &&
+           summary.stale_samples == 0,
+           "scan planner prev lookup: identity mapping carries every sample");
+    for (int i = 0; i < 16; i++) {
+        EXPECT(lookup[i] == i,
+               "scan planner prev lookup: identity mapping preserves row-major index");
+    }
+}
+
+static void test_scan_planner_prev_sample_lookup_invalid_and_stale_samples(void) {
+    uint8_t valid_mask[16];
+    uint8_t coverage_age[16];
+    anomaly_roi_state_t prev =
+        scan_planner_prev_lookup_roi(valid_mask, coverage_age);
+    anomaly_registration_model_t model = scan_planner_identity_registration();
+    valid_mask[5] = 0;
+    coverage_age[10] = 3;
+    int lookup[16];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+
+    bool ok = anomaly_scan_planner_build_prev_sample_lookup(
+            &prev,
+            &model,
+            40,
+            40,
+            0,
+            0,
+            40,
+            40,
+            10,
+            4,
+            4,
+            3,
+            lookup,
+            &summary);
+
+    EXPECT(ok, "scan planner prev lookup: valid ROI builds with exposed gaps");
+    EXPECT(lookup[5] == ANOMALY_SCAN_PLANNER_PREV_LOOKUP_INVALID,
+           "scan planner prev lookup: invalid previous sample uses invalid sentinel");
+    EXPECT(lookup[10] == 10,
+           "scan planner prev lookup: stale carried sample still maps to previous index");
+    EXPECT(summary.carried_samples == 15 &&
+           summary.newly_exposed_samples == 1 &&
+           summary.stale_samples == 1,
+           "scan planner prev lookup: invalid and stale counts match legacy accounting");
+}
+
 static void test_frame_centered_roi_bounds_contract(void) {
     anomaly_frame_roi_bounds_t bounds =
             anomaly_frame_centered_roi_bounds(100, 60, 0.8f);
@@ -9308,6 +11894,11 @@ int main(void) {
     test_anomaly_buffer_zero_count_is_noop_success();
     test_anomaly_buffer_grows_preserves_capacity_and_allows_writes();
     test_anomaly_buffer_resize_allocates_without_capacity();
+    test_frame_history_update_motion_luma_noops_null_inputs();
+    test_frame_history_update_motion_luma_copies_and_grows();
+    test_frame_history_update_registration_luma_copies_separate_snapshot();
+    test_frame_history_clear_noop_null_and_empty_state();
+    test_frame_history_clear_releases_motion_and_registration_snapshots();
     test_grid_region_active_mask_bounds_rejects_invalid_and_empty();
     test_grid_region_active_mask_bounds_padding_and_clamp();
     test_grid_region_float_zero_and_copy_touch_only_region();
@@ -9336,6 +11927,46 @@ int main(void) {
     test_debug_populate_registration_model_noops_null_inputs();
     test_debug_populate_registration_model_copies_fields_and_anchors();
     test_result_build_boxes_invalid_inputs_return_zero();
+    test_result_publish_boxes_null_result_safe();
+    test_result_publish_boxes_zero_count();
+    test_result_publish_boxes_copies_fields();
+    test_result_publish_boxes_preserves_oversized_count_and_clamps_copy();
+    test_result_publish_frame_metadata_null_inputs_noop();
+    test_result_publish_frame_metadata_copies_scalars_and_preserves_unrelated_fields();
+    test_result_publish_frame_metadata_copies_registration_and_movement_debug();
+    test_result_publish_saliency_debug_null_inputs_noop();
+    test_result_publish_saliency_debug_raw_and_accumulator_fields();
+    test_result_publish_saliency_debug_valid_raw_and_top_candidates();
+    test_result_publish_thermal_debug_summary_null_inputs_noop();
+    test_result_publish_thermal_debug_summary_copies_scalars_and_preserves_detail();
+    test_result_publish_thermal_debug_summary_legacy_raw_normalization();
+    test_result_publish_color_debug_summary_null_inputs_noop();
+    test_result_publish_color_debug_summary_raw_phase_and_samples();
+    test_result_publish_color_debug_summary_histogram_rejects_and_winner_gate();
+    test_result_publish_color_debug_summary_zero_sample_grid_resets_fractions();
+    test_result_publish_color_debug_target_base_null_inputs_noop();
+    test_result_publish_color_debug_target_base_resets_target_and_preserves_other_fields();
+    test_result_publish_color_debug_target_base_telemetry_and_disabled_norms();
+    test_result_publish_color_debug_target_component_trace_null_inputs_noop();
+    test_result_publish_color_debug_target_component_trace_copies_scalars();
+    test_result_publish_color_debug_target_component_trace_additive_only();
+    test_result_publish_color_debug_target_component_bbox_null_inputs_noop();
+    test_result_publish_color_debug_target_component_bbox_normalizes_and_clamps();
+    test_result_publish_color_debug_target_component_bbox_invalid_bounds_zeroes();
+    test_result_publish_color_debug_target_component_bbox_additive_only();
+    test_result_publish_color_debug_target_candidate_indices_null_inputs_noop();
+    test_result_publish_color_debug_target_candidate_indices_extracts_from_peak();
+    test_result_publish_color_debug_target_candidate_indices_fallback_and_invalid_match();
+    test_result_publish_color_debug_target_candidate_indices_additive_only();
+    test_result_publish_color_debug_target_gate_stage_null_inputs_noop();
+    test_result_publish_color_debug_target_gate_stage_rejects_on_matching_raw();
+    test_result_publish_color_debug_target_gate_stage_clears_nonrejecting_cases();
+    test_result_publish_color_debug_target_gate_stage_additive_only();
+    test_result_publish_color_debug_target_matched_candidate_null_inputs_noop();
+    test_result_publish_color_debug_target_matched_candidate_publishes_detail();
+    test_result_publish_color_debug_target_matched_candidate_invalid_noop();
+    test_result_publish_color_debug_target_matched_candidate_invalid_bbox_zeroes();
+    test_result_publish_color_debug_target_matched_candidate_additive_only();
     test_result_build_boxes_target_tracks_take_priority();
     test_result_build_boxes_accumulator_fallback_and_persist_filter();
     test_result_build_boxes_saliency_aux_current_gate_noop();
@@ -9467,13 +12098,38 @@ int main(void) {
     test_detector_facade_rejects_missing_state();
     test_detector_facade_rejects_unsupported_format();
 
+    test_motion_estimator_default_sidecar_ops_contract();
     test_motion_estimator_texture_scale_boundaries();
     test_motion_estimator_structure_scale_invalid_and_border();
     test_motion_estimator_structure_scale_strong_corner();
+    test_motion_estimator_appearance_zoom_motion_scale_contract();
+    test_motion_estimator_appearance_broad_motion_scale_contract();
+    test_motion_estimator_appearance_global_stats_defaults();
+    test_motion_estimator_appearance_global_stats_variance_floor();
+    test_motion_estimator_appearance_global_stats_motion_floor_minimum();
+    test_motion_estimator_appearance_global_stats_null_out_safe();
+    test_motion_estimator_appearance_global_motion_load_contract();
+    test_motion_estimator_populate_appearance_debug_summary_null_safe();
+    test_motion_estimator_populate_appearance_debug_summary_fields();
+    test_motion_estimator_populate_appearance_debug_summary_preserves_later_fields();
+    test_motion_estimator_populate_appearance_debug_result_null_safe();
+    test_motion_estimator_populate_appearance_debug_result_raw_candidate();
+    test_motion_estimator_populate_appearance_debug_result_fields_and_top();
     test_motion_estimator_residual_displacement_rejects_invalid_and_miss();
     test_motion_estimator_residual_displacement_shifted_patch();
     test_motion_estimator_appearance_scorer_output_init_defaults();
     test_motion_estimator_appearance_scorer_output_init_clears_scores();
+    test_motion_estimator_init_appearance_scorer_input_null_safe();
+    test_motion_estimator_init_appearance_scorer_input_copies_contract_fields();
+    test_motion_estimator_sync_appearance_scorer_state_null_safe();
+    test_motion_estimator_sync_appearance_scorer_state_copies_metadata();
+    test_motion_estimator_init_appearance_scorer_input_derives_motion_modes();
+    test_motion_estimator_init_appearance_scorer_input_feeds_ready_contract();
+    test_motion_estimator_appearance_grid_bounds_invalid_inputs();
+    test_motion_estimator_appearance_grid_bounds_normal_roi();
+    test_motion_estimator_appearance_grid_bounds_clamps_edges();
+    test_motion_estimator_appearance_grid_bounds_partial_edge_ceil();
+    test_motion_estimator_appearance_scorer_ready_contract();
     test_motion_estimator_appearance_score_winner_eligibility();
     test_motion_estimator_appearance_proposal_carries_candidate_fields();
     test_motion_estimator_build_appearance_proposals_rejects_invalid_inputs();
@@ -9514,6 +12170,7 @@ int main(void) {
     test_registration_prefilter_luma_grid_edges();
     test_registration_prefilter_luma_grid_degenerate_dimensions();
     test_registration_prefilter_luma_grid_invalid_inputs_noop();
+    test_registration_feature_score_contract();
     test_registration_health_confidence_values();
     test_registration_classify_health_contract();
     test_registration_cache_invalid_store_clears_validity();
@@ -9562,6 +12219,10 @@ int main(void) {
     test_frame_stride_selective_still_runs_registration();
     test_large_motion_discontinuity_clears_rois();
     test_scan_planner_roi_grid_cell_span_contract();
+    test_scan_planner_default_ops_contract();
+    test_scan_planner_prev_sample_lookup_invalid_input();
+    test_scan_planner_prev_sample_lookup_identity_mapping();
+    test_scan_planner_prev_sample_lookup_invalid_and_stale_samples();
     test_frame_centered_roi_bounds_contract();
     test_frame_registration_roi_bounds_contract();
     test_scan_planner_selective_refresh_helper_invalid_input();

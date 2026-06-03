@@ -187,6 +187,7 @@ object ProximityAlertCenter {
     private data class EvaluatedDrone(
         val remoteId: String,
         val mappedId: String,
+        val teamDrone: Boolean,
         val currentLat: Double,
         val currentLng: Double,
         val currentAltFt: Double,
@@ -223,6 +224,7 @@ object ProximityAlertCenter {
         val currentHorizontalFt: Double,
         val currentVerticalFt: Double,
         val currentThreeDFt: Double,
+        val altitudeSensitive: Boolean,
         val shouldAlert: Boolean,
         val isGettingFartherApart: Boolean,
         val highSeverity: Boolean,
@@ -350,9 +352,7 @@ object ProximityAlertCenter {
 
             activeAlertState != null -> {
                 val currentEval = currentEvaluationsByKey[activeAlertState.pairKey]
-                val clearCondition = currentEval == null ||
-                    currentEval.effectiveHorizontalFt > thresholdFt ||
-                    currentEval.effectiveVerticalFt > thresholdFt
+                val clearCondition = currentEval == null || !currentEval.isInsideThreshold(thresholdFt)
                 if (clearCondition) {
                     if (clearEligibleSinceMs == null) clearEligibleSinceMs = nowMs
                     if (nowMs - (clearEligibleSinceMs ?: nowMs) >= CLEAR_DELAY_MS) {
@@ -386,8 +386,12 @@ object ProximityAlertCenter {
         evaluations.forEach { evaluation ->
             previousPairSnapshots[evaluation.pairKey] = PairSnapshot(
                 effectiveHorizontalFt = evaluation.effectiveHorizontalFt,
-                effectiveVerticalFt = evaluation.effectiveVerticalFt,
-                effectiveThreeDFt = evaluation.effectiveThreeDFt
+                effectiveVerticalFt = if (evaluation.altitudeSensitive) evaluation.effectiveVerticalFt else 0.0,
+                effectiveThreeDFt = if (evaluation.altitudeSensitive) {
+                    evaluation.effectiveThreeDFt
+                } else {
+                    evaluation.effectiveHorizontalFt
+                }
             )
         }
     }
@@ -403,9 +407,7 @@ object ProximityAlertCenter {
     fun resumeSuspendedAlert() {
         val suspended = _suspendedAlert.value ?: return
         val currentEval = latestEvaluationsByKey[suspended.pairKey]
-        val stillWithinThreshold = currentEval != null &&
-            currentEval.effectiveHorizontalFt <= suspended.thresholdFt &&
-            currentEval.effectiveVerticalFt <= suspended.thresholdFt
+        val stillWithinThreshold = currentEval != null && currentEval.isInsideThreshold(suspended.thresholdFt)
         alertsSuspended = false
         if (stillWithinThreshold) {
             _uiState.value = currentEval.toUiState(suspended.alertInstanceId, suspended.thresholdFt)
@@ -421,8 +423,7 @@ object ProximityAlertCenter {
     private fun refreshResumeVisibility() {
         val suspended = _suspendedAlert.value
         _canResumeAlert.value = suspended != null && latestEvaluationsByKey[suspended.pairKey]?.let { evaluation ->
-            evaluation.effectiveHorizontalFt <= suspended.thresholdFt &&
-                evaluation.effectiveVerticalFt <= suspended.thresholdFt
+            evaluation.isInsideThreshold(suspended.thresholdFt)
         } == true
     }
 
@@ -451,6 +452,7 @@ object ProximityAlertCenter {
         return EvaluatedDrone(
             remoteId = spec.remoteId,
             mappedId = spec.mappedId,
+            teamDrone = !spec.isLocalArchiveOnly,
             currentLat = spec.lastLat,
             currentLng = spec.lastLng,
             currentAltFt = currentAltFt,
@@ -528,13 +530,18 @@ object ProximityAlertCenter {
 
         if (!effectiveHorizontalFt.isFinite() || !effectiveVerticalFt.isFinite()) return null
 
+        val altitudeSensitive = first.teamDrone && second.teamDrone
+        val decisionCurrentVerticalFt = if (altitudeSensitive) currentVerticalFt else 0.0
+        val decisionEffectiveVerticalFt = if (altitudeSensitive) effectiveVerticalFt else 0.0
+        val decisionCurrentThreeDFt = threeDistanceFt(currentHorizontalFt, decisionCurrentVerticalFt)
+        val decisionEffectiveThreeDFt = threeDistanceFt(effectiveHorizontalFt, decisionEffectiveVerticalFt)
         val pairKey = pairKey(first.remoteId, second.remoteId)
         val previous = previousPairSnapshots[pairKey]
         val decision = evaluateThresholdDecision(
             effectiveHorizontalFt = effectiveHorizontalFt,
-            effectiveVerticalFt = effectiveVerticalFt,
-            effectiveThreeDFt = effectiveThreeDFt,
-            currentThreeDFt = currentThreeDFt,
+            effectiveVerticalFt = decisionEffectiveVerticalFt,
+            effectiveThreeDFt = decisionEffectiveThreeDFt,
+            currentThreeDFt = decisionCurrentThreeDFt,
             thresholdFt = thresholdFt,
             predictionEnabled = predictionEnabled,
             previous = previous
@@ -549,6 +556,7 @@ object ProximityAlertCenter {
             currentHorizontalFt = currentHorizontalFt,
             currentVerticalFt = currentVerticalFt,
             currentThreeDFt = currentThreeDFt,
+            altitudeSensitive = altitudeSensitive,
             shouldAlert = decision.shouldAlert,
             isGettingFartherApart = decision.isGettingFartherApart,
             highSeverity = decision.highSeverity,
@@ -605,10 +613,22 @@ object ProximityAlertCenter {
         currentThreeDFt: Double,
         thresholdFt: Double,
         predictionEnabled: Boolean,
+        altitudeSensitive: Boolean = true,
         previousHorizontalFt: Double? = null,
         previousVerticalFt: Double? = null,
         previousThreeDFt: Double? = null
     ): PairThresholdDecision {
+        val decisionEffectiveVerticalFt = if (altitudeSensitive) effectiveVerticalFt else 0.0
+        val decisionEffectiveThreeDFt = if (altitudeSensitive) {
+            effectiveThreeDFt
+        } else {
+            threeDistanceFt(effectiveHorizontalFt, decisionEffectiveVerticalFt)
+        }
+        val decisionCurrentThreeDFt = if (altitudeSensitive) {
+            currentThreeDFt
+        } else {
+            threeDistanceFt(effectiveHorizontalFt, decisionEffectiveVerticalFt)
+        }
         val previous = if (
             previousHorizontalFt != null &&
             previousVerticalFt != null &&
@@ -624,14 +644,18 @@ object ProximityAlertCenter {
         }
         return evaluateThresholdDecision(
             effectiveHorizontalFt = effectiveHorizontalFt,
-            effectiveVerticalFt = effectiveVerticalFt,
-            effectiveThreeDFt = effectiveThreeDFt,
-            currentThreeDFt = currentThreeDFt,
+            effectiveVerticalFt = decisionEffectiveVerticalFt,
+            effectiveThreeDFt = decisionEffectiveThreeDFt,
+            currentThreeDFt = decisionCurrentThreeDFt,
             thresholdFt = thresholdFt,
             predictionEnabled = predictionEnabled,
             previous = previous
         )
     }
+
+    private fun PairEvaluation.isInsideThreshold(thresholdFt: Double): Boolean =
+        effectiveHorizontalFt <= thresholdFt &&
+            (!altitudeSensitive || effectiveVerticalFt <= thresholdFt)
 
     private fun PairEvaluation.toUiState(alertInstanceId: Long, thresholdFt: Double): ProximityAlertUiState {
         val nearest = listOf(first, second).sortedWith(

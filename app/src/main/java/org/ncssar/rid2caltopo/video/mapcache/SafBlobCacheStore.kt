@@ -178,9 +178,7 @@ internal class SafBlobCacheStore(
     }
 
     override fun exists(cacheKey: String): Boolean {
-        synchronized(dbLock) {
-            return (queryRow(cacheKey) ?: recoverRowFromFileLocked(cacheKey)) != null
-        }
+        return get(cacheKey, countHitMiss = false) != null
     }
 
     override fun remove(cacheKey: String): Boolean {
@@ -232,14 +230,14 @@ internal class SafBlobCacheStore(
     }
 
     override fun prewarm() {
+        val nsDir = getNamespaceDir()
+        if (nsDir == null) {
+            MapCacheDebug.log("saf prewarm ns=$namespace skipped(no namespace dir)")
+            return
+        }
+        val fileIndex = buildNamespaceFileIndex(nsDir)
         synchronized(dbLock) {
-            val nsDir = getNamespaceDir()
-            if (nsDir == null) {
-                MapCacheDebug.log("saf prewarm ns=$namespace skipped(no namespace dir)")
-                return
-            }
-            val fileIndex = ensureNamespaceFileIndexLocked(nsDir)
-            maybeRebuildIndexLocked(fileIndex)
+            namespaceFileIndex = fileIndex
             bytesUsedAtomic.set(bytesUsedLocked())
             MapCacheDebug.log("saf prewarm ns=$namespace ready files=${namespaceFileIndex?.size ?: 0}")
         }
@@ -458,42 +456,44 @@ internal class SafBlobCacheStore(
 
     private fun recoverRowFromFileLocked(cacheKey: String): Row? {
         val nsDir = getNamespaceDir() ?: return null
-        val fileIndex = ensureNamespaceFileIndexLocked(nsDir)
         val relativePath = keyToRelativePath(cacheKey)
         val legacyPath = legacyFileNameForKey(cacheKey)
-        val existing = fileIndex[relativePath] ?: fileIndex[legacyPath] ?: return null
-        if (!existing.isFile) return null
-        val resolvedFile = if (relativePath != legacyPath && fileIndex[relativePath] == null && fileIndex[legacyPath] != null) {
-            migrateLegacyFileLocked(nsDir, legacyPath, relativePath, existing, fileIndex)
+        val fileIndex = namespaceFileIndex
+        val located = if (fileIndex != null) {
+            val indexed = fileIndex[relativePath]?.takeIf { it.isFile }
+            val legacy = fileIndex[legacyPath]?.takeIf { it.isFile }
+            val resolvedFile = if (indexed == null && legacy != null && relativePath != legacyPath) {
+                migrateLegacyFileLocked(nsDir, legacyPath, relativePath, legacy, fileIndex)
+            } else {
+                indexed ?: legacy
+            } ?: return null
+            val resolvedName = if (resolvedFile === legacy && indexed == null) legacyPath else relativePath
+            LocatedFile(resolvedFile, resolvedName)
         } else {
-            existing
-        } ?: return null
+            findCacheFile(nsDir, relativePath) ?: findCacheFile(nsDir, legacyPath) ?: return null
+        }
         val now = System.currentTimeMillis()
         val expiresAt = defaultExpiry(now)
-        val size = resolvedFile.length().coerceAtLeast(0L)
-        val uriString = resolvedFile.uri.toString()
-        val fileName = if (relativePath != legacyPath && fileIndex[relativePath] != null) {
-            relativePath
-        } else {
-            fileIndex.entries.firstOrNull { it.value.uri == resolvedFile.uri }?.key ?: relativePath
-        }
+        val size = located.file.length().coerceAtLeast(0L)
+        val uriString = located.file.uri.toString()
         val cv = ContentValues().apply {
             put("namespace", storageNamespace)
             put("cache_key", cacheKey)
             put("file_uri", uriString)
-            put("file_name", fileName)
+            put("file_name", located.fileName)
             put("size_bytes", size)
             put("created_at", now)
             put("accessed_at", now)
             put("expires_at", expiresAt)
         }
         db.replaceOrThrow("saf_entries", null, cv)
+        namespaceFileIndex?.set(located.fileName, located.file)
         MapCacheDebug.log(
-            "saf reindex ns=$namespace key=$cacheKey file=$fileName size=$size uri=$uriString"
+            "saf reindex ns=$namespace key=$cacheKey file=${located.fileName} size=$size uri=$uriString"
         )
         return Row(
             fileUri = uriString,
-            fileName = fileName,
+            fileName = located.fileName,
             expiresAt = expiresAt
         )
     }
@@ -520,6 +520,12 @@ internal class SafBlobCacheStore(
 
     private fun ensureNamespaceFileIndexLocked(nsDir: DocumentFile): MutableMap<String, DocumentFile> {
         namespaceFileIndex?.let { return it }
+        val index = buildNamespaceFileIndex(nsDir)
+        namespaceFileIndex = index
+        return index
+    }
+
+    private fun buildNamespaceFileIndex(nsDir: DocumentFile): MutableMap<String, DocumentFile> {
         val startNs = System.nanoTime()
         val index = HashMap<String, DocumentFile>()
         try {
@@ -531,8 +537,29 @@ internal class SafBlobCacheStore(
         MapCacheDebug.log(
             "saf index-build ns=$namespace files=${index.size} elapsedMs=${"%.1f".format(Locale.US, elapsedMs)}"
         )
-        namespaceFileIndex = index
         return index
+    }
+
+    private fun findCacheFile(nsDir: DocumentFile, relativePath: String): LocatedFile? {
+        val segments = relativePath.split('/').filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return null
+        var current = nsDir
+        for (segment in segments.dropLast(1)) {
+            current = try {
+                current.findFile(segment)
+            } catch (e: Exception) {
+                MapCacheDebug.log("saf findExactDir failed ns=$namespace dir=$segment err=${e.javaClass.simpleName}")
+                null
+            } ?: return null
+            if (!current.isDirectory) return null
+        }
+        val leaf = try {
+            current.findFile(segments.last())
+        } catch (e: Exception) {
+            MapCacheDebug.log("saf findExactFile failed ns=$namespace file=$relativePath err=${e.javaClass.simpleName}")
+            null
+        } ?: return null
+        return if (leaf.isFile) LocatedFile(leaf, relativePath) else null
     }
 
     private fun maybeRebuildIndexLocked(fileIndex: MutableMap<String, DocumentFile>) {
@@ -840,5 +867,10 @@ internal class SafBlobCacheStore(
         val fileUri: String,
         val fileName: String,
         val expiresAt: Long
+    )
+
+    private data class LocatedFile(
+        val file: DocumentFile,
+        val fileName: String
     )
 }

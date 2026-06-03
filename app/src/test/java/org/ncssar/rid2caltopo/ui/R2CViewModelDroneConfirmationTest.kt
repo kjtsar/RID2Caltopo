@@ -162,6 +162,30 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
+    fun operatorRequestedConfirmationReopensSessionUnknownDroneAndAcceptsFieldEdits() {
+        val remoteId = "UNKNOWNOPERATOR"
+        val drone = activeDrone(remoteId, waypointTimestampMsec = 6789L)
+
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneSpecsChanged(listOf(drone))
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        viewModel.markPendingDroneConfirmationUnknown()
+        assertNull(viewModel.pendingDroneConfirmation.value)
+
+        viewModel.requestDroneConfirmation(drone)
+
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+
+        viewModel.updatePendingDroneConfirmation(
+            pilotCallsign = "1SAR83",
+            droneDescription = "DJI Matrice 4TD"
+        )
+
+        assertEquals("1SAR83", viewModel.pendingDroneConfirmation.value?.pilotCallsign)
+        assertEquals("DJI Matrice 4TD", viewModel.pendingDroneConfirmation.value?.droneDescription)
+    }
+
+    @Test
     fun firstRidSightingPromptIsNotReopenedWhenFlightBecomesActive() {
         val remoteId = "DRONEFIRSTSEENACTIVE"
         val drone = CtDroneSpec(remoteId)

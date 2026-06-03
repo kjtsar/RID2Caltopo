@@ -15,6 +15,8 @@ typedef struct {
     int stale_samples;
 } anomaly_scan_planner_prev_lookup_summary_t;
 
+#define ANOMALY_SCAN_PLANNER_PREV_LOOKUP_INVALID (-1)
+
 typedef struct {
     bool     adaptive_enabled;
     int      fixed_frame_stride;
@@ -64,6 +66,8 @@ typedef struct {
             size_t           sample_count,
             uint8_t        **refresh_mask_out);
 } anomaly_scan_planner_ops_t;
+
+const anomaly_scan_planner_ops_t *anomaly_scan_planner_default_ops(void);
 
 typedef struct {
     anomaly_state_t                              *state;
@@ -141,3 +145,19 @@ bool anomaly_scan_planner_build_selective_refresh_mask(
         uint8_t               *refresh_mask,
         int                   *selected_count_out,
         uint32_t              *reason_flags_out);
+
+bool anomaly_scan_planner_build_prev_sample_lookup(
+        const anomaly_roi_state_t                 *prev,
+        const anomaly_scan_planner_registration_t *registration,
+        int                                        frame_width,
+        int                                        frame_height,
+        int                                        roi_x0,
+        int                                        roi_y0,
+        int                                        roi_x1,
+        int                                        roi_y1,
+        int                                        sample_step,
+        int                                        sampled_width,
+        int                                        sampled_height,
+        int                                        stale_limit,
+        int                                       *prev_lookup_out,
+        anomaly_scan_planner_prev_lookup_summary_t *summary_out);

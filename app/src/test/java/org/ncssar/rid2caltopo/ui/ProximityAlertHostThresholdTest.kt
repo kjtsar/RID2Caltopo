@@ -41,6 +41,24 @@ class ProximityAlertHostThresholdTest {
     }
 
     @Test
+    fun nonTeamPairsIgnoreVerticalSeparationForTrafficProximity() {
+        val decision = ProximityAlertCenter.evaluateThresholdDecisionForTests(
+            effectiveHorizontalFt = 20.0,
+            effectiveVerticalFt = 400.0,
+            effectiveThreeDFt = 400.5,
+            currentThreeDFt = 400.5,
+            thresholdFt = 40.0,
+            predictionEnabled = true,
+            altitudeSensitive = false
+        )
+
+        assertTrue(decision.insideThreshold)
+        assertTrue(decision.shouldAlert)
+        assertTrue(decision.highSeverity)
+        assertEquals(0.5, decision.severityScore, 0.0001)
+    }
+
+    @Test
     fun highSeverityRequiresDroppingBelowSeventyFivePercentThreshold() {
         val atBoundary = ProximityAlertCenter.evaluateThresholdDecisionForTests(
             effectiveHorizontalFt = 30.0,

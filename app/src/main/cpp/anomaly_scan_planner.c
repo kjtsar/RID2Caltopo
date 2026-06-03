@@ -1,7 +1,11 @@
 // Private scan-planning wrapper for anomaly_analysis.c.
 #include "anomaly_scan_planner.h"
 #include "anomaly_analysis_internal.h"
+#include "anomaly_buffer.h"
+#include "anomaly_registration_model.h"
 #include "anomaly_registration_quality.h"
+#include "anomaly_roi_tracks.h"
+#include "anomaly_target_revisit.h"
 
 #include <math.h>
 #include <string.h>
@@ -12,6 +16,146 @@ int anomaly_scan_planner_roi_grid_cell_span(int sample_step) {
     int step = sample_step > 0 ? sample_step : 1;
     int span = (ANOMALY_SCAN_PLANNER_ROI_CELL_TARGET_SIZE_PX + step - 1) / step;
     return span > 0 ? span : 1;
+}
+
+static bool default_registration_valid(
+        const anomaly_scan_planner_registration_t *registration) {
+    return anomaly_registration_model_valid(registration);
+}
+
+static int default_target_revisit_track_count(
+        const anomaly_state_t *state) {
+    return anomaly_target_revisit_track_count(state);
+}
+
+static void default_adaptive_target_track_risk(
+        const anomaly_state_t *state,
+        int                    min_hits,
+        bool                  *has_track_risk_out,
+        bool                  *has_weak_lock_out) {
+    anomaly_target_revisit_adaptive_track_risk(
+            state,
+            min_hits,
+            has_track_risk_out,
+            has_weak_lock_out);
+}
+
+static bool default_ensure_refresh_mask_capacity(
+        anomaly_state_t *state,
+        size_t           sample_count,
+        uint8_t        **refresh_mask_out) {
+    if (refresh_mask_out != NULL) *refresh_mask_out = NULL;
+    if (state == NULL || refresh_mask_out == NULL) return false;
+    if (!anomaly_buffer_ensure_u8_capacity(
+            &state->scratch_refresh_mask,
+            &state->scratch_refresh_mask_capacity,
+            sample_count)) {
+        return false;
+    }
+    *refresh_mask_out = state->scratch_refresh_mask;
+    return true;
+}
+
+static const anomaly_scan_planner_ops_t default_ops = {
+    .registration_valid = default_registration_valid,
+    .target_revisit_track_count = default_target_revisit_track_count,
+    .adaptive_target_track_risk = default_adaptive_target_track_risk,
+    .age_roi_tracks_one_frame = anomaly_roi_tracks_age_one_frame,
+    .ensure_refresh_mask_capacity = default_ensure_refresh_mask_capacity,
+};
+
+const anomaly_scan_planner_ops_t *anomaly_scan_planner_default_ops(void) {
+    return &default_ops;
+}
+
+bool anomaly_scan_planner_build_prev_sample_lookup(
+        const anomaly_roi_state_t                 *prev,
+        const anomaly_scan_planner_registration_t *registration,
+        int                                        frame_width,
+        int                                        frame_height,
+        int                                        roi_x0,
+        int                                        roi_y0,
+        int                                        roi_x1,
+        int                                        roi_y1,
+        int                                        sample_step,
+        int                                        sampled_width,
+        int                                        sampled_height,
+        int                                        stale_limit,
+        int                                       *prev_lookup_out,
+        anomaly_scan_planner_prev_lookup_summary_t *summary_out) {
+    if (summary_out != NULL) {
+        summary_out->carried_samples = 0;
+        summary_out->newly_exposed_samples = 0;
+        summary_out->stale_samples = 0;
+    }
+    if (prev == NULL || registration == NULL || prev_lookup_out == NULL ||
+        frame_width <= 0 || frame_height <= 0 ||
+        sample_step <= 0 || sampled_width <= 0 || sampled_height <= 0 ||
+        !prev->valid || prev->sample_step <= 0 ||
+        prev->width <= 0 || prev->height <= 0 ||
+        prev->valid_mask == NULL ||
+        !anomaly_registration_model_valid(registration)) {
+        return false;
+    }
+
+    float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
+    float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
+    anomaly_inverse_affine_t inv = anomaly_registration_inverse_affine(registration);
+    if (!inv.valid) return false;
+
+    int carried_samples = 0;
+    int newly_exposed_samples = 0;
+    int stale_samples = 0;
+    for (int sy = 0; sy < sampled_height; sy++) {
+        int y = roi_y0 + sy * sample_step + sample_step / 2;
+        if (y >= roi_y1) y = roi_y1 - 1;
+        for (int sx = 0; sx < sampled_width; sx++) {
+            int x = roi_x0 + sx * sample_step + sample_step / 2;
+            if (x >= roi_x1) x = roi_x1 - 1;
+            size_t idx = (size_t)sy * (size_t)sampled_width + (size_t)sx;
+            prev_lookup_out[idx] = ANOMALY_SCAN_PLANNER_PREV_LOOKUP_INVALID;
+
+            float nx = clamp01f((float)x / fw);
+            float ny = clamp01f((float)y / fh);
+            float px = 0.0f;
+            float py = 0.0f;
+            if (!anomaly_registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
+                newly_exposed_samples++;
+                continue;
+            }
+            int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
+            int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
+            if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||
+                prev_py < prev->roi_y0 || prev_py >= prev->roi_y1) {
+                newly_exposed_samples++;
+                continue;
+            }
+            int prev_sx = (prev_px - prev->roi_x0) / prev->sample_step;
+            int prev_sy = (prev_py - prev->roi_y0) / prev->sample_step;
+            if (prev_sx < 0 || prev_sy < 0 ||
+                prev_sx >= prev->width || prev_sy >= prev->height) {
+                newly_exposed_samples++;
+                continue;
+            }
+            size_t prev_idx = (size_t)prev_sy * (size_t)prev->width + (size_t)prev_sx;
+            if (!prev->valid_mask[prev_idx]) {
+                newly_exposed_samples++;
+                continue;
+            }
+
+            prev_lookup_out[idx] = (int)prev_idx;
+            carried_samples++;
+            int age = (int)prev->coverage_age[prev_idx] + 1;
+            if (age > stale_limit) stale_samples++;
+        }
+    }
+
+    if (summary_out != NULL) {
+        summary_out->carried_samples = carried_samples;
+        summary_out->newly_exposed_samples = newly_exposed_samples;
+        summary_out->stale_samples = stale_samples;
+    }
+    return true;
 }
 
 static bool periodic_full_refresh_due(

@@ -11,8 +11,10 @@ package org.ncssar.rid2caltopo.app
 import StreamsViewModel
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.media.AudioManager
@@ -21,6 +23,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.provider.Settings
 import android.view.Display
 import android.view.View
 import android.widget.TextView
@@ -28,14 +31,19 @@ import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
@@ -104,6 +112,42 @@ internal fun buildLogArchiveEntryName(rawName: String?): String {
     }
 }
 
+internal fun shouldShowBluetoothDisabledPanel(
+    adapterPresent: Boolean,
+    bluetoothEnabled: Boolean,
+): Boolean = adapterPresent && !bluetoothEnabled
+
+@Composable
+private fun BluetoothDisabledDialog(
+    onOpenBluetoothSettings: () -> Unit,
+    onQuit: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+        title = { Text("bluetooth disabled") },
+        text = {
+            Text(
+                "Bluetooth is disabled. RID2Caltopo needs Bluetooth enabled to receive " +
+                    "Bluetooth Remote ID broadcasts."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onOpenBluetoothSettings) {
+                Text("Open Bluetooth Settings")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onQuit) {
+                Text("Quit")
+            }
+        },
+    )
+}
+
 data class LogArchiveDayOption(
     val directoryName: String,
     val logFileCount: Int,
@@ -122,6 +166,21 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     private var externalDisplayConnected by mutableStateOf(false)
     private var externalDisplayPresentation: ExternalDisplayPresentation? = null
     private var displayManager: DisplayManager? = null
+    private var bluetoothDisabled by mutableStateOf(false)
+    private var bluetoothStateReceiverRegistered = false
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            if (state == BluetoothAdapter.STATE_OFF || state == BluetoothAdapter.STATE_TURNING_OFF) {
+                setBluetoothDisabledPanelVisible(true, "state changed: $state")
+            } else if (state == BluetoothAdapter.STATE_ON || state == BluetoothAdapter.STATE_TURNING_ON) {
+                setBluetoothDisabledPanelVisible(false, "state changed: $state")
+            } else {
+                refreshBluetoothDisabledState("state changed: $state")
+            }
+        }
+    }
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {
             runOnUiThread { refreshExternalDisplay() }
@@ -357,6 +416,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     override fun onResume() {
         super.onResume()
         reloadExternalDisplayConfig()
+        refreshBluetoothDisabledState("resume")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -398,6 +458,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         displayManager?.registerDisplayListener(displayListener, null)
         reloadExternalDisplayConfig()
+        registerBluetoothStateReceiver()
+        refreshBluetoothDisabledState("startup")
 
         setContent {
             RID2CaltopoTheme() {
@@ -509,6 +571,12 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         onCancel = { MutualAidPackageTransferManager.cancelImport() }
                     )
                 }
+                if (bluetoothDisabled) {
+                    BluetoothDisabledDialog(
+                        onOpenBluetoothSettings = { openBluetoothSettings() },
+                        onQuit = { CaltopoClient.QuitApplication() },
+                    )
+                }
             }
         }
         refreshExternalDisplay()
@@ -562,15 +630,24 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         if (checkSelfPermission(Manifest.permission.BLUETOOTH) !=
             PackageManager.PERMISSION_GRANTED) {
             CTError(TAG, "checkBluetoothSupport(): Did not get access to bluetooth!")
+            refreshBluetoothDisabledState("bluetooth permission missing")
             return
         }
 
         val bluetoothAdapter: BluetoothAdapter? = BluetoothScanner.getBluetoothAdapter()
         if (null == bluetoothAdapter) {
             CTError(TAG, "Not able to access bluetooth adapter.")
+            setBluetoothDisabledPanelVisible(false, "adapter unavailable")
             return
         }
         legacyBluetoothSupported = bluetoothAdapter.isEnabled
+        setBluetoothDisabledPanelVisible(
+            shouldShowBluetoothDisabledPanel(
+                adapterPresent = true,
+                bluetoothEnabled = bluetoothAdapter.isEnabled,
+            ),
+            "support check",
+        )
         MyDeviceName = bluetoothAdapter.name
         CTDebug(TAG, "Setting MyDeviceName to:${MyDeviceName}")
         if (bluetoothAdapter.isLeCodedPhySupported) {
@@ -578,6 +655,61 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         }
         if (bluetoothAdapter.isLeExtendedAdvertisingSupported) {
             extendedAdvertisingSupported = true
+        }
+    }
+
+    private fun registerBluetoothStateReceiver() {
+        if (bluetoothStateReceiverRegistered) return
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(bluetoothStateReceiver, filter)
+        }
+        bluetoothStateReceiverRegistered = true
+    }
+
+    private fun unregisterBluetoothStateReceiver() {
+        if (!bluetoothStateReceiverRegistered) return
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+        } catch (e: Exception) {
+            CTError(TAG, "unregisterBluetoothStateReceiver() raised:", e)
+        } finally {
+            bluetoothStateReceiverRegistered = false
+        }
+    }
+
+    private fun refreshBluetoothDisabledState(reason: String) {
+        val bluetoothAdapter = try {
+            BluetoothScanner.getBluetoothAdapter()
+        } catch (e: SecurityException) {
+            CTError(TAG, "refreshBluetoothDisabledState(): bluetooth permission unavailable.", e)
+            null
+        }
+        setBluetoothDisabledPanelVisible(
+            shouldShowBluetoothDisabledPanel(
+                adapterPresent = bluetoothAdapter != null,
+                bluetoothEnabled = bluetoothAdapter?.isEnabled == true,
+            ),
+            reason,
+        )
+    }
+
+    private fun setBluetoothDisabledPanelVisible(visible: Boolean, reason: String) {
+        if (bluetoothDisabled != visible) {
+            CTDebug(TAG, "bluetooth disabled panel visible=$visible ($reason)")
+        }
+        bluetoothDisabled = visible
+    }
+
+    private fun openBluetoothSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+        } catch (e: Exception) {
+            CTError(TAG, "openBluetoothSettings() raised:", e)
+            showToast("Unable to open Bluetooth settings")
         }
     }
 
@@ -813,6 +945,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
     }
 
     public override fun onDestroy() {
+        unregisterBluetoothStateReceiver()
         displayManager?.unregisterDisplayListener(displayListener)
         dismissExternalDisplay(returnPhoneToMain = false)
         val exitRequested = CaltopoClient.IsExitRequested()

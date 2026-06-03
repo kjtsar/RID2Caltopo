@@ -66,6 +66,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import org.ncssar.rid2caltopo.ui.MapFoldersDialog
 import org.ncssar.rid2caltopo.ui.MapFolderUiState
@@ -118,6 +119,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
 import org.osmdroid.events.MapListener
+import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
 import org.osmdroid.events.ScrollEvent
 import org.osmdroid.events.ZoomEvent
@@ -216,17 +218,6 @@ internal enum class OfflinePrepAreaMode(val label: String) {
     MapBoundary("Selected map shape")
 }
 
-internal enum class DynamicZoomFactor(val label: String, val zoom: Int) {
-    Low("Low", 12),
-    Medium("Medium", 14),
-    High("High", 16);
-
-    companion object {
-        fun fromLabel(label: String): DynamicZoomFactor =
-            entries.firstOrNull { it.label == label } ?: Medium
-    }
-}
-
 internal enum class AlertSeverity {
     None,
     Near,
@@ -307,7 +298,7 @@ internal data class OfflinePrepCacheStatus(
         get() = checked && tileMissing == 0 && demMissing == 0
 }
 
-internal data class DynamicDroneTileRequest(
+internal data class LiveTileRequest(
     val tileIndex: Long,
     val currentTileIndex: Long,
     val requiresCurrentCached: Boolean
@@ -489,30 +480,60 @@ private fun prefetchMapTileIfMissing(
     tileSource: org.osmdroid.tileprovider.tilesource.ITileSource,
     tileIndex: Long,
     tileWriter: TileDiskCacheWriter,
-    httpClient: OkHttpClient
-) {
-    val onlineTileSource = tileSource as? OnlineTileSourceBase ?: return
-    if (tileWriter.exists(tileSource, tileIndex)) return
+    httpClient: OkHttpClient,
+    reason: String = "prefetch"
+): Boolean {
+    val onlineTileSource = tileSource as? OnlineTileSourceBase ?: return false
+    val z = MapTileIndex.getZoom(tileIndex)
+    val x = MapTileIndex.getX(tileIndex)
+    val y = MapTileIndex.getY(tileIndex)
+    if (tileWriter.exists(tileSource, tileIndex)) {
+        MapCacheDebug.debug(
+            MapCacheDebug.TAG_TILE,
+            "$reason tile hit source=${tileSource.name()} z=$z x=$x y=$y"
+        )
+        return true
+    }
     try {
+        MapCacheDebug.debug(
+            MapCacheDebug.TAG_TILE,
+            "$reason tile miss source=${tileSource.name()} z=$z x=$x y=$y"
+        )
         val url = onlineTileSource.getTileURLString(tileIndex)
         val request = buildOfflineTileRequest(onlineTileSource, url)
         httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return
-            val body = response.body ?: return
+            if (!response.isSuccessful) {
+                MapCacheDebug.debug(
+                    MapCacheDebug.TAG_TILE,
+                    "$reason tile fetch-http source=${tileSource.name()} z=$z x=$x y=$y http=${response.code}"
+                )
+                return false
+            }
+            val body = response.body
+            if (body == null) {
+                MapCacheDebug.debug(
+                    MapCacheDebug.TAG_TILE,
+                    "$reason tile fetch-empty source=${tileSource.name()} z=$z x=$x y=$y"
+                )
+                return false
+            }
             val bytes = body.bytes()
-            tileWriter.saveFile(tileSource, tileIndex, ByteArrayInputStream(bytes), null)
+            val saved = tileWriter.saveFile(tileSource, tileIndex, ByteArrayInputStream(bytes), null)
+            MapCacheDebug.debug(
+                MapCacheDebug.TAG_TILE,
+                "$reason tile fetch-ok source=${tileSource.name()} z=$z x=$x y=$y bytes=${bytes.size} saved=$saved"
+            )
+            return saved
         }
     } catch (e: Exception) {
         if (MapCacheDebug.isDebugEnabled()) {
-            val z = MapTileIndex.getZoom(tileIndex)
-            val x = MapTileIndex.getX(tileIndex)
-            val y = MapTileIndex.getY(tileIndex)
             MapCacheDebug.debug(
                 MapCacheDebug.TAG_TILE,
-                "bootstrap tile prefetch failed source=${tileSource.name()} z=$z x=$x y=$y err=${e.javaClass.simpleName}:${e.message}"
+                "$reason tile fetch-failed source=${tileSource.name()} z=$z x=$x y=$y err=${e.javaClass.simpleName}:${e.message}"
             )
         }
     }
+    return false
 }
 
 internal fun configureOsmdroid(context: Context) {
@@ -530,6 +551,40 @@ internal fun configureOsmdroid(context: Context) {
     cfg.expirationOverrideDuration = MapCachePolicy.TILE_TTL_MS
 }
 
+private fun buildTileMapProvider(
+    context: Context,
+    tileSource: ITileSource,
+    tileWriter: TileDiskCacheWriter
+): TileCacheMapProvider {
+    configureOsmdroid(context)
+    return TileCacheMapProvider(
+        context = context,
+        tileSource = tileSource,
+        tileWriter = tileWriter
+    ).apply {
+        setUseDataConnection(true)
+    }
+}
+
+private fun restartTileProviderForViewportIntent(
+    mapView: MapView,
+    context: Context,
+    tileSource: ITileSource,
+    tileWriter: TileDiskCacheWriter,
+    reason: String,
+    zoom: Int
+): TileCacheMapProvider {
+    val nextProvider = buildTileMapProvider(context, tileSource, tileWriter)
+    mapView.setTileProvider(nextProvider)
+    mapView.setUseDataConnection(true)
+    nextProvider.setUseDataConnection(true)
+    MapCacheDebug.debug(
+        MapCacheDebug.TAG_TILE,
+        "tile provider restarted reason=$reason zoom=$zoom source=${tileSource.name()}"
+    )
+    return nextProvider
+}
+
 // SplitMapPane composable - extracted from StreamsScreen.kt (lines 648-2466)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -543,13 +598,9 @@ internal fun SplitMapPane(
     val uiScope = rememberCoroutineScope()
     val restoredViewport = viewModel.mapViewportState()
     val baseLayer = viewModel.baseLayer
-    var dynamicZoomFactor by remember(context) {
-        mutableStateOf(DynamicZoomFactor.fromLabel(MapCacheSettings.dynamicZoomFactor(context)))
-    }
     var settingsMenuExpanded by remember { mutableStateOf(false) }
     var mapManagementMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
-    var dynamicZoomMenuExpanded by remember { mutableStateOf(false) }
     var badTilesMenuExpanded by remember { mutableStateOf(false) }
     var mapReloadInFlight by remember { mutableStateOf(false) }
     var showMapCacheSizeDialog by remember { mutableStateOf(false) }
@@ -648,14 +699,10 @@ internal fun SplitMapPane(
         onDispose { removeConsumer() }
     }
     val tileCacheWriter = remember(context) { TileDiskCacheWriter(context) }
-    val tileMapProvider = remember(context) {
-        configureOsmdroid(context)
-        TileCacheMapProvider(
-            context = context,
-            tileSource = OsmStandardTileSource,
-            tileWriter = tileCacheWriter
-        )
+    var tileMapProvider by remember(context) {
+        mutableStateOf(buildTileMapProvider(context, OsmStandardTileSource, tileCacheWriter))
     }
+    val latestTileMapProvider by rememberUpdatedState(tileMapProvider)
     val offlineHttpClient = remember {
         OkHttpClient.Builder()
             .connectTimeout(6, TimeUnit.SECONDS)
@@ -673,6 +720,8 @@ internal fun SplitMapPane(
     var prevDemHits by remember { mutableStateOf(0L) }
     var prevDemMisses by remember { mutableStateOf(0L) }
     var tileIoActiveUntilMs by remember { mutableStateOf(System.currentTimeMillis() + 12_000L) }
+    var visibleTileZoom by remember { mutableIntStateOf(14) }
+    var firstLiveTilePriorityPassComplete by remember { mutableStateOf(false) }
     var lastViewportSignature by remember { mutableStateOf<String?>(null) }
     // Auto-download: GeoTIFF tiles already initiated (prevents redundant re-downloads).
     val autoFetchedDemTiles = remember { HashSet<String>() }
@@ -869,7 +918,8 @@ internal fun SplitMapPane(
     LaunchedEffect(autoRemoveBadTiles) {
         BadTilePolicy.setAutoRemoveEnabled(context, autoRemoveBadTiles)
     }
-    LaunchedEffect(context) {
+    LaunchedEffect(context, firstLiveTilePriorityPassComplete) {
+        if (!firstLiveTilePriorityPassComplete) return@LaunchedEffect
         withContext(Dispatchers.IO) {
             try {
                 val appContext = context.applicationContext
@@ -922,33 +972,54 @@ internal fun SplitMapPane(
             }
         }
     }
-    LaunchedEffect(baseLayer, dynamicZoomFactor, offlinePrepInFlight) {
+    LaunchedEffect(baseLayer, visibleTileZoom, localDeviceRefreshToken, dronePoints, offlinePrepInFlight) {
         if (offlinePrepInFlight) return@LaunchedEffect
-        delay(1_500L)
-        val loc = CaltopoMap.GetMyLocation() ?: return@LaunchedEffect
-        if (!loc.latitude.isFinite() || !loc.longitude.isFinite()) return@LaunchedEffect
+        val tabletLocation = CaltopoMap.GetMyLocation()?.takeIf {
+            it.latitude.isFinite() && it.longitude.isFinite()
+        }?.let { GeoPoint(it.latitude, it.longitude) }
         val source = tileSourceForBaseLayer(baseLayer)
-        val tileIndex = tileIndexForPoint(GeoPoint(loc.latitude, loc.longitude), dynamicZoomFactor.zoom)
-            ?: return@LaunchedEffect
-        val key = "${source.name()}:$tileIndex"
-        if (!autoPrefetchedMapTiles.add(key)) return@LaunchedEffect
-        withContext(Dispatchers.IO) {
-            prefetchMapTileIfMissing(source, tileIndex, tileCacheWriter, offlineHttpClient)
+        val requests = liveTilePriorityRequests(
+            tabletLocation = tabletLocation,
+            dronePoints = dronePoints,
+            visibleZoom = visibleTileZoom
+        )
+        if (requests.isEmpty()) {
+            firstLiveTilePriorityPassComplete = true
+            return@LaunchedEffect
         }
-    }
-    LaunchedEffect(baseLayer, dynamicZoomFactor, dronePoints, offlinePrepInFlight) {
-        if (offlinePrepInFlight) return@LaunchedEffect
-        val source = tileSourceForBaseLayer(baseLayer)
-        val requests = dynamicDroneTileRequests(dronePoints, dynamicZoomFactor.zoom)
-        withContext(Dispatchers.IO) {
-            for (request in requests) {
-                if (request.requiresCurrentCached && !tileCacheWriter.exists(source, request.currentTileIndex)) {
-                    continue
+        val passZoom = visibleTileZoom
+        val passStartMs = System.currentTimeMillis()
+        MapCacheDebug.debug(
+            MapCacheDebug.TAG_TILE,
+            "live-priority pass start zoom=$passZoom requests=${requests.size} source=${source.name()}"
+        )
+        try {
+            withContext(Dispatchers.IO) {
+                for (request in requests) {
+                    if (request.requiresCurrentCached && !tileCacheWriter.exists(source, request.currentTileIndex)) {
+                        continue
+                    }
+                    val key = "${source.name()}:${request.tileIndex}"
+                    if (key in autoPrefetchedMapTiles) continue
+                    val available = prefetchMapTileIfMissing(
+                        source,
+                        request.tileIndex,
+                        tileCacheWriter,
+                        offlineHttpClient,
+                        reason = "live-priority"
+                    )
+                    if (available) {
+                        autoPrefetchedMapTiles.add(key)
+                    }
                 }
-                val key = "${source.name()}:${request.tileIndex}"
-                if (!autoPrefetchedMapTiles.add(key)) continue
-                prefetchMapTileIfMissing(source, request.tileIndex, tileCacheWriter, offlineHttpClient)
             }
+        } finally {
+            val elapsedMs = System.currentTimeMillis() - passStartMs
+            MapCacheDebug.debug(
+                MapCacheDebug.TAG_TILE,
+                "live-priority pass done zoom=$passZoom requests=${requests.size} elapsedMs=$elapsedMs"
+            )
+            firstLiveTilePriorityPassComplete = true
         }
     }
     LaunchedEffect(
@@ -1477,8 +1548,7 @@ internal fun SplitMapPane(
                             maxZoom = preset.maxZoom,
                             clipBoundary = clipBoundary,
                             tabletLocation = tabletLocation,
-                            dronePathPoints = dronePathPoints,
-                            preferredZoom = dynamicZoomFactor.zoom
+                            dronePathPoints = dronePathPoints
                         )
                         for (tileIndex in orderedTileIndexes) {
                             currentCoroutineContext().ensureActive()
@@ -1516,8 +1586,7 @@ internal fun SplitMapPane(
                                 maxZoom = preset.maxZoom,
                                 clipBoundary = clipBoundary,
                                 tabletLocation = tabletLocation,
-                                dronePathPoints = dronePathPoints,
-                                preferredZoom = dynamicZoomFactor.zoom
+                                dronePathPoints = dronePathPoints
                             )
                             for (tileIndex in orderedTileIndexes) {
                                 currentCoroutineContext().ensureActive()
@@ -1755,7 +1824,7 @@ internal fun SplitMapPane(
 
     DisposableEffect(Unit) {
         onDispose {
-            tileMapProvider.detach()
+            latestTileMapProvider.detach()
         }
     }
 
@@ -2155,6 +2224,19 @@ internal fun SplitMapPane(
 
                             override fun onZoom(event: ZoomEvent?): Boolean {
                                 viewModel.persistMapViewportState(mapCenter, zoomLevelDouble)
+                                val eventZoom = event?.zoomLevel ?: zoomLevelDouble
+                                val eventTileZoom = TileSystem.getInputTileZoomLevel(eventZoom)
+                                if (visibleTileZoom != eventTileZoom) {
+                                    visibleTileZoom = eventTileZoom
+                                    tileMapProvider = restartTileProviderForViewportIntent(
+                                        mapView = this@apply,
+                                        context = context,
+                                        tileSource = tileProvider.tileSource,
+                                        tileWriter = tileCacheWriter,
+                                        reason = "zoom-change",
+                                        zoom = eventTileZoom
+                                    )
+                                }
                                 return false
                             }
                         }
@@ -2173,6 +2255,18 @@ internal fun SplitMapPane(
                 val maxZoom = if (baseLayer == BaseLayerOption.OpenStreetMap) OSM_MAX_ZOOM else 19.0
                 if (mapView.maxZoomLevel != maxZoom) {
                     mapView.setMaxZoomLevel(maxZoom)
+                }
+                val currentTileZoom = TileSystem.getInputTileZoomLevel(mapView.zoomLevelDouble)
+                if (visibleTileZoom != currentTileZoom) {
+                    visibleTileZoom = currentTileZoom
+                    tileMapProvider = restartTileProviderForViewportIntent(
+                        mapView = mapView,
+                        context = context,
+                        tileSource = mapView.tileProvider.tileSource,
+                        tileWriter = tileCacheWriter,
+                        reason = "viewport-update",
+                        zoom = currentTileZoom
+                    )
                 }
                 if (mapView.tileProvider.tileSource.name() != tileSource.name()) {
                     mapView.setTileSource(tileSource)
@@ -2626,8 +2720,9 @@ internal fun SplitMapPane(
                     val aglM    = compDisplayState?.aglFt?.let { it / METERS_TO_FEET }
                     val staleDem = compDisplayState?.aglStale ?: false
                     val rangeM = distanceFeetFromTakeoff(point)?.let { it * FT_TO_METERS }
-                    val nearAgl  = aglM != null && aglM >= nearAglM
-                    val overAgl  = aglM != null && aglM >= limitAglM
+                    val altitudeAlarmEnabled = point.droneSpec?.isLocalArchiveOnly != true
+                    val nearAgl = altitudeAlarmEnabled && aglM != null && aglM >= nearAglM
+                    val overAgl = altitudeAlarmEnabled && aglM != null && aglM >= limitAglM
                     val nearRange = rangeM != null && rangeM >= nearRangeM
                     val overRange = rangeM != null && rangeM >= limitRangeM
                     complianceByDesignator[point.designator] = DroneComplianceState(
@@ -2947,7 +3042,6 @@ internal fun SplitMapPane(
                     settingsMenuExpanded = false
                     mapManagementMenuExpanded = false
                     baseLayerMenuExpanded = false
-                    dynamicZoomMenuExpanded = false
                     badTilesMenuExpanded = false
                 }
             ) {
@@ -3028,13 +3122,6 @@ internal fun SplitMapPane(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Dynamic Zoom Factor: ${dynamicZoomFactor.label}") },
-                    onClick = {
-                        mapManagementMenuExpanded = false
-                        dynamicZoomMenuExpanded = true
-                    }
-                )
-                DropdownMenuItem(
                     text = { Text("Max Cache Size: ${MapCacheSettings.formatDecimalGb(MapCacheSettings.maxCacheBytes(context))}") },
                     onClick = {
                         mapManagementMenuExpanded = false
@@ -3054,24 +3141,6 @@ internal fun SplitMapPane(
                         showMapTileAgeDialog = true
                     }
                 )
-            }
-            DropdownMenu(
-                expanded = dynamicZoomMenuExpanded,
-                onDismissRequest = { dynamicZoomMenuExpanded = false }
-            ) {
-                DynamicZoomFactor.entries.forEach { option ->
-                    DropdownMenuItem(
-                        text = {
-                            val selected = if (option == dynamicZoomFactor) " \u2713" else ""
-                            Text("${option.label}$selected")
-                        },
-                        onClick = {
-                            dynamicZoomFactor = option
-                            MapCacheSettings.setDynamicZoomFactor(context, option.label)
-                            dynamicZoomMenuExpanded = false
-                        }
-                    )
-                }
             }
             DropdownMenu(
                 expanded = badTilesMenuExpanded,
@@ -3929,8 +3998,7 @@ internal fun orderedTileIndexesForOfflinePrep(
     maxZoom: Int,
     clipBoundary: GeoBoundary? = null,
     tabletLocation: GeoPoint? = null,
-    dronePathPoints: List<GeoPoint> = emptyList(),
-    preferredZoom: Int? = null
+    dronePathPoints: List<GeoPoint> = emptyList()
 ): List<Long> {
     val allTileIndexes = collectTileIndexesForBounds(bounds, minZoom, maxZoom, clipBoundary)
     if (allTileIndexes.size <= 1 || minZoom > maxZoom) return allTileIndexes
@@ -3945,7 +4013,7 @@ internal fun orderedTileIndexesForOfflinePrep(
         }
     }
 
-    val mediumZoom = (preferredZoom ?: ((minZoom + maxZoom) / 2)).coerceIn(minZoom, maxZoom)
+    val mediumZoom = ((minZoom + maxZoom) / 2).coerceIn(minZoom, maxZoom)
     tabletLocation?.let { point ->
         tileIndexForPoint(point, mediumZoom)?.let(::addIfAvailable)
     }
@@ -3968,13 +4036,33 @@ internal fun orderedTileIndexesForOfflinePrep(
     return ordered
 }
 
-internal fun dynamicDroneTileRequests(
+internal fun liveTilePriorityRequests(
+    tabletLocation: GeoPoint?,
     dronePoints: List<DroneMapPoint>,
-    zoom: Int
-): List<DynamicDroneTileRequest> {
-    val currentRequests = ArrayList<DynamicDroneTileRequest>()
-    val headingRequests = ArrayList<DynamicDroneTileRequest>()
-    val addedCurrent = HashSet<Long>()
+    visibleZoom: Int
+): List<LiveTileRequest> {
+    val requests = ArrayList<LiveTileRequest>()
+    tabletLocation?.let { location ->
+        tileIndexForPoint(location, visibleZoom)?.let { tileIndex ->
+            requests += LiveTileRequest(
+                tileIndex = tileIndex,
+                currentTileIndex = tileIndex,
+                requiresCurrentCached = false
+            )
+        }
+    }
+    requests += droneTilePriorityRequests(dronePoints, visibleZoom, existingTileIndexes = requests.map { it.tileIndex }.toSet())
+    return requests
+}
+
+internal fun droneTilePriorityRequests(
+    dronePoints: List<DroneMapPoint>,
+    zoom: Int,
+    existingTileIndexes: Set<Long> = emptySet()
+): List<LiveTileRequest> {
+    val currentRequests = ArrayList<LiveTileRequest>()
+    val headingRequests = ArrayList<LiveTileRequest>()
+    val addedCurrent = existingTileIndexes.toHashSet()
     val addedHeading = HashSet<Long>()
     val currentTileByPoint = LinkedHashMap<DroneMapPoint, Long>()
 
@@ -3983,7 +4071,7 @@ internal fun dynamicDroneTileRequests(
         val currentTileIndex = tileIndexForPoint(location, zoom) ?: continue
         currentTileByPoint[point] = currentTileIndex
         if (addedCurrent.add(currentTileIndex)) {
-            currentRequests += DynamicDroneTileRequest(
+            currentRequests += LiveTileRequest(
                 tileIndex = currentTileIndex,
                 currentTileIndex = currentTileIndex,
                 requiresCurrentCached = false
@@ -3999,7 +4087,7 @@ internal fun dynamicDroneTileRequests(
             headingTileIndex !in addedCurrent &&
             addedHeading.add(headingTileIndex)
         ) {
-            headingRequests += DynamicDroneTileRequest(
+            headingRequests += LiveTileRequest(
                 tileIndex = headingTileIndex,
                 currentTileIndex = currentTileIndex,
                 requiresCurrentCached = true

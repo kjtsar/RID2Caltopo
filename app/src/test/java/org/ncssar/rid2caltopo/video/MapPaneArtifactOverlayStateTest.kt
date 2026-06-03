@@ -43,25 +43,27 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
-    fun orderedTileIndexesForOfflinePrep_usesPreferredDynamicZoomWhenProvided() {
+    fun liveTilePriorityRequests_usesVisibleMapZoomForTabletAndDrones() {
         val tablet = GeoPoint(38.9000, -120.0000)
-        val bounds = BoundingBox(39.0000, -119.9000, 38.8000, -120.1000)
-        val ordered = orderedTileIndexesForOfflinePrep(
-            bounds = bounds,
-            minZoom = 12,
-            maxZoom = 16,
+        val drone = dronePoint("drone-visible", 38.9300, -119.9600, headingDeg = 0.0)
+
+        val requests = liveTilePriorityRequests(
             tabletLocation = tablet,
-            preferredZoom = DynamicZoomFactor.High.zoom
+            dronePoints = listOf(drone),
+            visibleZoom = 17
         )
 
-        assertEquals(tileIndexForTestPoint(tablet, 16), ordered.first())
+        assertEquals(tileIndexForTestPoint(tablet, 17), requests[0].tileIndex)
+        assertEquals(false, requests[0].requiresCurrentCached)
+        assertEquals(tileIndexForTestPoint(GeoPoint(drone.lat, drone.lng), 17), requests[1].tileIndex)
+        assertEquals(false, requests[1].requiresCurrentCached)
     }
 
     @Test
-    fun dynamicDroneTileRequests_ordersAllCurrentDroneTilesBeforeHeadingTiles() {
+    fun droneTilePriorityRequests_ordersAllCurrentDroneTilesBeforeHeadingTiles() {
         val westDrone = dronePoint("drone-west", 38.9000, -120.0000, headingDeg = 90.0)
         val northDrone = dronePoint("drone-north", 38.9300, -119.9600, headingDeg = 0.0)
-        val requests = dynamicDroneTileRequests(listOf(westDrone, northDrone), DynamicZoomFactor.Medium.zoom)
+        val requests = droneTilePriorityRequests(listOf(westDrone, northDrone), 14)
 
         val westCurrent = tileIndexForTestPoint(GeoPoint(westDrone.lat, westDrone.lng), 14)
         val northCurrent = tileIndexForTestPoint(GeoPoint(northDrone.lat, northDrone.lng), 14)

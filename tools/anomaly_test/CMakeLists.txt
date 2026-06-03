@@ -15,6 +15,7 @@ add_executable(anomaly_test
     ../../app/src/main/cpp/anomaly_scratch.c
     ../../app/src/main/cpp/anomaly_color_detector.c
     ../../app/src/main/cpp/anomaly_debug_helpers.c
+    ../../app/src/main/cpp/anomaly_frame_history.c
     ../../app/src/main/cpp/anomaly_grid_region.c
     ../../app/src/main/cpp/anomaly_linear_solve.c
     ../../app/src/main/cpp/anomaly_appearance_candidates.c
@@ -48,6 +49,7 @@ add_executable(anomaly_video_test
     ../../app/src/main/cpp/anomaly_scratch.c
     ../../app/src/main/cpp/anomaly_color_detector.c
     ../../app/src/main/cpp/anomaly_debug_helpers.c
+    ../../app/src/main/cpp/anomaly_frame_history.c
     ../../app/src/main/cpp/anomaly_grid_region.c
     ../../app/src/main/cpp/anomaly_linear_solve.c
     ../../app/src/main/cpp/anomaly_appearance_candidates.c

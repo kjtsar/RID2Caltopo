@@ -39,6 +39,18 @@ typedef bool (*anomaly_motion_estimator_find_residual_displacement_fn)(
 typedef bool (*anomaly_motion_estimator_registration_valid_fn)(
         const anomaly_motion_estimator_registration_t *registration);
 
+bool anomaly_motion_estimator_project_cell(
+        const anomaly_motion_estimator_registration_t *registration,
+        int                                            width,
+        int                                            height,
+        int                                            motion_step,
+        int                                            motion_w,
+        int                                            motion_h,
+        int                                            mx,
+        int                                            my,
+        int                                           *px_idx_out,
+        int                                           *py_idx_out);
+
 bool anomaly_motion_estimator_find_residual_displacement(
         const uint8_t *curr_luma,
         const uint8_t *prev_luma,
@@ -56,6 +68,27 @@ bool anomaly_motion_estimator_find_residual_displacement(
 
 float anomaly_motion_estimator_texture_scale(int texture_score);
 
+float anomaly_motion_estimator_appearance_zoom_motion_scale(float registration_scale);
+
+float anomaly_motion_estimator_appearance_broad_motion_scale(float global_motion_load);
+
+float anomaly_motion_estimator_appearance_global_motion_load(
+        int strong_global_samples,
+        int global_count);
+
+typedef struct {
+    float mean;
+    float std;
+    float motion_floor_px;
+} anomaly_motion_appearance_global_stats_t;
+
+void anomaly_motion_estimator_appearance_global_stats(
+        double                                    global_sum,
+        double                                    global_sum2,
+        int                                       global_count,
+        int                                       motion_step,
+        anomaly_motion_appearance_global_stats_t *out);
+
 float anomaly_motion_estimator_structure_scale(
         const uint8_t *luma,
         int            w,
@@ -68,6 +101,8 @@ typedef struct {
     anomaly_motion_estimator_find_residual_displacement_fn find_residual_displacement;
     anomaly_motion_estimator_registration_valid_fn registration_valid;
 } anomaly_motion_estimator_sidecar_ops_t;
+
+const anomaly_motion_estimator_sidecar_ops_t *anomaly_motion_estimator_default_sidecar_ops(void);
 
 typedef struct {
     const anomaly_config_t                         *cfg;
@@ -227,6 +262,40 @@ typedef struct {
     const anomaly_motion_estimator_registration_t       *registration;
     const uint8_t                                       *curr_luma;
     const uint8_t                                       *prev_luma;
+    int                                                  prev_luma_width;
+    int                                                  prev_luma_height;
+    int                                                  width;
+    int                                                  height;
+    int                                                  motion_w;
+    int                                                  motion_h;
+    int                                                  motion_step;
+    int                                                  motion_count;
+    int                                                  roi_x0;
+    int                                                  roi_x1;
+    int                                                  roi_y0;
+    int                                                  roi_y1;
+    bool                                                 anomaly_detection_active;
+    bool                                                 scene_discontinuity;
+    float                                                motion_evidence_scale;
+    float                                               *saliency_motion_map;
+    float                                               *saliency_registration_map;
+    int                                                  sg_w;
+    int                                                  sg_h;
+    int                                                  sample_step;
+    int                                                  proposal_count;
+    const anomaly_motion_appearance_proposal_t          *proposals;
+    float                                               *persist;
+    int                                                  persist_w;
+    int                                                  persist_h;
+} anomaly_motion_appearance_scorer_input_args_t;
+
+typedef struct {
+    const anomaly_config_t                              *cfg;
+    const anomaly_motion_estimator_registration_t       *registration;
+    const uint8_t                                       *curr_luma;
+    const uint8_t                                       *prev_luma;
+    int                                                  prev_luma_width;
+    int                                                  prev_luma_height;
     int                                                  width;
     int                                                  height;
     int                                                  motion_w;
@@ -253,6 +322,13 @@ typedef struct {
 } anomaly_motion_appearance_scorer_input_t;
 
 typedef struct {
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+} anomaly_motion_appearance_grid_bounds_t;
+
+typedef struct {
     bool                                  valid;
     float                                 global_motion_mean;
     float                                 global_motion_std;
@@ -266,6 +342,57 @@ typedef struct {
 
 void anomaly_motion_estimator_init_appearance_scorer_output(
         anomaly_motion_appearance_scorer_output_t *out);
+
+void anomaly_motion_estimator_init_appearance_scorer_input(
+        anomaly_motion_appearance_scorer_input_t              *input,
+        anomaly_motion_appearance_scorer_state_t              *state,
+        const anomaly_motion_appearance_scorer_input_args_t   *args);
+
+void anomaly_motion_estimator_sync_appearance_scorer_state(
+        anomaly_motion_appearance_scorer_state_t *state,
+        float                                    *persist,
+        int                                       persist_w,
+        int                                       persist_h);
+
+void anomaly_motion_estimator_populate_appearance_debug_summary(
+        anomaly_debug_motion_t *debug,
+        bool                    scene_discontinuity,
+        int                     sample_step,
+        int                     motion_step,
+        int                     global_count,
+        int                     motion_candidate_count,
+        float                   global_motion_mean,
+        float                   global_motion_std,
+        float                   zoom_motion_scale,
+        float                   broad_motion_scale,
+        float                   global_motion_load);
+
+void anomaly_motion_estimator_populate_appearance_debug_result(
+        anomaly_debug_motion_t          *debug,
+        float                            raw_score,
+        int                              raw_x,
+        int                              raw_y,
+        float                            frame_w,
+        float                            frame_h,
+        float                            winner_component_area_frac,
+        float                            winner_component_span_frac,
+        float                            winner_component_fill_ratio,
+        float                            zoom_motion_scale,
+        float                            broad_motion_scale,
+        float                            global_motion_load,
+        float                            winner_texture_scale,
+        float                            winner_structure_scale,
+        float                            winner_support_scale,
+        float                            winner_persistence_scale,
+        const anomaly_debug_candidate_t *top_candidates,
+        int                              top_candidate_count);
+
+bool anomaly_motion_estimator_appearance_scorer_ready(
+        const anomaly_motion_appearance_scorer_input_t *input);
+
+bool anomaly_motion_estimator_appearance_grid_bounds(
+        const anomaly_motion_appearance_scorer_input_t *input,
+        anomaly_motion_appearance_grid_bounds_t        *out);
 
 bool anomaly_motion_estimator_appearance_score_is_winner_eligible(
         const anomaly_motion_appearance_score_t *score);

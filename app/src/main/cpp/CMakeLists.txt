@@ -20,6 +20,7 @@ add_library(
     anomaly_scratch.c
     anomaly_color_detector.c
     anomaly_debug_helpers.c
+    anomaly_frame_history.c
     anomaly_grid_region.c
     anomaly_linear_solve.c
     anomaly_appearance_candidates.c

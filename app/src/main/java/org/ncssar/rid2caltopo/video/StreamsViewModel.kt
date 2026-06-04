@@ -121,12 +121,40 @@ data class LocalMapMarker(
     val sourceDesignator: String
 )
 
+data class ClueSnapshotRef(
+    val title: String,
+    val thumbnail: Bitmap?,
+    val fullImage: Bitmap?
+)
+
 fun removeLocalMapMarkerById(markers: MutableList<LocalMapMarker>, markerId: Long): Boolean {
     val index = markers.indexOfFirst { it.id == markerId }
     if (index < 0) return false
     markers.removeAt(index)
     return true
 }
+
+fun registerClueSnapshotByTitle(
+    snapshots: MutableMap<String, ClueSnapshotRef>,
+    title: String,
+    thumbnail: Bitmap?,
+    fullImage: Bitmap?
+): ClueSnapshotRef? {
+    val key = title.trim()
+    if (key.isBlank()) return null
+    val snapshot = ClueSnapshotRef(
+        title = key,
+        thumbnail = thumbnail,
+        fullImage = fullImage
+    )
+    snapshots[key] = snapshot
+    return snapshot
+}
+
+fun clueSnapshotForTitle(
+    snapshots: Map<String, ClueSnapshotRef>,
+    title: String
+): ClueSnapshotRef? = snapshots[title.trim()]
 
 data class MapViewportState(
     val latitude: Double,
@@ -754,6 +782,7 @@ class StreamsViewModel(
     val pendingClue: PendingClue?
         get() = _pendingClue.value
     val localMapMarkers = mutableStateListOf<LocalMapMarker>()
+    private val clueSnapshotRefsByTitle = mutableStateMapOf<String, ClueSnapshotRef>()
     private var nextLocalMapMarkerId = 1L
 
     private val _mapName = mutableStateOf<String?>(null)
@@ -1252,6 +1281,7 @@ class StreamsViewModel(
             if (!oldName.equals(newName)) {
                 persistedMapViewportState = null
                 localMapMarkers.clear()
+                clueSnapshotRefsByTitle.clear()
                 CTDebug(tag, "Connected to ${newName}")
                 _mapName.value = newName
             }
@@ -1260,6 +1290,7 @@ class StreamsViewModel(
             CTDebug(tag, "Disconnected from ${oldName} map")
             resetFolderVisibility()
             localMapMarkers.clear()
+            clueSnapshotRefsByTitle.clear()
         }
     }
 
@@ -1433,6 +1464,31 @@ class StreamsViewModel(
         _pendingClue.value = _pendingClue.value?.copy(description = description)
     }
 
+    fun clueSnapshotForTitle(title: String): ClueSnapshotRef? =
+        clueSnapshotForTitle(clueSnapshotRefsByTitle, title)
+
+    private fun registerClueSnapshot(title: String, fullImage: Bitmap?, preview: Bitmap?): ClueSnapshotRef? {
+        val image = fullImage ?: preview
+        val thumbnail = makeClueSnapshotThumbnail(preview ?: fullImage)
+        return registerClueSnapshotByTitle(
+            snapshots = clueSnapshotRefsByTitle,
+            title = title,
+            thumbnail = thumbnail,
+            fullImage = image
+        )
+    }
+
+    private fun makeClueSnapshotThumbnail(bitmap: Bitmap?): Bitmap? {
+        if (bitmap == null) return null
+        val maxSide = 180
+        val longest = maxOf(bitmap.width, bitmap.height)
+        if (longest <= maxSide) return bitmap
+        val scaleFactor = maxSide.toFloat() / longest.toFloat()
+        val width = (bitmap.width * scaleFactor).toInt().coerceAtLeast(1)
+        val height = (bitmap.height * scaleFactor).toInt().coerceAtLeast(1)
+        return bitmap.scale(width, height)
+    }
+
     fun updateClueGimbalAngle(gimbalAngleDeg: Double) {
         _pendingClue.value = _pendingClue.value?.let { clue ->
             val projection = projectClueLocation(
@@ -1483,6 +1539,7 @@ class StreamsViewModel(
         ))
         val withCaptureSummary = appendTelemetrySummary(clue.description, buildClueCaptureSummary(clue))
         val finalDescription = appendTelemetrySummary(withCaptureSummary, clue.streamTelemetrySummary)
+        registerClueSnapshot(clue.title, clue.bitmap, clue.preview)
         CaltopoClient.SubmitClue(
             clue.droneSpec,
             clue.bitmap,
@@ -1501,6 +1558,7 @@ class StreamsViewModel(
         val clue = pendingClue ?: return
         val markerTitle = clue.title.ifBlank { "Local marker" }
         val markerDescription = appendTelemetrySummary(clue.description, buildClueCaptureSummary(clue))
+        registerClueSnapshot(markerTitle, clue.bitmap, clue.preview)
         localMapMarkers.add(
             LocalMapMarker(
                 id = nextLocalMapMarkerId++,

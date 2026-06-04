@@ -4,6 +4,7 @@ import StreamsViewModel
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
@@ -18,6 +19,7 @@ import android.os.StatFs
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -89,6 +91,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -108,6 +111,7 @@ import okhttp3.Call
 import okhttp3.Request
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -516,8 +520,10 @@ private class LocalMarkerInfoWindow(
     mapView: MapView,
     private val titleText: String,
     private val descriptionText: String,
-    private val markerId: Long,
-    private val onDelete: (Long) -> Unit
+    private val thumbnail: Bitmap?,
+    private val onOpenSnapshot: (() -> Unit)?,
+    private val markerId: Long?,
+    private val onDelete: ((Long) -> Unit)?
 ) : InfoWindow(R.layout.map_local_marker_info_window, mapView) {
     override fun onOpen(item: Any?) {
         mView.findViewById<TextView>(R.id.local_marker_title)?.text = titleText
@@ -525,15 +531,74 @@ private class LocalMarkerInfoWindow(
             text = descriptionText
             visibility = if (descriptionText.isBlank()) View.GONE else View.VISIBLE
         }
-        mView.findViewById<Button>(R.id.local_marker_delete)?.setOnClickListener {
-            close()
-            onDelete(markerId)
+        mView.findViewById<ImageView>(R.id.local_marker_snapshot)?.apply {
+            if (thumbnail != null) {
+                setImageBitmap(thumbnail)
+                visibility = View.VISIBLE
+                isClickable = onOpenSnapshot != null
+                setOnClickListener {
+                    onOpenSnapshot?.invoke()
+                }
+            } else {
+                setImageDrawable(null)
+                visibility = View.GONE
+                setOnClickListener(null)
+            }
+        }
+        mView.findViewById<Button>(R.id.local_marker_delete)?.apply {
+            if (markerId != null && onDelete != null) {
+                visibility = View.VISIBLE
+                setOnClickListener {
+                    close()
+                    onDelete.invoke(markerId)
+                }
+            } else {
+                visibility = View.GONE
+                setOnClickListener(null)
+            }
         }
     }
 
     override fun onClose() {
+        mView.findViewById<ImageView>(R.id.local_marker_snapshot)?.setOnClickListener(null)
         mView.findViewById<Button>(R.id.local_marker_delete)?.setOnClickListener(null)
     }
+}
+
+private fun openClueSnapshotInExternalViewer(context: Context, title: String, bitmap: Bitmap?) {
+    if (bitmap == null) {
+        CaltopoClient.ShowToast("No clue snapshot available.")
+        return
+    }
+    try {
+        val snapshotDir = File(context.cacheDir, "clue-snapshots").apply { mkdirs() }
+        val fileName = sanitizeClueSnapshotFileName(title)
+        val snapshotFile = File(snapshotDir, fileName)
+        FileOutputStream(snapshotFile).use { output ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)
+        }
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            snapshotFile
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "image/jpeg")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        CTError(MAP_PANE_TAG, "openClueSnapshotInExternalViewer(): failed", e)
+        CaltopoClient.ShowToast("No app found to open clue snapshot.")
+    }
+}
+
+private fun sanitizeClueSnapshotFileName(title: String): String {
+    val safeTitle = title.trim()
+        .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+        .trim('_')
+        .ifBlank { "clue_snapshot" }
+    return "$safeTitle.jpg"
 }
 
 // Tile source objects
@@ -2681,6 +2746,7 @@ internal fun SplitMapPane(
                     val markerSnippet = point.description.ifBlank {
                         "Local R2C marker from ${point.sourceDesignator}"
                     }
+                    val snapshot = viewModel.clueSnapshotForTitle(point.title)
                     val marker = Marker(mapView).apply {
                         position = GeoPoint(point.lat, point.lng)
                         icon = markerIconForArtifactSymbol(
@@ -2697,6 +2763,10 @@ internal fun SplitMapPane(
                         mapView = mapView,
                         titleText = markerTitle,
                         descriptionText = markerSnippet,
+                        thumbnail = snapshot?.thumbnail,
+                        onOpenSnapshot = snapshot?.fullImage?.let { fullImage ->
+                            { openClueSnapshotInExternalViewer(context, snapshot.title, fullImage) }
+                        },
                         markerId = point.id,
                         onDelete = { markerId ->
                             if (viewModel.deleteLocalMapMarker(markerId)) {
@@ -2738,6 +2808,19 @@ internal fun SplitMapPane(
                             )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = point.title
+                    }
+                    viewModel.clueSnapshotForTitle(point.title)?.let { snapshot ->
+                        marker.infoWindow = LocalMarkerInfoWindow(
+                            mapView = mapView,
+                            titleText = point.title,
+                            descriptionText = marker.snippet ?: "",
+                            thumbnail = snapshot.thumbnail,
+                            onOpenSnapshot = snapshot.fullImage?.let { fullImage ->
+                                { openClueSnapshotInExternalViewer(context, snapshot.title, fullImage) }
+                            },
+                            markerId = null,
+                            onDelete = null
+                        )
                     }
                     if (!isKnownArtifactSymbol(point.markerSymbol) && unknownSymbolsSeen.add(point.markerSymbol)) {
                         if (CTDebugEnabled(MAP_PANE_TAG))  CTDebug(MAP_PANE_TAG, "Unknown marker-symbol encountered: '${point.markerSymbol}'")

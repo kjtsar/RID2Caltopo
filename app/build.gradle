@@ -9,6 +9,32 @@ plugins {
     id("jacoco")
 }
 
+def generatedReleaseNotesAssetsDir = layout.buildDirectory.dir("generated/release-notes/assets")
+def generateReleaseNotes = tasks.register("generateReleaseNotes") {
+    def outputFile = generatedReleaseNotesAssetsDir.map { it.file("release_notes.txt") }
+    outputs.file(outputFile)
+
+    doLast {
+        def releaseNotesFile = outputFile.get().asFile
+        releaseNotesFile.parentFile.mkdirs()
+
+        def stdout = new ByteArrayOutputStream()
+        def stderr = new ByteArrayOutputStream()
+        def result = exec {
+            commandLine "git", "log", "-10", "--pretty=format:%h %ad %s", "--date=short"
+            standardOutput = stdout
+            errorOutput = stderr
+            ignoreExitValue = true
+        }
+
+        def notes = result.exitValue == 0 ? stdout.toString("UTF-8").trim() : ""
+        if (notes.isEmpty()) {
+            notes = "Release notes unavailable for this build."
+        }
+        releaseNotesFile.text = notes + System.lineSeparator()
+    }
+}
+
 // Read the keystore properties
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
@@ -128,7 +154,7 @@ android {
     }
     sourceSets {
         main {
-            assets.srcDirs += ['src/main/assets']
+            assets.srcDirs += ['src/main/assets', generatedReleaseNotesAssetsDir.get().asFile]
         }
     }
     testOptions {
@@ -140,6 +166,12 @@ android {
             }
         }
     }
+}
+
+tasks.matching { task ->
+    task.name.startsWith("merge") && task.name.endsWith("Assets")
+}.configureEach {
+    dependsOn(generateReleaseNotes)
 }
 
 dependencies {

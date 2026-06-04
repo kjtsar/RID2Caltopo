@@ -41,6 +41,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -250,6 +251,8 @@ fun MainScreen(
     var showOrgExportDialog by remember { mutableStateOf(false) }
     var showFaaExportDialog by remember { mutableStateOf(false) }
     var showImportConfigDialog by remember { mutableStateOf(false) }
+    var showReleaseNotesDialog by remember { mutableStateOf(false) }
+    var releaseNotesText by remember { mutableStateOf(RELEASE_NOTES_FALLBACK) }
     var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingMutualAidImportPreview by remember { mutableStateOf<MutualAidPackageManager.PackagePreview?>(null) }
     var showMutualAidImportPreviewDialog by remember { mutableStateOf(false) }
@@ -996,6 +999,12 @@ fun MainScreen(
                             CaltopoClient.CTEvent(tag,"ScannersDisplayed", null)
                             menuExpanded = false
                         })
+                        DropdownMenuItem(text = { Text("Release Notes") }, onClick = {
+                            releaseNotesText = loadReleaseNotes(context)
+                            showReleaseNotesDialog = true
+                            CaltopoClient.CTEvent(tag,"ReleaseNotesDisplayed", null)
+                            menuExpanded = false
+                        })
                         DropdownMenuItem(text = {
                             Text("LogLevel:${level}") }, onClick = {
                             CaltopoClient.BumpLoggingLevel()
@@ -1178,6 +1187,28 @@ fun MainScreen(
                     enabled = !loadingLogArchiveDays && !sendingLogArchive
                 ) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showReleaseNotesDialog) {
+        AlertDialog(
+            onDismissRequest = { showReleaseNotesDialog = false },
+            title = { Text("Release Notes") },
+            text = {
+                Text(
+                    text = releaseNotesText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showReleaseNotesDialog = false }) {
+                    Text("Close")
                 }
             }
         )

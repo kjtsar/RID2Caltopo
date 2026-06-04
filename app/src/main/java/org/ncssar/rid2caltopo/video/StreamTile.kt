@@ -2,6 +2,9 @@ package org.ncssar.rid2caltopo.video
 
 import StreamsViewModel
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color as AndroidColor
+import android.graphics.Paint
 import android.graphics.SurfaceTexture
 import android.view.Surface
 import android.view.TextureView
@@ -10,6 +13,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -55,10 +60,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -154,6 +161,28 @@ fun StreamTile(
     val showOverlayControls = (isFocused || isLocalPlayback) &&
         (streamState == StreamState.LIVE || showLocalPlaybackShell)
     var streamTileSize by remember(streamDesignator) { mutableStateOf(IntSize.Zero) }
+    var zoomScale by remember(streamDesignator, streamRevision) { mutableStateOf(1f) }
+    var zoomOffset by remember(streamDesignator, streamRevision) { mutableStateOf(Offset.Zero) }
+    val maxZoomScale = 4f
+    fun clampZoomOffset(offset: Offset, scale: Float): Offset {
+        if (scale <= 1.001f || streamTileSize.width <= 0 || streamTileSize.height <= 0) {
+            return Offset.Zero
+        }
+        val maxX = streamTileSize.width * (scale - 1f) * 0.5f
+        val maxY = streamTileSize.height * (scale - 1f) * 0.5f
+        return Offset(
+            x = offset.x.coerceIn(-maxX, maxX),
+            y = offset.y.coerceIn(-maxY, maxY),
+        )
+    }
+    val zoomTransformState = rememberTransformableState { zoomChange, panChange, _ ->
+        val nextScale = (zoomScale * zoomChange).coerceIn(1f, maxZoomScale)
+        zoomScale = nextScale
+        zoomOffset = clampZoomOffset(
+            offset = if (nextScale <= 1.001f) Offset.Zero else zoomOffset + panChange,
+            scale = nextScale,
+        )
+    }
     val togglePlaybackAnomalyEnabled = {
         viewModel.toggleAnomalyEnabled(streamDesignator)
         val nextEnabled = !anomalyConfig.enabled
@@ -173,6 +202,10 @@ fun StreamTile(
         }
     }
 
+    LaunchedEffect(streamTileSize, zoomScale) {
+        zoomOffset = clampZoomOffset(zoomOffset, zoomScale)
+    }
+
     Box(
         modifier = Modifier
             .border(
@@ -181,79 +214,109 @@ fun StreamTile(
             )
             .aspectRatio(16f / 9f)
             .onSizeChanged { streamTileSize = it }
+            .clipToBounds()
+            .transformable(zoomTransformState)
         ) {
-        StreamPlayer(
-            state = streamState,
-            designator = streamDesignator,
-            streamRevision = streamRevision,
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f),
-            viewModel = viewModel,
-            onTextureViewReady = { tv -> textureViewRef.value = tv }
-        )
-        if (isLocalPlayback) {
-            if (currentFrameAnnotations.isNotEmpty()) {
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                ) {
-                    currentFrameAnnotations.forEach { annotation ->
-                        val markerColor = when (annotation.verdict) {
-                            LocalPlaybackAnnotationVerdict.Good -> Color.Green
-                            LocalPlaybackAnnotationVerdict.Bad -> Color.Red
-                            LocalPlaybackAnnotationVerdict.Unsure -> Color.Yellow
+                .matchParentSize()
+                .graphicsLayer {
+                    scaleX = zoomScale
+                    scaleY = zoomScale
+                    translationX = zoomOffset.x
+                    translationY = zoomOffset.y
+                }
+        ) {
+            StreamPlayer(
+                state = streamState,
+                designator = streamDesignator,
+                streamRevision = streamRevision,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f),
+                viewModel = viewModel,
+                onTextureViewReady = { tv -> textureViewRef.value = tv }
+            )
+            if (isLocalPlayback) {
+                if (currentFrameAnnotations.isNotEmpty()) {
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                    ) {
+                        currentFrameAnnotations.forEach { annotation ->
+                            val markerColor = when (annotation.verdict) {
+                                LocalPlaybackAnnotationVerdict.Good -> Color.Green
+                                LocalPlaybackAnnotationVerdict.Bad -> Color.Red
+                                LocalPlaybackAnnotationVerdict.Unsure -> Color.Yellow
+                            }
+                            val center = Offset(
+                                x = annotation.xNorm.coerceIn(0f, 1f) * size.width,
+                                y = annotation.yNorm.coerceIn(0f, 1f) * size.height,
+                            )
+                            val radius = 10.dp.toPx()
+                            val strokeWidth = 2.dp.toPx()
+                            drawCircle(
+                                color = markerColor,
+                                radius = radius,
+                                center = center,
+                                style = Stroke(width = strokeWidth)
+                            )
+                            drawLine(
+                                color = markerColor,
+                                start = Offset(center.x - radius * 0.75f, center.y),
+                                end = Offset(center.x + radius * 0.75f, center.y),
+                                strokeWidth = strokeWidth
+                            )
+                            drawLine(
+                                color = markerColor,
+                                start = Offset(center.x, center.y - radius * 0.75f),
+                                end = Offset(center.x, center.y + radius * 0.75f),
+                                strokeWidth = strokeWidth
+                            )
                         }
-                        val center = Offset(
-                            x = annotation.xNorm.coerceIn(0f, 1f) * size.width,
-                            y = annotation.yNorm.coerceIn(0f, 1f) * size.height,
-                        )
-                        val radius = 10.dp.toPx()
-                        val strokeWidth = 2.dp.toPx()
-                        drawCircle(
-                            color = markerColor,
-                            radius = radius,
-                            center = center,
-                            style = Stroke(width = strokeWidth)
-                        )
-                        drawLine(
-                            color = markerColor,
-                            start = Offset(center.x - radius * 0.75f, center.y),
-                            end = Offset(center.x + radius * 0.75f, center.y),
-                            strokeWidth = strokeWidth
-                        )
-                        drawLine(
-                            color = markerColor,
-                            start = Offset(center.x, center.y - radius * 0.75f),
-                            end = Offset(center.x, center.y + radius * 0.75f),
-                            strokeWidth = strokeWidth
-                        )
                     }
                 }
             }
-            if (anomalyConfig.enabled && isLocalPlaybackPaused && currentFrameTimestampUs != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .pointerInput(streamDesignator, currentFrameTimestampUs, isLocalPlaybackPaused) {
-                            detectTapGestures(
-                                onTap = { tapOffset ->
-                                    val width = size.width.toFloat().coerceAtLeast(1f)
-                                    val height = size.height.toFloat().coerceAtLeast(1f)
-                                    pendingAnnotationPoint = Offset(
-                                        x = (tapOffset.x / width).coerceIn(0f, 1f),
-                                        y = (tapOffset.y / height).coerceIn(0f, 1f),
-                                    )
-                                },
-                                onLongPress = {
-                                    togglePlaybackAnomalyEnabled()
-                                }
-                            )
-                        }
-                )
-            }
+        }
+        if (isLocalPlayback && anomalyConfig.enabled && isLocalPlaybackPaused && currentFrameTimestampUs != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .pointerInput(
+                        streamDesignator,
+                        currentFrameTimestampUs,
+                        isLocalPlaybackPaused,
+                        zoomScale,
+                        zoomOffset,
+                    ) {
+                        detectTapGestures(
+                            onTap = { tapOffset ->
+                                val width = size.width.toFloat().coerceAtLeast(1f)
+                                val height = size.height.toFloat().coerceAtLeast(1f)
+                                val visualPoint = unzoomedStreamPoint(
+                                    tapOffset = tapOffset,
+                                    containerWidth = width,
+                                    containerHeight = height,
+                                    scale = zoomScale,
+                                    offset = zoomOffset,
+                                )
+                                pendingAnnotationPoint = Offset(
+                                    x = (visualPoint.x / width).coerceIn(0f, 1f),
+                                    y = (visualPoint.y / height).coerceIn(0f, 1f),
+                                )
+                            },
+                            onLongPress = {
+                                togglePlaybackAnomalyEnabled()
+                            },
+                            onDoubleTap = {
+                                zoomScale = 1f
+                                zoomOffset = Offset.Zero
+                            }
+                        )
+                    }
+            )
         }
 
         // ATO / AGL / HDG overlay — shown whenever the stream is live and we have a linked drone.
@@ -281,6 +344,14 @@ fun StreamTile(
                         fontFamily = FontFamily.Monospace,
                     )
                 }
+                if (zoomScale > 1.01f) {
+                    Text(
+                        text = "${zoomScale.formatZoom()}x",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
             }
         }
         if (
@@ -293,6 +364,12 @@ fun StreamTile(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
+                    .graphicsLayer {
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        translationX = zoomOffset.x
+                        translationY = zoomOffset.y
+                    }
             ) {
                 val guideColor = Color(0xFF80CBC4).copy(alpha = 0.70f)
                 val (scanZoneWidth, scanZoneHeight) = anomalyConfig.scanZoneSize(
@@ -377,7 +454,12 @@ fun StreamTile(
                                         return@detectTapGestures
                                     }
 
-                                    viewModel.onSnapshotCaptured(streamDesignator, bitmap)
+                                    val clueBitmap = zoomedSnapshotBitmap(
+                                        source = bitmap,
+                                        scale = zoomScale,
+                                        offset = zoomOffset,
+                                    )
+                                    viewModel.onSnapshotCaptured(streamDesignator, clueBitmap)
                                 }
                             )
                         }
@@ -1390,6 +1472,53 @@ private fun formatPlaybackTimestampUs(timestampUs: Long): String {
     val millis = totalMs % 1_000L
     return "%02d:%02d.%03d".format(minutes, seconds, millis)
 }
+
+private fun unzoomedStreamPoint(
+    tapOffset: Offset,
+    containerWidth: Float,
+    containerHeight: Float,
+    scale: Float,
+    offset: Offset,
+): Offset {
+    if (scale <= 1.001f) return tapOffset
+    val center = Offset(containerWidth * 0.5f, containerHeight * 0.5f)
+    return Offset(
+        x = center.x + ((tapOffset.x - center.x - offset.x) / scale),
+        y = center.y + ((tapOffset.y - center.y - offset.y) / scale),
+    )
+}
+
+internal fun zoomedSnapshotBitmap(
+    source: Bitmap,
+    scale: Float,
+    offset: Offset,
+): Bitmap {
+    if (scale <= 1.001f && kotlin.math.abs(offset.x) <= 0.5f && kotlin.math.abs(offset.y) <= 0.5f) {
+        return source
+    }
+    val output = Bitmap.createBitmap(
+        source.width,
+        source.height,
+        source.config ?: Bitmap.Config.ARGB_8888
+    )
+    val canvas = android.graphics.Canvas(output)
+    val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+    canvas.drawColor(AndroidColor.BLACK)
+    val centerX = source.width * 0.5f
+    val centerY = source.height * 0.5f
+    canvas.translate(centerX + offset.x, centerY + offset.y)
+    canvas.scale(scale.coerceAtLeast(1f), scale.coerceAtLeast(1f))
+    canvas.translate(-centerX, -centerY)
+    canvas.drawBitmap(source, 0f, 0f, paint)
+    return output
+}
+
+private fun Float.formatZoom(): String =
+    if (this >= 3.95f) {
+        "4"
+    } else {
+        "%.1f".format(this)
+    }
 
 @Composable
 private fun OutlinedLegendText(

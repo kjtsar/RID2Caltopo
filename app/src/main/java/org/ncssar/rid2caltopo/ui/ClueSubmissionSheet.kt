@@ -59,6 +59,7 @@ fun ClueSubmissionSheet(
     onDescriptionChanged: (String) -> Unit,
     onGimbalAngleChanged: (Double) -> Unit,
     onCancel: () -> Unit,
+    onSubmitLocalMarkerOnly: () -> Unit,
     onSubmit: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(
@@ -80,6 +81,7 @@ fun ClueSubmissionSheet(
             onTitleChange = onTitleChanged,
             onDescriptionChange = onDescriptionChanged,
             onGimbalAngleChange = onGimbalAngleChanged,
+            onSubmitLocalMarkerOnly = onSubmitLocalMarkerOnly,
             onSubmit = onSubmit,
             onCancel = onCancel
         )
@@ -93,6 +95,7 @@ fun ClueSheetContent (
     onTitleChange: (String) -> Unit,
     onDescriptionChange: (String) -> Unit,
     onGimbalAngleChange: (Double) -> Unit,
+    onSubmitLocalMarkerOnly: () -> Unit,
     onSubmit: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -310,23 +313,35 @@ fun ClueSheetContent (
                 }
             }
 
-            Row(
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
-                    modifier = Modifier.weight(1f),
-                    onClick = onCancel
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onSubmitLocalMarkerOnly
                 ) {
-                    Text("Cancel")
+                    Text("Local Marker Only")
                 }
 
-                Button(
-                    modifier = Modifier.weight(1f),
-                    enabled = clue.title.isNotBlank(),
-                    onClick = onSubmit
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("Submit")
+                    OutlinedButton(
+                        modifier = Modifier.weight(1f),
+                        onClick = onCancel
+                    ) {
+                        Text("Cancel")
+                    }
+
+                    Button(
+                        modifier = Modifier.weight(1f),
+                        enabled = clue.title.isNotBlank(),
+                        onClick = onSubmit
+                    ) {
+                        Text("Submit")
+                    }
                 }
             }
         }

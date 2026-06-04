@@ -10,6 +10,7 @@ import android.view.Surface
 import org.osmdroid.api.IGeoPoint
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateSetOf
@@ -108,6 +109,24 @@ data class PendingClue(
     val description: String,
     val streamTelemetrySummary: String? = null
 )
+
+data class LocalMapMarker(
+    val id: Long,
+    val lat: Double,
+    val lng: Double,
+    val alt: Double,
+    val title: String,
+    val description: String,
+    val createdAtMs: Long,
+    val sourceDesignator: String
+)
+
+fun removeLocalMapMarkerById(markers: MutableList<LocalMapMarker>, markerId: Long): Boolean {
+    val index = markers.indexOfFirst { it.id == markerId }
+    if (index < 0) return false
+    markers.removeAt(index)
+    return true
+}
 
 data class MapViewportState(
     val latitude: Double,
@@ -734,6 +753,8 @@ class StreamsViewModel(
     private val _pendingClue = mutableStateOf<PendingClue?>(null)
     val pendingClue: PendingClue?
         get() = _pendingClue.value
+    val localMapMarkers = mutableStateListOf<LocalMapMarker>()
+    private var nextLocalMapMarkerId = 1L
 
     private val _mapName = mutableStateOf<String?>(null)
     val mapName: String? by _mapName
@@ -1230,6 +1251,7 @@ class StreamsViewModel(
         if (status == CaltopoMap.MapStatusListener.mapStatus.up) {
             if (!oldName.equals(newName)) {
                 persistedMapViewportState = null
+                localMapMarkers.clear()
                 CTDebug(tag, "Connected to ${newName}")
                 _mapName.value = newName
             }
@@ -1237,6 +1259,7 @@ class StreamsViewModel(
             _mapName.value = null
             CTDebug(tag, "Disconnected from ${oldName} map")
             resetFolderVisibility()
+            localMapMarkers.clear()
         }
     }
 
@@ -1472,6 +1495,44 @@ class StreamsViewModel(
         )
 
         clearPendingClue()
+    }
+
+    fun submitLocalMarkerOnly() {
+        val clue = pendingClue ?: return
+        val markerTitle = clue.title.ifBlank { "Local marker" }
+        val markerDescription = appendTelemetrySummary(clue.description, buildClueCaptureSummary(clue))
+        localMapMarkers.add(
+            LocalMapMarker(
+                id = nextLocalMapMarkerId++,
+                lat = clue.lat,
+                lng = clue.lng,
+                alt = clue.alt,
+                title = markerTitle,
+                description = markerDescription,
+                createdAtMs = System.currentTimeMillis(),
+                sourceDesignator = clue.designator
+            )
+        )
+        CaltopoClient.ShowToast("Local marker added to R2C Map Pane.")
+        CTDebug(tag, String.format(
+            Locale.US,
+            "submitLocalMarkerOnly: '%s' designator=%s lat=%.6f lng=%.6f alt=%.1f",
+            markerTitle,
+            clue.designator,
+            clue.lat,
+            clue.lng,
+            clue.alt
+        ))
+        clearPendingClue()
+    }
+
+    fun deleteLocalMapMarker(markerId: Long): Boolean {
+        val removed = removeLocalMapMarkerById(localMapMarkers, markerId)
+        if (removed) {
+            CaltopoClient.ShowToast("Local marker removed.")
+            CTDebug(tag, "deleteLocalMapMarker: id=$markerId")
+        }
+        return removed
     }
 
     fun clearPendingClue() {

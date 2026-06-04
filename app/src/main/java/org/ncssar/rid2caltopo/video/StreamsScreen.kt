@@ -320,6 +320,7 @@ fun StreamsScreen(
                         onDescriptionChanged = viewModel::updateClueDescription,
                         onGimbalAngleChanged = viewModel::updateClueGimbalAngle,
                         onSubmit = viewModel::submitClue,
+                        onSubmitLocalMarkerOnly = viewModel::submitLocalMarkerOnly,
                         onCancel = viewModel::clearPendingClue,
                     )
                 }

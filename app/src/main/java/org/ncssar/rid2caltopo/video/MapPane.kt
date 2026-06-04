@@ -16,6 +16,9 @@ import android.graphics.drawable.Drawable
 import android.location.Location
 import android.os.StatFs
 import android.view.MotionEvent
+import android.view.View
+import android.widget.Button
+import android.widget.TextView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -134,6 +137,7 @@ import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
+import org.osmdroid.views.overlay.infowindow.InfoWindow
 import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.app.R2CActivity
@@ -145,6 +149,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
+import org.ncssar.rid2caltopo.data.WaypointTrack
 import org.ncssar.rid2caltopo.data.PeerCoordinator
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
@@ -413,6 +418,64 @@ internal data class BadTileDialogState(
 
 private fun localTrackDesignator(mappedId: String): String = mappedId.ifBlank { "unmapped" }
 
+private const val LOCAL_TRACK_RECENT_POINT_LIMIT = 500
+private const val LOCAL_TRACK_FLIGHT_POINT_LIMIT = 10_000
+private const val LOCAL_TRACK_DUPLICATE_COORD_EPSILON = 0.000001
+private const val LOCAL_TRACK_DUPLICATE_ALT_EPSILON_METERS = 0.5
+
+internal fun seedLocalTrackPointsFromSnapshot(
+    mappedId: String,
+    snapshot: List<WaypointTrack.TrackPoint>,
+    receivedAtMsec: Long,
+    recentPoints: MutableList<LocalTrackPoint>,
+    flightPoints: MutableList<LocalTrackPoint>
+): Boolean {
+    val key = localTrackDesignator(mappedId)
+    val snapshotPoints = snapshot.mapNotNull { point ->
+        if (!point.lat.isFinite() || !point.lng.isFinite()) return@mapNotNull null
+        if (point.lat == 0.0 && point.lng == 0.0) return@mapNotNull null
+        LocalTrackPoint(
+            mappedId = key,
+            lat = point.lat,
+            lng = point.lng,
+            altitudeM = point.ele,
+            timestampMsec = point.timestampMsec,
+            receivedAtMsec = receivedAtMsec
+        )
+    }
+    if (snapshotPoints.isEmpty()) return false
+
+    var changed = false
+    snapshotPoints.forEach { point ->
+        if (flightPoints.none { existing -> existing.isSameTrackPoint(point) }) {
+            flightPoints.add(point)
+            changed = true
+        }
+    }
+    while (flightPoints.size > LOCAL_TRACK_FLIGHT_POINT_LIMIT) {
+        flightPoints.removeAt(0)
+        changed = true
+    }
+
+    if (recentPoints.isEmpty()) {
+        recentPoints.add(snapshotPoints.last())
+        changed = true
+    }
+    while (recentPoints.size > LOCAL_TRACK_RECENT_POINT_LIMIT) {
+        recentPoints.removeAt(0)
+        changed = true
+    }
+
+    return changed
+}
+
+private fun LocalTrackPoint.isSameTrackPoint(other: LocalTrackPoint): Boolean {
+    if (timestampMsec != other.timestampMsec) return false
+    if (kotlin.math.abs(lat - other.lat) > LOCAL_TRACK_DUPLICATE_COORD_EPSILON) return false
+    if (kotlin.math.abs(lng - other.lng) > LOCAL_TRACK_DUPLICATE_COORD_EPSILON) return false
+    return kotlin.math.abs(altitudeM - other.altitudeM) <= LOCAL_TRACK_DUPLICATE_ALT_EPSILON_METERS
+}
+
 private fun closedPolylinePoints(points: List<GeoPoint>): List<GeoPoint> {
     if (points.isEmpty()) return points
     val first = points.first()
@@ -447,6 +510,30 @@ private fun applyPolylineStyle(
 ) {
     polyline.color = color
     polyline.width = width
+}
+
+private class LocalMarkerInfoWindow(
+    mapView: MapView,
+    private val titleText: String,
+    private val descriptionText: String,
+    private val markerId: Long,
+    private val onDelete: (Long) -> Unit
+) : InfoWindow(R.layout.map_local_marker_info_window, mapView) {
+    override fun onOpen(item: Any?) {
+        mView.findViewById<TextView>(R.id.local_marker_title)?.text = titleText
+        mView.findViewById<TextView>(R.id.local_marker_description)?.apply {
+            text = descriptionText
+            visibility = if (descriptionText.isBlank()) View.GONE else View.VISIBLE
+        }
+        mView.findViewById<Button>(R.id.local_marker_delete)?.setOnClickListener {
+            close()
+            onDelete(markerId)
+        }
+    }
+
+    override fun onClose() {
+        mView.findViewById<Button>(R.id.local_marker_delete)?.setOnClickListener(null)
+    }
 }
 
 // Tile source objects
@@ -2250,10 +2337,10 @@ internal fun SplitMapPane(
                     "track_ingest designator=$key wall=$nowWallMsec droneTs=$timestampMsec " +
                         "lat=${"%.6f".format(Locale.US, lat)} lng=${"%.6f".format(Locale.US, lng)} alt=${"%.1f".format(Locale.US, altitudeMeters)}"
                 )
-                if (list.size > 500) {
+                if (list.size > LOCAL_TRACK_RECENT_POINT_LIMIT) {
                     list.removeAt(0)
                 }
-                if (flightList.size > 10_000) {
+                if (flightList.size > LOCAL_TRACK_FLIGHT_POINT_LIMIT) {
                     flightList.removeAt(0)
                 }
             }
@@ -2266,10 +2353,25 @@ internal fun SplitMapPane(
                 trackOverlayRefreshToken++
             }
         }
-        // Seed localTrackPointsByMappedId from current droneStates so drones already known
-        // appear immediately without waiting for the next broadcast notification.
+        // Seed from the active WaypointTrack so reopening MapPane mid-flight preserves
+        // points collected while this composable was not active.
         val seedTimeMs = System.currentTimeMillis()
         viewModel.droneStates.forEach { (key, state) ->
+            val snapshot = WaypointTrack.GetTrackPointsSnapshot(state.source)
+            if (snapshot.isNotEmpty()) {
+                val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+                val flightList = currentFlightTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+                if (seedLocalTrackPointsFromSnapshot(key, snapshot, seedTimeMs, list, flightList)) {
+                    trackOverlayRefreshToken++
+                    if (CTDebugEnabled(ICON_LATENCY_TAG)) CTDebug(
+                        ICON_LATENCY_TAG,
+                        "track_seed_snapshot designator=$key points=${snapshot.size}"
+                    )
+                }
+                return@forEach
+            }
+
+            // Fall back to the current drone state if no active local track snapshot exists yet.
             val seedLat = state.lastLat
             val seedLng = state.lastLng
             if (seedLat.isFinite() && seedLng.isFinite() && !(seedLat == 0.0 && seedLng == 0.0)
@@ -2572,6 +2674,38 @@ internal fun SplitMapPane(
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
+                }
+
+                viewModel.localMapMarkers.forEach { point ->
+                    val markerTitle = "Local: ${point.title}"
+                    val markerSnippet = point.description.ifBlank {
+                        "Local R2C marker from ${point.sourceDesignator}"
+                    }
+                    val marker = Marker(mapView).apply {
+                        position = GeoPoint(point.lat, point.lng)
+                        icon = markerIconForArtifactSymbol(
+                            resources = context.resources,
+                            symbol = "clue",
+                            colorHex = "#F9A825",
+                            cache = symbolMarkerCache
+                        )
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        title = markerTitle
+                        snippet = markerSnippet
+                    }
+                    marker.infoWindow = LocalMarkerInfoWindow(
+                        mapView = mapView,
+                        titleText = markerTitle,
+                        descriptionText = markerSnippet,
+                        markerId = point.id,
+                        onDelete = { markerId ->
+                            if (viewModel.deleteLocalMapMarker(markerId)) {
+                                mapView.invalidate()
+                            }
+                        }
+                    )
+                    mapView.overlays.add(marker)
+                    managedOverlays.add(marker)
                 }
 
                 artifactOverlayState.points.forEach { point ->

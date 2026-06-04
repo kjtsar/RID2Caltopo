@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
@@ -41,7 +42,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -252,7 +252,7 @@ fun MainScreen(
     var showFaaExportDialog by remember { mutableStateOf(false) }
     var showImportConfigDialog by remember { mutableStateOf(false) }
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
-    var releaseNotesText by remember { mutableStateOf(RELEASE_NOTES_FALLBACK) }
+    var releaseNoteEntries by remember { mutableStateOf(parseReleaseNotes(null)) }
     var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingMutualAidImportPreview by remember { mutableStateOf<MutualAidPackageManager.PackagePreview?>(null) }
     var showMutualAidImportPreviewDialog by remember { mutableStateOf(false) }
@@ -1000,7 +1000,7 @@ fun MainScreen(
                             menuExpanded = false
                         })
                         DropdownMenuItem(text = { Text("Release Notes") }, onClick = {
-                            releaseNotesText = loadReleaseNotes(context)
+                            releaseNoteEntries = loadReleaseNotes(context)
                             showReleaseNotesDialog = true
                             CaltopoClient.CTEvent(tag,"ReleaseNotesDisplayed", null)
                             menuExpanded = false
@@ -1197,14 +1197,43 @@ fun MainScreen(
             onDismissRequest = { showReleaseNotesDialog = false },
             title = { Text("Release Notes") },
             text = {
-                Text(
-                    text = releaseNotesText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace,
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .heightIn(max = 520.dp)
                         .verticalScroll(rememberScrollState())
-                )
+                ) {
+                    releaseNoteEntries.forEachIndexed { index, entry ->
+                        if (index > 0) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 10.dp)
+                            )
+                        }
+                        val title = listOf(entry.title, entry.date)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" \u00b7 ")
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        if (entry.detail.isNotBlank()) {
+                            Text(
+                                text = entry.detail,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        val metadata = entry.hash.takeIf { it.isNotBlank() }?.let { "commit $it" }.orEmpty()
+                        if (metadata.isNotBlank()) {
+                            Text(
+                                text = metadata,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp)
+                            )
+                        }
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = { showReleaseNotesDialog = false }) {

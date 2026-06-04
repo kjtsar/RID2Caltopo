@@ -21,7 +21,7 @@ def generateReleaseNotes = tasks.register("generateReleaseNotes") {
         def stdout = new ByteArrayOutputStream()
         def stderr = new ByteArrayOutputStream()
         def result = exec {
-            commandLine "git", "log", "-10", "--pretty=format:%h %ad %s", "--date=short"
+            commandLine "git", "log", "-10", "--pretty=format:%h%x09%ad%x09%B%x1E", "--date=format:%Y-%m-%d %H:%M:%S %z"
             standardOutput = stdout
             errorOutput = stderr
             ignoreExitValue = true

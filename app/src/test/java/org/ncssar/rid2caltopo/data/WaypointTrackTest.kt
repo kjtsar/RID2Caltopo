@@ -1,7 +1,12 @@
 package org.ncssar.rid2caltopo.data
 
+import org.json.JSONArray
+import org.json.JSONObject
+import org.ncssar.rid2caltopo.BuildConfig
+import org.ncssar.rid2caltopo.app.R2CActivity
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -83,6 +88,38 @@ class WaypointTrackTest {
         assertEquals(emptyList<WaypointTrack.TrackPoint>(), WaypointTrack.GetTrackPointsSnapshot(bravo))
     }
 
+    @Test
+    fun getGeoJson_includesDeviceAndBuildMetadataInR2cProp() {
+        val originalDeviceName = R2CActivity.MyDeviceName
+        R2CActivity.MyDeviceName = "Field Tablet Alpha"
+        try {
+            val drone = activeDrone("RID-META", "RID-META")
+            val track = WaypointTrack(drone.trackLabel(), drone)
+            track.addWaypoint(39.153000, -121.132000, 100L, 1_000L)
+
+            val r2cProp = track.getGeoJson()!!
+                .getJSONArray("features")
+                .getJSONObject(0)
+                .getJSONObject("properties")
+                .getJSONObject("r2c_prop")
+
+            assertEquals("Field Tablet Alpha", r2cProp.getString("device_name"))
+            assertEquals(BuildConfig.BUILD_VERSION, r2cProp.getString("BUILD_VERSION"))
+            assertEquals(BuildConfig.BUILD_TIME, r2cProp.getString("BUILD_TIME"))
+        } finally {
+            R2CActivity.MyDeviceName = originalDeviceName
+        }
+    }
+
+    @Test
+    fun shouldPublishGeoJsonStatsForTracker_requiresDroneOrgToMatchTrackerOrgUppercase() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg(" ncssar ")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("MUTUALAID")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("")))
+    }
+
     private fun activeDrone(remoteId: String, mappedId: String): CtDroneSpec {
         val drone = CtDroneSpec(remoteId, mappedId, "NCSSAR", "DJI Mini 4 Pro", "Pilot")
         assertTrue(
@@ -98,6 +135,24 @@ class WaypointTrackTest {
         )
         return drone
     }
+
+    private fun geoJsonWithOrg(org: String): JSONObject =
+        JSONObject()
+            .put("type", "FeatureCollection")
+            .put(
+                "features",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "Feature")
+                        .put(
+                            "properties",
+                            JSONObject().put(
+                                "r2c_prop",
+                                JSONObject().put("org", org)
+                            )
+                        )
+                )
+            )
 
     private fun resetTracks() {
         @Suppress("UNCHECKED_CAST")

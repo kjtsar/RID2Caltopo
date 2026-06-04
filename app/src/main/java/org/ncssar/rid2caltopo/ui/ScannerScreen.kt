@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.launch
+import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import kotlin.math.roundToInt
@@ -89,6 +90,10 @@ fun ScannerScreen(
                             Column(
                                 modifier = Modifier.width(IntrinsicSize.Max)
                             ) {
+                                Text("BUILD_VERSION: ${BuildConfig.BUILD_VERSION}")
+                                Text("BUILD_TIME: ${BuildConfig.BUILD_TIME}")
+
+                                Spacer(modifier = Modifier.height(24.dp))
                                 StatusSectionHeader("Scanner Status")
                                 Text("Bluetooth 4: ${R2CActivity.legacyBluetoothSupported}")
                                 Text(
@@ -189,9 +194,12 @@ private fun StatusSectionHeader(title: String) {
     Spacer(modifier = Modifier.height(8.dp))
 }
 
-private fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.data.CtDroneSpec>): String {
+internal fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.data.CtDroneSpec>): String {
     val bluetooth5 = R2CActivity.codedPhySupported || R2CActivity.extendedAdvertisingSupported
     val builder = StringBuilder()
+    builder.appendLine("BUILD_VERSION: ${BuildConfig.BUILD_VERSION}")
+    builder.appendLine("BUILD_TIME: ${BuildConfig.BUILD_TIME}")
+    builder.appendLine()
     builder.appendLine("Scanner Status")
     builder.appendLine("Bluetooth 4: ${R2CActivity.legacyBluetoothSupported}")
     builder.appendLine("Bluetooth 5: $bluetooth5")

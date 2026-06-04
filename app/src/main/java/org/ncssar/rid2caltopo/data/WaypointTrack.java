@@ -14,6 +14,8 @@ import static org.ncssar.rid2caltopo.data.CaltopoClient.CTWarn;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.GetTodaysTrackDir;
 
 import org.json.*;
+import org.ncssar.rid2caltopo.BuildConfig;
+import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 
 import android.graphics.Bitmap;
@@ -294,6 +296,9 @@ public class WaypointTrack {
             r2cProp.put("op_period", opPeriod);
             r2cProp.put("map_id", mapId);
             r2cProp.put("tz_str", ZoneId.systemDefault().getId());
+            r2cProp.put("device_name", R2CActivity.MyDeviceName);
+            r2cProp.put("BUILD_VERSION", BuildConfig.BUILD_VERSION);
+            r2cProp.put("BUILD_TIME", BuildConfig.BUILD_TIME);
             r2cProp.put("distance_mi",
                     String.format(Locale.US, "%.4f",
                             (float)droneSpec.getDistanceInFeet()/5280.0));
@@ -399,6 +404,9 @@ public class WaypointTrack {
     }
 
     private static int PublishGeoJsonStatsWithRetry(@NonNull String geoJsonString, @NonNull String context) {
+        if (!ShouldPublishGeoJsonStatsForTracker(geoJsonString, context)) {
+            return 204;
+        }
         int responseCode = 503;
         for (int attempt = 1; attempt <= MAX_GEOJSON_STATS_RETRIES; attempt++) {
             if (CaltopoClient.IsExitRequested()) {
@@ -440,6 +448,51 @@ public class WaypointTrack {
             }
         }
         return responseCode;
+    }
+
+    @Nullable
+    private static JSONObject GetR2cProp(@Nullable JSONObject waypointTrack) {
+        if (waypointTrack == null) return null;
+        JSONArray features = waypointTrack.optJSONArray("features");
+        if (features == null || features.length() <= 0) return null;
+        JSONObject feature = features.optJSONObject(0);
+        if (feature == null) return null;
+        JSONObject properties = feature.optJSONObject("properties");
+        if (properties == null) return null;
+        return properties.optJSONObject("r2c_prop");
+    }
+
+    @NonNull
+    private static String NormalizeTrackerOrg(@Nullable String org) {
+        if (org == null) return "";
+        return org.trim().toUpperCase(Locale.US);
+    }
+
+    public static boolean ShouldPublishGeoJsonStatsForTracker(@Nullable JSONObject waypointTrack) {
+        JSONObject r2cProp = GetR2cProp(waypointTrack);
+        String droneOrg = NormalizeTrackerOrg(r2cProp != null ? r2cProp.optString("org", "") : "");
+        String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetHomeOrgName());
+        return !droneOrg.isEmpty() && !trackerOrg.isEmpty() && droneOrg.equals(trackerOrg);
+    }
+
+    private static boolean ShouldPublishGeoJsonStatsForTracker(@NonNull String geoJsonString,
+                                                               @NonNull String context) {
+        try {
+            JSONObject waypointTrack = new JSONObject(geoJsonString);
+            boolean shouldPublish = ShouldPublishGeoJsonStatsForTracker(waypointTrack);
+            if (!shouldPublish) {
+                JSONObject r2cProp = GetR2cProp(waypointTrack);
+                String droneOrg = NormalizeTrackerOrg(r2cProp != null ? r2cProp.optString("org", "") : "");
+                String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetHomeOrgName());
+                CTInfo(TAG, String.format(Locale.US,
+                        "%s skipping tracker upload: drone org '%s' does not match tracker org '%s'",
+                        context, droneOrg, trackerOrg));
+            }
+            return shouldPublish;
+        } catch (JSONException e) {
+            CTWarn(TAG, context + " skipping tracker upload: malformed geojson", e);
+            return false;
+        }
     }
 
     private static boolean IsLocalArchiveOnly(@Nullable JSONObject waypointTrack) {

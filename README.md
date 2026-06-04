@@ -166,6 +166,15 @@ bridge revealed that line of sight is probably the best determinate for coverage
 support for multiple DroneScout Bridge + RID2Caltopo pairings, which we'll call "R2C Zones" or 
 more simply "R2C" instances going forward.
 
+Recent field testing with a DroneScout Bridge and a small RID module showed that the bridge can
+still be detected at a few hundred feet in favorable conditions, but reception is not continuous
+enough at that distance to treat it as an operator-trustworthy link.  As a conservative operating
+guideline, keep the tablet or phone running RID2Caltopo within about 10 meters of its paired
+DroneScout Bridge.  If multiple DroneScout Bridges are deployed for the same incident, separate
+the bridges by at least 200 meters when practical.  Placing several bridges close together can make
+local Bluetooth congestion worse by causing multiple strong bridge transmitters to rebroadcast
+near the same tablet instead of improving coverage.
+
 Each R2C instance needs to have network connectivity to write to the map and to connect with it's 
 peers.  Networks can be cellular data or wireless.  In the Sierras, we may end up setting up 
 battery powered Starlink Minis if we can't locate our R2C instance high enough to get cell
@@ -206,8 +215,9 @@ Try to establish the site location for the Bridge and R2C as high as possible.  
 tripods](https://www.amazon.com/s?k=tall+tripod) that you can use to elevate the bridge and a 
 corresponding power bank 15' or more above the ground.  If your tripod is tall enough, you might
 consider placing the cell phone running RID2Caltopo on the same tripod.  It isn't necessary to
-place the device running RID2Caltopo right next to the bridge, but by placing the entire setup at 
-higher locations, you can improve your chance of getting cell coverage.
+place the device running RID2Caltopo right next to the bridge, but keep it within about 10 meters of the
+bridge when possible.  By placing the entire setup at higher locations, you can improve your chance
+of getting cell coverage.
 
 ## How to build
 To build the application, use Android Studio.

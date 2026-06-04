@@ -121,6 +121,10 @@
         This app should be paired with an external Bluetooth/Wifi bridge such as the
         &lt;a href=&quot;https://dronescout.co/bridge&quot;&gt;Bluemark DroneScout Bridge&lt;/a&gt; - both ds100 and ds110
         models have been verified to work with this app.&lt;br&gt;&lt;br&gt;
+        Field guideline: keep the tablet or phone running RID2Caltopo within about 10 meters of its paired
+        DroneScout Bridge.  If multiple DroneScout Bridges are deployed for the same incident, separate
+        the bridges by at least 200 meters when practical.  Placing several bridges close together can make
+        local Bluetooth congestion worse instead of improving coverage.&lt;br&gt;&lt;br&gt;
 	If you want to publish tracks in real-time, this app requires
 	&lt;a href=&quot;https://training.caltopo.com/all_users/team-accounts/teamapi&quot;&gt;Caltopo Teams Credentials&lt;/a&gt;
         to write into your team maps.&lt;br&gt;&lt;br&gt;
@@ -145,7 +149,7 @@
         Find the SW information (possibly in the &quot;About Phone&quot; menu) and click 7 times on the &quot;Build Number&quot;.&lt;br&gt;&lt;br&gt;
         Go back, find the &quot;Developer options&quot; menu, scroll to &quot;Wi-Fi scan throttling&quot; and disable it.&lt;br&gt;</string>
     <string name="nanHelp">Reception of Wi-Fi Neighbor-aware Network remote ID signals is possible only if the device has support for Wi-Fi NaN.&lt;br&gt;
-        See the claimed support for this device for this feature in the options menu.&lt;br&gt;</string>
+        See the claimed support for this device for this feature in the Status menu.&lt;br&gt;</string>
     <!-- TODO: Remove or change this placeholder text -->
     <string name="hello_blank_fragment">Hello blank fragment</string>
     <string name="ct_SaveButton">Save</string>

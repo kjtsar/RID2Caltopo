@@ -17,7 +17,13 @@ internal data class ReleaseNoteEntry(
     val date: String,
     val title: String,
     val detail: String
-)
+) {
+    val changeLines: List<String>
+        get() = detail.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+}
 
 internal fun parseReleaseNotes(raw: String?): List<ReleaseNoteEntry> {
     val entries = raw

@@ -23,6 +23,13 @@ class ReleaseNotesTest {
             ),
             entries
         )
+        assertEquals(
+            listOf(
+                "Added pinch/spread zoom for video playback.",
+                "Added zoom-aware clue snapshots."
+            ),
+            entries.single().changeLines
+        )
     }
 
     @Test

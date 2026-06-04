@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -1216,12 +1217,21 @@ fun MainScreen(
                             text = title,
                             style = MaterialTheme.typography.titleMedium
                         )
-                        if (entry.detail.isNotBlank()) {
-                            Text(
-                                text = entry.detail,
-                                style = MaterialTheme.typography.bodyMedium,
+                        entry.changeLines.forEach { change ->
+                            Row(
                                 modifier = Modifier.padding(top = 4.dp)
-                            )
+                            ) {
+                                Text(
+                                    text = "\u2022",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.width(18.dp)
+                                )
+                                Text(
+                                    text = change,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                         }
                         val metadata = entry.hash.takeIf { it.isNotBlank() }?.let { "commit $it" }.orEmpty()
                         if (metadata.isNotBlank()) {

@@ -1374,6 +1374,319 @@ static void test_result_publish_frame_metadata_copies_registration_and_movement_
            "result builder frame metadata: movement debug is copied exactly");
 }
 
+static void test_result_publish_movement_debug_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_debug_movement_t movement;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&movement, 0, sizeof(movement));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_movement_debug(NULL, &movement);
+    anomaly_result_publish_movement_debug(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder movement debug: null inputs are no-ops");
+}
+
+static void test_result_publish_movement_debug_copies_debug_sidecar_and_preserves_unrelated(void) {
+    anomaly_result_t result;
+    anomaly_debug_movement_t movement;
+    memset(&result, 0, sizeof(result));
+    memset(&movement, 0, sizeof(movement));
+    result.box_count = 2;
+    result.scan_plan.total_samples = 17;
+    result.thermal_debug.raw_score = 0.44f;
+    movement.valid = true;
+    movement.sample_count = 9;
+    movement.tile_cols = 3;
+    movement.tile_rows = 4;
+    movement.tiles[0].valid = true;
+    movement.tiles[0].residual_px = 1.25f;
+    movement.tiles[0].confidence = 0.75f;
+    movement.tiles[0].layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+
+    anomaly_result_publish_movement_debug(&result, &movement);
+
+    EXPECT(memcmp(&result.movement_debug, &movement, sizeof(movement)) == 0,
+           "result builder movement debug: sidecar is copied exactly");
+    EXPECT(result.box_count == 2 &&
+           result.scan_plan.total_samples == 17 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder movement debug: unrelated result fields are preserved");
+}
+
+static void test_result_publish_movement_debug_overwrites_stale_state(void) {
+    anomaly_result_t result;
+    anomaly_debug_movement_t movement;
+    memset(&result, 0, sizeof(result));
+    memset(&movement, 0, sizeof(movement));
+    result.movement_debug.valid = true;
+    result.movement_debug.sample_count = 99;
+    result.movement_debug.tiles[0].valid = true;
+    result.movement_debug.tiles[0].residual_px = 9.0f;
+    movement.valid = false;
+    movement.sample_count = 1;
+    movement.tile_cols = 2;
+    movement.tile_rows = 3;
+
+    anomaly_result_publish_movement_debug(&result, &movement);
+
+    EXPECT(memcmp(&result.movement_debug, &movement, sizeof(movement)) == 0,
+           "result builder movement debug: new sidecar overwrites stale state exactly");
+}
+
+static void test_result_publish_scan_plan_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_scan_plan_t scan_plan;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&scan_plan, 0, sizeof(scan_plan));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_scan_plan(NULL, &scan_plan);
+    anomaly_result_publish_scan_plan(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder scan plan: null inputs are no-ops");
+}
+
+static void test_result_publish_scan_plan_copies_plan_and_preserves_unrelated(void) {
+    anomaly_result_t result;
+    anomaly_scan_plan_t scan_plan;
+    memset(&result, 0, sizeof(result));
+    memset(&scan_plan, 0, sizeof(scan_plan));
+    result.rescan_mode = ANOMALY_RESCAN_MODE_TARGET_ONLY;
+    result.box_count = 2;
+    result.movement_debug.valid = true;
+    scan_plan.valid = true;
+    scan_plan.mode = ANOMALY_RESCAN_MODE_PARTIAL;
+    scan_plan.reason_flags =
+        ANOMALY_SCAN_REASON_PARTIAL_ELIGIBLE | ANOMALY_SCAN_REASON_MASK_BUILD_FAILED;
+    scan_plan.total_samples = 17;
+    scan_plan.sampled_width = 5;
+    scan_plan.sampled_height = 6;
+    scan_plan.provisional_candidate_count = 3;
+    scan_plan.provisional_candidate_selected_count = 2;
+
+    anomaly_result_publish_scan_plan(&result, &scan_plan);
+
+    EXPECT(memcmp(&result.scan_plan, &scan_plan, sizeof(scan_plan)) == 0,
+           "result builder scan plan: plan is copied exactly");
+    EXPECT(result.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY &&
+           result.box_count == 2 &&
+           result.movement_debug.valid,
+           "result builder scan plan: unrelated result fields are preserved");
+}
+
+static void test_result_publish_scan_plan_overwrites_stale_plan(void) {
+    anomaly_result_t result;
+    anomaly_scan_plan_t scan_plan;
+    memset(&result, 0, sizeof(result));
+    memset(&scan_plan, 0, sizeof(scan_plan));
+    result.scan_plan.valid = true;
+    result.scan_plan.reason_flags = 0xFFFFFFFFu;
+    result.scan_plan.total_samples = 99;
+    scan_plan.valid = true;
+    scan_plan.mode = ANOMALY_RESCAN_MODE_FULL;
+    scan_plan.reason_flags = ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH;
+    scan_plan.total_samples = 11;
+
+    anomaly_result_publish_scan_plan(&result, &scan_plan);
+
+    EXPECT(memcmp(&result.scan_plan, &scan_plan, sizeof(scan_plan)) == 0,
+           "result builder scan plan: new plan overwrites stale result plan exactly");
+}
+
+static void test_result_publish_rescan_mode_null_result_noop(void) {
+    anomaly_result_publish_rescan_mode(NULL, ANOMALY_RESCAN_MODE_FULL);
+    EXPECT(true, "result builder rescan mode: null result is a no-op");
+}
+
+static void test_result_publish_rescan_mode_copies_mode_and_preserves_unrelated(void) {
+    anomaly_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.scan_plan.total_samples = 17;
+    result.box_count = 2;
+    result.movement_debug.valid = true;
+
+    anomaly_result_publish_rescan_mode(&result, ANOMALY_RESCAN_MODE_TARGET_ONLY);
+
+    EXPECT(result.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "result builder rescan mode: mode is copied");
+    EXPECT(result.scan_plan.total_samples == 17 &&
+           result.box_count == 2 &&
+           result.movement_debug.valid,
+           "result builder rescan mode: unrelated result fields are preserved");
+}
+
+static void test_result_publish_rescan_mode_overwrites_stale_mode(void) {
+    anomaly_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.rescan_mode = ANOMALY_RESCAN_MODE_TARGET_ONLY;
+
+    anomaly_result_publish_rescan_mode(&result, ANOMALY_RESCAN_MODE_FULL);
+
+    EXPECT(result.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
+           "result builder rescan mode: new mode overwrites stale mode");
+}
+
+static void test_result_publish_motion_appearance_debug_summary_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_motion_appearance_debug_summary_publication_t debug;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_motion_appearance_debug_summary(NULL, &debug);
+    anomaly_result_publish_motion_appearance_debug_summary(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder motion appearance summary: null inputs are no-ops");
+}
+
+static void test_result_publish_motion_appearance_debug_summary_copies_and_preserves_later_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_motion_appearance_debug_summary_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    result.motion_debug.raw_candidate_valid = true;
+    result.motion_debug.raw_score = 7.5f;
+    result.motion_debug.raw_x_norm = 0.25f;
+    result.motion_debug.raw_y_norm = 0.75f;
+    result.motion_debug.winner_texture_scale = 0.44f;
+    result.motion_debug.top_candidate_count = 1;
+    result.motion_debug.top_candidates[0].pixel_x = 12;
+    result.motion_debug.top_candidates[0].pixel_y = 34;
+    result.color_debug.raw_score = 0.66f;
+    debug.scene_discontinuity = true;
+    debug.sample_step = 3;
+    debug.motion_step = 6;
+    debug.global_count = 27;
+    debug.motion_candidate_count = 4;
+    debug.global_motion_mean = 1.25f;
+    debug.global_motion_std = 2.50f;
+    debug.zoom_motion_scale = 0.80f;
+    debug.broad_motion_scale = 0.70f;
+    debug.global_motion_load = 0.35f;
+
+    anomaly_result_publish_motion_appearance_debug_summary(&result, &debug);
+
+    EXPECT(result.motion_debug.valid &&
+           result.motion_debug.scene_discontinuity &&
+           result.motion_debug.sample_step == 3 &&
+           result.motion_debug.motion_step == 6 &&
+           result.motion_debug.sample_count == 27,
+           "result builder motion appearance summary: scalar fields are copied");
+    EXPECT_NEAR(result.motion_debug.residual_mean, 1.25f, 0.0001f,
+                "result builder motion appearance summary: residual mean is copied");
+    EXPECT_NEAR(result.motion_debug.residual_std, 2.50f, 0.0001f,
+                "result builder motion appearance summary: residual std is copied");
+    EXPECT_NEAR(result.motion_debug.zoom_motion_scale, 0.80f, 0.0001f,
+                "result builder motion appearance summary: zoom scale is copied");
+    EXPECT_NEAR(result.motion_debug.broad_motion_scale, 0.70f, 0.0001f,
+                "result builder motion appearance summary: broad scale is copied");
+    EXPECT_NEAR(result.motion_debug.global_motion_load, 0.35f, 0.0001f,
+                "result builder motion appearance summary: load is copied");
+    EXPECT(result.motion_debug.raw_candidate_valid &&
+           result.motion_debug.top_candidate_count == 1 &&
+           result.motion_debug.top_candidates[0].pixel_x == 12 &&
+           result.motion_debug.top_candidates[0].pixel_y == 34,
+           "result builder motion appearance summary: later result fields are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.66f, 0.0001f,
+                "result builder motion appearance summary: unrelated fields are preserved");
+}
+
+static void test_result_publish_motion_appearance_debug_result_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_motion_appearance_debug_result_publication_t debug;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_motion_appearance_debug_result(NULL, &debug);
+    anomaly_result_publish_motion_appearance_debug_result(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder motion appearance result: null inputs are no-ops");
+}
+
+static void test_result_publish_motion_appearance_debug_result_copies_clamps_and_preserves_summary(void) {
+    anomaly_result_t result;
+    anomaly_debug_candidate_t top[ANOMALY_DEBUG_TOP_CANDIDATES + 2];
+    anomaly_result_motion_appearance_debug_result_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(top, 0, sizeof(top));
+    memset(&debug, 0, sizeof(debug));
+    result.motion_debug.valid = true;
+    result.motion_debug.scene_discontinuity = true;
+    result.motion_debug.sample_step = 5;
+    result.motion_debug.motion_step = 10;
+    result.motion_debug.sample_count = 45;
+    result.motion_debug.residual_mean = 1.5f;
+    result.motion_debug.residual_std = 2.5f;
+    result.thermal_debug.raw_score = 0.55f;
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_CANDIDATES + 2; i++) {
+        top[i].valid = true;
+        top[i].pixel_x = 20 + i;
+        top[i].pixel_y = 30 + i;
+        top[i].combined_score = 0.95f - (float)i * 0.05f;
+    }
+    debug.raw_score = 0.42f;
+    debug.raw_x = 8;
+    debug.raw_y = 16;
+    debug.frame_w = 64.0f;
+    debug.frame_h = 32.0f;
+    debug.winner_component_area_frac = 0.10f;
+    debug.winner_component_span_frac = 0.20f;
+    debug.winner_component_fill_ratio = 0.30f;
+    debug.zoom_motion_scale = 0.40f;
+    debug.broad_motion_scale = 1.10f;
+    debug.global_motion_load = 1.20f;
+    debug.winner_texture_scale = 1.30f;
+    debug.winner_structure_scale = 1.40f;
+    debug.winner_support_scale = 1.50f;
+    debug.winner_persistence_scale = 1.60f;
+    debug.top_candidates = top;
+    debug.top_candidate_count = ANOMALY_DEBUG_TOP_CANDIDATES + 2;
+
+    anomaly_result_publish_motion_appearance_debug_result(&result, &debug);
+
+    EXPECT(result.motion_debug.raw_candidate_valid,
+           "result builder motion appearance result: nonnegative raw score is valid");
+    EXPECT_NEAR(result.motion_debug.raw_score, 0.42f, 0.0001f,
+                "result builder motion appearance result: raw score is copied");
+    EXPECT_NEAR(result.motion_debug.raw_x_norm, 0.125f, 0.0001f,
+                "result builder motion appearance result: raw x is normalized");
+    EXPECT_NEAR(result.motion_debug.raw_y_norm, 0.50f, 0.0001f,
+                "result builder motion appearance result: raw y is normalized");
+    EXPECT_NEAR(result.motion_debug.winner_component_area_frac, 0.10f, 0.0001f,
+                "result builder motion appearance result: winner area is copied");
+    EXPECT_NEAR(result.motion_debug.winner_component_span_frac, 0.20f, 0.0001f,
+                "result builder motion appearance result: winner span is copied");
+    EXPECT_NEAR(result.motion_debug.winner_component_fill_ratio, 0.30f, 0.0001f,
+                "result builder motion appearance result: winner fill is copied");
+    EXPECT_NEAR(result.motion_debug.winner_texture_scale, 1.30f, 0.0001f,
+                "result builder motion appearance result: texture scale is copied");
+    EXPECT_NEAR(result.motion_debug.winner_structure_scale, 1.40f, 0.0001f,
+                "result builder motion appearance result: structure scale is copied");
+    EXPECT_NEAR(result.motion_debug.winner_support_scale, 1.50f, 0.0001f,
+                "result builder motion appearance result: support scale is copied");
+    EXPECT_NEAR(result.motion_debug.winner_persistence_scale, 1.60f, 0.0001f,
+                "result builder motion appearance result: persistence scale is copied");
+    EXPECT(result.motion_debug.top_candidate_count == ANOMALY_DEBUG_TOP_CANDIDATES &&
+           result.motion_debug.top_candidates[0].pixel_x == 20 &&
+           result.motion_debug.top_candidates[ANOMALY_DEBUG_TOP_CANDIDATES - 1].pixel_x ==
+               20 + ANOMALY_DEBUG_TOP_CANDIDATES - 1,
+           "result builder motion appearance result: top candidates are copied and capped");
+    EXPECT(result.motion_debug.valid &&
+           result.motion_debug.scene_discontinuity &&
+           result.motion_debug.sample_step == 5 &&
+           result.motion_debug.motion_step == 10 &&
+           result.motion_debug.sample_count == 45,
+           "result builder motion appearance result: summary fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.55f, 0.0001f,
+                "result builder motion appearance result: unrelated fields are preserved");
+}
+
 static void test_result_publish_saliency_debug_null_inputs_noop(void) {
     anomaly_result_t result;
     anomaly_result_saliency_debug_publication_t debug;
@@ -1396,6 +1709,7 @@ static void test_result_publish_saliency_debug_raw_and_accumulator_fields(void) 
     result.box_count = 2;
     result.timing.compiled = true;
     result.motion_debug.raw_score = 0.25f;
+    debug.bg_ready = true;
     debug.raw_score = -0.50f;
     debug.raw_x = 0;
     debug.raw_y = 27;
@@ -1414,6 +1728,8 @@ static void test_result_publish_saliency_debug_raw_and_accumulator_fields(void) 
 
     anomaly_result_publish_saliency_debug(&result, &debug);
 
+    EXPECT(result.saliency_debug.bg_ready,
+           "result builder saliency debug: background readiness is copied");
     EXPECT(!result.saliency_debug.raw_candidate_valid,
            "result builder saliency debug: negative raw score is invalid");
     EXPECT_NEAR(result.saliency_debug.raw_score, -0.50f, 0.0001f,
@@ -1442,6 +1758,70 @@ static void test_result_publish_saliency_debug_raw_and_accumulator_fields(void) 
            result.timing.compiled &&
            fabsf(result.motion_debug.raw_score - 0.25f) < 0.0001f,
            "result builder saliency debug: unrelated result fields are preserved");
+}
+
+static void test_result_publish_saliency_debug_bg_ready_false_overwrites_stale_true(void) {
+    anomaly_result_t result;
+    anomaly_result_saliency_debug_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    result.saliency_debug.bg_ready = true;
+    result.saliency_debug.raw_score = 0.91f;
+    debug.bg_ready = false;
+    debug.raw_score = 0.25f;
+    debug.raw_x = 48;
+    debug.raw_y = 27;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+
+    anomaly_result_publish_saliency_debug(&result, &debug);
+
+    EXPECT(!result.saliency_debug.bg_ready,
+           "result builder saliency debug: false background readiness overwrites stale true");
+    EXPECT_NEAR(result.saliency_debug.raw_score, 0.25f, 0.0001f,
+                "result builder saliency debug: scalar fields still publish with false bg readiness");
+}
+
+static void test_result_publish_saliency_debug_null_top_candidates_keeps_scalar_publication(void) {
+    anomaly_result_t result;
+    anomaly_result_saliency_debug_publication_t debug;
+    memset(&result, 0, sizeof(result));
+    memset(&debug, 0, sizeof(debug));
+    debug.bg_ready = true;
+    debug.raw_score = 0.75f;
+    debug.raw_x = 96;
+    debug.raw_y = 54;
+    debug.frame_w = 192.0f;
+    debug.frame_h = 108.0f;
+    debug.tracked_score_pre = 0.61f;
+    debug.acc_pre_active = true;
+    debug.acc_pre_hits = 4;
+    debug.acc_pre_x_norm = 0.33f;
+    debug.acc_pre_y_norm = 0.44f;
+    debug.acc_post_active = true;
+    debug.acc_post_hits = 5;
+    debug.acc_post_x_norm = 0.55f;
+    debug.acc_post_y_norm = 0.66f;
+    debug.switch_suppressed = true;
+    debug.top_candidates = NULL;
+    debug.top_candidate_count = 3;
+
+    anomaly_result_publish_saliency_debug(&result, &debug);
+
+    EXPECT(result.saliency_debug.bg_ready &&
+           result.saliency_debug.raw_candidate_valid &&
+           result.saliency_debug.top_candidate_count == 3,
+           "result builder saliency debug: scalar fields publish before null top-candidate return");
+    EXPECT_NEAR(result.saliency_debug.raw_x_norm, 0.5f, 0.0001f,
+                "result builder saliency debug: raw x normalizes without top candidates");
+    EXPECT_NEAR(result.saliency_debug.raw_y_norm, 0.5f, 0.0001f,
+                "result builder saliency debug: raw y normalizes without top candidates");
+    EXPECT(result.saliency_debug.acc_pre_active &&
+           result.saliency_debug.acc_pre_hits == 4 &&
+           result.saliency_debug.acc_post_active &&
+           result.saliency_debug.acc_post_hits == 5 &&
+           result.saliency_debug.switch_suppressed,
+           "result builder saliency debug: accumulator fields publish without top candidates");
 }
 
 static void test_result_publish_saliency_debug_valid_raw_and_top_candidates(void) {
@@ -1568,6 +1948,2360 @@ static void test_result_publish_thermal_debug_summary_legacy_raw_normalization(v
                 "result builder thermal summary: zero x keeps legacy normalization");
     EXPECT_NEAR(result.thermal_debug.raw_y_norm, 0.25f, 0.0001f,
                 "result builder thermal summary: nonzero y normalizes by frame height");
+}
+
+static anomaly_result_thermal_debug_target_base_publication_t
+thermal_target_base_fixture(void) {
+    anomaly_result_thermal_debug_target_base_publication_t target;
+    memset(&target, 0, sizeof(target));
+    target.enabled = true;
+    target.valid = true;
+    target.inside_scan_zone = true;
+    target.pixel_x = 77;
+    target.pixel_y = 88;
+    target.sample_x = 7;
+    target.sample_y = 8;
+    target.x_norm = 0.37f;
+    target.y_norm = 0.48f;
+    target.target_delta = 1.1f;
+    target.target_score = 2.2f;
+    target.target_raw_delta = 3.3f;
+    target.target_raw_score = 4.4f;
+    target.target_temporal_margin = 5.5f;
+    target.target_spatial_abs_delta = 6.6f;
+    target.target_spatial_std = 7.7f;
+    target.target_spatial_score = 8.8f;
+    target.hot_eligible = true;
+    target.started_component = true;
+    target.local_max = true;
+    target.local_peak_radius = 4;
+    target.local_peak_sample_x = 17;
+    target.local_peak_sample_y = 18;
+    target.local_peak_delta = 9.1f;
+    target.local_peak_score = 9.2f;
+    target.local_peak_distance = 9.3f;
+    target.local_peak_raw_sample_x = 27;
+    target.local_peak_raw_sample_y = 28;
+    target.local_peak_raw_delta = 9.4f;
+    target.local_peak_raw_score = 9.5f;
+    target.local_peak_raw_distance = 9.6f;
+    target.local_peak_raw_temporal_margin = 9.7f;
+    target.local_peak_raw_spatial_abs_delta = 9.8f;
+    target.local_peak_raw_spatial_std = 9.9f;
+    target.local_peak_raw_spatial_score = 10.1f;
+    target.local_peak_is_component_seed = true;
+    target.local_window_sample_count = 31;
+    target.local_window_hot_count = 11;
+    target.local_window_raw_delta_sum = 12.1f;
+    target.local_window_raw_delta_mean = 12.2f;
+    target.local_window_weighted_centroid_dx = -0.3f;
+    target.local_window_weighted_centroid_dy = 0.4f;
+    return target;
+}
+
+static void test_result_publish_thermal_debug_target_base_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_base_publication_t target;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&target, 0, sizeof(target));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_base(NULL, &target);
+    anomaly_result_publish_thermal_debug_target_base(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target base: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_base_resets_and_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_base_publication_t target =
+        thermal_target_base_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.target.micro_candidate_would_create = true;
+    result.thermal_debug.target.component_seed_x = 99;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+
+    anomaly_result_publish_thermal_debug_target_base(&result, &target);
+
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.valid &&
+           result.thermal_debug.target.inside_scan_zone,
+           "result builder thermal target base: enabled validity flags are copied");
+    EXPECT(result.thermal_debug.target.pixel_x == 77 &&
+           result.thermal_debug.target.pixel_y == 88 &&
+           result.thermal_debug.target.sample_x == 7 &&
+           result.thermal_debug.target.sample_y == 8,
+           "result builder thermal target base: position fields are copied");
+    EXPECT_NEAR(result.thermal_debug.target.x_norm, 0.37f, 0.0001f,
+                "result builder thermal target base: x norm is copied");
+    EXPECT_NEAR(result.thermal_debug.target.y_norm, 0.48f, 0.0001f,
+                "result builder thermal target base: y norm is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_delta, 1.1f, 0.0001f,
+                "result builder thermal target base: target delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_score, 2.2f, 0.0001f,
+                "result builder thermal target base: target score is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_raw_delta, 3.3f, 0.0001f,
+                "result builder thermal target base: raw delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_raw_score, 4.4f, 0.0001f,
+                "result builder thermal target base: raw score is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_temporal_margin, 5.5f, 0.0001f,
+                "result builder thermal target base: temporal margin is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_spatial_abs_delta, 6.6f, 0.0001f,
+                "result builder thermal target base: spatial absolute delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_spatial_std, 7.7f, 0.0001f,
+                "result builder thermal target base: spatial std is copied");
+    EXPECT_NEAR(result.thermal_debug.target.target_spatial_score, 8.8f, 0.0001f,
+                "result builder thermal target base: spatial score is copied");
+    EXPECT(result.thermal_debug.target.hot_eligible &&
+           result.thermal_debug.target.started_component &&
+           result.thermal_debug.target.local_max,
+           "result builder thermal target base: hot/local flags are copied");
+    EXPECT(result.thermal_debug.target.local_peak_radius == 4 &&
+           result.thermal_debug.target.local_peak_sample_x == 17 &&
+           result.thermal_debug.target.local_peak_sample_y == 18,
+           "result builder thermal target base: local peak samples are copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_delta, 9.1f, 0.0001f,
+                "result builder thermal target base: local peak delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_score, 9.2f, 0.0001f,
+                "result builder thermal target base: local peak score is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_distance, 9.3f, 0.0001f,
+                "result builder thermal target base: local peak distance is copied");
+    EXPECT(result.thermal_debug.target.local_peak_raw_sample_x == 27 &&
+           result.thermal_debug.target.local_peak_raw_sample_y == 28,
+           "result builder thermal target base: raw local peak samples are copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_raw_delta, 9.4f, 0.0001f,
+                "result builder thermal target base: raw local peak delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_raw_score, 9.5f, 0.0001f,
+                "result builder thermal target base: raw local peak score is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_raw_distance, 9.6f, 0.0001f,
+                "result builder thermal target base: raw local peak distance is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_raw_temporal_margin, 9.7f, 0.0001f,
+                "result builder thermal target base: raw local peak temporal margin is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_raw_spatial_abs_delta, 9.8f, 0.0001f,
+                "result builder thermal target base: raw local peak spatial delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_raw_spatial_std, 9.9f, 0.0001f,
+                "result builder thermal target base: raw local peak spatial std is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_raw_spatial_score, 10.1f, 0.0001f,
+                "result builder thermal target base: raw local peak spatial score is copied");
+    EXPECT(result.thermal_debug.target.local_peak_is_component_seed,
+           "result builder thermal target base: component-seed flag is copied");
+    EXPECT(result.thermal_debug.target.local_window_sample_count == 31 &&
+           result.thermal_debug.target.local_window_hot_count == 11,
+           "result builder thermal target base: local window counts are copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_window_raw_delta_sum, 12.1f, 0.0001f,
+                "result builder thermal target base: local window delta sum is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_window_raw_delta_mean, 12.2f, 0.0001f,
+                "result builder thermal target base: local window delta mean is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_window_weighted_centroid_dx, -0.3f, 0.0001f,
+                "result builder thermal target base: local window centroid dx is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_window_weighted_centroid_dy, 0.4f, 0.0001f,
+                "result builder thermal target base: local window centroid dy is copied");
+    EXPECT(!result.thermal_debug.target.micro_candidate_would_create &&
+           result.thermal_debug.target.component_seed_x == 0 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_NONE,
+           "result builder thermal target base: target is reset before base publication");
+}
+
+static void test_result_publish_thermal_debug_target_base_preserves_summary_candidates_and_unrelated(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_base_publication_t target =
+        thermal_target_base_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.candidate_count = 5;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 123;
+    result.color_debug.raw_score = 0.44f;
+    result.saliency_debug.raw_score = 0.55f;
+
+    anomaly_result_publish_thermal_debug_target_base(&result, &target);
+
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target base: thermal summary is preserved");
+    EXPECT(result.thermal_debug.candidate_count == 5 &&
+           result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 123,
+           "result builder thermal target base: thermal candidates are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target base: color debug is preserved");
+    EXPECT_NEAR(result.saliency_debug.raw_score, 0.55f, 0.0001f,
+                "result builder thermal target base: saliency debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_micro_candidate_publication_t
+thermal_target_micro_fixture(void) {
+    anomaly_result_thermal_debug_target_micro_candidate_publication_t micro;
+    memset(&micro, 0, sizeof(micro));
+    micro.would_create = true;
+    micro.reject_reason = ANOMALY_THERMAL_MICRO_REJECT_RING_HOT;
+    micro.peak_sample_x = 21;
+    micro.peak_sample_y = 22;
+    micro.peak_delta = 1.1f;
+    micro.peak_score = 2.2f;
+    micro.prominence = 3.3f;
+    micro.ring_mean = 4.4f;
+    micro.ring_hot_fraction = 0.45f;
+    micro.hot_count = 5;
+    micro.sample_count = 17;
+    micro.compactness = 0.67f;
+    micro.centroid_dx = -0.25f;
+    micro.centroid_dy = 0.35f;
+    micro.centroid_offset = 0.46f;
+    micro.one_sided_support = 0.57f;
+    micro.distance_to_debug_target = 8.9f;
+    return micro;
+}
+
+static void test_result_publish_thermal_debug_target_micro_candidate_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_micro_candidate_publication_t micro;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&micro, 0, sizeof(micro));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_micro_candidate(NULL, &micro);
+    anomaly_result_publish_thermal_debug_target_micro_candidate(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target micro candidate: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_micro_candidate_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_micro_candidate_publication_t micro =
+        thermal_target_micro_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_micro_candidate(&result, &micro);
+
+    EXPECT(result.thermal_debug.target.micro_candidate_would_create &&
+           result.thermal_debug.target.micro_candidate_reject_reason ==
+               ANOMALY_THERMAL_MICRO_REJECT_RING_HOT,
+           "result builder thermal target micro candidate: create and reject fields are copied");
+    EXPECT(result.thermal_debug.target.micro_candidate_peak_sample_x == 21 &&
+           result.thermal_debug.target.micro_candidate_peak_sample_y == 22,
+           "result builder thermal target micro candidate: peak samples are copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_peak_delta, 1.1f, 0.0001f,
+                "result builder thermal target micro candidate: peak delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_peak_score, 2.2f, 0.0001f,
+                "result builder thermal target micro candidate: peak score is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_prominence, 3.3f, 0.0001f,
+                "result builder thermal target micro candidate: prominence is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_ring_mean, 4.4f, 0.0001f,
+                "result builder thermal target micro candidate: ring mean is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_ring_hot_fraction, 0.45f, 0.0001f,
+                "result builder thermal target micro candidate: ring hot fraction is copied");
+    EXPECT(result.thermal_debug.target.micro_candidate_hot_count == 5 &&
+           result.thermal_debug.target.micro_candidate_sample_count == 17,
+           "result builder thermal target micro candidate: hot/sample counts are copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_compactness, 0.67f, 0.0001f,
+                "result builder thermal target micro candidate: compactness is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_centroid_dx, -0.25f, 0.0001f,
+                "result builder thermal target micro candidate: centroid dx is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_centroid_dy, 0.35f, 0.0001f,
+                "result builder thermal target micro candidate: centroid dy is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_centroid_offset, 0.46f, 0.0001f,
+                "result builder thermal target micro candidate: centroid offset is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_one_sided_support, 0.57f, 0.0001f,
+                "result builder thermal target micro candidate: one-sided support is copied");
+    EXPECT_NEAR(result.thermal_debug.target.micro_candidate_distance_to_debug_target, 8.9f, 0.0001f,
+                "result builder thermal target micro candidate: target distance is copied");
+}
+
+static void test_result_publish_thermal_debug_target_micro_candidate_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_micro_candidate_publication_t micro =
+        thermal_target_micro_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 123;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.local_peak_score = 7.7f;
+    result.thermal_debug.target.suppressor_sample_x = 44;
+    result.thermal_debug.target.component_seed_x = 55;
+    result.thermal_debug.target.movement_tile_valid = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_micro_candidate(&result, &micro);
+
+    EXPECT(result.thermal_debug.target.micro_candidate_would_create &&
+           result.thermal_debug.target.micro_candidate_peak_sample_x == 21,
+           "result builder thermal target micro candidate: requested fields are published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           fabsf(result.thermal_debug.target.local_peak_score - 7.7f) < 0.0001f,
+           "result builder thermal target micro candidate: base target fields are preserved");
+    EXPECT(result.thermal_debug.target.suppressor_sample_x == 44 &&
+           result.thermal_debug.target.component_seed_x == 55 &&
+           result.thermal_debug.target.movement_tile_valid &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target micro candidate: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target micro candidate: thermal summary is preserved");
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 123,
+           "result builder thermal target micro candidate: thermal candidates are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target micro candidate: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_suppressor_publication_t
+thermal_target_suppressor_fixture(void) {
+    anomaly_result_thermal_debug_target_suppressor_publication_t suppressor;
+    memset(&suppressor, 0, sizeof(suppressor));
+    suppressor.suppressor_sample_x = 31;
+    suppressor.suppressor_sample_y = 32;
+    suppressor.suppressor_delta = 1.25f;
+    suppressor.suppressor_score = 2.50f;
+    return suppressor;
+}
+
+static void test_result_publish_thermal_debug_target_suppressor_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_suppressor_publication_t suppressor;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&suppressor, 0, sizeof(suppressor));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_suppressor(NULL, &suppressor);
+    anomaly_result_publish_thermal_debug_target_suppressor(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target suppressor: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_suppressor_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_suppressor_publication_t suppressor =
+        thermal_target_suppressor_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_suppressor(&result, &suppressor);
+
+    EXPECT(result.thermal_debug.target.suppressor_sample_x == 31 &&
+           result.thermal_debug.target.suppressor_sample_y == 32,
+           "result builder thermal target suppressor: samples are copied");
+    EXPECT_NEAR(result.thermal_debug.target.suppressor_delta, 1.25f, 0.0001f,
+                "result builder thermal target suppressor: delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.suppressor_score, 2.50f, 0.0001f,
+                "result builder thermal target suppressor: score is copied");
+}
+
+static void test_result_publish_thermal_debug_target_suppressor_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_suppressor_publication_t suppressor =
+        thermal_target_suppressor_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.micro_candidate_would_create = true;
+    result.thermal_debug.target.micro_candidate_peak_sample_x = 21;
+    result.thermal_debug.target.component_seed_x = 41;
+    result.thermal_debug.target.rejection_gate = ANOMALY_THERMAL_TARGET_GATE_RING_HOT;
+    result.thermal_debug.target.nearby_rejected_component_valid = true;
+    result.thermal_debug.target.nearby_rejected_component_seed_x = 61;
+    result.thermal_debug.target.dropped_by_nms = true;
+    result.thermal_debug.target.movement_tile_valid = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_suppressor(&result, &suppressor);
+
+    EXPECT(result.thermal_debug.target.suppressor_sample_x == 31 &&
+           result.thermal_debug.target.suppressor_sample_y == 32,
+           "result builder thermal target suppressor: requested fields are published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.micro_candidate_would_create &&
+           result.thermal_debug.target.micro_candidate_peak_sample_x == 21,
+           "result builder thermal target suppressor: earlier target fields are preserved");
+    EXPECT(result.thermal_debug.target.component_seed_x == 41 &&
+           result.thermal_debug.target.rejection_gate == ANOMALY_THERMAL_TARGET_GATE_RING_HOT &&
+           result.thermal_debug.target.nearby_rejected_component_valid &&
+           result.thermal_debug.target.nearby_rejected_component_seed_x == 61 &&
+           result.thermal_debug.target.dropped_by_nms &&
+           result.thermal_debug.target.movement_tile_valid &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target suppressor: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target suppressor: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target suppressor: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_component_trace_publication_t
+thermal_target_component_trace_fixture(void) {
+    anomaly_result_thermal_debug_target_component_trace_publication_t trace;
+    memset(&trace, 0, sizeof(trace));
+    trace.component_seed_x = 41;
+    trace.component_seed_y = 42;
+    trace.component_peak_x = 43;
+    trace.component_peak_y = 44;
+    trace.component_area = 5.5f;
+    trace.component_span = 6.5f;
+    trace.component_fill = 0.72f;
+    trace.component_peak_delta = 7.5f;
+    trace.component_mean_delta = 8.5f;
+    trace.component_quality = 0.83f;
+    trace.component_rejected = true;
+    trace.rejection_gate = ANOMALY_THERMAL_TARGET_GATE_RING_HOT;
+    return trace;
+}
+
+static void test_result_publish_thermal_debug_target_component_trace_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_component_trace_publication_t trace;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&trace, 0, sizeof(trace));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_component_trace(NULL, &trace);
+    anomaly_result_publish_thermal_debug_target_component_trace(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target component trace: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_component_trace_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_component_trace_publication_t trace =
+        thermal_target_component_trace_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_component_trace(&result, &trace);
+
+    EXPECT(result.thermal_debug.target.component_seed_x == 41 &&
+           result.thermal_debug.target.component_seed_y == 42 &&
+           result.thermal_debug.target.component_peak_x == 43 &&
+           result.thermal_debug.target.component_peak_y == 44,
+           "result builder thermal target component trace: sample positions are copied");
+    EXPECT_NEAR(result.thermal_debug.target.component_area, 5.5f, 0.0001f,
+                "result builder thermal target component trace: area is copied");
+    EXPECT_NEAR(result.thermal_debug.target.component_span, 6.5f, 0.0001f,
+                "result builder thermal target component trace: span is copied");
+    EXPECT_NEAR(result.thermal_debug.target.component_fill, 0.72f, 0.0001f,
+                "result builder thermal target component trace: fill is copied");
+    EXPECT_NEAR(result.thermal_debug.target.component_peak_delta, 7.5f, 0.0001f,
+                "result builder thermal target component trace: peak delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.component_mean_delta, 8.5f, 0.0001f,
+                "result builder thermal target component trace: mean delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.component_quality, 0.83f, 0.0001f,
+                "result builder thermal target component trace: quality is copied");
+    EXPECT(result.thermal_debug.target.component_rejected &&
+           result.thermal_debug.target.rejection_gate == ANOMALY_THERMAL_TARGET_GATE_RING_HOT,
+           "result builder thermal target component trace: rejection fields are copied");
+}
+
+static void test_result_publish_thermal_debug_target_component_trace_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_component_trace_publication_t trace =
+        thermal_target_component_trace_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.micro_candidate_would_create = true;
+    result.thermal_debug.target.suppressor_sample_x = 31;
+    result.thermal_debug.target.nearby_rejected_component_valid = true;
+    result.thermal_debug.target.nearby_rejected_component_seed_x = 61;
+    result.thermal_debug.target.dropped_by_nms = true;
+    result.thermal_debug.target.movement_tile_valid = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_component_trace(&result, &trace);
+
+    EXPECT(result.thermal_debug.target.component_seed_x == 41 &&
+           result.thermal_debug.target.rejection_gate == ANOMALY_THERMAL_TARGET_GATE_RING_HOT,
+           "result builder thermal target component trace: requested fields are published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.micro_candidate_would_create &&
+           result.thermal_debug.target.suppressor_sample_x == 31,
+           "result builder thermal target component trace: earlier target fields are preserved");
+    EXPECT(result.thermal_debug.target.nearby_rejected_component_valid &&
+           result.thermal_debug.target.nearby_rejected_component_seed_x == 61 &&
+           result.thermal_debug.target.dropped_by_nms &&
+           result.thermal_debug.target.movement_tile_valid &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target component trace: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target component trace: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target component trace: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_nearby_rejected_component_publication_t
+thermal_target_nearby_rejected_component_fixture(void) {
+    anomaly_result_thermal_debug_target_nearby_rejected_component_publication_t component;
+    memset(&component, 0, sizeof(component));
+    component.valid = true;
+    component.contains_target = true;
+    component.gate = ANOMALY_THERMAL_TARGET_GATE_SUPPORT_MASS;
+    component.seed_x = 51;
+    component.seed_y = 52;
+    component.peak_x = 53;
+    component.peak_y = 54;
+    component.area = 9.5f;
+    component.span = 10.5f;
+    component.fill = 0.64f;
+    component.peak_delta = 11.5f;
+    component.mean_delta = 12.5f;
+    component.quality = 0.73f;
+    component.distance = 0.018f;
+    return component;
+}
+
+static void test_result_publish_thermal_debug_target_nearby_rejected_component_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_nearby_rejected_component_publication_t component;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&component, 0, sizeof(component));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_nearby_rejected_component(NULL, &component);
+    anomaly_result_publish_thermal_debug_target_nearby_rejected_component(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target nearby rejected component: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_nearby_rejected_component_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_nearby_rejected_component_publication_t component =
+        thermal_target_nearby_rejected_component_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_nearby_rejected_component(&result, &component);
+
+    EXPECT(result.thermal_debug.target.nearby_rejected_component_valid &&
+           result.thermal_debug.target.nearby_rejected_component_contains_target &&
+           result.thermal_debug.target.nearby_rejected_component_gate ==
+               ANOMALY_THERMAL_TARGET_GATE_SUPPORT_MASS,
+           "result builder thermal target nearby rejected component: validity and gate are copied");
+    EXPECT(result.thermal_debug.target.nearby_rejected_component_seed_x == 51 &&
+           result.thermal_debug.target.nearby_rejected_component_seed_y == 52 &&
+           result.thermal_debug.target.nearby_rejected_component_peak_x == 53 &&
+           result.thermal_debug.target.nearby_rejected_component_peak_y == 54,
+           "result builder thermal target nearby rejected component: sample positions are copied");
+    EXPECT_NEAR(result.thermal_debug.target.nearby_rejected_component_area, 9.5f, 0.0001f,
+                "result builder thermal target nearby rejected component: area is copied");
+    EXPECT_NEAR(result.thermal_debug.target.nearby_rejected_component_span, 10.5f, 0.0001f,
+                "result builder thermal target nearby rejected component: span is copied");
+    EXPECT_NEAR(result.thermal_debug.target.nearby_rejected_component_fill, 0.64f, 0.0001f,
+                "result builder thermal target nearby rejected component: fill is copied");
+    EXPECT_NEAR(result.thermal_debug.target.nearby_rejected_component_peak_delta, 11.5f, 0.0001f,
+                "result builder thermal target nearby rejected component: peak delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.nearby_rejected_component_mean_delta, 12.5f, 0.0001f,
+                "result builder thermal target nearby rejected component: mean delta is copied");
+    EXPECT_NEAR(result.thermal_debug.target.nearby_rejected_component_quality, 0.73f, 0.0001f,
+                "result builder thermal target nearby rejected component: quality is copied");
+    EXPECT_NEAR(result.thermal_debug.target.nearby_rejected_component_distance, 0.018f, 0.0001f,
+                "result builder thermal target nearby rejected component: distance is copied");
+}
+
+static void test_result_publish_thermal_debug_target_nearby_rejected_component_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_nearby_rejected_component_publication_t component =
+        thermal_target_nearby_rejected_component_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.suppressor_sample_x = 31;
+    result.thermal_debug.target.component_seed_x = 41;
+    result.thermal_debug.target.dropped_by_nms = true;
+    result.thermal_debug.target.provisional_candidate_index = 3;
+    result.thermal_debug.target.movement_tile_valid = true;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_nearby_rejected_component(&result, &component);
+
+    EXPECT(result.thermal_debug.target.nearby_rejected_component_valid &&
+           result.thermal_debug.target.nearby_rejected_component_seed_x == 51,
+           "result builder thermal target nearby rejected component: requested fields are published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.suppressor_sample_x == 31 &&
+           result.thermal_debug.target.component_seed_x == 41,
+           "result builder thermal target nearby rejected component: earlier fields are preserved");
+    EXPECT(result.thermal_debug.target.dropped_by_nms &&
+           result.thermal_debug.target.provisional_candidate_index == 3 &&
+           result.thermal_debug.target.movement_tile_valid &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target nearby rejected component: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target nearby rejected component: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target nearby rejected component: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_nms_cap_publication_t
+thermal_target_nms_cap_fixture(void) {
+    anomaly_result_thermal_debug_target_nms_cap_publication_t nms_cap;
+    memset(&nms_cap, 0, sizeof(nms_cap));
+    nms_cap.dropped_by_cap = true;
+    nms_cap.dropped_by_nms = true;
+    nms_cap.replaced_by_nms = true;
+    nms_cap.nms_conflict_rank = 2;
+    nms_cap.nms_conflict_sample_x = 61;
+    nms_cap.nms_conflict_sample_y = 62;
+    nms_cap.pre_cap_rank = 3;
+    nms_cap.pre_cap_candidate_count = 9;
+    nms_cap.pre_cap_limit = 4;
+    nms_cap.pre_cap_retention_rank = 1.75f;
+    nms_cap.extracted_rank = 5;
+    nms_cap.winning_rank = 6;
+    return nms_cap;
+}
+
+static void test_result_publish_thermal_debug_target_nms_cap_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_nms_cap_publication_t nms_cap;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&nms_cap, 0, sizeof(nms_cap));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_nms_cap(NULL, &nms_cap);
+    anomaly_result_publish_thermal_debug_target_nms_cap(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target nms/cap: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_nms_cap_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_nms_cap_publication_t nms_cap =
+        thermal_target_nms_cap_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_nms_cap(&result, &nms_cap);
+
+    EXPECT(result.thermal_debug.target.dropped_by_cap &&
+           result.thermal_debug.target.dropped_by_nms &&
+           result.thermal_debug.target.replaced_by_nms,
+           "result builder thermal target nms/cap: drop and replace flags are copied");
+    EXPECT(result.thermal_debug.target.nms_conflict_rank == 2 &&
+           result.thermal_debug.target.nms_conflict_sample_x == 61 &&
+           result.thermal_debug.target.nms_conflict_sample_y == 62,
+           "result builder thermal target nms/cap: nms conflict fields are copied");
+    EXPECT(result.thermal_debug.target.pre_cap_rank == 3 &&
+           result.thermal_debug.target.pre_cap_candidate_count == 9 &&
+           result.thermal_debug.target.pre_cap_limit == 4,
+           "result builder thermal target nms/cap: pre-cap integer fields are copied");
+    EXPECT_NEAR(result.thermal_debug.target.pre_cap_retention_rank, 1.75f, 0.0001f,
+                "result builder thermal target nms/cap: retention rank is copied");
+    EXPECT(result.thermal_debug.target.extracted_rank == 5 &&
+           result.thermal_debug.target.winning_rank == 6,
+           "result builder thermal target nms/cap: extracted and winning ranks are copied");
+}
+
+static void test_result_publish_thermal_debug_target_nms_cap_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_nms_cap_publication_t nms_cap =
+        thermal_target_nms_cap_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.nearby_rejected_component_valid = true;
+    result.thermal_debug.target.nearby_rejected_component_seed_x = 51;
+    result.thermal_debug.target.provisional_candidate_index = 7;
+    result.thermal_debug.target.provisional_selected_rank = 8;
+    result.thermal_debug.target.movement_tile_valid = true;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_nms_cap(&result, &nms_cap);
+
+    EXPECT(result.thermal_debug.target.dropped_by_cap &&
+           result.thermal_debug.target.winning_rank == 6,
+           "result builder thermal target nms/cap: requested fields are published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.nearby_rejected_component_valid &&
+           result.thermal_debug.target.nearby_rejected_component_seed_x == 51,
+           "result builder thermal target nms/cap: earlier fields are preserved");
+    EXPECT(result.thermal_debug.target.provisional_candidate_index == 7 &&
+           result.thermal_debug.target.provisional_selected_rank == 8 &&
+           result.thermal_debug.target.movement_tile_valid &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target nms/cap: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target nms/cap: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target nms/cap: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_provisional_publication_t
+thermal_target_provisional_fixture(void) {
+    anomaly_result_thermal_debug_target_provisional_publication_t provisional;
+    memset(&provisional, 0, sizeof(provisional));
+    provisional.candidate_index = 7;
+    provisional.score_floor = 0.41f;
+    provisional.final_score = 2.35f;
+    provisional.score_eligible = true;
+    provisional.shape_eligible = true;
+    provisional.candidate_rank = 8;
+    provisional.selected_rank = 9;
+    provisional.selected_score = 3.45f;
+    provisional.near_existing_skip = true;
+    return provisional;
+}
+
+static void test_result_publish_thermal_debug_target_provisional_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_provisional_publication_t provisional;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&provisional, 0, sizeof(provisional));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_provisional(NULL, &provisional);
+    anomaly_result_publish_thermal_debug_target_provisional(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target provisional: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_provisional_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_provisional_publication_t provisional =
+        thermal_target_provisional_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_provisional(&result, &provisional);
+
+    EXPECT(result.thermal_debug.target.provisional_candidate_index == 7,
+           "result builder thermal target provisional: candidate index is copied");
+    EXPECT_NEAR(result.thermal_debug.target.provisional_score_floor, 0.41f, 0.0001f,
+                "result builder thermal target provisional: score floor is copied");
+    EXPECT_NEAR(result.thermal_debug.target.provisional_final_score, 2.35f, 0.0001f,
+                "result builder thermal target provisional: final score is copied");
+    EXPECT(result.thermal_debug.target.provisional_score_eligible &&
+           result.thermal_debug.target.provisional_shape_eligible,
+           "result builder thermal target provisional: eligibility flags are copied");
+    EXPECT(result.thermal_debug.target.provisional_candidate_rank == 8 &&
+           result.thermal_debug.target.provisional_selected_rank == 9,
+           "result builder thermal target provisional: ranks are copied");
+    EXPECT_NEAR(result.thermal_debug.target.provisional_selected_score, 3.45f, 0.0001f,
+                "result builder thermal target provisional: selected score is copied");
+    EXPECT(result.thermal_debug.target.provisional_near_existing_skip,
+           "result builder thermal target provisional: near-existing skip is copied");
+}
+
+static void test_result_publish_thermal_debug_target_provisional_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_provisional_publication_t provisional =
+        thermal_target_provisional_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.dropped_by_nms = true;
+    result.thermal_debug.target.winning_rank = 6;
+    result.thermal_debug.target.raw_delta_rescue_score = 0.71f;
+    result.thermal_debug.target.movement_tile_valid = true;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_provisional(&result, &provisional);
+
+    EXPECT(result.thermal_debug.target.provisional_candidate_index == 7 &&
+           result.thermal_debug.target.provisional_selected_rank == 9,
+           "result builder thermal target provisional: requested fields are published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.dropped_by_nms &&
+           result.thermal_debug.target.winning_rank == 6,
+           "result builder thermal target provisional: earlier fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.target.raw_delta_rescue_score, 0.71f, 0.0001f,
+                "result builder thermal target provisional: raw delta rescue score is preserved");
+    EXPECT(result.thermal_debug.target.movement_tile_valid &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target provisional: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target provisional: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target provisional: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_raw_delta_rescue_publication_t
+thermal_target_raw_delta_rescue_fixture(void) {
+    anomaly_result_thermal_debug_target_raw_delta_rescue_publication_t rescue;
+    memset(&rescue, 0, sizeof(rescue));
+    rescue.raw_delta_rescue_score = 0.71f;
+    return rescue;
+}
+
+static void test_result_publish_thermal_debug_target_raw_delta_rescue_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_raw_delta_rescue_publication_t rescue;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&rescue, 0, sizeof(rescue));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_raw_delta_rescue(NULL, &rescue);
+    anomaly_result_publish_thermal_debug_target_raw_delta_rescue(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target raw delta rescue: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_raw_delta_rescue_copies_field(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_raw_delta_rescue_publication_t rescue =
+        thermal_target_raw_delta_rescue_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_raw_delta_rescue(&result, &rescue);
+
+    EXPECT_NEAR(result.thermal_debug.target.raw_delta_rescue_score, 0.71f, 0.0001f,
+                "result builder thermal target raw delta rescue: score is copied");
+}
+
+static void test_result_publish_thermal_debug_target_raw_delta_rescue_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_raw_delta_rescue_publication_t rescue =
+        thermal_target_raw_delta_rescue_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.provisional_candidate_index = 7;
+    result.thermal_debug.target.movement_tile_valid = true;
+    result.thermal_debug.target.movement_independent_score = 0.42f;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_raw_delta_rescue(&result, &rescue);
+
+    EXPECT_NEAR(result.thermal_debug.target.raw_delta_rescue_score, 0.71f, 0.0001f,
+                "result builder thermal target raw delta rescue: requested field is published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.provisional_candidate_index == 7,
+           "result builder thermal target raw delta rescue: earlier fields are preserved");
+    EXPECT(result.thermal_debug.target.movement_tile_valid &&
+           fabsf(result.thermal_debug.target.movement_independent_score - 0.42f) < 0.0001f &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target raw delta rescue: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target raw delta rescue: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target raw delta rescue: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_movement_diagnostics_publication_t
+thermal_target_movement_diagnostics_fixture(void) {
+    anomaly_result_thermal_debug_target_movement_diagnostics_publication_t movement;
+    memset(&movement, 0, sizeof(movement));
+    movement.residual_px = 1.25f;
+    movement.independent_score = 0.42f;
+    movement.confidence = 0.67f;
+    movement.motion_support = 0.58f;
+    movement.layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    return movement;
+}
+
+static void test_result_publish_thermal_debug_target_movement_diagnostics_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_movement_diagnostics_publication_t movement;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&movement, 0, sizeof(movement));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_movement_diagnostics(NULL, &movement);
+    anomaly_result_publish_thermal_debug_target_movement_diagnostics(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target movement diagnostics: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_movement_diagnostics_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_movement_diagnostics_publication_t movement =
+        thermal_target_movement_diagnostics_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_movement_diagnostics(&result, &movement);
+
+    EXPECT_NEAR(result.thermal_debug.target.movement_residual_px, 1.25f, 0.0001f,
+                "result builder thermal target movement diagnostics: residual is copied");
+    EXPECT_NEAR(result.thermal_debug.target.movement_independent_score, 0.42f, 0.0001f,
+                "result builder thermal target movement diagnostics: independent score is copied");
+    EXPECT_NEAR(result.thermal_debug.target.movement_confidence, 0.67f, 0.0001f,
+                "result builder thermal target movement diagnostics: confidence is copied");
+    EXPECT_NEAR(result.thermal_debug.target.movement_motion_support, 0.58f, 0.0001f,
+                "result builder thermal target movement diagnostics: motion support is copied");
+    EXPECT(result.thermal_debug.target.movement_layer_class ==
+               ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "result builder thermal target movement diagnostics: layer class is copied");
+}
+
+static void test_result_publish_thermal_debug_target_movement_diagnostics_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_movement_diagnostics_publication_t movement =
+        thermal_target_movement_diagnostics_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.raw_delta_rescue_score = 0.71f;
+    result.thermal_debug.target.local_peak_movement_residual_px = 2.25f;
+    result.thermal_debug.target.raw_delta_rescue_eligible = true;
+    result.thermal_debug.target.movement_shadow_motion_support = true;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_movement_diagnostics(&result, &movement);
+
+    EXPECT_NEAR(result.thermal_debug.target.movement_residual_px, 1.25f, 0.0001f,
+                "result builder thermal target movement diagnostics: requested field is published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           fabsf(result.thermal_debug.target.raw_delta_rescue_score - 0.71f) < 0.0001f,
+           "result builder thermal target movement diagnostics: earlier fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_movement_residual_px, 2.25f, 0.0001f,
+                "result builder thermal target movement diagnostics: local peak movement is preserved");
+    EXPECT(result.thermal_debug.target.raw_delta_rescue_eligible &&
+           result.thermal_debug.target.movement_shadow_motion_support &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target movement diagnostics: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target movement diagnostics: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target movement diagnostics: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_local_peak_movement_publication_t
+thermal_target_local_peak_movement_fixture(void) {
+    anomaly_result_thermal_debug_target_local_peak_movement_publication_t movement;
+    memset(&movement, 0, sizeof(movement));
+    movement.residual_px = 2.25f;
+    movement.independent_score = 0.52f;
+    movement.confidence = 0.77f;
+    movement.motion_support = 0.68f;
+    movement.layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+    return movement;
+}
+
+static void test_result_publish_thermal_debug_target_local_peak_movement_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_local_peak_movement_publication_t movement;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&movement, 0, sizeof(movement));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_local_peak_movement(NULL, &movement);
+    anomaly_result_publish_thermal_debug_target_local_peak_movement(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target local peak movement: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_local_peak_movement_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_local_peak_movement_publication_t movement =
+        thermal_target_local_peak_movement_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_local_peak_movement(&result, &movement);
+
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_movement_residual_px, 2.25f, 0.0001f,
+                "result builder thermal target local peak movement: residual is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_movement_independent_score, 0.52f, 0.0001f,
+                "result builder thermal target local peak movement: independent score is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_movement_confidence, 0.77f, 0.0001f,
+                "result builder thermal target local peak movement: confidence is copied");
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_movement_motion_support, 0.68f, 0.0001f,
+                "result builder thermal target local peak movement: motion support is copied");
+    EXPECT(result.thermal_debug.target.local_peak_movement_layer_class ==
+               ANOMALY_MOVEMENT_LAYER_BACKGROUND,
+           "result builder thermal target local peak movement: layer class is copied");
+}
+
+static void test_result_publish_thermal_debug_target_local_peak_movement_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_local_peak_movement_publication_t movement =
+        thermal_target_local_peak_movement_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.movement_residual_px = 1.25f;
+    result.thermal_debug.target.movement_layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    result.thermal_debug.target.raw_delta_rescue_eligible = true;
+    result.thermal_debug.target.movement_shadow_motion_support = true;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_local_peak_movement(&result, &movement);
+
+    EXPECT_NEAR(result.thermal_debug.target.local_peak_movement_residual_px, 2.25f, 0.0001f,
+                "result builder thermal target local peak movement: requested field is published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           fabsf(result.thermal_debug.target.movement_residual_px - 1.25f) < 0.0001f &&
+           result.thermal_debug.target.movement_layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "result builder thermal target local peak movement: earlier movement fields are preserved");
+    EXPECT(result.thermal_debug.target.raw_delta_rescue_eligible &&
+           result.thermal_debug.target.movement_shadow_motion_support &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target local peak movement: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target local peak movement: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target local peak movement: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_rescue_movement_flags_publication_t
+thermal_target_rescue_movement_flags_fixture(void) {
+    anomaly_result_thermal_debug_target_rescue_movement_flags_publication_t flags;
+    memset(&flags, 0, sizeof(flags));
+    flags.raw_delta_rescue_eligible = true;
+    flags.movement_tile_valid = true;
+    flags.movement_independent = true;
+    flags.movement_parallax = true;
+    flags.would_promote_movement_rescue = true;
+    flags.local_peak_movement_tile_valid = true;
+    flags.local_peak_movement_independent = true;
+    flags.local_peak_movement_parallax = true;
+    return flags;
+}
+
+static void test_result_publish_thermal_debug_target_rescue_movement_flags_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_rescue_movement_flags_publication_t flags;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&flags, 0, sizeof(flags));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_rescue_movement_flags(NULL, &flags);
+    anomaly_result_publish_thermal_debug_target_rescue_movement_flags(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target rescue movement flags: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_rescue_movement_flags_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_rescue_movement_flags_publication_t flags =
+        thermal_target_rescue_movement_flags_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_rescue_movement_flags(&result, &flags);
+
+    EXPECT(result.thermal_debug.target.raw_delta_rescue_eligible &&
+           result.thermal_debug.target.movement_tile_valid &&
+           result.thermal_debug.target.movement_independent &&
+           result.thermal_debug.target.movement_parallax &&
+           result.thermal_debug.target.would_promote_movement_rescue,
+           "result builder thermal target rescue movement flags: target movement flags are copied");
+    EXPECT(result.thermal_debug.target.local_peak_movement_tile_valid &&
+           result.thermal_debug.target.local_peak_movement_independent &&
+           result.thermal_debug.target.local_peak_movement_parallax,
+           "result builder thermal target rescue movement flags: local peak movement flags are copied");
+}
+
+static void test_result_publish_thermal_debug_target_rescue_movement_flags_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_rescue_movement_flags_publication_t flags =
+        thermal_target_rescue_movement_flags_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.local_peak_movement_residual_px = 2.25f;
+    result.thermal_debug.target.movement_shadow_motion_support = true;
+    result.thermal_debug.target.movement_rescue_would_publish = true;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_rescue_movement_flags(&result, &flags);
+
+    EXPECT(result.thermal_debug.target.raw_delta_rescue_eligible &&
+           result.thermal_debug.target.local_peak_movement_parallax,
+           "result builder thermal target rescue movement flags: requested fields are published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           fabsf(result.thermal_debug.target.local_peak_movement_residual_px - 2.25f) < 0.0001f,
+           "result builder thermal target rescue movement flags: earlier fields are preserved");
+    EXPECT(result.thermal_debug.target.movement_shadow_motion_support &&
+           result.thermal_debug.target.movement_rescue_would_publish &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target rescue movement flags: later lifecycle fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target rescue movement flags: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target rescue movement flags: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_movement_shadow_rescue_publication_t
+thermal_target_movement_shadow_rescue_fixture(void) {
+    anomaly_result_thermal_debug_target_movement_shadow_rescue_publication_t shadow_rescue;
+    memset(&shadow_rescue, 0, sizeof(shadow_rescue));
+    shadow_rescue.movement_shadow_motion_support = true;
+    shadow_rescue.movement_shadow_parallax_penalty = true;
+    shadow_rescue.movement_shadow_thermal_support = true;
+    shadow_rescue.movement_shadow_clutter_veto = true;
+    shadow_rescue.movement_rescue_would_publish = true;
+    shadow_rescue.movement_boost_would_publish = true;
+    shadow_rescue.movement_rescue_reject_reason =
+        ANOMALY_MOVEMENT_SHADOW_REJECT_PARALLAX;
+    return shadow_rescue;
+}
+
+static void test_result_publish_thermal_debug_target_movement_shadow_rescue_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_movement_shadow_rescue_publication_t shadow_rescue;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&shadow_rescue, 0, sizeof(shadow_rescue));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_movement_shadow_rescue(NULL, &shadow_rescue);
+    anomaly_result_publish_thermal_debug_target_movement_shadow_rescue(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target movement shadow rescue: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_movement_shadow_rescue_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_movement_shadow_rescue_publication_t shadow_rescue =
+        thermal_target_movement_shadow_rescue_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_movement_shadow_rescue(&result, &shadow_rescue);
+
+    EXPECT(result.thermal_debug.target.movement_shadow_motion_support &&
+           result.thermal_debug.target.movement_shadow_parallax_penalty &&
+           result.thermal_debug.target.movement_shadow_thermal_support &&
+           result.thermal_debug.target.movement_shadow_clutter_veto,
+           "result builder thermal target movement shadow rescue: shadow flags are copied");
+    EXPECT(result.thermal_debug.target.movement_rescue_would_publish &&
+           result.thermal_debug.target.movement_boost_would_publish &&
+           result.thermal_debug.target.movement_rescue_reject_reason ==
+                ANOMALY_MOVEMENT_SHADOW_REJECT_PARALLAX,
+           "result builder thermal target movement shadow rescue: publish flags and reject reason are copied");
+}
+
+static void test_result_publish_thermal_debug_target_movement_shadow_rescue_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_movement_shadow_rescue_publication_t shadow_rescue =
+        thermal_target_movement_shadow_rescue_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.raw_delta_rescue_eligible = true;
+    result.thermal_debug.target.local_peak_movement_parallax = true;
+    result.thermal_debug.target.matched_track_index = 3;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.matched_track_hit_count = 8;
+    result.thermal_debug.target.matched_track_miss_count = 2;
+    result.thermal_debug.target.matched_track_hold_count = 5;
+    result.thermal_debug.target.matched_track_publish_confirmed = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_movement_shadow_rescue(&result, &shadow_rescue);
+
+    EXPECT(result.thermal_debug.target.movement_shadow_motion_support &&
+           result.thermal_debug.target.movement_boost_would_publish &&
+           result.thermal_debug.target.movement_rescue_reject_reason ==
+                ANOMALY_MOVEMENT_SHADOW_REJECT_PARALLAX,
+           "result builder thermal target movement shadow rescue: requested fields are published");
+    EXPECT(result.thermal_debug.target.raw_delta_rescue_eligible &&
+           result.thermal_debug.target.local_peak_movement_parallax,
+           "result builder thermal target movement shadow rescue: earlier rescue flags are preserved");
+    EXPECT(result.thermal_debug.target.matched_track_index == 3 &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.matched_track_hit_count == 8 &&
+           result.thermal_debug.target.matched_track_miss_count == 2 &&
+           result.thermal_debug.target.matched_track_hold_count == 5 &&
+           result.thermal_debug.target.matched_track_publish_confirmed &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target movement shadow rescue: later track and stage fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target movement shadow rescue: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target movement shadow rescue: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_target_track_match_publication_t
+thermal_target_track_match_fixture(void) {
+    anomaly_result_thermal_debug_target_track_match_publication_t track_match;
+    memset(&track_match, 0, sizeof(track_match));
+    track_match.matched_track_index = 3;
+    track_match.matched_track_id = 77;
+    track_match.matched_track_hit_count = 8;
+    track_match.matched_track_miss_count = 2;
+    track_match.matched_track_hold_count = 5;
+    track_match.matched_track_publish_confirmed = true;
+    return track_match;
+}
+
+static void test_result_publish_thermal_debug_target_track_match_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_track_match_publication_t track_match;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&track_match, 0, sizeof(track_match));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_track_match(NULL, &track_match);
+    anomaly_result_publish_thermal_debug_target_track_match(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target track match: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_track_match_copies_fields(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_track_match_publication_t track_match =
+        thermal_target_track_match_fixture();
+    memset(&result, 0, sizeof(result));
+
+    anomaly_result_publish_thermal_debug_target_track_match(&result, &track_match);
+
+    EXPECT(result.thermal_debug.target.matched_track_index == 3 &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.matched_track_hit_count == 8,
+           "result builder thermal target track match: track identity and hit count are copied");
+    EXPECT(result.thermal_debug.target.matched_track_miss_count == 2 &&
+           result.thermal_debug.target.matched_track_hold_count == 5 &&
+           result.thermal_debug.target.matched_track_publish_confirmed,
+           "result builder thermal target track match: miss/hold/publish fields are copied");
+}
+
+static void test_result_publish_thermal_debug_target_track_match_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_track_match_publication_t track_match =
+        thermal_target_track_match_fixture();
+    memset(&result, 0, sizeof(result));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.movement_shadow_motion_support = true;
+    result.thermal_debug.target.movement_rescue_reject_reason =
+        ANOMALY_MOVEMENT_SHADOW_REJECT_PARALLAX;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 21;
+    result.color_debug.raw_score = 0.44f;
+
+    anomaly_result_publish_thermal_debug_target_track_match(&result, &track_match);
+
+    EXPECT(result.thermal_debug.target.matched_track_index == 3 &&
+           result.thermal_debug.target.matched_track_publish_confirmed,
+           "result builder thermal target track match: requested fields are published");
+    EXPECT(result.thermal_debug.target.movement_shadow_motion_support &&
+           result.thermal_debug.target.movement_rescue_reject_reason ==
+                ANOMALY_MOVEMENT_SHADOW_REJECT_PARALLAX,
+           "result builder thermal target track match: earlier movement shadow fields are preserved");
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED &&
+           result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 21,
+           "result builder thermal target track match: later stage and candidate fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target track match: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target track match: unrelated color debug is preserved");
+}
+
+static void test_result_publish_thermal_debug_target_stage_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_stage_publication_t stage;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&stage, 0, sizeof(stage));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_target_stage(NULL, &stage);
+    anomaly_result_publish_thermal_debug_target_stage(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal target stage: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_target_stage_copies_field(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_stage_publication_t stage;
+    memset(&result, 0, sizeof(result));
+    memset(&stage, 0, sizeof(stage));
+    stage.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+
+    anomaly_result_publish_thermal_debug_target_stage(&result, &stage);
+
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal target stage: stage is copied");
+}
+
+static void test_result_publish_thermal_debug_target_stage_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_target_stage_publication_t stage;
+    memset(&result, 0, sizeof(result));
+    memset(&stage, 0, sizeof(stage));
+    result.thermal_debug.raw_score = 0.91f;
+    result.thermal_debug.target.matched_track_index = 3;
+    result.thermal_debug.target.matched_track_id = 77;
+    result.thermal_debug.target.matched_track_publish_confirmed = true;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 21;
+    result.color_debug.raw_score = 0.44f;
+    stage.stage = ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE;
+
+    anomaly_result_publish_thermal_debug_target_stage(&result, &stage);
+
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_REJECTED_BY_GATE,
+           "result builder thermal target stage: requested field is published");
+    EXPECT(result.thermal_debug.target.matched_track_index == 3 &&
+           result.thermal_debug.target.matched_track_id == 77 &&
+           result.thermal_debug.target.matched_track_publish_confirmed,
+           "result builder thermal target stage: earlier track fields are preserved");
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 21,
+           "result builder thermal target stage: later candidate fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.91f, 0.0001f,
+                "result builder thermal target stage: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal target stage: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_candidate_base_publication_t
+result_builder_thermal_candidate_base_fixture(
+        int   pixel_x,
+        int   pixel_y,
+        float final_score) {
+    anomaly_result_thermal_debug_candidate_base_publication_t candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.pixel_x = pixel_x;
+    candidate.pixel_y = pixel_y;
+    candidate.min_x = 5;
+    candidate.min_y = 6;
+    candidate.max_x = 7;
+    candidate.max_y = 8;
+    candidate.base_score = 1.25f;
+    candidate.final_score = final_score;
+    candidate.temporal_score = 0.75f;
+    candidate.area = 2.5f;
+    candidate.span = 3.5f;
+    candidate.fill = 0.45f;
+    candidate.center_share = 0.55f;
+    candidate.quality = 0.65f;
+    candidate.isolation_rank = 0.75f;
+    candidate.peak_delta = 11.5f;
+    candidate.mean_delta = 7.5f;
+    candidate.score_scale = 1.1f;
+    candidate.history_scale = 1.2f;
+    candidate.apparent_size_scale = 1.3f;
+    candidate.isolation_track_scale = 1.4f;
+    candidate.context_scale = 1.5f;
+    candidate.parent_scale = 1.6f;
+    candidate.area_rank = 0.15f;
+    candidate.span_rank = 0.25f;
+    candidate.center_rank = 0.35f;
+    candidate.quality_rank = 0.45f;
+    candidate.patch_support = 0.56f;
+    candidate.motion_support = 0.67f;
+    candidate.singleton_score_scale = 1.7f;
+    candidate.retention_rank = 0.89f;
+    return candidate;
+}
+
+static void test_result_publish_thermal_debug_candidates_base_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_base_publication_t candidates;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_candidates_base(NULL, &candidates);
+    anomaly_result_publish_thermal_debug_candidates_base(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal candidates base: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_candidates_base_invalid_list_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_base_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 88;
+    result.thermal_debug.candidate_count = 7;
+    candidates.candidates = NULL;
+    candidates.candidate_count = 3;
+
+    anomaly_result_publish_thermal_debug_candidates_base(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 88 &&
+           result.thermal_debug.candidate_count == 7,
+           "result builder thermal candidates base: invalid candidate list preserves existing fields");
+}
+
+static void test_result_publish_thermal_debug_candidates_base_publishes_caps_and_defaults(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_base_publication_t samples[
+        ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1];
+    anomaly_result_thermal_debug_candidates_base_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidate_count = 99;
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1; i++) {
+        samples[i] = result_builder_thermal_candidate_base_fixture(50 + i, 40 + i, 3.25f + (float)i);
+        samples[i].temporal_score += (float)i;
+    }
+    candidates.candidates = samples;
+    candidates.candidate_count = ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1;
+    candidates.roi_x0 = 10;
+    candidates.roi_y0 = 20;
+    candidates.sample_step = 4;
+    candidates.frame_w = 100.0f;
+    candidates.frame_h = 80.0f;
+
+    anomaly_result_publish_thermal_debug_candidates_base(&result, &candidates);
+
+    const anomaly_debug_thermal_candidate_t *first = &result.thermal_debug.candidates[0];
+    EXPECT(first->valid &&
+           first->pixel_x == 50 &&
+           first->pixel_y == 40,
+           "result builder thermal candidates base: first candidate position is copied");
+    EXPECT_NEAR(first->x_norm, 0.5f, 0.0001f,
+                "result builder thermal candidates base: x norm is copied");
+    EXPECT_NEAR(first->y_norm, 0.5f, 0.0001f,
+                "result builder thermal candidates base: y norm is copied");
+    EXPECT_NEAR(first->bbox_left_norm, 0.28f, 0.0001f,
+                "result builder thermal candidates base: bbox left normalizes");
+    EXPECT_NEAR(first->bbox_top_norm, 0.525f, 0.0001f,
+                "result builder thermal candidates base: bbox top normalizes");
+    EXPECT_NEAR(first->bbox_right_norm, 0.44f, 0.0001f,
+                "result builder thermal candidates base: bbox right normalizes");
+    EXPECT_NEAR(first->bbox_bottom_norm, 0.725f, 0.0001f,
+                "result builder thermal candidates base: bbox bottom normalizes");
+    EXPECT_NEAR(first->base_score, 1.25f, 0.0001f,
+                "result builder thermal candidates base: base score is copied");
+    EXPECT_NEAR(first->final_score, 3.25f, 0.0001f,
+                "result builder thermal candidates base: final score is copied");
+    EXPECT_NEAR(first->temporal_score, 0.75f, 0.0001f,
+                "result builder thermal candidates base: temporal score is copied");
+    EXPECT(first->area > 2.49f &&
+           first->span > 3.49f &&
+           first->fill > 0.44f &&
+           first->center_share > 0.54f &&
+           first->quality > 0.64f &&
+           first->isolation_rank > 0.74f,
+           "result builder thermal candidates base: shape and quality fields are copied");
+    EXPECT(first->peak_delta > 11.49f &&
+           first->mean_delta > 7.49f &&
+           first->score_scale > 1.09f &&
+           first->history_scale > 1.19f &&
+           first->apparent_size_scale > 1.29f &&
+           first->isolation_track_scale > 1.39f,
+           "result builder thermal candidates base: score scale fields are copied");
+    EXPECT(first->context_scale > 1.49f &&
+           first->parent_scale > 1.59f &&
+           first->area_rank > 0.14f &&
+           first->span_rank > 0.24f &&
+           first->center_rank > 0.34f &&
+           first->quality_rank > 0.44f,
+           "result builder thermal candidates base: context and rank fields are copied");
+    EXPECT(first->patch_support > 0.55f &&
+           first->motion_support > 0.66f &&
+           first->singleton_score_scale > 1.69f &&
+           first->retention_rank > 0.88f,
+           "result builder thermal candidates base: support and retention fields are copied");
+    EXPECT(first->movement_layer_class == ANOMALY_MOVEMENT_LAYER_UNKNOWN &&
+           first->nearest_track_index == -1 &&
+           first->nearest_track_id == -1 &&
+           first->nearest_track_hit_count == -1,
+           "result builder thermal candidates base: enrichment defaults match legacy loop");
+
+    const anomaly_debug_thermal_candidate_t *last =
+        &result.thermal_debug.candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1];
+    EXPECT(last->valid &&
+           last->pixel_x == 50 + ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1,
+           "result builder thermal candidates base: publication caps at debug array size");
+    EXPECT(result.thermal_debug.candidate_count == 99,
+           "result builder thermal candidates base: summary candidate count is preserved");
+}
+
+static void test_result_publish_thermal_debug_candidates_base_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_base_publication_t sample =
+        result_builder_thermal_candidate_base_fixture(60, 32, 4.5f);
+    anomaly_result_thermal_debug_candidates_base_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.raw_score = 0.77f;
+    result.thermal_debug.candidate_count = 3;
+    result.thermal_debug.target.enabled = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+    candidates.candidates = &sample;
+    candidates.candidate_count = 1;
+    candidates.roi_x0 = 10;
+    candidates.roi_y0 = 20;
+    candidates.sample_step = 4;
+    candidates.frame_w = 100.0f;
+    candidates.frame_h = 80.0f;
+
+    anomaly_result_publish_thermal_debug_candidates_base(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 60,
+           "result builder thermal candidates base: requested candidate is published");
+    EXPECT(result.thermal_debug.target.enabled &&
+           result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED,
+           "result builder thermal candidates base: target fields are preserved");
+    EXPECT(result.thermal_debug.candidate_count == 3,
+           "result builder thermal candidates base: summary candidate count is preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.77f, 0.0001f,
+                "result builder thermal candidates base: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal candidates base: unrelated color debug is preserved");
+}
+
+static void test_result_copy_thermal_debug_candidate_null_and_invalid_inputs(void) {
+    anomaly_result_t result;
+    anomaly_debug_thermal_candidate_t out;
+    memset(&result, 0, sizeof(result));
+    memset(&out, 0x5A, sizeof(out));
+    out.pixel_x = 77;
+    anomaly_debug_thermal_candidate_t saved = out;
+
+    EXPECT(!anomaly_result_copy_thermal_debug_candidate(NULL, 0, &out),
+           "result builder thermal candidate copy: null result returns false");
+    EXPECT(!anomaly_result_copy_thermal_debug_candidate(&result, 0, NULL),
+           "result builder thermal candidate copy: null output returns false");
+    EXPECT(!anomaly_result_copy_thermal_debug_candidate(&result, -1, &out),
+           "result builder thermal candidate copy: negative index returns false");
+    EXPECT(!anomaly_result_copy_thermal_debug_candidate(
+                &result,
+                ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES,
+                &out),
+           "result builder thermal candidate copy: capped index returns false");
+    EXPECT(memcmp(&out, &saved, sizeof(out)) == 0,
+           "result builder thermal candidate copy: invalid inputs preserve output");
+}
+
+static void test_result_copy_thermal_debug_candidate_copies_staged_candidate(void) {
+    anomaly_result_t result;
+    anomaly_debug_thermal_candidate_t out;
+    anomaly_result_thermal_debug_candidate_base_publication_t sample =
+        result_builder_thermal_candidate_base_fixture(64, 40, 5.5f);
+    anomaly_result_thermal_debug_candidates_base_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&out, 0, sizeof(out));
+    memset(&candidates, 0, sizeof(candidates));
+    candidates.candidates = &sample;
+    candidates.candidate_count = 1;
+    candidates.roi_x0 = 10;
+    candidates.roi_y0 = 20;
+    candidates.sample_step = 4;
+    candidates.frame_w = 128.0f;
+    candidates.frame_h = 80.0f;
+
+    anomaly_result_publish_thermal_debug_candidates_base(&result, &candidates);
+    result.thermal_debug.candidates[0].movement_tile_valid = true;
+    result.thermal_debug.candidates[0].movement_independent_score = 0.72f;
+    result.thermal_debug.candidates[0].movement_independent = true;
+    result.thermal_debug.candidates[0].near_tracked_target = true;
+    result.thermal_debug.candidates[0].near_debug_target = true;
+    result.thermal_debug.candidates[0].raw_delta_rescue_score = 0.81f;
+    result.thermal_debug.candidates[0].raw_delta_rescue_eligible = true;
+    result.thermal_debug.candidates[0].would_promote_movement_rescue = true;
+    result.thermal_debug.candidates[0].singleton_blob = true;
+    result.thermal_debug.candidates[0].above_threshold = true;
+
+    EXPECT(anomaly_result_copy_thermal_debug_candidate(&result, 0, &out),
+           "result builder thermal candidate copy: valid index returns true");
+
+    EXPECT(out.valid && out.pixel_x == 64 && out.pixel_y == 40,
+           "result builder thermal candidate copy: base position fields are copied");
+    EXPECT_NEAR(out.x_norm, 0.5f, 0.0001f,
+                "result builder thermal candidate copy: x norm is copied");
+    EXPECT_NEAR(out.y_norm, 0.5f, 0.0001f,
+                "result builder thermal candidate copy: y norm is copied");
+    EXPECT_NEAR(out.bbox_left_norm, result.thermal_debug.candidates[0].bbox_left_norm, 0.0001f,
+                "result builder thermal candidate copy: bbox left is copied");
+    EXPECT_NEAR(out.peak_delta, sample.peak_delta, 0.0001f,
+                "result builder thermal candidate copy: peak delta is copied");
+    EXPECT_NEAR(out.mean_delta, sample.mean_delta, 0.0001f,
+                "result builder thermal candidate copy: mean delta is copied");
+    EXPECT_NEAR(out.area, sample.area, 0.0001f,
+                "result builder thermal candidate copy: area is copied");
+    EXPECT_NEAR(out.span, sample.span, 0.0001f,
+                "result builder thermal candidate copy: span is copied");
+    EXPECT_NEAR(out.fill, sample.fill, 0.0001f,
+                "result builder thermal candidate copy: fill is copied");
+    EXPECT_NEAR(out.quality, sample.quality, 0.0001f,
+                "result builder thermal candidate copy: quality is copied");
+    EXPECT_NEAR(out.final_score, sample.final_score, 0.0001f,
+                "result builder thermal candidate copy: final score is copied");
+    EXPECT(out.movement_tile_valid &&
+           out.movement_independent &&
+           out.near_tracked_target &&
+           out.near_debug_target,
+           "result builder thermal candidate copy: enrichment flags are copied");
+    EXPECT_NEAR(out.movement_independent_score, 0.72f, 0.0001f,
+                "result builder thermal candidate copy: movement score is copied");
+    EXPECT_NEAR(out.raw_delta_rescue_score, 0.81f, 0.0001f,
+                "result builder thermal candidate copy: raw-delta rescue score is copied");
+    EXPECT(out.raw_delta_rescue_eligible &&
+           out.would_promote_movement_rescue &&
+           out.singleton_blob &&
+           out.above_threshold,
+           "result builder thermal candidate copy: late flags are copied");
+}
+
+static anomaly_result_thermal_debug_candidate_movement_publication_t
+result_builder_thermal_candidate_movement_fixture(void) {
+    anomaly_result_thermal_debug_candidate_movement_publication_t movement;
+    memset(&movement, 0, sizeof(movement));
+    movement.movement_tile_valid = true;
+    movement.movement_residual_px = 1.25f;
+    movement.movement_independent_score = 0.72f;
+    movement.movement_confidence = 0.63f;
+    movement.movement_layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    movement.movement_independent = true;
+    movement.movement_parallax = true;
+    return movement;
+}
+
+static void test_result_publish_thermal_debug_candidates_movement_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_movement_publication_t candidates;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_candidates_movement(NULL, &candidates);
+    anomaly_result_publish_thermal_debug_candidates_movement(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal candidates movement: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_candidates_movement_invalid_list_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_movement_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].movement_tile_valid = true;
+    result.thermal_debug.candidates[0].movement_layer_class =
+        ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    candidates.candidates = NULL;
+    candidates.candidate_count = 3;
+
+    anomaly_result_publish_thermal_debug_candidates_movement(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].movement_tile_valid &&
+           result.thermal_debug.candidates[0].movement_layer_class ==
+                ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "result builder thermal candidates movement: invalid candidate list preserves existing fields");
+}
+
+static void test_result_publish_thermal_debug_candidates_movement_copies_valid_entries_and_caps(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_movement_publication_t samples[
+        ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1];
+    anomaly_result_thermal_debug_candidates_movement_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1; i++) {
+        samples[i] = result_builder_thermal_candidate_movement_fixture();
+        samples[i].movement_residual_px += (float)i;
+        samples[i].movement_layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    }
+    candidates.candidates = samples;
+    candidates.candidate_count = ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1;
+
+    anomaly_result_publish_thermal_debug_candidates_movement(&result, &candidates);
+
+    const anomaly_debug_thermal_candidate_t *first = &result.thermal_debug.candidates[0];
+    EXPECT(first->movement_tile_valid &&
+           first->movement_independent &&
+           first->movement_parallax,
+           "result builder thermal candidates movement: movement flags are copied");
+    EXPECT_NEAR(first->movement_residual_px, 1.25f, 0.0001f,
+                "result builder thermal candidates movement: residual is copied");
+    EXPECT_NEAR(first->movement_independent_score, 0.72f, 0.0001f,
+                "result builder thermal candidates movement: independent score is copied");
+    EXPECT_NEAR(first->movement_confidence, 0.63f, 0.0001f,
+                "result builder thermal candidates movement: confidence is copied");
+    EXPECT(first->movement_layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "result builder thermal candidates movement: layer class is copied");
+
+    const anomaly_debug_thermal_candidate_t *last =
+        &result.thermal_debug.candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1];
+    EXPECT(last->movement_tile_valid &&
+           fabsf(last->movement_residual_px -
+                 (1.25f + (float)(ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1))) < 0.0001f,
+           "result builder thermal candidates movement: publication caps at debug array size");
+}
+
+static void test_result_publish_thermal_debug_candidates_movement_skips_invalid_entries(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_movement_publication_t samples[2];
+    anomaly_result_thermal_debug_candidates_movement_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].movement_layer_class =
+        ANOMALY_MOVEMENT_LAYER_UNKNOWN;
+    result.thermal_debug.candidates[0].nearest_track_index = -1;
+    result.thermal_debug.candidates[1].movement_residual_px = 9.0f;
+    result.thermal_debug.candidates[1].movement_layer_class =
+        ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    samples[0] = result_builder_thermal_candidate_movement_fixture();
+    samples[1] = result_builder_thermal_candidate_movement_fixture();
+    samples[1].movement_tile_valid = false;
+    samples[1].movement_residual_px = 4.0f;
+    samples[1].movement_layer_class = ANOMALY_MOVEMENT_LAYER_UNSTABLE;
+    candidates.candidates = samples;
+    candidates.candidate_count = 2;
+
+    anomaly_result_publish_thermal_debug_candidates_movement(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].movement_tile_valid &&
+           result.thermal_debug.candidates[0].movement_layer_class ==
+                ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "result builder thermal candidates movement: valid entries are published");
+    EXPECT(!result.thermal_debug.candidates[1].movement_tile_valid &&
+           fabsf(result.thermal_debug.candidates[1].movement_residual_px - 9.0f) < 0.0001f &&
+           result.thermal_debug.candidates[1].movement_layer_class ==
+                ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "result builder thermal candidates movement: invalid entries preserve prior fields");
+}
+
+static void test_result_publish_thermal_debug_candidates_movement_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_movement_publication_t movement =
+        result_builder_thermal_candidate_movement_fixture();
+    anomaly_result_thermal_debug_candidates_movement_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.raw_score = 0.77f;
+    result.thermal_debug.candidate_count = 3;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 60;
+    result.thermal_debug.candidates[0].nearest_track_index = -1;
+    result.thermal_debug.candidates[0].near_debug_target = true;
+    result.thermal_debug.candidates[0].raw_delta_rescue_score = 0.88f;
+    result.thermal_debug.candidates[0].singleton_blob = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+    candidates.candidates = &movement;
+    candidates.candidate_count = 1;
+
+    anomaly_result_publish_thermal_debug_candidates_movement(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].movement_tile_valid &&
+           result.thermal_debug.candidates[0].movement_independent,
+           "result builder thermal candidates movement: requested movement fields are published");
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 60 &&
+           result.thermal_debug.candidates[0].nearest_track_index == -1 &&
+           result.thermal_debug.candidates[0].near_debug_target &&
+           fabsf(result.thermal_debug.candidates[0].raw_delta_rescue_score - 0.88f) < 0.0001f &&
+           result.thermal_debug.candidates[0].singleton_blob,
+           "result builder thermal candidates movement: base and later enrichment fields are preserved");
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED &&
+           result.thermal_debug.candidate_count == 3,
+           "result builder thermal candidates movement: target and summary fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.77f, 0.0001f,
+                "result builder thermal candidates movement: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal candidates movement: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_candidate_nearest_track_publication_t
+result_builder_thermal_candidate_nearest_track_fixture(void) {
+    anomaly_result_thermal_debug_candidate_nearest_track_publication_t track;
+    memset(&track, 0, sizeof(track));
+    track.nearest_track_valid = true;
+    track.nearest_track_distance = 0.012f;
+    track.nearest_track_index = 2;
+    track.nearest_track_id = 77;
+    track.nearest_track_hit_count = 8;
+    track.near_tracked_target = true;
+    return track;
+}
+
+static void test_result_publish_thermal_debug_candidates_nearest_track_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_nearest_track_publication_t candidates;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_candidates_nearest_track(NULL, &candidates);
+    anomaly_result_publish_thermal_debug_candidates_nearest_track(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal candidates nearest track: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_candidates_nearest_track_invalid_list_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_nearest_track_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].nearest_track_index = 3;
+    result.thermal_debug.candidates[0].nearest_track_id = 88;
+    candidates.candidates = NULL;
+    candidates.candidate_count = 3;
+
+    anomaly_result_publish_thermal_debug_candidates_nearest_track(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].nearest_track_index == 3 &&
+           result.thermal_debug.candidates[0].nearest_track_id == 88,
+           "result builder thermal candidates nearest track: invalid candidate list preserves existing fields");
+}
+
+static void test_result_publish_thermal_debug_candidates_nearest_track_copies_valid_entries_and_caps(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_nearest_track_publication_t samples[
+        ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1];
+    anomaly_result_thermal_debug_candidates_nearest_track_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1; i++) {
+        samples[i] = result_builder_thermal_candidate_nearest_track_fixture();
+        samples[i].nearest_track_distance += 0.001f * (float)i;
+        samples[i].nearest_track_index = i;
+        samples[i].nearest_track_id = 70 + i;
+        samples[i].nearest_track_hit_count = 5 + i;
+        samples[i].near_tracked_target = (i % 2) == 0;
+    }
+    candidates.candidates = samples;
+    candidates.candidate_count = ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1;
+
+    anomaly_result_publish_thermal_debug_candidates_nearest_track(&result, &candidates);
+
+    const anomaly_debug_thermal_candidate_t *first = &result.thermal_debug.candidates[0];
+    EXPECT_NEAR(first->nearest_track_distance, 0.012f, 0.0001f,
+                "result builder thermal candidates nearest track: distance is copied");
+    EXPECT(first->nearest_track_index == 0 &&
+           first->nearest_track_id == 70 &&
+           first->nearest_track_hit_count == 5 &&
+           first->near_tracked_target,
+           "result builder thermal candidates nearest track: identity and near flag are copied");
+
+    const anomaly_debug_thermal_candidate_t *last =
+        &result.thermal_debug.candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1];
+    EXPECT(last->nearest_track_index == ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1 &&
+           last->nearest_track_id == 70 + ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1,
+           "result builder thermal candidates nearest track: publication caps at debug array size");
+}
+
+static void test_result_publish_thermal_debug_candidates_nearest_track_skips_invalid_entries(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_nearest_track_publication_t samples[2];
+    anomaly_result_thermal_debug_candidates_nearest_track_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].nearest_track_index = -1;
+    result.thermal_debug.candidates[1].nearest_track_distance = 0.44f;
+    result.thermal_debug.candidates[1].nearest_track_index = 4;
+    result.thermal_debug.candidates[1].nearest_track_id = 99;
+    result.thermal_debug.candidates[1].near_tracked_target = true;
+    samples[0] = result_builder_thermal_candidate_nearest_track_fixture();
+    samples[1] = result_builder_thermal_candidate_nearest_track_fixture();
+    samples[1].nearest_track_valid = false;
+    samples[1].nearest_track_distance = 0.02f;
+    samples[1].nearest_track_index = 1;
+    samples[1].nearest_track_id = 12;
+    samples[1].near_tracked_target = false;
+    candidates.candidates = samples;
+    candidates.candidate_count = 2;
+
+    anomaly_result_publish_thermal_debug_candidates_nearest_track(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].nearest_track_index == 2 &&
+           result.thermal_debug.candidates[0].nearest_track_id == 77,
+           "result builder thermal candidates nearest track: valid entries are published");
+    EXPECT_NEAR(result.thermal_debug.candidates[1].nearest_track_distance, 0.44f, 0.0001f,
+                "result builder thermal candidates nearest track: invalid entries preserve distance");
+    EXPECT(result.thermal_debug.candidates[1].nearest_track_index == 4 &&
+           result.thermal_debug.candidates[1].nearest_track_id == 99 &&
+           result.thermal_debug.candidates[1].near_tracked_target,
+           "result builder thermal candidates nearest track: invalid entries preserve identity and near flag");
+}
+
+static void test_result_publish_thermal_debug_candidates_nearest_track_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_nearest_track_publication_t track =
+        result_builder_thermal_candidate_nearest_track_fixture();
+    anomaly_result_thermal_debug_candidates_nearest_track_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.raw_score = 0.77f;
+    result.thermal_debug.candidate_count = 3;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 60;
+    result.thermal_debug.candidates[0].movement_tile_valid = true;
+    result.thermal_debug.candidates[0].movement_independent = true;
+    result.thermal_debug.candidates[0].near_debug_target = true;
+    result.thermal_debug.candidates[0].raw_delta_rescue_score = 0.88f;
+    result.thermal_debug.candidates[0].singleton_blob = true;
+    result.thermal_debug.candidates[0].above_threshold = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+    candidates.candidates = &track;
+    candidates.candidate_count = 1;
+
+    anomaly_result_publish_thermal_debug_candidates_nearest_track(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].nearest_track_index == 2 &&
+           result.thermal_debug.candidates[0].nearest_track_id == 77 &&
+           result.thermal_debug.candidates[0].near_tracked_target,
+           "result builder thermal candidates nearest track: requested nearest-track fields are published");
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 60 &&
+           result.thermal_debug.candidates[0].movement_tile_valid &&
+           result.thermal_debug.candidates[0].movement_independent,
+           "result builder thermal candidates nearest track: base and movement fields are preserved");
+    EXPECT(result.thermal_debug.candidates[0].near_debug_target &&
+           fabsf(result.thermal_debug.candidates[0].raw_delta_rescue_score - 0.88f) < 0.0001f &&
+           result.thermal_debug.candidates[0].singleton_blob &&
+           result.thermal_debug.candidates[0].above_threshold,
+           "result builder thermal candidates nearest track: later enrichment fields are preserved");
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED &&
+           result.thermal_debug.candidate_count == 3,
+           "result builder thermal candidates nearest track: target and summary fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.77f, 0.0001f,
+                "result builder thermal candidates nearest track: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal candidates nearest track: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_candidate_near_debug_publication_t
+result_builder_thermal_candidate_near_debug_fixture(bool near_debug_target) {
+    anomaly_result_thermal_debug_candidate_near_debug_publication_t near_debug;
+    memset(&near_debug, 0, sizeof(near_debug));
+    near_debug.near_debug_valid = true;
+    near_debug.near_debug_target = near_debug_target;
+    return near_debug;
+}
+
+static void test_result_publish_thermal_debug_candidates_near_debug_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_near_debug_publication_t candidates;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_candidates_near_debug(NULL, &candidates);
+    anomaly_result_publish_thermal_debug_candidates_near_debug(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal candidates near debug: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_candidates_near_debug_invalid_list_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_near_debug_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].near_debug_target = true;
+    candidates.candidates = NULL;
+    candidates.candidate_count = 3;
+
+    anomaly_result_publish_thermal_debug_candidates_near_debug(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].near_debug_target,
+           "result builder thermal candidates near debug: invalid candidate list preserves existing fields");
+}
+
+static void test_result_publish_thermal_debug_candidates_near_debug_copies_valid_entries_and_caps(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_near_debug_publication_t samples[
+        ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1];
+    anomaly_result_thermal_debug_candidates_near_debug_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1; i++) {
+        samples[i] = result_builder_thermal_candidate_near_debug_fixture((i % 2) == 0);
+    }
+    candidates.candidates = samples;
+    candidates.candidate_count = ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1;
+
+    anomaly_result_publish_thermal_debug_candidates_near_debug(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].near_debug_target &&
+           !result.thermal_debug.candidates[1].near_debug_target,
+           "result builder thermal candidates near debug: near flags are copied");
+    EXPECT(result.thermal_debug.candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1]
+               .near_debug_target == ((ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1) % 2 == 0),
+           "result builder thermal candidates near debug: publication caps at debug array size");
+}
+
+static void test_result_publish_thermal_debug_candidates_near_debug_skips_invalid_entries(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_near_debug_publication_t samples[2];
+    anomaly_result_thermal_debug_candidates_near_debug_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].near_debug_target = false;
+    result.thermal_debug.candidates[1].near_debug_target = true;
+    samples[0] = result_builder_thermal_candidate_near_debug_fixture(true);
+    samples[1] = result_builder_thermal_candidate_near_debug_fixture(false);
+    samples[1].near_debug_valid = false;
+    candidates.candidates = samples;
+    candidates.candidate_count = 2;
+
+    anomaly_result_publish_thermal_debug_candidates_near_debug(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].near_debug_target,
+           "result builder thermal candidates near debug: valid entries are published");
+    EXPECT(result.thermal_debug.candidates[1].near_debug_target,
+           "result builder thermal candidates near debug: invalid entries preserve prior fields");
+}
+
+static void test_result_publish_thermal_debug_candidates_near_debug_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_near_debug_publication_t near_debug =
+        result_builder_thermal_candidate_near_debug_fixture(true);
+    anomaly_result_thermal_debug_candidates_near_debug_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.raw_score = 0.77f;
+    result.thermal_debug.candidate_count = 3;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 60;
+    result.thermal_debug.candidates[0].movement_tile_valid = true;
+    result.thermal_debug.candidates[0].nearest_track_index = 2;
+    result.thermal_debug.candidates[0].nearest_track_id = 77;
+    result.thermal_debug.candidates[0].near_tracked_target = true;
+    result.thermal_debug.candidates[0].raw_delta_rescue_score = 0.88f;
+    result.thermal_debug.candidates[0].raw_delta_rescue_eligible = true;
+    result.thermal_debug.candidates[0].would_promote_movement_rescue = true;
+    result.thermal_debug.candidates[0].singleton_blob = true;
+    result.thermal_debug.candidates[0].above_threshold = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+    candidates.candidates = &near_debug;
+    candidates.candidate_count = 1;
+
+    anomaly_result_publish_thermal_debug_candidates_near_debug(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].near_debug_target,
+           "result builder thermal candidates near debug: requested near-debug field is published");
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 60 &&
+           result.thermal_debug.candidates[0].movement_tile_valid &&
+           result.thermal_debug.candidates[0].nearest_track_index == 2 &&
+           result.thermal_debug.candidates[0].nearest_track_id == 77 &&
+           result.thermal_debug.candidates[0].near_tracked_target,
+           "result builder thermal candidates near debug: base movement and nearest-track fields are preserved");
+    EXPECT(fabsf(result.thermal_debug.candidates[0].raw_delta_rescue_score - 0.88f) < 0.0001f &&
+           result.thermal_debug.candidates[0].raw_delta_rescue_eligible &&
+           result.thermal_debug.candidates[0].would_promote_movement_rescue &&
+           result.thermal_debug.candidates[0].singleton_blob &&
+           result.thermal_debug.candidates[0].above_threshold,
+           "result builder thermal candidates near debug: later rescue and flag fields are preserved");
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED &&
+           result.thermal_debug.candidate_count == 3,
+           "result builder thermal candidates near debug: target and summary fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.77f, 0.0001f,
+                "result builder thermal candidates near debug: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal candidates near debug: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_candidate_raw_delta_rescue_publication_t
+result_builder_thermal_candidate_raw_delta_rescue_fixture(float score) {
+    anomaly_result_thermal_debug_candidate_raw_delta_rescue_publication_t rescue;
+    memset(&rescue, 0, sizeof(rescue));
+    rescue.raw_delta_rescue_score = score;
+    rescue.raw_delta_rescue_eligible = true;
+    rescue.would_promote_movement_rescue = score >= 0.62f;
+    return rescue;
+}
+
+static void test_result_publish_thermal_debug_candidates_raw_delta_rescue_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_raw_delta_rescue_publication_t candidates;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_candidates_raw_delta_rescue(NULL, &candidates);
+    anomaly_result_publish_thermal_debug_candidates_raw_delta_rescue(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal candidates raw-delta rescue: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_candidates_raw_delta_rescue_invalid_list_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_raw_delta_rescue_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].raw_delta_rescue_score = 0.55f;
+    result.thermal_debug.candidates[0].raw_delta_rescue_eligible = true;
+    result.thermal_debug.candidates[0].would_promote_movement_rescue = false;
+    candidates.candidates = NULL;
+    candidates.candidate_count = 3;
+
+    anomaly_result_publish_thermal_debug_candidates_raw_delta_rescue(&result, &candidates);
+
+    EXPECT_NEAR(result.thermal_debug.candidates[0].raw_delta_rescue_score, 0.55f, 0.0001f,
+                "result builder thermal candidates raw-delta rescue: invalid list preserves score");
+    EXPECT(result.thermal_debug.candidates[0].raw_delta_rescue_eligible &&
+           !result.thermal_debug.candidates[0].would_promote_movement_rescue,
+           "result builder thermal candidates raw-delta rescue: invalid list preserves flags");
+}
+
+static void test_result_publish_thermal_debug_candidates_raw_delta_rescue_empty_count_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_raw_delta_rescue_publication_t sample =
+        result_builder_thermal_candidate_raw_delta_rescue_fixture(0.91f);
+    anomaly_result_thermal_debug_candidates_raw_delta_rescue_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].raw_delta_rescue_score = 0.44f;
+    result.thermal_debug.candidates[0].raw_delta_rescue_eligible = false;
+    result.thermal_debug.candidates[0].would_promote_movement_rescue = false;
+    candidates.candidates = &sample;
+    candidates.candidate_count = 0;
+
+    anomaly_result_publish_thermal_debug_candidates_raw_delta_rescue(&result, &candidates);
+
+    EXPECT_NEAR(result.thermal_debug.candidates[0].raw_delta_rescue_score, 0.44f, 0.0001f,
+                "result builder thermal candidates raw-delta rescue: empty count preserves score");
+    EXPECT(!result.thermal_debug.candidates[0].raw_delta_rescue_eligible &&
+           !result.thermal_debug.candidates[0].would_promote_movement_rescue,
+           "result builder thermal candidates raw-delta rescue: empty count preserves flags");
+}
+
+static void test_result_publish_thermal_debug_candidates_raw_delta_rescue_copies_and_caps(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_raw_delta_rescue_publication_t samples[
+        ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1];
+    anomaly_result_thermal_debug_candidates_raw_delta_rescue_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1; i++) {
+        samples[i] = result_builder_thermal_candidate_raw_delta_rescue_fixture(0.50f + (float)i * 0.05f);
+        samples[i].raw_delta_rescue_eligible = (i % 2) == 0;
+        samples[i].would_promote_movement_rescue = (i % 3) == 0;
+    }
+    candidates.candidates = samples;
+    candidates.candidate_count = ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1;
+
+    anomaly_result_publish_thermal_debug_candidates_raw_delta_rescue(&result, &candidates);
+
+    EXPECT_NEAR(result.thermal_debug.candidates[0].raw_delta_rescue_score, 0.50f, 0.0001f,
+                "result builder thermal candidates raw-delta rescue: first score is copied");
+    EXPECT(result.thermal_debug.candidates[0].raw_delta_rescue_eligible &&
+           result.thermal_debug.candidates[0].would_promote_movement_rescue,
+           "result builder thermal candidates raw-delta rescue: first flags are copied");
+    const anomaly_debug_thermal_candidate_t *last =
+        &result.thermal_debug.candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1];
+    EXPECT_NEAR(last->raw_delta_rescue_score,
+                0.50f + (float)(ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1) * 0.05f,
+                0.0001f,
+                "result builder thermal candidates raw-delta rescue: publication caps at debug array size");
+    EXPECT(last->raw_delta_rescue_eligible ==
+               (((ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1) % 2) == 0) &&
+           last->would_promote_movement_rescue ==
+               (((ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1) % 3) == 0),
+           "result builder thermal candidates raw-delta rescue: capped entry flags are copied");
+}
+
+static void test_result_publish_thermal_debug_candidates_raw_delta_rescue_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_raw_delta_rescue_publication_t rescue =
+        result_builder_thermal_candidate_raw_delta_rescue_fixture(0.88f);
+    anomaly_result_thermal_debug_candidates_raw_delta_rescue_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.raw_score = 0.77f;
+    result.thermal_debug.candidate_count = 3;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 60;
+    result.thermal_debug.candidates[0].movement_tile_valid = true;
+    result.thermal_debug.candidates[0].nearest_track_index = 2;
+    result.thermal_debug.candidates[0].nearest_track_id = 77;
+    result.thermal_debug.candidates[0].near_tracked_target = true;
+    result.thermal_debug.candidates[0].near_debug_target = true;
+    result.thermal_debug.candidates[0].singleton_blob = true;
+    result.thermal_debug.candidates[0].above_threshold = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+    candidates.candidates = &rescue;
+    candidates.candidate_count = 1;
+
+    anomaly_result_publish_thermal_debug_candidates_raw_delta_rescue(&result, &candidates);
+
+    EXPECT_NEAR(result.thermal_debug.candidates[0].raw_delta_rescue_score, 0.88f, 0.0001f,
+                "result builder thermal candidates raw-delta rescue: requested score is published");
+    EXPECT(result.thermal_debug.candidates[0].raw_delta_rescue_eligible &&
+           result.thermal_debug.candidates[0].would_promote_movement_rescue,
+           "result builder thermal candidates raw-delta rescue: requested flags are published");
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 60 &&
+           result.thermal_debug.candidates[0].movement_tile_valid &&
+           result.thermal_debug.candidates[0].nearest_track_index == 2 &&
+           result.thermal_debug.candidates[0].nearest_track_id == 77 &&
+           result.thermal_debug.candidates[0].near_tracked_target &&
+           result.thermal_debug.candidates[0].near_debug_target,
+           "result builder thermal candidates raw-delta rescue: prior candidate fields are preserved");
+    EXPECT(result.thermal_debug.candidates[0].singleton_blob &&
+           result.thermal_debug.candidates[0].above_threshold,
+           "result builder thermal candidates raw-delta rescue: later final flags are preserved");
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED &&
+           result.thermal_debug.candidate_count == 3,
+           "result builder thermal candidates raw-delta rescue: target and summary fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.77f, 0.0001f,
+                "result builder thermal candidates raw-delta rescue: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal candidates raw-delta rescue: unrelated color debug is preserved");
+}
+
+static anomaly_result_thermal_debug_candidate_final_flags_publication_t
+result_builder_thermal_candidate_final_flags_fixture(bool singleton_blob, bool above_threshold) {
+    anomaly_result_thermal_debug_candidate_final_flags_publication_t flags;
+    memset(&flags, 0, sizeof(flags));
+    flags.singleton_blob = singleton_blob;
+    flags.above_threshold = above_threshold;
+    return flags;
+}
+
+static void test_result_publish_thermal_debug_candidates_final_flags_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_final_flags_publication_t candidates;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_thermal_debug_candidates_final_flags(NULL, &candidates);
+    anomaly_result_publish_thermal_debug_candidates_final_flags(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder thermal candidates final flags: null inputs are no-ops");
+}
+
+static void test_result_publish_thermal_debug_candidates_final_flags_invalid_list_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidates_final_flags_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].singleton_blob = true;
+    result.thermal_debug.candidates[0].above_threshold = false;
+    candidates.candidates = NULL;
+    candidates.candidate_count = 3;
+
+    anomaly_result_publish_thermal_debug_candidates_final_flags(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].singleton_blob &&
+           !result.thermal_debug.candidates[0].above_threshold,
+           "result builder thermal candidates final flags: invalid list preserves existing flags");
+}
+
+static void test_result_publish_thermal_debug_candidates_final_flags_empty_count_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_final_flags_publication_t sample =
+        result_builder_thermal_candidate_final_flags_fixture(false, true);
+    anomaly_result_thermal_debug_candidates_final_flags_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.candidates[0].singleton_blob = true;
+    result.thermal_debug.candidates[0].above_threshold = false;
+    candidates.candidates = &sample;
+    candidates.candidate_count = 0;
+
+    anomaly_result_publish_thermal_debug_candidates_final_flags(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].singleton_blob &&
+           !result.thermal_debug.candidates[0].above_threshold,
+           "result builder thermal candidates final flags: empty count preserves existing flags");
+}
+
+static void test_result_publish_thermal_debug_candidates_final_flags_copies_and_caps(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_final_flags_publication_t samples[
+        ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1];
+    anomaly_result_thermal_debug_candidates_final_flags_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(samples, 0, sizeof(samples));
+    memset(&candidates, 0, sizeof(candidates));
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1; i++) {
+        samples[i] =
+            result_builder_thermal_candidate_final_flags_fixture((i % 2) == 0, (i % 3) == 0);
+    }
+    candidates.candidates = samples;
+    candidates.candidate_count = ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES + 1;
+
+    anomaly_result_publish_thermal_debug_candidates_final_flags(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].singleton_blob &&
+           result.thermal_debug.candidates[0].above_threshold,
+           "result builder thermal candidates final flags: first flags are copied");
+    EXPECT(!result.thermal_debug.candidates[1].singleton_blob &&
+           !result.thermal_debug.candidates[1].above_threshold,
+           "result builder thermal candidates final flags: second flags are copied");
+    const anomaly_debug_thermal_candidate_t *last =
+        &result.thermal_debug.candidates[ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1];
+    EXPECT(last->singleton_blob == (((ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1) % 2) == 0) &&
+           last->above_threshold == (((ANOMALY_DEBUG_TOP_THERMAL_CANDIDATES - 1) % 3) == 0),
+           "result builder thermal candidates final flags: publication caps at debug array size");
+}
+
+static void test_result_publish_thermal_debug_candidates_final_flags_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_thermal_debug_candidate_final_flags_publication_t flags =
+        result_builder_thermal_candidate_final_flags_fixture(true, true);
+    anomaly_result_thermal_debug_candidates_final_flags_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.thermal_debug.raw_score = 0.77f;
+    result.thermal_debug.candidate_count = 3;
+    result.thermal_debug.candidates[0].valid = true;
+    result.thermal_debug.candidates[0].pixel_x = 60;
+    result.thermal_debug.candidates[0].movement_tile_valid = true;
+    result.thermal_debug.candidates[0].nearest_track_index = 2;
+    result.thermal_debug.candidates[0].nearest_track_id = 77;
+    result.thermal_debug.candidates[0].near_tracked_target = true;
+    result.thermal_debug.candidates[0].near_debug_target = true;
+    result.thermal_debug.candidates[0].raw_delta_rescue_score = 0.88f;
+    result.thermal_debug.candidates[0].raw_delta_rescue_eligible = true;
+    result.thermal_debug.candidates[0].would_promote_movement_rescue = true;
+    result.thermal_debug.target.stage = ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED;
+    result.color_debug.raw_score = 0.44f;
+    candidates.candidates = &flags;
+    candidates.candidate_count = 1;
+
+    anomaly_result_publish_thermal_debug_candidates_final_flags(&result, &candidates);
+
+    EXPECT(result.thermal_debug.candidates[0].singleton_blob &&
+           result.thermal_debug.candidates[0].above_threshold,
+           "result builder thermal candidates final flags: requested flags are published");
+    EXPECT(result.thermal_debug.candidates[0].valid &&
+           result.thermal_debug.candidates[0].pixel_x == 60 &&
+           result.thermal_debug.candidates[0].movement_tile_valid &&
+           result.thermal_debug.candidates[0].nearest_track_index == 2 &&
+           result.thermal_debug.candidates[0].nearest_track_id == 77 &&
+           result.thermal_debug.candidates[0].near_tracked_target &&
+           result.thermal_debug.candidates[0].near_debug_target,
+           "result builder thermal candidates final flags: prior candidate fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.candidates[0].raw_delta_rescue_score, 0.88f, 0.0001f,
+                "result builder thermal candidates final flags: raw-delta rescue score is preserved");
+    EXPECT(result.thermal_debug.candidates[0].raw_delta_rescue_eligible &&
+           result.thermal_debug.candidates[0].would_promote_movement_rescue,
+           "result builder thermal candidates final flags: raw-delta rescue flags are preserved");
+    EXPECT(result.thermal_debug.target.stage == ANOMALY_THERMAL_TARGET_STAGE_EXTRACTED &&
+           result.thermal_debug.candidate_count == 3,
+           "result builder thermal candidates final flags: target and summary fields are preserved");
+    EXPECT_NEAR(result.thermal_debug.raw_score, 0.77f, 0.0001f,
+                "result builder thermal candidates final flags: thermal summary is preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.44f, 0.0001f,
+                "result builder thermal candidates final flags: unrelated color debug is preserved");
 }
 
 static void test_result_publish_color_debug_summary_null_inputs_noop(void) {
@@ -2677,6 +5411,211 @@ static void test_result_publish_color_debug_target_matched_candidate_additive_on
            result.color_debug.candidates[0].pixel_x == 88 &&
            fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
            "result builder color target matched candidate: candidates and unrelated fields are preserved");
+}
+
+static anomaly_result_color_debug_candidate_publication_t result_builder_color_candidate_fixture(
+        int   pixel_x,
+        int   pixel_y,
+        float final_score) {
+    anomaly_result_color_debug_candidate_publication_t candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.pixel_x = pixel_x;
+    candidate.pixel_y = pixel_y;
+    candidate.min_x = 5;
+    candidate.min_y = 6;
+    candidate.max_x = 7;
+    candidate.max_y = 8;
+    candidate.base_score = 1.25f;
+    candidate.final_score = final_score;
+    candidate.area = 2.5f;
+    candidate.span = 3.5f;
+    candidate.fill = 0.45f;
+    candidate.center_share = 0.55f;
+    candidate.quality = 0.65f;
+    candidate.isolation_score = 0.75f;
+    candidate.ring_fraction = 0.85f;
+    candidate.support_mass = 4.5f;
+    candidate.contrast_weight = 1.5f;
+    candidate.hist_key = 1234;
+    candidate.hist_current_count = 5.5f;
+    candidate.hist_recent_count = 6.5f;
+    candidate.hist_rarity_score = 0.35f;
+    candidate.small_target_span_ratio = 0.25f;
+    candidate.small_target_area_ratio = 0.15f;
+    candidate.scene_commonness = 0.05f;
+    candidate.retention_rank = 0.95f;
+    candidate.above_threshold = true;
+    return candidate;
+}
+
+static void test_result_publish_color_debug_candidates_null_inputs_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_candidates_publication_t candidates;
+    memset(&result, 0x5A, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    anomaly_result_t saved = result;
+
+    anomaly_result_publish_color_debug_candidates(NULL, &candidates);
+    anomaly_result_publish_color_debug_candidates(&result, NULL);
+
+    EXPECT(memcmp(&result, &saved, sizeof(result)) == 0,
+           "result builder color candidates: null inputs are no-ops");
+}
+
+static void test_result_publish_color_debug_candidates_invalid_list_noop(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_candidates_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.color_debug.candidates[0].valid = true;
+    result.color_debug.candidates[0].pixel_x = 88;
+    result.color_debug.candidate_count = 7;
+    candidates.candidates = NULL;
+    candidates.candidate_count = 3;
+
+    anomaly_result_publish_color_debug_candidates(&result, &candidates);
+
+    EXPECT(result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 88 &&
+           result.color_debug.candidate_count == 7,
+           "result builder color candidates: invalid candidate list preserves existing fields");
+}
+
+static void test_result_publish_color_debug_candidates_publishes_and_caps(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_candidate_publication_t samples[
+        ANOMALY_DEBUG_TOP_COLOR_CANDIDATES + 1];
+    anomaly_result_color_debug_candidates_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.color_debug.candidate_count = 99;
+    for (int i = 0; i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES + 1; i++) {
+        samples[i] = result_builder_color_candidate_fixture(50 + i, 40 + i, 3.25f + (float)i);
+        samples[i].hist_key += i;
+        samples[i].above_threshold = (i % 2) == 0;
+    }
+    candidates.candidates = samples;
+    candidates.candidate_count = ANOMALY_DEBUG_TOP_COLOR_CANDIDATES + 1;
+    candidates.roi_x0 = 10;
+    candidates.roi_y0 = 20;
+    candidates.sample_step = 4;
+    candidates.frame_w = 100.0f;
+    candidates.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_candidates(&result, &candidates);
+
+    const anomaly_debug_color_candidate_t *first = &result.color_debug.candidates[0];
+    EXPECT(first->valid &&
+           first->pixel_x == 50 &&
+           first->pixel_y == 40,
+           "result builder color candidates: first candidate position is copied");
+    EXPECT_NEAR(first->x_norm, 0.5f, 0.0001f,
+                "result builder color candidates: x norm is copied");
+    EXPECT_NEAR(first->y_norm, 0.5f, 0.0001f,
+                "result builder color candidates: y norm is copied");
+    EXPECT_NEAR(first->bbox_left_norm, 0.28f, 0.0001f,
+                "result builder color candidates: bbox left normalizes");
+    EXPECT_NEAR(first->bbox_top_norm, 0.525f, 0.0001f,
+                "result builder color candidates: bbox top normalizes");
+    EXPECT_NEAR(first->bbox_right_norm, 0.44f, 0.0001f,
+                "result builder color candidates: bbox right normalizes");
+    EXPECT_NEAR(first->bbox_bottom_norm, 0.725f, 0.0001f,
+                "result builder color candidates: bbox bottom normalizes");
+    EXPECT_NEAR(first->base_score, 1.25f, 0.0001f,
+                "result builder color candidates: base score is copied");
+    EXPECT_NEAR(first->final_score, 3.25f, 0.0001f,
+                "result builder color candidates: final score is copied");
+    EXPECT_NEAR(first->temporal_score, -1.0f, 0.0001f,
+                "result builder color candidates: temporal score keeps legacy sentinel");
+    EXPECT_NEAR(first->area, 2.5f, 0.0001f,
+                "result builder color candidates: area is copied");
+    EXPECT_NEAR(first->span, 3.5f, 0.0001f,
+                "result builder color candidates: span is copied");
+    EXPECT_NEAR(first->fill, 0.45f, 0.0001f,
+                "result builder color candidates: fill is copied");
+    EXPECT_NEAR(first->center_share, 0.55f, 0.0001f,
+                "result builder color candidates: center share is copied");
+    EXPECT_NEAR(first->quality, 0.65f, 0.0001f,
+                "result builder color candidates: quality is copied");
+    EXPECT_NEAR(first->isolation_score, 0.75f, 0.0001f,
+                "result builder color candidates: isolation score is copied");
+    EXPECT_NEAR(first->ring_fraction, 0.85f, 0.0001f,
+                "result builder color candidates: ring fraction is copied");
+    EXPECT_NEAR(first->support_mass, 4.5f, 0.0001f,
+                "result builder color candidates: support mass is copied");
+    EXPECT_NEAR(first->contrast_weight, 1.5f, 0.0001f,
+                "result builder color candidates: contrast weight is copied");
+    EXPECT(first->hist_key == 1234 &&
+           fabsf(first->hist_current_count - 5.5f) < 0.0001f &&
+           fabsf(first->hist_recent_count - 6.5f) < 0.0001f &&
+           fabsf(first->hist_rarity_score - 0.35f) < 0.0001f,
+           "result builder color candidates: histogram fields are copied");
+    EXPECT_NEAR(first->small_target_span_ratio, 0.25f, 0.0001f,
+                "result builder color candidates: small target span ratio is copied");
+    EXPECT_NEAR(first->small_target_area_ratio, 0.15f, 0.0001f,
+                "result builder color candidates: small target area ratio is copied");
+    EXPECT_NEAR(first->scene_commonness, 0.05f, 0.0001f,
+                "result builder color candidates: scene commonness is copied");
+    EXPECT_NEAR(first->retention_rank, 0.95f, 0.0001f,
+                "result builder color candidates: retention rank is copied");
+    EXPECT(first->above_threshold,
+           "result builder color candidates: threshold flag is copied");
+
+    const anomaly_debug_color_candidate_t *last =
+        &result.color_debug.candidates[ANOMALY_DEBUG_TOP_COLOR_CANDIDATES - 1];
+    EXPECT(last->valid &&
+           last->pixel_x == 50 + ANOMALY_DEBUG_TOP_COLOR_CANDIDATES - 1,
+           "result builder color candidates: publication caps at debug array size");
+    EXPECT(result.color_debug.candidate_count == 99,
+           "result builder color candidates: summary candidate count is preserved");
+}
+
+static void test_result_publish_color_debug_candidates_additive_only(void) {
+    anomaly_result_t result;
+    anomaly_result_color_debug_candidate_publication_t sample =
+        result_builder_color_candidate_fixture(60, 32, 4.5f);
+    anomaly_result_color_debug_candidates_publication_t candidates;
+    memset(&result, 0, sizeof(result));
+    memset(&candidates, 0, sizeof(candidates));
+    result.color_debug.raw_score = 0.77f;
+    result.color_debug.candidate_count = 3;
+    result.color_debug.target.enabled = true;
+    result.color_debug.target.pixel_x = 101;
+    result.color_debug.target.component_bbox_left_norm = 0.11f;
+    result.color_debug.target.extracted_candidate_index = 1;
+    result.color_debug.target.matched_candidate_score = 0.91f;
+    result.color_debug.target.rejected_by_winner_gate = true;
+    result.color_debug.target.stage = ANOMALY_COLOR_TARGET_STAGE_WINNER;
+    result.thermal_debug.raw_score = 0.44f;
+    candidates.candidates = &sample;
+    candidates.candidate_count = 1;
+    candidates.roi_x0 = 10;
+    candidates.roi_y0 = 20;
+    candidates.sample_step = 4;
+    candidates.frame_w = 100.0f;
+    candidates.frame_h = 80.0f;
+
+    anomaly_result_publish_color_debug_candidates(&result, &candidates);
+
+    EXPECT(result.color_debug.candidates[0].valid &&
+           result.color_debug.candidates[0].pixel_x == 60,
+           "result builder color candidates: requested candidate is published");
+    EXPECT(result.color_debug.target.enabled &&
+           result.color_debug.target.pixel_x == 101 &&
+           result.color_debug.target.extracted_candidate_index == 1,
+           "result builder color candidates: target base and index fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.component_bbox_left_norm, 0.11f, 0.0001f,
+                "result builder color candidates: component bbox fields are preserved");
+    EXPECT_NEAR(result.color_debug.target.matched_candidate_score, 0.91f, 0.0001f,
+                "result builder color candidates: matched candidate fields are preserved");
+    EXPECT(result.color_debug.target.rejected_by_winner_gate &&
+           result.color_debug.target.stage == ANOMALY_COLOR_TARGET_STAGE_WINNER,
+           "result builder color candidates: winner gate and stage fields are preserved");
+    EXPECT_NEAR(result.color_debug.raw_score, 0.77f, 0.0001f,
+                "result builder color candidates: color summary is preserved");
+    EXPECT(result.color_debug.candidate_count == 3 &&
+           fabsf(result.thermal_debug.raw_score - 0.44f) < 0.0001f,
+           "result builder color candidates: unrelated result fields are preserved");
 }
 
 static void test_result_build_boxes_target_tracks_take_priority(void) {
@@ -8774,6 +11713,488 @@ static void test_motion_estimator_init_appearance_scorer_input_null_safe(void) {
            "motion appearance input init: null args clear state dimensions");
 }
 
+static void test_motion_estimator_movement_mode_normalization_contract(void) {
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+
+    EXPECT(anomaly_motion_estimator_normalize_movement_mode(NULL) ==
+               ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+           "motion estimator: NULL movement mode defaults to legacy affine");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    EXPECT(anomaly_motion_estimator_normalize_movement_mode(&cfg) ==
+               ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE,
+           "motion estimator: layered active movement mode is preserved");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
+    EXPECT(anomaly_motion_estimator_normalize_movement_mode(&cfg) ==
+               ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW,
+           "motion estimator: layered shadow movement mode is preserved");
+
+    cfg.movement_estimator_mode = -17;
+    EXPECT(anomaly_motion_estimator_normalize_movement_mode(&cfg) ==
+               ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+           "motion estimator: invalid movement mode falls back to legacy affine");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    EXPECT(anomaly_motion_estimator_normalize_movement_mode(&cfg) ==
+               anomaly_runtime_normalize_movement_estimator_mode(&cfg),
+           "motion estimator: movement mode contract matches runtime normalization");
+}
+
+static void test_motion_estimator_sidecar_publishes_normalized_mode_before_readiness(void) {
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    anomaly_motion_estimator_sidecar_input_t input;
+    anomaly_debug_movement_t movement;
+    memset(&input, 0, sizeof(input));
+    memset(&movement, 0x5A, sizeof(movement));
+
+    anomaly_motion_estimator_estimate_sidecar(NULL, &movement);
+    EXPECT(movement.mode == ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+           "motion sidecar: null input publishes legacy mode");
+    EXPECT_NEAR(movement.parallax_suppression_scale, 1.0f, 0.0001f,
+                "motion sidecar: null input publishes default suppression scale");
+
+    input.cfg = NULL;
+    memset(&movement, 0x5A, sizeof(movement));
+    anomaly_motion_estimator_estimate_sidecar(&input, &movement);
+    EXPECT(movement.mode == ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+           "motion sidecar: null config publishes legacy mode");
+
+    cfg.movement_estimator_mode = -9;
+    input.cfg = &cfg;
+    memset(&movement, 0x5A, sizeof(movement));
+    anomaly_motion_estimator_estimate_sidecar(&input, &movement);
+    EXPECT(movement.mode == ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+           "motion sidecar: invalid config mode publishes legacy mode");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    memset(&movement, 0x5A, sizeof(movement));
+    anomaly_motion_estimator_estimate_sidecar(&input, &movement);
+    EXPECT(movement.mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE,
+           "motion sidecar: active mode is published before readiness return");
+    EXPECT(!movement.valid && movement.sample_count == 0,
+           "motion sidecar: invalid active input still returns without samples");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
+    memset(&movement, 0x5A, sizeof(movement));
+    anomaly_motion_estimator_estimate_sidecar(&input, &movement);
+    EXPECT(movement.mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW,
+           "motion sidecar: shadow mode is published before readiness return");
+}
+
+static bool motion_estimator_test_project_cell(
+        const anomaly_motion_estimator_registration_t *registration,
+        int width,
+        int height,
+        int motion_step,
+        int motion_w,
+        int motion_h,
+        int mx,
+        int my,
+        int *px_idx_out,
+        int *py_idx_out) {
+    (void)registration;
+    (void)width;
+    (void)height;
+    (void)motion_step;
+    (void)motion_w;
+    (void)motion_h;
+    if (px_idx_out != NULL) *px_idx_out = mx;
+    if (py_idx_out != NULL) *py_idx_out = my;
+    return true;
+}
+
+static bool motion_estimator_test_find_residual(
+        const uint8_t *curr_luma,
+        const uint8_t *prev_luma,
+        int motion_w,
+        int motion_h,
+        int mx,
+        int my,
+        int pred_x,
+        int pred_y,
+        int patch_half,
+        int search_radius,
+        int *best_dx_out,
+        int *best_dy_out,
+        int *best_sad_out) {
+    (void)curr_luma;
+    (void)prev_luma;
+    (void)motion_w;
+    (void)motion_h;
+    (void)mx;
+    (void)my;
+    (void)pred_x;
+    (void)pred_y;
+    (void)patch_half;
+    (void)search_radius;
+    if (best_dx_out != NULL) *best_dx_out = 0;
+    if (best_dy_out != NULL) *best_dy_out = 0;
+    if (best_sad_out != NULL) *best_sad_out = 0;
+    return true;
+}
+
+static bool motion_estimator_test_registration_valid(
+        const anomaly_motion_estimator_registration_t *registration) {
+    return registration != NULL;
+}
+
+static anomaly_motion_estimator_sidecar_input_t motion_estimator_ready_input(
+        anomaly_config_t *cfg,
+        const anomaly_motion_estimator_sidecar_ops_t *ops) {
+    static uint8_t curr_luma[16];
+    static uint8_t prev_luma[16];
+    static int registration_anchor;
+    anomaly_motion_estimator_sidecar_input_t input;
+    memset(curr_luma, 20, sizeof(curr_luma));
+    memset(prev_luma, 18, sizeof(prev_luma));
+    memset(&input, 0, sizeof(input));
+    input.cfg = cfg;
+    input.registration = (const anomaly_motion_estimator_registration_t *)&registration_anchor;
+    input.curr_luma = curr_luma;
+    input.prev_luma = prev_luma;
+    input.motion_w = 4;
+    input.motion_h = 4;
+    input.motion_step = 2;
+    input.width = 8;
+    input.height = 8;
+    input.roi_x0 = 0;
+    input.roi_x1 = 8;
+    input.roi_y0 = 0;
+    input.roi_y1 = 8;
+    input.ops = ops;
+    return input;
+}
+
+static void test_motion_estimator_sidecar_input_ready_contract(void) {
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    anomaly_motion_estimator_sidecar_ops_t ops = {
+        .project_cell = motion_estimator_test_project_cell,
+        .find_residual_displacement = motion_estimator_test_find_residual,
+        .registration_valid = motion_estimator_test_registration_valid,
+    };
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    anomaly_motion_estimator_sidecar_input_t input =
+        motion_estimator_ready_input(&cfg, &ops);
+
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(NULL),
+           "motion sidecar ready: null input is not ready");
+    EXPECT(anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: valid active input is ready");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
+    EXPECT(anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: valid shadow input is ready");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: legacy mode is not ready");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    input.cfg = NULL;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: null config normalizes to not ready");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.curr_luma = NULL;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: current luma is required");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.prev_luma = NULL;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: previous luma is required");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.motion_w = 2;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: motion grid must leave a border");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.motion_h = 2;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: motion grid height must leave a border");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.width = 1;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: frame width must be usable");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.height = 1;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: frame height must be usable");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.motion_step = 0;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: motion step must be positive");
+
+    input = motion_estimator_ready_input(&cfg, NULL);
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: ops are required");
+
+    anomaly_motion_estimator_sidecar_ops_t missing_project = ops;
+    missing_project.project_cell = NULL;
+    input = motion_estimator_ready_input(&cfg, &missing_project);
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: projection callback is required");
+
+    anomaly_motion_estimator_sidecar_ops_t missing_find = ops;
+    missing_find.find_residual_displacement = NULL;
+    input = motion_estimator_ready_input(&cfg, &missing_find);
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: residual callback is required");
+
+    anomaly_motion_estimator_sidecar_ops_t missing_registration_valid = ops;
+    missing_registration_valid.registration_valid = NULL;
+    input = motion_estimator_ready_input(&cfg, &missing_registration_valid);
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: registration validity callback is required");
+
+    input = motion_estimator_ready_input(&cfg, &ops);
+    input.registration = NULL;
+    EXPECT(!anomaly_motion_estimator_sidecar_input_ready(&input),
+           "motion sidecar ready: valid registration is required");
+}
+
+static anomaly_motion_estimator_sidecar_input_t motion_estimator_bounds_input(
+        int roi_x0,
+        int roi_x1,
+        int roi_y0,
+        int roi_y1,
+        int motion_step,
+        int motion_w,
+        int motion_h) {
+    static anomaly_config_t cfg;
+    static anomaly_motion_estimator_sidecar_ops_t ops = {
+        .project_cell = motion_estimator_test_project_cell,
+        .find_residual_displacement = motion_estimator_test_find_residual,
+        .registration_valid = motion_estimator_test_registration_valid,
+    };
+    cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    anomaly_motion_estimator_sidecar_input_t input =
+        motion_estimator_ready_input(&cfg, &ops);
+    input.roi_x0 = roi_x0;
+    input.roi_x1 = roi_x1;
+    input.roi_y0 = roi_y0;
+    input.roi_y1 = roi_y1;
+    input.motion_step = motion_step;
+    input.motion_w = motion_w;
+    input.motion_h = motion_h;
+    return input;
+}
+
+static void test_motion_estimator_sidecar_grid_bounds_invalid_inputs(void) {
+    anomaly_motion_sidecar_grid_bounds_t bounds = {
+        .x0 = 3,
+        .x1 = 4,
+        .y0 = 5,
+        .y1 = 6,
+    };
+
+    EXPECT(!anomaly_motion_estimator_sidecar_grid_bounds(NULL, &bounds),
+           "motion sidecar bounds: null input rejected");
+    EXPECT(bounds.x0 == 0 && bounds.x1 == 0 && bounds.y0 == 0 && bounds.y1 == 0,
+           "motion sidecar bounds: null input clears output");
+
+    anomaly_motion_estimator_sidecar_input_t input =
+        motion_estimator_bounds_input(0, 8, 0, 8, 0, 4, 4);
+    bounds.x0 = 3;
+    bounds.x1 = 4;
+    bounds.y0 = 5;
+    bounds.y1 = 6;
+    EXPECT(!anomaly_motion_estimator_sidecar_grid_bounds(&input, &bounds),
+           "motion sidecar bounds: nonpositive motion step rejected");
+    EXPECT(bounds.x0 == 0 && bounds.x1 == 0 && bounds.y0 == 0 && bounds.y1 == 0,
+           "motion sidecar bounds: invalid dimensions clear output");
+
+    input = motion_estimator_bounds_input(0, 8, 0, 8, 2, 2, 4);
+    EXPECT(!anomaly_motion_estimator_sidecar_grid_bounds(&input, NULL),
+           "motion sidecar bounds: null output rejected");
+}
+
+static void test_motion_estimator_sidecar_grid_bounds_normal_roi(void) {
+    anomaly_motion_estimator_sidecar_input_t input =
+        motion_estimator_bounds_input(4, 14, 6, 18, 2, 12, 14);
+    anomaly_motion_sidecar_grid_bounds_t bounds;
+
+    EXPECT(anomaly_motion_estimator_sidecar_grid_bounds(&input, &bounds),
+           "motion sidecar bounds: valid ROI accepted");
+    EXPECT(bounds.x0 == 2 && bounds.x1 == 7 && bounds.y0 == 3 && bounds.y1 == 9,
+           "motion sidecar bounds: normal ROI follows legacy conversion");
+}
+
+static void test_motion_estimator_sidecar_grid_bounds_clamps_patch_border(void) {
+    anomaly_motion_estimator_sidecar_input_t input =
+        motion_estimator_bounds_input(-12, 100, -8, 90, 4, 10, 9);
+    anomaly_motion_sidecar_grid_bounds_t bounds;
+
+    EXPECT(anomaly_motion_estimator_sidecar_grid_bounds(&input, &bounds),
+           "motion sidecar bounds: oversized ROI accepted");
+    EXPECT(bounds.x0 == 1 && bounds.x1 == 9 && bounds.y0 == 1 && bounds.y1 == 8,
+           "motion sidecar bounds: oversized ROI clamps to sidecar patch border");
+}
+
+static void test_motion_estimator_sidecar_grid_bounds_partial_upper_ceil(void) {
+    anomaly_motion_estimator_sidecar_input_t input =
+        motion_estimator_bounds_input(1, 5, 3, 8, 4, 8, 8);
+    anomaly_motion_sidecar_grid_bounds_t bounds;
+
+    EXPECT(anomaly_motion_estimator_sidecar_grid_bounds(&input, &bounds),
+           "motion sidecar bounds: partial edge ROI accepted");
+    EXPECT(bounds.x0 == 1 && bounds.x1 == 2 && bounds.y0 == 1 && bounds.y1 == 2,
+           "motion sidecar bounds: upper bounds preserve legacy ceil behavior");
+}
+
+static void test_motion_estimator_sidecar_grid_bounds_rejects_collapsed_roi(void) {
+    anomaly_motion_estimator_sidecar_input_t input =
+        motion_estimator_bounds_input(40, 1, 0, 8, 4, 8, 8);
+    anomaly_motion_sidecar_grid_bounds_t bounds = {
+        .x0 = 3,
+        .x1 = 4,
+        .y0 = 5,
+        .y1 = 6,
+    };
+
+    EXPECT(!anomaly_motion_estimator_sidecar_grid_bounds(&input, &bounds),
+           "motion sidecar bounds: collapsed ROI rejected");
+    EXPECT(bounds.x0 == 0 && bounds.x1 == 0 && bounds.y0 == 0 && bounds.y1 == 0,
+           "motion sidecar bounds: collapsed ROI clears output");
+}
+
+static void test_motion_estimator_sidecar_tile_center_norm_contract(void) {
+    float x_norm = -1.0f;
+    float y_norm = -1.0f;
+
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_center_norm(
+                2, 3, 4, 16, 24, NULL, &y_norm),
+           "motion sidecar tile center: null x output rejected");
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_center_norm(
+                2, 3, 4, 16, 24, &x_norm, NULL),
+           "motion sidecar tile center: null y output rejected");
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_center_norm(
+                2, 3, 0, 16, 24, &x_norm, &y_norm),
+           "motion sidecar tile center: nonpositive motion step rejected");
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_center_norm(
+                2, 3, 4, 0, 24, &x_norm, &y_norm),
+           "motion sidecar tile center: nonpositive width rejected");
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_center_norm(
+                2, 3, 4, 16, 0, &x_norm, &y_norm),
+           "motion sidecar tile center: nonpositive height rejected");
+
+    EXPECT(anomaly_motion_estimator_sidecar_tile_center_norm(
+                2, 3, 4, 16, 24, &x_norm, &y_norm),
+           "motion sidecar tile center: valid input accepted");
+    EXPECT_NEAR(x_norm, 0.5f, 0.0001f,
+                "motion sidecar tile center: x norm follows legacy conversion");
+    EXPECT_NEAR(y_norm, 0.5f, 0.0001f,
+                "motion sidecar tile center: y norm follows legacy conversion");
+
+    EXPECT(anomaly_motion_estimator_sidecar_tile_center_norm(
+                -2, 10, 4, 16, 24, &x_norm, &y_norm),
+           "motion sidecar tile center: out-of-range input accepted for clamping");
+    EXPECT_NEAR(x_norm, 0.0f, 0.0001f,
+                "motion sidecar tile center: negative x clamps to zero");
+    EXPECT_NEAR(y_norm, 1.0f, 0.0001f,
+                "motion sidecar tile center: high y clamps to one");
+}
+
+static void test_motion_estimator_sidecar_classify_layer_contract(void) {
+    EXPECT(anomaly_motion_estimator_sidecar_classify_layer(1.8f, 12.0f, 20.0f, 4) ==
+               ANOMALY_MOVEMENT_LAYER_BACKGROUND,
+           "motion sidecar classify: background threshold preserves inclusive edge");
+    EXPECT(anomaly_motion_estimator_sidecar_classify_layer(11.0f, 40.0f, 5.0f, 4) ==
+               ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR,
+           "motion sidecar classify: coherent-near precedes local outlier");
+    EXPECT(anomaly_motion_estimator_sidecar_classify_layer(3.0f, 18.0f, 8.0f, 4) ==
+               ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "motion sidecar classify: local outlier threshold preserves inclusive edge");
+    EXPECT(anomaly_motion_estimator_sidecar_classify_layer(3.1f, 18.0f, 8.0f, 4) ==
+               ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER,
+           "motion sidecar classify: local outlier accepts flow above threshold");
+    EXPECT(anomaly_motion_estimator_sidecar_classify_layer(2.0f, 17.9f, 8.0f, 4) ==
+               ANOMALY_MOVEMENT_LAYER_UNSTABLE,
+           "motion sidecar classify: unstable fallback preserves residual lower bound");
+    EXPECT(anomaly_motion_estimator_sidecar_classify_layer(20.0f, 40.0f, 20.0f, 0) ==
+               ANOMALY_MOVEMENT_LAYER_UNKNOWN,
+           "motion sidecar classify: invalid motion step returns unknown");
+}
+
+static void test_motion_estimator_sidecar_parallax_suppression_scale_contract(void) {
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_parallax_suppression_scale(0.25f, 0.0f),
+                1.0f,
+                0.0001f,
+                "motion sidecar suppression: parallax threshold edge is unsuppressed");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_parallax_suppression_scale(0.70f, 0.20f),
+                1.0f,
+                0.0001f,
+                "motion sidecar suppression: local outlier threshold edge is unsuppressed");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_parallax_suppression_scale(0.475f, 0.0f),
+                0.775f,
+                0.0001f,
+                "motion sidecar suppression: parallax load interpolates legacy scale");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_parallax_suppression_scale(1.0f, 0.0f),
+                0.55f,
+                0.0001f,
+                "motion sidecar suppression: high parallax clamps to legacy floor");
+}
+
+static void test_motion_estimator_sidecar_tile_confidence_contract(void) {
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_tile_confidence(0.0f, 0.0f, 4),
+                1.0f,
+                0.0001f,
+                "motion sidecar confidence: clean stationary tile is fully confident");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_tile_confidence(32.0f, 4.0f, 4),
+                0.625f,
+                0.0001f,
+                "motion sidecar confidence: residual penalty and flow bonus preserve legacy formula");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_tile_confidence(0.0f, 80.0f, 4),
+                1.0f,
+                0.0001f,
+                "motion sidecar confidence: flow bonus is capped then clamped to one");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_tile_confidence(128.0f, 0.0f, 4),
+                0.0f,
+                0.0001f,
+                "motion sidecar confidence: high residual clamps to zero");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_tile_confidence(32.0f, 4.0f, 0),
+                0.0f,
+                0.0001f,
+                "motion sidecar confidence: invalid motion step returns zero");
+}
+
+static void test_motion_estimator_sidecar_tile_displacement_px_contract(void) {
+    float dx_px = 99.0f;
+    float dy_px = -99.0f;
+
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_displacement_px(
+                2, -3, 4, NULL, &dy_px),
+           "motion sidecar displacement: null dx output rejected");
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_displacement_px(
+                2, -3, 4, &dx_px, NULL),
+           "motion sidecar displacement: null dy output rejected");
+    EXPECT(!anomaly_motion_estimator_sidecar_tile_displacement_px(
+                2, -3, 0, &dx_px, &dy_px),
+           "motion sidecar displacement: nonpositive motion step rejected");
+
+    EXPECT(anomaly_motion_estimator_sidecar_tile_displacement_px(
+                2, -3, 4, &dx_px, &dy_px),
+           "motion sidecar displacement: valid displacement accepted");
+    EXPECT_NEAR(dx_px, 8.0f, 0.0001f,
+                "motion sidecar displacement: dx scales by motion step");
+    EXPECT_NEAR(dy_px, -12.0f, 0.0001f,
+                "motion sidecar displacement: dy scales by motion step");
+
+    EXPECT(anomaly_motion_estimator_sidecar_tile_displacement_px(
+                0, 0, 5, &dx_px, &dy_px),
+           "motion sidecar displacement: zero displacement accepted");
+    EXPECT_NEAR(dx_px, 0.0f, 0.0001f,
+                "motion sidecar displacement: zero dx preserved");
+    EXPECT_NEAR(dy_px, 0.0f, 0.0001f,
+                "motion sidecar displacement: zero dy preserved");
+}
+
 static void test_motion_estimator_init_appearance_scorer_input_copies_contract_fields(void) {
     anomaly_motion_appearance_scorer_input_args_t args =
         motion_appearance_input_args(ANOMALY_ALGO_MOTION);
@@ -11934,12 +15355,100 @@ int main(void) {
     test_result_publish_frame_metadata_null_inputs_noop();
     test_result_publish_frame_metadata_copies_scalars_and_preserves_unrelated_fields();
     test_result_publish_frame_metadata_copies_registration_and_movement_debug();
+    test_result_publish_movement_debug_null_inputs_noop();
+    test_result_publish_movement_debug_copies_debug_sidecar_and_preserves_unrelated();
+    test_result_publish_movement_debug_overwrites_stale_state();
+    test_result_publish_scan_plan_null_inputs_noop();
+    test_result_publish_scan_plan_copies_plan_and_preserves_unrelated();
+    test_result_publish_scan_plan_overwrites_stale_plan();
+    test_result_publish_rescan_mode_null_result_noop();
+    test_result_publish_rescan_mode_copies_mode_and_preserves_unrelated();
+    test_result_publish_rescan_mode_overwrites_stale_mode();
+    test_result_publish_motion_appearance_debug_summary_null_inputs_noop();
+    test_result_publish_motion_appearance_debug_summary_copies_and_preserves_later_fields();
+    test_result_publish_motion_appearance_debug_result_null_inputs_noop();
+    test_result_publish_motion_appearance_debug_result_copies_clamps_and_preserves_summary();
     test_result_publish_saliency_debug_null_inputs_noop();
     test_result_publish_saliency_debug_raw_and_accumulator_fields();
+    test_result_publish_saliency_debug_bg_ready_false_overwrites_stale_true();
+    test_result_publish_saliency_debug_null_top_candidates_keeps_scalar_publication();
     test_result_publish_saliency_debug_valid_raw_and_top_candidates();
     test_result_publish_thermal_debug_summary_null_inputs_noop();
     test_result_publish_thermal_debug_summary_copies_scalars_and_preserves_detail();
     test_result_publish_thermal_debug_summary_legacy_raw_normalization();
+    test_result_publish_thermal_debug_target_base_null_inputs_noop();
+    test_result_publish_thermal_debug_target_base_resets_and_copies_fields();
+    test_result_publish_thermal_debug_target_base_preserves_summary_candidates_and_unrelated();
+    test_result_publish_thermal_debug_target_micro_candidate_null_inputs_noop();
+    test_result_publish_thermal_debug_target_micro_candidate_copies_fields();
+    test_result_publish_thermal_debug_target_micro_candidate_additive_only();
+    test_result_publish_thermal_debug_target_suppressor_null_inputs_noop();
+    test_result_publish_thermal_debug_target_suppressor_copies_fields();
+    test_result_publish_thermal_debug_target_suppressor_additive_only();
+    test_result_publish_thermal_debug_target_component_trace_null_inputs_noop();
+    test_result_publish_thermal_debug_target_component_trace_copies_fields();
+    test_result_publish_thermal_debug_target_component_trace_additive_only();
+    test_result_publish_thermal_debug_target_nearby_rejected_component_null_inputs_noop();
+    test_result_publish_thermal_debug_target_nearby_rejected_component_copies_fields();
+    test_result_publish_thermal_debug_target_nearby_rejected_component_additive_only();
+    test_result_publish_thermal_debug_target_nms_cap_null_inputs_noop();
+    test_result_publish_thermal_debug_target_nms_cap_copies_fields();
+    test_result_publish_thermal_debug_target_nms_cap_additive_only();
+    test_result_publish_thermal_debug_target_provisional_null_inputs_noop();
+    test_result_publish_thermal_debug_target_provisional_copies_fields();
+    test_result_publish_thermal_debug_target_provisional_additive_only();
+    test_result_publish_thermal_debug_target_raw_delta_rescue_null_inputs_noop();
+    test_result_publish_thermal_debug_target_raw_delta_rescue_copies_field();
+    test_result_publish_thermal_debug_target_raw_delta_rescue_additive_only();
+    test_result_publish_thermal_debug_target_movement_diagnostics_null_inputs_noop();
+    test_result_publish_thermal_debug_target_movement_diagnostics_copies_fields();
+    test_result_publish_thermal_debug_target_movement_diagnostics_additive_only();
+    test_result_publish_thermal_debug_target_local_peak_movement_null_inputs_noop();
+    test_result_publish_thermal_debug_target_local_peak_movement_copies_fields();
+    test_result_publish_thermal_debug_target_local_peak_movement_additive_only();
+    test_result_publish_thermal_debug_target_rescue_movement_flags_null_inputs_noop();
+    test_result_publish_thermal_debug_target_rescue_movement_flags_copies_fields();
+    test_result_publish_thermal_debug_target_rescue_movement_flags_additive_only();
+    test_result_publish_thermal_debug_target_movement_shadow_rescue_null_inputs_noop();
+    test_result_publish_thermal_debug_target_movement_shadow_rescue_copies_fields();
+    test_result_publish_thermal_debug_target_movement_shadow_rescue_additive_only();
+    test_result_publish_thermal_debug_target_track_match_null_inputs_noop();
+    test_result_publish_thermal_debug_target_track_match_copies_fields();
+    test_result_publish_thermal_debug_target_track_match_additive_only();
+    test_result_publish_thermal_debug_target_stage_null_inputs_noop();
+    test_result_publish_thermal_debug_target_stage_copies_field();
+    test_result_publish_thermal_debug_target_stage_additive_only();
+    test_result_publish_thermal_debug_candidates_base_null_inputs_noop();
+    test_result_publish_thermal_debug_candidates_base_invalid_list_noop();
+    test_result_publish_thermal_debug_candidates_base_publishes_caps_and_defaults();
+    test_result_publish_thermal_debug_candidates_base_additive_only();
+    test_result_copy_thermal_debug_candidate_null_and_invalid_inputs();
+    test_result_copy_thermal_debug_candidate_copies_staged_candidate();
+    test_result_publish_thermal_debug_candidates_movement_null_inputs_noop();
+    test_result_publish_thermal_debug_candidates_movement_invalid_list_noop();
+    test_result_publish_thermal_debug_candidates_movement_copies_valid_entries_and_caps();
+    test_result_publish_thermal_debug_candidates_movement_skips_invalid_entries();
+    test_result_publish_thermal_debug_candidates_movement_additive_only();
+    test_result_publish_thermal_debug_candidates_nearest_track_null_inputs_noop();
+    test_result_publish_thermal_debug_candidates_nearest_track_invalid_list_noop();
+    test_result_publish_thermal_debug_candidates_nearest_track_copies_valid_entries_and_caps();
+    test_result_publish_thermal_debug_candidates_nearest_track_skips_invalid_entries();
+    test_result_publish_thermal_debug_candidates_nearest_track_additive_only();
+    test_result_publish_thermal_debug_candidates_near_debug_null_inputs_noop();
+    test_result_publish_thermal_debug_candidates_near_debug_invalid_list_noop();
+    test_result_publish_thermal_debug_candidates_near_debug_copies_valid_entries_and_caps();
+    test_result_publish_thermal_debug_candidates_near_debug_skips_invalid_entries();
+    test_result_publish_thermal_debug_candidates_near_debug_additive_only();
+    test_result_publish_thermal_debug_candidates_raw_delta_rescue_null_inputs_noop();
+    test_result_publish_thermal_debug_candidates_raw_delta_rescue_invalid_list_noop();
+    test_result_publish_thermal_debug_candidates_raw_delta_rescue_empty_count_noop();
+    test_result_publish_thermal_debug_candidates_raw_delta_rescue_copies_and_caps();
+    test_result_publish_thermal_debug_candidates_raw_delta_rescue_additive_only();
+    test_result_publish_thermal_debug_candidates_final_flags_null_inputs_noop();
+    test_result_publish_thermal_debug_candidates_final_flags_invalid_list_noop();
+    test_result_publish_thermal_debug_candidates_final_flags_empty_count_noop();
+    test_result_publish_thermal_debug_candidates_final_flags_copies_and_caps();
+    test_result_publish_thermal_debug_candidates_final_flags_additive_only();
     test_result_publish_color_debug_summary_null_inputs_noop();
     test_result_publish_color_debug_summary_raw_phase_and_samples();
     test_result_publish_color_debug_summary_histogram_rejects_and_winner_gate();
@@ -11967,6 +15476,10 @@ int main(void) {
     test_result_publish_color_debug_target_matched_candidate_invalid_noop();
     test_result_publish_color_debug_target_matched_candidate_invalid_bbox_zeroes();
     test_result_publish_color_debug_target_matched_candidate_additive_only();
+    test_result_publish_color_debug_candidates_null_inputs_noop();
+    test_result_publish_color_debug_candidates_invalid_list_noop();
+    test_result_publish_color_debug_candidates_publishes_and_caps();
+    test_result_publish_color_debug_candidates_additive_only();
     test_result_build_boxes_target_tracks_take_priority();
     test_result_build_boxes_accumulator_fallback_and_persist_filter();
     test_result_build_boxes_saliency_aux_current_gate_noop();
@@ -12119,6 +15632,19 @@ int main(void) {
     test_motion_estimator_residual_displacement_shifted_patch();
     test_motion_estimator_appearance_scorer_output_init_defaults();
     test_motion_estimator_appearance_scorer_output_init_clears_scores();
+    test_motion_estimator_movement_mode_normalization_contract();
+    test_motion_estimator_sidecar_publishes_normalized_mode_before_readiness();
+    test_motion_estimator_sidecar_input_ready_contract();
+    test_motion_estimator_sidecar_grid_bounds_invalid_inputs();
+    test_motion_estimator_sidecar_grid_bounds_normal_roi();
+    test_motion_estimator_sidecar_grid_bounds_clamps_patch_border();
+    test_motion_estimator_sidecar_grid_bounds_partial_upper_ceil();
+    test_motion_estimator_sidecar_grid_bounds_rejects_collapsed_roi();
+    test_motion_estimator_sidecar_tile_center_norm_contract();
+    test_motion_estimator_sidecar_classify_layer_contract();
+    test_motion_estimator_sidecar_parallax_suppression_scale_contract();
+    test_motion_estimator_sidecar_tile_confidence_contract();
+    test_motion_estimator_sidecar_tile_displacement_px_contract();
     test_motion_estimator_init_appearance_scorer_input_null_safe();
     test_motion_estimator_init_appearance_scorer_input_copies_contract_fields();
     test_motion_estimator_sync_appearance_scorer_state_null_safe();

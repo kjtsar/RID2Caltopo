@@ -134,6 +134,7 @@ public class WaypointTrack {
     private static final int MAX_GEOJSON_STATS_RETRIES = 3;
     private static final long GEOJSON_RETRY_BASE_DELAY_MS = 500;
     private static final long GEOJSON_PUBLISH_TIMEOUT_SECONDS = 20;
+    public static final int GEOJSON_STATS_UPLOAD_SKIPPED = -1;
 
     private static final String GEOJSON_MIME_TYPE = "application/geo+json";
 	// map trackLabel to WaypointTrack.
@@ -403,9 +404,15 @@ public class WaypointTrack {
         return responseCode == 408 || responseCode == 429 || responseCode >= 500;
     }
 
+    public static boolean ShouldMarkGeoJsonStatsReportedForResponse(int responseCode) {
+        return responseCode != GEOJSON_STATS_UPLOAD_SKIPPED &&
+                responseCode != 408 &&
+                responseCode < 500;
+    }
+
     private static int PublishGeoJsonStatsWithRetry(@NonNull String geoJsonString, @NonNull String context) {
         if (!ShouldPublishGeoJsonStatsForTracker(geoJsonString, context)) {
-            return 204;
+            return GEOJSON_STATS_UPLOAD_SKIPPED;
         }
         int responseCode = 503;
         for (int attempt = 1; attempt <= MAX_GEOJSON_STATS_RETRIES; attempt++) {
@@ -471,7 +478,7 @@ public class WaypointTrack {
     public static boolean ShouldPublishGeoJsonStatsForTracker(@Nullable JSONObject waypointTrack) {
         JSONObject r2cProp = GetR2cProp(waypointTrack);
         String droneOrg = NormalizeTrackerOrg(r2cProp != null ? r2cProp.optString("org", "") : "");
-        String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetHomeOrgName());
+        String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetTrackerUploadOrgName());
         return !droneOrg.isEmpty() && !trackerOrg.isEmpty() && droneOrg.equals(trackerOrg);
     }
 
@@ -483,9 +490,9 @@ public class WaypointTrack {
             if (!shouldPublish) {
                 JSONObject r2cProp = GetR2cProp(waypointTrack);
                 String droneOrg = NormalizeTrackerOrg(r2cProp != null ? r2cProp.optString("org", "") : "");
-                String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetHomeOrgName());
+                String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetTrackerUploadOrgName());
                 CTInfo(TAG, String.format(Locale.US,
-                        "%s skipping tracker upload: drone org '%s' does not match tracker org '%s'",
+                        "%s skipping tracker upload: drone org '%s' does not match tracker upload org '%s'",
                         context, droneOrg, trackerOrg));
             }
             return shouldPublish;
@@ -662,9 +669,14 @@ public class WaypointTrack {
                         "archive(%s): Publishing...", fileName));
                 int responseCode = PublishGeoJsonStatsWithRetry(
                         geoJsonString, String.format(Locale.US, "archive(%s)", fileName));
-                CTDebug(TAG, String.format(Locale.US,
-                        "archive(%s): server returned %d", fileName, responseCode));
-                if (responseCode != 408 && responseCode < 500) statsReported();
+                if (responseCode == GEOJSON_STATS_UPLOAD_SKIPPED) {
+                    CTDebug(TAG, String.format(Locale.US,
+                            "archive(%s): tracker upload skipped locally", fileName));
+                } else {
+                    CTDebug(TAG, String.format(Locale.US,
+                            "archive(%s): server returned %d", fileName, responseCode));
+                }
+                if (ShouldMarkGeoJsonStatsReportedForResponse(responseCode)) statsReported();
             }
             if (!clues.isEmpty()) archiveKmz();
             // don't report finished for some kind of timeout:

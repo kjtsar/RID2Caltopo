@@ -182,7 +182,7 @@ fun StreamsScreen(
         }
     }
     val serverStatus = when {
-        isServerRunning  -> "\uD83D\uDFE2 In => rtmp://$myIpAddress/<droneDesig>, Out => rtsp://$myIpAddress/<droneDesig>"
+        isServerRunning  -> "\uD83D\uDFE2 In => rtmp://$myIpAddress/<droneDesig>"
         serverExitReason.isNotEmpty() -> "\uD83D\uDD34 Server exited: $serverExitReason"
         else             -> "\uD83D\uDFE1 Starting"
     }

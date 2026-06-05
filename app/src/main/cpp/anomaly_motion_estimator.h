@@ -104,6 +104,8 @@ typedef struct {
 
 const anomaly_motion_estimator_sidecar_ops_t *anomaly_motion_estimator_default_sidecar_ops(void);
 
+int anomaly_motion_estimator_normalize_movement_mode(const anomaly_config_t *cfg);
+
 typedef struct {
     const anomaly_config_t                         *cfg;
     const anomaly_motion_estimator_registration_t  *registration;
@@ -120,6 +122,51 @@ typedef struct {
     int                                             roi_y1;
     const anomaly_motion_estimator_sidecar_ops_t   *ops;
 } anomaly_motion_estimator_sidecar_input_t;
+
+bool anomaly_motion_estimator_sidecar_input_ready(
+        const anomaly_motion_estimator_sidecar_input_t *input);
+
+typedef struct {
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+} anomaly_motion_sidecar_grid_bounds_t;
+
+bool anomaly_motion_estimator_sidecar_grid_bounds(
+        const anomaly_motion_estimator_sidecar_input_t *input,
+        anomaly_motion_sidecar_grid_bounds_t          *out);
+
+bool anomaly_motion_estimator_sidecar_tile_center_norm(
+        int    mx,
+        int    my,
+        int    motion_step,
+        int    width,
+        int    height,
+        float *x_norm_out,
+        float *y_norm_out);
+
+int anomaly_motion_estimator_sidecar_classify_layer(
+        float flow_px,
+        float residual_px,
+        float neighbor_delta_px,
+        int   motion_step);
+
+float anomaly_motion_estimator_sidecar_parallax_suppression_scale(
+        float parallax_load,
+        float local_outlier_load);
+
+float anomaly_motion_estimator_sidecar_tile_confidence(
+        float residual_px,
+        float flow_px,
+        int   motion_step);
+
+bool anomaly_motion_estimator_sidecar_tile_displacement_px(
+        int    dx,
+        int    dy,
+        int    motion_step,
+        float *dx_px_out,
+        float *dy_px_out);
 
 void anomaly_motion_estimator_estimate_sidecar(
         const anomaly_motion_estimator_sidecar_input_t *input,

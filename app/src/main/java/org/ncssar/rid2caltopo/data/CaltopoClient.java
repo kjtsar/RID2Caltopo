@@ -1329,6 +1329,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static CaltopoProfileRecord GetPreferredUploadTrackerProfile() {
         ClientClassState ccs = GetState();
         ensureProfileStateFresh(ccs, false);
+        long nowMs = System.currentTimeMillis();
+        String currentMapId = CaltopoMap.GetMapId();
+        if (ccs.caltopoProfiles != null && !currentMapId.isEmpty()) {
+            for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
+                if (!"MUTUAL_AID".equals(profile.profileType)) continue;
+                if (HasExpired(profile, nowMs)) continue;
+                if (!currentMapId.equals(profile.targetMapId)) continue;
+                if (!HasUsableTrackerCredentials(profile)) continue;
+                return profile;
+            }
+        }
         CaltopoProfileRecord active = GetActiveCaltopoProfile();
         if (active != null &&
                 "HOME".equals(active.profileType) &&
@@ -1336,7 +1347,6 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             return active;
         }
         if (ccs.caltopoProfiles == null) return null;
-        long nowMs = System.currentTimeMillis();
         for (CaltopoProfileRecord profile : ccs.caltopoProfiles) {
             if (!"HOME".equals(profile.profileType)) continue;
             if (HasExpired(profile, nowMs)) continue;
@@ -1635,6 +1645,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             return active.sourceLabel;
         }
         return "";
+    }
+
+    @NonNull
+    public static String GetTrackerUploadOrgName() {
+        ClientClassState ccs = GetState();
+        ensureProfileStateFresh(ccs, false);
+        CaltopoProfileRecord profile = GetPreferredUploadTrackerProfile();
+        if (profile != null && profile.sourceLabel != null && !profile.sourceLabel.isEmpty()) {
+            return profile.sourceLabel;
+        }
+        String mutualAidSourceLabel = GetMutualAidSourceLabel();
+        if (!mutualAidSourceLabel.isEmpty()) {
+            return mutualAidSourceLabel;
+        }
+        return GetHomeOrgName();
     }
 
     public static void SetHomeOrgName(@NonNull String orgName) {
@@ -2023,6 +2048,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             JSONObject credentials = new JSONObject();
             credentials.put("type", "ct_credentials");
             credentials.put("file_version", "1.0");
+            if (orgName != null && !orgName.isEmpty())
+                credentials.put("org_name", orgName);
             CaltopoCredentials cred = ccs.caltopoCredentials;
             if (cred != null) {
                 if (cred.teamId != null && !cred.teamId.isEmpty())
@@ -2597,6 +2624,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
 
         ArrayList<CtDroneSpec> dsArrayClone = (ArrayList<CtDroneSpec>) DsArray.clone();
+        ProximityAlertCenter.INSTANCE.updateDrones(dsArrayClone);
         if (false) CTDebug(TAG, String.format(Locale.US,
                 "ProcessSortedCurrentDroneSpecArray(%s) updating %d listeners",
                 changedFlag, DroneSpecsChangedListeners.size()));

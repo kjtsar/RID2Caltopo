@@ -14,7 +14,9 @@ import java.lang.reflect.Field
 
 class WaypointTrackTest {
     private lateinit var trackMapField: Field
+    private lateinit var mapNodeField: Field
     private var originalTrackMap: MutableMap<Any, Any>? = null
+    private var originalMapNode: Any? = null
     private var originalWaypointCount: Int = 0
 
     @Before
@@ -22,10 +24,15 @@ class WaypointTrackTest {
         trackMapField = WaypointTrack::class.java.getDeclaredField("TrackMap").apply {
             isAccessible = true
         }
+        mapNodeField = CaltopoMap::class.java.getDeclaredField("MapNode").apply {
+            isAccessible = true
+        }
         @Suppress("UNCHECKED_CAST")
         originalTrackMap = HashMap(trackMapField.get(null) as MutableMap<Any, Any>)
+        originalMapNode = mapNodeField.get(null)
         originalWaypointCount = WaypointTrack.WaypointCount
         resetTracks()
+        mapNodeField.set(null, null)
         CtDroneSpec.MyLat = 0.0
         CtDroneSpec.MyLng = 0.0
     }
@@ -37,6 +44,7 @@ class WaypointTrackTest {
         trackMap.clear()
         originalTrackMap?.let { trackMap.putAll(it) }
         WaypointTrack.WaypointCount = originalWaypointCount
+        mapNodeField.set(null, originalMapNode)
         CtDroneSpec.MyLat = 0.0
         CtDroneSpec.MyLng = 0.0
         CaltopoClient.ResetPersistedClientState()
@@ -118,6 +126,67 @@ class WaypointTrackTest {
         assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg(" ncssar ")))
         assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("MUTUALAID")))
         assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("")))
+    }
+
+    @Test
+    fun shouldPublishGeoJsonStatsForTracker_allowsMapMatchedMutualAidTrackerOrg() {
+        mapNodeField.set(null, CaltopoNode.MapNode("map-ncssar", "NCSSAR Search", 0L))
+        CaltopoClient.UpsertCaltopoProfile(
+            CaltopoProfileRecord(
+                "ma-ncssar",
+                "NCSSAR Mutual Aid",
+                "MUTUAL_AID",
+                CaltopoCredentials(),
+                "caltopo.com",
+                "Drone Tracks",
+                "Training",
+                "1",
+                "tracker-token",
+                "https://tracker.example.org",
+                false,
+                0L,
+                false,
+                "NCSSAR",
+                "map-ncssar",
+                "NCSSAR Search",
+                "",
+                0L,
+                ""
+            ),
+            true,
+            false
+        )
+
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("NCSSAR")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("OTHER")))
+    }
+
+    @Test
+    fun shouldPublishGeoJsonStatsForTracker_usesOrgConfigSourceLabelForLegacyHomeTrackerProfile() {
+        CaltopoClient.SetTrackerApiKey("tracker-token")
+        CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
+        CaltopoClient.SetMutualAidTemplate(
+            MutualAidTemplateRecord(
+                "team-id",
+                "credential-id",
+                "credential-secret",
+                "caltopo.com",
+                "NCSSAR",
+                "MAI"
+            )
+        )
+
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("NCSSAR")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("OTHER")))
+    }
+
+    @Test
+    fun shouldMarkGeoJsonStatsReportedForResponse_doesNotReportLocalUploadSkip() {
+        assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(WaypointTrack.GEOJSON_STATS_UPLOAD_SKIPPED))
+        assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(408))
+        assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(503))
+        assertTrue(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(200))
+        assertTrue(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(409))
     }
 
     private fun activeDrone(remoteId: String, mappedId: String): CtDroneSpec {

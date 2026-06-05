@@ -8,17 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static inline int normalize_sidecar_movement_mode(const anomaly_config_t *cfg) {
-    if (cfg == NULL) return ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
-    if (cfg->movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE) {
-        return ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
-    }
-    if (cfg->movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW) {
-        return ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
-    }
-    return ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
-}
-
 bool anomaly_motion_estimator_find_residual_displacement(
         const uint8_t *curr_luma,
         const uint8_t *prev_luma,
@@ -135,6 +124,141 @@ static const anomaly_motion_estimator_sidecar_ops_t default_sidecar_ops = {
 
 const anomaly_motion_estimator_sidecar_ops_t *anomaly_motion_estimator_default_sidecar_ops(void) {
     return &default_sidecar_ops;
+}
+
+int anomaly_motion_estimator_normalize_movement_mode(const anomaly_config_t *cfg) {
+    if (cfg == NULL) return ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+    if (cfg->movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE) {
+        return ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    }
+    if (cfg->movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW) {
+        return ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
+    }
+    return ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+}
+
+bool anomaly_motion_estimator_sidecar_input_ready(
+        const anomaly_motion_estimator_sidecar_input_t *input) {
+    if (input == NULL) return false;
+    if (anomaly_motion_estimator_normalize_movement_mode(input->cfg) ==
+        ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE) {
+        return false;
+    }
+    const anomaly_motion_estimator_sidecar_ops_t *ops = input->ops;
+    if (input->curr_luma == NULL || input->prev_luma == NULL ||
+        input->motion_w <= 2 || input->motion_h <= 2 ||
+        input->width <= 1 || input->height <= 1 || input->motion_step <= 0 ||
+        ops == NULL || ops->project_cell == NULL ||
+        ops->find_residual_displacement == NULL || ops->registration_valid == NULL ||
+        !ops->registration_valid(input->registration)) {
+        return false;
+    }
+    return true;
+}
+
+bool anomaly_motion_estimator_sidecar_grid_bounds(
+        const anomaly_motion_estimator_sidecar_input_t *input,
+        anomaly_motion_sidecar_grid_bounds_t          *out) {
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (input == NULL || out == NULL ||
+        input->motion_step <= 0 ||
+        input->motion_w <= 2 ||
+        input->motion_h <= 2) {
+        return false;
+    }
+
+    int roi_mgx0 = clamp_i32(input->roi_x0 / input->motion_step, 1, input->motion_w - 2);
+    int roi_mgx1 = clamp_i32(
+            (input->roi_x1 + input->motion_step - 1) / input->motion_step,
+            2,
+            input->motion_w - 1);
+    int roi_mgy0 = clamp_i32(input->roi_y0 / input->motion_step, 1, input->motion_h - 2);
+    int roi_mgy1 = clamp_i32(
+            (input->roi_y1 + input->motion_step - 1) / input->motion_step,
+            2,
+            input->motion_h - 1);
+    if (roi_mgx1 <= roi_mgx0 || roi_mgy1 <= roi_mgy0) {
+        return false;
+    }
+    out->x0 = roi_mgx0;
+    out->x1 = roi_mgx1;
+    out->y0 = roi_mgy0;
+    out->y1 = roi_mgy1;
+    return true;
+}
+
+bool anomaly_motion_estimator_sidecar_tile_center_norm(
+        int    mx,
+        int    my,
+        int    motion_step,
+        int    width,
+        int    height,
+        float *x_norm_out,
+        float *y_norm_out) {
+    if (x_norm_out == NULL || y_norm_out == NULL ||
+        motion_step <= 0 || width <= 0 || height <= 0) {
+        return false;
+    }
+    *x_norm_out = clamp01f((float)(mx * motion_step) / (float)width);
+    *y_norm_out = clamp01f((float)(my * motion_step) / (float)height);
+    return true;
+}
+
+int anomaly_motion_estimator_sidecar_classify_layer(
+        float flow_px,
+        float residual_px,
+        float neighbor_delta_px,
+        int   motion_step) {
+    if (motion_step <= 0) return ANOMALY_MOVEMENT_LAYER_UNKNOWN;
+    if (flow_px <= (float)motion_step * 0.45f && residual_px <= 12.0f) {
+        return ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+    }
+    if (neighbor_delta_px <= (float)motion_step * 1.25f &&
+        flow_px <= (float)motion_step * 2.75f) {
+        return ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR;
+    }
+    if (residual_px >= 18.0f && flow_px >= (float)motion_step * 0.75f) {
+        return ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    }
+    return ANOMALY_MOVEMENT_LAYER_UNSTABLE;
+}
+
+float anomaly_motion_estimator_sidecar_parallax_suppression_scale(
+        float parallax_load,
+        float local_outlier_load) {
+    if (parallax_load > 0.25f && local_outlier_load < 0.20f) {
+        float t = (parallax_load - 0.25f) / 0.45f;
+        return 1.0f - (0.45f * clampf(t, 0.0f, 1.0f));
+    }
+    return 1.0f;
+}
+
+float anomaly_motion_estimator_sidecar_tile_confidence(
+        float residual_px,
+        float flow_px,
+        int   motion_step) {
+    if (motion_step <= 0) return 0.0f;
+    return clampf(
+            1.0f - (residual_px / 64.0f) +
+                fminf(flow_px / ((float)motion_step * 8.0f), 0.25f),
+            0.0f,
+            1.0f);
+}
+
+bool anomaly_motion_estimator_sidecar_tile_displacement_px(
+        int    dx,
+        int    dy,
+        int    motion_step,
+        float *dx_px_out,
+        float *dy_px_out) {
+    if (dx_px_out == NULL || dy_px_out == NULL || motion_step <= 0) {
+        return false;
+    }
+    *dx_px_out = (float)dx * (float)motion_step;
+    *dy_px_out = (float)dy * (float)motion_step;
+    return true;
 }
 
 float anomaly_motion_estimator_texture_scale(int texture_score) {
@@ -650,7 +774,7 @@ void anomaly_motion_estimator_estimate_sidecar(
         anomaly_debug_movement_t                      *movement_out) {
     if (movement_out == NULL) return;
     memset(movement_out, 0, sizeof(*movement_out));
-    int mode = input != NULL ? normalize_sidecar_movement_mode(input->cfg) :
+    int mode = input != NULL ? anomaly_motion_estimator_normalize_movement_mode(input->cfg) :
         ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
     movement_out->mode = mode;
     movement_out->parallax_suppression_scale = 1.0f;
@@ -658,21 +782,19 @@ void anomaly_motion_estimator_estimate_sidecar(
         return;
     }
 
-    const anomaly_motion_estimator_sidecar_ops_t *ops = input->ops;
-    if (input->curr_luma == NULL || input->prev_luma == NULL ||
-        input->motion_w <= 2 || input->motion_h <= 2 ||
-        input->width <= 1 || input->height <= 1 || input->motion_step <= 0 ||
-        ops == NULL || ops->project_cell == NULL ||
-        ops->find_residual_displacement == NULL || ops->registration_valid == NULL ||
-        !ops->registration_valid(input->registration)) {
+    if (!anomaly_motion_estimator_sidecar_input_ready(input)) {
         return;
     }
+    const anomaly_motion_estimator_sidecar_ops_t *ops = input->ops;
 
-    int roi_mgx0 = clamp_i32(input->roi_x0 / input->motion_step, 1, input->motion_w - 2);
-    int roi_mgx1 = clamp_i32((input->roi_x1 + input->motion_step - 1) / input->motion_step, 2, input->motion_w - 1);
-    int roi_mgy0 = clamp_i32(input->roi_y0 / input->motion_step, 1, input->motion_h - 2);
-    int roi_mgy1 = clamp_i32((input->roi_y1 + input->motion_step - 1) / input->motion_step, 2, input->motion_h - 1);
-    if (roi_mgx1 <= roi_mgx0 || roi_mgy1 <= roi_mgy0) return;
+    anomaly_motion_sidecar_grid_bounds_t bounds;
+    if (!anomaly_motion_estimator_sidecar_grid_bounds(input, &bounds)) {
+        return;
+    }
+    int roi_mgx0 = bounds.x0;
+    int roi_mgx1 = bounds.x1;
+    int roi_mgy0 = bounds.y0;
+    int roi_mgy1 = bounds.y1;
 
     const int grid_cols = ANOMALY_MOVEMENT_GRID_COLS;
     const int grid_rows = ANOMALY_MOVEMENT_GRID_ROWS;
@@ -745,34 +867,44 @@ void anomaly_motion_estimator_estimate_sidecar(
             have_prev_flow = true;
 
             int layer_class = ANOMALY_MOVEMENT_LAYER_UNKNOWN;
-            if (flow_px <= (float)input->motion_step * 0.45f && residual_px <= 12.0f) {
+            layer_class = anomaly_motion_estimator_sidecar_classify_layer(
+                    flow_px,
+                    residual_px,
+                    neighbor_delta,
+                    input->motion_step);
+            if (layer_class == ANOMALY_MOVEMENT_LAYER_BACKGROUND) {
                 background++;
-                layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
-            } else if (neighbor_delta <= (float)input->motion_step * 1.25f &&
-                       flow_px <= (float)input->motion_step * 2.75f) {
+            } else if (layer_class == ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR) {
                 coherent_near++;
-                layer_class = ANOMALY_MOVEMENT_LAYER_COHERENT_NEAR;
-            } else if (residual_px >= 18.0f && flow_px >= (float)input->motion_step * 0.75f) {
+            } else if (layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER) {
                 local_outlier++;
-                layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
             } else {
                 unstable++;
-                layer_class = ANOMALY_MOVEMENT_LAYER_UNSTABLE;
             }
 
             int tile_idx = gy * grid_cols + gx;
             if (tile_idx >= 0 && tile_idx < ANOMALY_MOVEMENT_TILE_COUNT) {
                 anomaly_debug_movement_tile_t *tile = &movement_out->tiles[tile_idx];
                 tile->valid = true;
-                tile->center_x_norm = clamp01f((float)(mx * input->motion_step) / (float)input->width);
-                tile->center_y_norm = clamp01f((float)(my * input->motion_step) / (float)input->height);
-                tile->dx_px = (float)best_dx * (float)input->motion_step;
-                tile->dy_px = (float)best_dy * (float)input->motion_step;
+                anomaly_motion_estimator_sidecar_tile_center_norm(
+                        mx,
+                        my,
+                        input->motion_step,
+                        input->width,
+                        input->height,
+                        &tile->center_x_norm,
+                        &tile->center_y_norm);
+                anomaly_motion_estimator_sidecar_tile_displacement_px(
+                        best_dx,
+                        best_dy,
+                        input->motion_step,
+                        &tile->dx_px,
+                        &tile->dy_px);
                 tile->residual_px = residual_px;
-                tile->confidence = clampf(
-                    1.0f - (residual_px / 64.0f) + fminf(flow_px / ((float)input->motion_step * 8.0f), 0.25f),
-                    0.0f,
-                    1.0f);
+                tile->confidence = anomaly_motion_estimator_sidecar_tile_confidence(
+                        residual_px,
+                        flow_px,
+                        input->motion_step);
                 tile->layer_class = layer_class;
             }
         }
@@ -811,10 +943,8 @@ void anomaly_motion_estimator_estimate_sidecar(
             (0.5f * movement_out->local_outlier_fraction),
         0.0f,
         1.0f);
-    if (movement_out->parallax_load > 0.25f && movement_out->local_outlier_load < 0.20f) {
-        float t = (movement_out->parallax_load - 0.25f) / 0.45f;
-        movement_out->parallax_suppression_scale = 1.0f - (0.45f * clampf(t, 0.0f, 1.0f));
-    } else {
-        movement_out->parallax_suppression_scale = 1.0f;
-    }
+    movement_out->parallax_suppression_scale =
+        anomaly_motion_estimator_sidecar_parallax_suppression_scale(
+                movement_out->parallax_load,
+                movement_out->local_outlier_load);
 }

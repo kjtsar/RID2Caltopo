@@ -611,6 +611,28 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return specs;
     }
 
+    @NonNull
+    private static String NormalizeOrgName(@Nullable String orgName) {
+        if (orgName == null) return "";
+        return orgName.trim().toUpperCase(Locale.US);
+    }
+
+    public static boolean IsKnownTeamDroneForTrackerUpload(@Nullable String remoteId, @Nullable String droneOrg) {
+        if (remoteId == null) return false;
+        String trimmedRemoteId = remoteId.trim();
+        if (RejectNonCanonicalRemoteId("IsKnownTeamDroneForTrackerUpload()", trimmedRemoteId)) return false;
+        String normalizedDroneOrg = NormalizeOrgName(droneOrg);
+        String normalizedTrackerOrg = NormalizeOrgName(GetTrackerUploadOrgName());
+        if (normalizedDroneOrg.isEmpty() ||
+                normalizedTrackerOrg.isEmpty() ||
+                !normalizedDroneOrg.equals(normalizedTrackerOrg)) {
+            return false;
+        }
+        CtDroneSpec registeredDrone = GetDroneSpec(trimmedRemoteId);
+        if (registeredDrone == null || registeredDrone.isLocalArchiveOnly()) return false;
+        return normalizedDroneOrg.equals(NormalizeOrgName(registeredDrone.getOrg()));
+    }
+
     public static int GetActiveFlightCount() {
         ClientClassState ccs = GetState();
         if (ccs.droneSpecTable == null || ccs.droneSpecTable.isEmpty()) return 0;

@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.Icons
@@ -43,12 +44,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.app.ArchiveCleanupDeleteResult
 import org.ncssar.rid2caltopo.app.ArchiveCleanupDirectoryOption
@@ -72,6 +76,7 @@ import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.MutualAidPackageManager
 import org.ncssar.rid2caltopo.data.OrgConfigManager
+import org.ncssar.rid2caltopo.data.WaypointTrack
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
@@ -265,6 +270,9 @@ fun MainScreen(
     var showArchiveDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showTestingToolsDialog by remember { mutableStateOf(false) }
     var showResetPersistentStateDialog by remember { mutableStateOf(false) }
+    var showResubmitRecentTracksDialog by remember { mutableStateOf(false) }
+    var resubmitRecentTracksDaysText by remember { mutableStateOf("2") }
+    var resubmitRecentTracksInProgress by remember { mutableStateOf(false) }
     var forceArchiveDirPrompt by remember { mutableStateOf(false) }
     var mqttDisabled by remember { mutableStateOf(!CaltopoClient.GetUsePeersFlag()) }
     var loadingLogArchiveDays by remember { mutableStateOf(false) }
@@ -1412,6 +1420,77 @@ fun MainScreen(
         )
     }
 
+    if (showResubmitRecentTracksDialog) {
+        val days = resubmitRecentTracksDaysText.trim().toIntOrNull()
+        val daysInvalid = days == null || days < 1
+        AlertDialog(
+            onDismissRequest = {
+                if (!resubmitRecentTracksInProgress) showResubmitRecentTracksDialog = false
+            },
+            title = { Text("Resubmit Recent Tracks") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = resubmitRecentTracksDaysText,
+                        onValueChange = { resubmitRecentTracksDaysText = it },
+                        label = { Text("Days") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        isError = daysInvalid,
+                        enabled = !resubmitRecentTracksInProgress,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (daysInvalid) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Enter 1 or more days.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Only matching org/team-drone tracks are uploaded.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val requestedDays = days ?: return@TextButton
+                        resubmitRecentTracksInProgress = true
+                        coroutineScope.launch {
+                            try {
+                                val result = withContext(Dispatchers.IO) {
+                                    WaypointTrack.ResubmitRecentTrackStatsToTracker(requestedDays)
+                                }
+                                CaltopoClient.ShowToast(result.summary())
+                                showResubmitRecentTracksDialog = false
+                            } catch (e: Exception) {
+                                CTError(tag, "Resubmit recent tracks failed.", e)
+                                CaltopoClient.ShowToast("Resubmit recent tracks failed.")
+                            } finally {
+                                resubmitRecentTracksInProgress = false
+                            }
+                        }
+                    },
+                    enabled = !resubmitRecentTracksInProgress && !daysInvalid
+                ) {
+                    Text(if (resubmitRecentTracksInProgress) "Resubmitting..." else "Resubmit")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showResubmitRecentTracksDialog = false },
+                    enabled = !resubmitRecentTracksInProgress
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     if (showTestingToolsDialog) {
         AlertDialog(
             onDismissRequest = { showTestingToolsDialog = false },
@@ -1439,6 +1518,17 @@ fun MainScreen(
                     ) {
                         val active = if (CaltopoClient.IsDebugTagFilterEnabled()) "on" else "off"
                         Text("Debug Tags ($active)")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            resubmitRecentTracksDaysText = "2"
+                            showResubmitRecentTracksDialog = true
+                            showTestingToolsDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Resubmit Recent Tracks To Tracker")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(

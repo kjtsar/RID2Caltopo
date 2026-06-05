@@ -11,6 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.lang.reflect.Field
+import java.time.LocalDate
 
 class WaypointTrackTest {
     private lateinit var trackMapField: Field
@@ -122,15 +123,17 @@ class WaypointTrackTest {
     @Test
     fun shouldPublishGeoJsonStatsForTracker_requiresDroneOrgToMatchTrackerOrgUppercase() {
         CaltopoClient.SetHomeOrgName("NCSSAR")
+        confirmTeamDrone("RIDTEAM1", "NCSSAR")
 
-        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg(" ncssar ")))
-        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("MUTUALAID")))
-        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("")))
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid(" ncssar ", "RIDTEAM1")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("MUTUALAID", "RIDTEAM1")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("", "RIDTEAM1")))
     }
 
     @Test
     fun shouldPublishGeoJsonStatsForTracker_allowsMapMatchedMutualAidTrackerOrg() {
         mapNodeField.set(null, CaltopoNode.MapNode("map-ncssar", "NCSSAR Search", 0L))
+        confirmTeamDrone("RIDTEAM2", "NCSSAR")
         CaltopoClient.UpsertCaltopoProfile(
             CaltopoProfileRecord(
                 "ma-ncssar",
@@ -157,12 +160,13 @@ class WaypointTrackTest {
             false
         )
 
-        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("NCSSAR")))
-        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("OTHER")))
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("NCSSAR", "RIDTEAM2")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("OTHER", "RIDTEAM2")))
     }
 
     @Test
     fun shouldPublishGeoJsonStatsForTracker_usesOrgConfigSourceLabelForLegacyHomeTrackerProfile() {
+        confirmTeamDrone("RIDTEAM3", "NCSSAR")
         CaltopoClient.SetTrackerApiKey("tracker-token")
         CaltopoClient.SetTrackerUrlPfx("https://tracker.example.org")
         CaltopoClient.SetMutualAidTemplate(
@@ -176,17 +180,41 @@ class WaypointTrackTest {
             )
         )
 
-        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("NCSSAR")))
-        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrg("OTHER")))
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("NCSSAR", "RIDTEAM3")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("OTHER", "RIDTEAM3")))
+    }
+
+    @Test
+    fun shouldPublishGeoJsonStatsForTracker_requiresRemoteIdToMatchTeamDrone() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        confirmTeamDrone("RIDTEAM4", "NCSSAR")
+        confirmTeamDrone("RIDTEAM5", "OTHER")
+
+        assertTrue(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("NCSSAR", "RIDTEAM4")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("NCSSAR", "RIDUNKNOWN")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("NCSSAR", "")))
+        assertFalse(WaypointTrack.ShouldPublishGeoJsonStatsForTracker(geoJsonWithOrgAndRid("NCSSAR", "RIDTEAM5")))
     }
 
     @Test
     fun shouldMarkGeoJsonStatsReportedForResponse_doesNotReportLocalUploadSkip() {
         assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(WaypointTrack.GEOJSON_STATS_UPLOAD_SKIPPED))
         assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(408))
+        assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(429))
         assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(503))
         assertTrue(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(200))
         assertTrue(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(409))
+    }
+
+    @Test
+    fun isTrackDirectoryWithinRecentDays_includesTodayAndPreviousNDaysOnly() {
+        val today = LocalDate.of(2026, 6, 5)
+
+        assertTrue(WaypointTrack.IsTrackDirectoryWithinRecentDays("tracks-05Jun2026", 2, today))
+        assertTrue(WaypointTrack.IsTrackDirectoryWithinRecentDays("tracks-04Jun2026", 2, today))
+        assertFalse(WaypointTrack.IsTrackDirectoryWithinRecentDays("tracks-03Jun2026", 2, today))
+        assertFalse(WaypointTrack.IsTrackDirectoryWithinRecentDays("tracks-06Jun2026", 2, today))
+        assertFalse(WaypointTrack.IsTrackDirectoryWithinRecentDays("cache", 2, today))
     }
 
     private fun activeDrone(remoteId: String, mappedId: String): CtDroneSpec {
@@ -205,7 +233,11 @@ class WaypointTrackTest {
         return drone
     }
 
-    private fun geoJsonWithOrg(org: String): JSONObject =
+    private fun confirmTeamDrone(remoteId: String, org: String) {
+        CaltopoClient.SaveDroneSpecConfirmation(remoteId, org, "DJI Mini 4 Pro", "Pilot", "1sar$remoteId")
+    }
+
+    private fun geoJsonWithOrgAndRid(org: String, remoteId: String): JSONObject =
         JSONObject()
             .put("type", "FeatureCollection")
             .put(
@@ -217,7 +249,9 @@ class WaypointTrackTest {
                             "properties",
                             JSONObject().put(
                                 "r2c_prop",
-                                JSONObject().put("org", org)
+                                JSONObject()
+                                    .put("org", org)
+                                    .put("rid", remoteId)
                             )
                         )
                 )

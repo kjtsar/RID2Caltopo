@@ -37,7 +37,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import android.content.ContentResolver;
@@ -134,6 +137,9 @@ public class WaypointTrack {
     private static final int MAX_GEOJSON_STATS_RETRIES = 3;
     private static final long GEOJSON_RETRY_BASE_DELAY_MS = 500;
     private static final long GEOJSON_PUBLISH_TIMEOUT_SECONDS = 20;
+    private static final long ACTIVE_TRACK_GRACE_MS = 1000 * 60 * 60;
+    private static final DateTimeFormatter TRACK_DIRECTORY_DATE_FORMATTER =
+            DateTimeFormatter.ofPattern("ddMMMyyyy", Locale.US);
     public static final int GEOJSON_STATS_UPLOAD_SKIPPED = -1;
 
     private static final String GEOJSON_MIME_TYPE = "application/geo+json";
@@ -406,8 +412,7 @@ public class WaypointTrack {
 
     public static boolean ShouldMarkGeoJsonStatsReportedForResponse(int responseCode) {
         return responseCode != GEOJSON_STATS_UPLOAD_SKIPPED &&
-                responseCode != 408 &&
-                responseCode < 500;
+                !IsTransientStatsResponse(responseCode);
     }
 
     private static int PublishGeoJsonStatsWithRetry(@NonNull String geoJsonString, @NonNull String context) {
@@ -479,7 +484,11 @@ public class WaypointTrack {
         JSONObject r2cProp = GetR2cProp(waypointTrack);
         String droneOrg = NormalizeTrackerOrg(r2cProp != null ? r2cProp.optString("org", "") : "");
         String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetTrackerUploadOrgName());
-        return !droneOrg.isEmpty() && !trackerOrg.isEmpty() && droneOrg.equals(trackerOrg);
+        String remoteId = r2cProp != null ? r2cProp.optString("rid", "") : "";
+        return !droneOrg.isEmpty() &&
+                !trackerOrg.isEmpty() &&
+                droneOrg.equals(trackerOrg) &&
+                CaltopoClient.IsKnownTeamDroneForTrackerUpload(remoteId, droneOrg);
     }
 
     private static boolean ShouldPublishGeoJsonStatsForTracker(@NonNull String geoJsonString,
@@ -492,8 +501,11 @@ public class WaypointTrack {
                 String droneOrg = NormalizeTrackerOrg(r2cProp != null ? r2cProp.optString("org", "") : "");
                 String trackerOrg = NormalizeTrackerOrg(CaltopoClient.GetTrackerUploadOrgName());
                 CTInfo(TAG, String.format(Locale.US,
-                        "%s skipping tracker upload: drone org '%s' does not match tracker upload org '%s'",
-                        context, droneOrg, trackerOrg));
+                        "%s skipping tracker upload: drone org '%s', remoteId '%s', tracker upload org '%s'",
+                        context,
+                        droneOrg,
+                        r2cProp != null ? r2cProp.optString("rid", "") : "",
+                        trackerOrg));
             }
             return shouldPublish;
         } catch (JSONException e) {
@@ -512,6 +524,133 @@ public class WaypointTrack {
         if (properties == null) return false;
         JSONObject r2cProp = properties.optJSONObject("r2c_prop");
         return r2cProp != null && r2cProp.optBoolean("local_archive_only", false);
+    }
+
+    public static class ResubmitRecentTrackStatsResult {
+        public final int daysRequested;
+        public int directoriesChecked;
+        public int reportFilesDeleted;
+        public int filesConsidered;
+        public int filesUploaded;
+        public int filesMarkedReported;
+        public int filesSkippedActive;
+        public int filesSkippedIneligible;
+        public int filesFailed;
+
+        ResubmitRecentTrackStatsResult(int daysRequested) {
+            this.daysRequested = daysRequested;
+        }
+
+        @NonNull
+        public String summary() {
+            return String.format(Locale.US,
+                    "Resubmit checked %d recent archive folder(s), uploaded %d track(s), rebuilt %d report entry(s), skipped %d active, skipped %d ineligible, failed %d.",
+                    directoriesChecked,
+                    filesUploaded,
+                    filesMarkedReported,
+                    filesSkippedActive,
+                    filesSkippedIneligible,
+                    filesFailed);
+        }
+    }
+
+    static boolean IsTrackDirectoryWithinRecentDays(@Nullable String directoryName,
+                                                    int daysBack,
+                                                    @NonNull LocalDate today) {
+        if (directoryName == null || !directoryName.startsWith("tracks-")) return false;
+        if (daysBack < 1) daysBack = 1;
+        String datePart = directoryName.substring("tracks-".length());
+        try {
+            LocalDate directoryDate = LocalDate.parse(datePart, TRACK_DIRECTORY_DATE_FORMATTER);
+            LocalDate oldestIncluded = today.minusDays(daysBack - 1L);
+            return !directoryDate.isBefore(oldestIncluded) && !directoryDate.isAfter(today);
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+    @NonNull
+    public static ResubmitRecentTrackStatsResult ResubmitRecentTrackStatsToTracker(int daysBack) {
+        if (daysBack < 1) daysBack = 1;
+        ResubmitRecentTrackStatsResult result = new ResubmitRecentTrackStatsResult(daysBack);
+        DocumentFile archiveDir = CaltopoClient.GetArchiveDir();
+        if (archiveDir == null || !archiveDir.isDirectory()) {
+            CTDebug(TAG, "ResubmitRecentTrackStatsToTracker(): no archiveDir");
+            return result;
+        }
+
+        LocalDate today = LocalDate.now(ZoneId.systemDefault());
+        for (DocumentFile trackDir : archiveDir.listFiles()) {
+            String trackDirName = trackDir.getName();
+            if (!trackDir.isDirectory()) continue;
+            if (!IsTrackDirectoryWithinRecentDays(trackDirName, daysBack, today)) continue;
+            result.directoriesChecked++;
+            CTInfo(TAG, "ResubmitRecentTrackStatsToTracker() Checking " + trackDirName);
+            DocumentFile reportedFilepath = trackDir.findFile(ReportedFilenames);
+            if (reportedFilepath != null && reportedFilepath.isFile()) {
+                if (reportedFilepath.delete()) result.reportFilesDeleted++;
+            }
+            reportedFilepath = trackDir.createFile("text/plain", ReportedFilenames);
+            if (reportedFilepath == null) {
+                CTError(TAG, String.format(Locale.US, "Couldn't create '%s' in '%s'",
+                        ReportedFilenames, trackDir.getUri()));
+                result.filesFailed++;
+                continue;
+            }
+            ResubmitTrackDirectory(trackDir, reportedFilepath, result);
+        }
+        CTDebug(TAG, "ResubmitRecentTrackStatsToTracker(): " + result.summary());
+        return result;
+    }
+
+    private static void ResubmitTrackDirectory(@NonNull DocumentFile trackDir,
+                                               @NonNull DocumentFile reportedFilepath,
+                                               @NonNull ResubmitRecentTrackStatsResult result) {
+        long nowMs = System.currentTimeMillis();
+        for (DocumentFile file : trackDir.listFiles()) {
+            String filename = file.getName();
+            if (filename == null || !filename.endsWith(".json")) continue;
+            result.filesConsidered++;
+            if (file.lastModified() > 0 && file.lastModified() + ACTIVE_TRACK_GRACE_MS > nowMs) {
+                CTInfo(TAG, "ResubmitRecentTrackStatsToTracker() skipping active file " + filename);
+                result.filesSkippedActive++;
+                continue;
+            }
+            JSONObject waypointTrack;
+            try {
+                waypointTrack = ReadGeoJson(file);
+            } catch (Exception e) {
+                CTWarn(TAG, "Not able to read " + filename, e);
+                ReportStatsForFile(reportedFilepath, filename);
+                result.filesMarkedReported++;
+                continue;
+            }
+            if (waypointTrack == null) continue;
+            if (IsLocalArchiveOnly(waypointTrack)) {
+                CTInfo(TAG, "ResubmitRecentTrackStatsToTracker() skipping local-archive-only file " + filename);
+                ReportStatsForFile(reportedFilepath, filename);
+                result.filesMarkedReported++;
+                result.filesSkippedIneligible++;
+                continue;
+            }
+            if (!ShouldPublishGeoJsonStatsForTracker(waypointTrack)) {
+                CTInfo(TAG, "ResubmitRecentTrackStatsToTracker() skipping ineligible tracker file " + filename);
+                ReportStatsForFile(reportedFilepath, filename);
+                result.filesMarkedReported++;
+                result.filesSkippedIneligible++;
+                continue;
+            }
+            int responseCode = PublishGeoJsonStatsWithRetry(
+                    waypointTrack.toString(),
+                    String.format(Locale.US, "ResubmitRecentTrackStatsToTracker(%s)", filename));
+            if (ShouldMarkGeoJsonStatsReportedForResponse(responseCode)) {
+                ReportStatsForFile(reportedFilepath, filename);
+                result.filesMarkedReported++;
+                result.filesUploaded++;
+            } else {
+                result.filesFailed++;
+            }
+        }
     }
 
 
@@ -562,7 +701,7 @@ public class WaypointTrack {
                     CTInfo(TAG, "BgPollUnreportedTracks() skipping non geo-json file " + filename);
                     continue;
                 }
-                if (reportLastModifiedMillis <= (file.lastModified() + 1000 * 60 * 60)) {
+                if (reportLastModifiedMillis <= (file.lastModified() + ACTIVE_TRACK_GRACE_MS)) {
                     CTInfo(TAG, "BgPollUnreportedTracks() skipping file that appears to still be active: " + filename);
                     continue;
                 }
@@ -587,12 +726,17 @@ public class WaypointTrack {
                     ReportStatsForFile(finalReportedFilepath, filename);
                     continue;
                 }
+                if (!ShouldPublishGeoJsonStatsForTracker(waypointTrack)) {
+                    CTInfo(TAG, "BgPollUnreportedTracks() skipping ineligible tracker file " + filename);
+                    ReportStatsForFile(finalReportedFilepath, filename);
+                    continue;
+                }
                 String geoJsonString = waypointTrack.toString();
                 CTDebug(TAG, "BgPollUnreportedTracks() publishing " + filename);
                 int responseCode = PublishGeoJsonStatsWithRetry(
                         geoJsonString,
                         String.format(Locale.US, "BgPollUnreportedTracks(%s)", filename));
-                if (responseCode == 408 || responseCode >= 500) { // timeouts may indicate network issues
+                if (!ShouldMarkGeoJsonStatsReportedForResponse(responseCode)) {
                     consecutiveFails++;
                     if (consecutiveFails > 2) {
                         CTDebug(TAG, "BgPollUnreportedTracks(): suspending ops due to 2 consecutive failures to publish");

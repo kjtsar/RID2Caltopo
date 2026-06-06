@@ -31,7 +31,13 @@ fun parseMapHierarchy(jsonResponse: JSONObject): List<CaltopoNode> {
 
     val nodeMap = mutableMapOf<String, CaltopoNode>()
     val parentMap = mutableMapOf<String, String>() // ChildID -> ParentID
+    val relParentMap = mutableMapOf<String, String>() // MapID -> folder/account from bookmark relation
     val allMapsFlat = mutableListOf<CaltopoNode.MapNode>()
+
+    fun JSONObject.cleanId(key: String): String {
+        val raw = optString(key, "")
+        return if (raw == "null" || raw.isEmpty()) "" else raw
+    }
 
     // 1. Create Root Directories from Accounts
     for (i in 0 until accounts.length()) {
@@ -47,6 +53,21 @@ fun parseMapHierarchy(jsonResponse: JSONObject): List<CaltopoNode> {
         nodeMap[id] = CaltopoNode.Directory(id, title)
     }
 
+    val rels = jsonResponse.optJSONArray("rels") ?: JSONArray()
+    for (i in 0 until rels.length()) {
+        val rel = rels.optJSONObject(i) ?: continue
+        val props = rel.optJSONObject("properties") ?: continue
+        if (props.optString("class") != "UserAccountMapRel") continue
+
+        val mapId = props.cleanId("mapId")
+        if (mapId.isEmpty()) continue
+
+        val folderId = props.cleanId("folderId")
+        val accountId = props.cleanId("accountId")
+        val pid = if (folderId.isNotEmpty()) folderId else accountId
+        if (pid.isNotEmpty()) relParentMap[mapId] = pid
+    }
+
     // 2. Second Pass: Extract Folders and Maps
     for (i in 0 until features.length()) {
         val feat = features.getJSONObject(i)
@@ -54,17 +75,11 @@ fun parseMapHierarchy(jsonResponse: JSONObject): List<CaltopoNode> {
         val props = feat.optJSONObject("properties") ?: continue
         val className = props.optString("class")
 
-        // --- THE FIX: Clean the parent IDs ---
-        fun getCleanId(key: String): String {
-            val raw = props.optString(key, "")
-            return if (raw == "null" || raw.isEmpty()) "" else raw
-        }
-
-        val folderId = getCleanId("folderId")
-        val accountId = getCleanId("accountId")
+        val folderId = props.cleanId("folderId")
+        val accountId = props.cleanId("accountId")
 
         // Priority: Nest in folder if available, otherwise nest in account
-        val pid = if (folderId.isNotEmpty()) folderId else accountId
+        val pid = relParentMap[id] ?: if (folderId.isNotEmpty()) folderId else accountId
         if (pid.isNotEmpty()) parentMap[id] = pid
 
         when (className) {

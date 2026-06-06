@@ -162,6 +162,12 @@ data class MapViewportState(
     val zoom: Double
 )
 
+private fun isUsablePersistedMapViewportState(latitude: Double, longitude: Double, zoom: Double): Boolean {
+    if (!latitude.isFinite() || !longitude.isFinite() || !zoom.isFinite()) return false
+    if (latitude !in -85.0..85.0 || longitude !in -180.0..180.0) return false
+    return !(abs(latitude) < 0.000001 && abs(longitude) < 0.000001)
+}
+
 enum class StreamsLayoutMode {
     Both,
     Streams,
@@ -1355,7 +1361,7 @@ class StreamsViewModel(
     fun persistMapViewportState(center: IGeoPoint?, zoom: Double) {
         val lat = center?.latitude ?: return
         val lng = center.longitude
-        if (!lat.isFinite() || !lng.isFinite() || !zoom.isFinite()) return
+        if (!isUsablePersistedMapViewportState(lat, lng, zoom)) return
         persistedMapViewportState = MapViewportState(
             latitude = lat,
             longitude = lng,

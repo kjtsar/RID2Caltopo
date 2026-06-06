@@ -10,6 +10,80 @@ import org.osmdroid.util.MapTileIndex
 
 class MapPaneArtifactOverlayStateTest {
     @Test
+    fun usgsContoursTileSource_exportsTransparentImageForTileBounds() {
+        val tileIndex = MapTileIndex.getTileIndex(1, 1, 1)
+
+        val url = UsgsContoursTileSource.getTileURLString(tileIndex)
+
+        assertEquals(
+            "https://carto.nationalmap.gov/arcgis/rest/services/contours/MapServer/export" +
+                "?bbox=0.000000,-20037508.342789,20037508.342789,0.000000" +
+                "&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image",
+            url
+        )
+    }
+
+    @Test
+    fun usgsContoursTileSource_allowsMapPaneDisplayZoomRequests() {
+        assertEquals(MAP_DISPLAY_MAX_ZOOM.toInt(), UsgsContoursTileSource.maximumZoomLevel)
+    }
+
+    @Test
+    fun needsBaseTileProviderRestart_detectsLayerSourceMismatch() {
+        assertEquals(
+            true,
+            needsBaseTileProviderRestart(
+                currentSourceName = ArcGisWorldImageryTileSource.name(),
+                desiredTileSource = OsmStandardTileSource
+            )
+        )
+        assertEquals(
+            false,
+            needsBaseTileProviderRestart(
+                currentSourceName = OsmStandardTileSource.name(),
+                desiredTileSource = OsmStandardTileSource
+            )
+        )
+    }
+
+    @Test
+    fun visibleTileNetworkActive_staysEnabledUnlessOfflinePrepSuppressesNetwork() {
+        assertEquals(true, visibleTileNetworkActive(suppressLiveMapNetwork = false))
+        assertEquals(false, visibleTileNetworkActive(suppressLiveMapNetwork = true))
+    }
+
+    @Test
+    fun offlineFirstForVisibleTiles_prioritizesDownloaderWhenNetworkIsAvailable() {
+        assertEquals(false, offlineFirstForVisibleTiles(tileNetworkActive = true))
+        assertEquals(true, offlineFirstForVisibleTiles(tileNetworkActive = false))
+    }
+
+    @Test
+    fun offlinePrepTileSources_addsContoursWhenRequested() {
+        assertEquals(
+            listOf(ArcGisWorldImageryTileSource.name()),
+            offlinePrepTileSources(BaseLayerOption.Imagery, includeContours = false).map { it.name() }
+        )
+        assertEquals(
+            listOf(ArcGisWorldImageryTileSource.name(), UsgsContoursTileSource.name()),
+            offlinePrepTileSources(BaseLayerOption.Imagery, includeContours = true).map { it.name() }
+        )
+    }
+
+    @Test
+    fun offlinePrepTileOperationCount_countsContourCompanionTiles() {
+        assertEquals(12, offlinePrepTileOperationCount(baseTileCount = 12, includeContours = false))
+        assertEquals(24, offlinePrepTileOperationCount(baseTileCount = 12, includeContours = true))
+    }
+
+    @Test
+    fun isUsableMapViewportState_rejectsDefaultOriginViewport() {
+        assertEquals(false, isUsableMapViewportState(0.0, 0.0, 14.0))
+        assertEquals(false, isUsableMapViewportState(0.0000004, -0.0000004, 14.0))
+        assertEquals(true, isUsableMapViewportState(38.9, -120.0, 14.0))
+    }
+
+    @Test
     fun orderedTileIndexesForOfflinePrep_prioritizesTabletMediumZoomTile() {
         val tablet = GeoPoint(38.9000, -120.0000)
         val bounds = BoundingBox(39.0000, -119.9000, 38.8000, -120.1000)

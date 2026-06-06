@@ -13,6 +13,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.location.Location
 import android.os.StatFs
@@ -81,8 +82,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
@@ -141,6 +144,7 @@ import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
+import org.osmdroid.views.overlay.TilesOverlay
 import org.osmdroid.views.overlay.infowindow.InfoWindow
 import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.R
@@ -217,6 +221,7 @@ internal const val OSM_OFFLINE_PREP_REQUEST_DELAY_MS = 1_250L
 internal const val TILE_FS_THREADS: Short = 4
 internal const val TILE_FS_MAX_QUEUE: Short = 2000
 internal const val TILE_IO_ACTIVE_GRACE_MS = 2_000L
+private const val WEB_MERCATOR_HALF_WORLD_METERS = 20_037_508.342789244
 
 // Enums
 internal enum class BaseLayerOption(val label: String) {
@@ -634,6 +639,29 @@ internal object OsmStandardTileSource : OnlineTileSourceBase(
     }
 }
 
+internal object UsgsContoursTileSource : OnlineTileSourceBase(
+    "USGS-Contours",
+    0,
+    MAP_DISPLAY_MAX_ZOOM.toInt(),
+    256,
+    ".png",
+    arrayOf("https://carto.nationalmap.gov/arcgis/rest/services/contours/MapServer/export")
+) {
+    override fun getTileURLString(pMapTileIndex: Long): String {
+        val zoom = MapTileIndex.getZoom(pMapTileIndex)
+        val x = MapTileIndex.getX(pMapTileIndex)
+        val y = MapTileIndex.getY(pMapTileIndex)
+        val tilesPerSide = 1 shl zoom
+        val span = (WEB_MERCATOR_HALF_WORLD_METERS * 2.0) / tilesPerSide.toDouble()
+        val minX = -WEB_MERCATOR_HALF_WORLD_METERS + (x * span)
+        val maxX = minX + span
+        val maxY = WEB_MERCATOR_HALF_WORLD_METERS - (y * span)
+        val minY = maxY - span
+        val bbox = String.format(Locale.US, "%.6f,%.6f,%.6f,%.6f", minX, minY, maxX, maxY)
+        return "$baseUrl?bbox=$bbox&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image"
+    }
+}
+
 internal fun osmUserAgent(): String =
     "RID2Caltopo v${BuildConfig.VERSION_NAME} (contact: kjtsar@kjt.us)"
 
@@ -654,6 +682,38 @@ internal fun tileSourceForBaseLayer(baseLayer: BaseLayerOption): OnlineTileSourc
         BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
         BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
     }
+
+internal fun offlinePrepTileSources(
+    baseLayer: BaseLayerOption,
+    includeContours: Boolean
+): List<OnlineTileSourceBase> {
+    val sources = mutableListOf<OnlineTileSourceBase>(tileSourceForBaseLayer(baseLayer))
+    if (includeContours) sources += UsgsContoursTileSource
+    return sources
+}
+
+internal fun offlinePrepTileOperationCount(baseTileCount: Int, includeContours: Boolean): Int {
+    val sourceCount = if (includeContours) 2 else 1
+    return (baseTileCount.toLong() * sourceCount.toLong()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+}
+
+internal fun needsBaseTileProviderRestart(
+    currentSourceName: String?,
+    desiredTileSource: ITileSource
+): Boolean =
+    currentSourceName != desiredTileSource.name()
+
+internal fun visibleTileNetworkActive(suppressLiveMapNetwork: Boolean): Boolean =
+    !suppressLiveMapNetwork
+
+internal fun offlineFirstForVisibleTiles(tileNetworkActive: Boolean): Boolean =
+    !tileNetworkActive
+
+internal fun isUsableMapViewportState(latitude: Double, longitude: Double, zoom: Double): Boolean {
+    if (!latitude.isFinite() || !longitude.isFinite() || !zoom.isFinite()) return false
+    if (latitude !in -85.0..85.0 || longitude !in -180.0..180.0) return false
+    return !(kotlin.math.abs(latitude) < 0.000001 && kotlin.math.abs(longitude) < 0.000001)
+}
 
 private fun prefetchMapTileIfMissing(
     tileSource: org.osmdroid.tileprovider.tilesource.ITileSource,
@@ -742,6 +802,7 @@ private fun buildTileMapProvider(
         tileWriter = tileWriter
     ).apply {
         setUseDataConnection(true)
+        setOfflineFirst(false)
     }
 }
 
@@ -775,7 +836,9 @@ internal fun SplitMapPane(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val uiScope = rememberCoroutineScope()
-    val restoredViewport = viewModel.mapViewportState()
+    val restoredViewport = viewModel.mapViewportState()?.takeIf {
+        isUsableMapViewportState(it.latitude, it.longitude, it.zoom)
+    }
     val baseLayer = viewModel.baseLayer
     var settingsMenuExpanded by remember { mutableStateOf(false) }
     var mapManagementMenuExpanded by remember { mutableStateOf(false) }
@@ -805,6 +868,7 @@ internal fun SplitMapPane(
     var offlinePrepInFlight by remember { mutableStateOf(false) }
     var offlinePrepPreset by remember { mutableStateOf(OFFLINE_PREP_PRESETS[1]) }
     var offlinePrepIncludeDem by remember { mutableStateOf(true) }
+    var offlinePrepIncludeContours by remember { mutableStateOf(false) }
     var offlinePrepMaxThroughput by remember { mutableStateOf(false) }
     var offlinePrepAreaMode by remember { mutableStateOf(OfflinePrepAreaMode.Viewport) }
     var offlinePrepBoundaryId by remember { mutableStateOf<String?>(null) }
@@ -843,6 +907,7 @@ internal fun SplitMapPane(
     var preparingMutualAidShare by remember { mutableStateOf(false) }
     val maximizeThroughputBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
     var predictiveHeadEnabled by remember { mutableStateOf(CaltopoClient.GetPredictiveHeadEnabled()) }
+    var contourOverlayEnabled by remember { mutableStateOf(MapCacheSettings.contourOverlayEnabled(context)) }
     var autoRemoveBadTiles by remember { mutableStateOf(BadTilePolicy.isAutoRemoveEnabled(context)) }
     var badTileDialogState by remember { mutableStateOf<BadTileDialogState?>(null) }
     var quarantineMatchingHash by remember { mutableStateOf(true) }
@@ -868,6 +933,7 @@ internal fun SplitMapPane(
     var restoredViewportStartupCheckStartedAtMs by remember { mutableStateOf(System.currentTimeMillis()) }
     var operatorAdjustedViewport by remember { mutableStateOf(false) }
     var lastLocalDeviceMarkerStats by remember { mutableStateOf("") }
+    var localDeviceLocationMissingLogged by remember { mutableStateOf(false) }
     var localDeviceViewportRescueApplied by remember { mutableStateOf(false) }
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
     val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
@@ -884,8 +950,13 @@ internal fun SplitMapPane(
     }
     val tileCacheWriter = remember(context) { TileDiskCacheWriter(context) }
     val tileFetchPriorityScheduler = remember { TileFetchPriorityScheduler() }
+    val baseTileSource = tileSourceForBaseLayer(baseLayer)
+    val latestBaseTileSource by rememberUpdatedState(baseTileSource)
     var tileMapProvider by remember(context) {
-        mutableStateOf(buildTileMapProvider(context, OsmStandardTileSource, tileCacheWriter))
+        mutableStateOf(buildTileMapProvider(context, baseTileSource, tileCacheWriter))
+    }
+    val contourTileMapProvider = remember(context) {
+        buildTileMapProvider(context, UsgsContoursTileSource, tileCacheWriter)
     }
     val latestTileMapProvider by rememberUpdatedState(tileMapProvider)
     val latestTileFetchPriorityScheduler by rememberUpdatedState(tileFetchPriorityScheduler)
@@ -1227,6 +1298,7 @@ internal fun SplitMapPane(
         offlinePrepBoundaryId,
         offlinePrepPreset,
         offlinePrepIncludeDem,
+        offlinePrepIncludeContours,
         mapBounds,
         offlineBoundaryOptions
     ) {
@@ -1246,12 +1318,13 @@ internal fun SplitMapPane(
             return@LaunchedEffect
         }
         val computed = withContext(Dispatchers.Default) {
-            val tileEstimate = estimateTileCountApproximate(
+            val baseTileEstimate = estimateTileCountApproximate(
                 bounds = estimateBounds,
                 minZoom = offlinePrepPreset.minZoom,
                 maxZoom = offlinePrepPreset.maxZoom,
                 clipBoundary = selectedBoundary
             )
+            val tileEstimate = offlinePrepTileOperationCount(baseTileEstimate, offlinePrepIncludeContours)
             // DEM download fetches whole USGS 1° GeoTIFF tiles, not EPQS point samples.
             val demEstimate = if (offlinePrepIncludeDem) demTileNamesForBounds(estimateBounds).size else 0
             val tileCacheMb = (tileEstimate.toLong() * 20_000L) / (1024.0 * 1024.0)
@@ -1280,6 +1353,7 @@ internal fun SplitMapPane(
         offlinePrepBoundaryId,
         offlinePrepPreset,
         offlinePrepIncludeDem,
+        offlinePrepIncludeContours,
         baseLayer,
         mapBounds,
         offlineBoundaryOptions,
@@ -1302,10 +1376,7 @@ internal fun SplitMapPane(
             return@LaunchedEffect
         }
         offlinePrepCacheStatus = OfflinePrepCacheStatus(checked = false)
-        val tileSource = when (baseLayer) {
-            BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
-            BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
-        }
+        val tileSources = offlinePrepTileSources(baseLayer, offlinePrepIncludeContours)
         val includeDem = offlinePrepIncludeDem
         val computed = withContext(Dispatchers.IO) {
             var tileMissing = 0
@@ -1315,8 +1386,10 @@ internal fun SplitMapPane(
                 maxZoom = offlinePrepPreset.maxZoom,
                 clipBoundary = selectedBoundary
             ) { tileIndex ->
-                if (!tileCacheWriter.exists(tileSource, tileIndex)) {
-                    tileMissing++
+                for (tileSource in tileSources) {
+                    if (!tileCacheWriter.exists(tileSource, tileIndex)) {
+                        tileMissing++
+                    }
                 }
             }
             var demMissing = 0
@@ -1370,6 +1443,7 @@ internal fun SplitMapPane(
             "base=${baseLayer.name}",
             "preset=${offlinePrepPreset.label}",
             "dem=$offlinePrepIncludeDem",
+            "contours=$offlinePrepIncludeContours",
             areaKey,
             "n=${"%.5f".format(Locale.US, bounds.latNorth)}",
             "s=${"%.5f".format(Locale.US, bounds.latSouth)}",
@@ -1385,6 +1459,7 @@ internal fun SplitMapPane(
         offlinePrepBoundaryId,
         offlinePrepPreset,
         offlinePrepIncludeDem,
+        offlinePrepIncludeContours,
         baseLayer,
         mapBounds,
         offlineBoundaryOptions
@@ -1468,6 +1543,8 @@ internal fun SplitMapPane(
         offlinePrepProgress = OfflinePrepProgress(phase = "Preparing", total = 0, completed = 0)
         val preset = offlinePrepPreset
         val includeDem = offlinePrepIncludeDem
+        val includeContours = offlinePrepIncludeContours
+        val tileSources = offlinePrepTileSources(baseLayer, includeContours)
         val isOsmDownload = baseLayer == BaseLayerOption.OpenStreetMap
         val maximizeThroughput = offlinePrepMaxThroughput && !isOsmDownload
         // Compute 1° GeoTIFF tile names for the area now (on the main thread, before the IO job).
@@ -1475,7 +1552,6 @@ internal fun SplitMapPane(
         val estimatedTileOps = offlinePrepEstimate.tileEstimate
         val estimatedDemOps = demTileNames.size
         val estimatedTotalOps = (estimatedTileOps + estimatedDemOps).coerceAtLeast(1)
-        val tileSource = selectedTileSource()
         val selectionKey = currentOfflinePrepSelectionKey()
         val tabletLocation = CaltopoMap.GetMyLocation()?.takeIf {
             it.latitude.isFinite() && it.longitude.isFinite()
@@ -1484,8 +1560,7 @@ internal fun SplitMapPane(
             if (point.lat.isFinite() && point.lng.isFinite()) GeoPoint(point.lat, point.lng) else null
         }
         offlinePrepJob = uiScope.launch(Dispatchers.IO) {
-            val onlineTileSource = tileSource as? OnlineTileSourceBase
-            if (onlineTileSource == null) {
+            if (tileSources.isEmpty()) {
                 withContext(Dispatchers.Main.immediate) {
                     offlinePrepInFlight = false
                     offlinePrepJob = null
@@ -1571,7 +1646,7 @@ internal fun SplitMapPane(
                             delay(500L)
                         }
                     }
-                    suspend fun processTile(tileIndex: Long) {
+                    suspend fun processTile(tileSource: OnlineTileSourceBase, tileIndex: Long) {
                         ensureActive()
                         val exists = tileCacheWriter.exists(tileSource, tileIndex)
                         if (exists) {
@@ -1582,8 +1657,8 @@ internal fun SplitMapPane(
                             val y = MapTileIndex.getY(tileIndex)
                             var failureDetail = ""
                             val ok = try {
-                                val url = onlineTileSource.getTileURLString(tileIndex)
-                                val req = buildOfflineTileRequest(onlineTileSource, url)
+                                val url = tileSource.getTileURLString(tileIndex)
+                                val req = buildOfflineTileRequest(tileSource, url)
                                 val call = offlineHttpClient.newCall(req)
                                 offlinePrepActiveCalls += call
                                 try {
@@ -1618,7 +1693,7 @@ internal fun SplitMapPane(
                                 failureDetail = "ex=${e.javaClass.simpleName} z=$z x=$x y=$y source=${tileSource.name()}"
                                 false
                             }
-                            if (isOsmDownload) {
+                            if (tileSource.name() == OsmStandardTileSource.name()) {
                                 delay(OSM_OFFLINE_PREP_REQUEST_DELAY_MS)
                             }
                             if (ok) {
@@ -1735,11 +1810,11 @@ internal fun SplitMapPane(
 
                     if (!maximizeThroughput) {
                         val workerCount = if (isOsmDownload) 1 else 3
-                        val tileQueue = Channel<Long>(capacity = workerCount * 3)
+                        val tileQueue = Channel<Pair<OnlineTileSourceBase, Long>>(capacity = workerCount * 3)
                         val workers = List(workerCount) {
                             launch {
-                                for (tileIndex in tileQueue) {
-                                    processTile(tileIndex)
+                                for ((source, tileIndex) in tileQueue) {
+                                    processTile(source, tileIndex)
                                 }
                             }
                         }
@@ -1753,7 +1828,9 @@ internal fun SplitMapPane(
                         )
                         for (tileIndex in orderedTileIndexes) {
                             currentCoroutineContext().ensureActive()
-                            tileQueue.send(tileIndex)
+                            for (source in tileSources) {
+                                tileQueue.send(source to tileIndex)
+                            }
                         }
                         tileQueue.close()
                         workers.forEach { it.join() }
@@ -1775,7 +1852,7 @@ internal fun SplitMapPane(
                     } else {
                         val maxWorkers = 16
                         val minWorkers = 2
-                        val tileQueue = Channel<Long>(capacity = maxWorkers * 4)
+                        val tileQueue = Channel<Pair<OnlineTileSourceBase, Long>>(capacity = maxWorkers * 4)
                         val demQueue = Channel<String>(capacity = maxWorkers * 3)
                         val tileWorkers = mutableListOf<Job>()
                         val demWorkers = mutableListOf<Job>()
@@ -1791,7 +1868,9 @@ internal fun SplitMapPane(
                             )
                             for (tileIndex in orderedTileIndexes) {
                                 currentCoroutineContext().ensureActive()
-                                tileQueue.send(tileIndex)
+                                for (source in tileSources) {
+                                    tileQueue.send(source to tileIndex)
+                                }
                             }
                             tileQueue.close()
                         }
@@ -1815,8 +1894,8 @@ internal fun SplitMapPane(
 
                         fun addTileWorker() {
                             tileWorkers += launch {
-                                for (tileIndex in tileQueue) {
-                                    processTile(tileIndex)
+                                for ((source, tileIndex) in tileQueue) {
+                                    processTile(source, tileIndex)
                                 }
                             }
                         }
@@ -2073,7 +2152,9 @@ internal fun SplitMapPane(
     }
 
     LaunchedEffect(mapName) {
-        val persistedViewport = viewModel.mapViewportState()
+        val persistedViewport = viewModel.mapViewportState()?.takeIf {
+            isUsableMapViewportState(it.latitude, it.longitude, it.zoom)
+        }
         localTrackPointsByMappedId.clear()
         currentFlightTrackPointsByMappedId.clear()
         trackOverlayRefreshToken++
@@ -2091,6 +2172,7 @@ internal fun SplitMapPane(
         restoredViewportStartupWaitLogged = false
         restoredViewportStartupCheckStartedAtMs = System.currentTimeMillis()
         operatorAdjustedViewport = false
+        localDeviceLocationMissingLogged = false
         startArtifactHydration("mapName=$mapName")
     }
     LaunchedEffect(Unit) {
@@ -2482,7 +2564,6 @@ internal fun SplitMapPane(
                 MapView(context).apply {
                     setMultiTouchControls(true)
                     setTileProvider(tileMapProvider)
-                    setTileSource(OsmStandardTileSource)
                     setUseDataConnection(true)
                     tileMapProvider.setUseDataConnection(true)
                     setMaxZoomLevel(MAP_DISPLAY_MAX_ZOOM)
@@ -2522,7 +2603,7 @@ internal fun SplitMapPane(
                                     tileMapProvider = restartTileProviderForViewportIntent(
                                         mapView = this@apply,
                                         context = context,
-                                        tileSource = tileProvider.tileSource,
+                                        tileSource = latestBaseTileSource,
                                         tileWriter = tileCacheWriter,
                                         reason = "zoom-change",
                                         zoom = eventTileZoom
@@ -2539,55 +2620,70 @@ internal fun SplitMapPane(
                 localDeviceRefreshToken
                 val uiNowWallMsec = System.currentTimeMillis()
                 mapBounds = mapView.boundingBox
-                val tileSource = when (baseLayer) {
-                    BaseLayerOption.OpenStreetMap -> OsmStandardTileSource
-                    BaseLayerOption.Imagery -> ArcGisWorldImageryTileSource
-                }
+                val tileSource = baseTileSource
                 val maxZoom = MAP_DISPLAY_MAX_ZOOM
                 if (mapView.maxZoomLevel != maxZoom) {
                     mapView.setMaxZoomLevel(maxZoom)
                 }
                 val currentTileZoom = TileSystem.getInputTileZoomLevel(mapView.zoomLevelDouble)
-                if (visibleTileZoom != currentTileZoom) {
-                    visibleTileZoom = currentTileZoom
+                val baseSourceChanged = needsBaseTileProviderRestart(
+                    currentSourceName = mapView.tileProvider.tileSource.name(),
+                    desiredTileSource = tileSource
+                )
+                if (baseSourceChanged) {
                     tileMapProvider = restartTileProviderForViewportIntent(
                         mapView = mapView,
                         context = context,
-                        tileSource = mapView.tileProvider.tileSource,
+                        tileSource = tileSource,
                         tileWriter = tileCacheWriter,
-                        reason = "viewport-update",
+                        reason = "base-layer-change",
                         zoom = currentTileZoom
                     )
-                }
-                if (mapView.tileProvider.tileSource.name() != tileSource.name()) {
-                    mapView.setTileSource(tileSource)
                     tileIoActiveUntilMs = uiNowWallMsec + TILE_IO_ACTIVE_GRACE_MS
+                }
+                if (visibleTileZoom != currentTileZoom) {
+                    visibleTileZoom = currentTileZoom
+                    if (!baseSourceChanged) {
+                        tileMapProvider = restartTileProviderForViewportIntent(
+                            mapView = mapView,
+                            context = context,
+                            tileSource = tileSource,
+                            tileWriter = tileCacheWriter,
+                            reason = "viewport-update",
+                            zoom = currentTileZoom
+                        )
+                    }
                 }
 
                 val center = mapView.mapCenter
                 val viewportSignature = String.format(
                     Locale.US,
-                    "%.5f|%.5f|%.3f|%d|%d|%s",
+                    "%.5f|%.5f|%.3f|%d|%d|%s|contours=%s",
                     center.latitude,
                     center.longitude,
                     mapView.zoomLevelDouble,
                     mapView.width,
                     mapView.height,
-                    tileSource.name()
+                    tileSource.name(),
+                    contourOverlayEnabled
                 )
                 if (lastViewportSignature != viewportSignature) {
                     lastViewportSignature = viewportSignature
                     tileIoActiveUntilMs = uiNowWallMsec + TILE_IO_ACTIVE_GRACE_MS
                 }
                 val suppressLiveMapNetwork = offlinePrepInFlight && baseLayer == BaseLayerOption.OpenStreetMap
-                val tileNetworkActive = !suppressLiveMapNetwork && (uiNowWallMsec <= tileIoActiveUntilMs)
+                val tileNetworkActive = visibleTileNetworkActive(suppressLiveMapNetwork)
                 if (mapView.useDataConnection() != tileNetworkActive) {
                     mapView.setUseDataConnection(tileNetworkActive)
                 }
                 if (tileMapProvider.useDataConnection() != tileNetworkActive) {
                     tileMapProvider.setUseDataConnection(tileNetworkActive)
                 }
+                tileMapProvider.setOfflineFirst(offlineFirstForVisibleTiles(tileNetworkActive))
                 tileMapProvider.setCacheLookupEnabled(true)
+                contourTileMapProvider.setUseDataConnection(tileNetworkActive)
+                contourTileMapProvider.setOfflineFirst(offlineFirstForVisibleTiles(tileNetworkActive))
+                contourTileMapProvider.setCacheLookupEnabled(true)
 
                 if (managedOverlays.isNotEmpty()) {
                     mapView.overlays.removeAll(managedOverlays)
@@ -2627,6 +2723,15 @@ internal fun SplitMapPane(
                 )
                 mapView.overlays.add(tapOverlay)
                 managedOverlays.add(tapOverlay)
+
+                if (contourOverlayEnabled) {
+                    val contourOverlay = TilesOverlay(contourTileMapProvider, context).apply {
+                        setLoadingDrawable(ColorDrawable(AndroidColor.TRANSPARENT))
+                        setUseDataConnection(tileNetworkActive)
+                    }
+                    mapView.overlays.add(contourOverlay)
+                    managedOverlays.add(contourOverlay)
+                }
 
                 artifactOverlayState.polygons.forEach { polygonSpec ->
                     val polygonFill = Polygon(mapView).apply {
@@ -2938,6 +3043,7 @@ internal fun SplitMapPane(
                     )
                     if (localDeviceMarkerStats != lastLocalDeviceMarkerStats) {
                         lastLocalDeviceMarkerStats = localDeviceMarkerStats
+                        localDeviceLocationMissingLogged = false
                         if (CTDebugEnabled(MAP_PANE_TAG)) {
                             CTDebug(
                                 MAP_PANE_TAG,
@@ -2945,6 +3051,9 @@ internal fun SplitMapPane(
                             )
                         }
                     }
+                } else if (!localDeviceLocationMissingLogged) {
+                    localDeviceLocationMissingLogged = true
+                    CTDebug(MAP_PANE_TAG, "Local device marker skipped: CaltopoMap.GetMyLocation() unavailable.")
                 }
 
                 val iconLimitAglM = AGL_LIMIT_FT * FT_TO_METERS
@@ -3438,6 +3547,7 @@ internal fun SplitMapPane(
                 DropdownMenuItem(
                     text = { Text("Download Map...") },
                     onClick = {
+                        offlinePrepIncludeContours = contourOverlayEnabled
                         settingsMenuExpanded = false
                         showOfflinePrepDialog = true
                     }
@@ -3573,6 +3683,14 @@ internal fun SplitMapPane(
                         }
                     )
                 }
+                DropdownMenuItem(
+                    text = { Text(if (contourOverlayEnabled) "Contours: On" else "Contours: Off") },
+                    onClick = {
+                        contourOverlayEnabled = !contourOverlayEnabled
+                        MapCacheSettings.setContourOverlayEnabled(context, contourOverlayEnabled)
+                        baseLayerMenuExpanded = false
+                    }
+                )
             }
         }
 
@@ -3807,12 +3925,22 @@ internal fun SplitMapPane(
                                 }
                             }
                         }
-                        Column(
+                        val offlinePrepOptionsScrollState = rememberScrollState()
+                        var offlinePrepOptionsViewportHeightPx by remember { mutableIntStateOf(0) }
+                        Box(
                             modifier = Modifier
                                 .heightIn(max = 420.dp)
-                                .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                                .fillMaxWidth()
+                                .clipToBounds()
+                                .onSizeChanged { offlinePrepOptionsViewportHeightPx = it.height }
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .verticalScroll(offlinePrepOptionsScrollState)
+                                    .padding(end = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
                         Text("Area")
                         OfflinePrepAreaMode.entries.forEach { area ->
                             val enabled = area != OfflinePrepAreaMode.MapBoundary || offlineBoundaryOptions.isNotEmpty()
@@ -3900,6 +4028,14 @@ internal fun SplitMapPane(
                             )
                             Text("Include DEM tiles (USGS 1° GeoTIFF, ~25–54 MB/tile)")
                         }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = offlinePrepIncludeContours,
+                                onCheckedChange = { if (!offlinePrepInFlight) offlinePrepIncludeContours = it },
+                                enabled = !offlinePrepInFlight
+                            )
+                            Text("Include contour tiles")
+                        }
                         if (maximizeThroughputBlockedForOsm) {
                             Text(
                                 "OpenStreetMap offline prep uses a conservative single-request mode with the app's OSM user agent.",
@@ -3920,7 +4056,9 @@ internal fun SplitMapPane(
                                 "Estimate: calculating..."
                             } else {
                                 "Estimate: " +
-                                    "tiles=${offlinePrepEstimate.tileEstimate} (~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedTileCacheMb)} MB), " +
+                                    "tiles=${offlinePrepEstimate.tileEstimate}" +
+                                    (if (offlinePrepIncludeContours) " incl. contours" else "") +
+                                    " (~${"%.1f".format(Locale.US, offlinePrepEstimate.estimatedTileCacheMb)} MB), " +
                                     "dem=${offlinePrepEstimate.demEstimate} tile(s) (~${"%.0f".format(Locale.US, offlinePrepEstimate.estimatedDemCacheMb)} MB)"
                             },
                             fontSize = 12.sp
@@ -4002,7 +4140,81 @@ internal fun SplitMapPane(
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             }
                         )
-                    }
+                            }
+                            val maxScroll = offlinePrepOptionsScrollState.maxValue
+                            if (maxScroll > 0 && offlinePrepOptionsViewportHeightPx > 0) {
+                                val density = LocalDensity.current
+                                val viewportDp = with(density) { offlinePrepOptionsViewportHeightPx.toDp() }
+                                val surfaceColor = MaterialTheme.colorScheme.surface
+                                if (offlinePrepOptionsScrollState.value > 0) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopStart)
+                                            .fillMaxWidth()
+                                            .height(18.dp)
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = listOf(
+                                                        surfaceColor,
+                                                        Color.Transparent
+                                                    )
+                                                )
+                                            )
+                                    )
+                                }
+                                if (offlinePrepOptionsScrollState.value < maxScroll) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .fillMaxWidth()
+                                            .height(22.dp)
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = listOf(
+                                                        Color.Transparent,
+                                                        surfaceColor
+                                                    )
+                                                )
+                                            )
+                                    )
+                                }
+                                val estimatedContentHeightPx = offlinePrepOptionsViewportHeightPx + maxScroll
+                                val thumbHeightPx = (
+                                    offlinePrepOptionsViewportHeightPx.toFloat() *
+                                        offlinePrepOptionsViewportHeightPx.toFloat() /
+                                        estimatedContentHeightPx.toFloat()
+                                    ).toInt().coerceAtLeast(with(density) { 36.dp.roundToPx() })
+                                    .coerceAtMost(offlinePrepOptionsViewportHeightPx)
+                                val thumbOffsetPx = if (maxScroll <= 0) {
+                                    0
+                                } else {
+                                    ((offlinePrepOptionsViewportHeightPx - thumbHeightPx).toFloat() *
+                                        offlinePrepOptionsScrollState.value.toFloat() /
+                                        maxScroll.toFloat()).toInt()
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.CenterEnd)
+                                        .width(6.dp)
+                                        .height(viewportDp)
+                                        .background(
+                                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
+                                            CircleShape
+                                        )
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(y = with(density) { thumbOffsetPx.toDp() })
+                                        .width(6.dp)
+                                        .height(with(density) { thumbHeightPx.toDp() })
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.82f),
+                                            CircleShape
+                                        )
+                                )
+                            }
+                        }
                     }
                 },
                 confirmButton = {
@@ -4090,6 +4302,14 @@ internal fun SplitMapPane(
                 lineHeight = 8.sp,
                 color = MaterialTheme.colorScheme.onSurface
             )
+            if (contourOverlayEnabled) {
+                Text(
+                    text = "Contours: USGS The National Map",
+                    fontSize = 8.sp,
+                    lineHeight = 8.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
         }
     }
 }

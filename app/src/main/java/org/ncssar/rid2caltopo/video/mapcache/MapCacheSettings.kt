@@ -11,6 +11,7 @@ internal object MapCacheSettings {
     private const val MAX_CACHE_BYTES_KEY = "max_cache_bytes_v1"
     private const val MAX_TILE_AGE_DAYS_KEY = "max_tile_age_days_v1"
     private const val BASE_LAYER_KEY = "base_layer_v1"
+    private const val CONTOUR_OVERLAY_ENABLED_KEY = "contour_overlay_enabled_v1"
 
     private const val DECIMAL_GB_BYTES = 1_000_000_000L
     private const val MIN_CACHE_BYTES = 100_000_000L
@@ -62,6 +63,19 @@ internal object MapCacheSettings {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(BASE_LAYER_KEY, baseLayer.name)
+            .apply()
+    }
+
+    fun contourOverlayEnabled(context: Context): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(CONTOUR_OVERLAY_ENABLED_KEY, false)
+    }
+
+    fun setContourOverlayEnabled(context: Context, enabled: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(CONTOUR_OVERLAY_ENABLED_KEY, enabled)
             .apply()
     }
 

@@ -878,12 +878,45 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
                         PackageManager.PERMISSION_GRANTED)) {
             if (mFusedLocationClient != null && locationRequest != null && locationCallback != null) {
+                CTDebug(TAG, "initialize(): requesting fused location updates.")
                 mFusedLocationClient?.requestLocationUpdates(
                     locationRequest!!,
                     locationCallback!!,
                     Looper.getMainLooper()
-                )
+                )?.addOnSuccessListener {
+                    CTDebug(TAG, "initialize(): fused location updates registered.")
+                }?.addOnFailureListener { e ->
+                    CTError(TAG, "initialize(): requestLocationUpdates failed.", e)
+                }
+                mFusedLocationClient?.lastLocation
+                    ?.addOnSuccessListener { location ->
+                        if (location == null) {
+                            CTDebug(TAG, "initialize(): fused lastLocation unavailable.")
+                            return@addOnSuccessListener
+                        }
+                        CTDebug(
+                            TAG,
+                            String.format(
+                                Locale.US,
+                                "initialize(): applying fused lastLocation lat=%.7f lng=%.7f accuracy=%.3fm ageMs=%d",
+                                location.latitude,
+                                location.longitude,
+                                location.accuracy,
+                                (System.currentTimeMillis() - location.time).coerceAtLeast(0L)
+                            )
+                        )
+                        val hadDeviceLocationBefore = CaltopoMap.GetDeviceLocation() != null
+                        CaltopoMap.UpdateMyLocation(location)
+                        if (!hadDeviceLocationBefore && CaltopoMap.GetDeviceLocation() != null) {
+                            NotamCenter.requestImmediateRefresh()
+                        }
+                    }
+                    ?.addOnFailureListener { e ->
+                        CTError(TAG, "initialize(): fused lastLocation failed.", e)
+                    }
             }
+        } else {
+            CTError(TAG, "initialize(): location permissions unavailable; fused location updates not requested.")
         }
         if (!RestartingFlag || !ScanningService.IsRunning()) {
             CTDebug(

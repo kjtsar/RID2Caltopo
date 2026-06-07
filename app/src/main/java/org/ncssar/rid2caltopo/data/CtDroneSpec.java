@@ -569,6 +569,13 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public static void BumpInvalidWaypointCount() {InvalidWaypointCount++;}
     public static double MyLat = 0.0F;
     public static double MyLng = 0.0F;
+
+    public static void UpdateMyLocationBaseline(double lat, double lng) {
+        if (!Double.isFinite(lat) || !Double.isFinite(lng)) return;
+        if (lat == 0.0F || lng == 0.0F) return;
+        MyLat = lat;
+        MyLng = lng;
+    }
     // Reject altitude spikes/drops that imply unrealistic vertical rates for small UAS.
 
     private void updateStationaryRepeatState(double lat, double lng, long timestampInMilliseconds) {
@@ -644,9 +651,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
 
         Location myLocation = CaltopoMap.GetMyLocation();
-        if (MyLat == 0.0F && null != myLocation && myLocation.hasAccuracy()) {
-            MyLat = myLocation.getLatitude();
-            MyLng = myLocation.getLongitude();
+        if (null != myLocation && myLocation.hasAccuracy()) {
+            UpdateMyLocationBaseline(myLocation.getLatitude(), myLocation.getLongitude());
         }
 
         // N.B: Autel Evo Max 4N has demonstrated willingness to publish wild coordinates,

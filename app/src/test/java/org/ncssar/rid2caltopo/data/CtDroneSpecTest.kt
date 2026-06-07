@@ -1,9 +1,29 @@
 package org.ncssar.rid2caltopo.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 
 class CtDroneSpecTest {
+    @Before
+    fun setUp() {
+        clearLocationState()
+    }
+
+    @After
+    fun tearDown() {
+        clearLocationState()
+    }
+
+    private fun clearLocationState() {
+        CtDroneSpec.MyLat = 0.0
+        CtDroneSpec.MyLng = 0.0
+        CaltopoMap.MyLocation = null
+        CaltopoMap.SetMyLocationOverride(null)
+    }
+
     @Test
     fun guessMakeModel_matchesKnownSerialPrefixes() {
         assertEquals("DJI Mini 4 Pro", CtDroneSpec.GuessMakeModel("1581F6Z9C24BH0036EJL"))
@@ -61,6 +81,28 @@ class CtDroneSpecTest {
             "1sar1002-02DjMtrc4td",
             CtDroneSpec.BuildMappedId("1sar1002-02", "DJI Matrice 4TD", "1581F8HGX256G00A0JPU")
         )
+    }
+
+    @Test
+    fun checkNewWaypoint_acceptsAfterTabletLocationBaselineRefresh() {
+        CtDroneSpec.MyLat = 38.0
+        CtDroneSpec.MyLng = -120.0
+        CtDroneSpec.UpdateMyLocationBaseline(39.0719204, -121.5505101)
+        val drone = CtDroneSpec("RID123")
+
+        val accepted = drone.checkNewWaypoint(
+            39.0719113,
+            -121.5508618,
+            100.0,
+            1_000L,
+            1_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+
+        assertTrue(accepted)
+        assertEquals(39.0719204, CtDroneSpec.MyLat, 0.000001)
+        assertEquals(-121.5505101, CtDroneSpec.MyLng, 0.000001)
     }
 
     @Test

@@ -1163,6 +1163,9 @@ public class CaltopoMap {
     public static void UpdateMyLocation(@NonNull android.location.Location location) {
         boolean updateNeeded = ( null == MyLocation || !MyLocation.hasAccuracy() );
         double distanceInMeters = 0F;
+        if (location.hasAccuracy()) {
+            CtDroneSpec.UpdateMyLocationBaseline(location.getLatitude(), location.getLongitude());
+        }
         if (null != MyLocation && MyLocation.hasAccuracy() && location.hasAccuracy()) {
             distanceInMeters = DistanceFromMeInMeters(location.getLatitude(), location.getLongitude());
             if ((location.getAccuracy() < MyLocation.getAccuracy()) ||

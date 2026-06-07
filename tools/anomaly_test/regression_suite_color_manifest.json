@@ -1,0 +1,99 @@
+{
+  "schema_version": 2,
+  "suite_name": "Visible-Color Regression Suite (Seed Manifest)",
+  "notes": [
+    "This manifest is intentionally seeded with profiles only.",
+    "Add visible-light source clips under source_clips and reviewed excerpts under excerpts as color videos land in app/src/test/resources/vidcap/.",
+    "Keeping color cases in a separate manifest avoids accidentally folding them into the existing black-hot baseline suite."
+  ],
+  "profiles": [
+    {
+      "id": "visible-color-baseline",
+      "label": "Visible color baseline",
+      "description": "Color-outlier-first visible-light profile with motion support enabled and thermal disabled.",
+      "detector_args": [
+        "-a",
+        "5",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.8",
+        "--registration",
+        "affine",
+        "--stride",
+        "1"
+      ]
+    },
+    {
+      "id": "visible-color-dense-gold",
+      "label": "Visible color dense gold mode",
+      "description": "Dense visible-light comparison profile that forces 1px appearance sampling for profiling and reviewed replay.",
+      "detector_args": [
+        "-a",
+        "5",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.8",
+        "--registration",
+        "affine",
+        "--stride",
+        "1",
+        "--pixel-step",
+        "1"
+      ]
+    }
+  ],
+  "source_clips": [
+    {
+      "id": "color1",
+      "label": "Color1.mp4",
+      "source_path": "app/src/test/resources/vidcap/Color1.mp4",
+      "preserve_full_source": true,
+      "notes": "Full visible-light source clip retained for color profiling and later reviewed excerpt selection."
+    },
+    {
+      "id": "color2",
+      "label": "Color2.mp4",
+      "source_path": "app/src/test/resources/vidcap/Color2.mp4",
+      "preserve_full_source": true,
+      "notes": "Full visible-light source clip retained for color profiling and later reviewed excerpt selection."
+    },
+    {
+      "id": "color3",
+      "label": "Color3.mp4",
+      "source_path": "app/src/test/resources/vidcap/Color3.mp4",
+      "preserve_full_source": true,
+      "notes": "Full visible-light source clip retained for color profiling and later reviewed excerpt selection."
+    },
+    {
+      "id": "red1",
+      "label": "Red1.mp4",
+      "source_path": "app/src/test/resources/vidcap/Red1.mp4",
+      "preserve_full_source": true,
+      "notes": "Short visible-light clip with a clearly contrasted red target and first reviewed color-AD functional annotations."
+    }
+  ],
+  "excerpts": [
+    {
+      "id": "red1-opening-target-track",
+      "label": "Red1 reviewed opening target track",
+      "source_clip_id": "red1",
+      "start_s": 0.0,
+      "end_s": 5.1,
+      "review_status": "reviewed",
+      "review_path": "app/src/test/resources/vidcap/Red1.review.json",
+      "tags": [
+        "correct_detection",
+        "missed_target",
+        "easy_true_target",
+        "visible_color"
+      ],
+      "notes": "First reviewed visible-color regression case covering a short red target track that should be recoverable by color anomaly detection."
+    }
+  ]
+}

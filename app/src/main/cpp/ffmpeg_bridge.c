@@ -3963,7 +3963,17 @@ static void *ad_thread_main(void *arg) {
 
         bool skipped = false;
 
-        if (!process_enabled || packet.generation_id != generation_id) {
+        bool bypass_for_pressure = false;
+        if (process_enabled && packet.generation_id == generation_id) {
+            if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALL) {
+                bypass_for_pressure = true;
+            } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALTERNATE &&
+                       (session->ad_pressure_frame_counter % 2) == 0) {
+                bypass_for_pressure = true;
+            }
+        }
+
+        if (!process_enabled || packet.generation_id != generation_id || bypass_for_pressure) {
             packet.analyzed = false;
             skipped = true;
             session->ad_worker_skipped_frame_count += 1;
@@ -5108,10 +5118,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                     if (!enqueued) {
                         if (!local_file_source && ad_enabled && !enqueued) {
                             ct_warn(TAG,
-                                    "ad input queue full id=%lld designator=%s; disabling anomaly path",
+                                    "ad input queue full id=%lld designator=%s; forwarding frame without AD",
                                     (long long) session->session_id,
                                     session->designator);
-                            disable_anomaly_runtime(session, AD_PAUSE_REASON_OVERLOAD);
                             pthread_mutex_lock(&session->render_lock);
                             enqueued = enqueue_render_frame(
                                     session,
@@ -5132,9 +5141,9 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                         false,
                                         ad_thread_started,
                                         ad_sync_ready,
-                                        AD_RUNTIME_MODE_BYPASSED,
+                                        runtime_mode,
                                         "fallback-render",
-                                        "queue-full-runtime-disabled");
+                                        "live-ad-pressure");
                                 pthread_cond_signal(&session->render_cond);
                             }
                             pthread_mutex_unlock(&session->render_lock);

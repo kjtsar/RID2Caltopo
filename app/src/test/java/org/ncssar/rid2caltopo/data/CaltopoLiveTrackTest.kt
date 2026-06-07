@@ -117,6 +117,25 @@ class CaltopoLiveTrackTest {
         assertEquals(drone.remoteId, peerCoordinator.latestEventOfKind("onDroneLost")?.summary)
     }
 
+    @Test
+    fun finishTrackWithoutLiveTrackId_clearsBufferedPointsBeforeReuse() {
+        val drone = CtDroneSpec("RID-BUFFER")
+        setDroneTrackLabel(drone, "RID-BUFFER_122000Apr28")
+        val liveTrack = CaltopoLiveTrack(drone, 39.1, -121.1, 500.0, 1_000L)
+        liveTrack.mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus.up, null, null)
+        liveTrack.publishDirect(39.2, -121.2, 501L, 2_000L)
+
+        liveTrack.setLocalOwner(false)
+        liveTrack.finishTrack("test segment finished without live track id")
+
+        assertEquals(0, queuedPointCount(liveTrack))
+
+        setDroneTrackLabel(drone, "RID-BUFFER_122500Apr28")
+        liveTrack.startNewTrack(39.3, -121.3, 502.0, 3_000L)
+
+        assertEquals(1, queuedPointCount(liveTrack))
+    }
+
     private fun setDroneTrackLabel(drone: CtDroneSpec, trackLabel: String) {
         val mappedId = trackLabel.substringBefore('_')
         CtDroneSpec::class.java.getDeclaredField("mappedId").apply {
@@ -141,6 +160,14 @@ class CaltopoLiveTrackTest {
             isAccessible = true
             set(target, value)
         }
+    }
+
+    private fun queuedPointCount(liveTrack: CaltopoLiveTrack): Int {
+        val field = CaltopoLiveTrack::class.java.getDeclaredField("linePoints").apply {
+            isAccessible = true
+        }
+        val points = field.get(liveTrack) as Collection<*>
+        return points.size
     }
 
     private fun startLiveTrackCompleteMethod(): Method =

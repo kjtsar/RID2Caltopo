@@ -5,15 +5,21 @@
 
 #include <math.h>
 
+static bool anomaly_target_revisit_track_is_eligible(
+        const anomaly_target_track_t *track) {
+    return track != NULL &&
+           track->active &&
+           (track->forced_revisit ||
+            track->miss_count > 0 ||
+            track->confidence >= ANOMALY_TARGET_REVISIT_CONFIDENCE_MIN);
+}
+
 int anomaly_target_revisit_track_count(const anomaly_state_t *state) {
     if (state == NULL) return 0;
     int count = 0;
     for (int i = 0; i < ANOMALY_MAX_TARGET_TRACKS; i++) {
         const anomaly_target_track_t *track = &state->target_tracks[i];
-        if (!track->active) continue;
-        if (track->forced_revisit ||
-            track->miss_count > 0 ||
-            track->confidence >= ANOMALY_TARGET_REVISIT_CONFIDENCE_MIN) {
+        if (anomaly_target_revisit_track_is_eligible(track)) {
             count++;
         }
     }
@@ -79,7 +85,7 @@ void anomaly_target_revisit_annotate_roi_cells(
     }
     for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
         const anomaly_target_track_t *track = &state->target_tracks[ti];
-        if (!track->active || !track->forced_revisit) continue;
+        if (!anomaly_target_revisit_track_is_eligible(track)) continue;
         float revisit_radius = anomaly_target_revisit_radius_for_track(track, min_hits);
         float x0_norm = clamp01f(track->center_x_norm - revisit_radius);
         float x1_norm = clamp01f(track->center_x_norm + revisit_radius);
@@ -118,7 +124,7 @@ bool anomaly_target_revisit_point_inside_gate(
     float best_radius = 0.0f;
     for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
         const anomaly_target_track_t *track = &state->target_tracks[ti];
-        if (!track->active || !track->forced_revisit) continue;
+        if (!anomaly_target_revisit_track_is_eligible(track)) continue;
         float radius = anomaly_target_revisit_radius_for_track(track, min_hits);
         float dx = x_norm - track->center_x_norm;
         float dy = y_norm - track->center_y_norm;

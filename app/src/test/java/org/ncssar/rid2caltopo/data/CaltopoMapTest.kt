@@ -126,6 +126,22 @@ class CaltopoMapTest {
     }
 
     @Test
+    fun resetMapConnection_shutsDownPendingLiveTrackWithoutLiveTrackId() {
+        val drone = CtDroneSpec("RID-PENDING-RESET")
+        setDroneTrackLabel(drone, "RID-PENDING-RESET_123000Apr28")
+        val liveTrack = CaltopoLiveTrack(drone, 39.1, -121.1, 500.0, 1_000L)
+        liveTrack.mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus.up, null, null)
+        liveTrack.publishDirect(39.2, -121.2, 501L, 2_000L)
+
+        CaltopoMap.ResetMapConnection(0L)
+
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        assertEquals(1, peerCoordinator.countEvents("onDroneLost"))
+        assertEquals(0, queuedPointCount(liveTrack))
+        assertFalse(liveTrack.isActive)
+    }
+
+    @Test
     fun updateMyLocation_startsStandaloneTrackerWithEmptyMapString() {
         mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
         mapNodeField.set(null, null)
@@ -321,5 +337,25 @@ class CaltopoMapTest {
         state.droneSpecTable[drone.remoteId] = drone
         CaltopoMap.OnDroneSpecStatusChanged(true)
         return drone
+    }
+
+    private fun setDroneTrackLabel(drone: CtDroneSpec, trackLabel: String) {
+        val mappedId = trackLabel.substringBefore('_')
+        CtDroneSpec::class.java.getDeclaredField("mappedId").apply {
+            isAccessible = true
+            set(drone, mappedId)
+        }
+        CtDroneSpec::class.java.getDeclaredField("trackLabel").apply {
+            isAccessible = true
+            set(drone, trackLabel)
+        }
+    }
+
+    private fun queuedPointCount(liveTrack: CaltopoLiveTrack): Int {
+        val field = CaltopoLiveTrack::class.java.getDeclaredField("linePoints").apply {
+            isAccessible = true
+        }
+        val points = field.get(liveTrack) as Collection<*>
+        return points.size
     }
 }

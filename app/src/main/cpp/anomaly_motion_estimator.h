@@ -168,6 +168,11 @@ bool anomaly_motion_estimator_sidecar_tile_displacement_px(
         float *dx_px_out,
         float *dy_px_out);
 
+float anomaly_motion_estimator_sidecar_displacement_magnitude_px(
+        int dx,
+        int dy,
+        int motion_step);
+
 void anomaly_motion_estimator_estimate_sidecar(
         const anomaly_motion_estimator_sidecar_input_t *input,
         anomaly_debug_movement_t                      *movement_out);
@@ -233,6 +238,12 @@ bool anomaly_motion_estimator_query_snapshot_at_norm(
         float                                    x_norm,
         float                                    y_norm,
         anomaly_debug_movement_tile_t           *tile_out);
+
+float anomaly_motion_estimator_tile_flow_magnitude_px(
+        const anomaly_debug_movement_tile_t *tile);
+
+float anomaly_motion_estimator_tile_residual_independent_score(
+        const anomaly_debug_movement_tile_t *tile);
 
 float anomaly_motion_estimator_tile_independent_score(
         const anomaly_debug_movement_tile_t *tile);

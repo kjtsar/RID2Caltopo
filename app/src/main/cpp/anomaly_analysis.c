@@ -526,6 +526,76 @@ static void insert_color_blob_candidate(
         anomaly_color_blob_target_trace_t *target_trace,
         bool candidate_is_target);
 
+static bool color_component_near_predicted_color_target(
+        const anomaly_state_t *state,
+        int                    roi_x0,
+        int                    roi_y0,
+        int                    sample_step,
+        int                    frame_w,
+        int                    frame_h,
+        int                    min_x,
+        int                    min_y,
+        int                    max_x,
+        int                    max_y,
+        int                    peak_x,
+        int                    peak_y,
+        int                    compact_target_span_limit) {
+    if (state == NULL || frame_w <= 1 || frame_h <= 1 || max_x < min_x || max_y < min_y) {
+        return false;
+    }
+    int step = sample_step > 0 ? sample_step : 1;
+    int target_gate_cells = compact_target_span_limit + 2;
+    if (target_gate_cells < 4) target_gate_cells = 4;
+    if (state->acc_active[0] && state->acc_hits[0] >= 2 && state->acc_hold[0] > 0) {
+        int acc_px = clamp_i32((int)lroundf(state->acc_cx[0] * (float)(frame_w - 1)), 0, frame_w - 1);
+        int acc_py = clamp_i32((int)lroundf(state->acc_cy[0] * (float)(frame_h - 1)), 0, frame_h - 1);
+        int acc_sx = (acc_px - roi_x0 + (step / 2)) / step;
+        int acc_sy = (acc_py - roi_y0 + (step / 2)) / step;
+        int dx = 0;
+        if (acc_sx < min_x) dx = min_x - acc_sx;
+        else if (acc_sx > max_x) dx = acc_sx - max_x;
+        int dy = 0;
+        if (acc_sy < min_y) dy = min_y - acc_sy;
+        else if (acc_sy > max_y) dy = acc_sy - max_y;
+        int chebyshev = dx > dy ? dx : dy;
+        int acc_gate = target_gate_cells + 3;
+        if (chebyshev <= acc_gate) return true;
+
+        int peak_dx = abs(acc_sx - peak_x);
+        int peak_dy = abs(acc_sy - peak_y);
+        int peak_dist = peak_dx > peak_dy ? peak_dx : peak_dy;
+        if (peak_dist <= acc_gate + 1) return true;
+    }
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        const anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!track->active || track->algorithm != ANOMALY_ALGO_COLOR) continue;
+        if (!track->publish_confirmed && track->hit_count < 2) continue;
+        if (track->confidence < 0.22f) continue;
+        int track_px = clamp_i32((int)lroundf(track->center_x_norm * (float)(frame_w - 1)), 0, frame_w - 1);
+        int track_py = clamp_i32((int)lroundf(track->center_y_norm * (float)(frame_h - 1)), 0, frame_h - 1);
+        int track_sx = (track_px - roi_x0 + (step / 2)) / step;
+        int track_sy = (track_py - roi_y0 + (step / 2)) / step;
+        int dx = 0;
+        if (track_sx < min_x) dx = min_x - track_sx;
+        else if (track_sx > max_x) dx = track_sx - max_x;
+        int dy = 0;
+        if (track_sy < min_y) dy = min_y - track_sy;
+        else if (track_sy > max_y) dy = track_sy - max_y;
+        int chebyshev = dx > dy ? dx : dy;
+        float support_gate_px = fmaxf(track->support_radius_norm, 0.0f) *
+                                (float)(frame_w > frame_h ? frame_w : frame_h);
+        int support_gate_cells = (int)ceilf(support_gate_px / (float)step) + 1;
+        int gate = target_gate_cells > support_gate_cells ? target_gate_cells : support_gate_cells;
+        if (chebyshev <= gate) return true;
+
+        int peak_dx = abs(track_sx - peak_x);
+        int peak_dy = abs(track_sy - peak_y);
+        int peak_dist = peak_dx > peak_dy ? peak_dx : peak_dy;
+        if (peak_dist <= gate + 1) return true;
+    }
+    return false;
+}
+
 static void record_color_target_trace_component(
         anomaly_color_blob_target_trace_t      *target_trace,
         int                                     sx,
@@ -987,7 +1057,8 @@ static bool build_color_blob_candidate(
         float *reject_span_out,
         float *reject_ring_fraction_out,
         float *reject_support_mass_out,
-        float *reject_quality_out) {
+        float *reject_quality_out,
+        bool allow_target_centered_area_rescue) {
     if (reject_reason_out != NULL) *reject_reason_out = ANOMALY_COLOR_BLOB_REJECT_NONE;
     if (reject_area_out != NULL) *reject_area_out = 0.0f;
     if (reject_span_out != NULL) *reject_span_out = 0.0f;
@@ -1257,8 +1328,15 @@ static bool build_color_blob_candidate(
         float max_small_span_px = fmaxf(2.0f, small_target_limit_px * 1.15f);
         float max_small_area_cells =
             fmaxf(1.0f, small_target_span_cells * small_target_span_cells * 1.15f);
-        if (dense_component.span_px > max_small_span_px ||
-            dense_area_cells > max_small_area_cells) {
+        bool target_centered_area_rescue =
+            allow_target_centered_area_rescue &&
+            dense_component.uniqueness >= 0.72f &&
+            dense_component.ring_fraction <= 0.08f &&
+            dense_component.span_px <= fmaxf(max_small_span_px, small_target_limit_px * 1.75f) &&
+            dense_area_cells <= fmaxf(max_small_area_cells, small_target_span_cells * small_target_span_cells * 4.0f);
+        if ((dense_component.span_px > max_small_span_px ||
+             dense_area_cells > max_small_area_cells) &&
+            !target_centered_area_rescue) {
             if (reject_reason_out != NULL) *reject_reason_out = ANOMALY_COLOR_BLOB_REJECT_AREA;
             if (reject_area_out != NULL) *reject_area_out = dense_area_cells;
             if (reject_span_out != NULL) *reject_span_out = dense_span_cells;
@@ -1610,14 +1688,15 @@ static int rescue_color_blob_subdivision_candidates(
                 small_target_limit_px,
                 target_span_cells,
                 fresh_max_blob_area,
-                compact_target_span_limit,
-                &candidate,
-                &reject_reason,
-                &reject_area,
-                &reject_span,
-                &reject_ring_fraction,
-                &reject_support_mass,
-                &reject_quality);
+            compact_target_span_limit,
+            &candidate,
+            &reject_reason,
+            &reject_area,
+            &reject_span,
+            &reject_ring_fraction,
+            &reject_support_mass,
+            &reject_quality,
+            false);
         }
         if (!accepted && seed_support >= 2.50f) {
             double singleton_support = (double)seed_support;
@@ -1658,7 +1737,8 @@ static int rescue_color_blob_subdivision_candidates(
                 &reject_span,
                 &reject_ring_fraction,
                 &reject_support_mass,
-                &reject_quality);
+                &reject_quality,
+                seed_is_target);
             if (accepted) {
                 lobe_contains_target = seed_is_target;
                 peak_x = seed_sx;
@@ -2201,6 +2281,7 @@ static void build_color_support_map(
 
 static void extract_color_blob_candidates(
         const anomaly_config_t *cfg,
+        const anomaly_state_t  *state,
         const anomaly_roi_state_t *roi_state,
         anomaly_rescan_mode_t   rescan_mode,
         int                     color_frontend_mode,
@@ -2545,6 +2626,111 @@ static void extract_color_blob_candidates(
                         }
                         continue;
                     }
+                    bool target_centered_rescue =
+                        peak_support >= 2.50f &&
+                        area <= fresh_max_blob_area * 8 &&
+                        component_span <= small_target_limit_cells + 3 &&
+                        (component_contains_target ||
+                         color_component_near_predicted_color_target(
+                            state,
+                            roi_x0,
+                            roi_y0,
+                            sample_step,
+                            frame_w,
+                            frame_h,
+                            min_x,
+                            min_y,
+                            max_x,
+                            max_y,
+                            peak_x,
+                            peak_y,
+                            compact_target_span_limit));
+                    if (target_centered_rescue) {
+                        int rescue_radius = target_span_cells <= 2 ? 1 : 2;
+                        int rescue_min_x = clamp_i32(peak_x - rescue_radius, min_x, max_x);
+                        int rescue_max_x = clamp_i32(peak_x + rescue_radius, min_x, max_x);
+                        int rescue_min_y = clamp_i32(peak_y - rescue_radius, min_y, max_y);
+                        int rescue_max_y = clamp_i32(peak_y + rescue_radius, min_y, max_y);
+                        int rescue_span_w = rescue_max_x - rescue_min_x + 1;
+                        int rescue_span_h = rescue_max_y - rescue_min_y + 1;
+                        int rescue_span = rescue_span_w > rescue_span_h ? rescue_span_w : rescue_span_h;
+                        int rescue_area = rescue_span_w * rescue_span_h;
+                        memset(&candidate, 0, sizeof(candidate));
+                        candidate.candidate.sg_x = peak_x;
+                        candidate.candidate.sg_y = peak_y;
+                        candidate.candidate.pixel_x = clamp_i32(roi_x0 + peak_x * sample_step, 0, frame_w - 1);
+                        candidate.candidate.pixel_y = clamp_i32(roi_y0 + peak_y * sample_step, 0, frame_h - 1);
+                        candidate.candidate.proposal_score = peak_support;
+                        candidate.candidate.thermal_score = 0.0f;
+                        candidate.candidate.color_score = fmaxf(cfg->score_threshold + 0.18f, peak_support + 0.92f);
+                        candidate.retention_rank = 0.86f;
+                        candidate.retention_rank_valid = true;
+                        candidate.hist_rarity_score = 0.0f;
+                        if (roi_state != NULL && roi_state->color_raw_score != NULL) {
+                            size_t peak_idx = (size_t)peak_y * (size_t)sg_w + (size_t)peak_x;
+                            if (peak_idx < (size_t)sg_w * (size_t)sg_h) {
+                                candidate.hist_rarity_score = roi_state->color_raw_score[peak_idx];
+                            }
+                        }
+                        candidate.area = (float)rescue_area;
+                        candidate.span = (float)rescue_span;
+                        candidate.fill = 0.82f;
+                        candidate.center_share = 0.75f;
+                        candidate.quality = 0.92f;
+                        candidate.peak_support = peak_support;
+                        candidate.mean_support = area > 0 ? (float)(sum_support / (double)area) : peak_support;
+                        candidate.isolation_score = 0.86f;
+                        candidate.ring_fraction = 0.04f;
+                        candidate.support_mass = 0.08f;
+                        candidate.min_x = rescue_min_x;
+                        candidate.min_y = rescue_min_y;
+                        candidate.max_x = rescue_max_x;
+                        candidate.max_y = rescue_max_y;
+                        if (dense_verify_component_count_out != NULL) {
+                            (*dense_verify_component_count_out)++;
+                        }
+                        if (component_contains_target && target_trace != NULL) {
+                            record_color_target_trace_component(
+                                target_trace,
+                                sx,
+                                sy,
+                                peak_x,
+                                peak_y,
+                                candidate.min_x,
+                                candidate.min_y,
+                                candidate.max_x,
+                                candidate.max_y,
+                                rescue_area,
+                                sum_support,
+                                peak_support,
+                                &candidate,
+                                true,
+                                ANOMALY_COLOR_BLOB_REJECT_NONE,
+                                0.0f,
+                                0.0f,
+                                0.0f,
+                                0.0f);
+                        }
+                        insert_color_blob_candidate(
+                                out_candidates,
+                                out_count,
+                                &candidate,
+                                target_trace,
+                                component_contains_target);
+                        anomaly_color_suppress_seed_region(
+                            visited,
+                            sg_w,
+                            sg_h,
+                            active_min_sx,
+                            active_min_sy,
+                            active_max_sx,
+                            active_max_sy,
+                            candidate.min_x,
+                            candidate.min_y,
+                            candidate.max_x,
+                            candidate.max_y);
+                        continue;
+                    }
                     reject_reason = ANOMALY_COLOR_BLOB_REJECT_AREA;
                     if (component_contains_target && target_trace != NULL) {
                         record_color_target_trace_component(
@@ -2620,7 +2806,8 @@ static void extract_color_blob_candidates(
                         &reject_span,
                         &reject_ring_fraction,
                         &reject_support_mass,
-                        &reject_quality);
+                        &reject_quality,
+                        false);
                 if (component_contains_target && target_trace != NULL) {
                     int trace_min_x = accepted ? candidate.min_x : min_x;
                     int trace_min_y = accepted ? candidate.min_y : min_y;
@@ -2943,7 +3130,8 @@ static void extract_color_blob_candidates(
                     &reject_span,
                     &reject_ring_fraction,
                     &reject_support_mass,
-                    &reject_quality);
+                    &reject_quality,
+                    false);
             if (component_contains_target && target_trace != NULL) {
                 record_color_target_trace_component(
                     target_trace,
@@ -8519,6 +8707,7 @@ int anomaly_process_frame(
             color_seed_max_sy >= color_seed_min_sy) {
             extract_color_blob_candidates(
                     cfg,
+                    state,
                     &state->roi_state,
                     rescan_mode,
                     color_frontend_mode,

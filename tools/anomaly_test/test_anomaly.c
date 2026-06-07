@@ -11,6 +11,7 @@
 #include "anomaly_buffer.h"
 #include "anomaly_color_detector.h"
 #include "anomaly_debug_helpers.h"
+#include "anomaly_detector_annotation.h"
 #include "anomaly_detector.h"
 #include "anomaly_frame_geometry.h"
 #include "anomaly_frame_history.h"
@@ -5663,6 +5664,148 @@ static void test_result_build_boxes_target_tracks_take_priority(void) {
                 "result builder: target weight formula is preserved");
 }
 
+static void test_result_build_boxes_color_target_suppresses_motion_support_track(void) {
+    anomaly_state_t state;
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION);
+    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    memset(&state, 0, sizeof(state));
+    memset(boxes, 0, sizeof(boxes));
+    cfg.min_area_fraction = 0.01f;
+    cfg.min_hits = 2;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].hit_count = 3;
+    state.target_tracks[0].confidence = 0.80f;
+    state.target_tracks[0].center_x_norm = 0.54f;
+    state.target_tracks[0].center_y_norm = 0.46f;
+    state.target_tracks[0].half_w_norm = 0.016f;
+    state.target_tracks[0].half_h_norm = 0.016f;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+
+    state.target_tracks[1].active = true;
+    state.target_tracks[1].publish_confirmed = true;
+    state.target_tracks[1].hit_count = 3;
+    state.target_tracks[1].confidence = 0.70f;
+    state.target_tracks[1].center_x_norm = 0.39f;
+    state.target_tracks[1].center_y_norm = 0.61f;
+    state.target_tracks[1].half_w_norm = 0.018f;
+    state.target_tracks[1].half_h_norm = 0.018f;
+    state.target_tracks[1].algorithm = ANOMALY_ALGO_MOTION;
+
+    int count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 1,
+           "result builder: color target suppresses independent motion support track");
+    EXPECT(boxes[0].algorithm == ANOMALY_ALGO_COLOR,
+           "result builder: color target remains the published display ROI");
+    EXPECT_NEAR((boxes[0].left_norm + boxes[0].right_norm) * 0.5f, 0.54f, 0.0001f,
+                "result builder: published ROI remains centered on color target x");
+    EXPECT_NEAR((boxes[0].top_norm + boxes[0].bottom_norm) * 0.5f, 0.46f, 0.0001f,
+                "result builder: published ROI remains centered on color target y");
+}
+
+static void test_result_build_boxes_stale_color_target_is_not_published(void) {
+    anomaly_state_t state;
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION);
+    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    memset(&state, 0, sizeof(state));
+    memset(boxes, 0, sizeof(boxes));
+    cfg.min_area_fraction = 0.01f;
+    cfg.min_hits = 2;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].hit_count = 7;
+    state.target_tracks[0].miss_count = 4;
+    state.target_tracks[0].hold_count = ANOMALY_ACC_HOLD_FRAMES - 4;
+    state.target_tracks[0].confidence = 0.60f;
+    state.target_tracks[0].center_x_norm = 0.54f;
+    state.target_tracks[0].center_y_norm = 0.44f;
+    state.target_tracks[0].half_w_norm = 0.016f;
+    state.target_tracks[0].half_h_norm = 0.016f;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[0].fresh_observation = false;
+    state.target_tracks[1].active = true;
+    state.target_tracks[1].publish_confirmed = true;
+    state.target_tracks[1].hit_count = 5;
+    state.target_tracks[1].miss_count = 0;
+    state.target_tracks[1].hold_count = ANOMALY_ACC_HOLD_FRAMES;
+    state.target_tracks[1].confidence = 0.72f;
+    state.target_tracks[1].center_x_norm = 0.38f;
+    state.target_tracks[1].center_y_norm = 0.57f;
+    state.target_tracks[1].half_w_norm = 0.016f;
+    state.target_tracks[1].half_h_norm = 0.016f;
+    state.target_tracks[1].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[1].fresh_observation = true;
+    state.acc_active[0] = true;
+    state.acc_hits[0] = 5;
+    state.acc_cx[0] = 0.44f;
+    state.acc_cy[0] = 0.61f;
+
+    int count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 0,
+           "result builder: stale carried color lock prevents a different color ROI from taking over");
+
+    state.target_tracks[0].miss_count = 0;
+    state.target_tracks[0].fresh_observation = true;
+    state.target_tracks[1].active = false;
+    count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 1 && boxes[0].algorithm == ANOMALY_ALGO_COLOR,
+           "result builder: fresh confirmed color lock still publishes");
+}
+
+static void test_result_build_boxes_color_target_suppresses_secondary_color_track(void) {
+    anomaly_state_t state;
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION);
+    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    memset(&state, 0, sizeof(state));
+    memset(boxes, 0, sizeof(boxes));
+    cfg.min_area_fraction = 0.01f;
+    cfg.min_hits = 2;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].hit_count = 8;
+    state.target_tracks[0].miss_count = 0;
+    state.target_tracks[0].confidence = 0.88f;
+    state.target_tracks[0].center_x_norm = 0.54f;
+    state.target_tracks[0].center_y_norm = 0.41f;
+    state.target_tracks[0].half_w_norm = 0.016f;
+    state.target_tracks[0].half_h_norm = 0.016f;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[0].fresh_observation = true;
+
+    state.target_tracks[1].active = true;
+    state.target_tracks[1].publish_confirmed = true;
+    state.target_tracks[1].hit_count = 5;
+    state.target_tracks[1].miss_count = 0;
+    state.target_tracks[1].confidence = 0.80f;
+    state.target_tracks[1].center_x_norm = 0.38f;
+    state.target_tracks[1].center_y_norm = 0.57f;
+    state.target_tracks[1].half_w_norm = 0.016f;
+    state.target_tracks[1].half_h_norm = 0.016f;
+    state.target_tracks[1].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[1].fresh_observation = true;
+
+    int count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 1,
+           "result builder: primary color target suppresses secondary color ROI");
+    EXPECT(boxes[0].algorithm == ANOMALY_ALGO_COLOR,
+           "result builder: remaining ROI is the color target");
+    EXPECT_NEAR((boxes[0].left_norm + boxes[0].right_norm) * 0.5f, 0.54f, 0.0001f,
+                "result builder: primary color target x is published");
+    EXPECT_NEAR((boxes[0].top_norm + boxes[0].bottom_norm) * 0.5f, 0.41f, 0.0001f,
+                "result builder: primary color target y is published");
+}
+
 static void test_result_build_boxes_accumulator_fallback_and_persist_filter(void) {
     anomaly_state_t state;
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
@@ -7328,6 +7471,62 @@ static void test_target_tracks_update_matches_existing_and_preserves_publish_con
                 "target tracks update: matching observation gains confidence from prior track");
     EXPECT(track->forced_revisit && track->fresh_observation && track->hold_count == ANOMALY_ACC_HOLD_FRAMES,
            "target tracks update: matching observation refreshes lifecycle flags");
+}
+
+static void test_target_tracks_confirmed_color_rejects_loose_nonconfirming_drag(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.next_target_track_id = 4;
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].id = 3;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[0].center_x_norm = 0.540f;
+    state.target_tracks[0].center_y_norm = 0.456f;
+    state.target_tracks[0].half_w_norm = 0.016f;
+    state.target_tracks[0].half_h_norm = 0.016f;
+    state.target_tracks[0].support_radius_norm = 0.025f;
+    state.target_tracks[0].confidence = 0.82f;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].hit_count = 4;
+    state.target_tracks[0].hold_count = ANOMALY_ACC_HOLD_FRAMES;
+
+    anomaly_target_observation_t obs;
+    memset(&obs, 0, sizeof(obs));
+    obs.valid = true;
+    obs.algorithm = ANOMALY_ALGO_COLOR;
+    obs.center_x_norm = 0.615f;
+    obs.center_y_norm = 0.456f;
+    obs.half_w_norm = 0.018f;
+    obs.half_h_norm = 0.018f;
+    obs.support_radius_norm = 0.025f;
+    obs.confidence = 0.60f;
+    obs.publish_confirming = false;
+
+    bool clear_intent = anomaly_target_tracks_update_from_observations(
+            &state,
+            &obs,
+            1,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            0.90f);
+
+    const anomaly_target_track_t *track = &state.target_tracks[0];
+    EXPECT(!clear_intent,
+           "target tracks update: loose nonconfirming color observation should not request ROI clear");
+    EXPECT(track->active && track->id == 3 && state.next_target_track_id == 4,
+           "target tracks update: loose nonconfirming color observation keeps confirmed slot");
+    EXPECT(track->publish_confirmed,
+           "target tracks update: loose nonconfirming color observation preserves confirmation");
+    EXPECT_NEAR(track->center_x_norm, 0.540f, 0.0001f,
+                "target tracks update: confirmed color lock is not dragged by loose nonconfirming x");
+    EXPECT_NEAR(track->center_y_norm, 0.456f, 0.0001f,
+                "target tracks update: confirmed color lock is not dragged by loose nonconfirming y");
+    EXPECT(track->hit_count == 4 &&
+           track->miss_count == 1 &&
+           track->hold_count == ANOMALY_ACC_HOLD_FRAMES - 1 &&
+           !track->fresh_observation,
+           "target tracks update: rejected loose nonconfirming observation ages as a miss");
+    EXPECT_NEAR(track->confidence, 0.60f, 0.0001f,
+                "target tracks update: rejected loose nonconfirming observation decays confidence");
 }
 
 static void test_target_tracks_update_unmatched_ages_and_respects_registration_health(void) {
@@ -10949,6 +11148,1376 @@ static void test_detector_facade_matches_process_frame(void) {
     free(facade_frame);
 }
 
+static void test_detector_facade_structured_args_match_positional_process(void) {
+    const int W = 16;
+    const int H = 16;
+    uint8_t *positional_frame = make_gray_frame(W, H, 80);
+    uint8_t *structured_frame = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t positional_state;
+    anomaly_detector_state_t structured_state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t positional_result;
+    anomaly_detector_result_t structured_result;
+    anomaly_frame_input_t frame = {
+        .rgba = positional_frame,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 13579,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_frame_input_t structured_input = frame;
+    structured_input.rgba = structured_frame;
+    anomaly_detector_process_args_t args = {
+        .state = &structured_state,
+        .frame = &structured_input,
+        .config = &cfg,
+        .result_out = &structured_result,
+    };
+    anomaly_detector_state_init(&positional_state);
+    anomaly_detector_state_init(&structured_state);
+
+    int positional_boxes = anomaly_detector_process(
+            &positional_state, &frame, &cfg, &positional_result);
+    int structured_boxes = anomaly_detector_process_with_args(&args);
+
+    EXPECT(positional_boxes == structured_boxes,
+           "detector facade args: return value matches positional process");
+    expect_same_result_shape(
+            &positional_result,
+            &structured_result,
+            "detector facade args: result shape matches positional process");
+
+    anomaly_detector_state_cleanup(&positional_state);
+    anomaly_detector_state_cleanup(&structured_state);
+    free(positional_frame);
+    free(structured_frame);
+}
+
+static void test_detector_facade_structured_args_null_safe(void) {
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t result;
+    anomaly_detector_process_args_t args = {
+        .state = NULL,
+        .frame = NULL,
+        .config = &cfg,
+        .result_out = &result,
+    };
+
+    int null_args_boxes = anomaly_detector_process_with_args(NULL);
+    int missing_state_boxes = anomaly_detector_process_with_args(&args);
+
+    EXPECT(null_args_boxes == 0,
+           "detector facade args: null args return zero boxes");
+    EXPECT(missing_state_boxes == 0,
+           "detector facade args: missing state returns zero boxes");
+    EXPECT(result.box_count == 0,
+           "detector facade args: missing state initializes result");
+}
+
+static void test_detector_facade_process_args_make_copies_fields(void) {
+    anomaly_detector_state_t state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t result;
+    anomaly_frame_input_t frame;
+    memset(&frame, 0, sizeof(frame));
+
+    anomaly_detector_process_args_t args =
+        anomaly_detector_process_args_make(&state, &frame, &cfg, &result);
+
+    EXPECT(args.state == &state,
+           "detector facade args make: state pointer is copied");
+    EXPECT(args.frame == &frame,
+           "detector facade args make: frame pointer is copied");
+    EXPECT(args.config == &cfg,
+           "detector facade args make: config pointer is copied");
+    EXPECT(args.result_out == &result,
+           "detector facade args make: result pointer is copied");
+}
+
+static void test_detector_facade_process_args_make_allows_optional_fields(void) {
+    anomaly_detector_process_args_t args =
+        anomaly_detector_process_args_make(NULL, NULL, NULL, NULL);
+
+    EXPECT(args.state == NULL,
+           "detector facade args make: null state is preserved");
+    EXPECT(args.frame == NULL,
+           "detector facade args make: null frame is preserved");
+    EXPECT(args.config == NULL,
+           "detector facade args make: null config is preserved");
+    EXPECT(args.result_out == NULL,
+           "detector facade args make: null result is preserved");
+}
+
+static void test_detector_facade_default_window_frames_contract(void) {
+    EXPECT(anomaly_detector_default_window_frames(30.0f) == 15,
+           "detector facade default window: 30fps maps to half-second window");
+    EXPECT(anomaly_detector_default_window_frames(29.97f) == 15,
+           "detector facade default window: fractional video rate rounds to nearest frame");
+    EXPECT(anomaly_detector_default_window_frames(0.0f) == 15,
+           "detector facade default window: nonpositive fps falls back to 30fps");
+    EXPECT(anomaly_detector_default_window_frames(-12.0f) == 15,
+           "detector facade default window: negative fps falls back to 30fps");
+    EXPECT(anomaly_detector_default_window_frames(1.0f) == 1,
+           "detector facade default window: low fps keeps at least one frame");
+}
+
+static void test_detector_facade_realtime_default_config_contract(void) {
+    anomaly_detector_config_t cfg =
+        anomaly_detector_config_make_realtime_default(
+                ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL,
+                30.0f);
+
+    EXPECT(cfg.enabled,
+           "detector facade default config: realtime native default is enabled");
+    EXPECT(cfg.algorithm_mask == (ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL),
+           "detector facade default config: algorithm mask is copied");
+    EXPECT(cfg.registration_mode == ANOMALY_REGISTRATION_GMV,
+           "detector facade default config: registration mode uses native GMV default");
+    EXPECT(cfg.movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+           "detector facade default config: movement estimator default is legacy affine");
+    EXPECT(cfg.stride_mode == ANOMALY_STRIDE_MODE_FIXED,
+           "detector facade default config: default stride mode is fixed");
+    EXPECT(cfg.frame_stride == 15,
+           "detector facade default config: frame stride uses half-second window");
+    EXPECT(cfg.adaptive_min_stride_frames == 2,
+           "detector facade default config: adaptive min stride has native fallback");
+    EXPECT(cfg.adaptive_max_stride_frames == 15,
+           "detector facade default config: adaptive max frames uses half-second window");
+    EXPECT_NEAR(cfg.adaptive_max_stride_seconds, 0.5f, 0.0001f,
+                "detector facade default config: adaptive max seconds names half-second default");
+    EXPECT(cfg.pixel_step == 0,
+           "detector facade default config: pixel step defaults to auto");
+    EXPECT_NEAR(cfg.score_threshold, ANOMALY_DEFAULT_SCORE_THRESHOLD, 0.0001f,
+                "detector facade default config: score threshold uses native default");
+    EXPECT_NEAR(cfg.motion_evidence_scale, 1.0f, 0.0001f,
+                "detector facade default config: motion evidence scale is neutral");
+    EXPECT_NEAR(cfg.min_area_fraction, ANOMALY_DEFAULT_MIN_AREA_FRACTION, 0.0001f,
+                "detector facade default config: min area uses native default");
+    EXPECT(cfg.thermal_polarity == ANOMALY_THERMAL_WHITE_HOT,
+           "detector facade default config: thermal polarity uses native white-hot default");
+    EXPECT_NEAR(cfg.scan_zone, ANOMALY_SCAN_ZONE_DEFAULT, 0.0001f,
+                "detector facade default config: scan zone uses native default");
+    EXPECT(cfg.min_hits == ANOMALY_DEFAULT_MIN_HITS,
+           "detector facade default config: min hits uses native default");
+    EXPECT_NEAR(cfg.thermal_min_delta, ANOMALY_THERMAL_MIN_DELTA, 0.0001f,
+                "detector facade default config: thermal delta uses native default");
+    EXPECT_NEAR(cfg.small_target_screen_fraction,
+                ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT,
+                0.0001f,
+                "detector facade default config: small target size uses native default");
+    EXPECT(cfg.color_frontend_mode == ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
+           "detector facade default config: color algorithm uses fresh RGBA frontend");
+
+    anomaly_detector_config_t fallback =
+        anomaly_detector_config_make_realtime_default(ANOMALY_ALGO_MOTION, 0.0f);
+    EXPECT(fallback.frame_stride == 15 &&
+           fallback.adaptive_max_stride_frames == 15 &&
+           fallback.algorithm_mask == ANOMALY_ALGO_MOTION &&
+           fallback.color_frontend_mode == ANOMALY_COLOR_FRONTEND_LEGACY,
+           "detector facade default config: invalid fps falls back while preserving non-color algorithms");
+}
+
+static void test_detector_facade_annotation_cadence_contract(void) {
+    EXPECT(anomaly_detector_annotation_cadence_allows_update(0, 15),
+           "detector facade annotation cadence: first frame may publish");
+    EXPECT(!anomaly_detector_annotation_cadence_allows_update(1, 15),
+           "detector facade annotation cadence: within half-second window is held");
+    EXPECT(!anomaly_detector_annotation_cadence_allows_update(14, 15),
+           "detector facade annotation cadence: frame before boundary is held");
+    EXPECT(anomaly_detector_annotation_cadence_allows_update(15, 15),
+           "detector facade annotation cadence: boundary frame may update");
+    EXPECT(anomaly_detector_annotation_cadence_allows_update(30, 15),
+           "detector facade annotation cadence: repeated boundary may update");
+    EXPECT(!anomaly_detector_annotation_cadence_allows_update(-1, 15),
+           "detector facade annotation cadence: negative frame ordinal cannot update");
+    EXPECT(anomaly_detector_annotation_cadence_allows_update(7, 0),
+           "detector facade annotation cadence: invalid cadence falls back to every frame");
+    EXPECT(anomaly_detector_annotation_cadence_allows_update(7, -3),
+           "detector facade annotation cadence: negative cadence falls back to every frame");
+    EXPECT(anomaly_detector_annotation_cadence_allows_update(3, 1),
+           "detector facade annotation cadence: cadence of one allows every frame");
+}
+
+static void test_detector_facade_annotation_cadence_visibility_state_contract(void) {
+    anomaly_detector_annotation_cadence_state_t state;
+    memset(&state, 0x5A, sizeof(state));
+
+    anomaly_detector_annotation_cadence_state_init(&state);
+    EXPECT(!state.initialized &&
+           !state.annotations_visible &&
+           state.last_update_frame_ordinal == -1,
+           "detector facade annotation cadence state: init clears state");
+
+    EXPECT(!anomaly_detector_annotation_cadence_update_visibility(&state, false, 0, 15),
+           "detector facade annotation cadence state: first false stays hidden");
+    EXPECT(state.initialized &&
+           !state.annotations_visible &&
+           state.last_update_frame_ordinal == 0,
+           "detector facade annotation cadence state: first update initializes state");
+
+    EXPECT(!anomaly_detector_annotation_cadence_update_visibility(&state, true, 1, 15),
+           "detector facade annotation cadence state: appearance is held within window");
+    EXPECT(!state.annotations_visible &&
+           state.last_update_frame_ordinal == 0,
+           "detector facade annotation cadence state: held appearance does not mutate state");
+
+    EXPECT(anomaly_detector_annotation_cadence_update_visibility(&state, true, 15, 15),
+           "detector facade annotation cadence state: appearance allowed at boundary");
+    EXPECT(state.annotations_visible &&
+           state.last_update_frame_ordinal == 15,
+           "detector facade annotation cadence state: boundary appearance mutates state");
+
+    EXPECT(anomaly_detector_annotation_cadence_update_visibility(&state, false, 16, 15),
+           "detector facade annotation cadence state: disappearance is held within window");
+    EXPECT(state.annotations_visible &&
+           state.last_update_frame_ordinal == 15,
+           "detector facade annotation cadence state: held disappearance does not mutate state");
+
+    EXPECT(!anomaly_detector_annotation_cadence_update_visibility(&state, false, 30, 15),
+           "detector facade annotation cadence state: disappearance allowed at boundary");
+    EXPECT(!state.annotations_visible &&
+           state.last_update_frame_ordinal == 30,
+           "detector facade annotation cadence state: boundary disappearance mutates state");
+
+    EXPECT(anomaly_detector_annotation_cadence_update_visibility(NULL, true, 7, 15),
+           "detector facade annotation cadence state: null state returns desired visibility");
+
+    anomaly_detector_annotation_cadence_state_init(&state);
+    EXPECT(anomaly_detector_annotation_cadence_update_visibility(&state, true, 7, 15),
+           "detector facade annotation cadence state: first valid frame initializes to desired visibility");
+    EXPECT(state.last_update_frame_ordinal == 7,
+           "detector facade annotation cadence state: first valid frame ordinal is recorded");
+
+    EXPECT(!anomaly_detector_annotation_cadence_update_visibility(&state, false, -1, 15),
+           "detector facade annotation cadence state: negative frame ordinal falls back to desired visibility");
+}
+
+static void test_detector_facade_annotation_cadence_snapshot_contract(void) {
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    anomaly_detector_annotation_t first[1];
+    anomaly_detector_annotation_t second[1];
+    memset(&state, 0x5A, sizeof(state));
+    memset(first, 0, sizeof(first));
+    memset(second, 0, sizeof(second));
+    first[0].left_norm = 0.10f;
+    first[0].right_norm = 0.20f;
+    first[0].algorithm = ANOMALY_ALGO_THERMAL;
+    second[0].left_norm = 0.40f;
+    second[0].right_norm = 0.60f;
+    second[0].algorithm = ANOMALY_ALGO_COLOR;
+    anomaly_detector_annotation_view_t first_view = {
+        .boxes = first,
+        .box_count = 1,
+    };
+    anomaly_detector_annotation_view_t second_view = {
+        .boxes = second,
+        .box_count = 1,
+    };
+    anomaly_detector_annotation_view_t empty_view = {
+        .boxes = NULL,
+        .box_count = 0,
+    };
+
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    EXPECT(!state.visibility.initialized &&
+           !state.visibility.annotations_visible &&
+           state.visibility.last_update_frame_ordinal == -1 &&
+           state.box_count == 0,
+           "detector facade annotation cadence snapshot: init clears snapshot state");
+
+    anomaly_detector_annotation_view_t out =
+        anomaly_detector_annotation_cadence_update_snapshot(&state, first_view, 0, 15);
+    EXPECT(out.boxes == state.boxes &&
+           out.box_count == 1 &&
+           fabsf(out.boxes[0].left_norm - 0.10f) < 0.0001f &&
+           state.visibility.annotations_visible &&
+           state.visibility.last_update_frame_ordinal == 0,
+           "detector facade annotation cadence snapshot: first visible frame copies boxes");
+
+    first[0].left_norm = 0.90f;
+    out = anomaly_detector_annotation_cadence_update_snapshot(&state, second_view, 1, 15);
+    EXPECT(out.boxes == state.boxes &&
+           out.box_count == 1 &&
+           fabsf(out.boxes[0].left_norm - 0.10f) < 0.0001f &&
+           state.visibility.last_update_frame_ordinal == 0,
+           "detector facade annotation cadence snapshot: within-window desired boxes are held");
+
+    out = anomaly_detector_annotation_cadence_update_snapshot(&state, second_view, 15, 15);
+    EXPECT(out.boxes == state.boxes &&
+           out.box_count == 1 &&
+           fabsf(out.boxes[0].left_norm - 0.40f) < 0.0001f &&
+           state.visibility.last_update_frame_ordinal == 15,
+           "detector facade annotation cadence snapshot: boundary copies new boxes");
+
+    out = anomaly_detector_annotation_cadence_update_snapshot(&state, empty_view, 16, 15);
+    EXPECT(out.boxes == state.boxes &&
+           out.box_count == 1 &&
+           fabsf(out.boxes[0].left_norm - 0.40f) < 0.0001f &&
+           state.visibility.annotations_visible,
+           "detector facade annotation cadence snapshot: disappearance is held within window");
+
+    out = anomaly_detector_annotation_cadence_update_snapshot(&state, empty_view, 30, 15);
+    EXPECT(out.boxes == NULL &&
+           out.box_count == 0 &&
+           !state.visibility.annotations_visible &&
+           state.box_count == 0 &&
+           state.visibility.last_update_frame_ordinal == 30,
+           "detector facade annotation cadence snapshot: boundary disappearance clears boxes");
+
+    anomaly_detector_annotation_view_t null_state_out =
+        anomaly_detector_annotation_cadence_update_snapshot(NULL, second_view, 7, 15);
+    EXPECT(null_state_out.boxes == second &&
+           null_state_out.box_count == 1,
+           "detector facade annotation cadence snapshot: null state returns desired view");
+}
+
+static void test_detector_facade_process_args_frame_ready_contract(void) {
+    const int W = 8;
+    const int H = 8;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t result;
+    anomaly_frame_input_t frame = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 24680,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_detector_process_args_t args = {
+        .state = &state,
+        .frame = &frame,
+        .config = &cfg,
+        .result_out = &result,
+    };
+    anomaly_detector_state_init(&state);
+
+    EXPECT(anomaly_detector_process_args_frame_ready(&args),
+           "detector facade args ready: valid state and RGBA frame are ready");
+
+    args.config = NULL;
+    EXPECT(anomaly_detector_process_args_frame_ready(&args),
+           "detector facade args ready: config is optional for frame readiness");
+
+    args.result_out = NULL;
+    EXPECT(anomaly_detector_process_args_frame_ready(&args),
+           "detector facade args ready: result output is optional for frame readiness");
+
+    args.state = NULL;
+    EXPECT(!anomaly_detector_process_args_frame_ready(&args),
+           "detector facade args ready: state is required");
+
+    args.state = &state;
+    frame.frame_format = ANOMALY_FRAME_FORMAT_RESERVED_YUV;
+    EXPECT(!anomaly_detector_process_args_frame_ready(&args),
+           "detector facade args ready: processable frame is required");
+
+    EXPECT(!anomaly_detector_process_args_frame_ready(NULL),
+           "detector facade args ready: null args are not ready");
+
+    anomaly_detector_state_cleanup(&state);
+    free(frame_buf);
+}
+
+static void test_detector_facade_process_args_may_annotate_frame_contract(void) {
+    const int W = 8;
+    const int H = 8;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t result;
+    anomaly_frame_input_t frame = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 35791,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_detector_process_args_t args =
+        anomaly_detector_process_args_make(&state, &frame, &cfg, &result);
+    anomaly_detector_state_init(&state);
+
+    cfg.enabled = true;
+    cfg.show_hot_overlay = false;
+    EXPECT(anomaly_detector_process_args_may_annotate_frame(&args),
+           "detector facade annotation: enabled detector may draw result boxes");
+
+    cfg.enabled = false;
+    cfg.show_hot_overlay = true;
+    EXPECT(anomaly_detector_process_args_may_annotate_frame(&args),
+           "detector facade annotation: hot overlay may draw without detector boxes");
+
+    cfg.enabled = false;
+    cfg.show_hot_overlay = false;
+    EXPECT(!anomaly_detector_process_args_may_annotate_frame(&args),
+           "detector facade annotation: disabled detector without overlay will not annotate");
+
+    args.config = NULL;
+    EXPECT(!anomaly_detector_process_args_may_annotate_frame(&args),
+           "detector facade annotation: null config has no annotation policy");
+
+    args.config = &cfg;
+    frame.frame_format = ANOMALY_FRAME_FORMAT_RESERVED_YUV;
+    EXPECT(!anomaly_detector_process_args_may_annotate_frame(&args),
+           "detector facade annotation: unready frame cannot be annotated");
+
+    EXPECT(!anomaly_detector_process_args_may_annotate_frame(NULL),
+           "detector facade annotation: null args cannot annotate");
+
+    anomaly_detector_state_cleanup(&state);
+    free(frame_buf);
+}
+
+static void test_detector_facade_process_args_frame_output_contract(void) {
+    const int W = 8;
+    const int H = 8;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t result;
+    anomaly_frame_input_t frame = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 46802,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_detector_process_args_t args =
+        anomaly_detector_process_args_make(&state, &frame, &cfg, &result);
+    anomaly_detector_state_init(&state);
+
+    cfg.enabled = true;
+    cfg.show_hot_overlay = false;
+    anomaly_detector_frame_output_t output =
+        anomaly_detector_process_args_frame_output(&args);
+    EXPECT(output.rgba == frame_buf,
+           "detector facade frame output: ready args expose RGBA buffer");
+    EXPECT(output.rgba_stride == W * 4 && output.width == W && output.height == H,
+           "detector facade frame output: ready args expose frame geometry");
+    EXPECT(output.source_timestamp_us == 46802,
+           "detector facade frame output: ready args expose source timestamp");
+    EXPECT(output.annotations_may_be_in_place,
+           "detector facade frame output: enabled detector may annotate output frame");
+
+    cfg.enabled = false;
+    cfg.show_hot_overlay = false;
+    output = anomaly_detector_process_args_frame_output(&args);
+    EXPECT(output.rgba == frame_buf,
+           "detector facade frame output: disabled detector still exposes output frame");
+    EXPECT(!output.annotations_may_be_in_place,
+           "detector facade frame output: disabled/no-overlay output is not annotated in-place");
+
+    frame.frame_format = ANOMALY_FRAME_FORMAT_RESERVED_YUV;
+    output = anomaly_detector_process_args_frame_output(&args);
+    EXPECT(output.rgba == NULL &&
+           output.rgba_stride == 0 &&
+           output.width == 0 &&
+           output.height == 0 &&
+           output.source_timestamp_us == 0 &&
+           !output.annotations_may_be_in_place,
+           "detector facade frame output: unready frame exposes empty output");
+
+    output = anomaly_detector_process_args_frame_output(NULL);
+    EXPECT(output.rgba == NULL &&
+           output.rgba_stride == 0 &&
+           output.width == 0 &&
+           output.height == 0 &&
+           output.source_timestamp_us == 0 &&
+           !output.annotations_may_be_in_place,
+           "detector facade frame output: null args expose empty output");
+
+    anomaly_detector_state_cleanup(&state);
+    free(frame_buf);
+}
+
+static void test_detector_facade_result_annotations_view_contract(void) {
+    anomaly_detector_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.box_count = 2;
+    result.boxes[0].left_norm = 0.10f;
+    result.boxes[1].left_norm = 0.20f;
+
+    anomaly_detector_annotation_view_t view =
+        anomaly_detector_result_annotations(&result);
+
+    EXPECT(view.boxes == result.boxes,
+           "detector facade annotations: positive count exposes result boxes");
+    EXPECT(view.box_count == 2,
+           "detector facade annotations: positive count is preserved");
+    EXPECT_NEAR(view.boxes[1].left_norm, 0.20f, 0.0001f,
+                "detector facade annotations: view points at current annotations");
+
+    result.box_count = ANOMALY_MAX_BOXES_PER_FRAME + 3;
+    view = anomaly_detector_result_annotations(&result);
+    EXPECT(view.boxes == result.boxes,
+           "detector facade annotations: oversized count still exposes result boxes");
+    EXPECT(view.box_count == ANOMALY_MAX_BOXES_PER_FRAME,
+           "detector facade annotations: oversized count is bounded to public capacity");
+
+    result.box_count = 0;
+    view = anomaly_detector_result_annotations(&result);
+    EXPECT(view.boxes == NULL && view.box_count == 0,
+           "detector facade annotations: zero count exposes no annotations");
+
+    result.box_count = -4;
+    view = anomaly_detector_result_annotations(&result);
+    EXPECT(view.boxes == NULL && view.box_count == 0,
+           "detector facade annotations: negative count exposes no annotations");
+
+    view = anomaly_detector_result_annotations(NULL);
+    EXPECT(view.boxes == NULL && view.box_count == 0,
+           "detector facade annotations: null result exposes no annotations");
+}
+
+static void test_detector_facade_result_apply_annotation_cadence(void) {
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    memset(&result, 0, sizeof(result));
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    state.visibility.initialized = true;
+    state.visibility.annotations_visible = false;
+    state.visibility.last_update_frame_ordinal = 0;
+
+    result.box_count = 1;
+    result.boxes[0].left_norm = 0.20f;
+    result.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+    anomaly_detector_annotation_view_t view =
+        anomaly_detector_result_apply_annotation_cadence(&result, &state, 1, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade result cadence: first within-window appearance is held invisible");
+
+    view = anomaly_detector_result_apply_annotation_cadence(&result, &state, 15, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f,
+           "detector facade result cadence: boundary appearance is snapshotted");
+
+    result.box_count = 0;
+    view = anomaly_detector_result_apply_annotation_cadence(&result, &state, 16, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f,
+           "detector facade result cadence: within-window disappearance is held visible");
+
+    view = anomaly_detector_result_apply_annotation_cadence(&result, &state, 30, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade result cadence: boundary disappearance clears stable boxes");
+
+    result.box_count = 1;
+    result.boxes[0].left_norm = 0.70f;
+    view = anomaly_detector_result_apply_annotation_cadence(&result, NULL, 7, 15);
+    EXPECT(view.boxes == result.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.70f) < 0.0001f,
+           "detector facade result cadence: null snapshot state returns raw result view");
+}
+
+static void test_detector_facade_result_apply_annotation_visibility_cadence_tracks_motion(void) {
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    memset(&result, 0, sizeof(result));
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    state.visibility.initialized = true;
+    state.visibility.annotations_visible = false;
+    state.visibility.last_update_frame_ordinal = 0;
+
+    result.box_count = 1;
+    result.boxes[0].left_norm = 0.20f;
+    result.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+    anomaly_detector_annotation_view_t view =
+        anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 1, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade visibility cadence: first within-window appearance is held invisible");
+
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 15, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f,
+           "detector facade visibility cadence: boundary appearance is published");
+
+    result.boxes[0].left_norm = 0.45f;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 16, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.45f) < 0.0001f,
+           "detector facade visibility cadence: visible moving annotation follows latest box");
+
+    result.box_count = 0;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 17, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.45f) < 0.0001f,
+           "detector facade visibility cadence: within-window disappearance holds last moving box");
+
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 30, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade visibility cadence: boundary disappearance clears stable boxes");
+
+    result.box_count = 1;
+    result.boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    result.boxes[0].left_norm = 0.55f;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 45, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1,
+           "detector facade visibility cadence: boundary color appearance is published");
+    result.box_count = 0;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 46, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade visibility cadence: color disappearance clears stale ROI immediately");
+}
+
+static void test_detector_facade_result_apply_annotation_visibility_cadence_smooths_jitter(void) {
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    memset(&result, 0, sizeof(result));
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    state.visibility.initialized = true;
+    state.visibility.annotations_visible = true;
+    state.visibility.last_update_frame_ordinal = 15;
+    state.box_count = 1;
+    state.boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.boxes[0].left_norm = 0.20f;
+    state.boxes[0].right_norm = 0.30f;
+    state.boxes[0].top_norm = 0.40f;
+    state.boxes[0].bottom_norm = 0.50f;
+    state.boxes[0].weight = 0.50f;
+
+    result.box_count = 1;
+    result.boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    result.boxes[0].left_norm = 0.24f;
+    result.boxes[0].right_norm = 0.34f;
+    result.boxes[0].top_norm = 0.36f;
+    result.boxes[0].bottom_norm = 0.46f;
+    result.boxes[0].weight = 0.90f;
+
+    anomaly_detector_annotation_view_t view =
+        anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 16, 15);
+
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1,
+           "detector facade visibility cadence smoothing: uses held snapshot storage");
+    EXPECT(view.boxes[0].left_norm > 0.20f &&
+           view.boxes[0].left_norm < 0.24f &&
+           view.boxes[0].top_norm < 0.40f &&
+           view.boxes[0].top_norm > 0.36f,
+           "detector facade visibility cadence smoothing: small coordinate jitter is eased");
+    EXPECT(view.boxes[0].weight > 0.50f &&
+           view.boxes[0].weight < 0.90f,
+           "detector facade visibility cadence smoothing: weight is eased with the box");
+
+    result.boxes[0].left_norm = 0.82f;
+    result.boxes[0].right_norm = 0.92f;
+    result.boxes[0].top_norm = 0.10f;
+    result.boxes[0].bottom_norm = 0.20f;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 17, 15);
+    EXPECT(fabsf(view.boxes[0].left_norm - 0.82f) < 0.0001f &&
+           fabsf(view.boxes[0].top_norm - 0.10f) < 0.0001f,
+           "detector facade visibility cadence smoothing: large target switch snaps to latest box");
+}
+
+static void test_detector_facade_annotation_snapshot_view_contract(void) {
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+
+    anomaly_detector_annotation_view_t view =
+        anomaly_detector_annotation_cadence_snapshot_view(&state);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade snapshot view: empty state returns empty view");
+
+    state.box_count = 1;
+    state.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.boxes[0].left_norm = 0.30f;
+    view = anomaly_detector_annotation_cadence_snapshot_view(&state);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.30f) < 0.0001f,
+           "detector facade snapshot view: populated state exposes held boxes");
+
+    view = anomaly_detector_annotation_cadence_snapshot_view(NULL);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade snapshot view: null state returns empty view");
+}
+
+static void test_detector_facade_process_output_combines_frame_and_annotations(void) {
+    const int W = 8;
+    const int H = 8;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t result;
+    anomaly_frame_input_t frame = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 57913,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_detector_process_args_t args =
+        anomaly_detector_process_args_make(&state, &frame, &cfg, &result);
+    anomaly_detector_state_init(&state);
+    memset(&result, 0, sizeof(result));
+    result.box_count = 1;
+    result.boxes[0].left_norm = 0.25f;
+    result.boxes[0].right_norm = 0.50f;
+    cfg.enabled = true;
+    cfg.show_hot_overlay = false;
+
+    anomaly_detector_process_output_t output =
+        anomaly_detector_process_output(&args, &result);
+
+    EXPECT(output.frame.rgba == frame_buf,
+           "detector facade process output: frame view exposes RGBA buffer");
+    EXPECT(output.frame.width == W &&
+           output.frame.height == H &&
+           output.frame.source_timestamp_us == 57913,
+           "detector facade process output: frame view exposes geometry and timestamp");
+    EXPECT(output.frame.annotations_may_be_in_place,
+           "detector facade process output: frame view preserves annotation policy");
+    EXPECT(output.annotations.boxes == result.boxes &&
+           output.annotations.box_count == 1,
+           "detector facade process output: annotation view exposes result boxes");
+    EXPECT_NEAR(output.annotations.boxes[0].left_norm, 0.25f, 0.0001f,
+                "detector facade process output: annotation view points at result data");
+
+    result.box_count = ANOMALY_MAX_BOXES_PER_FRAME + 1;
+    output = anomaly_detector_process_output(&args, &result);
+    EXPECT(output.annotations.box_count == ANOMALY_MAX_BOXES_PER_FRAME,
+           "detector facade process output: annotation count is bounded");
+
+    output = anomaly_detector_process_output(NULL, NULL);
+    EXPECT(output.frame.rgba == NULL &&
+           output.frame.width == 0 &&
+           output.frame.height == 0 &&
+           !output.frame.annotations_may_be_in_place &&
+           output.annotations.boxes == NULL &&
+           output.annotations.box_count == 0,
+           "detector facade process output: null inputs expose empty output");
+
+    anomaly_detector_state_cleanup(&state);
+    free(frame_buf);
+}
+
+static void test_detector_facade_process_output_apply_annotation_cadence(void) {
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    anomaly_detector_annotation_t first[1];
+    anomaly_detector_annotation_t second[1];
+    memset(first, 0, sizeof(first));
+    memset(second, 0, sizeof(second));
+    first[0].left_norm = 0.10f;
+    first[0].algorithm = ANOMALY_ALGO_THERMAL;
+    second[0].left_norm = 0.40f;
+    second[0].algorithm = ANOMALY_ALGO_COLOR;
+    anomaly_detector_process_output_t desired = {
+        .frame = {
+            .rgba = (uint8_t *)first,
+            .rgba_stride = 32,
+            .width = 8,
+            .height = 8,
+            .source_timestamp_us = 1234,
+            .annotations_may_be_in_place = true,
+        },
+        .annotations = {
+            .boxes = first,
+            .box_count = 1,
+        },
+    };
+
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    anomaly_detector_process_output_t out =
+        anomaly_detector_process_output_apply_annotation_cadence(desired, &state, 0, 15);
+    EXPECT(out.frame.rgba == desired.frame.rgba &&
+           out.frame.width == desired.frame.width &&
+           out.frame.source_timestamp_us == desired.frame.source_timestamp_us,
+           "detector facade stable output: frame view is preserved");
+    EXPECT(out.annotations.boxes == state.boxes &&
+           out.annotations.box_count == 1 &&
+           fabsf(out.annotations.boxes[0].left_norm - 0.10f) < 0.0001f,
+           "detector facade stable output: first annotations are snapshotted");
+
+    desired.annotations.boxes = second;
+    out = anomaly_detector_process_output_apply_annotation_cadence(desired, &state, 1, 15);
+    EXPECT(out.annotations.boxes == state.boxes &&
+           out.annotations.box_count == 1 &&
+           fabsf(out.annotations.boxes[0].left_norm - 0.10f) < 0.0001f,
+           "detector facade stable output: within-window annotations are held");
+
+    out = anomaly_detector_process_output_apply_annotation_cadence(desired, &state, 15, 15);
+    EXPECT(out.annotations.boxes == state.boxes &&
+           out.annotations.box_count == 1 &&
+           fabsf(out.annotations.boxes[0].left_norm - 0.40f) < 0.0001f,
+           "detector facade stable output: boundary refreshes annotations");
+
+    desired.annotations.boxes = NULL;
+    desired.annotations.box_count = 0;
+    out = anomaly_detector_process_output_apply_annotation_cadence(desired, &state, 16, 15);
+    EXPECT(out.annotations.boxes == state.boxes &&
+           out.annotations.box_count == 1 &&
+           fabsf(out.annotations.boxes[0].left_norm - 0.40f) < 0.0001f,
+           "detector facade stable output: within-window disappearance is held");
+
+    out = anomaly_detector_process_output_apply_annotation_cadence(desired, &state, 30, 15);
+    EXPECT(out.annotations.boxes == NULL &&
+           out.annotations.box_count == 0,
+           "detector facade stable output: boundary disappearance clears annotations");
+
+    desired.annotations.boxes = second;
+    desired.annotations.box_count = 1;
+    out = anomaly_detector_process_output_apply_annotation_cadence(desired, NULL, 2, 15);
+    EXPECT(out.annotations.boxes == second &&
+           out.annotations.box_count == 1,
+           "detector facade stable output: null snapshot state returns desired annotations");
+}
+
+static void test_detector_facade_process_frame_returns_processed_output(void) {
+    const int W = 16;
+    const int H = 16;
+    uint8_t *structured_frame = make_gray_frame(W, H, 80);
+    uint8_t *output_frame = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t structured_state;
+    anomaly_detector_state_t output_state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t structured_result;
+    anomaly_detector_result_t output_result;
+    anomaly_frame_input_t structured_input = {
+        .rgba = structured_frame,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 68024,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_frame_input_t output_input = structured_input;
+    output_input.rgba = output_frame;
+    anomaly_detector_process_args_t structured_args =
+        anomaly_detector_process_args_make(
+                &structured_state, &structured_input, &cfg, &structured_result);
+    anomaly_detector_process_args_t output_args =
+        anomaly_detector_process_args_make(
+                &output_state, &output_input, &cfg, &output_result);
+    int output_boxes = -1;
+    anomaly_detector_state_init(&structured_state);
+    anomaly_detector_state_init(&output_state);
+
+    int structured_boxes = anomaly_detector_process_with_args(&structured_args);
+    anomaly_detector_process_output_t output =
+        anomaly_detector_process_frame(&output_args, &output_boxes);
+
+    EXPECT(output_boxes == structured_boxes,
+           "detector facade process frame: box count out matches structured process");
+    expect_same_result_shape(
+            &structured_result,
+            &output_result,
+            "detector facade process frame: result shape matches structured process");
+    EXPECT(output.frame.rgba == output_frame,
+           "detector facade process frame: output exposes processed frame buffer");
+    EXPECT(output.frame.width == W &&
+           output.frame.height == H &&
+           output.frame.source_timestamp_us == 68024,
+           "detector facade process frame: output exposes frame geometry and timestamp");
+    EXPECT(output.frame.annotations_may_be_in_place,
+           "detector facade process frame: enabled detector may annotate frame output");
+    anomaly_detector_annotation_view_t expected_annotations =
+        anomaly_detector_result_annotations(&output_result);
+    EXPECT(output.annotations.boxes == expected_annotations.boxes,
+           "detector facade process frame: output annotations match result view");
+    EXPECT(output.annotations.box_count == expected_annotations.box_count,
+           "detector facade process frame: output annotation count matches result view");
+
+    output_boxes = -1;
+    output = anomaly_detector_process_frame(NULL, &output_boxes);
+    EXPECT(output_boxes == 0,
+           "detector facade process frame: null args return zero boxes");
+    EXPECT(output.frame.rgba == NULL &&
+           output.annotations.boxes == NULL &&
+           output.annotations.box_count == 0,
+           "detector facade process frame: null args return empty output");
+
+    anomaly_detector_state_cleanup(&structured_state);
+    anomaly_detector_state_cleanup(&output_state);
+    free(structured_frame);
+    free(output_frame);
+}
+
+static void test_detector_facade_process_frame_applies_annotation_cadence(void) {
+    const int W = 16;
+    const int H = 16;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t snapshot_state;
+    anomaly_frame_input_t input = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 81357,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_detector_process_args_t args =
+        anomaly_detector_process_args_make(&state, &input, &cfg, &result);
+    int boxes = -1;
+
+    anomaly_detector_state_init(&state);
+    anomaly_detector_annotation_cadence_snapshot_state_init(&snapshot_state);
+    snapshot_state.visibility.initialized = true;
+    snapshot_state.visibility.annotations_visible = true;
+    snapshot_state.visibility.last_update_frame_ordinal = 0;
+    snapshot_state.box_count = 1;
+    memset(&snapshot_state.boxes[0], 0, sizeof(snapshot_state.boxes[0]));
+    snapshot_state.boxes[0].left_norm = 0.25f;
+    snapshot_state.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+
+    anomaly_detector_process_output_t output =
+        anomaly_detector_process_frame_apply_annotation_cadence(
+                &args, &snapshot_state, 1, 15, &boxes);
+
+    EXPECT(boxes == result.box_count,
+           "detector facade process frame cadence: box count reports detector result");
+    EXPECT(output.frame.rgba == frame_buf &&
+           output.frame.width == W &&
+           output.frame.height == H &&
+           output.frame.source_timestamp_us == 81357,
+           "detector facade process frame cadence: frame output is preserved");
+    EXPECT(output.annotations.boxes == snapshot_state.boxes &&
+           output.annotations.box_count == 1 &&
+           fabsf(output.annotations.boxes[0].left_norm - 0.25f) < 0.0001f,
+           "detector facade process frame cadence: within-window annotations are held");
+
+    boxes = -1;
+    output = anomaly_detector_process_frame_apply_annotation_cadence(
+            NULL, NULL, 2, 15, &boxes);
+    EXPECT(boxes == 0,
+           "detector facade process frame cadence: null args return zero boxes");
+    EXPECT(output.frame.rgba == NULL &&
+           output.annotations.boxes == NULL &&
+           output.annotations.box_count == 0,
+           "detector facade process frame cadence: null inputs return empty output");
+
+    anomaly_detector_state_cleanup(&state);
+    free(frame_buf);
+}
+
+static void test_detector_facade_process_frame_input_matches_structured_wrapper(void) {
+    const int W = 16;
+    const int H = 16;
+    uint8_t *structured_frame = make_gray_frame(W, H, 80);
+    uint8_t *positional_frame = make_gray_frame(W, H, 80);
+    anomaly_detector_state_t structured_state;
+    anomaly_detector_state_t positional_state;
+    anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
+    anomaly_detector_result_t structured_result;
+    anomaly_detector_result_t positional_result;
+    anomaly_frame_input_t structured_input = {
+        .rgba = structured_frame,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 79135,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+    anomaly_frame_input_t positional_input = structured_input;
+    positional_input.rgba = positional_frame;
+    anomaly_detector_process_args_t structured_args =
+        anomaly_detector_process_args_make(
+                &structured_state, &structured_input, &cfg, &structured_result);
+    int structured_boxes = -1;
+    int positional_boxes = -1;
+    anomaly_detector_state_init(&structured_state);
+    anomaly_detector_state_init(&positional_state);
+
+    anomaly_detector_process_output_t structured_output =
+        anomaly_detector_process_frame(&structured_args, &structured_boxes);
+    anomaly_detector_process_output_t positional_output =
+        anomaly_detector_process_frame_input(
+                &positional_state,
+                &positional_input,
+                &cfg,
+                &positional_result,
+                &positional_boxes);
+
+    EXPECT(positional_boxes == structured_boxes,
+           "detector facade process frame input: box count matches structured wrapper");
+    expect_same_result_shape(
+            &structured_result,
+            &positional_result,
+            "detector facade process frame input: result shape matches structured wrapper");
+    EXPECT(positional_output.frame.rgba == positional_frame,
+           "detector facade process frame input: output exposes processed positional frame");
+    EXPECT(positional_output.frame.width == structured_output.frame.width &&
+           positional_output.frame.height == structured_output.frame.height &&
+           positional_output.frame.source_timestamp_us == structured_output.frame.source_timestamp_us,
+           "detector facade process frame input: output geometry matches structured wrapper");
+    EXPECT(positional_output.frame.annotations_may_be_in_place ==
+           structured_output.frame.annotations_may_be_in_place,
+           "detector facade process frame input: annotation policy matches structured wrapper");
+    anomaly_detector_annotation_view_t expected_annotations =
+        anomaly_detector_result_annotations(&positional_result);
+    EXPECT(positional_output.annotations.boxes == expected_annotations.boxes &&
+           positional_output.annotations.box_count == expected_annotations.box_count,
+           "detector facade process frame input: annotations match positional result view");
+
+    positional_boxes = -1;
+    positional_output =
+        anomaly_detector_process_frame_input(NULL, NULL, NULL, NULL, &positional_boxes);
+    EXPECT(positional_boxes == 0,
+           "detector facade process frame input: null inputs return zero boxes");
+    EXPECT(positional_output.frame.rgba == NULL &&
+           positional_output.annotations.boxes == NULL &&
+           positional_output.annotations.box_count == 0,
+           "detector facade process frame input: null inputs return empty output");
+
+    anomaly_detector_state_cleanup(&structured_state);
+    anomaly_detector_state_cleanup(&positional_state);
+    free(structured_frame);
+    free(positional_frame);
+}
+
+static void test_detector_facade_runtime_init_contract(void) {
+    anomaly_detector_runtime_t runtime;
+    memset(&runtime, 0x7f, sizeof(runtime));
+
+    anomaly_detector_runtime_init(&runtime, ANOMALY_ALGO_THERMAL, 30.0f);
+
+    EXPECT(runtime.config.enabled,
+           "detector runtime init: realtime config is enabled");
+    EXPECT(runtime.config.algorithm_mask == ANOMALY_ALGO_THERMAL,
+           "detector runtime init: algorithm mask is copied");
+    EXPECT(runtime.config.frame_stride == 15 &&
+           runtime.config.adaptive_max_stride_frames == 15,
+           "detector runtime init: 30 fps uses half-second window");
+    EXPECT(runtime.cadence_frames == 15,
+           "detector runtime init: cadence frames use half-second default");
+    EXPECT(runtime.frame_ordinal == 0,
+           "detector runtime init: frame ordinal starts at zero");
+    EXPECT(runtime.last_box_count == 0,
+           "detector runtime init: last box count starts at zero");
+    EXPECT(!runtime.annotation_cadence.visibility.initialized &&
+           runtime.annotation_cadence.box_count == 0,
+           "detector runtime init: cadence snapshot starts empty");
+
+    anomaly_detector_runtime_cleanup(&runtime);
+    anomaly_detector_runtime_init(NULL, ANOMALY_ALGO_THERMAL, 30.0f);
+    anomaly_detector_runtime_cleanup(NULL);
+}
+
+static void test_detector_facade_runtime_init_with_config_contract(void) {
+    anomaly_detector_runtime_t runtime;
+    anomaly_detector_config_t config =
+        anomaly_detector_config_make_realtime_default(ANOMALY_ALGO_COLOR, 24.0f);
+    memset(&runtime, 0x7f, sizeof(runtime));
+    config.show_candidate_blobs = true;
+    config.frame_stride = 7;
+    config.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+
+    anomaly_detector_runtime_init_with_config(&runtime, &config, 12);
+
+    EXPECT(runtime.config.algorithm_mask == ANOMALY_ALGO_COLOR &&
+           runtime.config.show_candidate_blobs &&
+           runtime.config.frame_stride == 7 &&
+           runtime.config.movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE,
+           "detector runtime init config: supplied config is copied");
+    EXPECT(runtime.cadence_frames == 12,
+           "detector runtime init config: supplied cadence is copied");
+    EXPECT(runtime.frame_ordinal == 0 &&
+           runtime.last_box_count == 0 &&
+           runtime.result.box_count == 0,
+           "detector runtime init config: runtime counters are reset");
+    EXPECT(!runtime.annotation_cadence.visibility.initialized &&
+           runtime.annotation_cadence.box_count == 0,
+           "detector runtime init config: cadence snapshot is reset");
+
+    anomaly_detector_runtime_cleanup(&runtime);
+
+    memset(&runtime, 0x00, sizeof(runtime));
+    runtime.cadence_frames = 99;
+    runtime.frame_ordinal = 42;
+    anomaly_detector_runtime_init_with_config(&runtime, &config, 0);
+    EXPECT(runtime.cadence_frames == 1,
+           "detector runtime init config: invalid cadence clamps to one frame");
+    anomaly_detector_runtime_cleanup(&runtime);
+
+    memset(&runtime, 0x00, sizeof(runtime));
+    runtime.cadence_frames = 33;
+    runtime.frame_ordinal = 44;
+    anomaly_detector_runtime_init_with_config(&runtime, NULL, 12);
+    EXPECT(runtime.cadence_frames == 33 &&
+           runtime.frame_ordinal == 44,
+           "detector runtime init config: null config leaves runtime unchanged");
+}
+
+static void test_detector_facade_runtime_apply_config_contract(void) {
+    anomaly_detector_runtime_t runtime;
+    anomaly_detector_config_t config =
+        anomaly_detector_config_make_realtime_default(ANOMALY_ALGO_COLOR, 30.0f);
+    anomaly_detector_config_t display_config;
+    anomaly_detector_config_t reset_config;
+
+    anomaly_detector_runtime_init_with_config(&runtime, &config, 15);
+    runtime.frame_ordinal = 8;
+    runtime.last_box_count = 3;
+    runtime.result.box_count = 3;
+    runtime.annotation_cadence.visibility.initialized = true;
+    runtime.annotation_cadence.visibility.annotations_visible = true;
+    runtime.annotation_cadence.visibility.last_update_frame_ordinal = 5;
+    runtime.annotation_cadence.box_count = 1;
+
+    display_config = runtime.config;
+    display_config.show_hot_overlay = !display_config.show_hot_overlay;
+    anomaly_config_transition_t transition =
+        anomaly_detector_runtime_apply_config(&runtime, &display_config, 9);
+    EXPECT(transition == ANOMALY_CONFIG_TRANSITION_DISPLAY_ONLY,
+           "detector runtime apply config: display-only transition is returned");
+    EXPECT(runtime.config.show_hot_overlay == display_config.show_hot_overlay &&
+           runtime.cadence_frames == 9,
+           "detector runtime apply config: display config and cadence are applied");
+    EXPECT(runtime.frame_ordinal == 8 &&
+           runtime.last_box_count == 3 &&
+           runtime.result.box_count == 3 &&
+           runtime.annotation_cadence.visibility.initialized &&
+           runtime.annotation_cadence.box_count == 1,
+           "detector runtime apply config: display-only change preserves runtime continuity");
+
+    reset_config = runtime.config;
+    reset_config.algorithm_mask = ANOMALY_ALGO_THERMAL;
+    transition = anomaly_detector_runtime_apply_config(&runtime, &reset_config, 0);
+    EXPECT(transition == ANOMALY_CONFIG_TRANSITION_RESET_DETECTOR_STATE,
+           "detector runtime apply config: reset-sensitive transition is returned");
+    EXPECT(runtime.config.algorithm_mask == ANOMALY_ALGO_THERMAL &&
+           runtime.cadence_frames == 1,
+           "detector runtime apply config: reset config and clamped cadence are applied");
+    EXPECT(runtime.frame_ordinal == 0 &&
+           runtime.last_box_count == 0 &&
+           runtime.result.box_count == 0 &&
+           !runtime.annotation_cadence.visibility.initialized &&
+           runtime.annotation_cadence.box_count == 0,
+           "detector runtime apply config: reset-sensitive change clears runtime state");
+
+    runtime.frame_ordinal = 11;
+    runtime.last_box_count = 4;
+    transition = anomaly_detector_runtime_apply_config(&runtime, NULL, 7);
+    EXPECT(transition == ANOMALY_CONFIG_TRANSITION_RESET_DETECTOR_STATE,
+           "detector runtime apply config: null config reports reset-sensitive transition");
+    EXPECT(runtime.frame_ordinal == 11 &&
+           runtime.last_box_count == 4,
+           "detector runtime apply config: null config leaves runtime unchanged");
+
+    transition = anomaly_detector_runtime_apply_config(NULL, &reset_config, 7);
+    EXPECT(transition == ANOMALY_CONFIG_TRANSITION_RESET_DETECTOR_STATE,
+           "detector runtime apply config: null runtime reports reset-sensitive transition");
+
+    anomaly_detector_runtime_cleanup(&runtime);
+}
+
+static void test_detector_facade_runtime_process_frame_contract(void) {
+    const int W = 16;
+    const int H = 16;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_detector_runtime_t runtime;
+    anomaly_frame_input_t input = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 92468,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+
+    anomaly_detector_runtime_init(&runtime, ANOMALY_ALGO_THERMAL, 30.0f);
+    runtime.frame_ordinal = 1;
+    runtime.annotation_cadence.visibility.initialized = true;
+    runtime.annotation_cadence.visibility.annotations_visible = true;
+    runtime.annotation_cadence.visibility.last_update_frame_ordinal = 0;
+    runtime.annotation_cadence.box_count = 1;
+    memset(&runtime.annotation_cadence.boxes[0], 0, sizeof(runtime.annotation_cadence.boxes[0]));
+    runtime.annotation_cadence.boxes[0].left_norm = 0.35f;
+    runtime.annotation_cadence.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+
+    anomaly_detector_process_output_t output =
+        anomaly_detector_runtime_process_frame(&runtime, &input);
+
+    EXPECT(runtime.frame_ordinal == 2,
+           "detector runtime process: frame ordinal advances after processing");
+    EXPECT(runtime.last_box_count == runtime.result.box_count,
+           "detector runtime process: raw detector count is stored");
+    EXPECT(output.frame.rgba == frame_buf &&
+           output.frame.width == W &&
+           output.frame.height == H &&
+           output.frame.source_timestamp_us == 92468,
+           "detector runtime process: frame output is exposed");
+    EXPECT(output.annotations.boxes == runtime.annotation_cadence.boxes &&
+           output.annotations.box_count == 1 &&
+           fabsf(output.annotations.boxes[0].left_norm - 0.35f) < 0.0001f,
+           "detector runtime process: cadence-held annotations are returned");
+
+    output = anomaly_detector_runtime_process_frame(NULL, &input);
+    EXPECT(output.frame.rgba == NULL &&
+           output.annotations.boxes == NULL &&
+           output.annotations.box_count == 0,
+           "detector runtime process: null runtime returns empty output");
+
+    anomaly_detector_runtime_cleanup(&runtime);
+    free(frame_buf);
+}
+
+static void test_detector_facade_runtime_process_frame_result_contract(void) {
+    const int W = 16;
+    const int H = 16;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_detector_runtime_t runtime;
+    anomaly_frame_input_t input = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 93579,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+
+    anomaly_detector_runtime_init(&runtime, ANOMALY_ALGO_THERMAL, 30.0f);
+    runtime.frame_ordinal = 4;
+    runtime.cadence_frames = 15;
+    runtime.annotation_cadence.visibility.initialized = true;
+    runtime.annotation_cadence.visibility.annotations_visible = true;
+    runtime.annotation_cadence.visibility.last_update_frame_ordinal = 0;
+    runtime.annotation_cadence.box_count = 1;
+    memset(&runtime.annotation_cadence.boxes[0], 0, sizeof(runtime.annotation_cadence.boxes[0]));
+    runtime.annotation_cadence.boxes[0].left_norm = 0.45f;
+    runtime.annotation_cadence.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+
+    anomaly_detector_runtime_process_result_t result =
+        anomaly_detector_runtime_process_frame_result(&runtime, &input);
+
+    EXPECT(result.frame_ordinal == 4 &&
+           runtime.frame_ordinal == 5,
+           "detector runtime process result: reports processed ordinal and advances runtime");
+    EXPECT(result.raw_box_count == runtime.last_box_count &&
+           result.raw_box_count == runtime.result.box_count,
+           "detector runtime process result: reports raw detector count");
+    EXPECT(result.cadence_frames == 15,
+           "detector runtime process result: reports cadence window");
+    EXPECT(result.output.frame.rgba == frame_buf &&
+           result.output.frame.source_timestamp_us == 93579,
+           "detector runtime process result: exposes processed frame output");
+    EXPECT(result.output.annotations.boxes == runtime.annotation_cadence.boxes &&
+           result.output.annotations.box_count == 1 &&
+           result.stable_box_count == 1 &&
+           result.annotations_visible,
+           "detector runtime process result: reports stable annotation visibility and count");
+
+    result = anomaly_detector_runtime_process_frame_result(NULL, &input);
+    EXPECT(result.output.frame.rgba == NULL &&
+           result.frame_ordinal == -1 &&
+           result.raw_box_count == 0 &&
+           result.stable_box_count == 0 &&
+           result.cadence_frames == 0 &&
+           !result.annotations_visible,
+           "detector runtime process result: null runtime returns empty metadata");
+
+    anomaly_detector_runtime_cleanup(&runtime);
+    free(frame_buf);
+}
+
+static void test_detector_facade_runtime_accessors_contract(void) {
+    anomaly_detector_runtime_t runtime;
+    anomaly_detector_config_t config =
+        anomaly_detector_config_make_realtime_default(ANOMALY_ALGO_COLOR, 30.0f);
+
+    anomaly_detector_runtime_init_with_config(&runtime, &config, 12);
+    runtime.frame_ordinal = 7;
+    runtime.last_box_count = 2;
+    runtime.result.box_count = 2;
+    runtime.annotation_cadence.box_count = 1;
+    memset(&runtime.annotation_cadence.boxes[0], 0, sizeof(runtime.annotation_cadence.boxes[0]));
+    runtime.annotation_cadence.boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    runtime.annotation_cadence.boxes[0].left_norm = 0.55f;
+
+    EXPECT(anomaly_detector_runtime_config(&runtime) == &runtime.config,
+           "detector runtime accessors: config pointer exposes runtime config");
+    EXPECT(anomaly_detector_runtime_result(&runtime) == &runtime.result,
+           "detector runtime accessors: result pointer exposes runtime result");
+    anomaly_detector_annotation_view_t annotations =
+        anomaly_detector_runtime_stable_annotations(&runtime);
+    EXPECT(annotations.boxes == runtime.annotation_cadence.boxes &&
+           annotations.box_count == 1 &&
+           fabsf(annotations.boxes[0].left_norm - 0.55f) < 0.0001f,
+           "detector runtime accessors: stable annotations expose cadence snapshot");
+    EXPECT(anomaly_detector_runtime_frame_ordinal(&runtime) == 7 &&
+           anomaly_detector_runtime_cadence_frames(&runtime) == 12 &&
+           anomaly_detector_runtime_last_box_count(&runtime) == 2,
+           "detector runtime accessors: scalar metadata exposes runtime counters");
+
+    annotations = anomaly_detector_runtime_stable_annotations(NULL);
+    EXPECT(anomaly_detector_runtime_config(NULL) == NULL &&
+           anomaly_detector_runtime_result(NULL) == NULL &&
+           annotations.boxes == NULL &&
+           annotations.box_count == 0 &&
+           anomaly_detector_runtime_frame_ordinal(NULL) == -1 &&
+           anomaly_detector_runtime_cadence_frames(NULL) == 0 &&
+           anomaly_detector_runtime_last_box_count(NULL) == 0,
+           "detector runtime accessors: null runtime returns safe defaults");
+
+    anomaly_detector_runtime_cleanup(&runtime);
+}
+
+static void test_detector_facade_frame_input_ready_contract(void) {
+    const int W = 8;
+    const int H = 8;
+    uint8_t *frame_buf = make_gray_frame(W, H, 80);
+    anomaly_frame_input_t frame = {
+        .rgba = frame_buf,
+        .rgba_stride = W * 4,
+        .width = W,
+        .height = H,
+        .source_timestamp_us = 11111,
+        .frame_format = ANOMALY_FRAME_FORMAT_RGBA8888,
+    };
+
+    EXPECT(anomaly_detector_frame_input_ready(&frame),
+           "detector facade: valid RGBA frame is ready");
+    EXPECT(!anomaly_detector_frame_input_ready(NULL),
+           "detector facade: null frame is not ready");
+
+    frame.frame_format = ANOMALY_FRAME_FORMAT_RESERVED_YUV;
+    EXPECT(!anomaly_detector_frame_input_ready(&frame),
+           "detector facade: unsupported frame format is not ready");
+
+    frame.frame_format = ANOMALY_FRAME_FORMAT_RGBA8888;
+    frame.rgba = NULL;
+    EXPECT(!anomaly_detector_frame_input_ready(&frame),
+           "detector facade: null RGBA pointer is not ready");
+
+    frame.rgba = frame_buf;
+    frame.rgba_stride = 0;
+    EXPECT(!anomaly_detector_frame_input_ready(&frame),
+           "detector facade: nonpositive stride is not ready");
+
+    frame.rgba_stride = W * 4;
+    frame.width = 0;
+    EXPECT(!anomaly_detector_frame_input_ready(&frame),
+           "detector facade: nonpositive width is not ready");
+
+    frame.width = W;
+    frame.height = 0;
+    EXPECT(!anomaly_detector_frame_input_ready(&frame),
+           "detector facade: nonpositive height is not ready");
+
+    free(frame_buf);
+}
+
 static void test_detector_facade_rejects_missing_frame(void) {
     anomaly_detector_state_t state;
     anomaly_detector_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL);
@@ -12195,6 +13764,25 @@ static void test_motion_estimator_sidecar_tile_displacement_px_contract(void) {
                 "motion sidecar displacement: zero dy preserved");
 }
 
+static void test_motion_estimator_sidecar_displacement_magnitude_contract(void) {
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_displacement_magnitude_px(3, 4, 2),
+                10.0f,
+                0.0001f,
+                "motion sidecar displacement magnitude: scales grid magnitude by motion step");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_displacement_magnitude_px(-3, 4, 2),
+                10.0f,
+                0.0001f,
+                "motion sidecar displacement magnitude: signed displacement uses Euclidean magnitude");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_displacement_magnitude_px(0, 0, 5),
+                0.0f,
+                0.0001f,
+                "motion sidecar displacement magnitude: zero displacement is preserved");
+    EXPECT_NEAR(anomaly_motion_estimator_sidecar_displacement_magnitude_px(3, 4, 0),
+                0.0f,
+                0.0001f,
+                "motion sidecar displacement magnitude: invalid motion step returns zero");
+}
+
 static void test_motion_estimator_init_appearance_scorer_input_copies_contract_fields(void) {
     anomaly_motion_appearance_scorer_input_args_t args =
         motion_appearance_input_args(ANOMALY_ALGO_MOTION);
@@ -12800,6 +14388,14 @@ static void test_motion_estimator_tile_classification_null_and_invalid(void) {
                 "motion tile classification: NULL tile scores zero");
     EXPECT_NEAR(anomaly_motion_estimator_tile_independent_score(&tile), 0.0f, 0.0001f,
                 "motion tile classification: invalid tile scores zero");
+    EXPECT_NEAR(anomaly_motion_estimator_tile_flow_magnitude_px(NULL), 0.0f, 0.0001f,
+                "motion tile classification: NULL tile has zero flow magnitude");
+    EXPECT_NEAR(anomaly_motion_estimator_tile_flow_magnitude_px(&tile), 0.0f, 0.0001f,
+                "motion tile classification: invalid tile has zero flow magnitude");
+    EXPECT_NEAR(anomaly_motion_estimator_tile_residual_independent_score(NULL), 0.0f, 0.0001f,
+                "motion tile classification: NULL tile has zero residual independent score");
+    EXPECT_NEAR(anomaly_motion_estimator_tile_residual_independent_score(&tile), 0.0f, 0.0001f,
+                "motion tile classification: invalid tile has zero residual independent score");
     EXPECT(!anomaly_motion_estimator_tile_is_independent(NULL, 1.0f),
            "motion tile classification: NULL tile is not independent");
     EXPECT(!anomaly_motion_estimator_tile_is_independent(&tile, 1.0f),
@@ -12808,6 +14404,52 @@ static void test_motion_estimator_tile_classification_null_and_invalid(void) {
            "motion tile classification: NULL tile is not parallax-like");
     EXPECT(!anomaly_motion_estimator_tile_is_parallax_like(&tile),
            "motion tile classification: invalid tile is not parallax-like");
+}
+
+static void test_motion_estimator_tile_flow_magnitude_contract(void) {
+    anomaly_debug_movement_tile_t tile;
+    memset(&tile, 0, sizeof(tile));
+    tile.valid = true;
+    tile.dx_px = 3.0f;
+    tile.dy_px = -4.0f;
+
+    EXPECT_NEAR(anomaly_motion_estimator_tile_flow_magnitude_px(&tile), 5.0f, 0.0001f,
+                "motion tile flow magnitude: signed pixel displacement uses Euclidean magnitude");
+
+    tile.dx_px = 0.0f;
+    tile.dy_px = 0.0f;
+    EXPECT_NEAR(anomaly_motion_estimator_tile_flow_magnitude_px(&tile), 0.0f, 0.0001f,
+                "motion tile flow magnitude: zero displacement is preserved");
+}
+
+static void test_motion_estimator_tile_residual_independent_score_contract(void) {
+    anomaly_debug_movement_tile_t tile;
+    memset(&tile, 0, sizeof(tile));
+    tile.valid = true;
+
+    tile.residual_px = 12.0f;
+    EXPECT_NEAR(anomaly_motion_estimator_tile_residual_independent_score(&tile),
+                0.0f,
+                0.0001f,
+                "motion tile residual score: lower threshold edge is zero");
+
+    tile.residual_px = 26.0f;
+    EXPECT_NEAR(anomaly_motion_estimator_tile_residual_independent_score(&tile),
+                0.5f,
+                0.0001f,
+                "motion tile residual score: midpoint preserves legacy linear scale");
+
+    tile.residual_px = 40.0f;
+    EXPECT_NEAR(anomaly_motion_estimator_tile_residual_independent_score(&tile),
+                1.0f,
+                0.0001f,
+                "motion tile residual score: upper threshold edge is one");
+
+    tile.residual_px = 80.0f;
+    EXPECT_NEAR(anomaly_motion_estimator_tile_residual_independent_score(&tile),
+                1.0f,
+                0.0001f,
+                "motion tile residual score: high residual clamps to one");
 }
 
 static void test_motion_estimator_tile_classification_local_outlier_independent(void) {
@@ -13878,7 +15520,7 @@ static void test_uniform_no_detection(void) {
 
     uint8_t *frame = make_gray_frame(W, H, 128);
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR | ANOMALY_ALGO_THERMAL);
-    cfg.score_threshold = 2.0f;
+    cfg.score_threshold = 1.2f;
 
     anomaly_result_t res;
     int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
@@ -15122,29 +16764,39 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     stamp_texture_field(frame1, W * 4, W, H, 0);
     stamp_texture_field(frame2, W * 4, W, H, 0);
     stamp_color_patch(frame1, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
-    stamp_color_patch(frame2, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
+    stamp_color_patch(frame2, W * 4, W, H, W / 2 + 4, H / 2, 2, 255, 24, 24);
 
     anomaly_result_t r1, r2;
     int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
+    const anomaly_target_track_t *track_after_full = find_active_track(&st, ANOMALY_ALGO_COLOR);
+    int full_refresh_hit_count = track_after_full != NULL ? track_after_full->hit_count : 0;
     int b2 = anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 0, &r2);
     EXPECT(b1 > 0, "target-only mode: first frame establishes an active track");
+    EXPECT(track_after_full != NULL, "target-only mode: first frame exposes a color target track");
     EXPECT(b2 >= 0, "target-only mode: follow-up frame processes successfully");
     EXPECT(r2.scan_plan.target_revisit_track_count > 0,
            "target-only mode: planner sees an active target revisit hint");
-    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
-           "target-only mode: Color stride gap holds instead of refreshing target-only");
-    EXPECT(st.target_tracks[0].active,
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "target-only mode: Color stride gap still refreshes the predicted target ROI");
+    EXPECT((r2.scan_plan.reason_flags & ANOMALY_SCAN_REASON_TARGET_ONLY_ELIGIBLE) != 0u,
+           "target-only mode: scan plan records the target-only revisit reason");
+    EXPECT((r2.scan_plan.reason_flags & ANOMALY_SCAN_REASON_NO_APPEARANCE_REFRESH) == 0u,
+           "target-only mode: target ROI refresh is not treated as an appearance skip");
+    const anomaly_target_track_t *track_after_target_only = find_active_track(&st, ANOMALY_ALGO_COLOR);
+    EXPECT(track_after_target_only != NULL,
            "target-only mode: explicit target track stays active");
-    EXPECT(st.target_tracks[0].hit_count > 0,
-           "target-only mode: explicit target track accumulates direct hits");
+    EXPECT(r2.color_debug.support_peak_score > 0.0f ||
+           (track_after_target_only != NULL &&
+            track_after_target_only->hit_count > full_refresh_hit_count),
+           "target-only mode: stride-gap ROI frame runs color analysis over the predicted target");
     int target_total = st.roi_state.width * st.roi_state.height;
     int target_fresh = count_mask_set(st.roi_state.fresh_mask, target_total);
     int target_carried = count_mask_set(st.roi_state.carried_mask, target_total);
     EXPECT(target_total > 0, "target-only mode: roi state populated");
-    EXPECT(target_fresh == target_total,
-           "target-only mode: Color stride hold leaves previous full-refresh ROI mask intact");
-    EXPECT(target_carried == 0,
-           "target-only mode: Color stride hold avoids selective ROI mutation");
+    EXPECT(target_fresh > 0 && target_fresh < target_total,
+           "target-only mode: stride-gap frame refreshes only the predicted target ROI");
+    EXPECT(target_carried == target_total - target_fresh,
+           "target-only mode: non-target ROI samples are carried forward");
 
     free(frame1);
     free(frame2);
@@ -15262,8 +16914,8 @@ static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(voi
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 100000, &r2);
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 400000, &r3);
 
-    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
-           "periodic refresh: stable follow-up frame holds Color ROI state");
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "periodic refresh: stable follow-up frame refreshes the predicted target ROI");
     EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
            "periodic refresh: ~333ms cadence forces a full refresh");
     EXPECT((r3.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) != 0u,
@@ -15481,6 +17133,9 @@ int main(void) {
     test_result_publish_color_debug_candidates_publishes_and_caps();
     test_result_publish_color_debug_candidates_additive_only();
     test_result_build_boxes_target_tracks_take_priority();
+    test_result_build_boxes_color_target_suppresses_motion_support_track();
+    test_result_build_boxes_stale_color_target_is_not_published();
+    test_result_build_boxes_color_target_suppresses_secondary_color_track();
     test_result_build_boxes_accumulator_fallback_and_persist_filter();
     test_result_build_boxes_saliency_aux_current_gate_noop();
     test_saliency_update_aux_track_noops_invalid_inputs();
@@ -15534,6 +17189,7 @@ int main(void) {
     test_target_tracks_allocate_full_uses_weakest_score();
     test_target_tracks_update_allocates_track_and_sets_lifecycle_fields();
     test_target_tracks_update_matches_existing_and_preserves_publish_confirmation();
+    test_target_tracks_confirmed_color_rejects_loose_nonconfirming_drag();
     test_target_tracks_update_unmatched_ages_and_respects_registration_health();
     test_target_tracks_update_empty_frame_returns_clear_intent_only_without_revisit_tracks();
     test_target_tracks_predict_null_and_default_noop();
@@ -15607,6 +17263,35 @@ int main(void) {
     test_target_observation_duplicate_suppression();
 
     test_detector_facade_matches_process_frame();
+    test_detector_facade_structured_args_match_positional_process();
+    test_detector_facade_structured_args_null_safe();
+    test_detector_facade_process_args_make_copies_fields();
+    test_detector_facade_process_args_make_allows_optional_fields();
+    test_detector_facade_default_window_frames_contract();
+    test_detector_facade_realtime_default_config_contract();
+    test_detector_facade_annotation_cadence_contract();
+    test_detector_facade_annotation_cadence_visibility_state_contract();
+    test_detector_facade_annotation_cadence_snapshot_contract();
+    test_detector_facade_process_args_frame_ready_contract();
+    test_detector_facade_process_args_may_annotate_frame_contract();
+    test_detector_facade_process_args_frame_output_contract();
+    test_detector_facade_result_annotations_view_contract();
+    test_detector_facade_result_apply_annotation_cadence();
+    test_detector_facade_result_apply_annotation_visibility_cadence_tracks_motion();
+    test_detector_facade_result_apply_annotation_visibility_cadence_smooths_jitter();
+    test_detector_facade_annotation_snapshot_view_contract();
+    test_detector_facade_process_output_combines_frame_and_annotations();
+    test_detector_facade_process_output_apply_annotation_cadence();
+    test_detector_facade_process_frame_returns_processed_output();
+    test_detector_facade_process_frame_applies_annotation_cadence();
+    test_detector_facade_process_frame_input_matches_structured_wrapper();
+    test_detector_facade_runtime_init_contract();
+    test_detector_facade_runtime_init_with_config_contract();
+    test_detector_facade_runtime_apply_config_contract();
+    test_detector_facade_runtime_process_frame_contract();
+    test_detector_facade_runtime_process_frame_result_contract();
+    test_detector_facade_runtime_accessors_contract();
+    test_detector_facade_frame_input_ready_contract();
     test_detector_facade_rejects_missing_frame();
     test_detector_facade_rejects_missing_state();
     test_detector_facade_rejects_unsupported_format();
@@ -15645,6 +17330,7 @@ int main(void) {
     test_motion_estimator_sidecar_parallax_suppression_scale_contract();
     test_motion_estimator_sidecar_tile_confidence_contract();
     test_motion_estimator_sidecar_tile_displacement_px_contract();
+    test_motion_estimator_sidecar_displacement_magnitude_contract();
     test_motion_estimator_init_appearance_scorer_input_null_safe();
     test_motion_estimator_init_appearance_scorer_input_copies_contract_fields();
     test_motion_estimator_sync_appearance_scorer_state_null_safe();
@@ -15671,6 +17357,8 @@ int main(void) {
     test_motion_estimator_snapshot_rejects_invalid_input();
     test_motion_estimator_snapshot_queries_valid_tile();
     test_motion_estimator_tile_classification_null_and_invalid();
+    test_motion_estimator_tile_flow_magnitude_contract();
+    test_motion_estimator_tile_residual_independent_score_contract();
     test_motion_estimator_tile_classification_local_outlier_independent();
     test_motion_estimator_tile_classification_parallax_like_layers();
     test_motion_estimator_tile_classification_unstable_partial_score();

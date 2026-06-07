@@ -507,6 +507,7 @@ static anomaly_scan_plan_t build_scan_plan(
                plan.stale_fraction < 0.10f) {
         plan.mode = ANOMALY_RESCAN_MODE_TARGET_ONLY;
         plan.reason_flags |= ANOMALY_SCAN_REASON_TARGET_ONLY_ELIGIBLE;
+        plan.reason_flags &= ~ANOMALY_SCAN_REASON_NO_APPEARANCE_REFRESH;
     } else {
         plan.mode = ANOMALY_RESCAN_MODE_PARTIAL;
         plan.reason_flags |= ANOMALY_SCAN_REASON_PARTIAL_ELIGIBLE;
@@ -701,7 +702,8 @@ bool anomaly_scan_planner_plan(
         input->color_stride_hold_eligible &&
         effective_frame_stride > 1 &&
         !full_refresh_cadence_due &&
-        !force_periodic_full_refresh;
+        !force_periodic_full_refresh &&
+        scan_plan.mode != ANOMALY_RESCAN_MODE_TARGET_ONLY;
     if (color_stride_hold_frame) {
         rescan_mode = ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP;
         scan_plan.mode = ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP;

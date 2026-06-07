@@ -261,6 +261,14 @@ bool anomaly_motion_estimator_sidecar_tile_displacement_px(
     return true;
 }
 
+float anomaly_motion_estimator_sidecar_displacement_magnitude_px(
+        int dx,
+        int dy,
+        int motion_step) {
+    if (motion_step <= 0) return 0.0f;
+    return sqrtf((float)(dx * dx + dy * dy)) * (float)motion_step;
+}
+
 float anomaly_motion_estimator_texture_scale(int texture_score) {
     if (texture_score <= 8) return 0.0f;
     if (texture_score >= 24) return 1.0f;
@@ -500,13 +508,25 @@ bool anomaly_motion_estimator_query_snapshot_at_norm(
 float anomaly_motion_estimator_tile_independent_score(
         const anomaly_debug_movement_tile_t *tile) {
     if (tile == NULL || !tile->valid) return 0.0f;
-    float residual_score = clampf((tile->residual_px - 12.0f) / 28.0f, 0.0f, 1.0f);
-    float flow_px = sqrtf(tile->dx_px * tile->dx_px + tile->dy_px * tile->dy_px);
+    float residual_score = anomaly_motion_estimator_tile_residual_independent_score(tile);
+    float flow_px = anomaly_motion_estimator_tile_flow_magnitude_px(tile);
     float flow_score = clampf(flow_px / 24.0f, 0.0f, 1.0f);
     float layer_score = tile->layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER ? 1.0f :
         (tile->layer_class == ANOMALY_MOVEMENT_LAYER_UNSTABLE ? 0.35f : 0.0f);
     return clampf((0.45f * residual_score) + (0.35f * flow_score) +
                   (0.20f * layer_score), 0.0f, 1.0f);
+}
+
+float anomaly_motion_estimator_tile_residual_independent_score(
+        const anomaly_debug_movement_tile_t *tile) {
+    if (tile == NULL || !tile->valid) return 0.0f;
+    return clampf((tile->residual_px - 12.0f) / 28.0f, 0.0f, 1.0f);
+}
+
+float anomaly_motion_estimator_tile_flow_magnitude_px(
+        const anomaly_debug_movement_tile_t *tile) {
+    if (tile == NULL || !tile->valid) return 0.0f;
+    return sqrtf(tile->dx_px * tile->dx_px + tile->dy_px * tile->dy_px);
 }
 
 bool anomaly_motion_estimator_tile_is_parallax_like(
@@ -809,8 +829,8 @@ void anomaly_motion_estimator_estimate_sidecar(
     int unstable = 0;
     int local_outlier = 0;
     int background = 0;
-    float prev_dx = 0.0f;
-    float prev_dy = 0.0f;
+    int prev_dx = 0;
+    int prev_dy = 0;
     bool have_prev_flow = false;
 
     for (int gy = 0; gy < grid_rows; gy++) {
@@ -849,7 +869,11 @@ void anomaly_motion_estimator_estimate_sidecar(
             float residual_px = (float)abs(
                 (int)input->curr_luma[my * input->motion_w + mx] -
                 (int)input->prev_luma[py_idx * input->motion_w + px_idx]);
-            float flow_px = sqrtf((float)(best_dx * best_dx + best_dy * best_dy)) * (float)input->motion_step;
+            float flow_px =
+                anomaly_motion_estimator_sidecar_displacement_magnitude_px(
+                        best_dx,
+                        best_dy,
+                        input->motion_step);
             residual_sum += residual_px;
             residual_sum2 += residual_px * residual_px;
             flow_sum += flow_px;
@@ -858,12 +882,14 @@ void anomaly_motion_estimator_estimate_sidecar(
 
             float neighbor_delta = 0.0f;
             if (have_prev_flow) {
-                float ddx = (float)best_dx - prev_dx;
-                float ddy = (float)best_dy - prev_dy;
-                neighbor_delta = sqrtf(ddx * ddx + ddy * ddy) * (float)input->motion_step;
+                neighbor_delta =
+                    anomaly_motion_estimator_sidecar_displacement_magnitude_px(
+                            best_dx - prev_dx,
+                            best_dy - prev_dy,
+                            input->motion_step);
             }
-            prev_dx = (float)best_dx;
-            prev_dy = (float)best_dy;
+            prev_dx = best_dx;
+            prev_dy = best_dy;
             have_prev_flow = true;
 
             int layer_class = ANOMALY_MOVEMENT_LAYER_UNKNOWN;

@@ -117,6 +117,11 @@ input:
 | `<clip>_annotated.mp4` | Original video with detection boxes drawn on every frame |
 | `<clip>_detections.csv` | One row per visible box per frame, with a blank **label** column |
 
+Use `--app-display-output` when you want the annotated video and CSV to reflect
+the app-visible publication path instead of raw detector boxes. This restores
+the clean decoded frame, applies annotation cadence/ROI smoothing, redraws the
+displayed boxes, and writes those displayed boxes to the CSV.
+
 **Quick start for IR / black-hot footage:**
 ```sh
 cd tools/anomaly_test
@@ -155,6 +160,8 @@ The matching summary JSON includes:
 -o <file.mp4>    Annotated video  (default: <input>_annotated.mp4)
 -c <file.csv>    Detection log    (default: <input>_detections.csv)
 --no-video       CSV only; skip annotated video output
+--app-display-output
+                 Write/draw app-visible annotations after cadence and ROI smoothing
 
 -t <float>       Score threshold  (default: 1.8 in the native struct; app default at 60% sensitivity is ~2.8)
 -m <int>         Min consecutive hits before showing box (default: 2)
@@ -301,6 +308,11 @@ Useful app-parity flags:
 - `--app-sensitivity <0..1>` uses the app's logarithmic threshold mapping.
 - `--app-motion-sensitivity <0..1>` uses the app's motion evidence scaling.
 
+For color appearance, app parity maps the app's legacy UI/default color
+frontend selection to the native `fresh-rgba` frontend, matching
+`AnomalyConfig.toNativeConfig(...)`. Pass `--color-frontend legacy` only when
+you intentionally want the old native color path for comparison.
+
 When app-parity mode is enabled, the harness prints both the high-level app
 inputs and the derived native detector settings at startup and records the
 parity metadata into the CSV header.
@@ -368,6 +380,36 @@ python3 tools/anomaly_test/run_regression_suite.py \
 If a change touches color scoring, color candidate selection, or selective
 refresh behavior, rerun the color manifest and check `red1-opening-target-track`
 before considering the change safe.
+
+For squinter-facing display checks, run the app-display stream and summarize
+its temporal stability:
+
+```sh
+tools/anomaly_test/build_timing/anomaly_video_test \
+  app/src/test/resources/vidcap/Red1.mp4 \
+  --app-defaults --app-appearance color --app-motion on --app-saliency off \
+  --app-display-output \
+  --summary-json /tmp/red1_app_display_summary.json \
+  -c /tmp/red1_app_display_detections.csv \
+  -o /tmp/red1_app_display_annotated.mp4
+
+python3 tools/anomaly_test/analyze_display_stability.py \
+  /tmp/red1_app_display_detections.csv \
+  --frame-count 154 \
+  --cadence-frames 15 \
+  --json-out /tmp/red1_app_display_stability.json
+
+python3 tools/anomaly_test/review_eval.py \
+  app/src/test/resources/vidcap/Red1.review.json \
+  /tmp/red1_app_display_detections.csv \
+  --time-window 0.25 \
+  --json
+```
+
+The stability summary reports visible-frame ratio, blink gaps, short gaps
+within the cadence window, and greedy per-track jump statistics. Pair it with
+`review_eval.py` so a smooth but wrong ROI is still counted as a miss.
+
 - `scan_reason_counts.reg-invalid`
 - dominant registration invalid reason
 - `rescan_modes.full/partial/target_only`

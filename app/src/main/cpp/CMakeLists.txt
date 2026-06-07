@@ -12,6 +12,7 @@ add_library(
     SHARED
     ffmpeg_bridge.c
     anomaly_detector.c
+    anomaly_detector_annotation.c
     anomaly_analysis.c
     anomaly_buffer.c
     anomaly_roi_tracks.c

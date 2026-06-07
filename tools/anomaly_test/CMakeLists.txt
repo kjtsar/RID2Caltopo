@@ -7,6 +7,7 @@ option(ANOMALY_DEBUG_TIMING "Enable anomaly detector stage timing instrumentatio
 add_executable(anomaly_test
     test_anomaly.c
     ../../app/src/main/cpp/anomaly_detector.c
+    ../../app/src/main/cpp/anomaly_detector_annotation.c
     ../../app/src/main/cpp/anomaly_analysis.c
     ../../app/src/main/cpp/anomaly_buffer.c
     ../../app/src/main/cpp/anomaly_roi_tracks.c
@@ -41,6 +42,7 @@ target_link_libraries(anomaly_test m)
 add_executable(anomaly_video_test
     anomaly_video_test.c
     ../../app/src/main/cpp/anomaly_detector.c
+    ../../app/src/main/cpp/anomaly_detector_annotation.c
     ../../app/src/main/cpp/anomaly_analysis.c
     ../../app/src/main/cpp/anomaly_buffer.c
     ../../app/src/main/cpp/anomaly_roi_tracks.c

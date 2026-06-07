@@ -443,8 +443,10 @@ public class CaltopoMap {
         if (MapNode != null) {
             // don't wait around for reset operations to complete:
             ResetMapConnection(0);
+            SetMapStatus(MapStatusListener.mapStatus.down, "Map switch request.");
         }
         MapNode = mapNode;
+        DisconnectInProgress = false;
 
         SetMapStatus(MapStatusListener.mapStatus.connecting, null);
         try {
@@ -664,7 +666,7 @@ public class CaltopoMap {
         ResolvedMyDeviceMarkerId = null;
         LastPublishedMyDeviceMarkerColor = null;
         long startTime = System.currentTimeMillis();
-        for (CaltopoLiveTrack track : LiveTracksById.values()) {
+        for (CaltopoLiveTrack track : new ArrayList<>(liveTracks)) {
             track.shutdown(maxWaitInMilliseconds);
             if (0 != maxWaitInMilliseconds)
                 maxWaitInMilliseconds = (maxWaitInMilliseconds - (System.currentTimeMillis() - startTime));

@@ -1680,7 +1680,8 @@ class FfmpegProbeService(
                         "adaptiveMaxFrames=${snapshot.second.adaptiveMaxStrideFrames} " +
                         "adaptiveMaxSec=${"%.1f".format(snapshot.second.adaptiveMaxStrideSeconds)} " +
                         "pixelStep=${snapshot.second.pixelStep} threshold=${"%.2f".format(snapshot.second.scoreThreshold)} " +
-                        "minHits=${snapshot.second.minHits} scanZone=${"%.2f".format(snapshot.second.scanZone)}"
+                        "minHits=${snapshot.second.minHits} scanZone=${"%.2f".format(snapshot.second.scanZone)} " +
+                        "colorFrontend=${snapshot.second.colorFrontendMode}"
                 )
             }
             FfmpegBridge.updateAnomalyConfig(sessionId, snapshot.second)
@@ -1701,7 +1702,8 @@ class FfmpegProbeService(
                     "adaptiveMaxFrames=${config.adaptiveMaxStrideFrames} " +
                     "adaptiveMaxSec=${"%.1f".format(config.adaptiveMaxStrideSeconds)} " +
                     "pixelStep=${config.pixelStep} threshold=${"%.2f".format(config.scoreThreshold)} " +
-                    "minHits=${config.minHits} scanZone=${"%.2f".format(config.scanZone)}"
+                    "minHits=${config.minHits} scanZone=${"%.2f".format(config.scanZone)} " +
+                    "colorFrontend=${config.colorFrontendMode}"
             )
         }
         FfmpegBridge.updateAnomalyConfig(sessionId, config)

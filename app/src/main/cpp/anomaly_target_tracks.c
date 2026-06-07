@@ -11,6 +11,7 @@
 #define ANOMALY_TARGET_MAX_CARRIED_MISSES 6
 #define ANOMALY_TARGET_CONFIDENCE_HIT_GAIN 0.22f
 #define ANOMALY_TARGET_CONFIDENCE_MISS_DECAY 0.22f
+#define ANOMALY_TARGET_CONFIRMED_COLOR_LOCK_GATE 0.040f
 
 void anomaly_target_tracks_clear_track(anomaly_target_track_t *track) {
     if (track == NULL) return;
@@ -66,6 +67,27 @@ int anomaly_target_tracks_allocate_slot(anomaly_state_t *state) {
     return weakest_idx;
 }
 
+static bool anomaly_target_tracks_should_hold_confirmed_color_lock(
+        const anomaly_target_track_t       *track,
+        const anomaly_target_observation_t *obs) {
+    if (track == NULL || obs == NULL) {
+        return false;
+    }
+    if (!track->active ||
+        !track->publish_confirmed ||
+        track->algorithm != ANOMALY_ALGO_COLOR ||
+        obs->algorithm != ANOMALY_ALGO_COLOR ||
+        obs->publish_confirming) {
+        return false;
+    }
+    float dx = obs->center_x_norm - track->center_x_norm;
+    float dy = obs->center_y_norm - track->center_y_norm;
+    float dist = sqrtf(dx * dx + dy * dy);
+    float gate = ANOMALY_TARGET_CONFIRMED_COLOR_LOCK_GATE +
+                 0.50f * fmaxf(track->support_radius_norm, obs->support_radius_norm);
+    return dist > gate;
+}
+
 bool anomaly_target_tracks_update_from_observations(
         anomaly_state_t                    *state,
         const anomaly_target_observation_t *observations,
@@ -92,6 +114,12 @@ bool anomaly_target_tracks_update_from_observations(
         }
 
         anomaly_target_track_t *track = &state->target_tracks[track_idx];
+        if (anomaly_target_tracks_should_hold_confirmed_color_lock(track, obs)) {
+            track->fresh_observation = false;
+            track->forced_revisit = true;
+            continue;
+        }
+
         track->active = true;
         track->algorithm = obs->algorithm;
         track->center_x_norm = obs->center_x_norm;

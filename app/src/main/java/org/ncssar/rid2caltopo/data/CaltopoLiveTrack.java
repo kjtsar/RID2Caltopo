@@ -150,7 +150,6 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             case credentialsVerified:
             case connecting: {
                 shuttingDown = false;
-                active = true;
                 break;
             }
             case up: {
@@ -289,7 +288,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         }
         notifyPeerCoordinatorTrackEnded(wasActive);
         localOwner = false;
-        active = false;
+        clearLiveTrackState();
     }
 
     /** CaltopoMap periodically checks for updates to map features
@@ -406,6 +405,14 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         active = false;
     }
 
+    private void clearLiveTrackState() {
+        linePoints.clear();
+        liveTrackId = null;
+        linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
+        startLiveTrackOp = null;
+        active = false;
+    }
+
     public String getTrackLabel() {
         return droneSpec.trackLabel() + (isActive()? "":"(inactive)");
     }
@@ -501,7 +508,11 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         NotifyLocalTrackFinished(droneSpec, reason);
         notifyPeerCoordinatorTrackEnded(true);
         localOwner = false;
-        active = false;
+        if (liveTrackId == null) {
+            clearLiveTrackState();
+        } else {
+            active = false;
+        }
     }
 
     private void notifyPeerCoordinatorTrackEnded(boolean wasActive) {

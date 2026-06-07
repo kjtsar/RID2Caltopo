@@ -37,6 +37,8 @@
 #define TAG "ffmpeg_bridge"
 #define MAX_SESSIONS 32
 #include "anomaly_analysis.h"
+#include "anomaly_debug_helpers.h"
+#include "anomaly_detector.h"
 #define RENDER_MIN_INTERVAL_MS 5
 #define RENDER_MAX_INTERVAL_MS 1000
 #define RENDER_DEFAULT_FPS 30
@@ -273,6 +275,8 @@ typedef struct ffmpeg_session_t {
     int64_t local_playback_step_budget;
     int64_t anomaly_process_frame_count;
     int64_t anomaly_annotated_frame_count;
+    anomaly_detector_annotation_cadence_snapshot_state_t anomaly_annotation_cadence;
+    int64_t anomaly_annotation_last_source_ts_us;
     int64_t anomaly_process_total_us;
     int64_t anomaly_process_max_us;
     int64_t anomaly_process_last_us;
@@ -343,6 +347,8 @@ typedef struct ffmpeg_session_t {
     AVFrame *anomaly_rgba_frame;
     uint8_t *anomaly_rgba_buffer;
     int anomaly_rgba_buffer_size;
+    uint8_t *anomaly_clean_rgba;
+    size_t anomaly_clean_rgba_capacity;
     int anomaly_rgba_width;
     int anomaly_rgba_height;
     enum AVPixelFormat anomaly_src_fmt;
@@ -778,6 +784,10 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
         av_free(session->anomaly_rgba_buffer);
         session->anomaly_rgba_buffer = NULL;
     }
+    if (session->anomaly_clean_rgba != NULL) {
+        free(session->anomaly_clean_rgba);
+        session->anomaly_clean_rgba = NULL;
+    }
 
     session->anomaly_rgba_frame = av_frame_alloc();
     if (session->anomaly_rgba_frame == NULL) return;
@@ -827,6 +837,8 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
     session->anomaly_src_fmt = src_fmt;
 
     anomaly_state_reset(&session->anomaly_state);
+    anomaly_detector_annotation_cadence_snapshot_state_init(
+            &session->anomaly_annotation_cadence);
 }
 
 static void cleanup_anomaly_resources(ffmpeg_session_t *session) {
@@ -855,9 +867,52 @@ static void cleanup_anomaly_resources(ffmpeg_session_t *session) {
         anomaly_state_cleanup(&session->anomaly_state);
     }
     session->anomaly_rgba_buffer_size = 0;
+    session->anomaly_clean_rgba_capacity = 0;
     session->anomaly_rgba_width = 0;
     session->anomaly_rgba_height = 0;
     session->anomaly_src_fmt = AV_PIX_FMT_NONE;
+}
+
+static bool ensure_anomaly_clean_rgba_capacity(ffmpeg_session_t *session,
+                                               int width,
+                                               int height,
+                                               int rgba_stride) {
+    if (session == NULL || width <= 0 || height <= 0 || rgba_stride <= 0) {
+        return false;
+    }
+    size_t required = (size_t) rgba_stride * (size_t) height;
+    if (required == 0) {
+        return false;
+    }
+    if (session->anomaly_clean_rgba_capacity >= required &&
+        session->anomaly_clean_rgba != NULL) {
+        return true;
+    }
+    uint8_t *buffer = (uint8_t *) realloc(session->anomaly_clean_rgba, required);
+    if (buffer == NULL) {
+        return false;
+    }
+    session->anomaly_clean_rgba = buffer;
+    session->anomaly_clean_rgba_capacity = required;
+    return true;
+}
+
+static void copy_anomaly_rgba_rows(uint8_t       *dst,
+                                   const uint8_t *src,
+                                   int            width,
+                                   int            height,
+                                   int            dst_stride,
+                                   int            src_stride) {
+    if (dst == NULL || src == NULL || width <= 0 || height <= 0 ||
+        dst_stride <= 0 || src_stride <= 0) {
+        return;
+    }
+    size_t row_bytes = (size_t) width * 4u;
+    for (int y = 0; y < height; y++) {
+        memcpy(dst + ((size_t) y * (size_t) dst_stride),
+               src + ((size_t) y * (size_t) src_stride),
+               row_bytes);
+    }
 }
 
 static AVFrame *clone_rgba_frame(const AVFrame *src) {
@@ -1107,10 +1162,57 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
     }
     int64_t started_at_us = monotonic_us();
     trace_begin_section("RID2C anomaly_process_frame");
-    bool annotated = anomaly_process_frame(&session->anomaly_state, &cfg,
-                                           rgba, rgba_stride, width, height,
-                                           source_ts_us, &result) > 0;
+    bool use_raw_overlay_draw =
+            cfg.show_hot_overlay ||
+            cfg.show_candidate_blobs;
+    bool clean_rgba_available =
+            !use_raw_overlay_draw &&
+            ensure_anomaly_clean_rgba_capacity(session, width, height, rgba_stride);
+    bool use_stable_overlay_draw = !use_raw_overlay_draw && clean_rgba_available;
+    if (clean_rgba_available) {
+        copy_anomaly_rgba_rows(
+                session->anomaly_clean_rgba,
+                rgba,
+                width,
+                height,
+                rgba_stride,
+                rgba_stride);
+    }
+    int raw_box_count = anomaly_process_frame(&session->anomaly_state, &cfg,
+                                              rgba, rgba_stride,
+                                              width, height,
+                                              source_ts_us, &result);
     trace_end_section();
+    anomaly_detector_annotation_view_t stable_annotations =
+            !use_stable_overlay_draw
+                    ? anomaly_detector_result_annotations(&result)
+                    : anomaly_detector_result_apply_annotation_visibility_cadence(
+                            &result,
+                            &session->anomaly_annotation_cadence,
+                            session->anomaly_process_frame_count,
+                            anomaly_detector_default_window_frames((float) RENDER_DEFAULT_FPS));
+    if (source_ts_us > 0) {
+        session->anomaly_annotation_last_source_ts_us = source_ts_us;
+    }
+    if (use_stable_overlay_draw) {
+        copy_anomaly_rgba_rows(
+                rgba,
+                session->anomaly_clean_rgba,
+                width,
+                height,
+                rgba_stride,
+                rgba_stride);
+    }
+    if (use_stable_overlay_draw && stable_annotations.box_count > 0) {
+        anomaly_debug_draw_boxes_rgba(
+                rgba,
+                rgba_stride,
+                width,
+                height,
+                stable_annotations.boxes,
+                stable_annotations.box_count);
+    }
+    bool annotated = stable_annotations.box_count > 0;
     int64_t elapsed_us = monotonic_us() - started_at_us;
     session->anomaly_process_frame_count += 1;
     session->anomaly_process_total_us += elapsed_us;
@@ -1360,15 +1462,18 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
          session->anomaly_process_frame_count <= 3 ||
          (session->anomaly_process_frame_count % 60) == 0 ||
          log_local_playback_summary)) {
-        const anomaly_box_t *first_box = result.box_count > 0 ? &result.boxes[0] : NULL;
+        const anomaly_box_t *first_box =
+                stable_annotations.box_count > 0 ? &stable_annotations.boxes[0] : NULL;
         ct_debug(TAG,
-                 "anomaly frame result id=%lld designator=%s frame=%lld ts=%.3fs annotated=%d boxCount=%d bestColor=%.2f bestThermal=%.2f bestMotion=%.2f overlay0=[algo=%d l=%.3f t=%.3f r=%.3f b=%.3f weight=%.2f] summary=%s",
+                 "anomaly frame result id=%lld designator=%s frame=%lld ts=%.3fs annotated=%d boxCount=%d stableBoxCount=%d rawBoxCount=%d bestColor=%.2f bestThermal=%.2f bestMotion=%.2f overlay0=[algo=%d l=%.3f t=%.3f r=%.3f b=%.3f weight=%.2f] summary=%s",
                  (long long) session->session_id,
                  session->designator,
                  (long long) session->anomaly_process_frame_count,
                  source_ts_us > 0 ? ((double) source_ts_us / 1000000.0) : 0.0,
                  annotated ? 1 : 0,
                  result.box_count,
+                 stable_annotations.box_count,
+                 raw_box_count,
                  result.color_debug.raw_score,
                  result.thermal_debug.raw_score,
                  result.motion_debug.raw_score,
@@ -1683,11 +1788,14 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
 
     anomaly_config_t cfg_override;
     anomaly_config_t *cfg_override_ptr = NULL;
-    if (frame_stride_override > 1) {
+    if (frame_stride_override > 0) {
         pthread_mutex_lock(&g_lock);
         cfg_override = session->anomaly_cfg;
         pthread_mutex_unlock(&g_lock);
+        cfg_override.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
         cfg_override.frame_stride = frame_stride_override;
+        cfg_override.adaptive_min_stride_frames = frame_stride_override;
+        cfg_override.adaptive_max_stride_frames = frame_stride_override;
         cfg_override_ptr = &cfg_override;
     }
 
@@ -2721,6 +2829,9 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->local_playback_history_replay_active = false;
         session->anomaly_process_frame_count = 0;
         session->anomaly_annotated_frame_count = 0;
+        anomaly_detector_annotation_cadence_snapshot_state_init(
+                &session->anomaly_annotation_cadence);
+        session->anomaly_annotation_last_source_ts_us = 0;
         session->anomaly_process_total_us = 0;
         session->anomaly_process_max_us = 0;
         session->anomaly_process_last_us = 0;
@@ -2764,6 +2875,9 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     }
     session->anomaly_process_frame_count = 0;
     session->anomaly_annotated_frame_count = 0;
+    anomaly_detector_annotation_cadence_snapshot_state_init(
+            &session->anomaly_annotation_cadence);
+    session->anomaly_annotation_last_source_ts_us = 0;
     session->anomaly_process_total_us = 0;
     session->anomaly_process_max_us = 0;
     session->anomaly_process_last_us = 0;
@@ -3736,38 +3850,16 @@ static void *ad_thread_main(void *arg) {
             continue;
         }
         session->ad_pressure_frame_counter += 1;
-        int64_t pressure_frame_counter = session->ad_pressure_frame_counter;
         pthread_mutex_unlock(&session->ad_lock);
 
         pthread_mutex_lock(&g_lock);
         int64_t generation_id = session->anomaly_generation_id;
         bool process_enabled = anomaly_processing_enabled_locked(session);
-        int configured_frame_stride = session->anomaly_cfg.frame_stride < 1
-                                      ? 1
-                                      : session->anomaly_cfg.frame_stride;
         pthread_mutex_unlock(&g_lock);
 
         bool skipped = false;
-        bool bypass_analysis = false;
-        int effective_frame_stride = 0;
-        if (pressure_mode == AD_PRESSURE_MODE_ANALYZE_ALTERNATE) {
-            pthread_mutex_lock(&g_lock);
-            effective_frame_stride = session->anomaly_cfg.frame_stride < 1
-                                     ? 2
-                                     : session->anomaly_cfg.frame_stride * 2;
-            pthread_mutex_unlock(&g_lock);
-        } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALTERNATE) {
-            bypass_analysis = (pressure_frame_counter % 2) == 0;
-        } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALL) {
-            bypass_analysis = true;
-        }
-        if (is_local_file_source(session) &&
-            configured_frame_stride > 1 &&
-            ((packet.frame_id - 1) % configured_frame_stride) != 0) {
-            bypass_analysis = true;
-        }
 
-        if (!process_enabled || packet.generation_id != generation_id || bypass_analysis) {
+        if (!process_enabled || packet.generation_id != generation_id) {
             packet.analyzed = false;
             skipped = true;
             session->ad_worker_skipped_frame_count += 1;
@@ -3778,7 +3870,7 @@ static void *ad_thread_main(void *arg) {
                                                        packet.frame,
                                                        packet.source_ts_us,
                                                        &analyzed,
-                                                       effective_frame_stride);
+                                                       0);
             packet.analyzed = analyzed;
         }
         if (session_stopping(session)) {
@@ -5096,6 +5188,8 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->ad_pressure_frame_counter = 0;
     slot->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
     anomaly_state_init(&slot->anomaly_state);
+    anomaly_detector_annotation_cadence_snapshot_state_init(
+            &slot->anomaly_annotation_cadence);
     if (pthread_mutex_init(&slot->anomaly_lock, NULL) != 0) {
         ct_error(TAG, "pthread_mutex_init failed for anomaly lock");
         memset(slot, 0, sizeof(*slot));

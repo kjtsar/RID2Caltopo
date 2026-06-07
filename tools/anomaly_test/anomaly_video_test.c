@@ -21,6 +21,8 @@
 // Requires ffmpeg and ffprobe on PATH.
 
 #include "anomaly_analysis.h"
+#include "anomaly_debug_helpers.h"
+#include "anomaly_detector.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -247,7 +249,10 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
     native_cfg->thermal_min_delta = app_clampf(app_cfg->thermal_min_delta, 1.0f, 64.0f);
     native_cfg->small_target_screen_fraction =
         app_clampf(app_cfg->small_target_screen_fraction, 0.0015f, 0.03f);
-    native_cfg->color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    native_cfg->color_frontend_mode =
+        app_cfg->appearance_selection == APP_APPEARANCE_COLOR
+            ? ANOMALY_COLOR_FRONTEND_FRESH_RGBA
+            : ANOMALY_COLOR_FRONTEND_LEGACY;
 }
 
 // ── pixel-font frame-number overlay ───────────────────────────────────────
@@ -1928,6 +1933,9 @@ static void usage(const char *prog) {
         "  -o <file.mp4>    Annotated video  (default: <input>_annotated.mp4)\n"
         "  -c <file.csv>    Detection log    (default: <input>_detections.csv)\n"
         "  --no-video       Skip annotated video (CSV only)\n"
+        "  --app-display-output\n"
+        "                   Write/draw the app-visible annotation stream after\n"
+        "                   cadence and ROI smoothing instead of raw detector boxes\n"
         "\n"
         "Detector settings:\n"
         "  -t <float>       Score threshold  (default: %.1f)\n"
@@ -1979,6 +1987,8 @@ static void usage(const char *prog) {
         "App-parity mode:\n"
         "  --app-defaults   Derive native detector config from the app's Kotlin\n"
         "                   AnomalyConfig defaults and mapping logic\n"
+        "                   Add --app-display-output when qualifying app-visible\n"
+        "                   behavior; without it CSV/video report raw detector boxes.\n"
         "  --app-appearance <auto|thermal|color>\n"
         "  --app-motion <on|off>\n"
         "  --app-saliency <on|off>\n"
@@ -2015,6 +2025,7 @@ int main(int argc, char **argv) {
     char color_debug_jsonl_path[1024] = "";
     char color_target_csv_path[1024] = "";
     int  write_video = 1;
+    int  app_display_output = 0;
 
     anomaly_config_t cfg = {
         .enabled           = true,
@@ -2271,6 +2282,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--debug-overlay")) {
             debug_overlay = 1;
         }
+        else if (!strcmp(argv[i], "--app-display-output")) app_display_output = 1;
         else if (!strcmp(argv[i], "--no-video")) write_video = 0;
         else { fprintf(stderr, "Unknown option: %s\n\n", argv[i]); usage(argv[0]); return 1; }
     }
@@ -2279,10 +2291,14 @@ int main(int argc, char **argv) {
         derive_native_cfg_from_app(&app_cfg, &cfg);
         if (color_frontend_overridden) {
             cfg.color_frontend_mode = requested_color_frontend_mode;
-        } else {
-            cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
         }
         cfg.movement_estimator_mode = requested_movement_estimator_mode;
+    }
+    bool app_qualification_ready = app_parity_mode && app_display_output;
+    if (app_parity_mode && !app_display_output) {
+        fprintf(stderr,
+                "Warning: --app-defaults without --app-display-output runs the app-derived detector config, "
+                "but reports raw detector boxes instead of the app-visible annotation stream.\n");
     }
 
     // ── Auto-detect dimensions and fps with ffprobe ──────────────────────
@@ -2445,9 +2461,10 @@ int main(int argc, char **argv) {
     size_t frame_bytes = (size_t)W * H * 4;
     uint8_t *rgba = malloc(frame_bytes);
     int debug_window_active = (debug_time_start >= 0.0 || debug_time_end >= 0.0);
-    uint8_t *raw_rgba = (debug_overlay || debug_frame > 0 || debug_window_active) ? malloc(frame_bytes) : NULL;
+    int needs_clean_rgba = app_display_output || debug_overlay || debug_frame > 0 || debug_window_active;
+    uint8_t *raw_rgba = needs_clean_rgba ? malloc(frame_bytes) : NULL;
     if (!rgba) { fprintf(stderr, "Out of memory\n"); return 1; }
-    if ((debug_overlay || debug_frame > 0 || debug_window_active) && !raw_rgba) {
+    if (needs_clean_rgba && !raw_rgba) {
         fprintf(stderr, "Out of memory\n");
         free(rgba);
         return 1;
@@ -2459,6 +2476,10 @@ int main(int argc, char **argv) {
 
     // Header lines document the settings so the file is self-contained.
     fprintf(csv, "# input: %s\n", input);
+    fprintf(csv, "# output_stream: %s\n",
+            app_display_output ? "app-display" : "raw-detector");
+    fprintf(csv, "# app_qualification_ready: %s\n",
+            app_qualification_ready ? "true" : "false");
     if (app_parity_mode) {
         fprintf(csv,
                 "# mode: app-parity  app_appearance: %s  app_motion: %d  app_saliency: %d  "
@@ -2580,6 +2601,10 @@ int main(int argc, char **argv) {
     // ── Process frames ───────────────────────────────────────────────────
     anomaly_state_t state;
     anomaly_state_init(&state);
+    anomaly_detector_annotation_cadence_snapshot_state_t display_cadence;
+    anomaly_detector_annotation_cadence_snapshot_state_init(&display_cadence);
+    int display_cadence_frames = anomaly_detector_default_window_frames((float)fps);
+    int64_t display_analyzed_frame_count = 0;
 
     int    frame_num        = 0;
     int    detection_frames = 0;
@@ -2677,8 +2702,32 @@ int main(int argc, char **argv) {
         }
 
         anomaly_result_t result;
+        memset(&result, 0, sizeof(result));
         int64_t source_ts_us = (int64_t)llround(time_s * 1000000.0);
+        anomaly_detector_annotation_view_t output_annotations = {0};
         anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, source_ts_us, &result);
+        output_annotations = anomaly_detector_result_annotations(&result);
+        if (app_display_output) {
+            output_annotations =
+                anomaly_detector_result_apply_annotation_visibility_cadence(
+                        &result,
+                        &display_cadence,
+                        display_analyzed_frame_count,
+                        display_cadence_frames);
+        }
+        display_analyzed_frame_count++;
+        if (app_display_output) {
+            memcpy(rgba, raw_rgba, frame_bytes);
+            if (output_annotations.box_count > 0) {
+                anomaly_debug_draw_boxes_rgba(
+                        rgba,
+                        W * 4,
+                        W,
+                        H,
+                        output_annotations.boxes,
+                        output_annotations.box_count);
+            }
+        }
         switch (result.rescan_mode) {
             case ANOMALY_RESCAN_MODE_FULL:
                 rescan_full_frames++;
@@ -2785,10 +2834,10 @@ int main(int argc, char **argv) {
             write_color_debug_jsonl(color_debug_jsonl, frame_num, time_s, &result);
         }
 
-        if (result.box_count > 0) {
+        if (output_annotations.box_count > 0) {
             detection_frames++;
-            for (int i = 0; i < result.box_count; i++) {
-                const anomaly_box_t *b = &result.boxes[i];
+            for (int i = 0; i < output_annotations.box_count; i++) {
+                const anomaly_box_t *b = &output_annotations.boxes[i];
                 float cx = (b->left_norm  + b->right_norm)  * 0.5f;
                 float cy = (b->top_norm   + b->bottom_norm) * 0.5f;
                 float bw = b->right_norm  - b->left_norm;
@@ -2953,6 +3002,26 @@ int main(int argc, char **argv) {
             } else {
                 fprintf(summary, "null");
             }
+            fprintf(summary, ",\n  \"output_stream\": ");
+            json_write_string(summary, app_display_output ? "app-display" : "raw-detector");
+            fprintf(summary, ",\n  \"display_cadence_frames\": %d", display_cadence_frames);
+            fprintf(summary, ",\n  \"app_parity\": {\n");
+            fprintf(summary, "    \"enabled\": %s,\n", app_parity_mode ? "true" : "false");
+            fprintf(summary, "    \"qualification_ready\": %s,\n",
+                    app_qualification_ready ? "true" : "false");
+            fprintf(summary, "    \"uses_app_config_mapping\": %s,\n",
+                    app_parity_mode ? "true" : "false");
+            fprintf(summary, "    \"uses_app_visible_annotations\": %s,\n",
+                    app_display_output ? "true" : "false");
+            fprintf(summary, "    \"processes_every_decoded_frame\": true,\n");
+            fprintf(summary, "    \"outer_ad_frame_skip\": false,\n");
+            fprintf(summary, "    \"render_stride_simulated\": 1,\n");
+            fprintf(summary, "    \"qualification_note\": ");
+            json_write_string(summary,
+                              app_qualification_ready
+                                  ? "Harness is configured for app-visible AD qualification."
+                                  : "Use --app-defaults with --app-display-output for app-visible AD qualification.");
+            fprintf(summary, "\n  }");
             fprintf(summary, ",\n  \"clip_start_s\": %.6f,\n", clip_time_start);
             if (clip_time_end >= 0.0) {
                 fprintf(summary, "  \"clip_end_s\": %.6f,\n", requested_media_end);

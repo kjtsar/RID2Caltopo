@@ -14,6 +14,17 @@ static float anomaly_result_clampf(float v, float lo, float hi) {
     return v;
 }
 
+#define ANOMALY_RESULT_MAX_STALE_COLOR_MISSES 3
+
+static bool anomaly_result_is_stale_color_target_track(const anomaly_target_track_t *track) {
+    return track != NULL &&
+           track->active &&
+           track->publish_confirmed &&
+           track->algorithm == ANOMALY_ALGO_COLOR &&
+           !track->fresh_observation &&
+           track->miss_count > ANOMALY_RESULT_MAX_STALE_COLOR_MISSES;
+}
+
 int anomaly_result_build_boxes(
         const anomaly_state_t  *state,
         const anomaly_config_t *cfg,
@@ -37,10 +48,44 @@ int anomaly_result_build_boxes(
         (cfg->algorithm_mask & ANOMALY_ALGO_PERSIST) != 0;
 
     int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
+    bool color_target_track_published = false;
+    bool stale_color_lock_pending = false;
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE)) != 0) {
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            const anomaly_target_track_t *track = &state->target_tracks[ti];
+            if (track->active &&
+                track->publish_confirmed &&
+                track->hit_count >= min_hits &&
+                track->algorithm == ANOMALY_ALGO_COLOR) {
+                if (anomaly_result_is_stale_color_target_track(track)) {
+                    stale_color_lock_pending = true;
+                    continue;
+                }
+                color_target_track_published = true;
+            }
+        }
+    }
     int box_count = 0;
+    bool emitted_color_target_track = false;
     for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS && box_count < max_boxes; ti++) {
         const anomaly_target_track_t *track = &state->target_tracks[ti];
         if (!track->active || !track->publish_confirmed || track->hit_count < min_hits) continue;
+        if (anomaly_result_is_stale_color_target_track(track) ||
+            (stale_color_lock_pending && track->algorithm == ANOMALY_ALGO_COLOR)) {
+            continue;
+        }
+        if (color_target_track_published &&
+            track->algorithm == ANOMALY_ALGO_COLOR &&
+            emitted_color_target_track) {
+            continue;
+        }
+        if (color_target_track_published &&
+            (track->algorithm == ANOMALY_ALGO_MOTION ||
+             track->algorithm == ANOMALY_ALGO_MOTION_TOLERANCE ||
+             track->algorithm == motion_box_algorithm)) {
+            continue;
+        }
         int rgb_idx = 3;
         if (track->algorithm == ANOMALY_ALGO_COLOR) rgb_idx = 0;
         else if (track->algorithm == ANOMALY_ALGO_THERMAL) rgb_idx = 1;
@@ -60,9 +105,13 @@ int anomaly_result_build_boxes(
                 weight);
         if (box_count > 0) {
             boxes[box_count - 1].algorithm = track->algorithm;
+            if (track->algorithm == ANOMALY_ALGO_COLOR) {
+                emitted_color_target_track = true;
+            }
         }
     }
     if (box_count > 0) return box_count;
+    if (stale_color_lock_pending) return 0;
     for (int ai = 0; ai < 4 && box_count < max_boxes; ai++) {
         if (saliency_primary && ai != 3) continue;
         if (!state->acc_active[ai]) continue;

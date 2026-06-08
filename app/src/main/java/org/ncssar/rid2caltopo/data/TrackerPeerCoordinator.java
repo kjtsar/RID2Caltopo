@@ -751,6 +751,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         reconnectPending = false;
         nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
         lastReconnectCause = reconnecting ? "reconnected" : "connected";
+        resetHeartbeatStateForNewTransport();
         sendHello();
         heartbeatSendQueued = false;
         heartbeatTimer.start(() -> requestHeartbeat("interval"), 0L, HEARTBEAT_INTERVAL_MS);
@@ -760,6 +761,15 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         flushPendingConfirmations();
         scheduleIdleParkIfEligible();
         notifyCoordinationIndicatorListener();
+    }
+
+    private void resetHeartbeatStateForNewTransport() {
+        heartbeatSeqCounter = 0L;
+        lastHeartbeatSeqSent = 0L;
+        lastHeartbeatSeqAcked = 0L;
+        lastHeartbeatSentAtMs = 0L;
+        lastHeartbeatAckAtMs = 0L;
+        heartbeatSendQueued = false;
     }
 
     private void notifyHardFailureIfNeeded(int responseCode, @Nullable String responseMessage) {

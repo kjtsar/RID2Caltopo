@@ -794,6 +794,31 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun reconnectOpenClearsStaleHeartbeatWatchdogState() {
+        transport.autoOpen = false
+
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+        transport.open()
+        coordinator.handleHelloAckForTesting()
+        coordinator.markHeartbeatSentForTesting(19L, clock.now())
+        clock.advanceBy(10_001L)
+
+        coordinator.checkAckLivenessForTesting()
+        awaitTrue("expected reconnect attempt after missed heartbeat ack") {
+            transport.connectCount >= 2
+        }
+
+        transport.open()
+        coordinator.stopBackgroundTimersForTesting()
+        coordinator.handleHelloAckForTesting()
+        clock.advanceBy(10_001L)
+        coordinator.checkAckLivenessForTesting()
+
+        assertEquals(1L, coordinator.getForcedReconnectCountForTesting())
+        assertEquals(2, transport.connectCount)
+    }
+
+    @Test
     fun queuedDroneConfirmation_flushesAfterDelayedOpen() {
         transport.autoOpen = false
 

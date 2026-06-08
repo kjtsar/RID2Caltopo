@@ -11747,15 +11747,15 @@ static void test_detector_facade_result_apply_annotation_visibility_cadence_trac
     view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 16, 15);
     EXPECT(view.boxes == state.boxes &&
            view.box_count == 1 &&
-           fabsf(view.boxes[0].left_norm - 0.45f) < 0.0001f,
-           "detector facade visibility cadence: visible moving annotation follows latest box");
+           fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f,
+           "detector facade visibility cadence: within-window detection changes are held");
 
     result.box_count = 0;
     view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 17, 15);
     EXPECT(view.boxes == state.boxes &&
            view.box_count == 1 &&
-           fabsf(view.boxes[0].left_norm - 0.45f) < 0.0001f,
-           "detector facade visibility cadence: within-window disappearance holds last moving box");
+           fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f,
+           "detector facade visibility cadence: within-window disappearance holds last published box");
 
     view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 30, 15);
     EXPECT(view.boxes == NULL &&
@@ -11776,7 +11776,7 @@ static void test_detector_facade_result_apply_annotation_visibility_cadence_trac
            "detector facade visibility cadence: color disappearance clears stale ROI immediately");
 }
 
-static void test_detector_facade_result_apply_annotation_visibility_cadence_smooths_jitter(void) {
+static void test_detector_facade_result_apply_annotation_visibility_cadence_holds_jitter(void) {
     anomaly_detector_result_t result;
     anomaly_detector_annotation_cadence_snapshot_state_t state;
     memset(&result, 0, sizeof(result));
@@ -11806,23 +11806,20 @@ static void test_detector_facade_result_apply_annotation_visibility_cadence_smoo
     EXPECT(view.boxes == state.boxes &&
            view.box_count == 1,
            "detector facade visibility cadence smoothing: uses held snapshot storage");
-    EXPECT(view.boxes[0].left_norm > 0.20f &&
-           view.boxes[0].left_norm < 0.24f &&
-           view.boxes[0].top_norm < 0.40f &&
-           view.boxes[0].top_norm > 0.36f,
-           "detector facade visibility cadence smoothing: small coordinate jitter is eased");
-    EXPECT(view.boxes[0].weight > 0.50f &&
-           view.boxes[0].weight < 0.90f,
-           "detector facade visibility cadence smoothing: weight is eased with the box");
+    EXPECT(fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f &&
+           fabsf(view.boxes[0].top_norm - 0.40f) < 0.0001f,
+           "detector facade visibility cadence: small coordinate jitter is held");
+    EXPECT(fabsf(view.boxes[0].weight - 0.50f) < 0.0001f,
+           "detector facade visibility cadence: weight is held with the box");
 
     result.boxes[0].left_norm = 0.82f;
     result.boxes[0].right_norm = 0.92f;
     result.boxes[0].top_norm = 0.10f;
     result.boxes[0].bottom_norm = 0.20f;
     view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 17, 15);
-    EXPECT(fabsf(view.boxes[0].left_norm - 0.82f) < 0.0001f &&
-           fabsf(view.boxes[0].top_norm - 0.10f) < 0.0001f,
-           "detector facade visibility cadence smoothing: large target switch snaps to latest box");
+    EXPECT(fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f &&
+           fabsf(view.boxes[0].top_norm - 0.40f) < 0.0001f,
+           "detector facade visibility cadence: large target switch is held within window");
 }
 
 static void test_detector_facade_annotation_snapshot_view_contract(void) {
@@ -17278,7 +17275,7 @@ int main(void) {
     test_detector_facade_result_annotations_view_contract();
     test_detector_facade_result_apply_annotation_cadence();
     test_detector_facade_result_apply_annotation_visibility_cadence_tracks_motion();
-    test_detector_facade_result_apply_annotation_visibility_cadence_smooths_jitter();
+    test_detector_facade_result_apply_annotation_visibility_cadence_holds_jitter();
     test_detector_facade_annotation_snapshot_view_contract();
     test_detector_facade_process_output_combines_frame_and_annotations();
     test_detector_facade_process_output_apply_annotation_cadence();

@@ -29,6 +29,7 @@ class R2CApplication : Application() {
         NotamCenter.initialize(this)
         R2CMqttManager.InitializeNetworkAddressMonitor(this)
         MapCacheStartupMaintenance.ensureStarted(this)
+        MainThreadStallMonitor.start()
         CTDebug(TAG, "onCreate().")
     }
 

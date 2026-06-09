@@ -98,6 +98,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private static final String MAPPED_ID_FILTER_REGEX = "[^-_a-zA-Z0-9]";
     private static final String CALLSIGN_OPT_MODEL_REGEX = "^([0-9]?[a-zA-Z]+[0-9]+)([_a-zA-Z0-9]{1,8})?$";
     private static final Pattern CallsignOptModelPattern = Pattern.compile(CALLSIGN_OPT_MODEL_REGEX);
+    private static final double EARTH_RADIUS_METERS = 6371008.8;
     private static long MostRecentWaypointTimestampInMsec = System.currentTimeMillis();
     private static long InvalidWaypointCount = 0;
 
@@ -116,6 +117,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     private transient long mostRecentFlightMsecTimestamp; /* timestamp carried by the most recent accepted waypoint */
     private transient double takeoffLat;
     private transient double takeoffLng;
+    private transient double homeLat;
+    private transient double homeLng;
     private transient CtDroneSpecListener myListener;
     private transient CaltopoLiveTrack myLiveTrack;
     private transient int[] transportCount = new int[TransportTypeEnum.values().length];
@@ -182,6 +185,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         mostRecentFlightMsecTimestamp = 0;
         takeoffLat = 0.0F;
         takeoffLng = 0.0F;
+        homeLat = 0.0F;
+        homeLng = 0.0F;
         distanceInFeet = 0.0F;
         stationaryRepeatCount = 0;
         lastLat = 0.0F;
@@ -477,6 +482,45 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         return takeoffLng;
     }
 
+    public boolean hasHomeLocation() {
+        return homeLat != 0.0F && homeLng != 0.0F;
+    }
+
+    public double getHomeLat() {
+        return homeLat;
+    }
+
+    public double getHomeLng() {
+        return homeLng;
+    }
+
+    public boolean isAwayFromHome(double distanceFeet) {
+        Double distanceFromHomeInFeet = distanceFromHomeInFeet();
+        return distanceFromHomeInFeet != null && distanceFromHomeInFeet > distanceFeet;
+    }
+
+    public boolean isAwayFromHomeOrTabletBaseline(double distanceFeet) {
+        Double distanceFromOriginInFeet = distanceFromHomeInFeet();
+        if (distanceFromOriginInFeet == null) distanceFromOriginInFeet = distanceFromTabletBaselineInFeet();
+        return distanceFromOriginInFeet != null && distanceFromOriginInFeet > distanceFeet;
+    }
+
+    @Nullable
+    public Double distanceFromHomeInFeet() {
+        if (!hasHomeLocation() || lastLat == 0.0F || lastLng == 0.0F) return null;
+        double distanceFeet = DistanceFeetBetween(homeLat, homeLng, lastLat, lastLng);
+        if (!Double.isFinite(distanceFeet)) return null;
+        return distanceFeet;
+    }
+
+    @Nullable
+    public Double distanceFromTabletBaselineInFeet() {
+        if (MyLat == 0.0F || MyLng == 0.0F || lastLat == 0.0F || lastLng == 0.0F) return null;
+        double distanceFeet = DistanceFeetBetween(MyLat, MyLng, lastLat, lastLng);
+        if (!Double.isFinite(distanceFeet)) return null;
+        return distanceFeet;
+    }
+
     public CtDroneSpec() throws RuntimeException {
         throw new RuntimeException("Use one of the other constructor methods.");
     }
@@ -569,12 +613,24 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     public static void BumpInvalidWaypointCount() {InvalidWaypointCount++;}
     public static double MyLat = 0.0F;
     public static double MyLng = 0.0F;
+    private static long MyLocationBaselineWallMsec = 0L;
 
     public static void UpdateMyLocationBaseline(double lat, double lng) {
+        UpdateMyLocationBaseline(lat, lng, System.currentTimeMillis());
+    }
+
+    public static void UpdateMyLocationBaseline(double lat, double lng, long wallMsec) {
         if (!Double.isFinite(lat) || !Double.isFinite(lng)) return;
         if (lat == 0.0F || lng == 0.0F) return;
         MyLat = lat;
         MyLng = lng;
+        MyLocationBaselineWallMsec = wallMsec;
+    }
+
+    public static void ClearMyLocationBaselineForTests() {
+        MyLat = 0.0F;
+        MyLng = 0.0F;
+        MyLocationBaselineWallMsec = 0L;
     }
     // Reject altitude spikes/drops that imply unrealistic vertical rates for small UAS.
 
@@ -652,7 +708,8 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
         Location myLocation = CaltopoMap.GetMyLocation();
         if (null != myLocation && myLocation.hasAccuracy()) {
-            UpdateMyLocationBaseline(myLocation.getLatitude(), myLocation.getLongitude());
+            long baselineWallMsec = myLocation.getTime() > 0 ? myLocation.getTime() : nowWallMsec;
+            UpdateMyLocationBaseline(myLocation.getLatitude(), myLocation.getLongitude(), baselineWallMsec);
         }
 
         // N.B: Autel Evo Max 4N has demonstrated willingness to publish wild coordinates,
@@ -671,9 +728,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
 
         float lDistanceInFeet = 0.0F ;
         if (lastLat != 0.0F) {
-            float[] dbResult = {Float.NaN};
-            Location.distanceBetween(lat, lng, lastLat, lastLng, dbResult);
-            lDistanceInFeet = dbResult[0] / FT_TO_METERS;
+            lDistanceInFeet = (float) DistanceFeetBetween(lat, lng, lastLat, lastLng);
             // Speed sanity check: rejects implausible coordinate jumps even without a phone GPS fix.
             // Catches startup coordinate bounces (e.g. Autel EVO Max: 30,000 mi in 15 min).
             long elapsedMsec = nowWallMsec - mostRecentMsecTimestamp;
@@ -719,6 +774,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
             takeoffLng = lng;
             updateTrackLabel();
         }
+        maybeRecordHomeLocation(lat, lng, nowWallMsec, transportType);
         if (acceptedWaypointTimestampMsec > mostRecentFlightMsecTimestamp) {
             mostRecentFlightMsecTimestamp = acceptedWaypointTimestampMsec;
         }
@@ -735,6 +791,41 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
         }
 
         return true;
+    }
+
+    private void maybeRecordHomeLocation(double lat, double lng, long nowWallMsec, @NonNull TransportTypeEnum transportType) {
+        if (hasHomeLocation() || MyLat == 0.0F || MyLng == 0.0F) return;
+        if (MyLocationBaselineWallMsec > 0
+                && Math.abs(nowWallMsec - MyLocationBaselineWallMsec) > CaltopoClient.HOME_LOCATION_MAX_TABLET_AGE_MS) {
+            return;
+        }
+
+        double distanceFeet = DistanceFeetBetween(
+                MyLat,
+                MyLng,
+                lat,
+                lng
+        );
+        if (!Double.isFinite(distanceFeet)) return;
+        if (distanceFeet > CaltopoClient.TAKEOFF_NEAR_TABLET_DISTANCE_FEET) return;
+
+        homeLat = lat;
+        homeLng = lng;
+        CTDebug(TAG, String.format(Locale.US,
+                "checkNewWaypoint(%s/%s): recording home location %.7f, %.7f from RID waypoint %.1fft from tablet",
+                mappedId, transportType, homeLat, homeLng, distanceFeet));
+    }
+
+    private static double DistanceFeetBetween(double lat1, double lng1, double lat2, double lng2) {
+        double lat1Rad = Math.toRadians(lat1);
+        double lat2Rad = Math.toRadians(lat2);
+        double deltaLatRad = Math.toRadians(lat2 - lat1);
+        double deltaLngRad = Math.toRadians(lng2 - lng1);
+        double a = Math.sin(deltaLatRad / 2.0) * Math.sin(deltaLatRad / 2.0)
+                + Math.cos(lat1Rad) * Math.cos(lat2Rad)
+                * Math.sin(deltaLngRad / 2.0) * Math.sin(deltaLngRad / 2.0);
+        double c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
+        return (EARTH_RADIUS_METERS * c) / FT_TO_METERS;
     }
 
     /** noteRidPositionPacketReceived()

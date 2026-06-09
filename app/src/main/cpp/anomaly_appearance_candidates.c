@@ -261,15 +261,19 @@ int anomaly_color_blob_candidate_compare_rank(
     if (lhs == NULL) return 1;
     if (rhs == NULL) return -1;
 
+    if (lhs->color_uniqueness_rank > 0.0f || rhs->color_uniqueness_rank > 0.0f) {
+        if (lhs->color_uniqueness_rank > rhs->color_uniqueness_rank) return -1;
+        if (lhs->color_uniqueness_rank < rhs->color_uniqueness_rank) return 1;
+    }
+    if (lhs->hist_rarity_score > 0.0f || rhs->hist_rarity_score > 0.0f) {
+        if (lhs->hist_rarity_score > rhs->hist_rarity_score) return -1;
+        if (lhs->hist_rarity_score < rhs->hist_rarity_score) return 1;
+    }
     if (lhs->retention_rank_valid || rhs->retention_rank_valid) {
         float lhs_rank = lhs->retention_rank_valid ? lhs->retention_rank : 0.0f;
         float rhs_rank = rhs->retention_rank_valid ? rhs->retention_rank : 0.0f;
         if (lhs_rank > rhs_rank) return -1;
         if (lhs_rank < rhs_rank) return 1;
-    }
-    if (lhs->hist_rarity_score > 0.0f || rhs->hist_rarity_score > 0.0f) {
-        if (lhs->hist_rarity_score > rhs->hist_rarity_score) return -1;
-        if (lhs->hist_rarity_score < rhs->hist_rarity_score) return 1;
     }
     if (lhs->candidate.color_score > rhs->candidate.color_score) return -1;
     if (lhs->candidate.color_score < rhs->candidate.color_score) return 1;

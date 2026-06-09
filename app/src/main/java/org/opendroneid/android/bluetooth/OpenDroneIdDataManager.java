@@ -22,7 +22,11 @@ import org.ncssar.rid2caltopo.data.CaltopoClient;
 
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class OpenDroneIdDataManager {
     static final double RID_INVALID_ALTITUDE_METERS = -1000.0;
@@ -40,10 +44,16 @@ public class OpenDroneIdDataManager {
     }
 
     private static final String TAG = "OpenDroneIdDataManager";
+    private static final int RID_INGEST_QUEUE_CAPACITY = 2048;
+    private static final long RID_INGEST_SLOW_PROCESSING_MS = 250L;
+    private static final long RID_INGEST_SLOW_PROCESSING_LOG_LIMIT = 10L;
 
     public android.location.Location receiverLocation;
 
     private final Callback callback;
+    private final ThreadPoolExecutor ridIngestExecutor;
+    private final AtomicLong droppedRidIngestPackets = new AtomicLong(0L);
+    private final AtomicLong slowRidIngestPacketsLogged = new AtomicLong(0L);
 
     // Tracks the last-logged altitude-source key per drone to suppress duplicate log spam.
     // Logged once on first contact and again whenever the key changes (altSource, isAtoType, fallback).
@@ -55,10 +65,38 @@ public class OpenDroneIdDataManager {
 
     public OpenDroneIdDataManager(Callback callback) {
         this.callback = callback;
+        ridIngestExecutor = new ThreadPoolExecutor(
+                1,
+                1,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(RID_INGEST_QUEUE_CAPACITY),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "RID-ingest");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                (runnable, executor) -> {
+                    long dropped = droppedRidIngestPackets.incrementAndGet();
+                    if (dropped == 1 || dropped % 100 == 0) {
+                        CaltopoClient.CTError(TAG, String.format(Locale.US,
+                                "RID ingest queue full; dropped packet count=%d queueSize=%d",
+                                dropped, executor.getQueue().size()));
+                    }
+                }
+        );
     }
 
     public ConcurrentHashMap<Long, AircraftObject> getAircraft() {
         return aircraft;
+    }
+
+    public int getRidIngestQueueDepth() {
+        return ridIngestExecutor.getQueue().size();
+    }
+
+    public long getDroppedRidIngestPacketCount() {
+        return droppedRidIngestPackets.get();
     }
 
     static long ridTimestampTenthsToUtcMsec(double locationTimestampTenths, long nowWallMsec) {
@@ -128,20 +166,47 @@ public class OpenDroneIdDataManager {
 
     void receiveDataBluetooth(byte[] data, ScanResult result, CtDroneSpec.TransportTypeEnum transportType) {
         String macAddress = result.getDevice().getAddress();
+        long timestampNanos = result.getTimestampNanos();
+        int rssi = result.getRssi();
+        byte[] packet = Arrays.copyOf(data, data.length);
+        android.location.Location location = receiverLocation;
+
+        enqueueRidPacket(
+                String.format(Locale.US,
+                        "processBluetoothPacket(mac=%s,rssi=%d,transport=%s,bytes=%d,timestampNanos=%d)",
+                        macAddress, rssi, transportType, packet.length, timestampNanos),
+                () -> processBluetoothPacket(
+                        packet, timestampNanos, macAddress, rssi, transportType, location));
+    }
+
+    private void processBluetoothPacket(byte[] data, long timestampNanos, String macAddress, int rssi,
+                                        CtDroneSpec.TransportTypeEnum transportType,
+                                        android.location.Location location) {
         String macAddressCleaned = macAddress.replace(":", "");
         long macAddressLong = Long.parseLong(macAddressCleaned,16);
-
         OpenDroneIdParser.Message<?> message =
-                OpenDroneIdParser.parseData(data, 6, result.getTimestampNanos(), receiverLocation);
+                OpenDroneIdParser.parseData(data, 6, timestampNanos, location);
         if (message == null)
             return;
-        receiveData(result.getTimestampNanos(), macAddress, macAddressLong, result.getRssi(),
+        receiveData(timestampNanos, macAddress, macAddressLong, rssi,
                     message, transportType);
     }
 
     void receiveDataNaN(byte[] data, int peerHash, long timeNano, CtDroneSpec.TransportTypeEnum transportType) {
+        byte[] packet = Arrays.copyOf(data, data.length);
+        android.location.Location location = receiverLocation;
+        enqueueRidPacket(
+                String.format(Locale.US,
+                        "processNaNPacket(peerHash=%d,transport=%s,bytes=%d,timeNano=%d)",
+                        peerHash, transportType, packet.length, timeNano),
+                () -> processNaNPacket(packet, peerHash, timeNano, transportType, location));
+    }
+
+    private void processNaNPacket(byte[] data, int peerHash, long timeNano,
+                                  CtDroneSpec.TransportTypeEnum transportType,
+                                  android.location.Location location) {
         OpenDroneIdParser.Message<?> message =
-                OpenDroneIdParser.parseData(data, 1, timeNano, receiverLocation);
+                OpenDroneIdParser.parseData(data, 1, timeNano, location);
         if (message == null) {
             CaltopoClient.CTError(TAG, "Not able to parse NaN data.");
             return;
@@ -152,11 +217,45 @@ public class OpenDroneIdDataManager {
 
     void receiveDataWiFiBeacon(byte[] data, String mac, long macLong, int rssi, long timeNano,
                                CtDroneSpec.TransportTypeEnum transportType) {
+        byte[] packet = Arrays.copyOf(data, data.length);
+        android.location.Location location = receiverLocation;
+        enqueueRidPacket(
+                String.format(Locale.US,
+                        "processWiFiBeaconPacket(mac=%s,macLong=%d,rssi=%d,transport=%s,bytes=%d,timeNano=%d)",
+                        mac, macLong, rssi, transportType, packet.length, timeNano),
+                () -> processWiFiBeaconPacket(
+                        packet, mac, macLong, rssi, timeNano, transportType, location));
+    }
+
+    private void processWiFiBeaconPacket(byte[] data, String mac, long macLong, int rssi, long timeNano,
+                                         CtDroneSpec.TransportTypeEnum transportType,
+                                         android.location.Location location) {
         OpenDroneIdParser.Message<?> message =
-                OpenDroneIdParser.parseData(data, 1, timeNano, receiverLocation);
+                OpenDroneIdParser.parseData(data, 1, timeNano, location);
         if (message == null)
             return;
         receiveData(timeNano, mac, macLong, rssi, message, transportType);
+    }
+
+    private void enqueueRidPacket(String description, Runnable runnable) {
+        ridIngestExecutor.execute(() -> {
+            long startedAtMs = System.currentTimeMillis();
+            try {
+                runnable.run();
+            } catch (Exception e) {
+                CaltopoClient.CTError(TAG, "RID ingest worker failed while processing packet.", e);
+            } finally {
+                long elapsedMs = System.currentTimeMillis() - startedAtMs;
+                if (elapsedMs >= RID_INGEST_SLOW_PROCESSING_MS) {
+                    long logged = slowRidIngestPacketsLogged.incrementAndGet();
+                    if (logged <= RID_INGEST_SLOW_PROCESSING_LOG_LIMIT) {
+                        CaltopoClient.CTError(TAG, String.format(Locale.US,
+                                "RID ingest slow processing elapsedMs=%d occurrence=%d/%d task=%s",
+                                elapsedMs, logged, RID_INGEST_SLOW_PROCESSING_LOG_LIMIT, description));
+                    }
+                }
+            }
+        });
     }
 
     // So many standards to choose from.  Pick them in priority order and hope the drone

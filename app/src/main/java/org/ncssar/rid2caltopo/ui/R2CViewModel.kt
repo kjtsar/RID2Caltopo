@@ -112,10 +112,31 @@ private class DroneSpecUiList(
     override fun hashCode(): Int = System.identityHashCode(this)
 }
 
-private fun normalizedDroneSpecUiList(
+private data class DroneSpecUiSignature(
+    val remoteId: String,
+    val mappedId: String,
+    val publishingLocally: Boolean,
+    val bt4Count: Int,
+    val bt4Rssi: Int,
+    val bt5Count: Int,
+    val bt5Rssi: Int,
+    val wifiCount: Int,
+    val wifiRssi: Int,
+    val wnanCount: Int,
+    val wnanRssi: Int,
+    val totalCount: Int,
+    val duration: String
+)
+
+private data class DroneSpecUiSnapshot(
+    val drones: List<CtDroneSpec>,
+    val signature: List<DroneSpecUiSignature>
+)
+
+private fun normalizedDroneSpecUiSnapshot(
     droneSpecs: List<CtDroneSpec>,
     tag: String
-): List<CtDroneSpec> {
+): DroneSpecUiSnapshot {
     val duplicates = droneSpecs
         .groupBy { it.remoteId }
         .filterValues { it.size > 1 }
@@ -129,12 +150,24 @@ private fun normalizedDroneSpecUiList(
         )
     }
     val normalized = droneSpecs.distinctBy { it.remoteId }
-    CTDebug(
-        tag,
-        "DroneItem list update: count=${normalized.size} ids=" +
-            normalized.joinToString { "${it.remoteId}:${it.mappedId}" }
-    )
-    return DroneSpecUiList(normalized)
+    val signature = normalized.map { drone ->
+        DroneSpecUiSignature(
+            remoteId = drone.remoteId,
+            mappedId = drone.mappedId,
+            publishingLocally = drone.publishingLocally(),
+            bt4Count = drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT4),
+            bt4Rssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.BT4),
+            bt5Count = drone.getTransportCount(CtDroneSpec.TransportTypeEnum.BT5),
+            bt5Rssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.BT5),
+            wifiCount = drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WIFI),
+            wifiRssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.WIFI),
+            wnanCount = drone.getTransportCount(CtDroneSpec.TransportTypeEnum.WNAN),
+            wnanRssi = drone.getLastRssi(CtDroneSpec.TransportTypeEnum.WNAN),
+            totalCount = drone.totalCount,
+            duration = drone.getDurationInSecAsString()
+        )
+    }
+    return DroneSpecUiSnapshot(normalized, signature)
 }
 
 class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
@@ -159,6 +192,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private var pendingDroneConfirmationRequestedByOperator = false
     private var screenBeforeConfirmation: ActiveScreen? = null
     private var screenBeforeConnectionOverlay: ActiveScreen? = null
+    private var lastDroneListSignature: List<DroneSpecUiSignature>? = null
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
@@ -539,7 +573,16 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
      * Once there are dronespecs, we will receive frequent updates.
      */
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
-        _drones.value = normalizedDroneSpecUiList(droneSpecs, tag)
+        val droneListSnapshot = normalizedDroneSpecUiSnapshot(droneSpecs, tag)
+        if (lastDroneListSignature != droneListSnapshot.signature) {
+            lastDroneListSignature = droneListSnapshot.signature
+            CTDebug(
+                tag,
+                "DroneItem list update: count=${droneListSnapshot.drones.size} ids=" +
+                    droneListSnapshot.drones.joinToString { "${it.remoteId}:${it.mappedId}" }
+            )
+            _drones.value = DroneSpecUiList(droneListSnapshot.drones)
+        }
         housekeeping()
         val activeRemoteIds = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
             currentFlightRemoteId(drone)

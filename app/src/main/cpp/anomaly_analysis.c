@@ -8461,6 +8461,7 @@ int anomaly_process_frame(
     float color_candidate_small_target_span_ratio[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_small_target_area_ratio[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_scene_commonness_score[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_uniqueness_rank[ANOMALY_MAX_COLOR_CANDIDATES];
     bool color_candidate_promotion_eligible[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_candidate_promotion_track[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_hist_nonzero_bins = 0;
@@ -8812,6 +8813,7 @@ int anomaly_process_frame(
             color_candidate_small_target_span_ratio[ci] = 0.0f;
             color_candidate_small_target_area_ratio[ci] = 0.0f;
             color_candidate_scene_commonness_score[ci] = 0.0f;
+            color_candidate_uniqueness_rank[ci] = 0.0f;
             color_candidate_promotion_eligible[ci] = false;
             color_candidate_promotion_track[ci] = -1;
             if (color_frame_hist != NULL && state->roi_state.color_valid_mask != NULL) {
@@ -8853,6 +8855,11 @@ int anomaly_process_frame(
                 color_candidate_hist_recent_count[ci],
                 color_hist_max_current_count,
                 color_hist_max_recent_count);
+            color_candidate_uniqueness_rank[ci] = anomaly_color_candidate_uniqueness_rank(
+                color_candidate_hist_rarity[ci],
+                color_candidate_scene_commonness_score[ci],
+                anomaly_color_frontend_uses_fresh_winner_gate(color_frontend_mode));
+            color_blob_candidates[ci].color_uniqueness_rank = color_candidate_uniqueness_rank[ci];
             if (anomaly_color_frontend_uses_fresh_winner_gate(color_frontend_mode) &&
                 color_candidate_final_score[ci] >= 0.35f &&
                 color_candidate_fill[ci] >= 0.40f &&
@@ -11076,17 +11083,11 @@ motion_appearance_scoring_done:
                                       0.0f,
                                       1.0f);
             float candidate_rank =
-                0.28f * score_rank +
+                0.40f * clamp01f(color_candidate_uniqueness_rank[ci]) +
                 0.22f * clamp01f(color_candidate_retention_rank[ci]) +
-                0.18f * clamp01f(color_candidate_quality[ci]) +
-                0.14f * clamp01f(color_candidate_isolation[ci]) +
-                0.10f * clampf(color_candidate_hist_rarity[ci] /
-                               (ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 3.0f),
-                               0.0f,
-                               1.0f) +
-                0.08f * clampf((0.82f - color_candidate_scene_commonness_score[ci]) / 0.82f,
-                               0.0f,
-                               1.0f);
+                0.16f * score_rank +
+                0.12f * clamp01f(color_candidate_quality[ci]) +
+                0.10f * clamp01f(color_candidate_isolation[ci]);
             anomaly_appearance_insert_ranked_index(
                     ci,
                     candidate_rank,

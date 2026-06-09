@@ -8408,6 +8408,16 @@ static void test_color_detector_candidate_scalar_helpers(void) {
                 1.0f,
                 0.0001f,
                 "color candidate scene commonness: result clamps at one");
+    EXPECT_NEAR(anomaly_color_candidate_uniqueness_rank(0.0034f, 0.0f, true),
+                1.0f,
+                0.0001f,
+                "color candidate uniqueness: rare uncommon fresh color ranks high");
+    EXPECT(anomaly_color_candidate_uniqueness_rank(0.0034f, 1.0f, true) <
+               anomaly_color_candidate_uniqueness_rank(0.0034f, 0.0f, true),
+           "color candidate uniqueness: scene-common colors are demoted despite rarity");
+    EXPECT(anomaly_color_candidate_uniqueness_rank(0.0034f, 1.0f, true) <
+               0.30f,
+           "color candidate uniqueness: very common colors cannot keep a strong rank");
 
     EXPECT_NEAR(anomaly_color_small_target_priority_scale(0.6f, 0.2f, 1.0f, 0.8f),
                 1.3664f,
@@ -9096,8 +9106,8 @@ static void test_color_detector_fresh_winner_gate_helper(void) {
         NULL,
         NULL,
         NULL);
-    EXPECT(reason == ANOMALY_COLOR_WINNER_GATE_NONE,
-           "fresh winner gate: commonness alone preserves legacy no-reject behavior");
+    EXPECT(reason == ANOMALY_COLOR_WINNER_GATE_COMMONNESS,
+           "fresh winner gate: common compact candidate returns commonness rejection");
 
     reason = anomaly_color_evaluate_fresh_winner_gate(
         small_target_span_px,
@@ -10434,8 +10444,16 @@ static void test_color_blob_candidate_rank_ordering(void) {
     challenger = base;
     challenger.retention_rank = base.retention_rank + 0.1f;
     challenger.hist_rarity_score = 0.0f;
+    EXPECT(anomaly_color_blob_candidate_compare_rank(&base, &challenger) < 0,
+           "color rank: higher rarity wins before retention rank");
+
+    challenger = base;
+    challenger.color_uniqueness_rank = base.color_uniqueness_rank + 0.2f;
+    challenger.hist_rarity_score = base.hist_rarity_score - 0.1f;
+    challenger.retention_rank = base.retention_rank - 0.1f;
+    challenger.quality = base.quality - 0.1f;
     EXPECT(anomaly_color_blob_candidate_compare_rank(&challenger, &base) < 0,
-           "color rank: higher retention rank wins before rarity");
+           "color rank: color uniqueness rank wins before rarity, retention, and shape");
 
     challenger = base;
     challenger.retention_rank_valid = false;

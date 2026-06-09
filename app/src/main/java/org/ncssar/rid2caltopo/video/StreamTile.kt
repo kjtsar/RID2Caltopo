@@ -101,6 +101,7 @@ fun StreamTile(
     onToggleFocus: () -> Unit,
 ) {
     val tag="StreamTile"
+    val clueCaptureSlowMs = 250L
     val textureViewRef = remember {mutableStateOf<TextureView?>(null)}
     var showPicker by remember { mutableStateOf(false) }
     var showUnmatchDialog by remember { mutableStateOf(false) }
@@ -432,6 +433,16 @@ fun StreamTile(
                                     }
                                 },
                                 onDoubleTap = {
+                                    val clueTapStartedAtMs = System.currentTimeMillis()
+                                    fun logClueTapIfSlow(step: String, elapsedMs: Long, bitmap: Bitmap? = null) {
+                                        if (elapsedMs < clueCaptureSlowMs) return
+                                        val bitmapSummary = bitmap?.let { " bitmap=${it.width}x${it.height}" } ?: ""
+                                        CaltopoClient.CTWarn(
+                                            tag,
+                                            "clue double-tap slow step=$step elapsedMs=$elapsedMs " +
+                                                "designator=$streamDesignator zoom=$zoomScale offset=${zoomOffset.x},${zoomOffset.y}$bitmapSummary"
+                                        )
+                                    }
                                     if (isLocalPlayback) return@detectTapGestures
                                     if (!currentIsFocused) {
                                         CaltopoClient.ShowToast("Single-tap view to focus before submitting clue.")
@@ -448,18 +459,41 @@ fun StreamTile(
                                         return@detectTapGestures
                                     }
 
+                                    val captureStartedAtMs = System.currentTimeMillis()
                                     val bitmap = tv.bitmap
+                                    logClueTapIfSlow(
+                                        "TextureView.bitmap",
+                                        System.currentTimeMillis() - captureStartedAtMs,
+                                        bitmap
+                                    )
                                     if (bitmap == null) {
                                         CTDebug(tag, "Failed to capture bitmap from TextureView")
                                         return@detectTapGestures
                                     }
 
+                                    val zoomStartedAtMs = System.currentTimeMillis()
                                     val clueBitmap = zoomedSnapshotBitmap(
                                         source = bitmap,
                                         scale = zoomScale,
                                         offset = zoomOffset,
                                     )
+                                    logClueTapIfSlow(
+                                        "zoomedSnapshotBitmap",
+                                        System.currentTimeMillis() - zoomStartedAtMs,
+                                        clueBitmap
+                                    )
+                                    val viewModelStartedAtMs = System.currentTimeMillis()
                                     viewModel.onSnapshotCaptured(streamDesignator, clueBitmap)
+                                    logClueTapIfSlow(
+                                        "StreamsViewModel.onSnapshotCaptured",
+                                        System.currentTimeMillis() - viewModelStartedAtMs,
+                                        clueBitmap
+                                    )
+                                    logClueTapIfSlow(
+                                        "total",
+                                        System.currentTimeMillis() - clueTapStartedAtMs,
+                                        clueBitmap
+                                    )
                                 }
                             )
                         }

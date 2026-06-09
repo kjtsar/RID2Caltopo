@@ -364,6 +364,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static final long OUT_OF_RANGE_DISTANCE_FEET = 300;
     public static final long OUT_OF_RANGE_TRACK_DELAY_SECONDS = 20 * 60;
     public static final long RETURN_TO_TAKEOFF_DISTANCE_FEET = 30;
+    public static final long TAKEOFF_NEAR_TABLET_DISTANCE_FEET = 50;
+    public static final long HOME_LOCATION_MAX_TABLET_AGE_MS = 60 * 1000;
+    public static final long REMOTE_LOSS_TRACK_DELAY_MULTIPLIER = 5;
     public static final int DEFAULT_ALARM_VOLUME_PERCENT = 100;
     static final long DEFAULT_BRIDGE_CHECK_DISTANCE_FEET = 20;
     static final long MainThreadId = Process.myTid();
@@ -403,14 +406,23 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static volatile long AppActiveStartedAtMsec = System.currentTimeMillis();
     private static FirebaseAnalytics FBAnalytics;
     private static final Object ShutdownLock = new Object();
+    private static final Object DebugLogLock = new Object();
     private static boolean ShutdownInProgress = false;
     private static boolean AppExitRequested = false;
+    private static long DebugLogGeneration = 0L;
 
     private static void ResetDebugOutputStream() {
+        synchronized (DebugLogLock) {
+            ResetDebugOutputStreamLocked();
+        }
+    }
+
+    private static void ResetDebugOutputStreamLocked() {
         DebugOutputStream = new DeferredLogOutputStream(STARTUP_LOG_BUFFER_BYTES);
         DebugLogPath = null;
         LogFilePath = null;
         BytesWrittenToDebugOutputStream = 0;
+        DebugLogGeneration++;
     }
     private static volatile boolean ArchivePermissionMissingFlag = false;
 
@@ -425,6 +437,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static long PreviousEarliestAgeOutInMsec = 0;
     private static final ArrayList<CtDroneSpec> DsArray = new ArrayList<>(16);
     private static long DroneSpecsArraySize = DsArray.size();
+    private static boolean ProcessingDroneSpecUpdate = false;
+    private static boolean PendingDroneSpecUpdate = false;
     private static boolean NotifySettingsChangedFlag;
     private static final Set<String> SessionUnknownDroneRemoteIds = new HashSet<>();
     private static final Set<String> CurrentPeerConfirmedDroneRemoteIds = new HashSet<>();
@@ -643,6 +657,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         return activeCount;
     }
 
+    public static int GetActiveFlightCountSnapshot() {
+        ClientClassState ccs = Ccstate;
+        if (ccs == null || ccs.droneSpecTable == null || ccs.droneSpecTable.isEmpty()) return -1;
+        int activeCount = 0;
+        for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
+            if (ds != null && ds.isActive()) activeCount++;
+        }
+        return activeCount;
+    }
+
     /**
      * Applies a drone spec received from a peer via MQTT.
      * If the drone is already active (waypoints being tracked), updates it in place so the
@@ -690,6 +714,17 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     @NonNull public CtDroneSpec getDroneSpec() {return droneSpec;}
 
     private static final Handler MainHandler = new Handler(Looper.getMainLooper());
+    private static final long WAYPOINT_SIDE_EFFECT_SLOW_MS = 250L;
+
+    private static void logWaypointSideEffectIfSlow(@NonNull String step,
+                                                    @NonNull CtDroneSpec droneSpec,
+                                                    long elapsedMs) {
+        if (elapsedMs < WAYPOINT_SIDE_EFFECT_SLOW_MS) return;
+        CTWarn(TAG, String.format(Locale.US,
+                "newWaypoint slow step=%s elapsedMs=%d remoteId=%s mappedId=%s thread=%s",
+                step, elapsedMs, droneSpec.getRemoteId(), droneSpec.getMappedId(),
+                (Looper.myLooper() == Looper.getMainLooper()) ? "main" : "background"));
+    }
 
     private static void UpdateDroneSpecs() {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -894,25 +929,27 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     }
 
     public static void CTLog(String type, String tag, String msg) {
-        OutputStream os = DebugOutputStream;  // capture reference before null check to avoid TOCTOU race
-        if (null == os) return;
-        if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) return;
+        synchronized (DebugLogLock) {
+            OutputStream os = DebugOutputStream;
+            if (null == os) return;
+            if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) return;
 
-        try {
-            if (null != type && null != tag) {
-                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("ddLLLHHmmss.SSS");
-                msg = String.format(Locale.US, "%s %s: %s %s\n  ", type,
-                        LocalDateTime.now().format(formatter), tag, msg);
+            try {
+                if (null != type && null != tag) {
+                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("ddLLLHHmmss.SSS");
+                    msg = String.format(Locale.US, "%s %s: %s %s\n  ", type,
+                            LocalDateTime.now().format(formatter), tag, msg);
+                }
+                byte[] bytes = msg.getBytes();
+                BytesWrittenToDebugOutputStream += bytes.length;
+                os.write(bytes);
+                os.flush();
+            } catch (IOException e) {
+                Log.e(TAG, String.format(Locale.US, "CTError: CTLog(): Not able to write '%s' - %s", LogFilePath, e));
             }
-            byte[] bytes = msg.getBytes();
-            BytesWrittenToDebugOutputStream += bytes.length;
-            os.write(bytes);
-            os.flush();
-        } catch (IOException e) {
-            Log.e(TAG, String.format(Locale.US, "CTError: CTLog(): Not able to write '%s' - %s", LogFilePath, e));
-        }
-        if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) {
-            Log.e(TAG, "CTError: CTLog(): Sorry.  Maximum debugging output file size reached.  Future bits will be tossed on the floor.");
+            if (BytesWrittenToDebugOutputStream >= MAX_SIZE_DEBUG_OUTPUT) {
+                Log.e(TAG, "CTError: CTLog(): Sorry.  Maximum debugging output file size reached.  Future bits will be tossed on the floor.");
+            }
         }
     }
 
@@ -2597,6 +2634,25 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
 
     private static void ProcessSortedCurrentDroneSpecArray(boolean changedFlag) {
+        if (ProcessingDroneSpecUpdate) {
+            PendingDroneSpecUpdate |= changedFlag;
+            return;
+        }
+        ProcessingDroneSpecUpdate = true;
+        try {
+            boolean forceChanged = changedFlag;
+            do {
+                boolean runChanged = forceChanged || PendingDroneSpecUpdate;
+                PendingDroneSpecUpdate = false;
+                ProcessSortedCurrentDroneSpecArrayOnce(runChanged);
+                forceChanged = false;
+            } while (PendingDroneSpecUpdate);
+        } finally {
+            ProcessingDroneSpecUpdate = false;
+        }
+    }
+
+    private static void ProcessSortedCurrentDroneSpecArrayOnce(boolean changedFlag) {
         long mostRecentUpdate = CtDroneSpec.LastWaypointUpdateTimestampMsec();
 
         ClientClassState ccs = GetState();
@@ -2606,9 +2662,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         if (changedFlag || currentTimeInMsec >= PreviousEarliestAgeOutInMsec) {
             DsArray.clear();
             for (CtDroneSpec ds : ccs.droneSpecTable.values()) {
-                long trackDelayInMsec = ds.isOutOfRange()
-                        ? OUT_OF_RANGE_TRACK_DELAY_SECONDS * 1000
-                        : newTrackDelayInMsec;
+                long trackDelayInMsec = TrackDelayInMsecForDroneSpec(ds, newTrackDelayInMsec);
                 long droneSpecIdleInMsec = ds.trackTelemetryIdleTimeInMsec(currentTimeInMsec);
                 if (ds.isActive() && droneSpecIdleInMsec > trackDelayInMsec) {
                     CaltopoClient client = (ClientMap != null) ? ClientMap.get(ds.getRemoteId()) : null;
@@ -2616,7 +2670,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                             "ProcessSortedCurrentDroneSpecArray(%s): %s idle for %.3f/%.3f seconds%s. Finishing track...",
                             changedFlag, ds.trackLabel(),
                             (double) droneSpecIdleInMsec / 1000.0, (double) trackDelayInMsec / 1000.0,
-                            ds.isOutOfRange() ? " (OOR)" : "");
+                            TrackDelayReasonSuffix(ds));
                     CTInfo(TAG, msg);
                     if (client != null) {
                         client.terminateTrack(msg, false);
@@ -2632,7 +2686,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 if (CTDebugEnabled(TAG)) CTDebug(TAG, String.format(Locale.US,
                         "ProcessSortedCurrentDroneSpecArray(%s): current age for %s is %.3f, age out in %.3f seconds. next age out in %.3f seconds%s",
                         changedFlag, ds.getMappedId(), droneSpecIdleInMsec / 1000.0, currentAgeOutInMsec / 1000.0, nextAgeOutInMsec / 1000.0,
-                        ds.isOutOfRange() ? " (OOR)" : ""));
+                        TrackDelayReasonSuffix(ds)));
                 DsArray.add(ds);
             }
             PreviousEarliestAgeOutInMsec = currentTimeInMsec + nextAgeOutInMsec;
@@ -2663,6 +2717,25 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             UiUpdatePoll.start(CaltopoClient::ProcessSortedCurrentDroneSpecArray, 1000, 1000);
             CTDebug(TAG, "UpdateDroneSpecs(): Starting UiUpdatePoll...");
         }
+    }
+
+    static long TrackDelayInMsecForDroneSpecForTests(@NonNull CtDroneSpec ds, long newTrackDelayInMsec) {
+        return TrackDelayInMsecForDroneSpec(ds, newTrackDelayInMsec);
+    }
+
+    private static long TrackDelayInMsecForDroneSpec(@NonNull CtDroneSpec ds, long newTrackDelayInMsec) {
+        if (ds.isOutOfRange()) return OUT_OF_RANGE_TRACK_DELAY_SECONDS * 1000L;
+        if (ds.isAwayFromHomeOrTabletBaseline(TAKEOFF_NEAR_TABLET_DISTANCE_FEET)) {
+            return newTrackDelayInMsec * REMOTE_LOSS_TRACK_DELAY_MULTIPLIER;
+        }
+        return newTrackDelayInMsec;
+    }
+
+    @NonNull
+    private static String TrackDelayReasonSuffix(@NonNull CtDroneSpec ds) {
+        if (ds.isOutOfRange()) return " (OOR)";
+        if (ds.isAwayFromHomeOrTabletBaseline(TAKEOFF_NEAR_TABLET_DISTANCE_FEET)) return " (remote-loss grace)";
+        return "";
     }
 
     public static long GetNewTrackDelayInSeconds() {
@@ -3098,17 +3171,21 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             if (null != ctxt) try {
                 DocumentFile dataFilepath = todaysArchiveDir.createFile("text/plain", filepath);
                 ContentResolver resolver = ctxt.getContentResolver();
-                if (null != dataFilepath) {
-                    Uri logPath = dataFilepath.getUri();
-                    OutputStream fileOutputStream = resolver.openOutputStream(logPath);
-                    if (fileOutputStream != null && DebugOutputStream instanceof DeferredLogOutputStream) {
-                        ((DeferredLogOutputStream) DebugOutputStream).attach(fileOutputStream);
-                        DebugLogPath = logPath;
-                    } else if (fileOutputStream != null) {
-                        DebugOutputStream = fileOutputStream;
-                        DebugLogPath = logPath;
-                    } else {
-                        Log.e(TAG, "CTError: InitArchiveDir(): openOutputStream returned null for " + logPath);
+                synchronized (DebugLogLock) {
+                    if (DebugLogPath == null && null != dataFilepath) {
+                        Uri logPath = dataFilepath.getUri();
+                        OutputStream fileOutputStream = resolver.openOutputStream(logPath);
+                        if (fileOutputStream != null && DebugOutputStream instanceof DeferredLogOutputStream) {
+                            ((DeferredLogOutputStream) DebugOutputStream).attach(fileOutputStream);
+                            DebugLogPath = logPath;
+                            DebugLogGeneration++;
+                        } else if (fileOutputStream != null) {
+                            DebugOutputStream = fileOutputStream;
+                            DebugLogPath = logPath;
+                            DebugLogGeneration++;
+                        } else {
+                            Log.e(TAG, "CTError: InitArchiveDir(): openOutputStream returned null for " + logPath);
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -3255,6 +3332,51 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         ShutdownAsync();
     }
 
+    static void InstallDebugOutputStreamForTests(@NonNull OutputStream outputStream) {
+        synchronized (DebugLogLock) {
+            DebugOutputStream = outputStream;
+            DebugLogPath = null;
+            LogFilePath = "test";
+            BytesWrittenToDebugOutputStream = 0;
+            DebugLogGeneration++;
+        }
+    }
+
+    static long CaptureDebugLogGenerationForTests() {
+        return CaptureDebugLogGeneration();
+    }
+
+    static void CloseDebugOutputStreamForShutdownForTests(long shutdownDebugLogGeneration) {
+        CloseDebugOutputStreamForShutdown(shutdownDebugLogGeneration);
+    }
+
+    private static long CaptureDebugLogGeneration() {
+        synchronized (DebugLogLock) {
+            return DebugLogGeneration;
+        }
+    }
+
+    private static void CloseDebugOutputStreamForShutdown(long shutdownDebugLogGeneration) {
+        synchronized (DebugLogLock) {
+            if (shutdownDebugLogGeneration != DebugLogGeneration) {
+                Log.w(TAG, String.format(Locale.US,
+                        "Skipping stale debug log close: shutdownGeneration=%d currentGeneration=%d",
+                        shutdownDebugLogGeneration, DebugLogGeneration));
+                return;
+            }
+            if (null != DebugOutputStream) {
+                try {
+                    DebugOutputStream.flush();
+                    DebugOutputStream.close();
+                    ResetDebugOutputStreamLocked();
+                } catch (IOException e) {
+                    Log.e(TAG, "CTError: Shutdown raised: " + e);
+                    ResetDebugOutputStreamLocked();
+                }
+            }
+        }
+    }
+
 
     public static void ShutdownAsync() {
         Thread shutdownThread = new Thread(CaltopoClient::Shutdown, "R2C-Shutdown");
@@ -3268,6 +3390,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             }
             ShutdownInProgress = true;
         }
+        long shutdownDebugLogGeneration = CaptureDebugLogGeneration();
         try {
             NotamCenter.INSTANCE.shutdown();
             if (Ccstate != null) {
@@ -3290,16 +3413,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 CTDebug(TAG, "Shutdown(): UiUpdatePoll suspended.");
             }
             AppIdleDelay.stop();
-            if (null != DebugOutputStream) {
-                try {
-                    DebugOutputStream.flush();
-                    DebugOutputStream.close();
-                    ResetDebugOutputStream();
-                } catch (IOException e) {
-                    Log.e(TAG, "CTError: Shutdown raised: " + e);
-                    ResetDebugOutputStream();
-                }
-            }
+            CloseDebugOutputStreamForShutdown(shutdownDebugLogGeneration);
         } finally {
             synchronized (ShutdownLock) {
                 ShutdownInProgress = false;
@@ -3310,6 +3424,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void MarkAppActive() {
         synchronized (ShutdownLock) {
             AppExitRequested = false;
+        }
+        synchronized (DebugLogLock) {
+            DebugLogGeneration++;
         }
         AppActiveStartedAtMsec = System.currentTimeMillis();
         RemoveExpiredCaltopoProfiles(System.currentTimeMillis(), true);
@@ -3614,6 +3731,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
     public boolean newWaypoint(double lat, double lng, double altitudeInMeters, long droneTimestampInMilliseconds,
                                CtDroneSpec.TransportTypeEnum transportType, @Nullable Boolean airborne) {
+        long totalStartedAtMs = System.currentTimeMillis();
         long longAltitudeInMeters = Math.round(altitudeInMeters);
         ArrayList<CtDroneSpec> proximityDrones = new ArrayList<>(GetState().droneSpecTable.values());
         if (SessionUnknownDroneRemoteIds.contains(remoteId)) {
@@ -3622,19 +3740,36 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
         if (shouldSuppressMapTracking(droneSpec)) {
             droneSpec.setLocalArchiveOnly(true);
+            long proximityStartedAtMs = System.currentTimeMillis();
             ProximityAlertCenter.INSTANCE.updateDrones(proximityDrones);
+            logWaypointSideEffectIfSlow("proximity.updateDrones.suppressed", droneSpec,
+                    System.currentTimeMillis() - proximityStartedAtMs);
             if (CTDebugEnabled(TAG)) {
                 CTDebug(TAG, String.format(Locale.US,
                         "newWaypoint(): map-suppressed non-team drone remoteId=%s mappedId=%s",
                         droneSpec.getRemoteId(), droneSpec.getMappedId()));
             }
+            logWaypointSideEffectIfSlow("total.suppressed", droneSpec,
+                    System.currentTimeMillis() - totalStartedAtMs);
             return true;
         }
 
+        long archiveStartedAtMs = System.currentTimeMillis();
         WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
+        logWaypointSideEffectIfSlow("WaypointTrack.AddWaypointForTrack", droneSpec,
+                System.currentTimeMillis() - archiveStartedAtMs);
+
+        long proximityStartedAtMs = System.currentTimeMillis();
         ProximityAlertCenter.INSTANCE.updateDrones(proximityDrones);
+        logWaypointSideEffectIfSlow("proximity.updateDrones", droneSpec,
+                System.currentTimeMillis() - proximityStartedAtMs);
+
+        long mapStatusStartedAtMs = System.currentTimeMillis();
         CaltopoMap.MapStatusListener.mapStatus mapStatus = CaltopoMap.GetMapStatus();
+        logWaypointSideEffectIfSlow("CaltopoMap.GetMapStatus", droneSpec,
+                System.currentTimeMillis() - mapStatusStartedAtMs);
         if (mapStatus == CaltopoMap.MapStatusListener.mapStatus.up) {
+            long liveTrackStartedAtMs = System.currentTimeMillis();
             if (null == liveTrack) {
                 if (CTDebugEnabled(TAG)) CTDebug(TAG, "newWaypoint(): starting new liveTrack for: " + droneSpec.trackLabel());
                 liveTrack = new CaltopoLiveTrack(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
@@ -3644,12 +3779,18 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 if (CTDebugEnabled(TAG)) CTDebug(TAG, "newWaypoint(): restarting liveTrack: " + droneSpec.trackLabel());
                 liveTrack.startNewTrack(lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
             }
+            logWaypointSideEffectIfSlow("liveTrack.up", droneSpec,
+                    System.currentTimeMillis() - liveTrackStartedAtMs);
 
             // Idle-track termination is handled centrally by ProcessSortedCurrentDroneSpecArray().
         } else {
             // Keep local map motion responsive even when the Teams/Caltopo live-track path is unavailable.
+            long notifyStartedAtMs = System.currentTimeMillis();
             CaltopoLiveTrack.NotifyLocalTrackPoint(droneSpec, lat, lng, altitudeInMeters, droneTimestampInMilliseconds);
+            logWaypointSideEffectIfSlow("NotifyLocalTrackPoint.mapDown", droneSpec,
+                    System.currentTimeMillis() - notifyStartedAtMs);
         }
+        logWaypointSideEffectIfSlow("total", droneSpec, System.currentTimeMillis() - totalStartedAtMs);
         return true;
     }
 }

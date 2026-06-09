@@ -628,12 +628,9 @@ static inline anomaly_color_winner_gate_reason_t anomaly_color_evaluate_fresh_wi
     bool oversize =
         candidate_span_cells > max_span_cells ||
         candidate_area_cells > max_area_cells;
-    bool has_material_extent =
-        candidate_span_cells >= commonness_min_span_cells ||
-        candidate_area_cells >= commonness_min_area_cells;
+    (void)commonness_min_span_cells;
+    (void)commonness_min_area_cells;
     bool too_common =
-        oversize &&
-        has_material_extent &&
         candidate_hist_rarity < min_rarity &&
         candidate_scene_commonness > max_commonness;
     if (oversize && too_common) return ANOMALY_COLOR_WINNER_GATE_SIZE_AND_COMMONNESS;
@@ -862,6 +859,28 @@ static inline float anomaly_color_candidate_scene_commonness(
     return anomaly_color_clampf((0.40f * current_commonness) + (0.60f * recent_commonness),
                                 0.0f,
                                 1.0f);
+}
+
+static inline float anomaly_color_candidate_uniqueness_rank(
+        float hist_rarity,
+        float scene_commonness,
+        bool  fresh_frontend) {
+    float rarity_anchor = fresh_frontend
+        ? (ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 4.0f)
+        : ANOMALY_COLOR_RARITY_MIN;
+    float rarity_rank = anomaly_color_clampf(
+        hist_rarity / fmaxf(rarity_anchor, 1e-6f),
+        0.0f,
+        1.0f);
+    float uncommon_rank = anomaly_color_clampf(
+        (ANOMALY_FRESH_COLOR_WINNER_MAX_COMMONNESS - scene_commonness) /
+        fmaxf(ANOMALY_FRESH_COLOR_WINNER_MAX_COMMONNESS, 1e-6f),
+        0.0f,
+        1.0f);
+    return anomaly_color_clampf(
+        rarity_rank * (0.18f + 0.82f * uncommon_rank),
+        0.0f,
+        1.0f);
 }
 
 static inline float anomaly_color_small_target_priority_scale(

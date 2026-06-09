@@ -513,12 +513,23 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
     }
 
     private fun distanceFeetFromTakeoff(spec: CtDroneSpec): Double? {
-        if (!spec.hasTakeoffLocation() || spec.lastLat == 0.0 || spec.lastLng == 0.0) return null
+        if (spec.lastLat == 0.0 || spec.lastLng == 0.0) return null
+        val originLat: Double
+        val originLng: Double
+        if (spec.hasHomeLocation()) {
+            originLat = spec.homeLat
+            originLng = spec.homeLng
+        } else if (spec.hasTakeoffLocation()) {
+            originLat = spec.takeoffLat
+            originLng = spec.takeoffLng
+        } else {
+            return null
+        }
         val result = FloatArray(1)
         return try {
             Location.distanceBetween(
-                spec.takeoffLat,
-                spec.takeoffLng,
+                originLat,
+                originLng,
                 spec.lastLat,
                 spec.lastLng,
                 result

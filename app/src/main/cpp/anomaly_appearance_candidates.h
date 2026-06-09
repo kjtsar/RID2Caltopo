@@ -52,6 +52,7 @@ typedef struct {
     anomaly_motion_candidate_t candidate;
     float retention_rank;
     bool retention_rank_valid;
+    float color_uniqueness_rank;
     float hist_rarity_score;
     float area;
     float span;

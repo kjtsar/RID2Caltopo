@@ -121,10 +121,13 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Collections
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
@@ -943,10 +946,17 @@ internal fun SplitMapPane(
     val iconCacheService = remember(context) { CaltopoIconCacheService(context) }
     // DemElevationService is owned by the coordinator (created once at ViewModel init).
     val demElevationService = viewModel.altitudeCoordinator.demElevationService
+    val liveTilePriorityJobRef = remember { AtomicReference<Job?>(null) }
+    val liveTilePriorityGeneration = remember { AtomicLong(0L) }
     // Register MapPane as an altitude consumer so the coordinator's update loop stays active.
     DisposableEffect(viewModel) {
         val removeConsumer = viewModel.addAltitudeConsumer()
         onDispose { removeConsumer() }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            liveTilePriorityJobRef.getAndSet(null)?.cancel()
+        }
     }
     val tileCacheWriter = remember(context) { TileDiskCacheWriter(context) }
     val tileFetchPriorityScheduler = remember { TileFetchPriorityScheduler() }
@@ -982,7 +992,7 @@ internal fun SplitMapPane(
     var lastViewportSignature by remember { mutableStateOf<String?>(null) }
     // Auto-download: GeoTIFF tiles already initiated (prevents redundant re-downloads).
     val autoFetchedDemTiles = remember { HashSet<String>() }
-    val autoPrefetchedMapTiles = remember { HashSet<String>() }
+    val autoPrefetchedMapTiles = remember { Collections.synchronizedSet(HashSet<String>()) }
     val demAutoFetchClient = remember {
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -1242,55 +1252,101 @@ internal fun SplitMapPane(
         }
     }
     LaunchedEffect(baseLayer, visibleTileZoom, localDeviceRefreshToken, dronePoints, offlinePrepInFlight) {
-        val tabletLocation = CaltopoMap.GetMyLocation()?.takeIf {
-            it.latitude.isFinite() && it.longitude.isFinite()
-        }?.let { GeoPoint(it.latitude, it.longitude) }
-        val source = tileSourceForBaseLayer(baseLayer)
-        val requests = liveTilePriorityRequests(
-            tabletLocation = tabletLocation,
-            dronePoints = dronePoints,
-            visibleZoom = visibleTileZoom
-        )
-        if (requests.isEmpty()) {
-            firstLiveTilePriorityPassComplete = true
-            return@LaunchedEffect
-        }
+        val generation = liveTilePriorityGeneration.incrementAndGet()
         val passZoom = visibleTileZoom
-        val passStartMs = System.currentTimeMillis()
-        MapCacheDebug.debug(
-            MapCacheDebug.TAG_TILE,
-            "live-priority pass start zoom=$passZoom requests=${requests.size} source=${source.name()}"
-        )
-        try {
-            withContext(Dispatchers.IO) {
-                for (request in requests) {
-                    if (request.requiresCurrentCached && !tileCacheWriter.exists(source, request.currentTileIndex)) {
-                        continue
+        val passBaseLayer = baseLayer
+        val passDronePoints = dronePoints
+        val previousJob = liveTilePriorityJobRef.getAndSet(
+            uiScope.launch(Dispatchers.IO) {
+                val source = tileSourceForBaseLayer(passBaseLayer)
+                val tabletLocation = CaltopoMap.GetMyLocation()?.takeIf {
+                    it.latitude.isFinite() && it.longitude.isFinite()
+                }?.let { GeoPoint(it.latitude, it.longitude) }
+                val requests = liveTilePriorityRequests(
+                    tabletLocation = tabletLocation,
+                    dronePoints = passDronePoints,
+                    visibleZoom = passZoom
+                )
+                if (requests.isEmpty()) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (liveTilePriorityGeneration.get() == generation) {
+                            firstLiveTilePriorityPassComplete = true
+                        }
                     }
-                    val key = "${source.name()}:${request.tileIndex}"
-                    if (key in autoPrefetchedMapTiles) continue
-                    val available = tileFetchPriorityScheduler.highPriority {
-                        prefetchMapTileIfMissing(
-                            source,
-                            request.tileIndex,
-                            tileCacheWriter,
-                            offlineHttpClient,
-                            reason = "live-priority"
+                    return@launch
+                }
+                val passStartMs = System.currentTimeMillis()
+                var attemptedRequests = 0
+                var availableRequests = 0
+                MapCacheDebug.debug(
+                    MapCacheDebug.TAG_TILE,
+                    "live-priority pass start zoom=$passZoom requests=${requests.size} source=${source.name()}"
+                )
+                try {
+                    for (request in requests) {
+                        currentCoroutineContext().ensureActive()
+                        if (request.requiresCurrentCached && !tileCacheWriter.exists(source, request.currentTileIndex)) {
+                            continue
+                        }
+                        val key = "${source.name()}:${request.tileIndex}"
+                        if (key in autoPrefetchedMapTiles) continue
+                        attemptedRequests++
+                        val taskStartMs = System.currentTimeMillis()
+                        val available = tileFetchPriorityScheduler.highPriority {
+                            prefetchMapTileIfMissing(
+                                source,
+                                request.tileIndex,
+                                tileCacheWriter,
+                                offlineHttpClient,
+                                reason = "live-priority"
+                            )
+                        }
+                        val taskElapsedMs = System.currentTimeMillis() - taskStartMs
+                        if (taskElapsedMs >= 1_000L) {
+                            MapCacheDebug.warn(
+                                MapCacheDebug.TAG_TILE,
+                                "live-priority tile slow zoom=$passZoom source=${source.name()} " +
+                                    "tile=${request.tileIndex} elapsedMs=$taskElapsedMs"
+                            )
+                        }
+                        if (available) {
+                            autoPrefetchedMapTiles.add(key)
+                            availableRequests++
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    val elapsedMs = System.currentTimeMillis() - passStartMs
+                    MapCacheDebug.debug(
+                        MapCacheDebug.TAG_TILE,
+                        "live-priority pass cancelled zoom=$passZoom requests=${requests.size} " +
+                            "attempted=$attemptedRequests elapsedMs=$elapsedMs"
+                    )
+                    throw e
+                } finally {
+                    val elapsedMs = System.currentTimeMillis() - passStartMs
+                    if (elapsedMs >= 1_000L) {
+                        MapCacheDebug.warn(
+                            MapCacheDebug.TAG_TILE,
+                            "live-priority pass slow zoom=$passZoom requests=${requests.size} " +
+                                "attempted=$attemptedRequests available=$availableRequests elapsedMs=$elapsedMs"
+                        )
+                    } else {
+                        MapCacheDebug.debug(
+                            MapCacheDebug.TAG_TILE,
+                            "live-priority pass done zoom=$passZoom requests=${requests.size} elapsedMs=$elapsedMs"
                         )
                     }
-                    if (available) {
-                        autoPrefetchedMapTiles.add(key)
+                    if (currentCoroutineContext().isActive) {
+                        withContext(Dispatchers.Main.immediate) {
+                            if (liveTilePriorityGeneration.get() == generation) {
+                                firstLiveTilePriorityPassComplete = true
+                            }
+                        }
                     }
                 }
             }
-        } finally {
-            val elapsedMs = System.currentTimeMillis() - passStartMs
-            MapCacheDebug.debug(
-                MapCacheDebug.TAG_TILE,
-                "live-priority pass done zoom=$passZoom requests=${requests.size} elapsedMs=$elapsedMs"
-            )
-            firstLiveTilePriorityPassComplete = true
-        }
+        )
+        previousJob?.cancel()
     }
     LaunchedEffect(
         showOfflinePrepDialog,

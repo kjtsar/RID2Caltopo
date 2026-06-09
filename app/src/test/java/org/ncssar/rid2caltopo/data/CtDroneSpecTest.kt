@@ -1,6 +1,6 @@
 package org.ncssar.rid2caltopo.data
-
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Before
@@ -18,10 +18,13 @@ class CtDroneSpecTest {
     }
 
     private fun clearLocationState() {
-        CtDroneSpec.MyLat = 0.0
-        CtDroneSpec.MyLng = 0.0
+        CtDroneSpec.ClearMyLocationBaselineForTests()
         CaltopoMap.MyLocation = null
         CaltopoMap.SetMyLocationOverride(null)
+    }
+
+    private fun setTabletLocation(lat: Double, lng: Double, timeMs: Long) {
+        CtDroneSpec.UpdateMyLocationBaseline(lat, lng, timeMs)
     }
 
     @Test
@@ -314,5 +317,150 @@ class CtDroneSpecTest {
         drone.reset()
 
         assertEquals(false, drone.hasTakeoffLocation())
+    }
+
+    @Test
+    fun acceptedWaypointNearTablet_recordsHomeLocationThatSurvivesTrackReset() {
+        val drone = CtDroneSpec("RID123")
+        val nowMs = System.currentTimeMillis()
+        setTabletLocation(39.0, -121.0, nowMs)
+
+        assertTrue(drone.checkNewWaypoint(
+            39.0001,
+            -121.0,
+            100.0,
+            nowMs,
+            nowMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+
+        assertTrue(drone.hasHomeLocation())
+        assertEquals(39.0001, drone.homeLat, 0.000001)
+        assertEquals(-121.0, drone.homeLng, 0.000001)
+
+        drone.reset()
+
+        assertFalse(drone.hasTakeoffLocation())
+        assertTrue(drone.hasHomeLocation())
+        assertEquals(39.0001, drone.homeLat, 0.000001)
+        assertEquals(-121.0, drone.homeLng, 0.000001)
+    }
+
+    @Test
+    fun acceptedWaypointFarFromTablet_doesNotRecordHomeUntilLaterNearTabletTrack() {
+        val drone = CtDroneSpec("RID123")
+        val firstNowMs = System.currentTimeMillis()
+        val secondNowMs = firstNowMs + 70_000L
+        setTabletLocation(39.0, -121.0, firstNowMs)
+
+        assertTrue(drone.checkNewWaypoint(
+            39.0100,
+            -121.0,
+            100.0,
+            firstNowMs,
+            firstNowMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+
+        assertFalse(drone.hasHomeLocation())
+
+        drone.reset()
+        setTabletLocation(39.0, -121.0, secondNowMs)
+
+        assertTrue(drone.checkNewWaypoint(
+            39.0001,
+            -121.0,
+            100.0,
+            secondNowMs,
+            secondNowMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+
+        assertTrue(drone.hasHomeLocation())
+        assertEquals(39.0001, drone.homeLat, 0.000001)
+        assertEquals(-121.0, drone.homeLng, 0.000001)
+    }
+
+    @Test
+    fun activeTrackAwayFromHome_usesExtendedSignalLossDelay() {
+        val drone = CtDroneSpec("RID123")
+        val newTrackDelayMs = 30_000L
+        val firstNowMs = System.currentTimeMillis()
+        val secondNowMs = firstNowMs + 90_000L
+        setTabletLocation(39.0, -121.0, firstNowMs)
+
+        assertTrue(drone.checkNewWaypoint(
+            39.0001,
+            -121.0,
+            100.0,
+            firstNowMs,
+            firstNowMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+        assertTrue(drone.checkNewWaypoint(
+            39.0040,
+            -121.0,
+            100.0,
+            secondNowMs,
+            secondNowMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+
+        assertEquals(
+            newTrackDelayMs * CaltopoClient.REMOTE_LOSS_TRACK_DELAY_MULTIPLIER,
+            CaltopoClient.TrackDelayInMsecForDroneSpecForTests(drone, newTrackDelayMs)
+        )
+    }
+
+    @Test
+    fun activeTrackFarFromTabletBeforeHome_usesExtendedSignalLossDelay() {
+        val drone = CtDroneSpec("RID123")
+        val newTrackDelayMs = 30_000L
+        val nowMs = System.currentTimeMillis()
+        setTabletLocation(39.0, -121.0, nowMs)
+
+        assertTrue(drone.checkNewWaypoint(
+            39.0100,
+            -121.0,
+            100.0,
+            nowMs,
+            nowMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+
+        assertFalse(drone.hasHomeLocation())
+        assertEquals(
+            newTrackDelayMs * CaltopoClient.REMOTE_LOSS_TRACK_DELAY_MULTIPLIER,
+            CaltopoClient.TrackDelayInMsecForDroneSpecForTests(drone, newTrackDelayMs)
+        )
+    }
+
+    @Test
+    fun activeTrackNearHome_usesConfiguredNewTrackDelay() {
+        val drone = CtDroneSpec("RID123")
+        val newTrackDelayMs = 30_000L
+        val nowMs = System.currentTimeMillis()
+        setTabletLocation(39.0, -121.0, nowMs)
+
+        assertTrue(drone.checkNewWaypoint(
+            39.0001,
+            -121.0,
+            100.0,
+            nowMs,
+            nowMs,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        ))
+
+        assertEquals(
+            newTrackDelayMs,
+            CaltopoClient.TrackDelayInMsecForDroneSpecForTests(drone, newTrackDelayMs)
+        )
     }
 }

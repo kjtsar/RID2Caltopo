@@ -57,6 +57,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     private static final String TAG = "CaltopoLiveTrack";
+    private static final long LIVE_TRACK_SIDE_EFFECT_SLOW_MS = 250L;
     private static final Util.SimpleMovingAverage CaltopoRttInMsec = new Util.SimpleMovingAverage(10);
     private static final Hashtable<String, CaltopoLiveTrack> LiveTrackByRemoteId = new Hashtable<>(16);
     private static final LinkedList<LocalTrackListener> LocalTrackListeners = new LinkedList<>();
@@ -96,6 +97,16 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     public static long GetCaltopoRttInMsec() { return CaltopoRttInMsec.get();}
     private CaltopoMap.MapStatusListener.mapStatus mapStatus;
 
+    private static void logSideEffectIfSlow(@NonNull String step,
+                                            @NonNull String remoteId,
+                                            @NonNull String mappedId,
+                                            long elapsedMs) {
+        if (elapsedMs < LIVE_TRACK_SIDE_EFFECT_SLOW_MS) return;
+        CTWarn(TAG, String.format(Locale.US,
+                "liveTrack slow step=%s elapsedMs=%d remoteId=%s mappedId=%s",
+                step, elapsedMs, remoteId, mappedId));
+    }
+
     public CaltopoLiveTrack(@NonNull CtDroneSpec droneSpec, double lat, double lng, double ele,
                             long droneTimestampInMsec) throws RuntimeException {
         if (droneSpec.trackLabel().isEmpty()) {
@@ -127,18 +138,28 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
 
     public void startNewTrack(double lat, double lng, double ele, long droneTimestampInMsec) {
         if (shuttingDown) return;
+        long startedAtMs = System.currentTimeMillis();
 
         linePoints.add(new QueuedPoint(lat, lng, ele, droneTimestampInMsec, droneSpec.getLastPositionTelemetry()));
+        long notifyStartedAtMs = System.currentTimeMillis();
         notifyLocalTrackPoint(lat, lng, ele, droneTimestampInMsec);
+        logSideEffectIfSlow("startNewTrack.notifyLocalTrackPoint", myRemoteId, droneSpec.getMappedId(),
+                System.currentTimeMillis() - notifyStartedAtMs);
         linePointsSentCount = linePointsConfirmedCount = consecutiveUpdateFails = 0;
         startLiveTrackOp = null;
         localOwner = false;
 
-        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
+        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) {
+            logSideEffectIfSlow("startNewTrack.total.mapDown", myRemoteId, droneSpec.getMappedId(),
+                    System.currentTimeMillis() - startedAtMs);
+            return;
+        }
 
         double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
         runtime.getPeerCoordinator()
                 .onLiveTrackCreated(this, droneSpec, distMeters, droneTimestampInMsec);
+        logSideEffectIfSlow("startNewTrack.total", myRemoteId, droneSpec.getMappedId(),
+                System.currentTimeMillis() - startedAtMs);
     }
 
     public void mapStatusUpdate(CaltopoMap.MapStatusListener.mapStatus mapStatusIn,
@@ -250,6 +271,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     public static void NotifyLocalTrackPoint(@NonNull CtDroneSpec droneSpec,
                                              double lat, double lng, double altitudeMeters,
                                              long timestampMsec) {
+        long startedAtMs = System.currentTimeMillis();
         if (LocalTrackListeners.isEmpty()) {
             CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
                     "track_notify_skipped remoteId=%s mappedId=%s reason=no_listeners droneTs=%d lat=%.6f lng=%.6f alt=%.1f",
@@ -259,10 +281,15 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         String remoteId = droneSpec.getRemoteId();
         String mappedId = droneSpec.getMappedId();
         for (LocalTrackListener listener : LocalTrackListeners) try {
+            long listenerStartedAtMs = System.currentTimeMillis();
             listener.onLocalTrackPoint(remoteId, mappedId, lat, lng, altitudeMeters, timestampMsec);
+            logSideEffectIfSlow("NotifyLocalTrackPoint.listener." + listener.getClass().getName(),
+                    remoteId, mappedId, System.currentTimeMillis() - listenerStartedAtMs);
         } catch (Exception e) {
             CTError(TAG, "NotifyLocalTrackPoint() listener raised", e);
         }
+        logSideEffectIfSlow("NotifyLocalTrackPoint.total", remoteId, mappedId,
+                System.currentTimeMillis() - startedAtMs);
     }
 
     public static void NotifyLocalTrackFinished(@NonNull CtDroneSpec droneSpec, @NonNull String reason) {
@@ -565,6 +592,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     public void publishDirect(double lat, double lng, long altitudeInMeters, long droneTimestampInMillisec) {
+        long startedAtMs = System.currentTimeMillis();
         queueWaypoint(
                 lat,
                 lng,
@@ -573,6 +601,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
                 droneSpec.getLastPositionTelemetry(),
                 true
         );
+        logSideEffectIfSlow("publishDirect.total", myRemoteId, droneSpec.getMappedId(),
+                System.currentTimeMillis() - startedAtMs);
     }
 
     @Override
@@ -597,6 +627,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             long timestampMsec,
             @Nullable CtDroneSpec.PositionTelemetry telemetry,
             boolean notifyCoordinator) {
+        long startedAtMs = System.currentTimeMillis();
         QueuedPoint previousPoint = linePoints.peekLast();
         if (isDuplicateOfPreviousPoint(previousPoint, lat, lng, altitudeMeters, timestampMsec)) {
             CTDebug(TAG, String.format(Locale.US,
@@ -605,24 +636,47 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
             return;
         }
         linePoints.add(new QueuedPoint(lat, lng, altitudeMeters, timestampMsec, telemetry));
+        long notifyStartedAtMs = System.currentTimeMillis();
         notifyLocalTrackPoint(lat, lng, altitudeMeters, timestampMsec);
+        logSideEffectIfSlow("queueWaypoint.notifyLocalTrackPoint", myRemoteId, droneSpec.getMappedId(),
+                System.currentTimeMillis() - notifyStartedAtMs);
         CTDebug(TAG, String.format(Locale.US,
                 "queueWaypoint(%s/localOwner=%s/%s): waypoint queued. size=%d sent=%d confirmed=%d errors=%d notify=%s",
                 droneSpec.trackLabel(), localOwner, mapStatus.toString(), linePoints.size(),
                 linePointsSentCount, linePointsConfirmedCount, consecutiveUpdateFails, notifyCoordinator));
 
         if (notifyCoordinator) {
+            long coordinatorStartedAtMs = System.currentTimeMillis();
             double distMeters = CaltopoMap.DistanceFromMeInMeters(lat, lng);
             runtime.getPeerCoordinator()
                     .onWaypointReceived(droneSpec, lat, lng, altitudeMeters, distMeters, timestampMsec, telemetry);
+            logSideEffectIfSlow("queueWaypoint.peerCoordinator.onWaypointReceived", myRemoteId, droneSpec.getMappedId(),
+                    System.currentTimeMillis() - coordinatorStartedAtMs);
         }
 
-        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) return;
-        if (!localOwner) {
+        if (mapStatus != CaltopoMap.MapStatusListener.mapStatus.up) {
+            logSideEffectIfSlow("queueWaypoint.total.mapDown", myRemoteId, droneSpec.getMappedId(),
+                    System.currentTimeMillis() - startedAtMs);
             return;
         }
-        if (null != liveTrackId) forwardNextWaypoints(null);
-        else if (null == startLiveTrackOp) startNewTrack();
+        if (!localOwner) {
+            logSideEffectIfSlow("queueWaypoint.total.notOwner", myRemoteId, droneSpec.getMappedId(),
+                    System.currentTimeMillis() - startedAtMs);
+            return;
+        }
+        if (null != liveTrackId) {
+            long forwardStartedAtMs = System.currentTimeMillis();
+            forwardNextWaypoints(null);
+            logSideEffectIfSlow("queueWaypoint.forwardNextWaypoints", myRemoteId, droneSpec.getMappedId(),
+                    System.currentTimeMillis() - forwardStartedAtMs);
+        } else if (null == startLiveTrackOp) {
+            long startStartedAtMs = System.currentTimeMillis();
+            startNewTrack();
+            logSideEffectIfSlow("queueWaypoint.startNewTrack", myRemoteId, droneSpec.getMappedId(),
+                    System.currentTimeMillis() - startStartedAtMs);
+        }
+        logSideEffectIfSlow("queueWaypoint.total", myRemoteId, droneSpec.getMappedId(),
+                System.currentTimeMillis() - startedAtMs);
     }
 
     /** forwardNextWaypoints():
@@ -686,6 +740,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     private void notifyLocalTrackPoint(double lat, double lng, double altitudeMeters, long timestampMsec) {
+        long startedAtMs = System.currentTimeMillis();
         if (LocalTrackListeners.isEmpty()) {
             CTDebug(ICON_LATENCY_TAG, String.format(Locale.US,
                     "track_notify_skipped remoteId=%s mappedId=%s reason=no_listeners droneTs=%d lat=%.6f lng=%.6f alt=%.1f",
@@ -694,9 +749,14 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
         }
         String mappedId = droneSpec.getMappedId();
         for (LocalTrackListener listener : LocalTrackListeners) try {
+            long listenerStartedAtMs = System.currentTimeMillis();
             listener.onLocalTrackPoint(myRemoteId, mappedId, lat, lng, altitudeMeters, timestampMsec);
+            logSideEffectIfSlow("notifyLocalTrackPoint.listener." + listener.getClass().getName(),
+                    myRemoteId, mappedId, System.currentTimeMillis() - listenerStartedAtMs);
         } catch (Exception e) {
             CTError(TAG, "notifyLocalTrackPoint() listener raised", e);
         }
+        logSideEffectIfSlow("notifyLocalTrackPoint.total", myRemoteId, mappedId,
+                System.currentTimeMillis() - startedAtMs);
     }
 }

@@ -1370,14 +1370,34 @@ class StreamsViewModel(
     }
 
     fun onSnapshotCaptured(designator: String, bitmap: Bitmap) {
+        val startedAtMs = System.currentTimeMillis()
+        fun logSnapshotIfSlow(step: String, elapsedMs: Long) {
+            if (elapsedMs < 250L) return
+            CaltopoClient.CTWarn(
+                tag,
+                String.format(
+                    Locale.US,
+                    "onSnapshotCaptured slow step=%s elapsedMs=%d designator=%s bitmap=%dx%d thread=%s",
+                    step,
+                    elapsedMs,
+                    designator,
+                    bitmap.width,
+                    bitmap.height,
+                    Thread.currentThread().name
+                )
+            )
+        }
         val droneSpec = droneStates[designator]?.source
 
         if (droneSpec == null) {
             CTDebug(tag, "onSnapshotCaptured(${designator}): No associated dronespec.")
+            logSnapshotIfSlow("total.noDrone", System.currentTimeMillis() - startedAtMs)
             return
         }
 
+        val telemetryStartedAtMs = System.currentTimeMillis()
         val telemetry = ffmpegProbeService?.telemetrySnapshot(designator)
+        logSnapshotIfSlow("telemetrySnapshot", System.currentTimeMillis() - telemetryStartedAtMs)
         val clueLat = telemetry?.latitude ?: droneSpec.lastLat
         val clueLng = telemetry?.longitude ?: droneSpec.lastLng
         val clueAlt = telemetry?.altitudeMeters ?: droneSpec.lastAlt
@@ -1395,6 +1415,7 @@ class StreamsViewModel(
             ?.takeIf { it.isFinite() }
             ?.coerceIn(-90.0, 0.0)
             ?: DEFAULT_CLUE_GIMBAL_ANGLE_DEG
+        val projectionStartedAtMs = System.currentTimeMillis()
         val projectedLocation = projectClueLocation(
             droneLat = clueLat,
             droneLng = clueLng,
@@ -1403,6 +1424,7 @@ class StreamsViewModel(
             aglMeters = clueAglMeters,
             gimbalAngleDeg = clueGimbalAngle,
         )
+        logSnapshotIfSlow("projection", System.currentTimeMillis() - projectionStartedAtMs)
         CTDebug(tag, String.format(
             Locale.US,
             "onSnapshotCaptured(%s): projection inputs droneLat=%.6f droneLng=%.6f droneAlt=%.1f bearingDeg=%s aglM=%s gimbalDeg=%s projectedLat=%.6f projectedLng=%.6f projectedAlt=%.1f",
@@ -1417,7 +1439,9 @@ class StreamsViewModel(
             projectedLocation.lng,
             projectedLocation.alt,
         ))
+        val summaryStartedAtMs = System.currentTimeMillis()
         val summary = buildTelemetrySummary(designator, droneSpec, telemetry)
+        logSnapshotIfSlow("buildTelemetrySummary", System.currentTimeMillis() - summaryStartedAtMs)
 
         _pendingClue.value = PendingClue(
             droneSpec = droneSpec,
@@ -1460,6 +1484,7 @@ class StreamsViewModel(
         }
 
         CTDebug(tag, "onSnapshotCaptured(${designator}): clue started for ${bitmap.width}x${bitmap.height} snapshot.")
+        logSnapshotIfSlow("total", System.currentTimeMillis() - startedAtMs)
     }
 
     fun updateClueTitle(title: String) {

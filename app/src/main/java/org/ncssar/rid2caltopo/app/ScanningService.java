@@ -62,6 +62,12 @@ public class ScanningService extends Service {
     private static OpenDroneIdDataManager DataManager = new OpenDroneIdDataManager(null);
     public static long GetStartTimeInMsec() {return ScannerUptime.getStartTimeInMsec();}
     public static boolean IsRunning() { return serviceRunning; }
+    public static int GetRidIngestQueueDepth() {
+        return (DataManager != null) ? DataManager.getRidIngestQueueDepth() : -1;
+    }
+    public static long GetDroppedRidIngestPacketCount() {
+        return (DataManager != null) ? DataManager.getDroppedRidIngestPacketCount() : -1L;
+    }
     public void startScanning() {
         if (scanning) {
             CTError(TAG, "startScanning(): ignoring start request while running.");

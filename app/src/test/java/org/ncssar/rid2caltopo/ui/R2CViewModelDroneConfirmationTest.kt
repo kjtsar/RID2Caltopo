@@ -2,8 +2,10 @@ package org.ncssar.rid2caltopo.ui
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Before
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -251,6 +253,32 @@ class R2CViewModelDroneConfirmationTest {
 
         assertEquals(remoteId, viewModel.drones.value.single().remoteId)
         assertNotNull(viewModel.pendingDroneConfirmation.value)
+    }
+
+    @Test
+    fun unchangedVisibleDroneListDoesNotRepublishUiList() {
+        val remoteId = "DRONEUNCHANGED"
+        val drone = activeDrone(remoteId, waypointTimestampMsec = 1234L)
+        val viewModel = R2CViewModel(SimpleTimer())
+
+        viewModel.onDroneSpecsChanged(listOf(drone))
+        val firstList = viewModel.drones.value
+
+        viewModel.onDroneSpecsChanged(listOf(drone))
+        assertSame(firstList, viewModel.drones.value)
+
+        drone.checkNewWaypoint(
+            39.1001,
+            -121.2001,
+            120.0,
+            2234L,
+            2234L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        viewModel.onDroneSpecsChanged(listOf(drone))
+
+        assertNotSame(firstList, viewModel.drones.value)
     }
 
     @Test

@@ -174,6 +174,7 @@ object ProximityAlertCenter {
     private const val CLEAR_DELAY_MS = 3_000L
     private const val FT_PER_METER = 3.28084
     private const val METERS_PER_FOOT = 0.3048
+    private const val PROXIMITY_UPDATE_SLOW_MS = 250L
 
     private data class DroneSample(
         val remoteId: String,
@@ -246,7 +247,29 @@ object ProximityAlertCenter {
     private var alertsSuspended = false
     private var clearEligibleSinceMs: Long? = null
 
+    private fun logUpdateIfSlow(
+        elapsedMs: Long,
+        inputCount: Int,
+        activeCount: Int,
+        evaluationCount: Int
+    ) {
+        if (elapsedMs < PROXIMITY_UPDATE_SLOW_MS) return
+        CaltopoClient.CTWarn(
+            "ProximityAlertCenter",
+            String.format(
+                Locale.US,
+                "updateDrones slow elapsedMs=%d input=%d active=%d pairs=%d thread=%s",
+                elapsedMs,
+                inputCount,
+                activeCount,
+                evaluationCount,
+                Thread.currentThread().name
+            )
+        )
+    }
+
     fun updateDrones(drones: List<CtDroneSpec>) {
+        val startedAtMs = System.currentTimeMillis()
         val nowMs = System.currentTimeMillis()
         val thresholdFt = CaltopoClient.GetProximityAlertSpacingFeet().toDouble()
         if (thresholdFt <= 0.0) {
@@ -257,6 +280,12 @@ object ProximityAlertCenter {
             _canResumeAlert.value = false
             _debugPairs.value = emptyList()
             latestEvaluationsByKey = emptyMap()
+            logUpdateIfSlow(
+                elapsedMs = System.currentTimeMillis() - startedAtMs,
+                inputCount = drones.size,
+                activeCount = 0,
+                evaluationCount = 0
+            )
             return
         }
 
@@ -394,6 +423,12 @@ object ProximityAlertCenter {
                 }
             )
         }
+        logUpdateIfSlow(
+            elapsedMs = System.currentTimeMillis() - startedAtMs,
+            inputCount = drones.size,
+            activeCount = activeDrones.size,
+            evaluationCount = evaluations.size
+        )
     }
 
     fun suspendCurrentAlert() {

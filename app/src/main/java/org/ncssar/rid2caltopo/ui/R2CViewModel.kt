@@ -193,6 +193,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private var screenBeforeConfirmation: ActiveScreen? = null
     private var screenBeforeConnectionOverlay: ActiveScreen? = null
     private var lastDroneListSignature: List<DroneSpecUiSignature>? = null
+    private var lastUnknownDroneConfirmationOrganization = ""
 
     var mapHierarchy by mutableStateOf<List<CaltopoNode>?>(null)
         private set
@@ -519,6 +520,9 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             )
             return
         }
+        if (current.usesUnknownOrganizationDefault) {
+            lastUnknownDroneConfirmationOrganization = organization
+        }
         val existingMappedId = CaltopoClient.GetDroneSpec(remoteId)?.mappedId?.trim().orEmpty()
         val mappedId = if (DroneSpecConfirmationLogic.shouldPreserveMappedId(
                 existingMappedId = existingMappedId,
@@ -572,6 +576,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     /* We only need the uptimePoll() before there are dronespecs.
      * Once there are dronespecs, we will receive frequent updates.
      */
+    @Synchronized
     override fun onDroneSpecsChanged(droneSpecs: List<CtDroneSpec>) {
         val droneListSnapshot = normalizedDroneSpecUiSnapshot(droneSpecs, tag)
         if (lastDroneListSignature != droneListSnapshot.signature) {
@@ -636,6 +641,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         housekeeping()
     }
 
+    @Synchronized
     override fun onDroneConfirmationCandidate(droneSpec: CtDroneSpec) {
         queueConfirmationIfNeeded(droneSpec, "first RID sighting")
     }
@@ -701,7 +707,8 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     private fun buildConfirmationState(drone: CtDroneSpec): DroneSpecConfirmationUiState {
         return DroneSpecConfirmationLogic.buildInitialState(
             drone = drone,
-            defaultOrganization = CaltopoClient.GetHomeOrgName()
+            defaultOrganization = CaltopoClient.GetHomeOrgName(),
+            defaultUnknownOrganization = lastUnknownDroneConfirmationOrganization
         )
     }
 

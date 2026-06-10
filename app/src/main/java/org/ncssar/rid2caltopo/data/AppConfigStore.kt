@@ -29,11 +29,18 @@ object AppConfigStore {
 
     @Volatile
     private var appContext: Context? = null
+    @Volatile
+    private var initializedDatastorePath: String? = null
 
     @JvmStatic
+    @Synchronized
     fun initialize(context: Context) {
-        appContext = context.applicationContext
-        CaltopoClient.CTDebug(TAG, "initialize(): datastore path=${context.filesDir.parent}/files/datastore/app_config.pb")
+        val nextContext = context.applicationContext
+        val datastorePath = "${nextContext.filesDir.parent}/files/datastore/app_config.pb"
+        if (appContext === nextContext && initializedDatastorePath == datastorePath) return
+        appContext = nextContext
+        initializedDatastorePath = datastorePath
+        CaltopoClient.CTDebug(TAG, "initialize(): datastore path=$datastorePath")
     }
 
     @JvmStatic

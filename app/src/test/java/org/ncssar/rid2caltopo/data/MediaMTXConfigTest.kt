@@ -14,8 +14,9 @@ class MediaMTXConfigTest {
             recordingRoot = File("/tmp/unused"),
         )
 
-        assertTrue(config.contains("record: no"))
+        assertTrue(config.contains("pathDefaults:\n  record: no"))
         assertFalse(config.contains("recordFormat: fmp4"))
+        assertFalse(config.contains("\nrecord: no"))
     }
 
     @Test
@@ -26,8 +27,9 @@ class MediaMTXConfigTest {
             recordingRoot = File("/tmp/mediamtx-recordings"),
         )
 
-        assertTrue(config.contains("record: yes"))
+        assertTrue(config.contains("pathDefaults:\n  record: yes"))
         assertTrue(config.contains("recordFormat: fmp4"))
+        assertFalse(config.contains("\nrecord: yes"))
         assertTrue(config.contains("%path/%Y-%m-%d_%H-%M-%S-%f"))
         assertTrue(config.contains("/tmp/mediamtx-recordings"))
     }

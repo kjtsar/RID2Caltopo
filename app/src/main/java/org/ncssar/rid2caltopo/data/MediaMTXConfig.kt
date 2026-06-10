@@ -13,26 +13,46 @@ object MediaMTXConfig {
     ): String {
         val normalizedBase = baseConfig.trimEnd()
         val logLevel = if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelDebug) "debug" else "info"
+        val recordSettings = mutableListOf<String>()
         if (!captureEnabled) {
-            return "$normalizedBase\nrecord: no\nlogLevel: $logLevel\n"
+            recordSettings.add("record: no")
+            return buildString {
+                append(withPathDefaultsSettings(normalizedBase, recordSettings))
+                append("\nlogLevel: ")
+                append(logLevel)
+                append('\n')
+            }
         }
 
         val recordPath = File(recordingRoot, "%path/%Y-%m-%d_%H-%M-%S-%f").absolutePath
+        recordSettings.add("record: yes")
+        recordSettings.add("recordPath: '${yamlSingleQuoted(recordPath)}'")
+        recordSettings.add("recordFormat: $RECORD_FORMAT_FMP4")
         return buildString {
-            append(normalizedBase)
+            append(withPathDefaultsSettings(normalizedBase, recordSettings))
             append('\n')
-            append('\n')
-            append("# RID2Caltopo-managed recording output.\n")
-            append("record: yes\n")
-            append("recordPath: '")
-            append(yamlSingleQuoted(recordPath))
-            append("'\n")
-            append("recordFormat: ")
-            append(RECORD_FORMAT_FMP4)
-            append("\nlogLevel: ")
+            append("logLevel: ")
             append(logLevel)
             append('\n')
         }
+    }
+
+    private fun withPathDefaultsSettings(baseConfig: String, settings: List<String>): String {
+        val lines = baseConfig.lines().toMutableList()
+        val pathDefaultsIndex = lines.indexOfFirst { it.trim() == "pathDefaults:" }
+        val renderedSettings = settings.map { "  $it" }
+        if (pathDefaultsIndex >= 0) {
+            lines.addAll(pathDefaultsIndex + 1, renderedSettings)
+            return lines.joinToString("\n")
+        }
+        return buildString {
+            append(baseConfig)
+            append("\npathDefaults:\n")
+            renderedSettings.forEach { setting ->
+                append(setting)
+                append('\n')
+            }
+        }.trimEnd()
     }
 
     private fun yamlSingleQuoted(value: String): String = value.replace("'", "''")

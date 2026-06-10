@@ -95,7 +95,7 @@ class CaltopoClientUnknownPromotionTest {
     }
 
     @Test
-    fun neverSeenRemoteIdIsSuppressedFromWaypointTrackByDefault() {
+    fun neverSeenRemoteIdIsArchivedLocallyButSuppressedFromMapAndTrackerByDefault() {
         val remoteId = "ELDORADO1"
         val client = CaltopoClient.ClientForRemoteId(remoteId)
         val drone = client.droneSpec
@@ -121,7 +121,7 @@ class CaltopoClientUnknownPromotionTest {
 
         assertTrue(drone.isActive)
         assertTrue(drone.isLocalArchiveOnly)
-        assertTrue(WaypointTrack.GetTrackPointsSnapshot(drone).isEmpty())
+        assertEquals(1, WaypointTrack.GetTrackPointsSnapshot(drone).size)
         assertEquals(0, peerCoordinator.countEvents("onLiveTrackCreated"))
     }
 

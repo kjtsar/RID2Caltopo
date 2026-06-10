@@ -6,6 +6,8 @@
  */
 package org.opendroneid.android.data;
 
+import android.os.Looper;
+
 import androidx.lifecycle.MutableLiveData;
 import androidx.annotation.NonNull;
 
@@ -24,20 +26,82 @@ public class AircraftObject {
     final public MutableLiveData<OperatorIdData> operatorid = new MutableLiveData<>();
 
     private final long macAddress;
+    private volatile Connection connectionData;
+    private volatile Identification identification1Data;
+    private volatile Identification identification2Data;
+    private volatile LocationData locationData;
+    private volatile AuthenticationData authenticationData;
+    private volatile SelfIdData selfidData;
+    private volatile SystemData systemData;
+    private volatile OperatorIdData operatoridData;
 
     public AircraftObject(long macAddress) {
         this.macAddress = macAddress;
     }
     public long getMacAddress() { return macAddress; }
 
-    public Connection getConnection() { return connection.getValue(); }
-    public Identification getIdentification1() { return identification1.getValue(); }
-    public Identification getIdentification2() { return identification2.getValue(); }
-    public LocationData getLocation() { return location.getValue(); }
-    public AuthenticationData getAuthentication() { return authentication.getValue(); }
-    public SelfIdData getSelfID() { return selfid.getValue(); }
-    public SystemData getSystem() { return system.getValue(); }
-    public OperatorIdData getOperatorID() { return operatorid.getValue(); }
+    public Connection getConnection() { return connectionData; }
+    public Identification getIdentification1() { return identification1Data; }
+    public Identification getIdentification2() { return identification2Data; }
+    public LocationData getLocation() { return locationData; }
+    public AuthenticationData getAuthentication() { return authenticationData; }
+    public SelfIdData getSelfID() { return selfidData; }
+    public SystemData getSystem() { return systemData; }
+    public OperatorIdData getOperatorID() { return operatoridData; }
+
+    public void updateConnection(Connection value) {
+        connectionData = value;
+        setLiveDataValue(connection, value);
+    }
+
+    public void updateIdentification1(Identification value) {
+        identification1Data = value;
+        setLiveDataValue(identification1, value);
+    }
+
+    public void updateIdentification2(Identification value) {
+        identification2Data = value;
+        setLiveDataValue(identification2, value);
+    }
+
+    public void updateLocation(LocationData value) {
+        locationData = value;
+        setLiveDataValue(location, value);
+    }
+
+    public void updateAuthentication(AuthenticationData value) {
+        authenticationData = value;
+        setLiveDataValue(authentication, value);
+    }
+
+    public void updateSelfID(SelfIdData value) {
+        selfidData = value;
+        setLiveDataValue(selfid, value);
+    }
+
+    public void updateSystem(SystemData value) {
+        systemData = value;
+        setLiveDataValue(system, value);
+    }
+
+    public void updateOperatorID(OperatorIdData value) {
+        operatoridData = value;
+        setLiveDataValue(operatorid, value);
+    }
+
+    public static boolean shouldSetLiveDataSynchronously(Thread currentThread, Thread mainThread) {
+        return currentThread == mainThread;
+    }
+
+    private static <T> void setLiveDataValue(MutableLiveData<T> liveData, T value) {
+        Looper mainLooper = Looper.getMainLooper();
+        Thread mainThread = mainLooper == null ? null : mainLooper.getThread();
+        if (shouldSetLiveDataSynchronously(Thread.currentThread(), mainThread)) {
+            liveData.setValue(value);
+        } else {
+            liveData.postValue(value);
+        }
+    }
 
     // Non-zero authentication data pages do not contain the following fields. Save them for displaying
     private int authLastPageIndexSave;
@@ -49,7 +113,7 @@ public class AircraftObject {
     private final byte[] authDataCombined = new byte[Constants.MAX_AUTH_DATA];
 
     public AuthenticationData combineAuthentication(AuthenticationData newData) {
-        AuthenticationData currData = authentication.getValue();
+        AuthenticationData currData = authenticationData;
         if (currData == null)
             currData = new AuthenticationData();
 
@@ -86,13 +150,13 @@ public class AircraftObject {
     public void updateShadowBasicId() {
         switch (idToShow) {
             case 0:
-                id1Shadow.setValue(identification1.getValue());
+                id1Shadow.setValue(identification1Data);
                 idToShow++;
                 break;
             case 3:
-                Identification id2 = identification2.getValue();
+                Identification id2 = identification2Data;
                 if (id2 != null && id2.getIdType() != Identification.IdTypeEnum.None)
-                    id2Shadow.setValue(identification2.getValue());
+                    id2Shadow.setValue(id2);
                 idToShow++;
                 break;
             case 6:

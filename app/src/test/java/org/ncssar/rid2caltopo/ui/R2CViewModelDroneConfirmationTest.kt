@@ -188,6 +188,35 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
+    fun firstUnknownDroneConfirmationStartsWithBlankOrganization() {
+        val remoteId = "UNKNOWNBLANKORG"
+        val viewModel = R2CViewModel(SimpleTimer())
+
+        viewModel.onDroneConfirmationCandidate(CtDroneSpec(remoteId))
+
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        assertEquals("", viewModel.pendingDroneConfirmation.value?.organization)
+    }
+
+    @Test
+    fun unknownDroneConfirmationUsesLastOperatorEnteredUnknownOrganization() {
+        val viewModel = R2CViewModel(SimpleTimer())
+
+        viewModel.onDroneConfirmationCandidate(CtDroneSpec("UNKNOWNORG1"))
+        viewModel.updatePendingDroneConfirmation(
+            organization = "Mutual Aid",
+            pilotCallsign = "MA12",
+            droneDescription = "HolyStone RID"
+        )
+        viewModel.savePendingDroneConfirmation()
+
+        viewModel.onDroneConfirmationCandidate(CtDroneSpec("UNKNOWNORG2"))
+
+        assertNotNull(viewModel.pendingDroneConfirmation.value)
+        assertEquals("Mutual Aid", viewModel.pendingDroneConfirmation.value?.organization)
+    }
+
+    @Test
     fun firstRidSightingPromptIsNotReopenedWhenFlightBecomesActive() {
         val remoteId = "DRONEFIRSTSEENACTIVE"
         val drone = CtDroneSpec(remoteId)

@@ -44,12 +44,16 @@ class DroneSpecConfirmationLogicTest {
     }
 
     @Test
-    fun unknownMutualAidDrone_usesDefaultOrgAndGuessOnlyWhenMappedIdEqualsRemoteId() {
+    fun unknownMutualAidDrone_usesUnknownDefaultOrgAndGuessOnlyWhenMappedIdEqualsRemoteId() {
         val drone = CtDroneSpec("1581F6Z9C24BK0036M9Q")
 
-        val state = DroneSpecConfirmationLogic.buildInitialState(drone, defaultOrganization = "NCSSAR")
+        val state = DroneSpecConfirmationLogic.buildInitialState(
+            drone,
+            defaultOrganization = "NCSSAR",
+            defaultUnknownOrganization = "Mutual Aid"
+        )
 
-        assertEquals("NCSSAR", state.organization)
+        assertEquals("Mutual Aid", state.organization)
         assertEquals("", state.pilotCallsign)
         assertEquals("DJI Mini 4 Pro", state.droneDescription)
         assertEquals(
@@ -64,7 +68,7 @@ class DroneSpecConfirmationLogicTest {
 
         val state = DroneSpecConfirmationLogic.buildInitialState(drone, defaultOrganization = "NCSSAR")
 
-        assertEquals("NCSSAR", state.organization)
+        assertEquals("", state.organization)
         assertEquals("", state.pilotCallsign)
         assertEquals("DJI Avata 360", state.droneDescription)
     }

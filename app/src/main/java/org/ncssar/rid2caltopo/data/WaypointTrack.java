@@ -34,6 +34,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Future;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.time.Instant;
@@ -462,6 +464,48 @@ public class WaypointTrack {
         return responseCode;
     }
 
+    @NonNull
+    private static synchronized ExecutorService GetArchiveReportExecutorPool() {
+        if (ArchiveReportExecutorPool == null ||
+                ArchiveReportExecutorPool.isShutdown() ||
+                ArchiveReportExecutorPool.isTerminated()) {
+            ArchiveReportExecutorPool = Executors.newSingleThreadExecutor();
+        }
+        return ArchiveReportExecutorPool;
+    }
+
+    @Nullable
+    private static ExecutorService ArchiveReportExecutorPool = null;
+
+    @NonNull
+    static Future<Integer> PublishGeoJsonStatsWithRetryAsyncForTesting(
+            @NonNull String geoJsonString,
+            @NonNull String context
+    ) {
+        return QueueGeoJsonStatsReport(geoJsonString, context, null);
+    }
+
+    @NonNull
+    private static Future<Integer> QueueGeoJsonStatsReport(
+            @NonNull String geoJsonString,
+            @NonNull String context,
+            @Nullable Runnable onReported
+    ) {
+        return GetArchiveReportExecutorPool().submit(() -> {
+            int responseCode = PublishGeoJsonStatsWithRetry(geoJsonString, context);
+            if (responseCode == GEOJSON_STATS_UPLOAD_SKIPPED) {
+                CTDebug(TAG, context + ": tracker upload skipped locally");
+            } else {
+                CTDebug(TAG, String.format(Locale.US,
+                        "%s: server returned %d", context, responseCode));
+            }
+            if (ShouldMarkGeoJsonStatsReportedForResponse(responseCode) && onReported != null) {
+                onReported.run();
+            }
+            return responseCode;
+        });
+    }
+
     @Nullable
     private static JSONObject GetR2cProp(@Nullable JSONObject waypointTrack) {
         if (waypointTrack == null) return null;
@@ -811,16 +855,10 @@ public class WaypointTrack {
             if (null != droneSpec && droneSpec.okToLog() && !droneSpec.isLocalArchiveOnly()) {
                 CTDebug(TAG, String.format(Locale.US,
                         "archive(%s): Publishing...", fileName));
-                int responseCode = PublishGeoJsonStatsWithRetry(
-                        geoJsonString, String.format(Locale.US, "archive(%s)", fileName));
-                if (responseCode == GEOJSON_STATS_UPLOAD_SKIPPED) {
-                    CTDebug(TAG, String.format(Locale.US,
-                            "archive(%s): tracker upload skipped locally", fileName));
-                } else {
-                    CTDebug(TAG, String.format(Locale.US,
-                            "archive(%s): server returned %d", fileName, responseCode));
-                }
-                if (ShouldMarkGeoJsonStatsReportedForResponse(responseCode)) statsReported();
+                QueueGeoJsonStatsReport(
+                        geoJsonString,
+                        String.format(Locale.US, "archive(%s)", fileName),
+                        this::statsReported);
             }
             if (!clues.isEmpty()) archiveKmz();
             // don't report finished for some kind of timeout:

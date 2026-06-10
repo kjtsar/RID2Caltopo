@@ -9,22 +9,27 @@ data class DroneSpecConfirmationUiState(
     val droneDescription: String,
     val initialPilotCallsign: String = pilotCallsign,
     val initialDroneDescription: String = droneDescription,
-    val warning: String? = null
+    val warning: String? = null,
+    val usesUnknownOrganizationDefault: Boolean = false
 )
 
 object DroneSpecConfirmationLogic {
     fun buildInitialState(
         drone: CtDroneSpec,
-        defaultOrganization: String
+        defaultOrganization: String,
+        defaultUnknownOrganization: String = ""
     ): DroneSpecConfirmationUiState {
         val hasKnownSpecFields = drone.org.isNotBlank() || drone.model.isNotBlank() || drone.owner.isNotBlank()
         val guessedDescription = CtDroneSpec.GuessMakeModel(drone.remoteId)
+        val usesUnknownOrganizationDefault = drone.org.isBlank() && drone.mappedId == drone.remoteId
         val droneDescription = drone.model
             .takeIf { it.isNotBlank() }
             ?: if (drone.mappedId == drone.remoteId) guessedDescription else ""
-        val organization = drone.org
-            .takeIf { it.isNotBlank() }
-            ?: defaultOrganization
+        val organization = when {
+            drone.org.isNotBlank() -> drone.org
+            usesUnknownOrganizationDefault -> defaultUnknownOrganization
+            else -> defaultOrganization
+        }
         val pilotCallsign = if (hasKnownSpecFields && drone.mappedId != drone.remoteId) {
             guessPilotCallsign(drone, droneDescription, guessedDescription)
         } else {
@@ -42,7 +47,8 @@ object DroneSpecConfirmationLogic {
             droneDescription = droneDescription,
             initialPilotCallsign = pilotCallsign,
             initialDroneDescription = droneDescription,
-            warning = warning
+            warning = warning,
+            usesUnknownOrganizationDefault = usesUnknownOrganizationDefault
         )
     }
 

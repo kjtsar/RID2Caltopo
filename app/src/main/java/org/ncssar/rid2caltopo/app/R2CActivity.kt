@@ -918,25 +918,29 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         } else {
             CTError(TAG, "initialize(): location permissions unavailable; fused location updates not requested.")
         }
-        if (!RestartingFlag || !ScanningService.IsRunning()) {
-            CTDebug(
-                TAG,
-                String.format(
-                    Locale.US,
-                    "onCreate(): Starting ScanningService from activity 0x%x",
-                    this.hashCode()
-                )
+        CTDebug(
+            TAG,
+            String.format(
+                Locale.US,
+                "onCreate(): Requesting ScanningService start from activity 0x%x restarting=%s running=%s",
+                this.hashCode(),
+                RestartingFlag,
+                ScanningService.IsRunning()
             )
-            ScanningService.requestStart(applicationContext)
-        } else {
-            CTDebug(TAG, "onCreate(): ScanningService already running; skipping duplicate start.")
-        }
-        if (!RestartingFlag || !MediaMTXService.IsRunning()) {
-            CTDebug(TAG, "Starting MediaMTXService...")
-            MediaMTXService.requestStart(applicationContext)
-        } else {
-            CTDebug(TAG, "onCreate(): MediaMTXService already running; skipping duplicate start.")
-        }
+        )
+        ScanningService.requestStart(applicationContext)
+
+        CTDebug(
+            TAG,
+            String.format(
+                Locale.US,
+                "onCreate(): Requesting MediaMTXService start restarting=%s running=%s",
+                RestartingFlag,
+                MediaMTXService.IsRunning()
+            )
+        )
+        MediaMTXService.requestStart(applicationContext)
+        RestartingFlag = false
     }
 
     private fun stopLocationUpdates() {

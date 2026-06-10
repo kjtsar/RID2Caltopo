@@ -12,6 +12,8 @@ import org.junit.Before
 import org.junit.Test
 import java.lang.reflect.Field
 import java.time.LocalDate
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class WaypointTrackTest {
     private lateinit var trackMapField: Field
@@ -204,6 +206,42 @@ class WaypointTrackTest {
         assertFalse(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(503))
         assertTrue(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(200))
         assertTrue(WaypointTrack.ShouldMarkGeoJsonStatsReportedForResponse(409))
+    }
+
+    @Test
+    fun publishGeoJsonStatsWithRetryAsyncForTesting_returnsBeforeSlowTrackerCompletes() {
+        CaltopoClient.SetHomeOrgName("NCSSAR")
+        confirmTeamDrone("RIDTEAMASYNC", "NCSSAR")
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val publisher = TrackerPublisher {
+            started.countDown()
+            release.await(5, TimeUnit.SECONDS)
+            200
+        }
+        val fixture = TestR2cRuntimeFactory.create("async-archive")
+        R2cRuntimeRegistry.setDefaultRuntimeForTesting(
+            R2cRuntime(
+                "async-archive",
+                fixture.peerCoordinator,
+                fixture.calTopoSessionGateway,
+                publisher
+            )
+        )
+        try {
+            val future = WaypointTrack.PublishGeoJsonStatsWithRetryAsyncForTesting(
+                geoJsonWithOrgAndRid("NCSSAR", "RIDTEAMASYNC").toString(),
+                "test async publish"
+            )
+
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            assertFalse(future.isDone)
+            release.countDown()
+            assertEquals(200, future.get(2, TimeUnit.SECONDS))
+        } finally {
+            release.countDown()
+            R2cRuntimeRegistry.resetDefaultRuntimeForTesting()
+        }
     }
 
     @Test

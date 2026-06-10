@@ -108,13 +108,15 @@ public class DelayedExec {
         schedule(delayInMsec);
     }
 
-    public void stop() {
+    public boolean stop() {
+        boolean wasRunning = running;
         if (handler != null && dispatcherRunnable != null) {
             handler.removeCallbacks(dispatcherRunnable);
         }
         stopScheduledFuture();
         repeatMsec = 0;
         running = false;
+        return wasRunning;
     }
 
     protected void finalize() {

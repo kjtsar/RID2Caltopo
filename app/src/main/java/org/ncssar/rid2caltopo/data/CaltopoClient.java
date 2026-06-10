@@ -2633,7 +2633,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      *                    If false, then check for inactive dronespecs.
      */
 
-    private static void ProcessSortedCurrentDroneSpecArray(boolean changedFlag) {
+    private static synchronized void ProcessSortedCurrentDroneSpecArray(boolean changedFlag) {
         if (ProcessingDroneSpecUpdate) {
             PendingDroneSpecUpdate |= changedFlag;
             return;
@@ -2711,8 +2711,9 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             listener.onDroneSpecsChanged(dsArrayClone);
         }
         if (DsArray.size() == 0) {
-            UiUpdatePoll.stop();
-            CTDebug(TAG, "ProcessSortedCurrentDroneSpecArray(): Stopping UiUpdatePoll.");
+            if (UiUpdatePoll.stop()) {
+                CTDebug(TAG, "ProcessSortedCurrentDroneSpecArray(): Stopping UiUpdatePoll.");
+            }
         } else if (!UiUpdatePoll.isRunning()) {
             UiUpdatePoll.start(CaltopoClient::ProcessSortedCurrentDroneSpecArray, 1000, 1000);
             CTDebug(TAG, "UpdateDroneSpecs(): Starting UiUpdatePoll...");
@@ -3740,6 +3741,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
 
         if (shouldSuppressMapTracking(droneSpec)) {
             droneSpec.setLocalArchiveOnly(true);
+            long archiveStartedAtMs = System.currentTimeMillis();
+            WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
+            logWaypointSideEffectIfSlow("WaypointTrack.AddWaypointForTrack.suppressed", droneSpec,
+                    System.currentTimeMillis() - archiveStartedAtMs);
             long proximityStartedAtMs = System.currentTimeMillis();
             ProximityAlertCenter.INSTANCE.updateDrones(proximityDrones);
             logWaypointSideEffectIfSlow("proximity.updateDrones.suppressed", droneSpec,

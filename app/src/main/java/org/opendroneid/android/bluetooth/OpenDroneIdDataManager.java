@@ -47,6 +47,7 @@ public class OpenDroneIdDataManager {
     private static final int RID_INGEST_QUEUE_CAPACITY = 2048;
     private static final long RID_INGEST_SLOW_PROCESSING_MS = 250L;
     private static final long RID_INGEST_SLOW_PROCESSING_LOG_LIMIT = 10L;
+    private static final long RID_INGEST_FAILURE_LOG_LIMIT = 10L;
 
     public android.location.Location receiverLocation;
 
@@ -54,6 +55,7 @@ public class OpenDroneIdDataManager {
     private final ThreadPoolExecutor ridIngestExecutor;
     private final AtomicLong droppedRidIngestPackets = new AtomicLong(0L);
     private final AtomicLong slowRidIngestPacketsLogged = new AtomicLong(0L);
+    private final AtomicLong failedRidIngestPacketsLogged = new AtomicLong(0L);
 
     // Tracks the last-logged altitude-source key per drone to suppress duplicate log spam.
     // Logged once on first contact and again whenever the key changes (altSource, isAtoType, fallback).
@@ -243,12 +245,17 @@ public class OpenDroneIdDataManager {
             try {
                 runnable.run();
             } catch (Exception e) {
-                CaltopoClient.CTError(TAG, "RID ingest worker failed while processing packet.", e);
+                long logged = failedRidIngestPacketsLogged.incrementAndGet();
+                if (shouldLogLimitedOccurrence(logged, RID_INGEST_FAILURE_LOG_LIMIT)) {
+                    CaltopoClient.CTError(TAG, String.format(Locale.US,
+                            "RID ingest worker failed while processing packet occurrence=%d/%d.",
+                            logged, RID_INGEST_FAILURE_LOG_LIMIT), e);
+                }
             } finally {
                 long elapsedMs = System.currentTimeMillis() - startedAtMs;
                 if (elapsedMs >= RID_INGEST_SLOW_PROCESSING_MS) {
                     long logged = slowRidIngestPacketsLogged.incrementAndGet();
-                    if (logged <= RID_INGEST_SLOW_PROCESSING_LOG_LIMIT) {
+                    if (shouldLogLimitedOccurrence(logged, RID_INGEST_SLOW_PROCESSING_LOG_LIMIT)) {
                         CaltopoClient.CTError(TAG, String.format(Locale.US,
                                 "RID ingest slow processing elapsedMs=%d occurrence=%d/%d task=%s",
                                 elapsedMs, logged, RID_INGEST_SLOW_PROCESSING_LOG_LIMIT, description));
@@ -256,6 +263,10 @@ public class OpenDroneIdDataManager {
                 }
             }
         });
+    }
+
+    static boolean shouldLogLimitedOccurrence(long occurrence, long limit) {
+        return occurrence >= 1L && occurrence <= limit;
     }
 
     // So many standards to choose from.  Pick them in priority order and hope the drone
@@ -428,7 +439,7 @@ public class OpenDroneIdDataManager {
         ac.getConnection().transportType = transportType;
         ac.getConnection().setTimestamp(timeNano);
         ac.getConnection().setMsgVersion(message.header.version);
-        ac.connection.setValue(ac.connection.getValue());
+        ac.updateConnection(ac.getConnection());
 
         if (newAircraft) {
             aircraft.put(macAddressLong, ac);
@@ -480,16 +491,20 @@ public class OpenDroneIdDataManager {
         Connection connection = new Connection();
         connection.firstSeen = System.currentTimeMillis();
         connection.macAddress = macAddress;
-        ac.connection.setValue(connection);
+        ac.updateConnection(connection);
 
-        ac.identification1.setValue(new Identification());
-        ac.identification2.setValue(new Identification());
-        ac.location.setValue(new LocationData());
-        ac.authentication.setValue(new AuthenticationData());
-        ac.selfid.setValue(new SelfIdData());
-        ac.system.setValue(new SystemData());
-        ac.operatorid.setValue(new OperatorIdData());
+        ac.updateIdentification1(new Identification());
+        ac.updateIdentification2(new Identification());
+        ac.updateLocation(new LocationData());
+        ac.updateAuthentication(new AuthenticationData());
+        ac.updateSelfID(new SelfIdData());
+        ac.updateSystem(new SystemData());
+        ac.updateOperatorID(new OperatorIdData());
         return ac;
+    }
+
+    static boolean shouldSetLiveDataSynchronously(Thread currentThread, Thread mainThread) {
+        return AircraftObject.shouldSetLiveDataSynchronously(currentThread, mainThread);
     }
 
     private void handleBasicId(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.BasicId> message) {
@@ -504,17 +519,17 @@ public class OpenDroneIdDataManager {
 
         // This implementation can receive up-to two different types of Basic ID messages
         // Find a free slot to store the current message in or overwrite old data of same type
-        Identification id1 = ac.identification1.getValue();
-        Identification id2 = ac.identification2.getValue();
+        Identification id1 = ac.getIdentification1();
+        Identification id2 = ac.getIdentification2();
         if (id1 == null || id2 == null)
             return;
         Identification.IdTypeEnum type1 = id1.getIdType();
         Identification.IdTypeEnum type2 = id2.getIdType();
         if (type1 == Identification.IdTypeEnum.None || type1 == data.getIdType()) {
-            ac.identification1.setValue(data);
+            ac.updateIdentification1(data);
         } else {
             if (type2 == Identification.IdTypeEnum.None || type2 == data.getIdType()) {
-                ac.identification2.setValue(data);
+                ac.updateIdentification2(data);
             } else {
                 CaltopoClient.CTInfo(TAG, "Discarded Basic ID message of type: " + data.getIdType().toString() +
                         ". Already have " + type1.toString() + " and " + type2.toString());
@@ -545,7 +560,7 @@ public class OpenDroneIdDataManager {
         data.setLocationTimestamp(raw.timestamp);
         data.setTimeAccuracy(raw.getTimeAccuracy());
         data.setDistance(raw.distance);
-        ac.location.setValue(data);
+        ac.updateLocation(data);
     }
 
     private void handleAuthentication(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.Authentication> message) {
@@ -562,7 +577,7 @@ public class OpenDroneIdDataManager {
             data.setAuthTimestamp(raw.authTimestamp);
         }
         data.setAuthData(raw.authData);
-        ac.authentication.setValue(ac.combineAuthentication(data));
+        ac.updateAuthentication(ac.combineAuthentication(data));
     }
 
     private void handleSelfID(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.SelfID> message) {
@@ -573,7 +588,7 @@ public class OpenDroneIdDataManager {
 
         data.setDescriptionType(raw.descriptionType);
         data.setOperationDescription(raw.operationDescription);
-        ac.selfid.setValue(data);
+        ac.updateSelfID(data);
     }
 
     private void handleSystem(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.SystemMsg> message) {
@@ -594,7 +609,7 @@ public class OpenDroneIdDataManager {
         data.setClassValue(raw.classValue);
         data.setOperatorAltitudeGeo(raw.getOperatorAltitudeGeo());
         data.setSystemTimestamp(raw.systemTimestamp);
-        ac.system.setValue(data);
+        ac.updateSystem(data);
     }
 
     private void handleOperatorID(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.OperatorID> message) {
@@ -605,7 +620,7 @@ public class OpenDroneIdDataManager {
 
         data.setOperatorIdType(raw.operatorIdType);
         data.setOperatorId(raw.operatorId);
-        ac.operatorid.setValue(data);
+        ac.updateOperatorID(data);
     }
 
     private boolean handleMessagePack(AircraftObject ac, OpenDroneIdParser.Message<OpenDroneIdParser.MessagePack> message,

@@ -18,6 +18,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import kotlin.math.max
 
 private const val SIGNAL_LOSS_ALERT_TAG = "DroneSignalLossAlert"
@@ -116,6 +117,7 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
     private fun recomputeLocked() {
         val activeFlights = linkedMapOf<String, CtDroneSpec>()
         lastDroneSpecs.forEach { spec ->
+            if (!isLocalAlertEligible(spec.remoteId)) return@forEach
             val flightKey = spec.flightKey() ?: return@forEach
             activeFlights[flightKey] = spec
         }
@@ -406,6 +408,9 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
         if (!isActive || startMsec <= 0L) return null
         return "$remoteId:$startMsec"
     }
+
+    private fun isLocalAlertEligible(remoteId: String): Boolean =
+        R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.isLocalAlertEligible(remoteId)
 
     private fun effectiveIdleThresholdMs(
         learnedIntervalMs: Long,

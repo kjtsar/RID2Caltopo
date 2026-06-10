@@ -2296,6 +2296,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         String trimmedMappedId = mappedId.trim();
 
         CtDroneSpec activeDs = ccs.droneSpecTable.get(remoteId);
+        String previousMappedId = activeDs != null ? activeDs.getMappedId().trim() : "";
+        WaypointTrack.TrackPoint latestPointBeforeMappedIdChange = activeDs != null
+                ? LatestLocalTrackPoint(activeDs)
+                : null;
         if (activeDs == null) {
             // Confirmation panel edits are session-scoped operator input.
             // Keep them only in the active table for this app invocation; they
@@ -2309,12 +2313,16 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             activeDs.setOwner(trimmedOwner);
             activeDs.setMappedId(trimmedMappedId);
         }
-        if (activeDs.isLocalArchiveOnly()) {
+        boolean mappedIdChanged = !previousMappedId.equals(activeDs.getMappedId().trim());
+        if (activeDs.isLocalArchiveOnly() && isTeamDroneOrg(trimmedOrg)) {
             PromoteLocalArchiveOnlyDrone(remoteId);
         } else {
             SessionUnknownDroneRemoteIds.remove(remoteId);
-            activeDs.setLocalArchiveOnly(false);
+            activeDs.setLocalArchiveOnly(shouldKeepConfirmedDroneLocalOnly(trimmedOrg));
             UpdateDroneSpecs();
+        }
+        if (mappedIdChanged) {
+            NotifyLatestLocalTrackPoint(activeDs, latestPointBeforeMappedIdChange);
         }
     }
 
@@ -2375,6 +2383,54 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
                 || SessionUnknownDroneRemoteIds.contains(remoteId)
                 || mappedId.isEmpty()
                 || mappedId.equals(remoteId);
+    }
+
+    private static boolean isTeamDroneOrg(@Nullable String orgName) {
+        String normalizedDroneOrg = NormalizeOrgName(orgName);
+        String normalizedTrackerOrg = NormalizeOrgName(GetTrackerUploadOrgName());
+        return !normalizedDroneOrg.isEmpty()
+                && !normalizedTrackerOrg.isEmpty()
+                && normalizedDroneOrg.equals(normalizedTrackerOrg);
+    }
+
+    private static boolean shouldKeepConfirmedDroneLocalOnly(@Nullable String orgName) {
+        String normalizedDroneOrg = NormalizeOrgName(orgName);
+        String normalizedTrackerOrg = NormalizeOrgName(GetTrackerUploadOrgName());
+        return !normalizedDroneOrg.isEmpty()
+                && !normalizedTrackerOrg.isEmpty()
+                && !normalizedDroneOrg.equals(normalizedTrackerOrg);
+    }
+
+    @Nullable
+    private static WaypointTrack.TrackPoint LatestLocalTrackPoint(@NonNull CtDroneSpec droneSpec) {
+        List<WaypointTrack.TrackPoint> points = WaypointTrack.GetTrackPointsSnapshot(droneSpec);
+        if (points.isEmpty()) return null;
+        return points.get(points.size() - 1);
+    }
+
+    private static void NotifyLatestLocalTrackPoint(@NonNull CtDroneSpec droneSpec,
+                                                    @Nullable WaypointTrack.TrackPoint latestPointBeforeMappedIdChange) {
+        WaypointTrack.TrackPoint point = latestPointBeforeMappedIdChange != null
+                ? latestPointBeforeMappedIdChange
+                : LatestLocalTrackPoint(droneSpec);
+        if (point == null) {
+            if (!Double.isFinite(droneSpec.lastLat) || !Double.isFinite(droneSpec.lastLng)) return;
+            if (droneSpec.lastLat == 0.0 && droneSpec.lastLng == 0.0) return;
+            if (droneSpec.mostRecentMsecTimestamp <= 0) return;
+            CaltopoLiveTrack.NotifyLocalTrackPoint(
+                    droneSpec,
+                    droneSpec.lastLat,
+                    droneSpec.lastLng,
+                    droneSpec.lastAlt,
+                    droneSpec.mostRecentMsecTimestamp);
+            return;
+        }
+        CaltopoLiveTrack.NotifyLocalTrackPoint(
+                droneSpec,
+                point.lat,
+                point.lng,
+                point.ele,
+                point.timestampMsec);
     }
 
     public static boolean IsSessionUnknownDrone(@NonNull String remoteId) {
@@ -3745,6 +3801,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             WaypointTrack.AddWaypointForTrack(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
             logWaypointSideEffectIfSlow("WaypointTrack.AddWaypointForTrack.suppressed", droneSpec,
                     System.currentTimeMillis() - archiveStartedAtMs);
+            long localTrackNotifyStartedAtMs = System.currentTimeMillis();
+            CaltopoLiveTrack.NotifyLocalTrackPoint(droneSpec, lat, lng, longAltitudeInMeters, droneTimestampInMilliseconds);
+            logWaypointSideEffectIfSlow("CaltopoLiveTrack.NotifyLocalTrackPoint.suppressed", droneSpec,
+                    System.currentTimeMillis() - localTrackNotifyStartedAtMs);
             long proximityStartedAtMs = System.currentTimeMillis();
             ProximityAlertCenter.INSTANCE.updateDrones(proximityDrones);
             logWaypointSideEffectIfSlow("proximity.updateDrones.suppressed", droneSpec,

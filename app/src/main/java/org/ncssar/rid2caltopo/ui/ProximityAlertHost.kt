@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.asin
@@ -76,6 +77,7 @@ data class ProximityDebugPair(
 )
 
 data class ComplianceAlertCandidate(
+    val remoteId: String,
     val mappedId: String,
     val aglFt: Double,
     val thresholdFt: Double,
@@ -111,7 +113,11 @@ object ComplianceAlertCenter {
 
     fun updateCandidates(candidates: List<ComplianceAlertCandidate>) {
         val bestCandidate = candidates
-            .filter { it.aglFt.isFinite() && it.thresholdFt > 0.0 }
+            .filter {
+                isLocalAlertEligible(it.remoteId) &&
+                    it.aglFt.isFinite() &&
+                    it.thresholdFt > 0.0
+            }
             .mapNotNull { candidate ->
                 val severity = when {
                     candidate.aglFt >= candidate.thresholdFt -> ComplianceAlertSeverity.Over
@@ -292,6 +298,7 @@ object ProximityAlertCenter {
         val staleCutoffMs = nowMs - (CaltopoClient.GetNewTrackDelayInSeconds() * MIN_STALE_MULTIPLIER)
         val activeDrones = drones.filter { spec ->
             spec.mostRecentMsecTimestamp >= staleCutoffMs &&
+                isLocalAlertEligible(spec.remoteId) &&
                 spec.lastLat.isFinite() &&
                 spec.lastLng.isFinite() &&
                 !(spec.lastLat == 0.0 && spec.lastLng == 0.0)
@@ -762,6 +769,9 @@ object ProximityAlertCenter {
         return org.osmdroid.util.GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2))
     }
 }
+
+private fun isLocalAlertEligible(remoteId: String): Boolean =
+    R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.isLocalAlertEligible(remoteId)
 
 @Composable
 fun ProximityAlertHost(

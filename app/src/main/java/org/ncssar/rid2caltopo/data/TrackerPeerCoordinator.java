@@ -86,6 +86,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     @NonNull private final ConcurrentHashMap<String, R2CMqttManager.PeerState> peers = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, String> ownerByRemoteId = new ConcurrentHashMap<>();
     @NonNull private final ConcurrentHashMap<String, Long> leaseSeqByRemoteId = new ConcurrentHashMap<>();
+    @NonNull private final ConcurrentHashMap<String, Boolean> locallyConfirmedRemoteIds = new ConcurrentHashMap<>();
     @NonNull private final DelayedExec heartbeatTimer = new DelayedExec(false);
     @NonNull private final DelayedExec reconnectTimer = new DelayedExec(false);
     @NonNull private final DelayedExec ackWatchdogTimer = new DelayedExec(false);
@@ -264,6 +265,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             iterator.remove();
         }
         pendingConfirmationsByRemoteId.clear();
+        locallyConfirmedRemoteIds.clear();
         peers.clear();
         ownerByRemoteId.clear();
         leaseSeqByRemoteId.clear();
@@ -362,6 +364,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         ownerByRemoteId.remove(remoteId);
         leaseSeqByRemoteId.remove(remoteId);
+        locallyConfirmedRemoteIds.remove(remoteId);
         lastSightingSentByRemoteId.remove(remoteId);
         wakeForCoordinationActivity("drone_lost");
         JSONObject jo = new JSONObject();
@@ -385,6 +388,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                                  @NonNull String mappedId) {
         JSONObject jo = new JSONObject();
         try {
+            locallyConfirmedRemoteIds.put(remoteId, true);
             jo.put("type", "drone_confirmed");
             jo.put("mapId", mapId != null ? mapId : "");
             jo.put("zoneId", myGuid != null ? myGuid : "");
@@ -402,6 +406,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                     remoteId,
                     mappedId));
             flushPendingConfirmations();
+            applyOwnerAssignment(remoteId, myGuid, -1L, 0L);
             scheduleIdleParkIfEligible();
         } catch (Exception e) {
             CTError(TAG, "onDroneConfirmed() raised", e);
@@ -412,6 +417,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     public boolean isLocalOwner(@NonNull String remoteId) {
         String ownerGuid = ownerByRemoteId.get(remoteId);
         return ownerGuid != null && ownerGuid.equals(myGuid);
+    }
+
+    @Override
+    public boolean isLocalAlertEligible(@NonNull String remoteId) {
+        return isLocalOwner(remoteId) && locallyConfirmedRemoteIds.containsKey(remoteId);
     }
 
     @Override
@@ -1123,7 +1133,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         if (pending != null) {
             pending.fallbackTimer.stop();
             pending.ownershipActivationTimer.stop();
-            if (ownerGuid.equals(myGuid)) {
+            if (ownerGuid.equals(myGuid) && locallyConfirmedRemoteIds.containsKey(remoteId)) {
                 lastOwnerActivityAtMs = nowMs();
                 CTInfo(TAG, String.format(Locale.US,
                         "applyOwnerAssignment(%s): ownership granted locally; publishing in %d ms mappedId='%s' trackLabel='%s' queuedPoints=%d",
@@ -1140,6 +1150,11 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 } else {
                     pending.ownershipActivationTimer.start(activateOwnership, handoffDelayMs, 0L);
                 }
+            } else if (ownerGuid.equals(myGuid)) {
+                CTInfo(TAG, String.format(Locale.US,
+                        "applyOwnerAssignment(%s): tracker lease granted locally but waiting for local Save before publishing mappedId='%s' trackLabel='%s'",
+                        remoteId, pending.droneSpec.getMappedId(), pending.droneSpec.trackLabel()));
+                pending.liveTrack.setLocalOwner(false);
             } else {
                 CTInfo(TAG, String.format(Locale.US,
                         "applyOwnerAssignment(%s): ownership assigned to peer guid='%s' mappedId='%s' trackLabel='%s'",
@@ -1165,6 +1180,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         }
         ownerByRemoteId.remove(remoteId);
         leaseSeqByRemoteId.remove(remoteId);
+        locallyConfirmedRemoteIds.remove(remoteId);
         lastSightingSentByRemoteId.remove(remoteId);
         CaltopoClient.ClearCurrentPeerDroneConfirmation(remoteId);
         PendingDrone pending = pendingDrones.get(remoteId);
@@ -1204,12 +1220,27 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 remoteId,
                 firstNonEmpty(jo.optString("confirmedByGuid"), firstNonEmpty(jo.optString("guid"), jo.optString("zoneId"))),
                 jo.optString("mappedId")));
+        String confirmedByGuid = firstNonEmpty(
+                jo.optString("confirmedByGuid"),
+                firstNonEmpty(jo.optString("guid"), jo.optString("zoneId")));
+        if (myGuid != null && myGuid.equals(confirmedByGuid)) {
+            locallyConfirmedRemoteIds.put(remoteId, true);
+        } else {
+            locallyConfirmedRemoteIds.remove(remoteId);
+        }
         CaltopoClient.ApplyPeerDroneSpecConfirmation(
                 remoteId,
                 jo.optString("org"),
                 jo.optString("model"),
                 jo.optString("ownerName"),
                 jo.optString("mappedId"));
+        if (!confirmedByGuid.isEmpty()) {
+            applyOwnerAssignment(
+                    remoteId,
+                    confirmedByGuid,
+                    jo.optLong("leaseSeq", -1L),
+                    jo.optLong("leaseExpireTs", 0L));
+        }
     }
 
     void handleOwnerAssignedForTesting(@NonNull String remoteId, @NonNull String ownerGuid, long leaseSeq) {

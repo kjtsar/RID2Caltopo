@@ -472,6 +472,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         _pendingDroneConfirmation.value = buildConfirmationState(drone)
         pendingDroneConfirmationRequestedByOperator = true
         screenBeforeConfirmation = null
+        refreshPendingDroneConfirmationValidation()
     }
 
     fun updatePendingDroneConfirmation(
@@ -485,6 +486,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             pilotCallsign = pilotCallsign ?: current.pilotCallsign,
             droneDescription = droneDescription ?: current.droneDescription
         )
+        refreshPendingDroneConfirmationValidation()
     }
 
     /**
@@ -518,6 +520,16 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
                 tag,
                 "savePendingDroneConfirmation(): blocked by empty field remoteIdEmpty=${remoteId.isEmpty()} orgEmpty=${organization.isEmpty()} callsignEmpty=${callsign.isEmpty()} modelEmpty=${droneDescription.isEmpty()}"
             )
+            return
+        }
+        findActivePilotCallsignConflict(remoteId, callsign)?.let { conflict ->
+            val message = pilotCallsignConflictMessage(callsign, conflict)
+            CTDebug(
+                tag,
+                "savePendingDroneConfirmation(): blocked by pilot callsign conflict remoteId=$remoteId callsign='$callsign' conflictRemoteId=${conflict.remoteId}"
+            )
+            _pendingDroneConfirmation.value = current.copy(pilotCallsignError = message)
+            CaltopoClient.ShowToast(message)
             return
         }
         if (current.usesUnknownOrganizationDefault) {
@@ -589,6 +601,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
             _drones.value = DroneSpecUiList(droneListSnapshot.drones)
         }
         housekeeping()
+        refreshPendingDroneConfirmationValidation()
         val activeRemoteIds = droneSpecs.mapNotNullTo(linkedSetOf()) { drone ->
             currentFlightRemoteId(drone)
         }
@@ -678,6 +691,7 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         promptedCurrentFlightRemoteIds.add(remoteId)
         _pendingDroneConfirmation.value = buildConfirmationState(drone)
         pendingDroneConfirmationRequestedByOperator = false
+        refreshPendingDroneConfirmationValidation()
         if (_activeScreen.value == ActiveScreen.STREAMS) {
             screenBeforeConfirmation = _activeScreen.value
             CaltopoClient.ShowToast("New drone needs confirmation. Returning to main screen.")
@@ -705,11 +719,51 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
     }
 
     private fun buildConfirmationState(drone: CtDroneSpec): DroneSpecConfirmationUiState {
-        return DroneSpecConfirmationLogic.buildInitialState(
-            drone = drone,
-            defaultOrganization = CaltopoClient.GetHomeOrgName(),
-            defaultUnknownOrganization = lastUnknownDroneConfirmationOrganization
+        return validatePendingDroneConfirmation(
+            DroneSpecConfirmationLogic.buildInitialState(
+                drone = drone,
+                defaultOrganization = CaltopoClient.GetHomeOrgName(),
+                defaultUnknownOrganization = lastUnknownDroneConfirmationOrganization
+            )
         )
+    }
+
+    private fun refreshPendingDroneConfirmationValidation() {
+        _pendingDroneConfirmation.value = _pendingDroneConfirmation.value
+            ?.let(::validatePendingDroneConfirmation)
+    }
+
+    private fun validatePendingDroneConfirmation(
+        state: DroneSpecConfirmationUiState
+    ): DroneSpecConfirmationUiState {
+        val callsign = state.pilotCallsign.trim()
+        val conflict = findActivePilotCallsignConflict(state.remoteId, callsign)
+        return state.copy(
+            pilotCallsignError = conflict?.let { pilotCallsignConflictMessage(callsign, it) }
+        )
+    }
+
+    private fun findActivePilotCallsignConflict(
+        remoteId: String,
+        pilotCallsign: String
+    ): CtDroneSpec? {
+        val normalizedPilot = pilotCallsign.trim()
+        if (normalizedPilot.isEmpty()) return null
+        return _drones.value.firstOrNull { drone ->
+            drone.remoteId != remoteId &&
+                drone.isActive &&
+                drone.owner.trim().equals(normalizedPilot, ignoreCase = true)
+        }
+    }
+
+    private fun pilotCallsignConflictMessage(
+        pilotCallsign: String,
+        conflict: CtDroneSpec
+    ): String {
+        val label = conflict.mappedId
+            .takeIf { it.isNotBlank() && it != conflict.remoteId }
+            ?: conflict.remoteId
+        return "Pilot callsign $pilotCallsign is already assigned to active drone $label."
     }
 
     private fun hasKnownDroneSpec(drone: CtDroneSpec): Boolean {

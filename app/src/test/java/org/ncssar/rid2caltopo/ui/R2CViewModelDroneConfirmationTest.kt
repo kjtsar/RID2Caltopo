@@ -357,6 +357,65 @@ class R2CViewModelDroneConfirmationTest {
         assertEquals(remoteId, viewModel.pendingDroneConfirmation.value?.remoteId)
     }
 
+    @Test
+    fun saveBlocksPilotCallsignAlreadyAssignedToAnotherActiveDrone() {
+        val activeDrone = activeDrone("DRONEACTIVEPILOT", waypointTimestampMsec = 151617L).apply {
+            setMappedId("1SAR7m3")
+            setOwner("1SAR7")
+        }
+        val candidate = activeDrone("DRONECANDIDATE", waypointTimestampMsec = 181920L)
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneSpecsChanged(listOf(activeDrone, candidate))
+
+        viewModel.requestDroneConfirmation(candidate)
+        viewModel.updatePendingDroneConfirmation(
+            organization = "NCSSAR",
+            pilotCallsign = "1sar7",
+            droneDescription = "DJI Mini 4 Pro"
+        )
+
+        assertEquals(
+            "Pilot callsign 1sar7 is already assigned to active drone 1SAR7m3.",
+            viewModel.pendingDroneConfirmation.value?.pilotCallsignError
+        )
+
+        viewModel.savePendingDroneConfirmation()
+
+        assertEquals("DRONECANDIDATE", viewModel.pendingDroneConfirmation.value?.remoteId)
+        assertNull(CaltopoClient.GetDroneSpec("DRONECANDIDATE"))
+    }
+
+    @Test
+    fun pilotCallsignCanBeReusedAfterOtherDroneIsNoLongerActive() {
+        val previousDrone = activeDrone("DRONEPREVIOUS", waypointTimestampMsec = 212223L).apply {
+            setMappedId("1SAR8m3")
+            setOwner("1SAR8")
+        }
+        val candidate = activeDrone("DRONENEXT", waypointTimestampMsec = 242526L)
+        val viewModel = R2CViewModel(SimpleTimer())
+        viewModel.onDroneSpecsChanged(listOf(previousDrone, candidate))
+
+        viewModel.requestDroneConfirmation(candidate)
+        viewModel.updatePendingDroneConfirmation(
+            organization = "NCSSAR",
+            pilotCallsign = "1SAR8",
+            droneDescription = "DJI Matrice 4TD"
+        )
+        assertEquals(
+            "Pilot callsign 1SAR8 is already assigned to active drone 1SAR8m3.",
+            viewModel.pendingDroneConfirmation.value?.pilotCallsignError
+        )
+
+        previousDrone.reset()
+        viewModel.onDroneSpecsChanged(listOf(previousDrone, candidate))
+
+        assertNull(viewModel.pendingDroneConfirmation.value?.pilotCallsignError)
+        viewModel.savePendingDroneConfirmation()
+
+        assertNull(viewModel.pendingDroneConfirmation.value)
+        assertEquals("1SAR8DjMtrc4td", CaltopoClient.GetDroneSpec("DRONENEXT")?.mappedId)
+    }
+
     private fun activeDrone(remoteId: String, waypointTimestampMsec: Long): CtDroneSpec {
         val drone = CtDroneSpec(remoteId)
         drone.checkNewWaypoint(

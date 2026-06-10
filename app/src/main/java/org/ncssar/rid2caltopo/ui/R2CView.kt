@@ -401,7 +401,10 @@ fun DroneSpecConfirmationDialog(
     val organization = state.organization.trim()
     val pilotCallsign = state.pilotCallsign.trim()
     val droneDescription = state.droneDescription.trim()
-    val saveEnabled = organization.isNotEmpty() && pilotCallsign.isNotEmpty() && droneDescription.isNotEmpty()
+    val saveEnabled = organization.isNotEmpty() &&
+        pilotCallsign.isNotEmpty() &&
+        droneDescription.isNotEmpty() &&
+        state.pilotCallsignError.isNullOrBlank()
 
     AlertDialog(
         onDismissRequest = {},
@@ -439,6 +442,10 @@ fun DroneSpecConfirmationDialog(
                     value = state.pilotCallsign,
                     onValueChange = { onFieldChange(null, it, null) },
                     label = { Text("Pilot Callsign") },
+                    isError = !state.pilotCallsignError.isNullOrBlank(),
+                    supportingText = state.pilotCallsignError?.let { message ->
+                        { Text(message) }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )

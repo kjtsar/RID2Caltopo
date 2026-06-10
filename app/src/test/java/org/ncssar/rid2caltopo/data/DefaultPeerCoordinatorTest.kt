@@ -116,10 +116,21 @@ class DefaultPeerCoordinatorTest {
 
         assertEquals(PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED, coordinator.coordinationIndicatorState)
         assertEquals("Tracker link disabled", coordinator.coordinationStatusText)
+        assertTrue(coordinator.isLocalAlertEligible("RID-1"))
         assertTrue(
             coordinator.coordinationDiagnosticLines.toString(),
             coordinator.coordinationDiagnosticLines.any { it == "Standalone tracker coordination disabled" }
         )
+    }
+
+    @Test
+    fun stoppingTrackerCoordinationRestoresUngatedStandaloneAlerts() {
+        val coordinator = DefaultPeerCoordinator.getInstance()
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        coordinator.stop()
+
+        assertTrue(coordinator.isLocalAlertEligible("RID-1"))
     }
 
     @Test

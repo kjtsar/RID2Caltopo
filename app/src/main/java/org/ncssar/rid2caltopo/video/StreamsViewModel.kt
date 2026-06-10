@@ -186,6 +186,7 @@ private const val COMPLIANCE_ALERT_AGL_LIMIT_FT = 200.0
 private const val LOCAL_PLAYBACK_STAGE_BUFFER_BYTES = 1024 * 1024
 
 data class OverLimitDroneUiState(
+    val remoteId: String,
     val mappedId: String,
     val aglFt: Double,
     val thresholdFt: Double,
@@ -842,6 +843,7 @@ class StreamsViewModel(
             val aglFt = displayState.aglFt ?: return@mapNotNull null
             if (aglFt < COMPLIANCE_ALERT_AGL_LIMIT_FT) return@mapNotNull null
             OverLimitDroneUiState(
+                remoteId = state.remoteId,
                 mappedId = designator,
                 aglFt = aglFt,
                 thresholdFt = COMPLIANCE_ALERT_AGL_LIMIT_FT,
@@ -857,6 +859,7 @@ class StreamsViewModel(
                 .filterNot { it.muted }
                 .map {
                     ComplianceAlertCandidate(
+                        remoteId = it.remoteId,
                         mappedId = it.mappedId,
                         aglFt = it.aglFt,
                         thresholdFt = it.thresholdFt,
@@ -880,6 +883,7 @@ class StreamsViewModel(
                 .filterNot { it.muted }
                 .map {
                     ComplianceAlertCandidate(
+                        remoteId = it.remoteId,
                         mappedId = it.mappedId,
                         aglFt = it.aglFt,
                         thresholdFt = it.thresholdFt,

@@ -59,6 +59,26 @@ import java.util.UUID;
  *     peers" or some such and just deal with the duplicated track points...
  */
 public class CaltopoMap {
+    interface TimeSource {
+        long now();
+    }
+
+    interface QuitHandler {
+        void quit();
+    }
+
+    private static final class RelocationAnchor {
+        final double latitude;
+        final double longitude;
+        final float accuracyMeters;
+
+        RelocationAnchor(double latitude, double longitude, float accuracyMeters) {
+            this.latitude = latitude;
+            this.longitude = longitude;
+            this.accuracyMeters = accuracyMeters;
+        }
+    }
+
     public interface MapStatusListener {
         enum mapStatus {
             down,
@@ -106,6 +126,11 @@ public class CaltopoMap {
     private static final long INITIAL_MARKER_WAIT_MS = 8_000L;
     private static final long STALE_DEVICE_MARKER_GRACE_MS = 15_000L;
     private static final long MARKER_DELETE_WAIT_MS = 4_000L;
+    private static final double AUTO_QUIT_RELOCATION_DISTANCE_METERS = 50.0 * 0.3048;
+    private static final float AUTO_QUIT_REQUIRED_ACCURACY_METERS = (float) (25.0 * 0.3048);
+    private static final long AUTO_QUIT_FLIGHT_QUIET_MS = 5L * 60L * 1000L;
+    @NonNull private static volatile TimeSource timeSource = System::currentTimeMillis;
+    @NonNull private static volatile QuitHandler quitHandler = CaltopoClient::QuitApplication;
 
     // my peers by GUID (MQTT-based):
     private static final Hashtable<String, R2CMqttManager.PeerState> PeerIdMap = new Hashtable<>(16);
@@ -161,7 +186,38 @@ public class CaltopoMap {
     private static volatile boolean InitialMarkerPublishPending = false;
     private static volatile long InitialMarkerWaitStartedMs = 0L;
     @NonNull private static R2cRuntime CurrentRuntime = R2cRuntimeRegistry.getDefaultRuntime();
+    @Nullable private static RelocationAnchor AutoQuitRelocationAnchor;
     public static List<CaltopoNode>GetSessionNodeMap() { return SessionNodeMap;}
+
+    static void setTimeSourceForTesting(@NonNull TimeSource testTimeSource) {
+        timeSource = testTimeSource;
+    }
+
+    static void setQuitHandlerForTesting(@NonNull QuitHandler testQuitHandler) {
+        quitHandler = testQuitHandler;
+    }
+
+    static void resetAutoQuitRelocationForTesting() {
+        AutoQuitRelocationAnchor = null;
+        timeSource = System::currentTimeMillis;
+        quitHandler = CaltopoClient::QuitApplication;
+    }
+
+    static boolean hasAutoQuitRelocationAnchorForTesting() {
+        return AutoQuitRelocationAnchor != null;
+    }
+
+    static void evaluateAutoQuitAfterRelocationForTesting(
+            double latitude,
+            double longitude,
+            float accuracyMeters
+    ) {
+        evaluateAutoQuitAfterRelocation(latitude, longitude, accuracyMeters, true);
+    }
+
+    static boolean isAutoQuitAfterRelocationEligibleForTesting(float accuracyMeters, long nowMs) {
+        return isAutoQuitAfterRelocationEligible(true, accuracyMeters, nowMs);
+    }
 
     @NonNull
     private static R2cRuntime getCurrentRuntime() {
@@ -1166,6 +1222,7 @@ public class CaltopoMap {
         if (location.hasAccuracy()) {
             CtDroneSpec.UpdateMyLocationBaseline(location.getLatitude(), location.getLongitude());
         }
+        evaluateAutoQuitAfterRelocation(location);
         if (null != MyLocation && MyLocation.hasAccuracy() && location.hasAccuracy()) {
             distanceInMeters = DistanceFromMeInMeters(location.getLatitude(), location.getLongitude());
             if ((location.getAccuracy() < MyLocation.getAccuracy()) ||
@@ -1191,6 +1248,74 @@ public class CaltopoMap {
             }
             refreshDeviceMarkerColorIfNeeded();
         }
+    }
+
+    private static void evaluateAutoQuitAfterRelocation(@NonNull Location location) {
+        evaluateAutoQuitAfterRelocation(
+                location.getLatitude(),
+                location.getLongitude(),
+                location.getAccuracy(),
+                location.hasAccuracy());
+    }
+
+    private static void evaluateAutoQuitAfterRelocation(
+            double latitude,
+            double longitude,
+            float accuracyMeters,
+            boolean hasAccuracy
+    ) {
+        long nowMs = timeSource.now();
+        if (!isAutoQuitAfterRelocationEligible(hasAccuracy, accuracyMeters, nowMs)) {
+            AutoQuitRelocationAnchor = null;
+            return;
+        }
+
+        RelocationAnchor anchor = AutoQuitRelocationAnchor;
+        if (anchor == null) {
+            AutoQuitRelocationAnchor = new RelocationAnchor(latitude, longitude, accuracyMeters);
+            CTInfo(TAG, String.format(Locale.US,
+                    "evaluateAutoQuitAfterRelocation(): armed at lat:%.7f lng:%.7f accuracy:%.2fm after %s without active drone flights.",
+                    latitude, longitude, accuracyMeters,
+                    DurationAsString(nowMs - CtDroneSpec.LastWaypointUpdateTimestampMsec())));
+            return;
+        }
+
+        double distanceMeters = distanceMeters(anchor.latitude, anchor.longitude, latitude, longitude);
+        if (distanceMeters < AUTO_QUIT_RELOCATION_DISTANCE_METERS) return;
+
+        AutoQuitRelocationAnchor = null;
+        CTWarn(TAG, String.format(Locale.US,
+                "evaluateAutoQuitAfterRelocation(): tablet moved %.2fm after %s without active drone flights; quitting app.",
+                distanceMeters, DurationAsString(nowMs - CtDroneSpec.LastWaypointUpdateTimestampMsec())));
+        CaltopoClient.CTEvent(TAG, "RelocationAutoQuit", null);
+        quitHandler.quit();
+    }
+
+    private static boolean isAutoQuitAfterRelocationEligible(
+            boolean hasAccuracy,
+            float accuracyMeters,
+            long nowMs
+    ) {
+        if (CaltopoClient.IsExitRequested()) return false;
+        if (MapStatus != MapStatusListener.mapStatus.up || MapNode == null) return false;
+        if (!hasAccuracy || accuracyMeters >= AUTO_QUIT_REQUIRED_ACCURACY_METERS) return false;
+        if (CaltopoClient.GetActiveFlightCount() > 0) return false;
+        long lastWaypointTimestampMs = CtDroneSpec.LastWaypointUpdateTimestampMsec();
+        return lastWaypointTimestampMs > 0L &&
+                nowMs - lastWaypointTimestampMs >= AUTO_QUIT_FLIGHT_QUIET_MS;
+    }
+
+    private static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+        final double earthRadiusMeters = 6_371_000.0;
+        double lat1Radians = Math.toRadians(lat1);
+        double lat2Radians = Math.toRadians(lat2);
+        double deltaLatRadians = Math.toRadians(lat2 - lat1);
+        double deltaLonRadians = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(deltaLatRadians / 2.0) * Math.sin(deltaLatRadians / 2.0) +
+                Math.cos(lat1Radians) * Math.cos(lat2Radians) *
+                        Math.sin(deltaLonRadians / 2.0) * Math.sin(deltaLonRadians / 2.0);
+        double c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
+        return earthRadiusMeters * c;
     }
 
     public static void EnsureStandaloneTrackerCoordinationStarted() {

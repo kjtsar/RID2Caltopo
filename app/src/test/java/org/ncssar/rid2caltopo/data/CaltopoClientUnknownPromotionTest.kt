@@ -23,6 +23,7 @@ class CaltopoClientUnknownPromotionTest {
         fixture.setAsDefaultRuntime()
         peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
         CaltopoClient.ResetPersistedClientState()
+        CaltopoClient.SetHomeOrgName("NCSSAR")
     }
 
     @After
@@ -95,33 +96,43 @@ class CaltopoClientUnknownPromotionTest {
     }
 
     @Test
-    fun neverSeenRemoteIdIsArchivedLocallyButSuppressedFromMapAndTrackerByDefault() {
+    fun neverSeenRemoteIdIsArchivedLocallyAndShownInLocalMapButSuppressedFromExternalPublicationByDefault() {
         val remoteId = "ELDORADO1"
         val client = CaltopoClient.ClientForRemoteId(remoteId)
         val drone = client.droneSpec
+        val localPoints = mutableListOf<String>()
+        val listener = CaltopoLiveTrack.LocalTrackListener { pointRemoteId, mappedId, lat, lng, altitudeMeters, timestampMsec ->
+            localPoints.add("$pointRemoteId:$mappedId:$lat:$lng:$altitudeMeters:$timestampMsec")
+        }
 
-        assertTrue(drone.isLocalArchiveOnly)
-        drone.checkNewWaypoint(
-            39.1,
-            -121.2,
-            120.0,
-            1234L,
-            1234L,
-            true,
-            CtDroneSpec.TransportTypeEnum.BT4
-        )
-        client.newWaypoint(
-            39.1,
-            -121.2,
-            120.0,
-            1234L,
-            CtDroneSpec.TransportTypeEnum.BT4,
-            true
-        )
+        CaltopoLiveTrack.AddLocalTrackListener(listener)
+        try {
+            assertTrue(drone.isLocalArchiveOnly)
+            drone.checkNewWaypoint(
+                39.1,
+                -121.2,
+                120.0,
+                1234L,
+                1234L,
+                true,
+                CtDroneSpec.TransportTypeEnum.BT4
+            )
+            client.newWaypoint(
+                39.1,
+                -121.2,
+                120.0,
+                1234L,
+                CtDroneSpec.TransportTypeEnum.BT4,
+                true
+            )
+        } finally {
+            CaltopoLiveTrack.RemoveLocalTrackListener(listener)
+        }
 
         assertTrue(drone.isActive)
         assertTrue(drone.isLocalArchiveOnly)
         assertEquals(1, WaypointTrack.GetTrackPointsSnapshot(drone).size)
+        assertEquals(listOf("ELDORADO1:ELDORADO1:39.1:-121.2:120.0:1234"), localPoints)
         assertEquals(0, peerCoordinator.countEvents("onLiveTrackCreated"))
     }
 
@@ -160,6 +171,55 @@ class CaltopoClientUnknownPromotionTest {
         )
 
         assertEquals(1, WaypointTrack.GetTrackPointsSnapshot(drone).size)
+    }
+
+    @Test
+    fun nonTeamConfirmationKeepsActiveDroneLocalArchiveOnly() {
+        val remoteId = "ELDORADO3"
+        val client = CaltopoClient.ClientForRemoteId(remoteId)
+        val drone = client.droneSpec
+        val localPoints = mutableListOf<String>()
+        val listener = CaltopoLiveTrack.LocalTrackListener { pointRemoteId, mappedId, lat, lng, altitudeMeters, timestampMsec ->
+            localPoints.add("$pointRemoteId:$mappedId:$lat:$lng:$altitudeMeters:$timestampMsec")
+        }
+
+        CaltopoLiveTrack.AddLocalTrackListener(listener)
+        try {
+            drone.checkNewWaypoint(
+                39.1,
+                -121.2,
+                120.0,
+                1234L,
+                1234L,
+                true,
+                CtDroneSpec.TransportTypeEnum.BT4
+            )
+            client.newWaypoint(
+                39.1,
+                -121.2,
+                120.0,
+                1234L,
+                CtDroneSpec.TransportTypeEnum.BT4,
+                true
+            )
+            assertEquals(listOf("ELDORADO3:ELDORADO3:39.1:-121.2:120.0:1234"), localPoints)
+            localPoints.clear()
+
+            CaltopoClient.SaveDroneSpecConfirmation(
+                remoteId,
+                "unk",
+                "Unknown",
+                "unk1",
+                "unk1Unk"
+            )
+        } finally {
+            CaltopoLiveTrack.RemoveLocalTrackListener(listener)
+        }
+
+        assertTrue(drone.isLocalArchiveOnly)
+        assertEquals("unk1Unk", drone.mappedId)
+        assertEquals(listOf("ELDORADO3:unk1Unk:39.1:-121.2:120.0:1234"), localPoints)
+        assertEquals(0, peerCoordinator.countEvents("onLiveTrackCreated"))
     }
 
     @Test

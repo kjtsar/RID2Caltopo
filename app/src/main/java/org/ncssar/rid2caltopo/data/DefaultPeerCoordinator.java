@@ -205,6 +205,12 @@ public final class DefaultPeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public boolean isLocalAlertEligible(@NonNull String remoteId) {
+        if (!trackerSelected) return true;
+        return activeCoordinator.isLocalAlertEligible(remoteId);
+    }
+
+    @Override
     public void updateCaltopoRtt(long rttMs) {
         myCaltopoRttMs = rttMs;
         activeCoordinator.updateCaltopoRtt(rttMs);

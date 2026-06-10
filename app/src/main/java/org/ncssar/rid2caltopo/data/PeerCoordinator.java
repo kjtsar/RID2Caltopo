@@ -39,6 +39,9 @@ public interface PeerCoordinator {
                                   @NonNull String mappedId) {
     }
     boolean isLocalOwner(@NonNull String remoteId);
+    default boolean isLocalAlertEligible(@NonNull String remoteId) {
+        return true;
+    }
     void updateCaltopoRtt(long rttMs);
     long getCaltopoRttMs();
     void updateMyPosition(double lat, double lon);

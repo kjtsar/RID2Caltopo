@@ -130,6 +130,10 @@ class TrackerPeerCoordinatorTest {
         TrackerPeerCoordinator.resetForTesting()
     }
 
+    private fun confirmLocalDrone(remoteId: String = "DRONE1") {
+        coordinator.onDroneConfirmed(remoteId, "NCSSAR", "DJI Mini 4 Pro", "1sar7", "1sar7DjMn4Pr")
+    }
+
     @Test
     fun start_connectsTransport() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
@@ -202,7 +206,7 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
-    fun ownerAssignedToLocalZone_setsLocalOwner() {
+    fun ownerAssignedToLocalZone_waitsForLocalSaveBeforePublishing() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
@@ -210,8 +214,14 @@ class TrackerPeerCoordinatorTest {
 
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
 
-        assertTrue(track.localOwnerFlag)
         assertTrue(coordinator.isLocalOwner("DRONE1"))
+        assertFalse(track.localOwnerFlag)
+        assertFalse(coordinator.isLocalAlertEligible("DRONE1"))
+
+        confirmLocalDrone()
+
+        assertTrue(track.localOwnerFlag)
+        assertTrue(coordinator.isLocalAlertEligible("DRONE1"))
     }
 
     @Test
@@ -416,6 +426,7 @@ class TrackerPeerCoordinatorTest {
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        confirmLocalDrone()
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
 
         coordinator.handleRelaySightingForTesting(
@@ -462,6 +473,7 @@ class TrackerPeerCoordinatorTest {
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        confirmLocalDrone()
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
         coordinator.markHeartbeatSentForTesting(1L, clock.now())
         coordinator.handleHeartbeatAckForTesting(1L, 0L)
@@ -521,6 +533,7 @@ class TrackerPeerCoordinatorTest {
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        confirmLocalDrone()
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
 
         coordinator.handleRelaySightingForTesting(
@@ -587,6 +600,7 @@ class TrackerPeerCoordinatorTest {
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        confirmLocalDrone()
 
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 9L)
         assertTrue(track.localOwnerFlag)
@@ -603,6 +617,7 @@ class TrackerPeerCoordinatorTest {
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        confirmLocalDrone()
 
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
         assertTrue(track.localOwnerFlag)
@@ -619,6 +634,7 @@ class TrackerPeerCoordinatorTest {
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        confirmLocalDrone()
 
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 4L)
         assertTrue(track.localOwnerFlag)
@@ -639,6 +655,7 @@ class TrackerPeerCoordinatorTest {
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-bravo", 4L)
         assertFalse(track.localOwnerFlag)
 
+        confirmLocalDrone()
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 5L)
         assertTrue(track.localOwnerFlag)
 
@@ -660,6 +677,7 @@ class TrackerPeerCoordinatorTest {
         val drone = CtDroneSpec("DRONE1")
         val track = FakeLiveTrack("DRONE1")
         coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+        confirmLocalDrone()
         coordinator.handleOwnerAssignedForTesting("DRONE1", "zone-alpha", 5L)
 
         transport.receive(

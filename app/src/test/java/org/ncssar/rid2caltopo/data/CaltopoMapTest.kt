@@ -25,6 +25,8 @@ class CaltopoMapTest {
     private lateinit var standaloneStartedField: Field
     private lateinit var standaloneEnabledForActiveFlightsField: Field
     private lateinit var clientStateField: Field
+    private lateinit var lastWaypointTimestampField: Field
+    private lateinit var appExitRequestedField: Field
 
     private lateinit var originalMapStatus: CaltopoMap.MapStatusListener.mapStatus
     private var originalMapNode: Any? = null
@@ -42,6 +44,8 @@ class CaltopoMapTest {
     private var originalTrackerApiKey: String = ""
     private var originalTrackerUrlPfx: String = ""
     private var originalMyLocation: Location? = null
+    private var originalLastWaypointTimestamp: Long = 0L
+    private var originalAppExitRequested: Boolean = false
 
     @Before
     fun setUp() {
@@ -61,6 +65,8 @@ class CaltopoMapTest {
         standaloneStartedField = CaltopoMap::class.java.getDeclaredField("StandaloneCoordinationStarted").apply { isAccessible = true }
         standaloneEnabledForActiveFlightsField = CaltopoMap::class.java.getDeclaredField("StandaloneCoordinationEnabledForActiveFlights").apply { isAccessible = true }
         clientStateField = CaltopoClient::class.java.getDeclaredField("Ccstate").apply { isAccessible = true }
+        lastWaypointTimestampField = CtDroneSpec::class.java.getDeclaredField("MostRecentWaypointTimestampInMsec").apply { isAccessible = true }
+        appExitRequestedField = CaltopoClient::class.java.getDeclaredField("AppExitRequested").apply { isAccessible = true }
 
         originalMapStatus = mapStatusField.get(null) as CaltopoMap.MapStatusListener.mapStatus
         originalMapNode = mapNodeField.get(null)
@@ -79,6 +85,8 @@ class CaltopoMapTest {
         originalTrackerApiKey = CaltopoClient.GetTrackerApiKey()
         originalTrackerUrlPfx = CaltopoClient.GetTrackerUrlPfx()
         originalMyLocation = CaltopoMap.MyLocation
+        originalLastWaypointTimestamp = lastWaypointTimestampField.getLong(null)
+        originalAppExitRequested = appExitRequestedField.getBoolean(null)
 
         mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.up)
         mapNodeField.set(null, CaltopoNode.MapNode("map-test", "Map Test", 0L))
@@ -92,6 +100,8 @@ class CaltopoMapTest {
         lastStandaloneScopeField.set(null, "")
         standaloneStartedField.setBoolean(null, false)
         standaloneEnabledForActiveFlightsField.set(null, null)
+        appExitRequestedField.setBoolean(null, false)
+        CaltopoMap.resetAutoQuitRelocationForTesting()
     }
 
     @After
@@ -111,6 +121,9 @@ class CaltopoMapTest {
         CaltopoMap.MyLocation = originalMyLocation
         CaltopoClient.SetTrackerApiKey(originalTrackerApiKey)
         CaltopoClient.SetTrackerUrlPfx(originalTrackerUrlPfx)
+        lastWaypointTimestampField.setLong(null, originalLastWaypointTimestamp)
+        appExitRequestedField.setBoolean(null, originalAppExitRequested)
+        CaltopoMap.resetAutoQuitRelocationForTesting()
         clientStateField.set(null, originalClientState)
         R2cRuntimeRegistry.resetDefaultRuntimeForTesting()
     }
@@ -275,6 +288,89 @@ class CaltopoMapTest {
     }
 
     @Test
+    fun updateMyLocation_quitsAfterQuietAccurateTabletRelocation() {
+        val nowMs = 1_000_000_000L
+        var quitCount = 0
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { quitCount++ }
+        setLastWaypointTimestamp(nowMs - FIVE_MINUTES_MS - 1L)
+
+        assertTrue(CaltopoMap.isAutoQuitAfterRelocationEligibleForTesting(5.0f, nowMs))
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 5.0f)
+
+        assertEquals(0, quitCount)
+        assertTrue(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(1, quitCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
+    fun updateMyLocation_doesNotQuitWhenGpsAccuracyIsTooPoor() {
+        val nowMs = 1_000_000_000L
+        var quitCount = 0
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { quitCount++ }
+        setLastWaypointTimestamp(nowMs - FIVE_MINUTES_MS - 1L)
+
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 8.0f)
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 8.0f)
+
+        assertEquals(0, quitCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
+    fun updateMyLocation_doesNotQuitWhenDroneTelemetryWasRecent() {
+        val nowMs = 1_000_000_000L
+        var quitCount = 0
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { quitCount++ }
+        setLastWaypointTimestamp(nowMs - FIVE_MINUTES_MS + 1L)
+
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 5.0f)
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(0, quitCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
+    fun updateMyLocation_doesNotQuitWhenDroneIsActive() {
+        val nowMs = 1_000_000_000L
+        var quitCount = 0
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { quitCount++ }
+        setLastWaypointTimestamp(nowMs - FIVE_MINUTES_MS - 1L)
+        activateDrone("RID-AUTOQUIT-ACTIVE")
+
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 5.0f)
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(0, quitCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
+    fun updateMyLocation_doesNotQuitWhenNotConnectedToMap() {
+        val nowMs = 1_000_000_000L
+        var quitCount = 0
+        mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
+        mapNodeField.set(null, null)
+        CaltopoMap.setTimeSourceForTesting { nowMs }
+        CaltopoMap.setQuitHandlerForTesting { quitCount++ }
+        setLastWaypointTimestamp(nowMs - FIVE_MINUTES_MS - 1L)
+
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153000, -121.132000, 5.0f)
+        CaltopoMap.evaluateAutoQuitAfterRelocationForTesting(39.153200, -121.132000, 5.0f)
+
+        assertEquals(0, quitCount)
+        assertFalse(CaltopoMap.hasAutoQuitRelocationAnchorForTesting())
+    }
+
+    @Test
     fun getIncident_defaultsToTrainingWhenNotConnectedToMap() {
         mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.down)
         mapNodeField.set(null, null)
@@ -339,6 +435,10 @@ class CaltopoMapTest {
         return drone
     }
 
+    private fun setLastWaypointTimestamp(timestampMs: Long) {
+        lastWaypointTimestampField.setLong(null, timestampMs)
+    }
+
     private fun setDroneTrackLabel(drone: CtDroneSpec, trackLabel: String) {
         val mappedId = trackLabel.substringBefore('_')
         CtDroneSpec::class.java.getDeclaredField("mappedId").apply {
@@ -357,5 +457,9 @@ class CaltopoMapTest {
         }
         val points = field.get(liveTrack) as Collection<*>
         return points.size
+    }
+
+    companion object {
+        private const val FIVE_MINUTES_MS = 5L * 60L * 1000L
     }
 }

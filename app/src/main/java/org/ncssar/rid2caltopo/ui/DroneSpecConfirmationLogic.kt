@@ -10,6 +10,7 @@ data class DroneSpecConfirmationUiState(
     val initialPilotCallsign: String = pilotCallsign,
     val initialDroneDescription: String = droneDescription,
     val warning: String? = null,
+    val pilotCallsignError: String? = null,
     val usesUnknownOrganizationDefault: Boolean = false
 )
 

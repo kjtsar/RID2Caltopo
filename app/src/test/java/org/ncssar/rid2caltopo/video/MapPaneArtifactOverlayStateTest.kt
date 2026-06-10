@@ -2,13 +2,26 @@ package org.ncssar.rid2caltopo.video
 
 import org.json.JSONArray
 import org.json.JSONObject
+import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
 
 class MapPaneArtifactOverlayStateTest {
+    @Before
+    fun setUp() {
+        CaltopoClient.ResetPersistedClientState()
+    }
+
+    @After
+    fun tearDown() {
+        CaltopoClient.ResetPersistedClientState()
+    }
+
     @Test
     fun usgsContoursTileSource_exportsTransparentImageForTileBounds() {
         val tileIndex = MapTileIndex.getTileIndex(1, 1, 1)
@@ -192,6 +205,97 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun layoutDroneLabelGroups_movesOverlappingLabelsApart() {
+        val labels = layoutDroneLabelGroups(
+            labels = listOf(
+                droneLabelLayoutInput("drone-a", anchorX = 100, anchorY = 100),
+                droneLabelLayoutInput("drone-b", anchorX = 106, anchorY = 104)
+            ),
+            viewportWidth = 300,
+            viewportHeight = 300
+        )
+
+        val a = labels.single { it.designator == "drone-a" }.bounds
+        val b = labels.single { it.designator == "drone-b" }.bounds
+
+        assertEquals(false, a.intersects(b))
+    }
+
+    @Test
+    fun layoutDroneLabelGroups_addsLeaderLineWhenLabelIsDisplacedFromDefault() {
+        val labels = layoutDroneLabelGroups(
+            labels = listOf(
+                droneLabelLayoutInput("drone-a", anchorX = 100, anchorY = 100),
+                droneLabelLayoutInput("drone-b", anchorX = 106, anchorY = 104)
+            ),
+            viewportWidth = 300,
+            viewportHeight = 300
+        )
+
+        val displaced = labels.single { it.designator == "drone-b" }
+
+        assertEquals(true, displaced.leaderLine != null)
+    }
+
+    @Test
+    fun fullFlightTrackMappedIds_includesOnlyEligibleConfirmedFlights() {
+        val savedCurrentFlight = dronePoint("SAVEDFLIGHT", 38.9000, -120.0000)
+        val visibleButUnconfirmed = dronePoint("UNCONFIRMED", 38.9100, -120.0100)
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            savedCurrentFlight.remoteId,
+            "NCSSAR",
+            "DJI Avata 360",
+            "1SAR7",
+            savedCurrentFlight.designator
+        )
+
+        val mappedIds = fullFlightTrackMappedIds(
+            dronePoints = listOf(savedCurrentFlight, visibleButUnconfirmed),
+            eligibleMappedIds = confirmedCurrentFlightMappedIds(listOf(savedCurrentFlight, visibleButUnconfirmed))
+        )
+
+        assertEquals(setOf("SAVEDFLIGHT"), mappedIds)
+    }
+
+    @Test
+    fun fullFlightTrackMappedIds_includesConfirmedFlightAliasesAfterDesignatorChange() {
+        val remoteId = "1581F6Z9C24BH0036EJL"
+        val currentFlight = dronePoint(
+            designator = "1sar7mn4pr",
+            remoteId = remoteId,
+            lat = 38.9000,
+            lng = -120.0000
+        )
+        CaltopoClient.ApplyPeerDroneSpecConfirmation(
+            remoteId,
+            "NCSSAR",
+            "DJI Mini 4 Pro",
+            "1SAR7",
+            "1sar7DjMn4Pr"
+        )
+
+        val mappedIds = fullFlightTrackMappedIds(
+            dronePoints = listOf(currentFlight),
+            eligibleMappedIds = confirmedCurrentFlightMappedIds(listOf(currentFlight)),
+            mappedIdsByRemoteId = mapOf(remoteId to setOf("1sar7DjMn4Pr", "1sar7mn4pr"))
+        )
+
+        assertEquals(setOf("1sar7DjMn4Pr", "1sar7mn4pr"), mappedIds)
+    }
+
+    @Test
+    fun fullFlightTrackMappedIds_excludesAllDronesWhenNothingIsEligible() {
+        val drone = dronePoint("TEAMDRONE", 38.9000, -120.0000)
+
+        val mappedIds = fullFlightTrackMappedIds(
+            dronePoints = listOf(drone),
+            eligibleMappedIds = emptySet()
+        )
+
+        assertEquals(emptySet<String>(), mappedIds)
+    }
+
+    @Test
     fun buildArtifactOverlayState_ignoresItemsOutsideRepresentedFoldersAndHiddenBuiltIns() {
         val representedFolder = folderFeature("folder-visible", "Search Segment")
         val visibleLine = lineFeature("line-visible", "Represented Line", "folder-visible")
@@ -353,16 +457,32 @@ class MapPaneArtifactOverlayStateTest {
         designator: String,
         lat: Double,
         lng: Double,
-        headingDeg: Double?
+        headingDeg: Double? = null,
+        remoteId: String = designator
     ): DroneMapPoint =
         DroneMapPoint(
             designator = designator,
-            remoteId = designator,
+            remoteId = remoteId,
             lat = lat,
             lng = lng,
             altitudeM = 0.0,
             timestampMsec = 1L,
             headingDeg = headingDeg
+        )
+
+    private fun droneLabelLayoutInput(
+        designator: String,
+        anchorX: Int,
+        anchorY: Int
+    ): DroneLabelLayoutInput =
+        DroneLabelLayoutInput(
+            designator = designator,
+            anchorX = anchorX,
+            anchorY = anchorY,
+            nameWidth = 80,
+            nameHeight = 24,
+            statusWidth = 120,
+            statusHeight = 22
         )
 
     private fun tileIndexForTestPoint(point: GeoPoint, zoom: Int): Long {

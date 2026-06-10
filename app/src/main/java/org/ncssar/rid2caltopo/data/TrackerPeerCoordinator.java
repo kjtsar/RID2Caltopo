@@ -301,6 +301,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         PendingDrone pending = new PendingDrone(liveTrack, droneSpec, distMeters, firstSeenTs);
         pendingDrones.put(droneSpec.getRemoteId(), pending);
         scheduleFallbackOwnership(pending);
+        applyKnownOwnerToPendingTrack(pending);
         sendFirstSighting(pending);
     }
 
@@ -801,6 +802,14 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
                 applyOwnerAssignment(pending.droneSpec.getRemoteId(), myGuid, -1L, 0L);
             }
         }, CONNECT_GRACE_MS, 0L);
+    }
+
+    private void applyKnownOwnerToPendingTrack(@NonNull PendingDrone pending) {
+        String remoteId = pending.droneSpec.getRemoteId();
+        String ownerGuid = ownerByRemoteId.get(remoteId);
+        if (ownerGuid == null || ownerGuid.isEmpty()) return;
+        Long leaseSeq = leaseSeqByRemoteId.get(remoteId);
+        applyOwnerAssignment(remoteId, ownerGuid, leaseSeq != null ? leaseSeq : -1L, 0L);
     }
 
     private void replayPendingFirstSightings() {

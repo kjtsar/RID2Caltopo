@@ -211,8 +211,6 @@ internal const val PREDICTIVE_HEAD_MAX_SPEED_MPS = 45.0
 internal const val PREDICTIVE_HEAD_MAX_VERTICAL_SPEED_MPS = 15.0
 internal const val PREDICTIVE_HEAD_MAX_DISTANCE_M = 90.0
 internal const val SIGNIFICANT_HEADING_MOVE_M = 16.0 * FT_TO_METERS
-internal const val DRONE_NAME_LABEL_ANCHOR_Y = 2.05f
-internal const val DRONE_STATUS_LABEL_ANCHOR_Y = 3.75f
 internal const val LABEL_MAX_ABS_FEET = 1000.0
 internal const val DEFAULT_CAMERA_FOV_WIDTH_DEG = 80.0
 internal const val OSM_MAX_ZOOM = 19.0
@@ -343,6 +341,53 @@ internal data class DroneMapPoint(
     val receivedAtMsec: Long? = null,
     val headingDeg: Double? = null,
     val droneSpec: CtDroneSpec? = null
+)
+
+internal data class LabelRect(
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int
+) {
+    val width: Int
+        get() = right - left
+    val height: Int
+        get() = bottom - top
+    val centerX: Int
+        get() = left + width / 2
+    val centerY: Int
+        get() = top + height / 2
+
+    fun intersects(other: LabelRect): Boolean =
+        left < other.right &&
+            right > other.left &&
+            top < other.bottom &&
+            bottom > other.top
+}
+
+internal data class LabelLeaderLine(
+    val startX: Int,
+    val startY: Int,
+    val endX: Int,
+    val endY: Int
+)
+
+internal data class DroneLabelLayoutInput(
+    val designator: String,
+    val anchorX: Int,
+    val anchorY: Int,
+    val nameWidth: Int,
+    val nameHeight: Int,
+    val statusWidth: Int,
+    val statusHeight: Int
+)
+
+internal data class DroneLabelLayout(
+    val designator: String,
+    val bounds: LabelRect,
+    val nameBounds: LabelRect,
+    val statusBounds: LabelRect,
+    val leaderLine: LabelLeaderLine?
 )
 
 // DroneAglState, AtoSeedSource, DroneAltitudeCalibration — defined in DroneAltitudeModels.kt
@@ -512,6 +557,144 @@ private fun LocalTrackPoint.isSameTrackPoint(other: LocalTrackPoint): Boolean {
     return kotlin.math.abs(altitudeM - other.altitudeM) <= LOCAL_TRACK_DUPLICATE_ALT_EPSILON_METERS
 }
 
+internal fun layoutDroneLabelGroups(
+    labels: List<DroneLabelLayoutInput>,
+    viewportWidth: Int,
+    viewportHeight: Int
+): List<DroneLabelLayout> {
+    val placedBounds = mutableListOf<LabelRect>()
+    val viewport = LabelRect(0, 0, viewportWidth, viewportHeight)
+    return labels.map { label ->
+        val candidates = droneLabelCandidates(label)
+        val preferred = candidates.firstOrNull { candidate ->
+            candidate.group.fitsWithin(viewport) && placedBounds.none { it.intersects(candidate.group) }
+        } ?: candidates.minWithOrNull(
+            compareBy<DroneLabelCandidate> { candidate ->
+                placedBounds.sumOf { candidate.group.overlapArea(it) }
+            }.thenBy { candidate ->
+                candidate.group.outsideArea(viewport)
+            }
+        ) ?: droneLabelCandidate(label, offsetX = 0, offsetY = 28)
+        placedBounds.add(preferred.group)
+        preferred.toLayout(label)
+    }
+}
+
+private data class DroneLabelCandidate(
+    val group: LabelRect,
+    val name: LabelRect,
+    val status: LabelRect,
+    val isDefault: Boolean
+) {
+    fun toLayout(label: DroneLabelLayoutInput): DroneLabelLayout =
+        DroneLabelLayout(
+            designator = label.designator,
+            bounds = group,
+            nameBounds = name,
+            statusBounds = status,
+            leaderLine = if (isDefault) {
+                null
+            } else {
+                LabelLeaderLine(
+                    startX = label.anchorX,
+                    startY = label.anchorY,
+                    endX = group.centerX,
+                    endY = group.centerY
+                )
+            }
+        )
+}
+
+private fun droneLabelCandidates(label: DroneLabelLayoutInput): List<DroneLabelCandidate> =
+    with(droneLabelGroupSize(label)) {
+        val sideOffsetX = width / 2 + 44
+        val farSideOffsetX = width / 2 + 92
+        val centeredOffsetY = -(height / 2)
+        listOf(
+            droneLabelCandidate(label, offsetX = 0, offsetY = 28, isDefault = true),
+            droneLabelCandidate(label, offsetX = 0, offsetY = -(height + 28)),
+            droneLabelCandidate(label, offsetX = sideOffsetX, offsetY = centeredOffsetY),
+            droneLabelCandidate(label, offsetX = -sideOffsetX, offsetY = centeredOffsetY),
+            droneLabelCandidate(label, offsetX = sideOffsetX, offsetY = 34),
+            droneLabelCandidate(label, offsetX = -sideOffsetX, offsetY = 34),
+            droneLabelCandidate(label, offsetX = 0, offsetY = height + 34),
+            droneLabelCandidate(label, offsetX = farSideOffsetX, offsetY = centeredOffsetY),
+            droneLabelCandidate(label, offsetX = -farSideOffsetX, offsetY = centeredOffsetY)
+        )
+    }
+
+private data class DroneLabelGroupSize(
+    val width: Int,
+    val height: Int
+)
+
+private fun droneLabelGroupSize(label: DroneLabelLayoutInput): DroneLabelGroupSize =
+    DroneLabelGroupSize(
+        width = maxOf(label.nameWidth, label.statusWidth),
+        height = label.nameHeight + 3 + label.statusHeight
+    )
+
+private fun droneLabelCandidate(
+    label: DroneLabelLayoutInput,
+    offsetX: Int,
+    offsetY: Int,
+    isDefault: Boolean = false
+): DroneLabelCandidate {
+    val gap = 3
+    val groupSize = droneLabelGroupSize(label)
+    val left = label.anchorX + offsetX - groupSize.width / 2
+    val top = label.anchorY + offsetY
+    val group = LabelRect(left, top, left + groupSize.width, top + groupSize.height)
+    val nameLeft = group.left + (group.width - label.nameWidth) / 2
+    val name = LabelRect(nameLeft, group.top, nameLeft + label.nameWidth, group.top + label.nameHeight)
+    val statusLeft = group.left + (group.width - label.statusWidth) / 2
+    val statusTop = name.bottom + gap
+    val status = LabelRect(statusLeft, statusTop, statusLeft + label.statusWidth, statusTop + label.statusHeight)
+    return DroneLabelCandidate(group = group, name = name, status = status, isDefault = isDefault)
+}
+
+private fun LabelRect.fitsWithin(container: LabelRect): Boolean =
+    left >= container.left &&
+        top >= container.top &&
+        right <= container.right &&
+        bottom <= container.bottom
+
+private fun LabelRect.overlapArea(other: LabelRect): Int {
+    val overlapWidth = (minOf(right, other.right) - maxOf(left, other.left)).coerceAtLeast(0)
+    val overlapHeight = (minOf(bottom, other.bottom) - maxOf(top, other.top)).coerceAtLeast(0)
+    return overlapWidth * overlapHeight
+}
+
+private fun LabelRect.outsideArea(container: LabelRect): Int {
+    val horizontal = (container.left - left).coerceAtLeast(0) + (right - container.right).coerceAtLeast(0)
+    val vertical = (container.top - top).coerceAtLeast(0) + (bottom - container.bottom).coerceAtLeast(0)
+    return horizontal * height + vertical * width
+}
+
+internal fun fullFlightTrackMappedIds(
+    dronePoints: List<DroneMapPoint>,
+    eligibleMappedIds: Set<String>,
+    mappedIdsByRemoteId: Map<String, Set<String>> = emptyMap()
+): Set<String> {
+    val mappedIds = LinkedHashSet<String>()
+    dronePoints.forEach { point ->
+        val currentMappedId = localTrackDesignator(point.designator)
+        if (currentMappedId !in eligibleMappedIds) return@forEach
+        mappedIds.add(currentMappedId)
+        mappedIdsByRemoteId[point.remoteId].orEmpty().forEach { alias ->
+            mappedIds.add(localTrackDesignator(alias))
+        }
+    }
+    return mappedIds
+}
+
+internal fun confirmedCurrentFlightMappedIds(dronePoints: List<DroneMapPoint>): Set<String> =
+    dronePoints
+        .asSequence()
+        .filter { point -> CaltopoClient.IsCurrentPeerDroneConfirmed(point.remoteId) }
+        .map { point -> localTrackDesignator(point.designator) }
+        .toSet()
+
 private fun closedPolylinePoints(points: List<GeoPoint>): List<GeoPoint> {
     if (points.isEmpty()) return points
     val first = points.first()
@@ -596,6 +779,77 @@ private class LocalMarkerInfoWindow(
         mView.findViewById<Button>(R.id.local_marker_delete)?.setOnClickListener(null)
     }
 }
+
+private data class DroneLabelDrawSpec(
+    val designator: String,
+    val position: GeoPoint,
+    val nameDrawable: Drawable,
+    val statusDrawable: Drawable
+)
+
+private class DroneLabelOverlay(
+    private val labels: List<DroneLabelDrawSpec>
+) : Overlay() {
+    private val leaderHaloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#AA000000")
+        style = Paint.Style.STROKE
+        strokeWidth = 4.5f
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val leaderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.parseColor("#FFFFFFFF")
+        style = Paint.Style.STROKE
+        strokeWidth = 2.0f
+        strokeCap = Paint.Cap.ROUND
+    }
+
+    override fun draw(canvas: Canvas, mapView: MapView, shadow: Boolean) {
+        if (shadow || labels.isEmpty()) return
+        val projection = mapView.projection
+        val layoutInputs = labels.map { label ->
+            val point = projection.toPixels(label.position, null)
+            DroneLabelLayoutInput(
+                designator = label.designator,
+                anchorX = point.x,
+                anchorY = point.y,
+                nameWidth = label.nameDrawable.intrinsicWidth.coerceAtLeast(1),
+                nameHeight = label.nameDrawable.intrinsicHeight.coerceAtLeast(1),
+                statusWidth = label.statusDrawable.intrinsicWidth.coerceAtLeast(1),
+                statusHeight = label.statusDrawable.intrinsicHeight.coerceAtLeast(1)
+            )
+        }
+        val layouts = layoutDroneLabelGroups(
+            labels = layoutInputs,
+            viewportWidth = mapView.width.takeIf { it > 0 } ?: canvas.width,
+            viewportHeight = mapView.height.takeIf { it > 0 } ?: canvas.height
+        )
+        layouts.zip(labels).forEach { (layout, label) ->
+            layout.leaderLine?.let { line ->
+                canvas.drawLine(
+                    line.startX.toFloat(),
+                    line.startY.toFloat(),
+                    line.endX.toFloat(),
+                    line.endY.toFloat(),
+                    leaderHaloPaint
+                )
+                canvas.drawLine(
+                    line.startX.toFloat(),
+                    line.startY.toFloat(),
+                    line.endX.toFloat(),
+                    line.endY.toFloat(),
+                    leaderPaint
+                )
+            }
+            label.nameDrawable.bounds = layout.nameBounds.toAndroidRect()
+            label.nameDrawable.draw(canvas)
+            label.statusDrawable.bounds = layout.statusBounds.toAndroidRect()
+            label.statusDrawable.draw(canvas)
+        }
+    }
+}
+
+private fun LabelRect.toAndroidRect(): Rect =
+    Rect(left, top, right, bottom)
 
 private fun openClueSnapshotInExternalViewer(context: Context, title: String, bitmap: Bitmap?) {
     if (bitmap == null) {
@@ -942,6 +1196,7 @@ internal fun SplitMapPane(
     val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val currentFlightTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
+    val localTrackMappedIdsByRemoteId = remember { mutableStateMapOf<String, MutableSet<String>>() }
     val localTrackLastSeededTimestampByMappedId = remember { mutableMapOf<String, Long>() }
     var trackOverlayRefreshToken by remember { mutableIntStateOf(0) }
     var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
@@ -2238,6 +2493,7 @@ internal fun SplitMapPane(
         }
         localTrackPointsByMappedId.clear()
         currentFlightTrackPointsByMappedId.clear()
+        localTrackMappedIdsByRemoteId.clear()
         localTrackLastSeededTimestampByMappedId.clear()
         trackOverlayRefreshToken++
         lastRenderStats = ""
@@ -2582,12 +2838,13 @@ internal fun SplitMapPane(
     }
 
     DisposableEffect(Unit) {
-        val localTrackListener = CaltopoLiveTrack.LocalTrackListener { _, mappedId, lat, lng, altitudeMeters, timestampMsec ->
+        val localTrackListener = CaltopoLiveTrack.LocalTrackListener { remoteId, mappedId, lat, lng, altitudeMeters, timestampMsec ->
             uiScope.launch(Dispatchers.Main.immediate) {
                 if (!lat.isFinite() || !lng.isFinite()) return@launch
                 if (lat == 0.0 && lng == 0.0) return@launch
                 val nowWallMsec = System.currentTimeMillis()
                 val key = localTrackDesignator(mappedId)
+                localTrackMappedIdsByRemoteId.getOrPut(remoteId) { mutableSetOf() }.add(key)
                 val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
                 val flightList = currentFlightTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
                 val point = LocalTrackPoint(
@@ -2614,12 +2871,15 @@ internal fun SplitMapPane(
                 }
             }
         }
-        val localTrackFinishedListener = CaltopoLiveTrack.LocalTrackFinishedListener { _, mappedId, _ ->
+        val localTrackFinishedListener = CaltopoLiveTrack.LocalTrackFinishedListener { remoteId, mappedId, _ ->
             uiScope.launch(Dispatchers.Main.immediate) {
-                val key = localTrackDesignator(mappedId)
-                localTrackPointsByMappedId.remove(key)
-                currentFlightTrackPointsByMappedId.remove(key)
-                localTrackLastSeededTimestampByMappedId.remove(key)
+                val mappedIds = localTrackMappedIdsByRemoteId.remove(remoteId).orEmpty() +
+                    localTrackDesignator(mappedId)
+                mappedIds.forEach { key ->
+                    localTrackPointsByMappedId.remove(key)
+                    currentFlightTrackPointsByMappedId.remove(key)
+                    localTrackLastSeededTimestampByMappedId.remove(key)
+                }
                 trackOverlayRefreshToken++
             }
         }
@@ -2938,7 +3198,14 @@ internal fun SplitMapPane(
                 }
                 expiredTrackIds.forEach { localTrackPointsByMappedId.remove(it) }
 
+                val confirmedCurrentFlightMappedIds = confirmedCurrentFlightMappedIds(dronePoints)
+                val fullFlightTrackMappedIds = fullFlightTrackMappedIds(
+                    dronePoints = dronePoints,
+                    eligibleMappedIds = confirmedCurrentFlightMappedIds,
+                    mappedIdsByRemoteId = localTrackMappedIdsByRemoteId
+                )
                 currentFlightTrackPointsByMappedId.forEach { (mappedId, points) ->
+                    if (mappedId !in fullFlightTrackMappedIds) return@forEach
                     if (points.size < 2) return@forEach
                     val line = Polyline(mapView).apply {
                         setPoints(points.map { GeoPoint(it.lat, it.lng) })
@@ -3172,6 +3439,7 @@ internal fun SplitMapPane(
 
                 val iconLimitAglM = AGL_LIMIT_FT * FT_TO_METERS
                 val nearIconAglM = (AGL_LIMIT_FT - AGL_ICON_NEAR_DELTA_FT) * FT_TO_METERS
+                val droneLabelSpecs = mutableListOf<DroneLabelDrawSpec>()
                 dronePoints.forEach { point ->
                     val pointLatencyKey =
                         "${point.timestampMsec}|${"%.6f".format(Locale.US, point.lat)}|${"%.6f".format(Locale.US, point.lng)}|${"%.1f".format(Locale.US, point.altitudeM)}"
@@ -3241,15 +3509,6 @@ internal fun SplitMapPane(
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
 
-                    val nameMarker = Marker(mapView).apply {
-                        position = GeoPoint(renderLat, renderLng)
-                        icon = buildDroneNameLabelDrawable(context.resources, point.designator)
-                        setAnchor(Marker.ANCHOR_CENTER, DRONE_NAME_LABEL_ANCHOR_Y)
-                        setOnMarkerClickListener { _, _ -> true }
-                    }
-                    mapView.overlays.add(nameMarker)
-                    managedOverlays.add(nameMarker)
-
                     val aglToken = labelAglFeet
                         ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
                         ?.let { "${"%.0f".format(it)}${if (labelAglStale) "?" else ""}AGL" } ?: "--AGL"
@@ -3258,14 +3517,21 @@ internal fun SplitMapPane(
                         ?.let { "%.0fATO".format(it) } ?: "--ATO"
                     val rangeToken = labelRangeFeet?.let { "%.0f".format(it) } ?: "--"
                     val labelText = "$aglToken,$atoToken,$rangeToken"
-                    val labelMarker = Marker(mapView).apply {
-                        position = GeoPoint(renderLat, renderLng)
-                        icon = buildDroneStatusLabelDrawable(context.resources, labelText)
-                        setAnchor(Marker.ANCHOR_CENTER, DRONE_STATUS_LABEL_ANCHOR_Y)
-                        setOnMarkerClickListener { _, _ -> true }
-                    }
-                    mapView.overlays.add(labelMarker)
-                    managedOverlays.add(labelMarker)
+                    val nameDrawable = buildDroneNameLabelDrawable(context.resources, point.designator)
+                    val statusDrawable = buildDroneStatusLabelDrawable(context.resources, labelText)
+                    droneLabelSpecs.add(
+                        DroneLabelDrawSpec(
+                            designator = point.designator,
+                            position = GeoPoint(renderLat, renderLng),
+                            nameDrawable = nameDrawable,
+                            statusDrawable = statusDrawable
+                        )
+                    )
+                }
+                if (droneLabelSpecs.isNotEmpty()) {
+                    val labelOverlay = DroneLabelOverlay(droneLabelSpecs)
+                    mapView.overlays.add(labelOverlay)
+                    managedOverlays.add(labelOverlay)
                 }
 
                 val limitAglM = AGL_LIMIT_FT * FT_TO_METERS

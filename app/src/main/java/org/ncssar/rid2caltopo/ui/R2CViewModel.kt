@@ -150,7 +150,9 @@ private fun normalizedDroneSpecUiSnapshot(
                 }
         )
     }
-    val normalized = droneSpecs.distinctBy { it.remoteId }
+    val normalized = droneSpecs
+        .distinctBy { it.remoteId }
+        .sortedWith { left, right -> left.compareToAge(right) }
     val signature = normalized.map { drone ->
         DroneSpecUiSignature(
             remoteId = drone.remoteId,

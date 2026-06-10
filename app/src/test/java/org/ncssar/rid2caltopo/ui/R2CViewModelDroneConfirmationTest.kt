@@ -311,6 +311,29 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
+    fun droneListOrdersByFirstWaypointTimestampNotRecentUpdate() {
+        val firstSeen = activeDrone("DRONEFIRST", waypointTimestampMsec = 1_000L)
+        val secondSeen = activeDrone("DRONESECOND", waypointTimestampMsec = 2_000L)
+        val viewModel = R2CViewModel(SimpleTimer())
+
+        firstSeen.checkNewWaypoint(
+            39.1001,
+            -121.2001,
+            120.0,
+            3_000L,
+            3_000L,
+            true,
+            CtDroneSpec.TransportTypeEnum.BT4
+        )
+        viewModel.onDroneSpecsChanged(listOf(secondSeen, firstSeen))
+
+        assertEquals(
+            listOf("DRONEFIRST", "DRONESECOND"),
+            viewModel.drones.value.map { it.remoteId }
+        )
+    }
+
+    @Test
     fun localStandalonePromptClearsWhenDroneLeavesActiveList() {
         val remoteId = "DRONESTANDALONE"
         val drone = activeDrone(remoteId, waypointTimestampMsec = 91011L)

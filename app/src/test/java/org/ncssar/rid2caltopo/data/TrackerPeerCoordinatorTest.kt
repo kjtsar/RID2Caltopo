@@ -225,6 +225,21 @@ class TrackerPeerCoordinatorTest {
     }
 
     @Test
+    fun localSaveBeforeLiveTrackCreated_publishesWhenTrackStarts() {
+        coordinator.start("MAP1", "zone-alpha", "Alpha", null)
+
+        confirmLocalDrone("DRONE1")
+
+        val drone = CtDroneSpec("DRONE1")
+        val track = FakeLiveTrack("DRONE1")
+        coordinator.onLiveTrackCreated(track, drone, 50.0, 1234L)
+
+        assertTrue(coordinator.isLocalOwner("DRONE1"))
+        assertTrue(track.localOwnerFlag)
+        assertTrue(coordinator.isLocalAlertEligible("DRONE1"))
+    }
+
+    @Test
     fun localArchiveOnlyDrone_neverRequestsTrackerOwnership() {
         coordinator.start("MAP1", "zone-alpha", "Alpha", null)
         val drone = CtDroneSpec("DRONE1").apply { setLocalArchiveOnly(true) }

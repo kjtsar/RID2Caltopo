@@ -1126,7 +1126,7 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
      *   Compares remoteIds which are guaranteed to be unique.
      *
      * @param  other to be compared against.
-     * @return returns most recently seen towards end.
+     * @return returns drones with earlier first-waypoint timestamps first.
      */
     @Override
     public int compareTo(@NonNull CtDroneSpec other) {
@@ -1134,7 +1134,9 @@ public class CtDroneSpec implements Comparable<CtDroneSpec>, Serializable {
     }
 
     public int compareToAge(@NonNull CtDroneSpec other) {
-        return (int)(this.startMsecTimestamp - other.startMsecTimestamp);
+        int byFirstWaypoint = Long.compare(this.startMsecTimestamp, other.startMsecTimestamp);
+        if (byFirstWaypoint != 0) return byFirstWaypoint;
+        return this.remoteId.compareTo(other.remoteId);
     }
 
     public boolean isDifferentFrom(@NonNull CtDroneSpec other) {

@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.data
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Before
 import org.junit.Test
 import java.lang.reflect.Field
@@ -35,10 +36,12 @@ class CaltopoLiveTrackTest {
         mapStatusField.set(null, CaltopoMap.MapStatusListener.mapStatus.up)
         folderIdField.set(null, "folder-test")
         archiveFolderIdField.set(null, "archive-folder-test")
+        clearLocalTrackListeners()
     }
 
     @After
     fun tearDown() {
+        clearLocalTrackListeners()
         mapStatusField.set(null, originalMapStatus)
         folderIdField.set(null, originalFolderId)
         archiveFolderIdField.set(null, originalArchiveFolderId)
@@ -136,6 +139,32 @@ class CaltopoLiveTrackTest {
         assertEquals(1, queuedPointCount(liveTrack))
     }
 
+    @Test
+    fun notifyLocalTrackPoint_allowsListenerRegistrationDuringCallback() {
+        val drone = CtDroneSpec("RID-LISTENER")
+        setDroneTrackLabel(drone, "RID-LISTENER_123000Apr28")
+        val calls = mutableListOf<String>()
+
+        val lateListener = CaltopoLiveTrack.LocalTrackListener { _, _, _, _, _, _ ->
+            calls.add("late")
+        }
+        val firstListener = CaltopoLiveTrack.LocalTrackListener { _, _, _, _, _, _ ->
+            calls.add("first")
+            CaltopoLiveTrack.AddLocalTrackListener(lateListener)
+        }
+        val secondListener = CaltopoLiveTrack.LocalTrackListener { _, _, _, _, _, _ ->
+            calls.add("second")
+        }
+
+        CaltopoLiveTrack.AddLocalTrackListener(firstListener)
+        CaltopoLiveTrack.AddLocalTrackListener(secondListener)
+
+        CaltopoLiveTrack.NotifyLocalTrackPoint(drone, 39.1, -121.1, 500.0, 1_000L)
+
+        assertEquals(listOf("first", "second"), calls)
+        assertFalse(calls.contains("late"))
+    }
+
     private fun setDroneTrackLabel(drone: CtDroneSpec, trackLabel: String) {
         val mappedId = trackLabel.substringBefore('_')
         CtDroneSpec::class.java.getDeclaredField("mappedId").apply {
@@ -168,6 +197,15 @@ class CaltopoLiveTrackTest {
         }
         val points = field.get(liveTrack) as Collection<*>
         return points.size
+    }
+
+    private fun clearLocalTrackListeners() {
+        listOf("LocalTrackListeners", "LocalTrackFinishedListeners").forEach { fieldName ->
+            CaltopoLiveTrack::class.java.getDeclaredField(fieldName).apply {
+                isAccessible = true
+                (get(null) as MutableCollection<*>).clear()
+            }
+        }
     }
 
     private fun startLiveTrackCompleteMethod(): Method =

@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug;
 import static org.ncssar.rid2caltopo.data.CaltopoClient.CTError;
@@ -60,8 +61,8 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     private static final long LIVE_TRACK_SIDE_EFFECT_SLOW_MS = 250L;
     private static final Util.SimpleMovingAverage CaltopoRttInMsec = new Util.SimpleMovingAverage(10);
     private static final Hashtable<String, CaltopoLiveTrack> LiveTrackByRemoteId = new Hashtable<>(16);
-    private static final LinkedList<LocalTrackListener> LocalTrackListeners = new LinkedList<>();
-    private static final LinkedList<LocalTrackFinishedListener> LocalTrackFinishedListeners = new LinkedList<>();
+    private static final CopyOnWriteArrayList<LocalTrackListener> LocalTrackListeners = new CopyOnWriteArrayList<>();
+    private static final CopyOnWriteArrayList<LocalTrackFinishedListener> LocalTrackFinishedListeners = new CopyOnWriteArrayList<>();
     private CaltopoOp startLiveTrackOp;
     private String liveTrackId;
     private static class QueuedPoint {
@@ -249,9 +250,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     public static void AddLocalTrackListener(@NonNull LocalTrackListener listener) {
-        if (!LocalTrackListeners.contains(listener)) {
-            LocalTrackListeners.add(listener);
-        }
+        LocalTrackListeners.addIfAbsent(listener);
     }
 
     public static void RemoveLocalTrackListener(@NonNull LocalTrackListener listener) {
@@ -259,9 +258,7 @@ public class CaltopoLiveTrack implements CaltopoMap.MapStatusListener, LiveTrack
     }
 
     public static void AddLocalTrackFinishedListener(@NonNull LocalTrackFinishedListener listener) {
-        if (!LocalTrackFinishedListeners.contains(listener)) {
-            LocalTrackFinishedListeners.add(listener);
-        }
+        LocalTrackFinishedListeners.addIfAbsent(listener);
     }
 
     public static void RemoveLocalTrackFinishedListener(@NonNull LocalTrackFinishedListener listener) {

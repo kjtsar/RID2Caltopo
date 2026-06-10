@@ -548,6 +548,8 @@ class DroneSpecState(
     val source: CtDroneSpec
 ) {
     val remoteId = source.remoteId
+    var flightStartMsec by mutableStateOf(source.startMsecTimestamp)
+        private set
     var lastLat by mutableStateOf(source.lastLat)
         private set
     var lastLng by mutableStateOf(source.lastLng)
@@ -562,6 +564,7 @@ class DroneSpecState(
     fun changeMappedId(id: String) { source.setMappedId(id) }
 
     fun updateFrom(spec: CtDroneSpec) {
+        flightStartMsec = spec.startMsecTimestamp
         lastLat = spec.lastLat
         lastLng = spec.lastLng
         lastAlt = spec.lastAlt

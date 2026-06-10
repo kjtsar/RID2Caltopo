@@ -62,4 +62,38 @@ class MapPaneLocalTrackSeedTest {
         assertEquals(emptyList<LocalTrackPoint>(), flight)
         assertEquals(emptyList<LocalTrackPoint>(), recent)
     }
+
+    @Test
+    fun shouldSeedLocalTrackSnapshotForDesignator_whenSnapshotHasNewerPoint() {
+        val lastSeeded = mutableMapOf<String, Long>()
+        val firstSnapshot = listOf(
+            WaypointTrack.TrackPoint(39.153000, -121.132000, 100.0, 1_000L),
+            WaypointTrack.TrackPoint(39.154000, -121.133000, 101.0, 2_000L),
+        )
+        val sameSnapshot = listOf(
+            WaypointTrack.TrackPoint(39.154000, -121.133000, 101.0, 2_000L),
+        )
+        val newerSnapshot = listOf(
+            WaypointTrack.TrackPoint(39.154000, -121.133000, 101.0, 2_000L),
+            WaypointTrack.TrackPoint(39.155000, -121.134000, 102.0, 3_000L),
+        )
+
+        assertTrue(shouldSeedLocalTrackSnapshotForDesignator("1SAR7", firstSnapshot, lastSeeded))
+        assertEquals(2_000L, lastSeeded["1SAR7"])
+        assertTrue(!shouldSeedLocalTrackSnapshotForDesignator("1SAR7", sameSnapshot, lastSeeded))
+        assertTrue(shouldSeedLocalTrackSnapshotForDesignator("1SAR7", newerSnapshot, lastSeeded))
+        assertEquals(3_000L, lastSeeded["1SAR7"])
+    }
+
+    @Test
+    fun shouldSeedLocalTrackSnapshotForDesignator_ignoresInvalidNewestPoint() {
+        val lastSeeded = mutableMapOf("1SAR7" to 2_000L)
+        val invalidNewerSnapshot = listOf(
+            WaypointTrack.TrackPoint(39.154000, -121.133000, 101.0, 2_000L),
+            WaypointTrack.TrackPoint(0.0, 0.0, 102.0, 3_000L),
+        )
+
+        assertTrue(!shouldSeedLocalTrackSnapshotForDesignator("1SAR7", invalidNewerSnapshot, lastSeeded))
+        assertEquals(2_000L, lastSeeded["1SAR7"])
+    }
 }

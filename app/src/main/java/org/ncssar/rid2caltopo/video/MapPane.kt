@@ -74,6 +74,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import org.ncssar.rid2caltopo.ui.MapFoldersDialog
 import org.ncssar.rid2caltopo.ui.MapFolderUiState
 import org.ncssar.rid2caltopo.ui.MapItemUiState
@@ -479,6 +480,29 @@ internal fun seedLocalTrackPointsFromSnapshot(
     }
 
     return changed
+}
+
+internal fun shouldSeedLocalTrackSnapshotForDesignator(
+    mappedId: String,
+    snapshot: List<WaypointTrack.TrackPoint>,
+    lastSeededTimestampByMappedId: MutableMap<String, Long>
+): Boolean {
+    val key = localTrackDesignator(mappedId)
+    val newestTimestamp = snapshot.asSequence()
+        .filter { point ->
+            point.lat.isFinite() &&
+                point.lng.isFinite() &&
+                !(point.lat == 0.0 && point.lng == 0.0)
+        }
+        .map { it.timestampMsec }
+        .maxOrNull()
+        ?: return false
+    val lastSeededTimestamp = lastSeededTimestampByMappedId[key]
+    if (lastSeededTimestamp != null && newestTimestamp <= lastSeededTimestamp) {
+        return false
+    }
+    lastSeededTimestampByMappedId[key] = newestTimestamp
+    return true
 }
 
 private fun LocalTrackPoint.isSameTrackPoint(other: LocalTrackPoint): Boolean {
@@ -918,6 +942,7 @@ internal fun SplitMapPane(
     val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val currentFlightTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
+    val localTrackLastSeededTimestampByMappedId = remember { mutableMapOf<String, Long>() }
     var trackOverlayRefreshToken by remember { mutableIntStateOf(0) }
     var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
@@ -2213,6 +2238,7 @@ internal fun SplitMapPane(
         }
         localTrackPointsByMappedId.clear()
         currentFlightTrackPointsByMappedId.clear()
+        localTrackLastSeededTimestampByMappedId.clear()
         trackOverlayRefreshToken++
         lastRenderStats = ""
         lastAlignmentStats = ""
@@ -2515,6 +2541,46 @@ internal fun SplitMapPane(
         }
     }
 
+    fun seedActiveLocalTrackSnapshots(seedTimeMs: Long, reason: String) {
+        viewModel.droneStates.forEach { (key, state) ->
+            val snapshot = WaypointTrack.GetTrackPointsSnapshot(state.source)
+            if (snapshot.isEmpty()) return@forEach
+            if (!shouldSeedLocalTrackSnapshotForDesignator(
+                    key,
+                    snapshot,
+                    localTrackLastSeededTimestampByMappedId
+                )) {
+                return@forEach
+            }
+            val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+            val flightList = currentFlightTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
+            if (seedLocalTrackPointsFromSnapshot(key, snapshot, seedTimeMs, list, flightList)) {
+                trackOverlayRefreshToken++
+                if (CTDebugEnabled(ICON_LATENCY_TAG)) CTDebug(
+                    ICON_LATENCY_TAG,
+                    "track_seed_snapshot designator=$key points=${snapshot.size} reason=$reason"
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            viewModel.droneStates.map { (key, state) ->
+                listOf(
+                    key,
+                    state.mappedId,
+                    state.flightStartMsec.toString(),
+                    state.lastTimestamp,
+                    state.lastLat.toString(),
+                    state.lastLng.toString()
+                ).joinToString(":")
+            }.sorted()
+        }.collect {
+            seedActiveLocalTrackSnapshots(System.currentTimeMillis(), "state")
+        }
+    }
+
     DisposableEffect(Unit) {
         val localTrackListener = CaltopoLiveTrack.LocalTrackListener { _, mappedId, lat, lng, altitudeMeters, timestampMsec ->
             uiScope.launch(Dispatchers.Main.immediate) {
@@ -2553,24 +2619,16 @@ internal fun SplitMapPane(
                 val key = localTrackDesignator(mappedId)
                 localTrackPointsByMappedId.remove(key)
                 currentFlightTrackPointsByMappedId.remove(key)
+                localTrackLastSeededTimestampByMappedId.remove(key)
                 trackOverlayRefreshToken++
             }
         }
         // Seed from the active WaypointTrack so reopening MapPane mid-flight preserves
         // points collected while this composable was not active.
-        val seedTimeMs = System.currentTimeMillis()
+        seedActiveLocalTrackSnapshots(System.currentTimeMillis(), "mount")
         viewModel.droneStates.forEach { (key, state) ->
             val snapshot = WaypointTrack.GetTrackPointsSnapshot(state.source)
             if (snapshot.isNotEmpty()) {
-                val list = localTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
-                val flightList = currentFlightTrackPointsByMappedId.getOrPut(key) { mutableStateListOf() }
-                if (seedLocalTrackPointsFromSnapshot(key, snapshot, seedTimeMs, list, flightList)) {
-                    trackOverlayRefreshToken++
-                    if (CTDebugEnabled(ICON_LATENCY_TAG)) CTDebug(
-                        ICON_LATENCY_TAG,
-                        "track_seed_snapshot designator=$key points=${snapshot.size}"
-                    )
-                }
                 return@forEach
             }
 
@@ -2588,7 +2646,7 @@ internal fun SplitMapPane(
                         lng = seedLng,
                         altitudeM = state.lastAlt,
                         timestampMsec = state.source.mostRecentMsecTimestamp,
-                        receivedAtMsec = seedTimeMs
+                        receivedAtMsec = System.currentTimeMillis()
                     )
                     list.add(point)
                     if (flightList.isEmpty()) {

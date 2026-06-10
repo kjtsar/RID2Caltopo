@@ -57,6 +57,7 @@ internal class DroneAltitudeCoordinator(
     private val demCorrectionPending    = HashSet<String>()
     private val demLastAttemptMs        = HashMap<String, Long>()
     private val latestLocalPointByDesignator = HashMap<String, LocalAltitudePoint>()
+    private val flightStartByRemoteId   = HashMap<String, Long>()
 
     // ── Heading state — keyed by designator (mappedId) ──────────────────────────────────────
     private val telemetryHeading      = HashMap<String, Double>()
@@ -91,6 +92,11 @@ internal class DroneAltitudeCoordinator(
             // for re-fetching after onMapReconnect() clears the DEM cache.
             val remoteId = droneStates[mappedId]?.remoteId
             if (remoteId != null) {
+                resetAutoAltitudeStateForNewFlight(
+                    remoteId = remoteId,
+                    designator = mappedId,
+                    flightStartMsec = droneStates[mappedId]?.flightStartMsec ?: 0L,
+                )
                 scheduleDemIfNeeded(remoteId, mappedId, lat, lng, System.currentTimeMillis())
             }
             recomputeDisplayState(mappedId)
@@ -149,6 +155,11 @@ internal class DroneAltitudeCoordinator(
                     // data is available immediately on reconnect.
 
                     states.forEach { state ->
+                        resetAutoAltitudeStateForNewFlight(
+                            remoteId = state.remoteId,
+                            designator = state.mappedId,
+                            flightStartMsec = state.flightStartMsec,
+                        )
                         scheduleDemIfNeeded(state, nowMs)
                         recomputeDisplayState(state.mappedId)
                     }
@@ -176,6 +187,31 @@ internal class DroneAltitudeCoordinator(
         } else {
             fallbackHeadingAnchor[designator] = Pair(lat, lng)
         }
+    }
+
+    private fun resetAutoAltitudeStateForNewFlight(
+        remoteId: String,
+        designator: String,
+        flightStartMsec: Long,
+    ) {
+        if (flightStartMsec <= 0L) return
+        val priorFlightStartMsec = flightStartByRemoteId.put(remoteId, flightStartMsec)
+        if (priorFlightStartMsec == null || priorFlightStartMsec == flightStartMsec) return
+        if (!shouldResetAutoCalibrationForFlightChange(calibrationByRemoteId[remoteId])) return
+
+        calibrationByRemoteId.remove(remoteId)
+        demGroundByRemoteId.remove(remoteId)
+        demKeyByRemoteId.remove(remoteId)
+        demCorrectionByRemoteId.remove(remoteId)
+        demScaleToMetersByRemoteId.remove(remoteId)
+        demPending.remove(remoteId)
+        demCorrectionPending.remove(remoteId)
+        demLastAttemptMs.remove(remoteId)
+        if (CTDebugEnabled(tag)) CTDebug(
+            tag,
+            "Altitude auto-calibration reset for new flight $designator: " +
+                "remoteId=$remoteId priorStart=$priorFlightStartMsec newStart=$flightStartMsec"
+        )
     }
 
     // ── Calibration (ATO auto-seed state machine) ────────────────────────────────────────────
@@ -477,29 +513,7 @@ internal class DroneAltitudeCoordinator(
                     demGroundRaw = it.groundM,
                     demScaleToMeters = demScaleToMeters,
                 )
-                val recovery = recoverNegativeAglMeters(
-                    aglMeters = aglMeters,
-                    altM = altM,
-                    ridHeightAtoM = ridHeightAtoM,
-                    calibration = calibration,
-                    correctionM = correctionM,
-                    demGroundRaw = it.groundM,
-                    demScaleToMeters = demScaleToMeters,
-                    demIsFreshForCurrentLocation = freshAgl != null && !locationChanged && !demIsPending,
-                )
-                if (recovery.correctionM != correctionM) {
-                    demCorrectionByRemoteId[remoteId] = recovery.correctionM
-                    if (CTDebugEnabled(tag)) CTDebug(
-                        tag,
-                        "Negative AGL recovery for $designator: " +
-                            "priorAgl=${"%.1f".format(aglMeters * METERS_TO_FEET)}ft " +
-                            "ridAto=${ridHeightAtoM?.let { h -> "%.1f".format(h) } ?: "n/a"}m " +
-                            "demGroundRaw=${"%.1f".format(it.groundM)} " +
-                            "correctionSource=${calibration?.seedSource ?: "NONE"} " +
-                            "correctionF=${"%.1f".format(correctionM)}m->${"%.1f".format(recovery.correctionM)}m"
-                    )
-                }
-                recovery.aglMeters * METERS_TO_FEET
+                aglMeters * METERS_TO_FEET
             }
         } else {
             ridHeightAtoM?.let { it * METERS_TO_FEET }
@@ -551,8 +565,6 @@ internal class DroneAltitudeCoordinator(
         private const val DEM_RETRY_INTERVAL_MS = 2_000L
         private const val METERS_TO_FEET = 3.28084
         private const val CALIBRATE_ATO_TARGET_FT = 50.0
-        private const val NEGATIVE_AGL_RECOVERY_THRESHOLD_M = -0.5
-        private const val MAX_RID_ATO_FOR_NEGATIVE_AGL_RECOVERY_M = 3.0
 
         internal fun calculateDemBackedAglMeters(
             altM: Double,
@@ -570,44 +582,17 @@ internal class DroneAltitudeCoordinator(
             return altM - demGroundM - correctionM
         }
 
-        internal fun recoverNegativeAglMeters(
-            aglMeters: Double,
-            altM: Double,
-            ridHeightAtoM: Double?,
-            calibration: DroneAltitudeCalibration?,
-            correctionM: Double,
-            demGroundRaw: Double,
-            demScaleToMeters: Double,
-            demIsFreshForCurrentLocation: Boolean,
-        ): NegativeAglRecovery {
-            if (aglMeters >= NEGATIVE_AGL_RECOVERY_THRESHOLD_M) {
-                return NegativeAglRecovery(aglMeters, correctionM)
-            }
-            if (calibration?.seedSource == AtoSeedSource.MANUAL) {
-                return NegativeAglRecovery(0.0, correctionM)
-            }
-            if (!demIsFreshForCurrentLocation || calibration == null) {
-                return NegativeAglRecovery(aglMeters, correctionM)
-            }
-            if (ridHeightAtoM != null && ridHeightAtoM > MAX_RID_ATO_FOR_NEGATIVE_AGL_RECOVERY_M) {
-                return NegativeAglRecovery(aglMeters, correctionM)
-            }
-
-            val demGroundM = demGroundRaw * demScaleToMeters
-            val recoveredCorrectionM = if (ridHeightAtoM != null) {
-                val recoveredTakeoffGroundM = demGroundM - ridHeightAtoM
-                calibration.takeoffTrackAltitudeM - recoveredTakeoffGroundM
-            } else {
-                altM - demGroundM
-            }
-            return NegativeAglRecovery(0.0, recoveredCorrectionM)
-        }
-
         internal fun shouldPreserveCalibrationOnMapReconnect(
             calibration: DroneAltitudeCalibration?
         ): Boolean {
             return calibration?.seedSource == AtoSeedSource.MANUAL ||
                 calibration?.seedSource == AtoSeedSource.AUTO_SEALED
+        }
+
+        internal fun shouldResetAutoCalibrationForFlightChange(
+            calibration: DroneAltitudeCalibration?
+        ): Boolean {
+            return calibration?.seedSource != AtoSeedSource.MANUAL
         }
     }
 }
@@ -616,9 +601,4 @@ private data class LocalAltitudePoint(
     val lat: Double,
     val lng: Double,
     val altM: Double,
-)
-
-internal data class NegativeAglRecovery(
-    val aglMeters: Double,
-    val correctionM: Double,
 )

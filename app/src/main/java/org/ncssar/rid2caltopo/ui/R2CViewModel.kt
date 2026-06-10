@@ -7,6 +7,7 @@
 
 package org.ncssar.rid2caltopo.ui
 
+import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -442,6 +443,25 @@ class R2CViewModel(val uptimeTimer: SimpleTimer) : ViewModel(),
         lat: Double,
         lng: Double,
         altitudeMeters: Double,
+        timestampMsec: Long
+    ) {
+        if (canPublishLocalTrackPointInline()) {
+            publishLocalTrackPointToUi(remoteId, mappedId, timestampMsec)
+        } else {
+            viewModelScope.launch(Dispatchers.Main.immediate) {
+                publishLocalTrackPointToUi(remoteId, mappedId, timestampMsec)
+            }
+        }
+    }
+
+    private fun canPublishLocalTrackPointInline(): Boolean {
+        val mainLooper = Looper.getMainLooper() ?: return true
+        return Looper.myLooper() == mainLooper
+    }
+
+    private fun publishLocalTrackPointToUi(
+        remoteId: String,
+        mappedId: String,
         timestampMsec: Long
     ) {
         val drone = CaltopoClient.GetDroneSpec(remoteId) ?: return

@@ -298,7 +298,6 @@ object ProximityAlertCenter {
         val staleCutoffMs = nowMs - (CaltopoClient.GetNewTrackDelayInSeconds() * MIN_STALE_MULTIPLIER)
         val activeDrones = drones.filter { spec ->
             spec.mostRecentMsecTimestamp >= staleCutoffMs &&
-                isLocalAlertEligible(spec.remoteId) &&
                 spec.lastLat.isFinite() &&
                 spec.lastLng.isFinite() &&
                 !(spec.lastLat == 0.0 && spec.lastLng == 0.0)
@@ -599,11 +598,29 @@ object ProximityAlertCenter {
             currentVerticalFt = currentVerticalFt,
             currentThreeDFt = currentThreeDFt,
             altitudeSensitive = altitudeSensitive,
-            shouldAlert = decision.shouldAlert,
+            shouldAlert = decision.shouldAlert && shouldAlertForPair(first, second),
             isGettingFartherApart = decision.isGettingFartherApart,
             highSeverity = decision.highSeverity,
             severityScore = decision.severityScore
         )
+    }
+
+    private fun shouldAlertForPair(first: EvaluatedDrone, second: EvaluatedDrone): Boolean =
+        first.teamDrone || second.teamDrone
+
+    internal fun shouldAlertForPairForTests(firstTeamDrone: Boolean, secondTeamDrone: Boolean): Boolean =
+        firstTeamDrone || secondTeamDrone
+
+    internal fun resetForTests() {
+        _uiState.value = null
+        _suspendedAlert.value = null
+        _canResumeAlert.value = false
+        _debugPairs.value = emptyList()
+        sampleHistoryByRemoteId.clear()
+        previousPairSnapshots.clear()
+        latestEvaluationsByKey = emptyMap()
+        alertsSuspended = false
+        clearEligibleSinceMs = null
     }
 
     private fun evaluateThresholdDecision(

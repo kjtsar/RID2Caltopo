@@ -29,6 +29,30 @@ class DroneAltitudeCoordinatorTest {
     }
 
     @Test
+    fun shouldResetAutoCalibrationForFlightChange_resetsAutoReferences() {
+        assertTrue(
+            DroneAltitudeCoordinator.shouldResetAutoCalibrationForFlightChange(
+                DroneAltitudeCalibration(512.4, AtoSeedSource.AUTO)
+            )
+        )
+        assertTrue(
+            DroneAltitudeCoordinator.shouldResetAutoCalibrationForFlightChange(
+                DroneAltitudeCalibration(512.4, AtoSeedSource.AUTO_SEALED)
+            )
+        )
+        assertTrue(DroneAltitudeCoordinator.shouldResetAutoCalibrationForFlightChange(null))
+    }
+
+    @Test
+    fun shouldResetAutoCalibrationForFlightChange_preservesManualReferences() {
+        assertFalse(
+            DroneAltitudeCoordinator.shouldResetAutoCalibrationForFlightChange(
+                DroneAltitudeCalibration(512.4, AtoSeedSource.MANUAL)
+            )
+        )
+    }
+
+    @Test
     fun calculateDemBackedAglMeters_prefersAtoOverDriftingAbsoluteAltitude() {
         val calibration = DroneAltitudeCalibration(522.6, AtoSeedSource.AUTO_SEALED)
         val demScaleToMeters = 0.3048
@@ -86,41 +110,18 @@ class DroneAltitudeCoordinatorTest {
     }
 
     @Test
-    fun recoverNegativeAglMeters_refreshesAutoCorrectionAtLanding() {
+    fun calculateDemBackedAglMeters_allowsNegativeDemResult() {
         val calibration = DroneAltitudeCalibration(100.0, AtoSeedSource.AUTO_SEALED)
-        val priorCorrectionM = 1.0
 
-        val recovery = DroneAltitudeCoordinator.recoverNegativeAglMeters(
-            aglMeters = -0.9144,
-            altM = 99.0,
+        val aglMeters = DroneAltitudeCoordinator.calculateDemBackedAglMeters(
+            altM = 100.0,
             ridHeightAtoM = 0.0,
             calibration = calibration,
-            correctionM = priorCorrectionM,
-            demGroundRaw = 100.0,
+            correctionM = 0.0,
+            demGroundRaw = 100.9144,
             demScaleToMeters = 1.0,
-            demIsFreshForCurrentLocation = true,
         )
 
-        assertEquals(0.0, recovery.aglMeters, 0.000001)
-        assertEquals(0.0, recovery.correctionM, 0.000001)
-    }
-
-    @Test
-    fun recoverNegativeAglMeters_clampsManualCalibrationWithoutReplacingCorrection() {
-        val priorCorrectionM = 1.0
-
-        val recovery = DroneAltitudeCoordinator.recoverNegativeAglMeters(
-            aglMeters = -0.9144,
-            altM = 99.0,
-            ridHeightAtoM = 0.0,
-            calibration = DroneAltitudeCalibration(100.0, AtoSeedSource.MANUAL),
-            correctionM = priorCorrectionM,
-            demGroundRaw = 100.0,
-            demScaleToMeters = 1.0,
-            demIsFreshForCurrentLocation = true,
-        )
-
-        assertEquals(0.0, recovery.aglMeters, 0.000001)
-        assertEquals(priorCorrectionM, recovery.correctionM, 0.000001)
+        assertEquals(-0.9144, aglMeters, 0.000001)
     }
 }

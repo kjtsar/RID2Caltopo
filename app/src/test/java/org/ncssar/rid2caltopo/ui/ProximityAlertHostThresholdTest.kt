@@ -1,11 +1,21 @@
 package org.ncssar.rid2caltopo.ui
 
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.CtDroneSpec
 
 class ProximityAlertHostThresholdTest {
+    @After
+    fun tearDown() {
+        ProximityAlertCenter.resetForTests()
+    }
+
     @Test
     fun exactHorizontalAndVerticalThresholdsStillCountAsInside() {
         val decision = ProximityAlertCenter.evaluateThresholdDecisionForTests(
@@ -59,6 +69,60 @@ class ProximityAlertHostThresholdTest {
     }
 
     @Test
+    fun proximityAlertRequiresAtLeastOneOwnedDroneButAllowsNonOwnedTraffic() {
+        assertTrue(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = true, secondTeamDrone = true))
+        assertTrue(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = true, secondTeamDrone = false))
+        assertTrue(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = false, secondTeamDrone = true))
+        assertFalse(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = false, secondTeamDrone = false))
+    }
+
+    @Test
+    fun updateDronesAlertsWhenOwnedDroneIsNearNonOwnedTraffic() {
+        CaltopoClient.SetProximityAlertSpacingFeet(40)
+        CaltopoClient.SetPredictiveHeadEnabled(false)
+        ProximityAlertCenter.resetForTests()
+
+        val owned = proximityDrone(
+            remoteId = "TEAMDRONE1",
+            mappedId = "1sar7mn4pr",
+            lat = 39.153099,
+            lng = -121.132858,
+            altMeters = 527.0,
+            localArchiveOnly = false
+        )
+        val traffic = proximityDrone(
+            remoteId = "TRAFFIC1",
+            mappedId = "traffic1",
+            lat = 39.153099,
+            lng = -121.132828,
+            altMeters = 544.5,
+            localArchiveOnly = true
+        )
+
+        ProximityAlertCenter.updateDrones(listOf(owned, traffic))
+
+        val alert = ProximityAlertCenter.uiState.value
+        assertNotNull(alert)
+        assertEquals("1sar7mn4pr", alert?.nearestDroneMappedId)
+        assertTrue(ProximityAlertCenter.debugPairs.value.single().alerting)
+
+        ProximityAlertCenter.resetForTests()
+        val otherTraffic = proximityDrone(
+            remoteId = "TRAFFIC2",
+            mappedId = "traffic2",
+            lat = 39.153099,
+            lng = -121.132858,
+            altMeters = 527.0,
+            localArchiveOnly = true
+        )
+
+        ProximityAlertCenter.updateDrones(listOf(traffic, otherTraffic))
+
+        assertNull(ProximityAlertCenter.uiState.value)
+        assertFalse(ProximityAlertCenter.debugPairs.value.single().alerting)
+    }
+
+    @Test
     fun highSeverityRequiresDroppingBelowSeventyFivePercentThreshold() {
         val atBoundary = ProximityAlertCenter.evaluateThresholdDecisionForTests(
             effectiveHorizontalFt = 30.0,
@@ -100,5 +164,23 @@ class ProximityAlertHostThresholdTest {
         assertTrue(decision.isGettingFartherApart)
         assertFalse(decision.actuallyApproaching)
         assertFalse(decision.shouldAlert)
+    }
+
+    private fun proximityDrone(
+        remoteId: String,
+        mappedId: String,
+        lat: Double,
+        lng: Double,
+        altMeters: Double,
+        localArchiveOnly: Boolean
+    ): CtDroneSpec {
+        return CtDroneSpec(remoteId).apply {
+            setMappedId(mappedId)
+            setLocalArchiveOnly(localArchiveOnly)
+            lastLat = lat
+            lastLng = lng
+            lastAlt = altMeters
+            mostRecentMsecTimestamp = System.currentTimeMillis()
+        }
     }
 }

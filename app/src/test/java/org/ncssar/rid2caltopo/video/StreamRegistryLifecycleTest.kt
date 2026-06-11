@@ -164,4 +164,42 @@ class StreamRegistryLifecycleTest {
         assertEquals(StreamState.ERROR, result.state.active["d1"]?.state)
         assertEquals("decoder failed to start", result.state.active["d1"]?.errorDetail)
     }
+
+    @Test
+    fun fifthConcurrentLiveStream_isRejectedAndFourAdmittedStreamsRemain() {
+        val initial = StreamAdmissionState(
+            active = mapOf(
+                "d1" to StreamInfo(designator = "d1", state = StreamState.LIVE),
+                "d2" to StreamInfo(designator = "d2", state = StreamState.LIVE),
+                "d3" to StreamInfo(designator = "d3", state = StreamState.LIVE),
+                "d4" to StreamInfo(designator = "d4", state = StreamState.LIVE),
+            ),
+            stateChangedAtMs = mapOf(
+                "d1" to 1_000L,
+                "d2" to 1_000L,
+                "d3" to 1_000L,
+                "d4" to 1_000L,
+            ),
+            rejectedPaths = emptySet(),
+        )
+
+        val result = StreamAdmissionPolicy.admit(
+            state = initial,
+            designator = "d5",
+            sourcePath = "d5",
+            controllerProfile = StreamControllerProfile.GENERIC,
+            targetState = StreamState.LIVE,
+            nowMs = 2_000L,
+            maxSimultaneousStreams = 4,
+            staleConnectingMs = 30_000L,
+            staleErrorMs = 120_000L,
+        )
+
+        assertFalse(result.admitted)
+        assertTrue(result.shouldNotifyRejection)
+        assertEquals("capacity", result.rejectionReason)
+        assertEquals(setOf("d1", "d2", "d3", "d4"), result.state.active.keys)
+        assertFalse(result.state.active.containsKey("d5"))
+        assertEquals(setOf("d5"), result.state.rejectedPaths)
+    }
 }

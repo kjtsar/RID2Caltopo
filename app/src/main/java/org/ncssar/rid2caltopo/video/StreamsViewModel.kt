@@ -239,6 +239,17 @@ internal fun chooseResyncSnapshot(
     }
 }
 
+internal fun focusAfterStreamSync(
+    currentFocus: String?,
+    liveDesignators: Set<String>,
+    newlyVisibleLiveDesignators: Set<String>,
+): String? {
+    if (currentFocus == null) return null
+    if (currentFocus !in liveDesignators) return null
+    if (newlyVisibleLiveDesignators.isNotEmpty()) return null
+    return currentFocus
+}
+
 private val clueTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 private const val DEFAULT_CLUE_GIMBAL_ANGLE_DEG = -90.0
 private const val METERS_TO_FEET = 3.28084
@@ -2061,17 +2072,19 @@ class StreamsViewModel(
             }
             .map { it.designator }
             .toSet()
-        val focusedPath = _focusedPath.value
-        if (streamsUiActive && focusedPath != null) {
-            val newlyAttachedOffFocus = added.filter { it != focusedPath }
-            if (newlyAttachedOffFocus.isNotEmpty()) {
-                val msg = if (newlyAttachedOffFocus.size == 1) {
-                    "New stream attached: ${newlyAttachedOffFocus.first()}"
-                } else {
-                    "New streams attached: ${newlyAttachedOffFocus.joinToString(", ")}"
-                }
-                CaltopoClient.ShowToast(msg)
-                CTInfo(tag, "$msg -> keeping current focus")
+        val focusAfterSync = focusAfterStreamSync(
+            currentFocus = _focusedPath.value,
+            liveDesignators = liveDesignators,
+            newlyVisibleLiveDesignators = added,
+        )
+        if (focusAfterSync != _focusedPath.value) {
+            val previousFocus = _focusedPath.value
+            _focusedPath.value = focusAfterSync
+            if (previousFocus != null && added.isNotEmpty()) {
+                CTInfo(
+                    tag,
+                    "Live stream set changed while $previousFocus had focus -> clearing focus to show ${activeLiveStreams.size} streams"
+                )
             }
         }
 

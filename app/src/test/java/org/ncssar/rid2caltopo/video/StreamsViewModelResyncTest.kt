@@ -49,4 +49,48 @@ class StreamsViewModelResyncTest {
 
         assertEquals(latestFlow, chosen)
     }
+
+    @Test
+    fun focusAfterStreamSync_clearsFocusWhenSecondStreamBecomesLive() {
+        val focus = focusAfterStreamSync(
+            currentFocus = "1SAR33",
+            liveDesignators = setOf("1SAR33", "1sar7mn4pr"),
+            newlyVisibleLiveDesignators = setOf("1sar7mn4pr"),
+        )
+
+        assertEquals(null, focus)
+    }
+
+    @Test
+    fun focusAfterStreamSync_clearsFocusWhenFourthStreamBecomesLive() {
+        val focus = focusAfterStreamSync(
+            currentFocus = "1SAR33",
+            liveDesignators = setOf("1SAR33", "1sar7mn4pr", "1sar83", "1sar50"),
+            newlyVisibleLiveDesignators = setOf("1sar50"),
+        )
+
+        assertEquals(null, focus)
+    }
+
+    @Test
+    fun focusAfterStreamSync_keepsManualFocusWhenNoNewStreamArrived() {
+        val focus = focusAfterStreamSync(
+            currentFocus = "1sar7mn4pr",
+            liveDesignators = setOf("1SAR33", "1sar7mn4pr"),
+            newlyVisibleLiveDesignators = emptySet(),
+        )
+
+        assertEquals("1sar7mn4pr", focus)
+    }
+
+    @Test
+    fun focusAfterStreamSync_clearsFocusWhenFocusedStreamDisappears() {
+        val focus = focusAfterStreamSync(
+            currentFocus = "1SAR33",
+            liveDesignators = setOf("1sar7mn4pr"),
+            newlyVisibleLiveDesignators = emptySet(),
+        )
+
+        assertEquals(null, focus)
+    }
 }

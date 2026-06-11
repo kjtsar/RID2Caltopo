@@ -195,6 +195,7 @@ object ProximityAlertCenter {
         val remoteId: String,
         val mappedId: String,
         val teamDrone: Boolean,
+        val localAlertEligible: Boolean,
         val currentLat: Double,
         val currentLng: Double,
         val currentAltFt: Double,
@@ -494,6 +495,7 @@ object ProximityAlertCenter {
             remoteId = spec.remoteId,
             mappedId = spec.mappedId,
             teamDrone = !spec.isLocalArchiveOnly,
+            localAlertEligible = isLocalAlertEligible(spec.remoteId),
             currentLat = spec.lastLat,
             currentLng = spec.lastLng,
             currentAltFt = currentAltFt,
@@ -606,10 +608,17 @@ object ProximityAlertCenter {
     }
 
     private fun shouldAlertForPair(first: EvaluatedDrone, second: EvaluatedDrone): Boolean =
-        first.teamDrone || second.teamDrone
+        (first.teamDrone || second.teamDrone) &&
+            (first.localAlertEligible || second.localAlertEligible)
 
-    internal fun shouldAlertForPairForTests(firstTeamDrone: Boolean, secondTeamDrone: Boolean): Boolean =
-        firstTeamDrone || secondTeamDrone
+    internal fun shouldAlertForPairForTests(
+        firstTeamDrone: Boolean,
+        firstLocalAlertEligible: Boolean,
+        secondTeamDrone: Boolean,
+        secondLocalAlertEligible: Boolean
+    ): Boolean =
+        (firstTeamDrone || secondTeamDrone) &&
+            (firstLocalAlertEligible || secondLocalAlertEligible)
 
     internal fun resetForTests() {
         _uiState.value = null

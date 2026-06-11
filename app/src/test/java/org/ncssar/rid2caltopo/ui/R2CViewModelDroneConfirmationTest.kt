@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -16,12 +17,14 @@ import org.ncssar.rid2caltopo.data.SimpleTimer
 class R2CViewModelDroneConfirmationTest {
     @Before
     fun setUp() {
+        clearLocalTrackListeners()
         CaltopoClient.ResetPersistedClientState()
     }
 
     @After
     fun tearDown() {
         CaltopoClient.ResetPersistedClientState()
+        clearLocalTrackListeners()
     }
 
     @Test
@@ -334,7 +337,7 @@ class R2CViewModelDroneConfirmationTest {
     }
 
     @Test
-    fun localStandalonePromptClearsWhenDroneLeavesActiveList() {
+    fun localStandaloneSaveStaysSuppressedUntilTrackFinished() {
         val remoteId = "DRONESTANDALONE"
         val drone = activeDrone(remoteId, waypointTimestampMsec = 91011L)
         val viewModel = R2CViewModel(SimpleTimer())
@@ -348,10 +351,16 @@ class R2CViewModelDroneConfirmationTest {
         )
         viewModel.savePendingDroneConfirmation()
         assertNull(viewModel.pendingDroneConfirmation.value)
+        assertTrue(CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId))
         viewModel.onDroneSpecsChanged(listOf(drone))
         assertNull(viewModel.pendingDroneConfirmation.value)
 
         viewModel.onDroneSpecsChanged(emptyList())
+        viewModel.onDroneSpecsChanged(listOf(drone))
+
+        assertNull(viewModel.pendingDroneConfirmation.value)
+
+        CaltopoLiveTrack.NotifyLocalTrackFinished(drone, "test track finished")
         viewModel.onDroneSpecsChanged(listOf(drone))
 
         assertNotNull(viewModel.pendingDroneConfirmation.value)
@@ -451,5 +460,14 @@ class R2CViewModelDroneConfirmationTest {
             CtDroneSpec.TransportTypeEnum.BT4
         )
         return drone
+    }
+
+    private fun clearLocalTrackListeners() {
+        listOf("LocalTrackListeners", "LocalTrackFinishedListeners").forEach { fieldName ->
+            CaltopoLiveTrack::class.java.getDeclaredField(fieldName).apply {
+                isAccessible = true
+                (get(null) as MutableCollection<*>).clear()
+            }
+        }
     }
 }

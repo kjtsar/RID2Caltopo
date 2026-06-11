@@ -2290,6 +2290,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     ) {
         ClientClassState ccs = GetState();
         if (RejectNonCanonicalRemoteId("SaveDroneSpecConfirmation()", remoteId)) return;
+        CurrentPeerConfirmedDroneRemoteIds.add(remoteId);
         String trimmedOrg = org.trim();
         String trimmedModel = model.trim();
         String trimmedOwner = owner.trim();

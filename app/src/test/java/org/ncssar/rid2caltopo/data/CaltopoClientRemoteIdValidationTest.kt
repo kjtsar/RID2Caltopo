@@ -46,7 +46,7 @@ class CaltopoClientRemoteIdValidationTest {
         val drone = CaltopoClient.GetDroneSpec(remoteId)!!
         assertEquals("1SAR7m3", drone.mappedId)
         assertEquals("1SAR7", drone.owner)
-        assertFalse(CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId))
+        assertTrue(CaltopoClient.IsCurrentPeerDroneConfirmed(remoteId))
         assertFalse(CaltopoClient.IsSessionUnknownDrone(remoteId))
         assertNull(CaltopoClient.GetDroneSpec("RID-ABC"))
     }

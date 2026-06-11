@@ -9,11 +9,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.data.FakePeerCoordinator
+import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
+import org.ncssar.rid2caltopo.data.TestR2cRuntimeFactory
 
 class ProximityAlertHostThresholdTest {
     @After
     fun tearDown() {
         ProximityAlertCenter.resetForTests()
+        R2cRuntimeRegistry.resetDefaultRuntimeForTesting()
     }
 
     @Test
@@ -70,16 +74,47 @@ class ProximityAlertHostThresholdTest {
 
     @Test
     fun proximityAlertRequiresAtLeastOneOwnedDroneButAllowsNonOwnedTraffic() {
-        assertTrue(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = true, secondTeamDrone = true))
-        assertTrue(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = true, secondTeamDrone = false))
-        assertTrue(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = false, secondTeamDrone = true))
-        assertFalse(ProximityAlertCenter.shouldAlertForPairForTests(firstTeamDrone = false, secondTeamDrone = false))
+        assertTrue(
+            ProximityAlertCenter.shouldAlertForPairForTests(
+                firstTeamDrone = true,
+                firstLocalAlertEligible = true,
+                secondTeamDrone = true,
+                secondLocalAlertEligible = false
+            )
+        )
+        assertTrue(
+            ProximityAlertCenter.shouldAlertForPairForTests(
+                firstTeamDrone = true,
+                firstLocalAlertEligible = true,
+                secondTeamDrone = false,
+                secondLocalAlertEligible = false
+            )
+        )
+        assertFalse(
+            ProximityAlertCenter.shouldAlertForPairForTests(
+                firstTeamDrone = true,
+                firstLocalAlertEligible = false,
+                secondTeamDrone = false,
+                secondLocalAlertEligible = false
+            )
+        )
+        assertFalse(
+            ProximityAlertCenter.shouldAlertForPairForTests(
+                firstTeamDrone = false,
+                firstLocalAlertEligible = true,
+                secondTeamDrone = false,
+                secondLocalAlertEligible = true
+            )
+        )
     }
 
     @Test
     fun updateDronesAlertsWhenOwnedDroneIsNearNonOwnedTraffic() {
         CaltopoClient.SetProximityAlertSpacingFeet(40)
         CaltopoClient.SetPredictiveHeadEnabled(false)
+        val fixture = TestR2cRuntimeFactory.create("proximity-owner")
+        fixture.setAsDefaultRuntime()
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
         ProximityAlertCenter.resetForTests()
 
         val owned = proximityDrone(
@@ -99,6 +134,13 @@ class ProximityAlertHostThresholdTest {
             localArchiveOnly = true
         )
 
+        ProximityAlertCenter.updateDrones(listOf(owned, traffic))
+
+        assertNull(ProximityAlertCenter.uiState.value)
+        assertFalse(ProximityAlertCenter.debugPairs.value.single().alerting)
+
+        peerCoordinator.setLocalOwnership("TEAMDRONE1", true)
+        ProximityAlertCenter.resetForTests()
         ProximityAlertCenter.updateDrones(listOf(owned, traffic))
 
         val alert = ProximityAlertCenter.uiState.value

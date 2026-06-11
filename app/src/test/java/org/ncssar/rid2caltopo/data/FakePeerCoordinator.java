@@ -103,6 +103,11 @@ public final class FakePeerCoordinator implements PeerCoordinator {
     }
 
     @Override
+    public boolean isLocalAlertEligible(@NonNull String remoteId) {
+        return isLocalOwner(remoteId);
+    }
+
+    @Override
     public void updateCaltopoRtt(long rttMs) {
         record("updateCaltopoRtt", Long.toString(rttMs));
     }

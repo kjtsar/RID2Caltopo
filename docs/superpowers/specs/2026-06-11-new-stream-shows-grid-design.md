@@ -18,6 +18,11 @@ visible in the streams grid. The layout change is the operator-facing alert.
   the current focused stream before render routing and layout decisions.
 - With no focused stream, `StreamsScreen` shows every visible live stream using
   the existing grid rules.
+- The existing stream admission cap remains four simultaneous streams. The first
+  through fourth live streams should be visible together in the grid when no
+  stream is focused.
+- A fifth concurrent stream should be rejected by the existing admission path
+  without disrupting the four visible streams.
 - Operators can focus an individual stream again after seeing the multi-stream
   grid.
 - The existing "New stream attached: ..." toast is removed for this path.
@@ -29,6 +34,7 @@ visible in the streams grid. The layout change is the operator-facing alert.
 - Do not add a persistent notification, banner, or extra stream count indicator.
 - Do not change the current grid geometry beyond allowing it to become visible
   when new streams arrive.
+- Do not raise the existing four-stream admission limit.
 
 ## Implementation Shape
 
@@ -46,6 +52,10 @@ Use focused unit tests around the stream view-model/router seam:
 - A focused single live stream receiving a second newly live stream clears focus.
 - After focus clears, the displayed tile count follows the live stream count
   rather than remaining at one.
+- Two, three, and four concurrent live streams remain visible together when a new
+  stream arrival clears focus.
+- A fifth concurrent stream fails cleanly through the existing admission
+  rejection path and leaves the four admitted streams visible.
 - A user can focus a stream again after the new-stream grid is visible.
 - The new-stream attached toast path is removed or no longer invoked.
 
@@ -53,8 +63,11 @@ Use focused unit tests around the stream view-model/router seam:
 
 - If stream A is focused and stream B becomes live, the UI returns to the grid
   with both A and B visible.
-- If stream C later becomes live while a stream is focused, the UI again returns
-  to the grid with all visible live streams.
+- If additional streams later become live while a stream is focused, the UI again
+  returns to the grid with all admitted visible live streams, up to the existing
+  four-stream limit.
+- If a fifth concurrent stream attempts to connect, it is rejected cleanly and
+  the four admitted streams remain visible.
 - No "New stream attached: ..." toast is shown for this connection event.
 - Existing single-stream focus behavior still works when the operator manually
   selects a stream after the grid is visible.

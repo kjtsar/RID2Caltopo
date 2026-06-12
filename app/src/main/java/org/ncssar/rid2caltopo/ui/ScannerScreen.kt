@@ -90,8 +90,8 @@ fun ScannerScreen(
                             Column(
                                 modifier = Modifier.width(IntrinsicSize.Max)
                             ) {
-                                Text("BUILD_VERSION: ${BuildConfig.BUILD_VERSION}")
-                                Text("BUILD_TIME: ${BuildConfig.BUILD_TIME}")
+                                Text("BUILD_VERSION: ${currentBuildVersion()}")
+                                Text("BUILD_TIME: ${currentBuildTime()}")
 
                                 Spacer(modifier = Modifier.height(24.dp))
                                 StatusSectionHeader("Scanner Status")
@@ -197,8 +197,8 @@ private fun StatusSectionHeader(title: String) {
 internal fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.data.CtDroneSpec>): String {
     val bluetooth5 = R2CActivity.codedPhySupported || R2CActivity.extendedAdvertisingSupported
     val builder = StringBuilder()
-    builder.appendLine("BUILD_VERSION: ${BuildConfig.BUILD_VERSION}")
-    builder.appendLine("BUILD_TIME: ${BuildConfig.BUILD_TIME}")
+    builder.appendLine("BUILD_VERSION: ${currentBuildVersion()}")
+    builder.appendLine("BUILD_TIME: ${currentBuildTime()}")
     builder.appendLine()
     builder.appendLine("Scanner Status")
     builder.appendLine("Bluetooth 4: ${R2CActivity.legacyBluetoothSupported}")
@@ -221,3 +221,10 @@ internal fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.da
     }
     return builder.toString().trimEnd()
 }
+
+private fun currentBuildVersion(): String = buildConfigString("BUILD_VERSION")
+
+private fun currentBuildTime(): String = buildConfigString("BUILD_TIME")
+
+private fun buildConfigString(fieldName: String): String =
+    BuildConfig::class.java.getField(fieldName).get(null) as String

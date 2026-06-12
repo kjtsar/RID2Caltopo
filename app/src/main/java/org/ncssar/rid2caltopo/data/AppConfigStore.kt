@@ -15,6 +15,7 @@ import java.io.IOException
 import java.util.ArrayList
 import java.util.Hashtable
 import java.util.Locale
+import java.util.concurrent.Executors
 
 private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
     fileName = "app_config.pb",
@@ -27,26 +28,54 @@ object AppConfigStore {
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
 
+    private data class PendingConfigWrite(
+        val context: Context,
+        val config: AppConfig,
+        val reason: String
+    )
+
+    private val cacheLock = Any()
+    @Volatile
+    private var cachedConfig: AppConfig? = null
     @Volatile
     private var appContext: Context? = null
     @Volatile
     private var initializedDatastorePath: String? = null
+    private val persistenceExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "r2c-app-config-store").apply { isDaemon = true }
+    }
+    private val backgroundWriter = CoalescingBackgroundWriter<PendingConfigWrite>(
+        dispatch = { task -> persistenceExecutor.execute(task) },
+        write = { pending -> writeConfigBlockingToDataStore(pending.context, pending.config) },
+        onWriteComplete = { pending -> requestBackup(pending.context, pending.reason) },
+        onWriteFailed = { pending, error ->
+            CaltopoClient.CTWarn(
+                TAG,
+                "background config persist failed after ${pending.reason}: ${error.javaClass.simpleName}:${error.message}",
+                error as? Exception ?: RuntimeException(error)
+            )
+        }
+    )
 
     @JvmStatic
     @Synchronized
     fun initialize(context: Context) {
         val nextContext = context.applicationContext
         val datastorePath = "${nextContext.filesDir.parent}/files/datastore/app_config.pb"
-        if (appContext === nextContext && initializedDatastorePath == datastorePath) return
+        if (appContext === nextContext && initializedDatastorePath == datastorePath && cachedConfig != null) return
         appContext = nextContext
         initializedDatastorePath = datastorePath
         CaltopoClient.CTDebug(TAG, "initialize(): datastore path=$datastorePath")
+        val config = readConfigBlockingFromDataStore(nextContext)
+        synchronized(cacheLock) {
+            cachedConfig = config
+        }
     }
 
     @JvmStatic
     fun restoreClientState(context: Context): Any {
         initialize(context)
-        val config = readConfigBlocking()
+        val config = currentConfigSnapshot()
         CaltopoClient.CTDebug(
             TAG,
             "restoreClientState(): legacyImportComplete=${config.legacyImportComplete}, ridMappings=${config.ridMappingsCount}, loadedConfigFiles=${config.loadedConfigFilesCount}, archiveUriBlank=${config.archiveLocation.treeUri.isBlank()}"
@@ -57,7 +86,7 @@ object AppConfigStore {
     @JvmStatic
     fun exportConfigBytes(context: Context): ByteArray {
         initialize(context)
-        return readConfigBlocking().toByteArray()
+        return currentConfigSnapshot().toByteArray()
     }
 
     @JvmStatic
@@ -65,7 +94,7 @@ object AppConfigStore {
         initialize(context)
         return try {
             val imported = AppConfig.parseFrom(bytes)
-            writeConfigBlocking(imported)
+            replaceCachedConfigAndEnqueueWrite(context, imported, "importConfigBytes")
             true
         } catch (e: Exception) {
             CaltopoClient.CTWarn(TAG, "importConfigBytes(): unable to parse imported config.", e)
@@ -76,17 +105,16 @@ object AppConfigStore {
     @JvmStatic
     fun hasMeaningfulConfig(context: Context): Boolean {
         initialize(context)
-        return hasMeaningfulConfig(readConfigBlocking())
+        return hasMeaningfulConfig(currentConfigSnapshot())
     }
 
     @JvmStatic
     fun persistState(context: Context, state: Any, archivePermissionMissing: Boolean) {
         initialize(context)
         val typedState = state as? ClientClassState ?: return
-        val current = readConfigBlocking()
-        val updated = mergeStateIntoConfig(current, typedState, archivePermissionMissing)
-        writeConfigBlocking(updated)
-        requestBackup(context, "persistState")
+        updateCachedConfigAndEnqueueWrite(context, "persistState") { current ->
+            mergeStateIntoConfig(current, typedState, archivePermissionMissing)
+        }
     }
 
     @JvmStatic
@@ -97,7 +125,6 @@ object AppConfigStore {
         updated: String
     ): String {
         initialize(context)
-        val current = readConfigBlocking()
         val nowMs = System.currentTimeMillis()
         val display = String.format(
             Locale.US,
@@ -108,25 +135,25 @@ object AppConfigStore {
             CaltopoClient.TimeDatestampString(nowMs)
         )
         val dedupeKey = String.format(Locale.US, "type:%s|editor:%s|dated:%s", type, editor, updated)
-        val updatedConfig = current.toBuilder()
-            .clearLoadedConfigFiles()
-            .addAllLoadedConfigFiles(mergeLoadedConfigFiles(current.loadedConfigFilesList, dedupeKey, display, nowMs))
-            .build()
-        writeConfigBlocking(updatedConfig)
-        requestBackup(context, "recordLoadedConfigFile")
+        val updatedConfig = updateCachedConfigAndEnqueueWrite(context, "recordLoadedConfigFile") { current ->
+            current.toBuilder()
+                .clearLoadedConfigFiles()
+                .addAllLoadedConfigFiles(mergeLoadedConfigFiles(current.loadedConfigFilesList, dedupeKey, display, nowMs))
+                .build()
+        }
         return loadedConfigFilesDisplay(updatedConfig)
     }
 
     @JvmStatic
     fun getArchiveSelectionHint(context: Context): String {
         initialize(context)
-        return readConfigBlocking().archiveLocation.selectionHintUri
+        return currentConfigSnapshot().archiveLocation.selectionHintUri
     }
 
     @JvmStatic
     fun getArchiveRequiresRegrant(context: Context): Boolean {
         initialize(context)
-        return readConfigBlocking().archiveLocation.requiresRegrant
+        return currentConfigSnapshot().archiveLocation.requiresRegrant
     }
 
     @JvmStatic
@@ -142,10 +169,43 @@ object AppConfigStore {
         }
     }
 
-    private fun readConfigBlocking(): AppConfig {
-        val context = requireNotNull(appContext) { "AppConfigStore not initialized." }
+    private fun currentConfigSnapshot(): AppConfig =
+        cachedConfig ?: throw IllegalStateException("AppConfigStore cache not initialized.")
+
+    private fun replaceCachedConfigAndEnqueueWrite(context: Context, config: AppConfig, reason: String): AppConfig {
+        synchronized(cacheLock) {
+            cachedConfig = config
+        }
+        enqueueConfigWrite(context, config, reason)
+        return config
+    }
+
+    private fun updateCachedConfigAndEnqueueWrite(
+        context: Context,
+        reason: String,
+        update: (AppConfig) -> AppConfig
+    ): AppConfig {
+        val updated = synchronized(cacheLock) {
+            val current = cachedConfig ?: throw IllegalStateException("AppConfigStore cache not initialized.")
+            update(current).also { cachedConfig = it }
+        }
+        enqueueConfigWrite(context, updated, reason)
+        return updated
+    }
+
+    private fun enqueueConfigWrite(context: Context, config: AppConfig, reason: String) {
+        backgroundWriter.enqueue(
+            PendingConfigWrite(
+                context = context.applicationContext,
+                config = config,
+                reason = reason
+            )
+        )
+    }
+
+    private fun readConfigBlockingFromDataStore(context: Context): AppConfig {
         val dataStoreFile = context.filesDir.resolve("datastore/app_config.pb")
-        CaltopoClient.CTDebug(TAG, "readConfigBlocking(): exists=${dataStoreFile.exists()} size=${if (dataStoreFile.exists()) dataStoreFile.length() else 0}")
+        CaltopoClient.CTDebug(TAG, "readConfigBlockingFromDataStore(): exists=${dataStoreFile.exists()} size=${if (dataStoreFile.exists()) dataStoreFile.length() else 0}")
         return runBlocking {
             context.appConfigDataStore.data
                 .catch { ex ->
@@ -155,15 +215,14 @@ object AppConfigStore {
         }
     }
 
-    private fun writeConfigBlocking(config: AppConfig) {
-        val context = requireNotNull(appContext) { "AppConfigStore not initialized." }
+    private fun writeConfigBlockingToDataStore(context: Context, config: AppConfig) {
         runBlocking {
             context.appConfigDataStore.updateData { config }
         }
         val dataStoreFile = context.filesDir.resolve("datastore/app_config.pb")
         CaltopoClient.CTDebug(
             TAG,
-            "writeConfigBlocking(): exists=${dataStoreFile.exists()} size=${if (dataStoreFile.exists()) dataStoreFile.length() else 0}, ridMappings=${config.ridMappingsCount}, loadedConfigFiles=${config.loadedConfigFilesCount}"
+            "writeConfigBlockingToDataStore(): exists=${dataStoreFile.exists()} size=${if (dataStoreFile.exists()) dataStoreFile.length() else 0}, ridMappings=${config.ridMappingsCount}, loadedConfigFiles=${config.loadedConfigFilesCount}"
         )
     }
 

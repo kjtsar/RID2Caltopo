@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -58,7 +59,6 @@ import org.ncssar.rid2caltopo.app.ArchiveCleanupDeleteResult
 import org.ncssar.rid2caltopo.app.ArchiveCleanupDirectoryOption
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.LogArchiveDayOption
-import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.app.canDeleteArchiveCleanupSelection
 import org.ncssar.rid2caltopo.app.defaultSelectedArchiveCleanupDirectories
 import org.ncssar.rid2caltopo.app.formatArchiveSize
@@ -140,6 +140,13 @@ sealed interface MainScreenItem {
 
 private fun shouldOfferDriveRestore(context: Context): Boolean {
     return !AppConfigStore.hasMeaningfulConfig(context) && CaltopoClient.GetArchiveUri() == null
+}
+
+internal suspend fun <T> readMutualAidPackagePreviewOffMain(
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    readPreview: () -> T
+): T = withContext(dispatcher) {
+    readPreview()
 }
 
 // Try to bust thru Google Drive's cache to get the latest version of requested
@@ -252,8 +259,9 @@ fun MainScreen(
     var pendingOrgExport by remember { mutableStateOf(false) }
     var pendingFaaExport by remember { mutableStateOf(false) }
     var driveSyncInProgress by remember { mutableStateOf(false) }
-    var showDriveRestoreDialog by remember { mutableStateOf(shouldOfferDriveRestore(context)) }
-    var linkedDriveEmail by remember { mutableStateOf(GoogleDriveConfigSync.getLinkedAccountEmail(context)) }
+    var driveRestoreEligibilityLoaded by remember { mutableStateOf(false) }
+    var showDriveRestoreDialog by remember { mutableStateOf(false) }
+    var linkedDriveEmail by remember { mutableStateOf("") }
     var showOrgExportDialog by remember { mutableStateOf(false) }
     var showFaaExportDialog by remember { mutableStateOf(false) }
     var showImportConfigDialog by remember { mutableStateOf(false) }
@@ -261,6 +269,7 @@ fun MainScreen(
     var releaseNoteEntries by remember { mutableStateOf(parseReleaseNotes(null)) }
     var pendingMutualAidImportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingMutualAidImportPreview by remember { mutableStateOf<MutualAidPackageManager.PackagePreview?>(null) }
+    var mutualAidPreviewRequestId by remember { mutableLongStateOf(0L) }
     var showMutualAidImportPreviewDialog by remember { mutableStateOf(false) }
     var importingMutualAidConfig by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
@@ -298,8 +307,21 @@ fun MainScreen(
     val coroutineScope = rememberCoroutineScope()
 
     fun refreshDriveState() {
-        linkedDriveEmail = GoogleDriveConfigSync.getLinkedAccountEmail(context)
-        showDriveRestoreDialog = shouldOfferDriveRestore(context)
+        coroutineScope.launch {
+            val email = withContext(Dispatchers.IO) {
+                GoogleDriveConfigSync.getLinkedAccountEmail(context)
+            }
+            val offerRestore = withContext(Dispatchers.IO) {
+                shouldOfferDriveRestore(context)
+            }
+            linkedDriveEmail = email
+            showDriveRestoreDialog = offerRestore
+            driveRestoreEligibilityLoaded = true
+        }
+    }
+
+    LaunchedEffect(context) {
+        refreshDriveState()
     }
 
     fun runDriveAction(accountResult: ActivityResult? = null, requestedAction: DriveSyncAction) {
@@ -374,15 +396,24 @@ fun MainScreen(
     val importMutualAidPackageLauncher = rememberLauncherForActivityResult(
         contract = FreshOpenDocument(),
         onResult = { uri ->
+            mutualAidPreviewRequestId += 1L
+            val requestId = mutualAidPreviewRequestId
             if (uri == null) return@rememberLauncherForActivityResult
-            val preview = MutualAidPackageManager.readPackagePreview(context, uri)
-            if (!preview.first || preview.second == null) {
-                CaltopoClient.ShowToast("Could not read MA package preview.")
-                return@rememberLauncherForActivityResult
+            pendingMutualAidImportUri = null
+            pendingMutualAidImportPreview = null
+            coroutineScope.launch {
+                val preview = readMutualAidPackagePreviewOffMain {
+                    MutualAidPackageManager.readPackagePreview(context, uri)
+                }
+                if (requestId != mutualAidPreviewRequestId) return@launch
+                if (!preview.first || preview.second == null) {
+                    CaltopoClient.ShowToast("Could not read MA package preview.")
+                    return@launch
+                }
+                pendingMutualAidImportUri = uri
+                pendingMutualAidImportPreview = preview.second
+                showMutualAidImportPreviewDialog = true
             }
-            pendingMutualAidImportUri = uri
-            pendingMutualAidImportPreview = preview.second
-            showMutualAidImportPreviewDialog = true
         }
     )
 
@@ -898,13 +929,19 @@ fun MainScreen(
             }
         }
     )
-    LaunchedEffect(showDriveRestoreDialog, driveSyncInProgress, forceArchiveDirPrompt) {
+    LaunchedEffect(showDriveRestoreDialog, driveSyncInProgress, forceArchiveDirPrompt, driveRestoreEligibilityLoaded) {
+        val archiveUriMissing = withContext(Dispatchers.IO) {
+            null == CaltopoClient.GetArchiveUri()
+        }
         val shouldPromptArchiveDir =
-            null == CaltopoClient.GetArchiveUri() &&
-                (forceArchiveDirPrompt || (!showDriveRestoreDialog && !driveSyncInProgress))
+            archiveUriMissing &&
+                (forceArchiveDirPrompt || (driveRestoreEligibilityLoaded && !showDriveRestoreDialog && !driveSyncInProgress))
         if (shouldPromptArchiveDir) {
-            val initialUri = CaltopoClient.GetArchiveUriSelectionHint()
-            val prompt = if (CaltopoClient.WasArchiveUriPermissionMissing()) {
+            val initialUri = withContext(Dispatchers.IO) {
+                CaltopoClient.GetArchiveUriSelectionHint()
+            }
+            val permissionMissing = CaltopoClient.WasArchiveUriPermissionMissing()
+            val prompt = if (permissionMissing) {
                 "Archive folder access expired. Please re-select the archive directory for tracks and map cache."
             } else {
                 "Select an archive directory for drone tracks and map cache."

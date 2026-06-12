@@ -575,7 +575,14 @@ public class CaltopoMap {
 
     public static void RequestMapRefreshNow() {
         if (MapNode == null) return;
+        boolean restartPeriodicUpdates = MapCheckerDelay.stop();
         PollMapUpdates();
+        if (restartPeriodicUpdates && !ShutdownInProgress && MapNode != null) {
+            MapCheckerDelay.start(
+                    CaltopoMap::PollMapUpdates,
+                    RepeatMapUpdateTimeInSeconds * 1000,
+                    RepeatMapUpdateTimeInSeconds * 1000);
+        }
     }
 
     public static void ReloadMapArtifactsNow(@Nullable Runnable onComplete) {
@@ -1497,9 +1504,7 @@ public class CaltopoMap {
             prop.put("class", "Shape");  // convert from LiveTrack to shape.
             CaltopoOp op = getCurrentRuntime().getCalTopoSessionGateway()
                     .editObjectWithId("Shape", trackId, feature, archiveOp ->
-                            CTInfo(TAG, String.format(Locale.US,
-                                    "archiveFeature(): edit trackId=%s success=%s responseCode=%d",
-                                    trackId, archiveOp.success(), archiveOp.responseCode)));
+                            onArchiveFeatureEditFinished(trackId, archiveOp));
             if (maxWaitInMilliseconds > 0) {
                 op.syncOp(maxWaitInMilliseconds);
                 maxWaitInMilliseconds = maxWaitInMilliseconds - (System.currentTimeMillis() - timeNowInMilliseconds);
@@ -1517,6 +1522,16 @@ public class CaltopoMap {
         } catch (Exception e) {
             CTError(TAG, "archiveFeature() raised:", e);
         }
+    }
+
+    private static void onArchiveFeatureEditFinished(@NonNull String trackId, @NonNull CaltopoOp archiveOp) {
+        CTInfo(TAG, String.format(Locale.US,
+                "archiveFeature(): edit trackId=%s success=%s responseCode=%d",
+                trackId, archiveOp.success(), archiveOp.responseCode));
+        if (!archiveOp.success()) return;
+        CTInfo(TAG, String.format(Locale.US,
+                "archiveFeature(): requesting map update after archiving trackId=%s", trackId));
+        RequestMapRefreshNow();
     }
 
     public static MapStatusListener.mapStatus GetMapStatus() {return (MapStatus);}

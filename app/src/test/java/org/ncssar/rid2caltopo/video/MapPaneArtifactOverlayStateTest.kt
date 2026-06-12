@@ -376,6 +376,30 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun mapFolderUiDebugSummary_listsArchiveFolderVisibilityAndItems() {
+        val archiveFolder = folderFeature("archive-folder", "Drone Tracks11Jun")
+            .also { it.getJSONObject("properties").put("visible", false) }
+        val archivedTrack = lineFeature("track-1", "1SAR34DjN2_113225Jun11", "archive-folder")
+        val folders = buildMapFolderUiStates(
+            mapOf(
+                "archive-folder" to archiveFolder,
+                "track-1" to archivedTrack
+            )
+        )
+
+        val summary = mapFolderUiDebugSummary(
+            folders = folders,
+            hiddenFolderIds = setOf("archive-folder"),
+            hiddenItemIds = emptySet()
+        )
+
+        assertEquals(
+            "folders=1 | Drone Tracks11Jun id=archive-folder hidden=true defaultVisible=false items=1 hiddenItems=0 sample=[1SAR34DjN2_113225Jun11(track-1)]",
+            summary
+        )
+    }
+
+    @Test
     fun buildArtifactOverlayState_honorsHiddenAssignmentsGroup() {
         val assignment = assignmentPolygonFeature("assignment-aa", "AA")
 

@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.data
 
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -136,6 +137,27 @@ class CaltopoMapTest {
         assertEquals(1, fixture.calTopoSessionGateway.countOperations("deleteMarker"))
         val deleteIndex = operations.indexOfFirst { it.kind == "deleteMarker" }
         assertTrue(operations.toString(), deleteIndex >= 0)
+    }
+
+    @Test
+    fun archiveFeature_refreshesMapUpdatesAfterArchiveEditSucceeds() {
+        val feature = JSONObject()
+            .put("id", "track-archive-refresh")
+            .put(
+                "properties",
+                JSONObject()
+                    .put("class", "LiveTrack")
+                    .put("title", "RID_120000Jun12")
+                    .put("folderId", "folder-test")
+            )
+
+        CaltopoMap.ArchiveFeature(feature, "Shape", 1_000L, 0L)
+
+        val operations = fixture.calTopoSessionGateway.snapshotOperations()
+        val editIndex = operations.indexOfFirst { it.kind == "editObject" }
+        val refreshIndex = operations.indexOfFirst { it.kind == "openMap" }
+        assertTrue(operations.toString(), editIndex >= 0)
+        assertTrue(operations.toString(), refreshIndex > editIndex)
     }
 
     @Test

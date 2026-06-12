@@ -2569,8 +2569,9 @@ internal fun SplitMapPane(
     }
 
     if (showMapFoldersDialog) {
+        val mapFolderUiStates = buildMapFolderUiStates(artifactStoreById)
         MapFoldersDialog(
-            folders = buildMapFolderUiStates(artifactStoreById),
+            folders = mapFolderUiStates,
             hiddenFolderIds = hiddenFolderIds,
             hiddenItemIds = hiddenItemIds,
             onFolderVisibilityChanged = { folderId, visible ->
@@ -3935,6 +3936,14 @@ internal fun SplitMapPane(
                 DropdownMenuItem(
                     text = { Text("Map Folders...") },
                     onClick = {
+                        CTInfo(
+                            MAP_PANE_TAG,
+                            "Map Folders opened: " + mapFolderUiDebugSummary(
+                                folders = buildMapFolderUiStates(artifactStoreById),
+                                hiddenFolderIds = hiddenFolderIds,
+                                hiddenItemIds = hiddenItemIds
+                            )
+                        )
                         settingsMenuExpanded = false
                         showMapFoldersDialog = true
                     },
@@ -4756,6 +4765,23 @@ internal fun buildMapFolderUiStates(features: Map<String, JSONObject>): List<Map
                 items = (folderItems[folderId] ?: emptyList()).sortedBy { it.title }
             )
         }
+}
+
+internal fun mapFolderUiDebugSummary(
+    folders: List<MapFolderUiState>,
+    hiddenFolderIds: Set<String>,
+    hiddenItemIds: Set<String>
+): String {
+    val folderSummaries = folders.map { folder ->
+        val hiddenItemCount = folder.items.count { it.featureId in hiddenItemIds }
+        val sampleItems = folder.items.take(5).joinToString(separator = ",") { item ->
+            "${item.title}(${item.featureId})"
+        }
+        "${folder.title} id=${folder.folderId} hidden=${folder.folderId in hiddenFolderIds} " +
+            "defaultVisible=${folder.initiallyVisible} items=${folder.items.size} " +
+            "hiddenItems=$hiddenItemCount sample=[$sampleItems]"
+    }
+    return (listOf("folders=${folders.size}") + folderSummaries).joinToString(separator = " | ")
 }
 
 internal fun buildArtifactOverlayState(

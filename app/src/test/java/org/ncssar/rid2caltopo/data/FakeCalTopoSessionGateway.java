@@ -183,7 +183,9 @@ public final class FakeCalTopoSessionGateway implements CalTopoSessionGateway {
     @Override
     public CaltopoOp editObjectWithId(@NonNull String objectType, @NonNull String objId, @NonNull JSONObject featureSet, @Nullable Consumer<CaltopoOp> onComplete) {
         record("editObject", objectType + ":" + objId, featureSet);
-        return completedOp(objId);
+        CaltopoOp op = completedOp(objId);
+        if (onComplete != null) onComplete.accept(op);
+        return op;
     }
 
     @NonNull

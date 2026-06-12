@@ -5253,8 +5253,16 @@ private fun artifactDisplayTitle(properties: JSONObject?, featureId: String, cla
 }
 
 private fun archivedDroneTrackPilotCallsign(properties: JSONObject?): String? {
-    val r2cProp = properties?.optJSONObject("r2c_prop") ?: return null
-    return normalizePilotCallsign(r2cProp.optString("owner"))
+    val r2cProp = properties?.optJSONObject("r2c_prop")
+    normalizePilotCallsign(r2cProp?.optString("owner"))?.let { return it }
+    val description = properties?.optString("description").orEmpty()
+    description.lineSequence().forEach { line ->
+        val parts = line.split(":", limit = 2)
+        if (parts.size == 2 && parts[0].trim().equals("Pilot Callsign", ignoreCase = true)) {
+            return normalizePilotCallsign(parts[1])
+        }
+    }
+    return null
 }
 
 private fun orphanFolderTitle(folderId: String): String {

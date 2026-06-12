@@ -1,6 +1,5 @@
 package org.ncssar.rid2caltopo.video
 
-import android.graphics.Color as AndroidColor
 import org.json.JSONArray
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -456,15 +455,40 @@ class MapPaneArtifactOverlayStateTest {
             stroke = "#FF00FF"
         )
 
+        var requestedCallsign: String? = null
         val state = buildArtifactOverlayState(
             listOf(archivedTrack),
             pilotArchiveTrackColorForCallsign = { callsign ->
+                requestedCallsign = callsign
                 if (callsign == "ALPHA") "#43A047" else null
             }
         )
 
         assertEquals(1, state.lines.size)
-        assertEquals(AndroidColor.parseColor("#43A047"), state.lines.single().color)
+        assertEquals("ALPHA", requestedCallsign)
+    }
+
+    @Test
+    fun buildArtifactOverlayState_usesPilotArchivePreferenceFromCaltopoArchiveDescription() {
+        val archivedTrack = caltopoArchivedDroneTrackFeature(
+            id = "track-alpha-caltopo",
+            title = "ALPHA-M3",
+            folderId = "archive-folder",
+            description = "Pilot Callsign: alpha\nPilot Organization: NCSSAR",
+            stroke = "#FF00FF"
+        )
+
+        var requestedCallsign: String? = null
+        val state = buildArtifactOverlayState(
+            listOf(archivedTrack),
+            pilotArchiveTrackColorForCallsign = { callsign ->
+                requestedCallsign = callsign
+                if (callsign == "ALPHA") "#43A047" else null
+            }
+        )
+
+        assertEquals(1, state.lines.size)
+        assertEquals("ALPHA", requestedCallsign)
     }
 
     @Test
@@ -697,6 +721,36 @@ class MapPaneArtifactOverlayStateTest {
                             .put("mid", title)
                             .put("rid", "rid-$id")
                     )
+            )
+            .put(
+                "geometry",
+                JSONObject()
+                    .put("type", "LineString")
+                    .put(
+                        "coordinates",
+                        JSONArray()
+                            .put(JSONArray().put(-122.0).put(37.0))
+                            .put(JSONArray().put(-122.1).put(37.1))
+                    )
+            )
+
+    private fun caltopoArchivedDroneTrackFeature(
+        id: String,
+        title: String,
+        folderId: String,
+        description: String,
+        stroke: String
+    ): JSONObject =
+        JSONObject()
+            .put("id", id)
+            .put(
+                "properties",
+                JSONObject()
+                    .put("class", "Shape")
+                    .put("title", title)
+                    .put("folderId", folderId)
+                    .put("description", description)
+                    .put("stroke", stroke)
             )
             .put(
                 "geometry",

@@ -31,7 +31,8 @@ fun parseMapHierarchy(jsonResponse: JSONObject): List<CaltopoNode> {
 
     val nodeMap = mutableMapOf<String, CaltopoNode>()
     val parentMap = mutableMapOf<String, String>() // ChildID -> ParentID
-    val relParentMap = mutableMapOf<String, String>() // MapID -> folder/account from bookmark relation
+    val relFolderParentMap = mutableMapOf<String, String>() // MapID -> folder from bookmark relation
+    val relAccountParentMap = mutableMapOf<String, String>() // MapID -> account from bookmark relation
     val allMapsFlat = mutableListOf<CaltopoNode.MapNode>()
 
     fun JSONObject.cleanId(key: String): String {
@@ -64,8 +65,8 @@ fun parseMapHierarchy(jsonResponse: JSONObject): List<CaltopoNode> {
 
         val folderId = props.cleanId("folderId")
         val accountId = props.cleanId("accountId")
-        val pid = if (folderId.isNotEmpty()) folderId else accountId
-        if (pid.isNotEmpty()) relParentMap[mapId] = pid
+        if (folderId.isNotEmpty()) relFolderParentMap[mapId] = folderId
+        if (accountId.isNotEmpty()) relAccountParentMap[mapId] = accountId
     }
 
     // 2. Second Pass: Extract Folders and Maps
@@ -77,9 +78,16 @@ fun parseMapHierarchy(jsonResponse: JSONObject): List<CaltopoNode> {
 
         val folderId = props.cleanId("folderId")
         val accountId = props.cleanId("accountId")
+        val relFolderId = relFolderParentMap[id].orEmpty()
+        val relAccountId = relAccountParentMap[id].orEmpty()
 
-        // Priority: Nest in folder if available, otherwise nest in account
-        val pid = relParentMap[id] ?: if (folderId.isNotEmpty()) folderId else accountId
+        // Priority: explicit map folder, relation folder for folderless bookmarks, then account fallback.
+        val pid = when {
+            folderId.isNotEmpty() -> folderId
+            relFolderId.isNotEmpty() -> relFolderId
+            accountId.isNotEmpty() -> accountId
+            else -> relAccountId
+        }
         if (pid.isNotEmpty()) parentMap[id] = pid
 
         when (className) {

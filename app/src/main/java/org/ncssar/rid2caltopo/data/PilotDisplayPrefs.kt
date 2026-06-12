@@ -1,0 +1,78 @@
+package org.ncssar.rid2caltopo.data
+
+import android.content.Context
+import java.util.Locale
+
+const val DEFAULT_ACTIVE_TRACK_COLOR = "#1E88E5"
+const val DEFAULT_ARCHIVE_TRACK_COLOR = "#FF00FF"
+
+data class PilotDisplayPreference(
+    val activeTrackColor: String = DEFAULT_ACTIVE_TRACK_COLOR,
+    val archiveTrackColor: String = DEFAULT_ARCHIVE_TRACK_COLOR,
+    val bearingEnabled: Boolean = false
+)
+
+fun normalizePilotCallsign(raw: String?): String? {
+    val normalized = raw?.trim()?.uppercase(Locale.US).orEmpty()
+    return normalized.ifBlank { null }
+}
+
+fun sanitizeTrackColor(raw: String?, fallback: String): String {
+    val value = raw?.trim().orEmpty()
+    return when {
+        Regex("^#[0-9a-fA-F]{6}$").matches(value) -> value.uppercase(Locale.US)
+        Regex("^[0-9a-fA-F]{6}$").matches(value) -> "#${value.uppercase(Locale.US)}"
+        else -> fallback
+    }
+}
+
+object PilotDisplayPrefs {
+    private const val PREFS_NAME = "pilot_display_prefs"
+    private const val KEY_ACTIVE_SUFFIX = ".active"
+    private const val KEY_ARCHIVE_SUFFIX = ".archive"
+    private const val KEY_BEARING_SUFFIX = ".bearing"
+
+    fun load(context: Context, pilotCallsign: String?): PilotDisplayPreference {
+        val key = normalizePilotCallsign(pilotCallsign) ?: return PilotDisplayPreference()
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return PilotDisplayPreference(
+            activeTrackColor = sanitizeTrackColor(
+                prefs.getString(key + KEY_ACTIVE_SUFFIX, null),
+                DEFAULT_ACTIVE_TRACK_COLOR
+            ),
+            archiveTrackColor = sanitizeTrackColor(
+                prefs.getString(key + KEY_ARCHIVE_SUFFIX, null),
+                DEFAULT_ARCHIVE_TRACK_COLOR
+            ),
+            bearingEnabled = prefs.getBoolean(key + KEY_BEARING_SUFFIX, false)
+        )
+    }
+
+    fun save(context: Context, pilotCallsign: String?, preference: PilotDisplayPreference): Boolean {
+        val key = normalizePilotCallsign(pilotCallsign) ?: return false
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(
+                key + KEY_ACTIVE_SUFFIX,
+                sanitizeTrackColor(preference.activeTrackColor, DEFAULT_ACTIVE_TRACK_COLOR)
+            )
+            .putString(
+                key + KEY_ARCHIVE_SUFFIX,
+                sanitizeTrackColor(preference.archiveTrackColor, DEFAULT_ARCHIVE_TRACK_COLOR)
+            )
+            .putBoolean(key + KEY_BEARING_SUFFIX, preference.bearingEnabled)
+            .apply()
+        return true
+    }
+
+    fun reset(context: Context, pilotCallsign: String?): Boolean {
+        val key = normalizePilotCallsign(pilotCallsign) ?: return false
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(key + KEY_ACTIVE_SUFFIX)
+            .remove(key + KEY_ARCHIVE_SUFFIX)
+            .remove(key + KEY_BEARING_SUFFIX)
+            .apply()
+        return true
+    }
+}

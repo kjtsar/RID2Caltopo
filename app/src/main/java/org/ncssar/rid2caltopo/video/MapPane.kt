@@ -6031,6 +6031,67 @@ private fun normalizeDegrees(value: Double): Double {
     return if (normalized < 0.0) normalized + 360.0 else normalized
 }
 
+internal data class ScreenLine(
+    val startX: Double,
+    val startY: Double,
+    val endX: Double,
+    val endY: Double
+)
+
+internal fun droneStatusLabelText(
+    atoFeet: Double?,
+    aglFeet: Double?,
+    aglStale: Boolean,
+    rangeFeet: Double?,
+    headingDeg: Double?
+): String {
+    val ato = atoFeet
+        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
+        ?.let { String.format(Locale.US, "%.0f", it) }
+        ?: "--"
+    val agl = aglFeet
+        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
+        ?.let { String.format(Locale.US, "%.0f%s", it, if (aglStale) "?" else "") }
+        ?: "--"
+    val range = rangeFeet
+        ?.let { String.format(Locale.US, "%.0f", it) }
+        ?: "--"
+    val heading = headingDeg
+        ?.takeIf { it.isFinite() }
+        ?.let { String.format(Locale.US, "%.0f", normalizeDegrees(it)) }
+        ?: "--"
+    return "ATO:$ato' AGL:$agl' RNG:$range' HDG:$heading°"
+}
+
+internal fun bearingLineToViewportEdge(
+    startX: Double,
+    startY: Double,
+    headingDeg: Double?,
+    viewportWidth: Int,
+    viewportHeight: Int
+): ScreenLine? {
+    val heading = headingDeg?.takeIf { it.isFinite() } ?: return null
+    if (viewportWidth <= 0 || viewportHeight <= 0) return null
+    val radians = Math.toRadians(normalizeDegrees(heading))
+    val dx = kotlin.math.sin(radians)
+    val dy = -kotlin.math.cos(radians)
+    val candidates = mutableListOf<Double>()
+    if (dx > 0.0) candidates += (viewportWidth.toDouble() - startX) / dx
+    if (dx < 0.0) candidates += (0.0 - startX) / dx
+    if (dy > 0.0) candidates += (viewportHeight.toDouble() - startY) / dy
+    if (dy < 0.0) candidates += (0.0 - startY) / dy
+    val distance = candidates
+        .filter { it > 0.0 && it.isFinite() }
+        .minOrNull()
+        ?: return null
+    return ScreenLine(
+        startX = startX,
+        startY = startY,
+        endX = startX + dx * distance,
+        endY = startY + dy * distance
+    )
+}
+
 private fun polarPoint(
     cx: Float,
     cy: Float,

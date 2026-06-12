@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.video
 
+import android.graphics.Color as AndroidColor
 import org.json.JSONArray
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -446,6 +447,27 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun buildArtifactOverlayState_usesPilotArchivePreferenceForArchivedDroneTrack() {
+        val archivedTrack = archivedDroneTrackFeature(
+            id = "track-alpha",
+            title = "ALPHA-M3",
+            folderId = "archive-folder",
+            owner = "alpha",
+            stroke = "#FF00FF"
+        )
+
+        val state = buildArtifactOverlayState(
+            listOf(archivedTrack),
+            pilotArchiveTrackColorForCallsign = { callsign ->
+                if (callsign == "ALPHA") "#43A047" else null
+            }
+        )
+
+        assertEquals(1, state.lines.size)
+        assertEquals(AndroidColor.parseColor("#43A047"), state.lines.single().color)
+    }
+
+    @Test
     fun buildArtifactHydrationResult_preservesFeaturesAndReportsProgress() {
         val features = (1..25).map { index ->
             markerFeature("marker-$index", "Marker $index", "")
@@ -639,6 +661,42 @@ class MapPaneArtifactOverlayStateTest {
                     .put("class", "AppTrack")
                     .put("title", title)
                     .put("stroke", "#00cd00")
+            )
+            .put(
+                "geometry",
+                JSONObject()
+                    .put("type", "LineString")
+                    .put(
+                        "coordinates",
+                        JSONArray()
+                            .put(JSONArray().put(-122.0).put(37.0))
+                            .put(JSONArray().put(-122.1).put(37.1))
+                    )
+            )
+
+    private fun archivedDroneTrackFeature(
+        id: String,
+        title: String,
+        folderId: String,
+        owner: String,
+        stroke: String
+    ): JSONObject =
+        JSONObject()
+            .put("id", id)
+            .put(
+                "properties",
+                JSONObject()
+                    .put("class", "Shape")
+                    .put("title", title)
+                    .put("folderId", folderId)
+                    .put("stroke", stroke)
+                    .put(
+                        "r2c_prop",
+                        JSONObject()
+                            .put("owner", owner)
+                            .put("mid", title)
+                            .put("rid", "rid-$id")
+                    )
             )
             .put(
                 "geometry",

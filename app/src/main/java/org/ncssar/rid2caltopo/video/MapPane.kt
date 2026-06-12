@@ -2565,6 +2565,7 @@ internal fun SplitMapPane(
         val replaceIfEmpty = artifactStoreById.isEmpty()
         val hiddenFoldersSnapshot = hiddenFolderIds.toSet()
         val hiddenItemsSnapshot = hiddenItemIds.toSet()
+        val appContext = context.applicationContext
         mapBackgroundWorkStatus = MapPaneBackgroundWorkStatus("Reading map items")
         artifactHydrationJob = uiScope.launch {
             try {
@@ -2577,7 +2578,10 @@ internal fun SplitMapPane(
                     buildArtifactHydrationResult(
                         snapshot = snapshot,
                         hiddenFolderIds = hiddenFoldersSnapshot,
-                        hiddenItemIds = hiddenItemsSnapshot
+                        hiddenItemIds = hiddenItemsSnapshot,
+                        pilotArchiveTrackColorForCallsign = { pilotKey ->
+                            PilotDisplayPrefs.load(appContext, pilotKey).archiveTrackColor
+                        }
                     ) { progress ->
                         uiScope.launch(Dispatchers.Main.immediate) {
                             if (artifactHydrationRunId == runId) {
@@ -2632,6 +2636,7 @@ internal fun SplitMapPane(
         val featuresSnapshot = artifactStoreById.values.toList()
         val hiddenFoldersSnapshot = hiddenFolderIds.toSet()
         val hiddenItemsSnapshot = hiddenItemIds.toSet()
+        val appContext = context.applicationContext
         mapBackgroundWorkStatus = MapPaneBackgroundWorkStatus("Updating map display")
         artifactOverlayRebuildJob = uiScope.launch {
             try {
@@ -2639,7 +2644,10 @@ internal fun SplitMapPane(
                     buildArtifactOverlayState(
                         featuresSnapshot,
                         hiddenFoldersSnapshot,
-                        hiddenItemsSnapshot
+                        hiddenItemsSnapshot,
+                        pilotArchiveTrackColorForCallsign = { pilotKey ->
+                            PilotDisplayPrefs.load(appContext, pilotKey).archiveTrackColor
+                        }
                     )
                 }
                 if (artifactOverlayRebuildRunId != runId) return@launch
@@ -2728,6 +2736,7 @@ internal fun SplitMapPane(
             colorPickerTarget = colorPickerTarget?.takeIf { it.settings.pilotKey == normalized }
                 ?.copy(settings = settings.copy(preference = sanitized))
             pilotDisplayRefreshToken++
+            startArtifactOverlayRebuild("pilot-display-preference")
         }
     }
 
@@ -2738,6 +2747,7 @@ internal fun SplitMapPane(
             pilotDisplayPrefsByKey[normalized] = defaults
             colorPickerTarget = null
             pilotDisplayRefreshToken++
+            startArtifactOverlayRebuild("pilot-display-reset")
         }
     }
 
@@ -5091,7 +5101,8 @@ internal fun mapFolderUiDebugSummary(
 internal fun buildArtifactOverlayState(
     features: Collection<JSONObject>,
     hiddenFolderIds: Set<String> = emptySet(),
-    hiddenItemIds: Set<String> = emptySet()
+    hiddenItemIds: Set<String> = emptySet(),
+    pilotArchiveTrackColorForCallsign: (String) -> String? = { null }
 ): ArtifactOverlayState {
     val points = mutableListOf<ArtifactPointSpec>()
     val lines = mutableListOf<ArtifactLineSpec>()
@@ -5124,8 +5135,10 @@ internal fun buildArtifactOverlayState(
         val trackLikeFeature = isTrackLikeFeature(properties, className)
         val defaultStrokeHex = markerColor?.takeIf { it.isNotBlank() } ?: "#FF5A1F"
 
+        val pilotArchiveColor = archivedDroneTrackPilotCallsign(properties)
+            ?.let(pilotArchiveTrackColorForCallsign)
         val strokeColor = colorFromHex(
-            properties?.optString("stroke", defaultStrokeHex),
+            pilotArchiveColor ?: properties?.optString("stroke", defaultStrokeHex),
             "#FF5A1F",
             properties?.optDouble("stroke-opacity", 1.0) ?: 1.0
         )
@@ -5166,6 +5179,7 @@ internal fun buildArtifactHydrationResult(
     hiddenFolderIds: Set<String> = emptySet(),
     hiddenItemIds: Set<String> = emptySet(),
     progressInterval: Int = 100,
+    pilotArchiveTrackColorForCallsign: (String) -> String? = { null },
     onProgress: (ArtifactHydrationProgress) -> Unit = {}
 ): ArtifactHydrationResult {
     val featuresById = LinkedHashMap<String, JSONObject>()
@@ -5198,7 +5212,12 @@ internal fun buildArtifactHydrationResult(
     }
     return ArtifactHydrationResult(
         featuresById = featuresById,
-        overlayState = buildArtifactOverlayState(featuresById.values, hiddenFolderIds, hiddenItemIds),
+        overlayState = buildArtifactOverlayState(
+            featuresById.values,
+            hiddenFolderIds,
+            hiddenItemIds,
+            pilotArchiveTrackColorForCallsign
+        ),
         folderDefaults = folderDefaultsById.values.toList()
     )
 }
@@ -5231,6 +5250,11 @@ private fun artifactDisplayTitle(properties: JSONObject?, featureId: String, cla
     properties?.optString("title")?.takeIf { it.isNotBlank() }?.let { return it }
     val typeLabel = className.ifBlank { "Map item" }
     return if (featureId.isBlank()) typeLabel else "$typeLabel:$featureId"
+}
+
+private fun archivedDroneTrackPilotCallsign(properties: JSONObject?): String? {
+    val r2cProp = properties?.optJSONObject("r2c_prop") ?: return null
+    return normalizePilotCallsign(r2cProp.optString("owner"))
 }
 
 private fun orphanFolderTitle(folderId: String): String {

@@ -47,7 +47,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 6
-    def versionPatch = 3
+    def versionPatch = 4
 
     signingConfigs {
         register("release") {
@@ -62,7 +62,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 87
+        versionCode = 88
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"

@@ -484,7 +484,7 @@ internal data class BadTileDialogState(
     val hash: String
 )
 
-private data class PilotDisplaySettingsState(
+internal data class PilotDisplaySettingsState(
     val pilotKey: String,
     val displayName: String,
     val preference: PilotDisplayPreference
@@ -793,49 +793,39 @@ private fun applyPolylineStyle(
 }
 
 @Composable
-private fun PilotDisplaySettingsDialog(
+private fun PilotDisplaySettingsContent(
     settings: PilotDisplaySettingsState,
-    onDismiss: () -> Unit,
     onPreferenceChange: (PilotDisplaySettingsState, PilotDisplayPreference) -> Unit,
     onPickColor: (PilotDisplayColorSlot) -> Unit,
     onReset: () -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Pilot Display: ${settings.displayName}") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                PilotDisplayColorRow(
-                    label = "Active",
-                    colorHex = settings.preference.activeTrackColor,
-                    onClick = { onPickColor(PilotDisplayColorSlot.Active) }
-                )
-                PilotDisplayColorRow(
-                    label = "Archive",
-                    colorHex = settings.preference.archiveTrackColor,
-                    onClick = { onPickColor(PilotDisplayColorSlot.Archive) }
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = settings.preference.bearingEnabled,
-                        onCheckedChange = { enabled ->
-                            onPreferenceChange(
-                                settings,
-                                settings.preference.copy(bearingEnabled = enabled)
-                            )
-                        }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Pilot Display: ${settings.displayName}", style = MaterialTheme.typography.titleSmall)
+        PilotDisplayColorRow(
+            label = "Active",
+            colorHex = settings.preference.activeTrackColor,
+            onClick = { onPickColor(PilotDisplayColorSlot.Active) }
+        )
+        PilotDisplayColorRow(
+            label = "Archive",
+            colorHex = settings.preference.archiveTrackColor,
+            onClick = { onPickColor(PilotDisplayColorSlot.Archive) }
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = settings.preference.bearingEnabled,
+                onCheckedChange = { enabled ->
+                    onPreferenceChange(
+                        settings,
+                        settings.preference.copy(bearingEnabled = enabled)
                     )
-                    Text("Bearing")
                 }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
-        dismissButton = {
+            )
+            Text("Bearing")
+            Spacer(Modifier.width(12.dp))
             TextButton(onClick = onReset) { Text("Reset") }
         }
-    )
+    }
 }
 
 @Composable
@@ -1386,7 +1376,6 @@ internal fun SplitMapPane(
     var trackOverlayRefreshToken by remember { mutableIntStateOf(0) }
     val pilotDisplayPrefsByKey = remember { mutableStateMapOf<String, PilotDisplayPreference>() }
     var pilotDisplayRefreshToken by remember { mutableIntStateOf(0) }
-    var selectedPilotDisplaySettings by remember { mutableStateOf<PilotDisplaySettingsState?>(null) }
     var colorPickerTarget by remember { mutableStateOf<PilotColorPickerTarget?>(null) }
     var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
@@ -2736,10 +2725,8 @@ internal fun SplitMapPane(
         )
         if (PilotDisplayPrefs.save(context, normalized, sanitized)) {
             pilotDisplayPrefsByKey[normalized] = sanitized
-            val updatedSettings = settings.copy(preference = sanitized)
-            selectedPilotDisplaySettings = updatedSettings
             colorPickerTarget = colorPickerTarget?.takeIf { it.settings.pilotKey == normalized }
-                ?.copy(settings = updatedSettings)
+                ?.copy(settings = settings.copy(preference = sanitized))
             pilotDisplayRefreshToken++
         }
     }
@@ -2749,7 +2736,6 @@ internal fun SplitMapPane(
         if (PilotDisplayPrefs.reset(context, normalized)) {
             val defaults = PilotDisplayPreference()
             pilotDisplayPrefsByKey[normalized] = defaults
-            selectedPilotDisplaySettings = settings.copy(preference = defaults)
             colorPickerTarget = null
             pilotDisplayRefreshToken++
         }
@@ -2926,20 +2912,6 @@ internal fun SplitMapPane(
         )
     }
 
-    selectedPilotDisplaySettings?.takeIf { colorPickerTarget == null }?.let { settings ->
-        PilotDisplaySettingsDialog(
-            settings = settings,
-            onDismiss = { selectedPilotDisplaySettings = null },
-            onPreferenceChange = ::updatePilotDisplayPreference,
-            onPickColor = { slot ->
-                colorPickerTarget = PilotColorPickerTarget(settings, slot)
-            },
-            onReset = {
-                resetPilotDisplayPreference(settings)
-            }
-        )
-    }
-
     colorPickerTarget?.let { target ->
         PilotTrackColorPickerDialog(
             target = target,
@@ -2955,7 +2927,7 @@ internal fun SplitMapPane(
         )
     }
 
-    openBubbleDesignator?.let { designator ->
+    openBubbleDesignator?.takeIf { colorPickerTarget == null }?.let { designator ->
         val point = dronePoints.firstOrNull { it.designator == designator }
         if (point != null) {
             val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
@@ -2966,21 +2938,32 @@ internal fun SplitMapPane(
             val aglStale = bubbleDisplayState?.aglStale ?: false
             val atoFeet  = bubbleDisplayState?.atoFt
             val rangeFeet = distanceFeetFromTakeoff(point)
-            val detailLines = buildList {
-                add("Location: ${CoordinateFormatter.format(point.lat, point.lng, coordinateDisplayFormat)} (${coordinateDisplayFormat.label})")
-                add("AGL: ${aglFeet?.let { "${"%.0f".format(it)}'${if (aglStale) "?" else ""}" } ?: "--"}")
-                add("ATO: ${atoFeet?.let { "%.0f'".format(it) } ?: "--"}")
-                add("Distance: ${rangeFeet?.let { "%.0f'".format(it) } ?: "--"}")
-                val telemetry = point.droneSpec?.lastPositionTelemetry
-                telemetry?.aircraftGsKnots?.let { add(String.format(Locale.US, "Speed: %.1f kt", it)) }
-                telemetry?.aircraftTrackDeg?.let { add(String.format(Locale.US, "Track: %.1f°", it)) }
-                telemetry?.aircraftAltitudeRateFpm?.let { add(String.format(Locale.US, "Climb: %.0f fpm", it)) }
+            val telemetry = point.droneSpec?.lastPositionTelemetry
+            val headingDeg = bubbleDisplayState?.headingDeg ?: telemetry?.aircraftTrackDeg
+            val detailLines = droneDetailLines(
+                locationText = CoordinateFormatter.format(point.lat, point.lng, coordinateDisplayFormat),
+                coordinateFormatLabel = coordinateDisplayFormat.label,
+                atoFeet = atoFeet,
+                aglFeet = aglFeet,
+                aglStale = aglStale,
+                rangeFeet = rangeFeet,
+                headingDeg = headingDeg,
+                speedKnots = telemetry?.aircraftGsKnots,
+                climbFpm = telemetry?.aircraftAltitudeRateFpm
+            )
+            val pilotKey = normalizePilotCallsign(point.droneSpec?.owner)
+            val pilotSettings = pilotKey?.let {
+                PilotDisplaySettingsState(
+                    pilotKey = it,
+                    displayName = point.droneSpec?.owner?.trim()?.takeIf { owner -> owner.isNotBlank() } ?: it,
+                    preference = pilotDisplayPreferenceFor(it)
+                )
             }
             AlertDialog(
                 onDismissRequest = { openBubbleDesignator = null },
                 title = { Text(point.designator) },
                 text = {
-                    Column {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                         Text(
                             text = detailLines.first(),
                             modifier = Modifier.clickable { coordinateMenuExpanded = true }
@@ -3001,6 +2984,19 @@ internal fun SplitMapPane(
                         }
                         detailLines.drop(1).forEach { line ->
                             Text(line)
+                        }
+                        pilotSettings?.let { settings ->
+                            Spacer(Modifier.height(12.dp))
+                            PilotDisplaySettingsContent(
+                                settings = settings,
+                                onPreferenceChange = ::updatePilotDisplayPreference,
+                                onPickColor = { slot ->
+                                    colorPickerTarget = PilotColorPickerTarget(settings, slot)
+                                },
+                                onReset = {
+                                    resetPilotDisplayPreference(settings)
+                                }
+                            )
                         }
                     }
                 },
@@ -3806,13 +3802,6 @@ internal fun SplitMapPane(
                         setOnMarkerClickListener { tappedMarker, _ ->
                             if (focusedPath != point.designator) {
                                 viewModel.toggleFocus(point.designator)
-                            }
-                            if (pilotKey != null) {
-                                selectedPilotDisplaySettings = PilotDisplaySettingsState(
-                                    pilotKey = pilotKey,
-                                    displayName = point.droneSpec?.owner?.trim()?.takeIf { it.isNotBlank() } ?: pilotKey,
-                                    preference = pilotDisplayPreferenceFor(pilotKey)
-                                )
                             }
                             if (tappedMarker.isInfoWindowShown) {
                                 tappedMarker.closeInfoWindow()
@@ -6376,6 +6365,41 @@ internal fun droneStatusLabelText(
         ?.let { String.format(Locale.US, "%.0f", normalizeDegrees(it)) }
         ?: "--"
     return "ATO:$ato' AGL:$agl' RNG:$range' HDG:$heading°"
+}
+
+internal fun droneDetailLines(
+    locationText: String,
+    coordinateFormatLabel: String,
+    atoFeet: Double?,
+    aglFeet: Double?,
+    aglStale: Boolean,
+    rangeFeet: Double?,
+    headingDeg: Double?,
+    speedKnots: Double? = null,
+    climbFpm: Double? = null
+): List<String> = buildList {
+    val ato = atoFeet
+        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
+        ?.let { String.format(Locale.US, "%.0f'", it) }
+        ?: "--"
+    val agl = aglFeet
+        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
+        ?.let { String.format(Locale.US, "%.0f%s'", it, if (aglStale) "?" else "") }
+        ?: "--"
+    val range = rangeFeet
+        ?.let { String.format(Locale.US, "%.0f'", it) }
+        ?: "--"
+    val heading = headingDeg
+        ?.takeIf { it.isFinite() }
+        ?.let { String.format(Locale.US, "%.0f°", normalizeDegrees(it)) }
+        ?: "--"
+    add("Location: $locationText ($coordinateFormatLabel)")
+    add("ATO: $ato")
+    add("AGL: $agl")
+    add("RNG: $range")
+    add("HDG: $heading")
+    speedKnots?.let { add(String.format(Locale.US, "Speed: %.1f kt", it)) }
+    climbFpm?.let { add(String.format(Locale.US, "Climb: %.0f fpm", it)) }
 }
 
 internal fun bearingLineToViewportEdge(

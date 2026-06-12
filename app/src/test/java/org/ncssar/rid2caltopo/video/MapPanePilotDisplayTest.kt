@@ -50,6 +50,28 @@ class MapPanePilotDisplayTest {
     }
 
     @Test
+    fun droneDetailLines_useRangeAndHeadingInCombinedPopup() {
+        assertEquals(
+            listOf(
+                "Location: 39.12345, -121.12345 (Decimal Degrees)",
+                "ATO: 121'",
+                "AGL: 76?'",
+                "RNG: 432'",
+                "HDG: 218°"
+            ),
+            droneDetailLines(
+                locationText = "39.12345, -121.12345",
+                coordinateFormatLabel = "Decimal Degrees",
+                atoFeet = 120.6,
+                aglFeet = 75.5,
+                aglStale = true,
+                rangeFeet = 431.5,
+                headingDeg = 217.7
+            )
+        )
+    }
+
+    @Test
     fun bearingLineToViewportEdge_extendsCardinalHeadingsToEdge() {
         val north = bearingLineToViewportEdge(50.0, 50.0, 0.0, 100, 100)
         assertEquals(50.0, north!!.endX, 0.01)

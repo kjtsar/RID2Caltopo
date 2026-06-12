@@ -10,6 +10,7 @@ import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
@@ -23,6 +24,7 @@ import android.widget.Button
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -43,6 +45,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -129,6 +132,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToInt
 import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
@@ -168,6 +172,12 @@ import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.data.MutualAidPackageManager
 import org.ncssar.rid2caltopo.data.MutualAidPackageTransferManager
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
+import org.ncssar.rid2caltopo.data.DEFAULT_ACTIVE_TRACK_COLOR
+import org.ncssar.rid2caltopo.data.DEFAULT_ARCHIVE_TRACK_COLOR
+import org.ncssar.rid2caltopo.data.PilotDisplayPreference
+import org.ncssar.rid2caltopo.data.PilotDisplayPrefs
+import org.ncssar.rid2caltopo.data.normalizePilotCallsign
+import org.ncssar.rid2caltopo.data.sanitizeTrackColor
 import org.ncssar.rid2caltopo.notam.NearbyNotam
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamMapOverlayAdapter
@@ -474,12 +484,42 @@ internal data class BadTileDialogState(
     val hash: String
 )
 
+private data class PilotDisplaySettingsState(
+    val pilotKey: String,
+    val displayName: String,
+    val preference: PilotDisplayPreference
+)
+
+private enum class PilotDisplayColorSlot {
+    Active,
+    Archive
+}
+
+private data class PilotColorPickerTarget(
+    val settings: PilotDisplaySettingsState,
+    val slot: PilotDisplayColorSlot
+)
+
 private fun localTrackDesignator(mappedId: String): String = mappedId.ifBlank { "unmapped" }
 
 private const val LOCAL_TRACK_RECENT_POINT_LIMIT = 500
 private const val LOCAL_TRACK_FLIGHT_POINT_LIMIT = 10_000
 private const val LOCAL_TRACK_DUPLICATE_COORD_EPSILON = 0.000001
 private const val LOCAL_TRACK_DUPLICATE_ALT_EPSILON_METERS = 0.5
+private val PILOT_DISPLAY_COLOR_PALETTE = listOf(
+    DEFAULT_ACTIVE_TRACK_COLOR,
+    DEFAULT_ARCHIVE_TRACK_COLOR,
+    "#E53935",
+    "#FB8C00",
+    "#FDD835",
+    "#43A047",
+    "#00ACC1",
+    "#3949AB",
+    "#8E24AA",
+    "#6D4C41",
+    "#FFFFFF",
+    "#212121"
+)
 
 internal fun seedLocalTrackPointsFromSnapshot(
     mappedId: String,
@@ -695,6 +735,27 @@ internal fun confirmedCurrentFlightMappedIds(dronePoints: List<DroneMapPoint>): 
         .map { point -> localTrackDesignator(point.designator) }
         .toSet()
 
+internal fun pilotDisplayPreferencesByMappedId(
+    dronePoints: List<DroneMapPoint>,
+    mappedIdsByRemoteId: Map<String, Set<String>> = emptyMap(),
+    preferenceForPilotKey: (String?) -> PilotDisplayPreference
+): Map<String, PilotDisplayPreference> {
+    val byMappedId = LinkedHashMap<String, PilotDisplayPreference>()
+    dronePoints.forEach { point ->
+        val pilotKey = normalizePilotCallsign(point.droneSpec?.owner)
+        val preference = preferenceForPilotKey(pilotKey)
+        val currentMappedId = localTrackDesignator(point.designator)
+        byMappedId[currentMappedId] = preference
+        mappedIdsByRemoteId[point.remoteId].orEmpty().forEach { alias ->
+            byMappedId[localTrackDesignator(alias)] = preference
+        }
+    }
+    return byMappedId
+}
+
+private fun trackColorInt(rawColor: String?, fallback: String): Int =
+    AndroidColor.parseColor(sanitizeTrackColor(rawColor, fallback))
+
 private fun closedPolylinePoints(points: List<GeoPoint>): List<GeoPoint> {
     if (points.isEmpty()) return points
     val first = points.first()
@@ -729,6 +790,130 @@ private fun applyPolylineStyle(
 ) {
     polyline.color = color
     polyline.width = width
+}
+
+@Composable
+private fun PilotDisplaySettingsDialog(
+    settings: PilotDisplaySettingsState,
+    onDismiss: () -> Unit,
+    onPreferenceChange: (PilotDisplaySettingsState, PilotDisplayPreference) -> Unit,
+    onPickColor: (PilotDisplayColorSlot) -> Unit,
+    onReset: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Pilot Display: ${settings.displayName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                PilotDisplayColorRow(
+                    label = "Active",
+                    colorHex = settings.preference.activeTrackColor,
+                    onClick = { onPickColor(PilotDisplayColorSlot.Active) }
+                )
+                PilotDisplayColorRow(
+                    label = "Archive",
+                    colorHex = settings.preference.archiveTrackColor,
+                    onClick = { onPickColor(PilotDisplayColorSlot.Archive) }
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = settings.preference.bearingEnabled,
+                        onCheckedChange = { enabled ->
+                            onPreferenceChange(
+                                settings,
+                                settings.preference.copy(bearingEnabled = enabled)
+                            )
+                        }
+                    )
+                    Text("Bearing")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+        dismissButton = {
+            TextButton(onClick = onReset) { Text("Reset") }
+        }
+    )
+}
+
+@Composable
+private fun PilotDisplayColorRow(
+    label: String,
+    colorHex: String,
+    onClick: () -> Unit
+) {
+    val sanitized = sanitizeTrackColor(colorHex, DEFAULT_ACTIVE_TRACK_COLOR)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                .clip(CircleShape)
+                .background(Color(trackColorInt(sanitized, DEFAULT_ACTIVE_TRACK_COLOR)))
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(label)
+        Spacer(Modifier.width(12.dp))
+        Text(sanitized, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun PilotTrackColorPickerDialog(
+    target: PilotColorPickerTarget,
+    onDismiss: () -> Unit,
+    onColorSelected: (String) -> Unit
+) {
+    val currentColor = when (target.slot) {
+        PilotDisplayColorSlot.Active -> target.settings.preference.activeTrackColor
+        PilotDisplayColorSlot.Archive -> target.settings.preference.archiveTrackColor
+    }
+    val title = when (target.slot) {
+        PilotDisplayColorSlot.Active -> "Active Track Color"
+        PilotDisplayColorSlot.Archive -> "Archive Track Color"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                PILOT_DISPLAY_COLOR_PALETTE.chunked(4).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        row.forEach { colorHex ->
+                            val selected = sanitizeTrackColor(currentColor, DEFAULT_ACTIVE_TRACK_COLOR) == colorHex
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .border(
+                                        width = if (selected) 3.dp else 1.dp,
+                                        color = if (selected) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.outline
+                                        },
+                                        shape = CircleShape
+                                    )
+                                    .padding(3.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(trackColorInt(colorHex, DEFAULT_ACTIVE_TRACK_COLOR)))
+                                    .clickable { onColorSelected(colorHex) }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 private class LocalMarkerInfoWindow(
@@ -1199,6 +1384,10 @@ internal fun SplitMapPane(
     val localTrackMappedIdsByRemoteId = remember { mutableStateMapOf<String, MutableSet<String>>() }
     val localTrackLastSeededTimestampByMappedId = remember { mutableMapOf<String, Long>() }
     var trackOverlayRefreshToken by remember { mutableIntStateOf(0) }
+    val pilotDisplayPrefsByKey = remember { mutableStateMapOf<String, PilotDisplayPreference>() }
+    var pilotDisplayRefreshToken by remember { mutableIntStateOf(0) }
+    var selectedPilotDisplaySettings by remember { mutableStateOf<PilotDisplaySettingsState?>(null) }
+    var colorPickerTarget by remember { mutableStateOf<PilotColorPickerTarget?>(null) }
     var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
     var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
@@ -2529,6 +2718,43 @@ internal fun SplitMapPane(
         }
     }
 
+    fun pilotDisplayPreferenceFor(pilotKey: String?): PilotDisplayPreference {
+        val normalized = normalizePilotCallsign(pilotKey) ?: return PilotDisplayPreference()
+        return pilotDisplayPrefsByKey[normalized] ?: PilotDisplayPrefs.load(context, normalized).also {
+            pilotDisplayPrefsByKey[normalized] = it
+        }
+    }
+
+    fun updatePilotDisplayPreference(
+        settings: PilotDisplaySettingsState,
+        preference: PilotDisplayPreference
+    ) {
+        val normalized = normalizePilotCallsign(settings.pilotKey) ?: return
+        val sanitized = preference.copy(
+            activeTrackColor = sanitizeTrackColor(preference.activeTrackColor, DEFAULT_ACTIVE_TRACK_COLOR),
+            archiveTrackColor = sanitizeTrackColor(preference.archiveTrackColor, DEFAULT_ARCHIVE_TRACK_COLOR)
+        )
+        if (PilotDisplayPrefs.save(context, normalized, sanitized)) {
+            pilotDisplayPrefsByKey[normalized] = sanitized
+            val updatedSettings = settings.copy(preference = sanitized)
+            selectedPilotDisplaySettings = updatedSettings
+            colorPickerTarget = colorPickerTarget?.takeIf { it.settings.pilotKey == normalized }
+                ?.copy(settings = updatedSettings)
+            pilotDisplayRefreshToken++
+        }
+    }
+
+    fun resetPilotDisplayPreference(settings: PilotDisplaySettingsState) {
+        val normalized = normalizePilotCallsign(settings.pilotKey) ?: return
+        if (PilotDisplayPrefs.reset(context, normalized)) {
+            val defaults = PilotDisplayPreference()
+            pilotDisplayPrefsByKey[normalized] = defaults
+            selectedPilotDisplaySettings = settings.copy(preference = defaults)
+            colorPickerTarget = null
+            pilotDisplayRefreshToken++
+        }
+    }
+
     badTileDialogState?.let { dlg ->
         AlertDialog(
             onDismissRequest = { badTileDialogState = null },
@@ -2696,6 +2922,35 @@ internal fun SplitMapPane(
                 TextButton(onClick = { showMapTileAgeDialog = false }) {
                     Text("Cancel")
                 }
+            }
+        )
+    }
+
+    selectedPilotDisplaySettings?.takeIf { colorPickerTarget == null }?.let { settings ->
+        PilotDisplaySettingsDialog(
+            settings = settings,
+            onDismiss = { selectedPilotDisplaySettings = null },
+            onPreferenceChange = ::updatePilotDisplayPreference,
+            onPickColor = { slot ->
+                colorPickerTarget = PilotColorPickerTarget(settings, slot)
+            },
+            onReset = {
+                resetPilotDisplayPreference(settings)
+            }
+        )
+    }
+
+    colorPickerTarget?.let { target ->
+        PilotTrackColorPickerDialog(
+            target = target,
+            onDismiss = { colorPickerTarget = null },
+            onColorSelected = { selectedColor ->
+                val updatedPreference = when (target.slot) {
+                    PilotDisplayColorSlot.Active -> target.settings.preference.copy(activeTrackColor = selectedColor)
+                    PilotDisplayColorSlot.Archive -> target.settings.preference.copy(archiveTrackColor = selectedColor)
+                }
+                updatePilotDisplayPreference(target.settings, updatedPreference)
+                colorPickerTarget = null
             }
         )
     }
@@ -2992,6 +3247,7 @@ internal fun SplitMapPane(
             },
             update = { mapView ->
                 trackOverlayRefreshToken
+                pilotDisplayRefreshToken
                 localDeviceRefreshToken
                 val uiNowWallMsec = System.currentTimeMillis()
                 mapBounds = mapView.boundingBox
@@ -3205,13 +3461,22 @@ internal fun SplitMapPane(
                     eligibleMappedIds = confirmedCurrentFlightMappedIds,
                     mappedIdsByRemoteId = localTrackMappedIdsByRemoteId
                 )
+                val pilotPreferencesByMappedId = pilotDisplayPreferencesByMappedId(
+                    dronePoints = dronePoints,
+                    mappedIdsByRemoteId = localTrackMappedIdsByRemoteId,
+                    preferenceForPilotKey = ::pilotDisplayPreferenceFor
+                )
                 currentFlightTrackPointsByMappedId.forEach { (mappedId, points) ->
                     if (mappedId !in fullFlightTrackMappedIds) return@forEach
                     if (points.size < 2) return@forEach
+                    val trackColor = trackColorInt(
+                        pilotPreferencesByMappedId[mappedId]?.archiveTrackColor,
+                        DEFAULT_ARCHIVE_TRACK_COLOR
+                    )
                     val line = Polyline(mapView).apply {
                         setPoints(points.map { GeoPoint(it.lat, it.lng) })
                         title = "Flight track: $mappedId (${points.size})"
-                        applyPolylineStyle(this, AndroidColor.parseColor("#FF00FF"), 2.0f)
+                        applyPolylineStyle(this, trackColor, 2.0f)
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -3219,10 +3484,14 @@ internal fun SplitMapPane(
 
                 localTrackPointsByMappedId.forEach { (mappedId, points) ->
                     if (points.size < 2) return@forEach
+                    val trackColor = trackColorInt(
+                        pilotPreferencesByMappedId[mappedId]?.activeTrackColor,
+                        DEFAULT_ACTIVE_TRACK_COLOR
+                    )
                     val line = Polyline(mapView).apply {
                         setPoints(points.map { GeoPoint(it.lat, it.lng) })
                         title = "Local track: $mappedId (${points.size})"
-                        applyPolylineStyle(this, AndroidColor.parseColor("#1E88E5"), 4.0f)
+                        applyPolylineStyle(this, trackColor, 4.0f)
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -3475,6 +3744,49 @@ internal fun SplitMapPane(
                     val labelAglStale = displayState?.aglStale ?: false
                     val labelAtoFeet = displayState?.atoFt
                     val labelRangeFeet = distanceFeetFromTakeoff(point, renderLat, renderLng)
+                    val pilotKey = normalizePilotCallsign(point.droneSpec?.owner)
+                    val pilotPreference = pilotDisplayPreferenceFor(pilotKey)
+                    if (pilotPreference.bearingEnabled) {
+                        val markerGeoPoint = GeoPoint(renderLat, renderLng)
+                        val startPoint = Point()
+                        mapView.projection.toPixels(markerGeoPoint, startPoint)
+                        if (startPoint.x in 0..mapView.width && startPoint.y in 0..mapView.height) {
+                            val bearingLine = bearingLineToViewportEdge(
+                                startX = startPoint.x.toDouble(),
+                                startY = startPoint.y.toDouble(),
+                                headingDeg = headingDeg,
+                                viewportWidth = mapView.width,
+                                viewportHeight = mapView.height
+                            )
+                            val endPoint = bearingLine?.let {
+                                mapView.projection.fromPixels(
+                                    it.endX.roundToInt(),
+                                    it.endY.roundToInt()
+                                )
+                            }
+                            if (endPoint != null &&
+                                endPoint.latitude.isFinite() &&
+                                endPoint.longitude.isFinite()
+                            ) {
+                                val bearingOverlay = Polyline(mapView).apply {
+                                    setPoints(
+                                        listOf(
+                                            markerGeoPoint,
+                                            GeoPoint(endPoint.latitude, endPoint.longitude)
+                                        )
+                                    )
+                                    title = "Bearing: ${point.designator}"
+                                    applyPolylineStyle(
+                                        this,
+                                        trackColorInt(pilotPreference.activeTrackColor, DEFAULT_ACTIVE_TRACK_COLOR),
+                                        2.0f
+                                    )
+                                }
+                                mapView.overlays.add(bearingOverlay)
+                                managedOverlays.add(bearingOverlay)
+                            }
+                        }
+                    }
                     val marker = Marker(mapView).apply {
                         position = GeoPoint(renderLat, renderLng)
                         val effectiveAglM = labelAglFeet?.let { it / METERS_TO_FEET }
@@ -3491,12 +3803,16 @@ internal fun SplitMapPane(
                             headingDeg = headingDeg,
                         )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                        val aglText = labelAglFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
-                        val atoText = labelAtoFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
-                        val distanceText = labelRangeFeet?.let { "${"%.0f".format(it)}'" } ?: "--"
                         setOnMarkerClickListener { tappedMarker, _ ->
                             if (focusedPath != point.designator) {
                                 viewModel.toggleFocus(point.designator)
+                            }
+                            if (pilotKey != null) {
+                                selectedPilotDisplaySettings = PilotDisplaySettingsState(
+                                    pilotKey = pilotKey,
+                                    displayName = point.droneSpec?.owner?.trim()?.takeIf { it.isNotBlank() } ?: pilotKey,
+                                    preference = pilotDisplayPreferenceFor(pilotKey)
+                                )
                             }
                             if (tappedMarker.isInfoWindowShown) {
                                 tappedMarker.closeInfoWindow()
@@ -3510,14 +3826,13 @@ internal fun SplitMapPane(
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
 
-                    val aglToken = labelAglFeet
-                        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
-                        ?.let { "${"%.0f".format(it)}${if (labelAglStale) "?" else ""}AGL" } ?: "--AGL"
-                    val atoToken = labelAtoFeet
-                        ?.takeIf { kotlin.math.abs(it) <= LABEL_MAX_ABS_FEET }
-                        ?.let { "%.0fATO".format(it) } ?: "--ATO"
-                    val rangeToken = labelRangeFeet?.let { "%.0f".format(it) } ?: "--"
-                    val labelText = "$aglToken,$atoToken,$rangeToken"
+                    val labelText = droneStatusLabelText(
+                        atoFeet = labelAtoFeet,
+                        aglFeet = labelAglFeet,
+                        aglStale = labelAglStale,
+                        rangeFeet = labelRangeFeet,
+                        headingDeg = headingDeg
+                    )
                     val nameDrawable = buildDroneNameLabelDrawable(context.resources, point.designator)
                     val statusDrawable = buildDroneStatusLabelDrawable(context.resources, labelText)
                     droneLabelSpecs.add(

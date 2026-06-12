@@ -3,6 +3,8 @@ package org.ncssar.rid2caltopo.video
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.ncssar.rid2caltopo.data.CtDroneSpec
+import org.ncssar.rid2caltopo.data.PilotDisplayPreference
 
 class MapPanePilotDisplayTest {
     @Test
@@ -79,5 +81,56 @@ class MapPanePilotDisplayTest {
         assertNull(bearingLineToViewportEdge(50.0, 50.0, Double.NaN, 100, 100))
         assertNull(bearingLineToViewportEdge(50.0, 50.0, 90.0, 0, 100))
         assertNull(bearingLineToViewportEdge(50.0, 50.0, 90.0, 100, 0))
+    }
+
+    @Test
+    fun pilotDisplayPreferencesByMappedId_fansOutToCurrentAndAliasedTracks() {
+        val alphaPreference = PilotDisplayPreference(
+            activeTrackColor = "#43A047",
+            archiveTrackColor = "#8E24AA",
+            bearingEnabled = true
+        )
+        val betaPreference = PilotDisplayPreference(
+            activeTrackColor = "#E53935",
+            archiveTrackColor = "#FB8C00",
+            bearingEnabled = false
+        )
+        val mapped = pilotDisplayPreferencesByMappedId(
+            dronePoints = listOf(
+                DroneMapPoint(
+                    designator = "ALPHA-M3",
+                    remoteId = "rid-alpha",
+                    lat = 39.0,
+                    lng = -121.0,
+                    altitudeM = 100.0,
+                    timestampMsec = 1L,
+                    droneSpec = CtDroneSpec("rid-alpha", "ALPHA-M3", "", "", "alpha")
+                ),
+                DroneMapPoint(
+                    designator = "BETA-M3",
+                    remoteId = "rid-beta",
+                    lat = 39.1,
+                    lng = -121.1,
+                    altitudeM = 110.0,
+                    timestampMsec = 2L,
+                    droneSpec = CtDroneSpec("rid-beta", "BETA-M3", "", "", "beta")
+                )
+            ),
+            mappedIdsByRemoteId = mapOf(
+                "rid-alpha" to setOf("ALPHA-OLD", "ALPHA-M3"),
+                "rid-beta" to setOf("BETA-OLD")
+            )
+        ) { pilotKey ->
+            when (pilotKey) {
+                "ALPHA" -> alphaPreference
+                "BETA" -> betaPreference
+                else -> PilotDisplayPreference()
+            }
+        }
+
+        assertEquals(alphaPreference, mapped["ALPHA-M3"])
+        assertEquals(alphaPreference, mapped["ALPHA-OLD"])
+        assertEquals(betaPreference, mapped["BETA-M3"])
+        assertEquals(betaPreference, mapped["BETA-OLD"])
     }
 }

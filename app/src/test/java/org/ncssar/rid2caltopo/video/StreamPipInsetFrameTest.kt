@@ -38,6 +38,48 @@ class StreamPipInsetFrameTest {
     }
 
     @Test
+    fun streamsFullScreenChrome_hidesTopBarOnlyWhenAllowedAndActive() {
+        assertEquals(
+            StreamsFullScreenChrome(showTopBar = true, showExitChip = false),
+            streamsFullScreenChrome(fullScreen = false, externalContentActive = false)
+        )
+        assertEquals(
+            StreamsFullScreenChrome(showTopBar = false, showExitChip = true),
+            streamsFullScreenChrome(fullScreen = true, externalContentActive = false)
+        )
+        assertEquals(
+            StreamsFullScreenChrome(showTopBar = true, showExitChip = false),
+            streamsFullScreenChrome(fullScreen = true, externalContentActive = true)
+        )
+    }
+
+    @Test
+    fun fullScreenExitChipLayout_keepsChipAwayFromSettingsWithLargeHitTarget() {
+        assertEquals(
+            FullScreenExitChipLayout(minWidthDp = 96f, minHeightDp = 48f, endPaddingDp = 84f),
+            fullScreenExitChipLayout()
+        )
+    }
+
+    @Test
+    fun streamTileChromePresentation_fillsContainerAndHidesDuplicateTelemetryInFullScreen() {
+        assertEquals(
+            StreamTileChromePresentation(
+                fillContainer = false,
+                showStandaloneTelemetryOverlay = false
+            ),
+            streamTileChromePresentation(fullScreenContent = false, focused = true)
+        )
+        assertEquals(
+            StreamTileChromePresentation(
+                fillContainer = true,
+                showStandaloneTelemetryOverlay = false
+            ),
+            streamTileChromePresentation(fullScreenContent = true, focused = true)
+        )
+    }
+
+    @Test
     fun streamClueCaptureReady_requiresFfmpegTextureViewAndRenderedFrame() {
         assertEquals(
             false,

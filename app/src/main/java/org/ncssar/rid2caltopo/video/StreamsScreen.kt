@@ -2,15 +2,18 @@ package org.ncssar.rid2caltopo.video
 
 import OverLimitDroneUiState
 import StreamsViewModel
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -25,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -59,17 +63,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.ncssar.rid2caltopo.app.MediaMTXService
@@ -119,10 +130,53 @@ internal fun streamPipInsetSize(
 internal fun streamPipHasStreamContent(visibleStreamCount: Int, focusedPath: String?): Boolean =
     visibleStreamCount > 0 || focusedPath != null
 
+internal data class StreamsFullScreenChrome(
+    val showTopBar: Boolean,
+    val showExitChip: Boolean
+)
+
+internal fun streamsFullScreenChrome(
+    fullScreen: Boolean,
+    externalContentActive: Boolean
+): StreamsFullScreenChrome {
+    val active = fullScreen && !externalContentActive
+    return StreamsFullScreenChrome(
+        showTopBar = !active,
+        showExitChip = active
+    )
+}
+
+internal data class FullScreenExitChipLayout(
+    val minWidthDp: Float,
+    val minHeightDp: Float,
+    val endPaddingDp: Float
+)
+
+internal fun fullScreenExitChipLayout(): FullScreenExitChipLayout =
+    FullScreenExitChipLayout(
+        minWidthDp = 96f,
+        minHeightDp = 48f,
+        endPaddingDp = 84f
+    )
+
 internal data class StreamTileFocusPresentation(
     val effectiveFocused: Boolean,
     val showFocusBorder: Boolean
 )
+
+internal data class StreamTileChromePresentation(
+    val fillContainer: Boolean,
+    val showStandaloneTelemetryOverlay: Boolean
+)
+
+internal fun streamTileChromePresentation(
+    fullScreenContent: Boolean,
+    focused: Boolean
+): StreamTileChromePresentation =
+    StreamTileChromePresentation(
+        fillContainer = fullScreenContent && focused,
+        showStandaloneTelemetryOverlay = !focused
+    )
 
 internal fun streamTileFocusPresentation(
     displayedTileCount: Int,
@@ -249,6 +303,12 @@ fun StreamsScreen(
     var showPerformancePanel by remember { mutableStateOf(false) }
     var showCompliancePanel by remember { mutableStateOf(false) }
     var showSignalLossPanel by remember { mutableStateOf(false) }
+    var streamsFullScreen by remember { mutableStateOf(false) }
+    val fullScreenChrome = streamsFullScreenChrome(
+        fullScreen = streamsFullScreen,
+        externalContentActive = externalContentMode != null
+    )
+    ApplyStreamsFullScreenSystemBars(fullScreenChrome.showExitChip)
     val allOverLimitMuted = overLimitDrones.isNotEmpty() && overLimitDrones.all { it.muted }
     val allSignalLossMuted = signalLossFlights.isNotEmpty() && signalLossFlights.all { it.muted }
 
@@ -257,86 +317,105 @@ fun StreamsScreen(
         color = MaterialTheme.colorScheme.background
     ) {
         Column {
-            TopAppBar(
-                modifier = Modifier.pointerInput(handleBack) {
-                    detectTapGestures(
-                        onDoubleTap = { handleBack() }
-                    )
-                },
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        NotamStatusChip(
-                            state = notamUiState,
-                            onClick = { showNotamPanel = true },
-                            outerPadding = PaddingValues(0.dp)
+            if (fullScreenChrome.showTopBar) {
+                TopAppBar(
+                    modifier = Modifier.pointerInput(handleBack) {
+                        detectTapGestures(
+                            onDoubleTap = { handleBack() }
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = serverStatus,
-                            modifier = Modifier
-                                .clickable { showPerformancePanel = true }
-                                .padding(end = 8.dp),
-                            fontSize = 14.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        StreamsMapStatusButton(
-                            mapName = mapName,
-                            onClick = onMapStatusTap,
-                            modifier = Modifier
-                                .widthIn(max = 220.dp)
-                                .height(36.dp)
-                        )
-                    }
-                },
-                navigationIcon = if (showNavigation) {
-                    {
-                        IconButton(onClick = handleBack) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back"
+                    },
+                    title = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            NotamStatusChip(
+                                state = notamUiState,
+                                onClick = { showNotamPanel = true },
+                                outerPadding = PaddingValues(0.dp)
                             )
-                        }
-                    }
-                } else {
-                    {}
-                },
-                actions = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ComplianceAlertBell(
-                            overLimitDrones = overLimitDrones,
-                            allOverLimitMuted = allOverLimitMuted,
-                            onClick = { showCompliancePanel = true }
-                        )
-                        SignalLossAlertButton(
-                            flights = signalLossFlights,
-                            allMuted = allSignalLossMuted,
-                            onClick = { showSignalLossPanel = true }
-                        )
-                        ResumeProximityAlertButton()
-                        if (externalContentMode == null) {
-                            LayoutToggleChip(
-                                label = if (streamPipUiState.enabled) "PiP:On" else "PiP:Off",
-                                selected = streamPipUiState.enabled,
-                                onClick = { viewModel.setStreamPipEnabled(!streamPipUiState.enabled) }
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = serverStatus,
+                                modifier = Modifier
+                                    .clickable { showPerformancePanel = true }
+                                    .padding(end = 8.dp),
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        if (layoutMode != StreamsLayoutMode.Both) {
-                            LayoutToggleChip(
-                                label = "Split",
-                                selected = false,
-                                onClick = {
-                                    viewModel.setLayoutMode(StreamsLayoutMode.Both)
-                                    if (splitFraction !in 0.1f..0.9f) {
-                                        splitFraction = 0.5f
+                            StreamsMapStatusButton(
+                                mapName = mapName,
+                                onClick = onMapStatusTap,
+                                modifier = Modifier
+                                    .widthIn(max = 220.dp)
+                                    .height(36.dp)
+                            )
+                            Spacer(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .pointerInput(externalContentMode) {
+                                        detectTapGestures(
+                                            onTap = {
+                                                if (externalContentMode == null) {
+                                                    streamsFullScreen = true
+                                                }
+                                            }
+                                        )
                                     }
-                                }
                             )
                         }
+                    },
+                    navigationIcon = if (showNavigation) {
+                        {
+                            IconButton(onClick = handleBack) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back"
+                                )
+                            }
+                        }
+                    } else {
+                        {}
+                    },
+                    actions = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ComplianceAlertBell(
+                                overLimitDrones = overLimitDrones,
+                                allOverLimitMuted = allOverLimitMuted,
+                                onClick = { showCompliancePanel = true }
+                            )
+                            SignalLossAlertButton(
+                                flights = signalLossFlights,
+                                allMuted = allSignalLossMuted,
+                                onClick = { showSignalLossPanel = true }
+                            )
+                            ResumeProximityAlertButton()
+                            if (externalContentMode == null) {
+                                LayoutToggleChip(
+                                    label = if (streamPipUiState.enabled) "PiP:On" else "PiP:Off",
+                                    selected = streamPipUiState.enabled,
+                                    onClick = { viewModel.setStreamPipEnabled(!streamPipUiState.enabled) }
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            if (layoutMode != StreamsLayoutMode.Both) {
+                                LayoutToggleChip(
+                                    label = "Split",
+                                    selected = false,
+                                    onClick = {
+                                        viewModel.setLayoutMode(StreamsLayoutMode.Both)
+                                        if (splitFraction !in 0.1f..0.9f) {
+                                            splitFraction = 0.5f
+                                        }
+                                    }
+                                )
+                            }
+                        }
                     }
-                }
-            )
+                )
+            }
 
             Box(Modifier.fillMaxSize()) {
                 when (layoutMode) {
@@ -357,6 +436,7 @@ fun StreamsScreen(
                             viewModel = viewModel,
                             allowCapturedVideoPicker = allowModalDialogs,
                             onMapStatusTap = onMapStatusTap,
+                            fullScreenContent = fullScreenChrome.showExitChip,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -401,6 +481,15 @@ fun StreamsScreen(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
+                }
+
+                if (fullScreenChrome.showExitChip) {
+                    FullScreenExitChip(
+                        onClick = { streamsFullScreen = false },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .zIndex(10f)
+                    )
                 }
 
                 if (allowModalDialogs) viewModel.pendingClue?.let {
@@ -458,6 +547,75 @@ fun StreamsScreen(
                     Text("Close")
                 }
             }
+        )
+    }
+}
+
+@Composable
+private fun ApplyStreamsFullScreenSystemBars(active: Boolean) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(active, view) {
+        val window = (view.context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        if (active && controller != null) {
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+}
+
+@Composable
+private fun FullScreenExitChip(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val layout = fullScreenExitChipLayout()
+    Box(
+        modifier = modifier
+            .padding(top = 8.dp, end = layout.endPaddingDp.dp)
+            .widthIn(min = layout.minWidthDp.dp)
+            .heightIn(min = layout.minHeightDp.dp)
+            .border(1.dp, Color.White, RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .background(Color.Transparent),
+        contentAlignment = Alignment.Center
+    ) {
+        OutlinedOverlayText(
+            text = "Exit FS",
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+}
+
+@Composable
+private fun OutlinedOverlayText(
+    text: String,
+    style: TextStyle,
+) {
+    val outlinedStyle = style.copy(fontWeight = FontWeight.Black)
+    Box {
+        Text(
+            text = text,
+            color = Color.Black,
+            style = outlinedStyle.copy(drawStyle = Stroke(width = 4f, miter = 2f)),
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.align(Alignment.CenterStart)
+        )
+        Text(
+            text = text,
+            color = Color.White,
+            style = outlinedStyle,
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.align(Alignment.CenterStart)
         )
     }
 }
@@ -833,6 +991,7 @@ private fun StreamsGrid(
     allowCapturedVideoPicker: Boolean,
     onMapStatusTap: () -> Unit,
     showTileControls: Boolean = true,
+    fullScreenContent: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val tag = "StreamsGrid"
@@ -912,6 +1071,40 @@ private fun StreamsGrid(
                 else -> 2
             }
 
+            if (fullScreenContent && visibleEntries.size == 1) {
+                val (path, info) = visibleEntries.first()
+                val focusPresentation = streamTileFocusPresentation(
+                    displayedTileCount = visibleEntries.size,
+                    explicitlyFocused = focusedPath == path
+                )
+                val chromePresentation = streamTileChromePresentation(
+                    fullScreenContent = true,
+                    focused = focusPresentation.effectiveFocused
+                )
+                StreamTile(
+                    viewModel = viewModel,
+                    streamDesignator = path,
+                    streamRevision = info.revision,
+                    streamState = info.state,
+                    streamErrorDetail = info.errorDetail,
+                    onCloseStream = {
+                        viewModel.closeStream(path)
+                    },
+                    onRestartServer = {
+                        restartMediaMtxServer(context)
+                    },
+                    onToggleFocus = {
+                        viewModel.toggleFocus(path)
+                    },
+                    showTileControls = showTileControls,
+                    effectiveFocused = focusPresentation.effectiveFocused,
+                    showFocusBorder = focusPresentation.showFocusBorder,
+                    fillContainer = chromePresentation.fillContainer,
+                    showStandaloneTelemetryOverlay = chromePresentation.showStandaloneTelemetryOverlay,
+                )
+                return@Box
+            }
+
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 val cellHeight = maxHeight / rows
 
@@ -928,6 +1121,10 @@ private fun StreamsGrid(
                         val focusPresentation = streamTileFocusPresentation(
                             displayedTileCount = visibleEntries.size,
                             explicitlyFocused = focusedPath == path
+                        )
+                        val chromePresentation = streamTileChromePresentation(
+                            fullScreenContent = false,
+                            focused = focusPresentation.effectiveFocused
                         )
                         Box(
                             modifier = Modifier
@@ -954,6 +1151,8 @@ private fun StreamsGrid(
                                 showTileControls = showTileControls,
                                 effectiveFocused = focusPresentation.effectiveFocused,
                                 showFocusBorder = focusPresentation.showFocusBorder,
+                                fillContainer = chromePresentation.fillContainer,
+                                showStandaloneTelemetryOverlay = chromePresentation.showStandaloneTelemetryOverlay,
                             )
                         }
                     }

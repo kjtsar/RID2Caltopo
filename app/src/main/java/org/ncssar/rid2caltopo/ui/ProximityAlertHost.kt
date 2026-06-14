@@ -42,6 +42,10 @@ import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import java.util.Locale
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
@@ -191,6 +195,21 @@ object ProximityAlertCenter {
         val wallTimeMs: Long
     )
 
+    private data class DroneInput(
+        val remoteId: String,
+        val mappedId: String,
+        val lastLat: Double,
+        val lastLng: Double,
+        val lastAlt: Double,
+        val mostRecentMsecTimestamp: Long,
+        val localArchiveOnly: Boolean
+    )
+
+    private data class ProximityUpdateRequest(
+        val drones: List<DroneInput>,
+        val submittedAtMs: Long
+    )
+
     private data class EvaluatedDrone(
         val remoteId: String,
         val mappedId: String,
@@ -248,6 +267,12 @@ object ProximityAlertCenter {
     private val _debugPairs = MutableStateFlow<List<ProximityDebugPair>>(emptyList())
     val debugPairs: StateFlow<List<ProximityDebugPair>> = _debugPairs.asStateFlow()
 
+    private val stateLock = Any()
+    private val pendingUpdate = AtomicReference<ProximityUpdateRequest?>(null)
+    private val workerScheduled = AtomicBoolean(false)
+    @Volatile
+    private var evaluationExecutor: Executor = createDefaultEvaluationExecutor()
+
     private val sampleHistoryByRemoteId = linkedMapOf<String, ArrayDeque<DroneSample>>()
     private val previousPairSnapshots = linkedMapOf<String, PairSnapshot>()
     private var latestEvaluationsByKey = emptyMap<String, PairEvaluation>()
@@ -276,7 +301,48 @@ object ProximityAlertCenter {
     }
 
     fun updateDrones(drones: List<CtDroneSpec>) {
-        val startedAtMs = System.currentTimeMillis()
+        val request = ProximityUpdateRequest(
+            drones = drones.map { spec ->
+                DroneInput(
+                    remoteId = spec.remoteId,
+                    mappedId = spec.mappedId,
+                    lastLat = spec.lastLat,
+                    lastLng = spec.lastLng,
+                    lastAlt = spec.lastAlt,
+                    mostRecentMsecTimestamp = spec.mostRecentMsecTimestamp,
+                    localArchiveOnly = spec.isLocalArchiveOnly
+                )
+            },
+            submittedAtMs = System.currentTimeMillis()
+        )
+        pendingUpdate.set(request)
+        if (workerScheduled.compareAndSet(false, true)) {
+            evaluationExecutor.execute(::drainPendingUpdates)
+        }
+    }
+
+    private fun drainPendingUpdates() {
+        try {
+            while (true) {
+                val request = pendingUpdate.getAndSet(null) ?: break
+                updateDronesOnWorker(request)
+            }
+        } catch (throwable: Throwable) {
+            CaltopoClient.CTWarn(
+                "ProximityAlertCenter",
+                "updateDrones worker failed: ${throwable.javaClass.simpleName}: ${throwable.message.orEmpty()}"
+            )
+        } finally {
+            workerScheduled.set(false)
+            if (pendingUpdate.get() != null && workerScheduled.compareAndSet(false, true)) {
+                evaluationExecutor.execute(::drainPendingUpdates)
+            }
+        }
+    }
+
+    private fun updateDronesOnWorker(request: ProximityUpdateRequest) = synchronized(stateLock) {
+        val startedAtMs = request.submittedAtMs
+        val drones = request.drones
         val nowMs = System.currentTimeMillis()
         val thresholdFt = CaltopoClient.GetProximityAlertSpacingFeet().toDouble()
         if (thresholdFt <= 0.0) {
@@ -439,27 +505,31 @@ object ProximityAlertCenter {
     }
 
     fun suspendCurrentAlert() {
-        alertsSuspended = true
-        clearEligibleSinceMs = null
-        _suspendedAlert.value = _uiState.value
-        _uiState.value = null
-        refreshResumeVisibility()
+        synchronized(stateLock) {
+            alertsSuspended = true
+            clearEligibleSinceMs = null
+            _suspendedAlert.value = _uiState.value
+            _uiState.value = null
+            refreshResumeVisibility()
+        }
     }
 
     fun resumeSuspendedAlert() {
-        val suspended = _suspendedAlert.value ?: return
-        val currentEval = latestEvaluationsByKey[suspended.pairKey]
-        val stillWithinThreshold = currentEval != null && currentEval.isInsideThreshold(suspended.thresholdFt)
-        alertsSuspended = false
-        if (stillWithinThreshold) {
-            _uiState.value = currentEval.toUiState(suspended.alertInstanceId, suspended.thresholdFt)
-            _suspendedAlert.value = null
-        } else {
-            _uiState.value = null
-            _suspendedAlert.value = null
+        synchronized(stateLock) {
+            val suspended = _suspendedAlert.value ?: return
+            val currentEval = latestEvaluationsByKey[suspended.pairKey]
+            val stillWithinThreshold = currentEval != null && currentEval.isInsideThreshold(suspended.thresholdFt)
+            alertsSuspended = false
+            if (stillWithinThreshold) {
+                _uiState.value = currentEval.toUiState(suspended.alertInstanceId, suspended.thresholdFt)
+                _suspendedAlert.value = null
+            } else {
+                _uiState.value = null
+                _suspendedAlert.value = null
+            }
+            clearEligibleSinceMs = null
+            refreshResumeVisibility()
         }
-        clearEligibleSinceMs = null
-        refreshResumeVisibility()
     }
 
     private fun refreshResumeVisibility() {
@@ -470,7 +540,7 @@ object ProximityAlertCenter {
     }
 
     private fun evaluateDrone(
-        spec: CtDroneSpec,
+        spec: DroneInput,
         predictiveEnabled: Boolean,
         myLocation: android.location.Location?
     ): EvaluatedDrone {
@@ -494,7 +564,7 @@ object ProximityAlertCenter {
         return EvaluatedDrone(
             remoteId = spec.remoteId,
             mappedId = spec.mappedId,
-            teamDrone = !spec.isLocalArchiveOnly,
+            teamDrone = !spec.localArchiveOnly,
             localAlertEligible = isLocalAlertEligible(spec.remoteId),
             currentLat = spec.lastLat,
             currentLng = spec.lastLng,
@@ -621,15 +691,27 @@ object ProximityAlertCenter {
             (firstLocalAlertEligible || secondLocalAlertEligible)
 
     internal fun resetForTests() {
-        _uiState.value = null
-        _suspendedAlert.value = null
-        _canResumeAlert.value = false
-        _debugPairs.value = emptyList()
-        sampleHistoryByRemoteId.clear()
-        previousPairSnapshots.clear()
-        latestEvaluationsByKey = emptyMap()
-        alertsSuspended = false
-        clearEligibleSinceMs = null
+        pendingUpdate.set(null)
+        workerScheduled.set(false)
+        synchronized(stateLock) {
+            _uiState.value = null
+            _suspendedAlert.value = null
+            _canResumeAlert.value = false
+            _debugPairs.value = emptyList()
+            sampleHistoryByRemoteId.clear()
+            previousPairSnapshots.clear()
+            latestEvaluationsByKey = emptyMap()
+            alertsSuspended = false
+            clearEligibleSinceMs = null
+        }
+    }
+
+    internal fun setEvaluationExecutorForTests(executor: Executor) {
+        evaluationExecutor = executor
+    }
+
+    internal fun clearEvaluationExecutorForTests() {
+        evaluationExecutor = createDefaultEvaluationExecutor()
     }
 
     private fun evaluateThresholdDecision(
@@ -794,6 +876,13 @@ object ProximityAlertCenter {
         )
         return org.osmdroid.util.GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2))
     }
+
+    private fun createDefaultEvaluationExecutor(): Executor =
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "r2c-proximity-alert").apply {
+                isDaemon = true
+            }
+        }
 }
 
 private fun isLocalAlertEligible(remoteId: String): Boolean =

@@ -102,6 +102,8 @@ fun StreamTile(
     showTileControls: Boolean = true,
     effectiveFocused: Boolean? = null,
     showFocusBorder: Boolean? = null,
+    fillContainer: Boolean = false,
+    showStandaloneTelemetryOverlay: Boolean = true,
 ) {
     val tag="StreamTile"
     val clueCaptureSlowMs = 250L
@@ -214,9 +216,25 @@ fun StreamTile(
             pendingAnnotationPoint = null
         }
     }
+    val streamFrameModifier = if (fillContainer) {
+        Modifier.fillMaxSize()
+    } else {
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+    }
 
     LaunchedEffect(streamTileSize, zoomScale) {
         zoomOffset = clampZoomOffset(zoomOffset, zoomScale)
+    }
+
+    fun openTelemetryPairingControl() {
+        if (!tileInteractionsEnabled || isLocalPlayback) return
+        when (designatorState) {
+            is DesignatorState.Yellow -> showPicker = true
+            is DesignatorState.Green -> showUnmatchDialog = true
+            else -> {}
+        }
     }
 
     fun captureClueSnapshot(reason: String): Boolean {
@@ -304,7 +322,7 @@ fun StreamTile(
                 width = if (drawFocusBorder) 3.dp else 0.dp,
                 color = if (drawFocusBorder) Color.Yellow else Color.Transparent
             )
-            .aspectRatio(16f / 9f)
+            .then(if (fillContainer) Modifier.fillMaxSize() else Modifier.aspectRatio(16f / 9f))
             .onSizeChanged { streamTileSize = it }
             .clipToBounds()
             .transformable(zoomTransformState)
@@ -323,9 +341,8 @@ fun StreamTile(
                 state = streamState,
                 designator = streamDesignator,
                 streamRevision = streamRevision,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f),
+                modifier = streamFrameModifier,
+                fillFrame = fillContainer,
                 viewModel = viewModel,
                 onTextureViewReady = { tv ->
                     clueCaptureTargetRef.value = StreamClueCaptureTarget(
@@ -346,9 +363,7 @@ fun StreamTile(
             if (isLocalPlayback) {
                 if (currentFrameAnnotations.isNotEmpty()) {
                     Canvas(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
+                        modifier = streamFrameModifier
                     ) {
                         currentFrameAnnotations.forEach { annotation ->
                             val markerColor = when (annotation.verdict) {
@@ -387,9 +402,7 @@ fun StreamTile(
         }
         if (isLocalPlayback && anomalyConfig.enabled && isLocalPlaybackPaused && currentFrameTimestampUs != null) {
             Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
+                modifier = streamFrameModifier
                     .pointerInput(
                         streamDesignator,
                         currentFrameTimestampUs,
@@ -426,7 +439,7 @@ fun StreamTile(
         }
 
         // ATO / AGL / HDG overlay — shown whenever the stream is live and we have a linked drone.
-        if (streamState == StreamState.LIVE && !isLocalPlayback) {
+        if (streamState == StreamState.LIVE && !isLocalPlayback && showStandaloneTelemetryOverlay) {
             val displayState = viewModel.droneDisplayStateFor(streamDesignator)
             val atoStr = displayState?.atoFt
                 ?.let { "${"%.0f".format(it)}ATO" } ?: "--ATO"
@@ -468,8 +481,7 @@ fun StreamTile(
         ) {
             Canvas(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
+                    .then(streamFrameModifier)
                     .graphicsLayer {
                         scaleX = zoomScale
                         scaleY = zoomScale
@@ -531,11 +543,7 @@ fun StreamTile(
                                         return@detectTapGestures
                                     }
                                     CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
-                                    when (designatorState) {
-                                        is DesignatorState.Yellow -> showPicker = true
-                                        is DesignatorState.Green  -> showUnmatchDialog = true
-                                        else -> {}
-                                    }
+                                    openTelemetryPairingControl()
                                 },
                                 onDoubleTap = {
                                     if (isLocalPlayback) return@detectTapGestures
@@ -926,13 +934,11 @@ fun StreamTile(
             streamErrorDetail = streamErrorDetail,
             viewModel = viewModel,
             onLongPress = {
-                if (!tileInteractionsEnabled) return@DesignatorIndicator
-                if (isLocalPlayback) return@DesignatorIndicator
-                when (designatorState) {
-                    is DesignatorState.Yellow -> showPicker = true
-                    is DesignatorState.Green  -> showUnmatchDialog = true
-                    else -> {}
-                }
+                openTelemetryPairingControl()
+            },
+            onTelemetryChipClick = {
+                CTDebug(tag, "StreamTile(${streamDesignator}) telemetryChipClick designatorState=${designatorState::class.simpleName}")
+                openTelemetryPairingControl()
             },
             interactionEnabled = tileInteractionsEnabled
         )
@@ -1876,6 +1882,7 @@ fun StreamPlayer(
     designator: String,
     streamRevision: Long,
     modifier: Modifier = Modifier,
+    fillFrame: Boolean = false,
     onTextureViewReady: (TextureView) -> Unit,
     onPlayerTextureViewReady: (TextureView) -> Unit = {},
     onTextureFrameUpdated: (Int) -> Unit = {}
@@ -1890,6 +1897,7 @@ fun StreamPlayer(
             StreamPlayerView(
                 player = player,
                 modifier = modifier,
+                fillFrame = fillFrame,
                 onPlayerTextureViewReady = onPlayerTextureViewReady
             )
         } else {

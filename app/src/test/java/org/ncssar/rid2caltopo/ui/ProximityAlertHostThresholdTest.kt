@@ -6,17 +6,26 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 import org.ncssar.rid2caltopo.data.FakePeerCoordinator
 import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
 import org.ncssar.rid2caltopo.data.TestR2cRuntimeFactory
+import java.util.ArrayDeque
+import java.util.concurrent.Executor
 
 class ProximityAlertHostThresholdTest {
+    @Before
+    fun setUp() {
+        ProximityAlertCenter.setEvaluationExecutorForTests(Executor { it.run() })
+    }
+
     @After
     fun tearDown() {
         ProximityAlertCenter.resetForTests()
+        ProximityAlertCenter.clearEvaluationExecutorForTests()
         R2cRuntimeRegistry.resetDefaultRuntimeForTesting()
     }
 
@@ -165,6 +174,47 @@ class ProximityAlertHostThresholdTest {
     }
 
     @Test
+    fun updateDronesQueuesEvaluationOffCallerThread() {
+        CaltopoClient.SetProximityAlertSpacingFeet(40)
+        CaltopoClient.SetPredictiveHeadEnabled(false)
+        val fixture = TestR2cRuntimeFactory.create("proximity-async")
+        fixture.setAsDefaultRuntime()
+        val peerCoordinator = fixture.peerCoordinator as FakePeerCoordinator
+        peerCoordinator.setLocalOwnership("TEAMDRONE1", true)
+        val executor = ManualExecutor()
+        ProximityAlertCenter.setEvaluationExecutorForTests(executor)
+        ProximityAlertCenter.resetForTests()
+
+        val owned = proximityDrone(
+            remoteId = "TEAMDRONE1",
+            mappedId = "1sar7mn4pr",
+            lat = 39.153099,
+            lng = -121.132858,
+            altMeters = 527.0,
+            localArchiveOnly = false
+        )
+        val traffic = proximityDrone(
+            remoteId = "TRAFFIC1",
+            mappedId = "traffic1",
+            lat = 39.153099,
+            lng = -121.132828,
+            altMeters = 544.5,
+            localArchiveOnly = true
+        )
+
+        ProximityAlertCenter.updateDrones(listOf(owned, traffic))
+
+        assertEquals(1, executor.pendingCount)
+        assertNull(ProximityAlertCenter.uiState.value)
+        assertTrue(ProximityAlertCenter.debugPairs.value.isEmpty())
+
+        executor.runNext()
+
+        assertNotNull(ProximityAlertCenter.uiState.value)
+        assertTrue(ProximityAlertCenter.debugPairs.value.single().alerting)
+    }
+
+    @Test
     fun highSeverityRequiresDroppingBelowSeventyFivePercentThreshold() {
         val atBoundary = ProximityAlertCenter.evaluateThresholdDecisionForTests(
             effectiveHorizontalFt = 30.0,
@@ -223,6 +273,20 @@ class ProximityAlertHostThresholdTest {
             lastLng = lng
             lastAlt = altMeters
             mostRecentMsecTimestamp = System.currentTimeMillis()
+        }
+    }
+
+    private class ManualExecutor : Executor {
+        private val queued = ArrayDeque<Runnable>()
+        val pendingCount: Int
+            get() = queued.size
+
+        override fun execute(command: Runnable) {
+            queued.add(command)
+        }
+
+        fun runNext() {
+            queued.removeFirst().run()
         }
     }
 }

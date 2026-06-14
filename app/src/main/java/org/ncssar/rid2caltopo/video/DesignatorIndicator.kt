@@ -4,6 +4,7 @@ import DroneSpecState
 import DroneDisplayState
 import StreamsViewModel
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -51,6 +53,7 @@ fun DesignatorIndicator(
     streamState: StreamState,
     streamErrorDetail: String?,
     onLongPress: () -> Unit,
+    onTelemetryChipClick: () -> Unit = onLongPress,
     interactionEnabled: Boolean = true
 ) {
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
@@ -109,6 +112,9 @@ fun DesignatorIndicator(
         return
     }
     val designatorState = viewModel.designatorStateFor(streamDesignator)
+    val showTelemetryChip = interactionEnabled &&
+        focusedPath == streamDesignator &&
+        (designatorState is DesignatorState.Yellow || designatorState is DesignatorState.Green)
     val showCompactTopTelemetry = designatorState is DesignatorState.Green && streamState == StreamState.LIVE
 
     val (palette, locationText, detailText) = when (designatorState) {
@@ -129,11 +135,11 @@ fun DesignatorIndicator(
         else -> Triple(
             indicatorPaletteFor(designatorState),
             null,
-            designatorDetailText(designatorState, mapStatus, interactionEnabled)
+            if (showTelemetryChip) "" else designatorDetailText(designatorState, mapStatus, interactionEnabled)
         )
     }
     Column {
-        if (showCompactTopTelemetry) {
+        if (showCompactTopTelemetry || showTelemetryChip) {
             Row(
                 modifier = Modifier
                     .padding(10.dp)
@@ -156,13 +162,21 @@ fun DesignatorIndicator(
                     palette = palette,
                     modifier = Modifier.requiredWidth(84.dp)
                 )
-                OutlinedIndicatorText(
-                    text = formatCompactTelemetry(droneDisplayState),
-                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
-                    maxLines = 1,
-                    overflow = TextOverflow.Clip,
-                    palette = palette
-                )
+                if (showTelemetryChip) {
+                    TelemetryIndicatorChip(
+                        text = telemetryChipTextFor(designatorState, droneDisplayState),
+                        palette = palette,
+                        onClick = onTelemetryChipClick
+                    )
+                } else {
+                    OutlinedIndicatorText(
+                        text = formatCompactTelemetry(droneDisplayState),
+                        style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                        palette = palette
+                    )
+                }
             }
         } else {
             OutlinedIndicatorText(
@@ -239,6 +253,29 @@ fun DesignatorIndicator(
 }
 
 @Composable
+private fun TelemetryIndicatorChip(
+    text: String,
+    palette: IndicatorPalette,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .border(1.dp, palette.fillColor, RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .background(Color.Transparent)
+    ) {
+        OutlinedIndicatorText(
+            text = text,
+            style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+            palette = palette
+        )
+    }
+}
+
+@Composable
 private fun OutlinedIndicatorText(
     text: String,
     palette: IndicatorPalette,
@@ -288,13 +325,17 @@ internal fun designatorDetailText(
     mapStatus: String,
     interactionEnabled: Boolean
 ): String = when (designatorState) {
-    is DesignatorState.Yellow -> if (interactionEnabled) {
-        "Long-press to match telemetry (mapStatus:${mapStatus})"
-    } else {
-        "Telemetry not attached (mapStatus:${mapStatus})"
-    }
+    is DesignatorState.Yellow -> "Telemetry not attached (mapStatus:${mapStatus})"
     DesignatorState.Red -> "No telemetry available (mapStatus:${mapStatus})"
     is DesignatorState.Green -> ""
+}
+
+internal fun telemetryChipTextFor(
+    designatorState: DesignatorState,
+    display: DroneDisplayState?
+): String = when (designatorState) {
+    is DesignatorState.Green -> formatCompactTelemetry(display)
+    else -> "No Telemetry"
 }
 
 internal fun formatLiveState(
@@ -309,7 +350,7 @@ internal fun formatLiveState(
     return String.format(Locale.US, "lag:%.1fs", delayMs / 1000.0)
 }
 
-private fun formatCompactTelemetry(display: DroneDisplayState?): String {
+internal fun formatCompactTelemetry(display: DroneDisplayState?): String {
     if (display == null) return "HDG --  AGL --  ATO --"
 
     val heading = display.headingDeg

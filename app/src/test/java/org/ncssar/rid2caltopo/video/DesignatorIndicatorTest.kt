@@ -41,9 +41,9 @@ class DesignatorIndicatorTest {
     }
 
     @Test
-    fun designatorDetailText_omitsLongPressPromptWhenInteractionsAreDisabled() {
+    fun designatorDetailText_doesNotUseLongPressPromptForUnpairedStream() {
         assertEquals(
-            "Long-press to match telemetry (mapStatus:Standalone)",
+            "Telemetry not attached (mapStatus:Standalone)",
             designatorDetailText(
                 designatorState = DesignatorState.Yellow(emptyMap()),
                 mapStatus = "Standalone",
@@ -56,6 +56,26 @@ class DesignatorIndicatorTest {
                 designatorState = DesignatorState.Yellow(emptyMap()),
                 mapStatus = "Standalone",
                 interactionEnabled = false
+            )
+        )
+    }
+
+    @Test
+    fun telemetryChipText_describesUnpairedAndPairedStreams() {
+        assertEquals(
+            "No Telemetry",
+            telemetryChipTextFor(
+                designatorState = DesignatorState.Yellow(emptyMap()),
+                display = null
+            )
+        )
+        assertEquals(
+            "HDG --  AGL --  ATO --",
+            telemetryChipTextFor(
+                designatorState = DesignatorState.Green(
+                    DroneSpecState(CtDroneSpec("testRemoteId"))
+                ),
+                display = null
             )
         )
     }

@@ -144,6 +144,68 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun movedDroneFolderMarkerIds_hidesClueMarkerMovedOutOfDroneFolder() {
+        val previous = markerFeature("clue-guid", "Possible clue", "drone-folder")
+            .apply { optJSONObject("properties")?.put("created", 1_000L) }
+        val incoming = markerFeature("clue-guid", "Possible clue", "hidden-folder")
+            .apply { optJSONObject("properties")?.put("created", 1_000L) }
+
+        val movedIds = movedDroneFolderMarkerIds(
+            previousFeatures = mapOf("clue-guid" to previous),
+            incomingFeatures = mapOf("clue-guid" to incoming),
+            expectedDroneFolderId = "drone-folder"
+        )
+
+        assertEquals(setOf("clue-guid"), movedIds)
+    }
+
+    @Test
+    fun movedDroneFolderMarkerIds_hidesMarkerMovedOutOfDroneFolderWithoutClueMetadata() {
+        val previous = markerFeature("clue-guid", "Possible clue", "drone-folder")
+        val incoming = markerFeature("clue-guid", "Possible clue", "hidden-folder")
+
+        val movedIds = movedDroneFolderMarkerIds(
+            previousFeatures = mapOf("clue-guid" to previous),
+            incomingFeatures = mapOf("clue-guid" to incoming),
+            expectedDroneFolderId = "drone-folder"
+        )
+
+        assertEquals(setOf("clue-guid"), movedIds)
+    }
+
+    @Test
+    fun movedDroneFolderMarkerIds_keepsClueMarkerStillInDroneFolder() {
+        val previous = markerFeature("clue-guid", "Possible clue", "drone-folder")
+            .apply { optJSONObject("properties")?.put("created", 1_000L) }
+        val incoming = markerFeature("clue-guid", "Possible clue", "drone-folder")
+            .apply { optJSONObject("properties")?.put("created", 1_000L) }
+
+        val movedIds = movedDroneFolderMarkerIds(
+            previousFeatures = mapOf("clue-guid" to previous),
+            incomingFeatures = mapOf("clue-guid" to incoming),
+            expectedDroneFolderId = "drone-folder"
+        )
+
+        assertEquals(emptySet<String>(), movedIds)
+    }
+
+    @Test
+    fun movedDroneFolderMarkerIds_ignoresManagedR2cDeviceMarkerMoves() {
+        val previous = markerFeature("device-marker", "R2C: Tablet", "drone-folder")
+            .apply { optJSONObject("properties")?.put("r2c-guid", "tablet-guid") }
+        val incoming = markerFeature("device-marker", "R2C: Tablet", "hidden-folder")
+            .apply { optJSONObject("properties")?.put("r2c-guid", "tablet-guid") }
+
+        val movedIds = movedDroneFolderMarkerIds(
+            previousFeatures = mapOf("device-marker" to previous),
+            incomingFeatures = mapOf("device-marker" to incoming),
+            expectedDroneFolderId = "drone-folder"
+        )
+
+        assertEquals(emptySet<String>(), movedIds)
+    }
+
+    @Test
     fun visibleTileNetworkActive_staysEnabledUnlessOfflinePrepSuppressesNetwork() {
         assertEquals(true, visibleTileNetworkActive(suppressLiveMapNetwork = false))
         assertEquals(false, visibleTileNetworkActive(suppressLiveMapNetwork = true))
@@ -405,6 +467,41 @@ class MapPaneArtifactOverlayStateTest {
         )
 
         assertEquals(0, state.lines.size)
+    }
+
+    @Test
+    fun buildArtifactOverlayState_hidesMediaObjectWhenParentMarkerHidden() {
+        val representedFolder = folderFeature("folder-hidden", "Hidden Clues")
+        val marker = markerFeature("clue-marker", "Clue", "folder-hidden")
+        val media = mediaObjectFeature("clue-media", "Clue photo", "clue-marker")
+
+        val itemHiddenState = buildArtifactOverlayState(
+            listOf(representedFolder, marker, media),
+            hiddenItemIds = setOf("clue-marker")
+        )
+        val folderHiddenState = buildArtifactOverlayState(
+            listOf(representedFolder, marker, media),
+            hiddenFolderIds = setOf("folder-hidden")
+        )
+
+        assertEquals(emptyList<String>(), itemHiddenState.points.map { it.id })
+        assertEquals(emptyList<String>(), folderHiddenState.points.map { it.id })
+    }
+
+    @Test
+    fun buildArtifactHydrationResult_appliesServerHiddenFolderToOverlayImmediately() {
+        val hiddenFolder = folderFeature("folder-hidden", "Hidden Clues")
+            .also { it.getJSONObject("properties").put("visible", false) }
+        val marker = markerFeature("clue-marker", "Clue", "folder-hidden")
+
+        val result = buildArtifactHydrationResult(
+            snapshot = listOf(hiddenFolder, marker),
+            hiddenFolderIds = emptySet(),
+            hiddenItemIds = emptySet()
+        )
+
+        assertEquals(false, result.folderDefaults.single().initiallyVisible)
+        assertEquals(emptyList<String>(), result.overlayState.points.map { it.id })
     }
 
     @Test
@@ -752,6 +849,25 @@ class MapPaneArtifactOverlayStateTest {
                     .put("title", title)
                     .put("folderId", folderId)
                     .put("marker-color", "#ff0000")
+            )
+            .put(
+                "geometry",
+                JSONObject()
+                    .put("type", "Point")
+                    .put("coordinates", JSONArray().put(-122.0).put(37.0))
+            )
+
+    private fun mediaObjectFeature(id: String, title: String, parentMarkerId: String): JSONObject =
+        JSONObject()
+            .put("id", id)
+            .put(
+                "properties",
+                JSONObject()
+                    .put("class", "MapMediaObject")
+                    .put("title", title)
+                    .put("parentId", "Marker:$parentMarkerId")
+                    .put("marker-color", "#ff00ff")
+                    .put("marker-symbol", "aperture")
             )
             .put(
                 "geometry",

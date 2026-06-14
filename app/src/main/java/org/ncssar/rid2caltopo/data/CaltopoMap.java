@@ -1038,7 +1038,7 @@ public class CaltopoMap {
     }
 
     private static void PhotoMarkerTimeout() {
-        ShowToast("Timeout while trying to add photo waypoint to map.");
+        ShowToast("Caltopo clue upload timed out; clue is saved in the KMZ/local archive for manual upload when connected.");
     }
 
     private static void PhotoMarkerComplete(CaltopoOp op) {
@@ -1046,7 +1046,10 @@ public class CaltopoMap {
         if (op.success()) {
             ShowToast("Photo Waypoint created.");
         } else {
-            ShowToast("Not able to create Photo Waypoint.");
+            CTWarn(TAG, String.format(Locale.US,
+                    "PhotoMarkerComplete(): clue upload failed responseCode=%d response=%s",
+                    op.responseCode, op.responseString()));
+            ShowToast("Caltopo clue upload failed; clue is saved in the KMZ/local archive for manual upload when connected.");
         }
     }
 

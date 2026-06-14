@@ -509,7 +509,8 @@ internal data class ArtifactFolderDefault(
 internal data class ArtifactHydrationResult(
     val featuresById: LinkedHashMap<String, JSONObject>,
     val overlayState: ArtifactOverlayState,
-    val folderDefaults: List<ArtifactFolderDefault>
+    val folderDefaults: List<ArtifactFolderDefault>,
+    val serverHiddenFolderIds: Set<String>
 )
 
 internal data class LocalTrackPoint(
@@ -2655,7 +2656,11 @@ internal fun SplitMapPane(
         }
     }
 
-    fun startArtifactHydration(reason: String, onComplete: (() -> Unit)? = null) {
+    fun startArtifactHydration(
+        reason: String,
+        replaceWhenSnapshotEmpty: Boolean = false,
+        onComplete: (() -> Unit)? = null
+    ) {
         artifactHydrationJob?.cancel()
         val runId = artifactHydrationRunId + 1
         artifactHydrationRunId = runId
@@ -2669,7 +2674,7 @@ internal fun SplitMapPane(
             try {
                 val result = withContext(Dispatchers.Default) {
                     val snapshot = CaltopoMap.GetArtifactFeatureSnapshot()
-                    val shouldReplace = snapshot.isNotEmpty() || replaceIfEmpty
+                    val shouldReplace = snapshot.isNotEmpty() || replaceIfEmpty || replaceWhenSnapshotEmpty
                     if (!shouldReplace) {
                         return@withContext null
                     }
@@ -2694,17 +2699,31 @@ internal fun SplitMapPane(
                 }
                 if (artifactHydrationRunId != runId) return@launch
                 if (result != null) {
+                    val autoHiddenMovedMarkerIds = movedDroneFolderMarkerIds(
+                        previousFeatures = artifactStoreById,
+                        incomingFeatures = result.featuresById,
+                        expectedDroneFolderId = CaltopoMap.GetFolderId()
+                    )
+                    if (autoHiddenMovedMarkerIds.isNotEmpty()) {
+                        hiddenItemIds.addAll(autoHiddenMovedMarkerIds)
+                        if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
+                            MAP_PANE_TAG,
+                            "Auto-hid moved Drone Tracks marker(s) from full snapshot: $autoHiddenMovedMarkerIds"
+                        )
+                    }
+                    val overlayHiddenFolderIds = hiddenFoldersSnapshot + result.serverHiddenFolderIds
+                    val overlayHiddenItemIds = hiddenItemsSnapshot + autoHiddenMovedMarkerIds
                     val cacheChangedDuringHydration = artifactRenderCache.featureVersion != hydrationStartVersion
                     val mergedFeatures = artifactRenderCache.mergedHydrationFeatures(
                         hydratedFeatures = result.featuresById,
                         hydrationStartVersion = hydrationStartVersion
                     )
-                    val mergedOverlayState = if (cacheChangedDuringHydration) {
+                    val mergedOverlayState = if (cacheChangedDuringHydration || autoHiddenMovedMarkerIds.isNotEmpty()) {
                         withContext(Dispatchers.Default) {
                             buildArtifactOverlayState(
                                 mergedFeatures.values.toList(),
-                                hiddenFoldersSnapshot,
-                                hiddenItemsSnapshot,
+                                overlayHiddenFolderIds,
+                                overlayHiddenItemIds,
                                 pilotArchiveTrackColorForCallsign = { pilotKey ->
                                     PilotDisplayPrefs.load(appContext, pilotKey).archiveTrackColor
                                 }
@@ -3156,7 +3175,7 @@ internal fun SplitMapPane(
                         return@launch
                     }
                     fullArtifactHydrationQueued = true
-                    startArtifactHydration("ingest-full") {
+                    startArtifactHydration("ingest-full", replaceWhenSnapshotEmpty = true) {
                         fullArtifactHydrationQueued = false
                     }
                 }
@@ -3171,6 +3190,19 @@ internal fun SplitMapPane(
                 if (isArtifactDelete(feature)) {
                     artifactRenderCache.removeFeature(featureId)
                 } else {
+                    val previousFeature = artifactRenderCache.featuresById[featureId]
+                    val autoHiddenMovedMarkerIds = movedDroneFolderMarkerIds(
+                        previousFeatures = if (previousFeature == null) emptyMap() else mapOf(featureId to previousFeature),
+                        incomingFeatures = mapOf(featureId to feature),
+                        expectedDroneFolderId = CaltopoMap.GetFolderId()
+                    )
+                    if (autoHiddenMovedMarkerIds.isNotEmpty()) {
+                        hiddenItemIds.addAll(autoHiddenMovedMarkerIds)
+                        if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
+                            MAP_PANE_TAG,
+                            "Auto-hid moved Drone Tracks marker(s) from artifact delta: $autoHiddenMovedMarkerIds"
+                        )
+                    }
                     artifactRenderCache.putFeature(featureId, feature)
                     // Auto-hide folders the server marks as not visible, on first encounter.
                     // Delegates to ViewModel so the choice persists across navigation.
@@ -5415,6 +5447,9 @@ internal fun buildArtifactOverlayState(
     hiddenItemIds: Set<String> = emptySet(),
     pilotArchiveTrackColorForCallsign: (String) -> String? = { null }
 ): ArtifactOverlayState {
+    val featuresById = features.mapNotNull { feature ->
+        feature.optString("id").takeIf { it.isNotBlank() }?.let { it to feature }
+    }.toMap()
     val points = mutableListOf<ArtifactPointSpec>()
     val lines = mutableListOf<ArtifactLineSpec>()
     val polygons = mutableListOf<ArtifactPolygonSpec>()
@@ -5440,6 +5475,7 @@ internal fun buildArtifactOverlayState(
         if (folderId.isBlank() || folderId !in representedFolderIds) continue
         if (folderId.isNotBlank() && folderId in hiddenFolderIds) continue
         if (featureId.isNotBlank() && featureId in hiddenItemIds) continue
+        if (isMediaObjectWithHiddenParent(properties, featuresById, hiddenFolderIds, hiddenItemIds)) continue
         val featureTitle = artifactDisplayTitle(properties, featureId, className)
         val markerSymbol = properties?.optString("marker-symbol", "point").orEmpty().ifBlank { "point" }
         val markerColor = properties?.optString("marker-color")
@@ -5495,6 +5531,7 @@ internal fun buildArtifactHydrationResult(
 ): ArtifactHydrationResult {
     val featuresById = LinkedHashMap<String, JSONObject>()
     val folderDefaultsById = LinkedHashMap<String, ArtifactFolderDefault>()
+    val serverHiddenFolderIds = LinkedHashSet<String>()
     val total = snapshot.size
     val checkpoint = progressInterval.coerceAtLeast(1)
     snapshot.forEachIndexed { index, feature ->
@@ -5503,6 +5540,9 @@ internal fun buildArtifactHydrationResult(
             featuresById[featureId] = feature
             val props = feature.optJSONObject("properties")
             if (props?.optString("class") == "Folder") {
+                if (!props.optBoolean("visible", true)) {
+                    serverHiddenFolderIds.add(featureId)
+                }
                 folderDefaultsById.putIfAbsent(
                     featureId,
                     ArtifactFolderDefault(featureId, props.optBoolean("visible", true))
@@ -5521,16 +5561,72 @@ internal fun buildArtifactHydrationResult(
     if (total == 0) {
         onProgress(ArtifactHydrationProgress(completed = 0, total = 0))
     }
+    val folderDefaults = folderDefaultsById.values.toList()
     return ArtifactHydrationResult(
         featuresById = featuresById,
         overlayState = buildArtifactOverlayState(
             featuresById.values,
-            hiddenFolderIds,
+            hiddenFolderIds + serverHiddenFolderIds,
             hiddenItemIds,
             pilotArchiveTrackColorForCallsign
         ),
-        folderDefaults = folderDefaultsById.values.toList()
+        folderDefaults = folderDefaults,
+        serverHiddenFolderIds = serverHiddenFolderIds
     )
+}
+
+internal fun movedDroneFolderMarkerIds(
+    previousFeatures: Map<String, JSONObject>,
+    incomingFeatures: Map<String, JSONObject>,
+    expectedDroneFolderId: String?
+): Set<String> {
+    val expectedFolder = expectedDroneFolderId?.takeIf { it.isNotBlank() } ?: return emptySet()
+    return incomingFeatures.mapNotNull { (featureId, incomingFeature) ->
+        if (featureId.isBlank()) return@mapNotNull null
+        val previousFeature = previousFeatures[featureId] ?: return@mapNotNull null
+        val previousProperties = previousFeature.optJSONObject("properties")
+        val incomingProperties = incomingFeature.optJSONObject("properties")
+        if (!isDroneTrackMarker(previousProperties) || !isDroneTrackMarker(incomingProperties)) {
+            return@mapNotNull null
+        }
+        val previousFolder = effectiveArtifactFolderId(
+            previousProperties,
+            previousProperties?.optString("class").orEmpty()
+        )
+        val incomingFolder = effectiveArtifactFolderId(
+            incomingProperties,
+            incomingProperties?.optString("class").orEmpty()
+        )
+        if (previousFolder == expectedFolder && incomingFolder.isNotBlank() && incomingFolder != expectedFolder) {
+            featureId
+        } else {
+            null
+        }
+    }.toSet()
+}
+
+private fun isDroneTrackMarker(properties: JSONObject?): Boolean {
+    if (properties?.optString("class") != "Marker") return false
+    return !properties.has("r2c-guid")
+}
+
+private fun isMediaObjectWithHiddenParent(
+    properties: JSONObject?,
+    featuresById: Map<String, JSONObject>,
+    hiddenFolderIds: Set<String>,
+    hiddenItemIds: Set<String>
+): Boolean {
+    if (properties?.optString("class") != "MapMediaObject") return false
+    val parentMarkerId = properties.optString("parentId")
+        .takeIf { it.startsWith("Marker:") }
+        ?.removePrefix("Marker:")
+        ?.takeIf { it.isNotBlank() }
+        ?: return false
+    if (parentMarkerId in hiddenItemIds) return true
+    val parentProperties = featuresById[parentMarkerId]?.optJSONObject("properties") ?: return false
+    val parentClassName = parentProperties.optString("class")
+    val parentFolderId = effectiveArtifactFolderId(parentProperties, parentClassName)
+    return parentFolderId.isNotBlank() && parentFolderId in hiddenFolderIds
 }
 
 private fun effectiveArtifactFolderId(properties: JSONObject?, className: String): String {

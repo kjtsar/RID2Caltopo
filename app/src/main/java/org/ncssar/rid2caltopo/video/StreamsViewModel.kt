@@ -822,14 +822,16 @@ class StreamsViewModel(
     private val seenFolderIds = HashSet<String>()
 
     /**
-     * Called when a Folder feature is first encountered in the artifact stream.
-     * Applies the Caltopo server's `visible` flag as the initial default, but only once
-     * per folder ID so that user overrides survive map reconnects and screen navigation.
+     * Called when a Folder feature is encountered in the artifact stream.
+     * Re-applies server-hidden state so CalTopo folder hides win after reloads; visible
+     * folders are still only recorded once so local hides survive ordinary reconnects.
      */
     fun applyCaltopoFolderDefault(folderId: String, caltopoVisible: Boolean) {
+        if (!caltopoVisible) {
+            hiddenFolderIds.add(folderId)
+        }
         if (folderId in seenFolderIds) return
         seenFolderIds.add(folderId)
-        if (!caltopoVisible) hiddenFolderIds.add(folderId)
     }
 
     /** Clears all folder/item visibility state and the seen-folder registry (e.g. on map disconnect). */

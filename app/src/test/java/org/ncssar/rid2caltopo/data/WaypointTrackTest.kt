@@ -13,6 +13,7 @@ import org.junit.Test
 import java.lang.reflect.Field
 import java.time.LocalDate
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class WaypointTrackTest {
@@ -245,6 +246,29 @@ class WaypointTrackTest {
     }
 
     @Test
+    fun archiveTrack_detachesTrackAndReturnsBeforeArchiveWorkCompletes() {
+        val drone = activeDrone("RID-ARCHIVE-ASYNC", "RID-ARCHIVE-ASYNC")
+        val track = BlockingArchiveTrack(drone.trackLabel(), drone)
+        @Suppress("UNCHECKED_CAST")
+        val trackMap = trackMapField.get(null) as MutableMap<String, WaypointTrack>
+        trackMap[drone.trackLabel()] = track
+        val caller = Executors.newSingleThreadExecutor()
+        try {
+            val archiveCall = caller.submit {
+                WaypointTrack.ArchiveTrack(drone.trackLabel())
+            }
+
+            assertTrue(track.archiveStarted.await(2, TimeUnit.SECONDS))
+            archiveCall.get(2, TimeUnit.SECONDS)
+            assertFalse(trackMap.containsKey(drone.trackLabel()))
+            assertFalse(track.archiveReleased)
+        } finally {
+            track.releaseArchive.countDown()
+            caller.shutdownNow()
+        }
+    }
+
+    @Test
     fun isTrackDirectoryWithinRecentDays_includesTodayAndPreviousNDaysOnly() {
         val today = LocalDate.of(2026, 6, 5)
 
@@ -300,5 +324,19 @@ class WaypointTrackTest {
         val trackMap = trackMapField.get(null) as MutableMap<Any, Any>
         trackMap.clear()
         WaypointTrack.WaypointCount = 0
+    }
+
+    private class BlockingArchiveTrack(trackLabel: String, droneSpec: CtDroneSpec) :
+        WaypointTrack(trackLabel, droneSpec) {
+        val archiveStarted = CountDownLatch(1)
+        val releaseArchive = CountDownLatch(1)
+        @Volatile
+        var archiveReleased = false
+
+        override fun archive() {
+            archiveStarted.countDown()
+            releaseArchive.await(5, TimeUnit.SECONDS)
+            archiveReleased = true
+        }
     }
 }

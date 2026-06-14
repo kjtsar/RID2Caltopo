@@ -39,6 +39,8 @@
 #include "anomaly_analysis.h"
 #include "anomaly_debug_helpers.h"
 #include "anomaly_detector.h"
+#include "anomaly_runtime_handoff.h"
+#include "anomaly_runtime_pressure.h"
 #define RENDER_MIN_INTERVAL_MS 5
 #define RENDER_MAX_INTERVAL_MS 1000
 #define RENDER_DEFAULT_FPS 30
@@ -164,12 +166,11 @@ typedef enum {
     AD_RUNTIME_MODE_THREADED = 2,
 } ad_runtime_mode_t;
 
-typedef enum {
-    AD_PRESSURE_MODE_NORMAL = 0,
-    AD_PRESSURE_MODE_ANALYZE_ALTERNATE = 1,
-    AD_PRESSURE_MODE_BYPASS_ALTERNATE = 2,
-    AD_PRESSURE_MODE_BYPASS_ALL = 3,
-} ad_pressure_mode_t;
+typedef anomaly_runtime_pressure_mode_t ad_pressure_mode_t;
+#define AD_PRESSURE_MODE_NORMAL ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL
+#define AD_PRESSURE_MODE_ANALYZE_ALTERNATE ANOMALY_RUNTIME_PRESSURE_MODE_ANALYZE_ALTERNATE
+#define AD_PRESSURE_MODE_BYPASS_ALTERNATE ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE
+#define AD_PRESSURE_MODE_BYPASS_ALL ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL
 
 #if HAVE_FFMPEG && HAVE_SWSCALE
 typedef struct {
@@ -1690,62 +1691,44 @@ static bool start_ad_thread_if_needed_locked(ffmpeg_session_t *session,
 }
 
 static const char *ad_pressure_mode_name(ad_pressure_mode_t mode) {
-    switch (mode) {
-        case AD_PRESSURE_MODE_ANALYZE_ALTERNATE:
-            return "analyze-alternate";
-        case AD_PRESSURE_MODE_BYPASS_ALTERNATE:
-            return "bypass-alternate";
-        case AD_PRESSURE_MODE_BYPASS_ALL:
-            return "bypass-all";
-        case AD_PRESSURE_MODE_NORMAL:
-        default:
-            return "normal";
-    }
+    const char *name = anomaly_runtime_pressure_mode_name(mode);
+    return strcmp(name, "unknown") == 0 ? "normal" : name;
+}
+
+static anomaly_runtime_pressure_policy_t ad_pressure_policy_for_session(
+        const ffmpeg_session_t *session) {
+    int capacity = session != NULL ? session->ad_input_queue_capacity : 0;
+    return anomaly_runtime_pressure_policy_make(
+            capacity,
+            AD_PRESSURE_RECOVER_DEPTH,
+            AD_PRESSURE_ANALYZE_ALTERNATE_PCT,
+            AD_PRESSURE_BYPASS_ALTERNATE_PCT,
+            AD_PRESSURE_BYPASS_ALL_PCT);
 }
 
 static int ad_queue_depth_threshold(const ffmpeg_session_t *session, int pct) {
-    if (session == NULL || session->ad_input_queue_capacity <= 0) return 0;
-    int cap = session->ad_input_queue_capacity;
-    int threshold = (cap * pct + 99) / 100;
-    if (threshold < 1) threshold = 1;
-    if (threshold > cap) threshold = cap;
-    return threshold;
+    if (session == NULL) return 0;
+    return anomaly_runtime_pressure_depth_threshold(session->ad_input_queue_capacity, pct);
 }
 
 static ad_pressure_mode_t select_ad_pressure_mode_locked(ffmpeg_session_t *session,
                                                          int queue_depth_before_dequeue) {
     if (session == NULL) return AD_PRESSURE_MODE_NORMAL;
-    ad_pressure_mode_t current = session->ad_pressure_mode;
-    if (queue_depth_before_dequeue <= AD_PRESSURE_RECOVER_DEPTH) {
-        return AD_PRESSURE_MODE_NORMAL;
-    }
+    return anomaly_runtime_pressure_select_mode(ad_pressure_policy_for_session(session),
+                                                session->ad_pressure_mode,
+                                                queue_depth_before_dequeue);
+}
 
-    int bypass_all_threshold = ad_queue_depth_threshold(session, AD_PRESSURE_BYPASS_ALL_PCT);
-    int bypass_alternate_threshold = ad_queue_depth_threshold(session, AD_PRESSURE_BYPASS_ALTERNATE_PCT);
-    int analyze_alternate_threshold = ad_queue_depth_threshold(session, AD_PRESSURE_ANALYZE_ALTERNATE_PCT);
-
-    if (queue_depth_before_dequeue >= bypass_all_threshold) {
-        return AD_PRESSURE_MODE_BYPASS_ALL;
-    }
-    if (current == AD_PRESSURE_MODE_BYPASS_ALL) {
-        return AD_PRESSURE_MODE_BYPASS_ALL;
-    }
-
-    if (queue_depth_before_dequeue >= bypass_alternate_threshold) {
-        return AD_PRESSURE_MODE_BYPASS_ALTERNATE;
-    }
-    if (current == AD_PRESSURE_MODE_BYPASS_ALTERNATE) {
-        return AD_PRESSURE_MODE_BYPASS_ALTERNATE;
-    }
-
-    if (queue_depth_before_dequeue >= analyze_alternate_threshold) {
-        return AD_PRESSURE_MODE_ANALYZE_ALTERNATE;
-    }
-    if (current == AD_PRESSURE_MODE_ANALYZE_ALTERNATE) {
-        return AD_PRESSURE_MODE_ANALYZE_ALTERNATE;
-    }
-
-    return AD_PRESSURE_MODE_NORMAL;
+static anomaly_runtime_handoff_frame_t ad_handoff_frame_from_packet(
+        const render_queue_slot_t *packet) {
+    return anomaly_runtime_handoff_frame_make(
+            packet != NULL ? packet->frame_id : 0,
+            packet != NULL ? packet->generation_id : 0,
+            packet != NULL ? packet->source_ts_us : 0,
+            packet != NULL ? packet->enqueued_at_ms : 0,
+            packet != NULL ? packet->width : 0,
+            packet != NULL ? packet->height : 0,
+            packet != NULL && packet->frame != NULL);
 }
 
 static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
@@ -2230,15 +2213,11 @@ static int64_t queue_pts_interval_ms_locked(const ffmpeg_session_t *session,
 
 static int64_t compute_target_latency_ms_locked(ffmpeg_session_t *session) {
     if (session == NULL) return 1000;
-    int64_t stall_ms = session->stall_estimate_ms > 0
-            ? session->stall_estimate_ms
-            : RENDER_STALL_ESTIMATE_FLOOR_MS;
-    if (session->proven_gap_ms > stall_ms) {
-        stall_ms = session->proven_gap_ms;
-    }
-    int64_t target_ms = (stall_ms * 2) + RENDER_PROCESSING_MARGIN_MS;
-    return clamp_i64(
-            target_ms,
+    return anomaly_detector_runtime_budget_target_latency_ms(
+            session->stall_estimate_ms,
+            session->proven_gap_ms,
+            RENDER_STALL_ESTIMATE_FLOOR_MS,
+            RENDER_PROCESSING_MARGIN_MS,
             RENDER_TARGET_LATENCY_MIN_MS,
             RENDER_TARGET_LATENCY_MAX_MS);
 }
@@ -2246,25 +2225,18 @@ static int64_t compute_target_latency_ms_locked(ffmpeg_session_t *session) {
 static void update_source_interval_estimate_locked(ffmpeg_session_t *session,
                                                    int64_t decode_delta_ms) {
     if (session == NULL || decode_delta_ms <= 0) return;
-    int64_t old_interval_ms = session->source_render_interval_ms > 0
-            ? session->source_render_interval_ms
-            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-    int64_t new_interval_ms;
-    if (session->source_interval_confidence <= 0) {
-        new_interval_ms = decode_delta_ms;
-    } else {
-        new_interval_ms =
-                ((old_interval_ms * (100 - RENDER_SOURCE_ESTIMATE_EMA_PCT)) +
-                 (decode_delta_ms * RENDER_SOURCE_ESTIMATE_EMA_PCT) + 50) / 100;
-    }
-    new_interval_ms = clamp_i64(new_interval_ms, RENDER_MIN_INTERVAL_MS, RENDER_MAX_INTERVAL_MS);
-    session->source_render_interval_ms = new_interval_ms;
-    if (session->source_interval_confidence < 100) {
-        session->source_interval_confidence += 5;
-        if (session->source_interval_confidence > 100) {
-            session->source_interval_confidence = 100;
-        }
-    }
+    anomaly_detector_runtime_budget_source_interval_estimate_t estimate =
+            anomaly_detector_runtime_budget_update_source_interval_estimate(
+                    session->source_render_interval_ms,
+                    session->source_interval_confidence,
+                    decode_delta_ms,
+                    RENDER_SOURCE_INTERVAL_DEFAULT_MS,
+                    RENDER_SOURCE_ESTIMATE_EMA_PCT,
+                    5,
+                    RENDER_MIN_INTERVAL_MS,
+                    RENDER_MAX_INTERVAL_MS);
+    session->source_render_interval_ms = estimate.interval_ms;
+    session->source_interval_confidence = estimate.confidence;
 }
 
 static void apply_pts_source_interval_locked(ffmpeg_session_t *session,
@@ -2272,29 +2244,22 @@ static void apply_pts_source_interval_locked(ffmpeg_session_t *session,
                                              bool force_direct) {
     if (session == NULL || pts_interval_ms <= 0) return;
 
-    int64_t old_interval_ms = session->source_render_interval_ms > 0
-            ? session->source_render_interval_ms
-            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-    int64_t new_interval_ms;
-    if (force_direct || session->source_interval_confidence < 70) {
-        new_interval_ms = pts_interval_ms;
-    } else {
-        int blend_pct = llabs(pts_interval_ms - old_interval_ms) >= 4 ? 35 : 20;
-        new_interval_ms =
-                ((old_interval_ms * (100 - blend_pct)) +
-                 (pts_interval_ms * blend_pct) + 50) / 100;
-        if (new_interval_ms == old_interval_ms && pts_interval_ms != old_interval_ms) {
-            new_interval_ms += pts_interval_ms > old_interval_ms ? 1 : -1;
-        }
-    }
-
-    session->source_render_interval_ms = clamp_i64(
-            new_interval_ms,
-            RENDER_MIN_INTERVAL_MS,
-            RENDER_MAX_INTERVAL_MS);
-    if (session->source_interval_confidence < 80) {
-        session->source_interval_confidence = 80;
-    }
+    anomaly_detector_runtime_budget_source_interval_estimate_t estimate =
+            anomaly_detector_runtime_budget_apply_pts_source_interval(
+                    session->source_render_interval_ms,
+                    session->source_interval_confidence,
+                    pts_interval_ms,
+                    force_direct,
+                    RENDER_SOURCE_INTERVAL_DEFAULT_MS,
+                    70,
+                    80,
+                    4,
+                    20,
+                    35,
+                    RENDER_MIN_INTERVAL_MS,
+                    RENDER_MAX_INTERVAL_MS);
+    session->source_render_interval_ms = estimate.interval_ms;
+    session->source_interval_confidence = estimate.confidence;
 }
 
 static bool maybe_fast_relock_to_pts_locked(ffmpeg_session_t *session,
@@ -2333,23 +2298,14 @@ static bool maybe_fast_relock_to_pts_locked(ffmpeg_session_t *session,
 
 static void update_stall_estimate_locked(ffmpeg_session_t *session, int64_t gap_ms) {
     if (session == NULL || gap_ms < RENDER_GAP_FLOOR_MS) return;
-    int64_t old_stall_ms = session->stall_estimate_ms > 0
-            ? session->stall_estimate_ms
-            : RENDER_STALL_ESTIMATE_FLOOR_MS;
-    int64_t new_stall_ms;
-    if (gap_ms >= old_stall_ms) {
-        new_stall_ms =
-                ((old_stall_ms * (100 - RENDER_STALL_RISE_EMA_PCT)) +
-                 (gap_ms * RENDER_STALL_RISE_EMA_PCT) + 50) / 100;
-    } else {
-        new_stall_ms =
-                ((old_stall_ms * (100 - RENDER_STALL_DECAY_EMA_PCT)) +
-                 (gap_ms * RENDER_STALL_DECAY_EMA_PCT) + 50) / 100;
-    }
-    session->stall_estimate_ms = clamp_i64(
-            new_stall_ms,
-            RENDER_STALL_ESTIMATE_FLOOR_MS,
-            RENDER_TARGET_LATENCY_MAX_MS);
+    session->stall_estimate_ms =
+            anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                    session->stall_estimate_ms,
+                    gap_ms,
+                    RENDER_STALL_ESTIMATE_FLOOR_MS,
+                    RENDER_STALL_RISE_EMA_PCT,
+                    RENDER_STALL_DECAY_EMA_PCT,
+                    RENDER_TARGET_LATENCY_MAX_MS);
     session->last_gap_at_ms = session->last_decode_at_ms;
     session->last_stall_decay_at_ms = session->last_decode_at_ms;
 }
@@ -2357,20 +2313,13 @@ static void update_stall_estimate_locked(ffmpeg_session_t *session, int64_t gap_
 static void update_proven_gap_locked(ffmpeg_session_t *session, int64_t gap_ms) {
     if (session == NULL || gap_ms < RENDER_PROVEN_GAP_TRIGGER_MS) return;
 
-    int64_t old_proven_gap_ms = session->proven_gap_ms > 0
-            ? session->proven_gap_ms
-            : RENDER_STALL_ESTIMATE_FLOOR_MS;
-    int64_t new_proven_gap_ms = old_proven_gap_ms;
-    if (gap_ms > old_proven_gap_ms) {
-        new_proven_gap_ms = gap_ms;
-    } else {
-        new_proven_gap_ms =
-                ((old_proven_gap_ms * 85) + (gap_ms * 15) + 50) / 100;
-    }
-    session->proven_gap_ms = clamp_i64(
-            new_proven_gap_ms,
-            RENDER_STALL_ESTIMATE_FLOOR_MS,
-            RENDER_TARGET_LATENCY_MAX_MS);
+    session->proven_gap_ms =
+            anomaly_detector_runtime_budget_update_proven_gap_ms(
+                    session->proven_gap_ms,
+                    gap_ms,
+                    RENDER_STALL_ESTIMATE_FLOOR_MS,
+                    15,
+                    RENDER_TARGET_LATENCY_MAX_MS);
     session->last_proven_gap_decay_at_ms = session->last_decode_at_ms;
 }
 
@@ -2383,11 +2332,10 @@ static void maybe_decay_stall_estimate_locked(ffmpeg_session_t *session, int64_t
 
     int64_t old_stall_ms = session->stall_estimate_ms;
     session->stall_estimate_ms =
-            ((session->stall_estimate_ms * (100 - RENDER_STALL_DECAY_EMA_PCT)) +
-             (RENDER_STALL_ESTIMATE_FLOOR_MS * RENDER_STALL_DECAY_EMA_PCT) + 50) / 100;
-    if (session->stall_estimate_ms < RENDER_STALL_ESTIMATE_FLOOR_MS) {
-        session->stall_estimate_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
-    }
+            anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                    session->stall_estimate_ms,
+                    RENDER_STALL_ESTIMATE_FLOOR_MS,
+                    RENDER_STALL_DECAY_EMA_PCT);
     session->last_stall_decay_at_ms = now_ms;
     if (llabs(session->stall_estimate_ms - old_stall_ms) >= 20) {
         ct_debug(TAG,
@@ -2408,11 +2356,10 @@ static void maybe_decay_proven_gap_locked(ffmpeg_session_t *session, int64_t now
 
     int64_t old_proven_gap_ms = session->proven_gap_ms;
     session->proven_gap_ms =
-            ((session->proven_gap_ms * (100 - RENDER_PROVEN_GAP_DECAY_EMA_PCT)) +
-             (RENDER_STALL_ESTIMATE_FLOOR_MS * RENDER_PROVEN_GAP_DECAY_EMA_PCT) + 50) / 100;
-    if (session->proven_gap_ms < RENDER_STALL_ESTIMATE_FLOOR_MS) {
-        session->proven_gap_ms = RENDER_STALL_ESTIMATE_FLOOR_MS;
-    }
+            anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                    session->proven_gap_ms,
+                    RENDER_STALL_ESTIMATE_FLOOR_MS,
+                    RENDER_PROVEN_GAP_DECAY_EMA_PCT);
     session->last_proven_gap_decay_at_ms = now_ms;
     if (llabs(session->proven_gap_ms - old_proven_gap_ms) >= 20) {
         ct_debug(TAG,
@@ -2678,48 +2625,21 @@ static int64_t compute_desired_render_interval_ms_locked(ffmpeg_session_t *sessi
         }
     }
 
-    double error_ratio = 0.0;
-    if (target_latency_ms > 0) {
-        error_ratio = (double) (buffered_span_ms - target_latency_ms) / (double) target_latency_ms;
-    }
-    if (error_ratio < -0.5) error_ratio = -0.5;
-    if (error_ratio > 4.0) error_ratio = 4.0;
-
-    double adjust_pct = error_ratio * 12.0;
-    double backlog_ratio = target_latency_ms > 0
-            ? (double) buffered_span_ms / (double) target_latency_ms
-            : 1.0;
-    double max_adjust_pct = RENDER_INTERVAL_ADJUST_BASE_PCT;
-    if (backlog_ratio >= 1.5) max_adjust_pct = 20.0;
-    if (backlog_ratio >= 2.0) max_adjust_pct = 28.0;
-    if (backlog_ratio >= 3.0) max_adjust_pct = 35.0;
-    if (backlog_ratio >= 5.0) max_adjust_pct = 40.0;
-    if (adjust_pct < -RENDER_INTERVAL_ADJUST_BASE_PCT) adjust_pct = -RENDER_INTERVAL_ADJUST_BASE_PCT;
-    if (adjust_pct > max_adjust_pct) adjust_pct = max_adjust_pct;
-
-    int64_t desired_interval_ms =
-            (int64_t) llround((double) source_interval_ms * (100.0 - adjust_pct) / 100.0);
-    bool preserve_during_stall =
-            session->stall_active &&
-            buffered_span_ms <= ((target_latency_ms * 5) / 4);
-    if (preserve_during_stall) {
-        int64_t preserve_interval_ms = (source_interval_ms * 108 + 99) / 100;
-        if (desired_interval_ms < preserve_interval_ms) {
-            desired_interval_ms = preserve_interval_ms;
-        }
-    }
-
-    int64_t min_interval_ms = (source_interval_ms * (100 - RENDER_INTERVAL_ADJUST_MAX_PCT) + 99) / 100;
-    int64_t max_interval_ms = (source_interval_ms * (100 + RENDER_INTERVAL_ADJUST_BASE_PCT) + 99) / 100;
-    desired_interval_ms = clamp_i64(desired_interval_ms, min_interval_ms, max_interval_ms);
-
     int64_t previous_interval_ms = session->render_interval_smoothed_ms > 0
             ? session->render_interval_smoothed_ms
             : source_interval_ms;
-    int64_t smoothed_interval_ms =
-            ((previous_interval_ms * (100 - RENDER_INTERVAL_SMOOTHING_PCT)) +
-             (desired_interval_ms * RENDER_INTERVAL_SMOOTHING_PCT) + 50) / 100;
-    smoothed_interval_ms = clamp_i64(smoothed_interval_ms, min_interval_ms, max_interval_ms);
+    anomaly_detector_runtime_budget_render_interval_t render_interval =
+            anomaly_detector_runtime_budget_desired_render_interval_ms(
+                    source_interval_ms,
+                    previous_interval_ms,
+                    buffered_span_ms,
+                    target_latency_ms,
+                    session->stall_active,
+                    RENDER_INTERVAL_ADJUST_BASE_PCT,
+                    RENDER_INTERVAL_ADJUST_MAX_PCT,
+                    RENDER_INTERVAL_SMOOTHING_PCT);
+    int64_t desired_interval_ms = render_interval.desired_interval_ms;
+    int64_t smoothed_interval_ms = render_interval.render_interval_ms;
     session->render_interval_smoothed_ms = smoothed_interval_ms;
 
     bool periodic_log =
@@ -3088,13 +3008,12 @@ static bool wait_for_local_playback_advance(ffmpeg_session_t *session) {
 }
 
 static int local_ad_input_capacity_for_source_interval_ms(int64_t source_interval_ms) {
-    int64_t interval = source_interval_ms > 0
-            ? source_interval_ms
-            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-    int frames = (int) ((500 + interval - 1) / interval);
-    if (frames < 2) frames = 2;
-    if (frames > AD_INPUT_QUEUE_HARD_CAPACITY) frames = AD_INPUT_QUEUE_HARD_CAPACITY;
-    return frames;
+    return anomaly_runtime_pressure_backlog_frame_capacity(
+            500,
+            source_interval_ms,
+            RENDER_SOURCE_INTERVAL_DEFAULT_MS,
+            2,
+            AD_INPUT_QUEUE_HARD_CAPACITY);
 }
 
 static void trim_render_queue_to_latest(ffmpeg_session_t *session, int keep_latest) {
@@ -3154,36 +3073,35 @@ static int compute_trim_keep_latest_locked(const ffmpeg_session_t *session,
                                            int64_t source_interval_ms,
                                            int64_t target_latency_ms) {
     if (session == NULL) return 8;
-    if (source_interval_ms <= 0) {
-        source_interval_ms = session->source_render_interval_ms > 0
-                ? session->source_render_interval_ms
-                : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
-    }
-    if (target_latency_ms <= 0) {
-        target_latency_ms = session->target_latency_ms > 0
-                ? session->target_latency_ms
-                : RENDER_TARGET_LATENCY_MIN_MS;
-    }
-    int keep_latest = (int) ((target_latency_ms + source_interval_ms - 1) / source_interval_ms);
-    if (keep_latest < 8) keep_latest = 8;
-    if (keep_latest > 36) keep_latest = 36;
-    return keep_latest;
+    int64_t default_source_interval_ms = session->source_render_interval_ms > 0
+            ? session->source_render_interval_ms
+            : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
+    int64_t default_target_latency_ms = session->target_latency_ms > 0
+            ? session->target_latency_ms
+            : RENDER_TARGET_LATENCY_MIN_MS;
+    return anomaly_detector_runtime_budget_trim_keep_latest_frames(
+            source_interval_ms,
+            target_latency_ms,
+            default_source_interval_ms,
+            default_target_latency_ms,
+            8,
+            36);
 }
 
 static int compute_render_queue_hard_cap_locked(const ffmpeg_session_t *session,
                                                 int keep_latest) {
     if (session == NULL) return 24;
-    if (keep_latest < 8) {
-        keep_latest = compute_trim_keep_latest_locked(
-                session,
-                session->source_render_interval_ms,
-                session->target_latency_ms);
-    }
-    int hard_cap = keep_latest * 2;
-    if (hard_cap < (keep_latest + 12)) hard_cap = keep_latest + 12;
-    if (hard_cap < 24) hard_cap = 24;
-    if (hard_cap > 72) hard_cap = 72;
-    return hard_cap;
+    int fallback_keep_latest = compute_trim_keep_latest_locked(
+            session,
+            session->source_render_interval_ms,
+            session->target_latency_ms);
+    return anomaly_detector_runtime_budget_render_queue_hard_cap(
+            keep_latest,
+            fallback_keep_latest,
+            8,
+            12,
+            24,
+            72);
 }
 
 static void clear_ad_input_queue(ffmpeg_session_t *session);
@@ -3248,27 +3166,16 @@ static bool ensure_render_queue_capacity(ffmpeg_session_t *session, int min_capa
 
 static bool ensure_ad_input_queue_capacity(ffmpeg_session_t *session, int min_capacity) {
     if (session == NULL) return false;
-    if (min_capacity < 1) min_capacity = 1;
-    if (min_capacity > AD_INPUT_QUEUE_HARD_CAPACITY) return false;
     if (session->ad_input_queue != NULL && session->ad_input_queue_capacity >= min_capacity) {
         return true;
     }
 
-    int new_capacity = session->ad_input_queue_capacity;
-    if (new_capacity < AD_INPUT_QUEUE_INITIAL_CAPACITY) {
-        new_capacity = AD_INPUT_QUEUE_INITIAL_CAPACITY;
-    }
-    while (new_capacity < min_capacity) {
-        if (new_capacity < 4096) {
-            new_capacity *= 2;
-        } else {
-            new_capacity += 1024;
-        }
-    }
-    if (new_capacity > AD_INPUT_QUEUE_HARD_CAPACITY) {
-        new_capacity = AD_INPUT_QUEUE_HARD_CAPACITY;
-    }
-    if (new_capacity < min_capacity) {
+    int new_capacity = anomaly_runtime_pressure_queue_storage_capacity(
+            session->ad_input_queue_capacity,
+            min_capacity,
+            AD_INPUT_QUEUE_INITIAL_CAPACITY,
+            AD_INPUT_QUEUE_HARD_CAPACITY);
+    if (new_capacity <= 0) {
         return false;
     }
 
@@ -3521,8 +3428,10 @@ static bool enqueue_local_ad_input_best_effort_locked(ffmpeg_session_t *session,
 
     int desired_depth =
             local_ad_input_capacity_for_source_interval_ms(session->source_render_interval_ms);
-    while (session->ad_input_queue_depth >= desired_depth &&
-           session->ad_input_queue_depth > 0) {
+    int drop_count = anomaly_runtime_pressure_oldest_drop_count_for_admission(
+            session->ad_input_queue_depth,
+            desired_depth);
+    for (int i = 0; i < drop_count && session->ad_input_queue_depth > 0; i++) {
         int drop_idx = session->ad_input_queue_head;
         clear_render_queue_slot(&session->ad_input_queue[drop_idx]);
         session->ad_input_queue_head =
@@ -3965,19 +3874,20 @@ static void *ad_thread_main(void *arg) {
 
         bool bypass_for_pressure = false;
         if (process_enabled && packet.generation_id == generation_id) {
-            if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALL) {
-                bypass_for_pressure = true;
-            } else if (pressure_mode == AD_PRESSURE_MODE_BYPASS_ALTERNATE &&
-                       (session->ad_pressure_frame_counter % 2) == 0) {
-                bypass_for_pressure = true;
-            }
+            bypass_for_pressure = anomaly_runtime_pressure_should_bypass_analysis(
+                    pressure_mode,
+                    session->ad_pressure_frame_counter);
         }
+        anomaly_runtime_handoff_decision_t handoff_decision =
+                anomaly_runtime_handoff_decide(ad_handoff_frame_from_packet(&packet),
+                                               process_enabled,
+                                               generation_id,
+                                               bypass_for_pressure);
 
-        if (!process_enabled || packet.generation_id != generation_id || bypass_for_pressure) {
+        if (handoff_decision.action ==
+            ANOMALY_RUNTIME_HANDOFF_ACTION_FORWARD_WITHOUT_ANALYSIS) {
             packet.analyzed = false;
             skipped = true;
-            session->ad_worker_skipped_frame_count += 1;
-            session->ad_forwarded_without_analysis_count += 1;
         } else {
             bool analyzed = false;
             packet.overlay_frame = build_overlay_frame(session,
@@ -3992,10 +3902,14 @@ static void *ad_thread_main(void *arg) {
             break;
         }
         bool overlay_present = packet.overlay_frame != NULL;
-        session->ad_worker_processed_frame_count += 1;
-        if (overlay_present) {
-            session->ad_worker_annotated_frame_count += 1;
-        }
+        anomaly_runtime_handoff_outcome_t handoff_outcome =
+                anomaly_runtime_handoff_outcome_for_decision(handoff_decision,
+                                                             overlay_present);
+        session->ad_worker_processed_frame_count += handoff_outcome.processed_delta;
+        session->ad_worker_skipped_frame_count += handoff_outcome.skipped_delta;
+        session->ad_forwarded_without_analysis_count +=
+                handoff_outcome.forwarded_without_analysis_delta;
+        session->ad_worker_annotated_frame_count += handoff_outcome.annotated_delta;
         update_ad_bridge_debug_summary(
                 session,
                 skipped ? "skipped" : "processed",

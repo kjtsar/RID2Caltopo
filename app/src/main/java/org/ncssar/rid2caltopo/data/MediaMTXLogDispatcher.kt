@@ -24,6 +24,14 @@ object MediaMtxLogParser {
     private val rtspNoPublishingRegex = Regex("""no one is publishing to path '([^']+)'""")
     private val rtmpPublishingRegex =
         Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+is publishing to path '([^']+)'""")
+    private val rtmpAcceptSucceededRegex =
+        Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+RTMP accept succeeded:\s+publish=true\s+path=/([^ ]+)\s+query=.*""")
+    private val rtmpReaderInitializedRegex =
+        Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+RTMP publish:\s+reader initialized for path '([^']+)'\s+in\s+([^ ]+)\s+with\s+(.+)""")
+    private val rtmpPublishIdleRegex =
+        Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+RTMP publish idle for\s+([^ ]+)\s+on path '([^']+)'\s+\((.+)\)""")
+    private val rtmpPublisherInactiveRegex =
+        Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+RTMP publisher inactive for\s+([^ ]+)\s+on path '([^']+)', closing connection""")
     private val rtmpClosedRegex =
         Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+closed:\s*(.+)""")
     private val rtmpPublishCommandRegex =
@@ -62,6 +70,21 @@ object MediaMtxLogParser {
                 return "RTMP closed: publisher disconnected unexpectedly"
             }
             return "RTMP closed: $reason"
+        }
+
+        fun parseDurationMs(value: String): Long? {
+            val trimmedValue = value.trim()
+            val suffix = when {
+                trimmedValue.endsWith("ms") -> "ms"
+                trimmedValue.endsWith("s") -> "s"
+                else -> return null
+            }
+            val numeric = trimmedValue.removeSuffix(suffix).toDoubleOrNull() ?: return null
+            return when (suffix) {
+                "ms" -> numeric.toLong()
+                "s" -> (numeric * 1000.0).toLong()
+                else -> null
+            }
         }
 
         val match = pathRegex.find(line)
@@ -132,6 +155,69 @@ object MediaMtxLogParser {
             }
             return MediaMtxParserResult(
                 MediaMTXEvent.StreamStarted(path),
+                updatedState(),
+            )
+        }
+
+        val rtmpAcceptSucceededMatch = rtmpAcceptSucceededRegex.find(line)
+        if (rtmpAcceptSucceededMatch != null) {
+            val conn = rtmpAcceptSucceededMatch.groupValues[1]
+            val path = rtmpAcceptSucceededMatch.groupValues[2].trim('/')
+            rtmpConnPathMap[conn] = path
+            return MediaMtxParserResult(
+                MediaMTXEvent.RtmpPublishDiagnostic(
+                    path = path,
+                    publisherConnId = conn,
+                    phase = "accept_succeeded",
+                ),
+                updatedState(),
+            )
+        }
+
+        val rtmpReaderInitializedMatch = rtmpReaderInitializedRegex.find(line)
+        if (rtmpReaderInitializedMatch != null) {
+            val conn = rtmpReaderInitializedMatch.groupValues[1]
+            val path = rtmpReaderInitializedMatch.groupValues[2].trim('/')
+            rtmpConnPathMap[conn] = path
+            return MediaMtxParserResult(
+                MediaMTXEvent.RtmpPublishDiagnostic(
+                    path = path,
+                    publisherConnId = conn,
+                    phase = "reader_initialized",
+                    elapsedMs = parseDurationMs(rtmpReaderInitializedMatch.groupValues[3]),
+                    detail = rtmpReaderInitializedMatch.groupValues[4],
+                ),
+                updatedState(),
+            )
+        }
+
+        val rtmpPublisherInactiveMatch = rtmpPublisherInactiveRegex.find(line)
+        if (rtmpPublisherInactiveMatch != null) {
+            val conn = rtmpPublisherInactiveMatch.groupValues[1]
+            val path = rtmpPublisherInactiveMatch.groupValues[3].trim('/')
+            return MediaMtxParserResult(
+                MediaMTXEvent.RtmpPublishDiagnostic(
+                    path = path,
+                    publisherConnId = conn,
+                    phase = "publisher_inactive",
+                    elapsedMs = parseDurationMs(rtmpPublisherInactiveMatch.groupValues[2]),
+                ),
+                updatedState(),
+            )
+        }
+
+        val rtmpPublishIdleMatch = rtmpPublishIdleRegex.find(line)
+        if (rtmpPublishIdleMatch != null) {
+            val conn = rtmpPublishIdleMatch.groupValues[1]
+            val path = rtmpPublishIdleMatch.groupValues[3].trim('/')
+            return MediaMtxParserResult(
+                MediaMTXEvent.RtmpPublishDiagnostic(
+                    path = path,
+                    publisherConnId = conn,
+                    phase = "publish_idle",
+                    elapsedMs = parseDurationMs(rtmpPublishIdleMatch.groupValues[2]),
+                    detail = rtmpPublishIdleMatch.groupValues[4],
+                ),
                 updatedState(),
             )
         }

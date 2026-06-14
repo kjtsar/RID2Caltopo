@@ -10,6 +10,7 @@ extern "C" {
 
 #include "anomaly_analysis.h"
 #include "anomaly_frame.h"
+#include "anomaly_runtime_budget.h"
 
 typedef anomaly_state_t  anomaly_detector_state_t;
 typedef anomaly_config_t anomaly_detector_config_t;

@@ -1,8 +1,10 @@
 package org.ncssar.rid2caltopo.data
 
+import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.video.StreamRegistry
 
 object MediaMTXBootstrap {
+    private const val SIGNAL_TAG = "MediaMTXSignal"
 
     @JvmStatic
     fun init() {
@@ -25,6 +27,8 @@ object MediaMTXBootstrap {
                     StreamRegistry.onStreamError(event.path, event.reason, event.publisherConnId)
 
                 is MediaMTXEvent.RtmpSessionClosed -> {}
+                is MediaMTXEvent.RtmpPublishDiagnostic ->
+                    logRtmpPublishDiagnostic(event)
 
                 is MediaMTXEvent.ServerStarted ->
                     MediaMTXStatus.onServerStarted(event.version)
@@ -41,8 +45,21 @@ object MediaMTXBootstrap {
                 is MediaMTXEvent.StreamStopped ->
                     StreamRegistry.onStreamStopped(event.path, event.publisherConnId)
 
+                is MediaMTXEvent.RtmpPublishDiagnostic ->
+                    logRtmpPublishDiagnostic(event)
+
                 else -> {}
             }
         }
+    }
+
+    private fun logRtmpPublishDiagnostic(event: MediaMTXEvent.RtmpPublishDiagnostic) {
+        val elapsed = event.elapsedMs?.let { " elapsedMs=$it" }.orEmpty()
+        val conn = event.publisherConnId?.let { " publisherConnId=$it" }.orEmpty()
+        val detail = event.detail?.let { " detail=$it" }.orEmpty()
+        CTDebug(
+            SIGNAL_TAG,
+            "RTMP setup path=${event.path} phase=${event.phase}$conn$elapsed$detail"
+        )
     }
 }

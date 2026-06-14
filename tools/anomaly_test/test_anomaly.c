@@ -25,6 +25,8 @@
 #include "anomaly_result_builder.h"
 #include "anomaly_roi_tracks.h"
 #include "anomaly_roi_state.h"
+#include "anomaly_runtime_handoff.h"
+#include "anomaly_runtime_pressure.h"
 #include "anomaly_runtime_config.h"
 #include "anomaly_saliency_tracks.h"
 #include "anomaly_scan_planner.h"
@@ -11336,6 +11338,713 @@ static void test_detector_facade_realtime_default_config_contract(void) {
            "detector facade default config: invalid fps falls back while preserving non-color algorithms");
 }
 
+static void test_detector_facade_runtime_budget_defaults(void) {
+    anomaly_detector_runtime_budget_t budget =
+        anomaly_detector_runtime_budget_make_default(30.0f);
+
+    EXPECT_NEAR(budget.startup_skip_seconds, 0.25f, 0.0001f,
+                "runtime budget default: startup skip is 0.25s");
+    EXPECT_NEAR(budget.cursory_backlog_seconds, 0.25f, 0.0001f,
+                "runtime budget default: cursory threshold is 0.25s");
+    EXPECT_NEAR(budget.thorough_backlog_seconds, 0.5f, 0.0001f,
+                "runtime budget default: thorough threshold is 0.5s");
+    EXPECT_NEAR(budget.max_backlog_seconds, 0.5f, 0.0001f,
+                "runtime budget default: max backlog is at least 0.5s");
+    EXPECT(budget.render_backlog_seconds == 0.0f &&
+           budget.startup_elapsed_seconds == 0.0f &&
+           !budget.adapter_pressure,
+           "runtime budget default: dynamic telemetry starts empty");
+
+    budget = anomaly_detector_runtime_budget_make_default(0.0f);
+    EXPECT_NEAR(budget.startup_skip_seconds, 0.25f, 0.0001f,
+                "runtime budget default: invalid fps keeps time thresholds");
+}
+
+static void test_detector_facade_runtime_budget_normalizes_thresholds(void) {
+    anomaly_detector_runtime_budget_t budget = {
+        .render_backlog_seconds = -1.0f,
+        .startup_elapsed_seconds = -2.0f,
+        .startup_skip_seconds = -3.0f,
+        .cursory_backlog_seconds = 0.0f,
+        .thorough_backlog_seconds = 0.1f,
+        .max_backlog_seconds = 0.2f,
+        .adapter_pressure = false,
+    };
+
+    anomaly_detector_runtime_budget_t out =
+        anomaly_detector_runtime_budget_normalize(budget);
+
+    EXPECT(out.render_backlog_seconds == 0.0f &&
+           out.startup_elapsed_seconds == 0.0f,
+           "runtime budget normalize: negative dynamic telemetry clamps to zero");
+    EXPECT_NEAR(out.startup_skip_seconds, 0.25f, 0.0001f,
+                "runtime budget normalize: invalid startup skip uses default");
+    EXPECT_NEAR(out.cursory_backlog_seconds, 0.25f, 0.0001f,
+                "runtime budget normalize: invalid cursory threshold uses default");
+    EXPECT_NEAR(out.thorough_backlog_seconds, 0.5f, 0.0001f,
+                "runtime budget normalize: thorough threshold stays above cursory");
+    EXPECT_NEAR(out.max_backlog_seconds, 0.5f, 0.0001f,
+                "runtime budget normalize: max backlog stays at least thorough threshold");
+}
+
+static void test_detector_facade_runtime_budget_selects_processing_mode(void) {
+    anomaly_detector_runtime_budget_t budget =
+        anomaly_detector_runtime_budget_make_default(30.0f);
+
+    budget.startup_elapsed_seconds = 0.10f;
+    budget.render_backlog_seconds = 1.0f;
+    EXPECT(anomaly_detector_runtime_budget_processing_mode(budget) ==
+           ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY,
+           "runtime budget mode: startup window forces cursory mode");
+
+    budget.startup_elapsed_seconds = 0.30f;
+    budget.render_backlog_seconds = 0.10f;
+    EXPECT(anomaly_detector_runtime_budget_processing_mode(budget) ==
+           ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY,
+           "runtime budget mode: low backlog selects cursory mode");
+
+    budget.render_backlog_seconds = 0.25f;
+    EXPECT(anomaly_detector_runtime_budget_processing_mode(budget) ==
+           ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY,
+           "runtime budget mode: boundary backlog remains cursory");
+
+    budget.render_backlog_seconds = 0.50f;
+    EXPECT(anomaly_detector_runtime_budget_processing_mode(budget) ==
+           ANOMALY_DETECTOR_PROCESSING_MODE_THOROUGH,
+           "runtime budget mode: sufficient backlog selects thorough mode");
+
+    budget.adapter_pressure = true;
+    EXPECT(anomaly_detector_runtime_budget_processing_mode(budget) ==
+           ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY,
+           "runtime budget mode: adapter pressure forces cursory mode");
+}
+
+static void test_detector_facade_runtime_budget_names_modes(void) {
+    EXPECT(strcmp(anomaly_detector_processing_mode_name(
+                   ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY),
+                  "cursory") == 0,
+           "runtime budget mode name: cursory is named");
+    EXPECT(strcmp(anomaly_detector_processing_mode_name(
+                   ANOMALY_DETECTOR_PROCESSING_MODE_THOROUGH),
+                  "thorough") == 0,
+           "runtime budget mode name: thorough is named");
+    EXPECT(strcmp(anomaly_detector_processing_mode_name(
+                   (anomaly_detector_processing_mode_t)99),
+                  "unknown") == 0,
+           "runtime budget mode name: invalid mode is unknown");
+}
+
+static void test_detector_facade_runtime_budget_trim_keep_latest_frames(void) {
+    EXPECT(anomaly_detector_runtime_budget_trim_keep_latest_frames(33, 1000, 33, 1000, 8, 36) == 31,
+           "runtime budget trim keep latest: target latency divided by source interval rounds up");
+    EXPECT(anomaly_detector_runtime_budget_trim_keep_latest_frames(40, 1000, 33, 1000, 8, 36) == 25,
+           "runtime budget trim keep latest: slower source interval keeps fewer frames");
+    EXPECT(anomaly_detector_runtime_budget_trim_keep_latest_frames(0, 1000, 33, 1000, 8, 36) == 31,
+           "runtime budget trim keep latest: invalid source interval uses default");
+    EXPECT(anomaly_detector_runtime_budget_trim_keep_latest_frames(33, 0, 33, 1000, 8, 36) == 31,
+           "runtime budget trim keep latest: invalid target latency uses default");
+    EXPECT(anomaly_detector_runtime_budget_trim_keep_latest_frames(1000, 1000, 33, 1000, 8, 36) == 8,
+           "runtime budget trim keep latest: minimum keep is honored");
+    EXPECT(anomaly_detector_runtime_budget_trim_keep_latest_frames(1, 1000, 33, 1000, 8, 36) == 36,
+           "runtime budget trim keep latest: maximum keep is honored");
+    EXPECT(anomaly_detector_runtime_budget_trim_keep_latest_frames(0, 0, 0, 0, 8, 36) == 8,
+           "runtime budget trim keep latest: invalid defaults still return bounded minimum");
+}
+
+static void test_detector_facade_runtime_budget_render_queue_hard_cap(void) {
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(8, 8, 8, 12, 24, 72) == 24,
+           "runtime budget render hard cap: minimum hard cap is honored");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(12, 8, 8, 12, 24, 72) == 24,
+           "runtime budget render hard cap: keep plus extra can set capacity");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(20, 8, 8, 12, 24, 72) == 40,
+           "runtime budget render hard cap: doubled keep can set capacity");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(36, 8, 8, 12, 24, 72) == 72,
+           "runtime budget render hard cap: maximum hard cap is honored");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(2, 31, 8, 12, 24, 72) == 62,
+           "runtime budget render hard cap: too-small keep uses fallback keep");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(2, 0, 8, 12, 24, 72) == 24,
+           "runtime budget render hard cap: invalid fallback uses minimum keep");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(8, 8, 8, -1, 24, 72) == 24,
+           "runtime budget render hard cap: invalid extra frames do not reduce minimum");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_hard_cap(36, 8, 8, 12, 24, 20) == 24,
+           "runtime budget render hard cap: malformed max bound preserves minimum hard cap");
+}
+
+static void test_detector_facade_runtime_budget_target_latency_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_target_latency_ms(200, 0, 250, 200, 1000, 5000) == 1000,
+           "runtime budget target latency: stall floor and min target are honored");
+    EXPECT(anomaly_detector_runtime_budget_target_latency_ms(600, 0, 250, 200, 1000, 5000) == 1400,
+           "runtime budget target latency: stall estimate is doubled with margin");
+    EXPECT(anomaly_detector_runtime_budget_target_latency_ms(300, 900, 250, 200, 1000, 5000) == 2000,
+           "runtime budget target latency: proven gap overrides stall estimate");
+    EXPECT(anomaly_detector_runtime_budget_target_latency_ms(3000, 0, 250, 200, 1000, 5000) == 5000,
+           "runtime budget target latency: maximum target is honored");
+    EXPECT(anomaly_detector_runtime_budget_target_latency_ms(-1, 0, 250, 200, 1000, 5000) == 1000,
+           "runtime budget target latency: invalid stall estimate uses floor");
+    EXPECT(anomaly_detector_runtime_budget_target_latency_ms(600, 0, 250, -50, 1000, 5000) == 1200,
+           "runtime budget target latency: negative margin does not reduce computed target");
+    EXPECT(anomaly_detector_runtime_budget_target_latency_ms(600, 0, 250, 200, 5000, 1000) == 5000,
+           "runtime budget target latency: malformed target bounds preserve minimum target");
+}
+
+static void test_detector_facade_runtime_budget_source_interval_estimate(void) {
+    anomaly_detector_runtime_budget_source_interval_estimate_t estimate =
+        anomaly_detector_runtime_budget_update_source_interval_estimate(
+                33, 0, 40, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 40 && estimate.confidence == 5,
+           "runtime budget source interval: no confidence uses decode delta directly");
+
+    estimate = anomaly_detector_runtime_budget_update_source_interval_estimate(
+            40, 50, 60, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 44 && estimate.confidence == 55,
+           "runtime budget source interval: confident estimate uses EMA and increments confidence");
+
+    estimate = anomaly_detector_runtime_budget_update_source_interval_estimate(
+            0, 50, 50, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 36 && estimate.confidence == 55,
+           "runtime budget source interval: invalid current interval uses default before EMA");
+
+    estimate = anomaly_detector_runtime_budget_update_source_interval_estimate(
+            40, 98, 60, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 44 && estimate.confidence == 100,
+           "runtime budget source interval: confidence saturates at 100");
+
+    estimate = anomaly_detector_runtime_budget_update_source_interval_estimate(
+            40, 100, 60, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 44 && estimate.confidence == 100,
+           "runtime budget source interval: max confidence stays capped");
+
+    estimate = anomaly_detector_runtime_budget_update_source_interval_estimate(
+            40, 0, 2, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 5 && estimate.confidence == 5,
+           "runtime budget source interval: minimum interval clamp is honored");
+
+    estimate = anomaly_detector_runtime_budget_update_source_interval_estimate(
+            40, 0, 2000, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 1000 && estimate.confidence == 5,
+           "runtime budget source interval: maximum interval clamp is honored");
+
+    estimate = anomaly_detector_runtime_budget_update_source_interval_estimate(
+            40, -5, 60, 33, 20, 5, 5, 1000);
+    EXPECT(estimate.interval_ms == 60 && estimate.confidence == 5,
+           "runtime budget source interval: negative confidence is treated as untrusted");
+}
+
+static void test_detector_facade_runtime_budget_apply_pts_source_interval(void) {
+    anomaly_detector_runtime_budget_source_interval_estimate_t estimate =
+        anomaly_detector_runtime_budget_apply_pts_source_interval(
+                33, 90, 40, true, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 40 && estimate.confidence == 90,
+           "runtime budget pts interval: force direct uses pts interval and preserves high confidence");
+
+    estimate = anomaly_detector_runtime_budget_apply_pts_source_interval(
+            33, 60, 42, false, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 42 && estimate.confidence == 80,
+           "runtime budget pts interval: low confidence uses direct pts and raises confidence floor");
+
+    estimate = anomaly_detector_runtime_budget_apply_pts_source_interval(
+            40, 90, 42, false, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 41 && estimate.confidence == 90,
+           "runtime budget pts interval: near delta uses low blend and nudges when rounding stalls");
+
+    estimate = anomaly_detector_runtime_budget_apply_pts_source_interval(
+            40, 90, 44, false, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 41 && estimate.confidence == 90,
+           "runtime budget pts interval: far delta uses stronger blend");
+
+    estimate = anomaly_detector_runtime_budget_apply_pts_source_interval(
+            40, 90, 41, false, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 41 && estimate.confidence == 90,
+           "runtime budget pts interval: rounded unchanged blend nudges toward pts interval");
+
+    estimate = anomaly_detector_runtime_budget_apply_pts_source_interval(
+            40, 90, 2, true, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 5 && estimate.confidence == 90,
+           "runtime budget pts interval: minimum interval clamp is honored");
+
+    estimate = anomaly_detector_runtime_budget_apply_pts_source_interval(
+            40, 90, 2000, true, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 1000 && estimate.confidence == 90,
+           "runtime budget pts interval: maximum interval clamp is honored");
+
+    estimate = anomaly_detector_runtime_budget_apply_pts_source_interval(
+            0, 90, 40, false, 33, 70, 80, 4, 20, 35, 5, 1000);
+    EXPECT(estimate.interval_ms == 35 && estimate.confidence == 90,
+           "runtime budget pts interval: invalid current interval uses default before blend");
+}
+
+static void test_detector_facade_runtime_budget_stall_estimate_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   300, 600, 300, 30, 4, 1800) == 390,
+           "runtime budget stall estimate: rising gap uses rise EMA");
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   600, 300, 300, 30, 4, 1800) == 588,
+           "runtime budget stall estimate: smaller gap uses decay EMA");
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   0, 600, 300, 30, 4, 1800) == 390,
+           "runtime budget stall estimate: invalid current stall uses floor before EMA");
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   300, 100, 300, 30, 4, 1800) == 300,
+           "runtime budget stall estimate: floor clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   1700, 2200, 300, 30, 4, 1800) == 1800,
+           "runtime budget stall estimate: maximum clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   300, 600, 300, -10, 4, 1800) == 300,
+           "runtime budget stall estimate: negative rise percentage clamps to zero");
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   600, 300, 300, 30, 150, 1800) == 300,
+           "runtime budget stall estimate: oversized decay percentage clamps to full gap");
+    EXPECT(anomaly_detector_runtime_budget_update_stall_estimate_ms(
+                   300, 600, 300, 30, 4, 200) == 300,
+           "runtime budget stall estimate: malformed max preserves floor");
+}
+
+static void test_detector_facade_runtime_budget_proven_gap_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   300, 900, 300, 15, 1800) == 900,
+           "runtime budget proven gap: larger gap is adopted directly");
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   900, 600, 300, 15, 1800) == 855,
+           "runtime budget proven gap: smaller gap uses blend EMA");
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   0, 600, 300, 15, 1800) == 600,
+           "runtime budget proven gap: invalid current gap uses floor before update");
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   300, 100, 300, 15, 1800) == 300,
+           "runtime budget proven gap: floor clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   1700, 2200, 300, 15, 1800) == 1800,
+           "runtime budget proven gap: maximum clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   900, 600, 300, -10, 1800) == 900,
+           "runtime budget proven gap: negative blend percentage preserves current value");
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   900, 600, 300, 150, 1800) == 600,
+           "runtime budget proven gap: oversized blend percentage clamps to full gap");
+    EXPECT(anomaly_detector_runtime_budget_update_proven_gap_ms(
+                   300, 600, 300, 15, 200) == 300,
+           "runtime budget proven gap: malformed max preserves floor");
+}
+
+static void test_detector_facade_runtime_budget_decay_toward_floor_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                   900, 300, 4) == 876,
+           "runtime budget decay: value decays toward floor by EMA");
+    EXPECT(anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                   310, 300, 4) == 310,
+           "runtime budget decay: rounded value can remain unchanged near floor");
+    EXPECT(anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                   200, 300, 4) == 300,
+           "runtime budget decay: value below floor clamps to floor");
+    EXPECT(anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                   0, 300, 4) == 300,
+           "runtime budget decay: invalid value clamps to floor");
+    EXPECT(anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                   900, 300, -10) == 900,
+           "runtime budget decay: negative percentage preserves value");
+    EXPECT(anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                   900, 300, 150) == 300,
+           "runtime budget decay: oversized percentage clamps to floor");
+    EXPECT(anomaly_detector_runtime_budget_decay_toward_floor_ms(
+                   900, -10, 4) == 864,
+           "runtime budget decay: negative floor normalizes to zero");
+}
+
+static void test_detector_facade_runtime_budget_desired_render_interval_ms(void) {
+    anomaly_detector_runtime_budget_render_interval_t interval =
+            anomaly_detector_runtime_budget_desired_render_interval_ms(
+                    33, 33, 1000, 1000, false, 12, 40, 15);
+    EXPECT(interval.desired_interval_ms == 33 &&
+           interval.render_interval_ms == 33,
+           "runtime budget render interval: target backlog preserves source cadence");
+
+    interval = anomaly_detector_runtime_budget_desired_render_interval_ms(
+            33, 33, 1500, 1000, false, 12, 40, 15);
+    EXPECT(interval.desired_interval_ms == 31 &&
+           interval.render_interval_ms == 33,
+           "runtime budget render interval: moderate backlog speeds desired cadence and smooths");
+
+    interval = anomaly_detector_runtime_budget_desired_render_interval_ms(
+            50, 80, 5000, 1000, false, 12, 40, 15);
+    EXPECT(interval.desired_interval_ms == 30 &&
+           interval.render_interval_ms == 56,
+           "runtime budget render interval: severe backlog clamps to the fastest interval");
+
+    interval = anomaly_detector_runtime_budget_desired_render_interval_ms(
+            50, 50, 1000, 1000, true, 12, 40, 15);
+    EXPECT(interval.desired_interval_ms == 54 &&
+           interval.render_interval_ms == 51,
+           "runtime budget render interval: active stall preserves a slower interval near target");
+
+    interval = anomaly_detector_runtime_budget_desired_render_interval_ms(
+            50, 50, 0, 1000, false, 12, 40, 15);
+    EXPECT(interval.desired_interval_ms == 53 &&
+           interval.render_interval_ms == 50,
+           "runtime budget render interval: underrun slows desired cadence within smoothing");
+
+    interval = anomaly_detector_runtime_budget_desired_render_interval_ms(
+            0, 0, 1000, 1000, false, 12, 40, 15);
+    EXPECT(interval.desired_interval_ms == 1 &&
+           interval.render_interval_ms == 1,
+           "runtime budget render interval: invalid source interval normalizes to one");
+}
+
+static void test_runtime_pressure_thresholds_round_up_and_clamp(void) {
+    EXPECT(anomaly_runtime_pressure_depth_threshold(24, 50) == 12,
+           "runtime pressure threshold: 50 percent of 24 is 12");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(24, 66) == 16,
+           "runtime pressure threshold: 66 percent of 24 rounds up to 16");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(24, 80) == 20,
+           "runtime pressure threshold: 80 percent of 24 rounds up to 20");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(15, 50) == 8,
+           "runtime pressure threshold: odd capacity rounds up");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(15, 66) == 10,
+           "runtime pressure threshold: 66 percent of 15 is 10");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(15, 80) == 12,
+           "runtime pressure threshold: 80 percent of 15 is 12");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(0, 80) == 0,
+           "runtime pressure threshold: zero capacity returns zero");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(5, 0) == 1,
+           "runtime pressure threshold: positive capacity minimum is one");
+    EXPECT(anomaly_runtime_pressure_depth_threshold(5, 150) == 5,
+           "runtime pressure threshold: threshold is clamped to capacity");
+}
+
+static void test_runtime_pressure_default_policy_matches_bridge_constants(void) {
+    anomaly_runtime_pressure_policy_t policy =
+        anomaly_runtime_pressure_policy_make_default(24);
+
+    EXPECT(policy.queue_capacity == 24,
+           "runtime pressure default policy: capacity is retained");
+    EXPECT(policy.recover_depth == 2,
+           "runtime pressure default policy: recover depth matches bridge default");
+    EXPECT(policy.analyze_alternate_pct == 50,
+           "runtime pressure default policy: analyze threshold matches bridge default");
+    EXPECT(policy.bypass_alternate_pct == 66,
+           "runtime pressure default policy: bypass alternate threshold matches bridge default");
+    EXPECT(policy.bypass_all_pct == 80,
+           "runtime pressure default policy: bypass all threshold matches bridge default");
+
+    policy = anomaly_runtime_pressure_policy_make_default(-1);
+    EXPECT(policy.queue_capacity == 0,
+           "runtime pressure default policy: invalid capacity clamps to zero");
+}
+
+static void test_runtime_pressure_explicit_policy_constructor(void) {
+    anomaly_runtime_pressure_policy_t policy =
+        anomaly_runtime_pressure_policy_make(15, 3, 40, 70, 90);
+
+    EXPECT(policy.queue_capacity == 15 &&
+           policy.recover_depth == 3 &&
+           policy.analyze_alternate_pct == 40 &&
+           policy.bypass_alternate_pct == 70 &&
+           policy.bypass_all_pct == 90,
+           "runtime pressure explicit policy: values are retained");
+
+    policy = anomaly_runtime_pressure_policy_make(-1, 4, 50, 66, 80);
+    EXPECT(policy.queue_capacity == 0 &&
+           policy.recover_depth == 4,
+           "runtime pressure explicit policy: invalid capacity clamps while preserving policy values");
+}
+
+static void test_runtime_pressure_selects_modes_and_recovers(void) {
+    anomaly_runtime_pressure_policy_t policy =
+        anomaly_runtime_pressure_policy_make_default(24);
+
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+                   2) == ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+           "runtime pressure mode: recover depth selects normal");
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+                   12) == ANOMALY_RUNTIME_PRESSURE_MODE_ANALYZE_ALTERNATE,
+           "runtime pressure mode: analyze threshold selects analyze alternate");
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+                   16) == ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+           "runtime pressure mode: bypass alternate threshold selects bypass alternate");
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+                   20) == ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+           "runtime pressure mode: bypass all threshold selects bypass all");
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+                   10) == ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+           "runtime pressure mode: bypass all is sticky above recover depth");
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+                   10) == ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+           "runtime pressure mode: bypass alternate is sticky above recover depth");
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_ANALYZE_ALTERNATE,
+                   10) == ANOMALY_RUNTIME_PRESSURE_MODE_ANALYZE_ALTERNATE,
+           "runtime pressure mode: analyze alternate is sticky above recover depth");
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+                   2) == ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+           "runtime pressure mode: sticky mode recovers at recover depth");
+
+    policy = anomaly_runtime_pressure_policy_make_default(0);
+    EXPECT(anomaly_runtime_pressure_select_mode(
+                   policy,
+                   ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+                   3) == ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+           "runtime pressure mode: zero-capacity thresholds preserve bridge fallback behavior");
+}
+
+static void test_runtime_pressure_bypass_decision(void) {
+    EXPECT(!anomaly_runtime_pressure_should_bypass_analysis(
+                    ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL,
+                    2),
+           "runtime pressure bypass: normal never bypasses");
+    EXPECT(!anomaly_runtime_pressure_should_bypass_analysis(
+                    ANOMALY_RUNTIME_PRESSURE_MODE_ANALYZE_ALTERNATE,
+                    2),
+           "runtime pressure bypass: analyze alternate changes stride but does not bypass");
+    EXPECT(!anomaly_runtime_pressure_should_bypass_analysis(
+                    ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+                    1),
+           "runtime pressure bypass: bypass alternate keeps odd frames");
+    EXPECT(anomaly_runtime_pressure_should_bypass_analysis(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+                   2),
+           "runtime pressure bypass: bypass alternate drops even frames");
+    EXPECT(anomaly_runtime_pressure_should_bypass_analysis(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+                   1),
+           "runtime pressure bypass: bypass all drops every frame");
+}
+
+static void test_runtime_pressure_backlog_frame_capacity(void) {
+    EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(500, 40, 33, 2, 24) == 13,
+           "runtime pressure backlog capacity: 500ms at 40ms rounds up to 13 frames");
+    EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(500, 33, 33, 2, 24) == 16,
+           "runtime pressure backlog capacity: 500ms at 33ms rounds up to 16 frames");
+    EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(500, 0, 33, 2, 24) == 16,
+           "runtime pressure backlog capacity: invalid source interval uses default");
+    EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(10, 33, 33, 2, 24) == 2,
+           "runtime pressure backlog capacity: minimum frame count is honored");
+    EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(2000, 33, 33, 2, 24) == 24,
+           "runtime pressure backlog capacity: hard capacity is honored");
+    EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(500, 33, 33, 2, 0) == 0,
+           "runtime pressure backlog capacity: nonpositive hard capacity returns zero");
+}
+
+static void test_runtime_pressure_oldest_drop_count_for_admission(void) {
+    EXPECT(anomaly_runtime_pressure_oldest_drop_count_for_admission(0, 2) == 0,
+           "runtime pressure admission drops: empty queue needs no drop");
+    EXPECT(anomaly_runtime_pressure_oldest_drop_count_for_admission(1, 2) == 0,
+           "runtime pressure admission drops: below desired depth needs no drop");
+    EXPECT(anomaly_runtime_pressure_oldest_drop_count_for_admission(2, 2) == 1,
+           "runtime pressure admission drops: at desired depth drops one before enqueue");
+    EXPECT(anomaly_runtime_pressure_oldest_drop_count_for_admission(5, 2) == 4,
+           "runtime pressure admission drops: over budget drops enough for one new frame");
+    EXPECT(anomaly_runtime_pressure_oldest_drop_count_for_admission(5, 4) == 2,
+           "runtime pressure admission drops: larger budget drops only excess plus admission slot");
+    EXPECT(anomaly_runtime_pressure_oldest_drop_count_for_admission(-1, 2) == 0,
+           "runtime pressure admission drops: invalid queue depth needs no drop");
+    EXPECT(anomaly_runtime_pressure_oldest_drop_count_for_admission(5, 0) == 5,
+           "runtime pressure admission drops: invalid desired depth drains existing queue");
+}
+
+static void test_runtime_pressure_queue_storage_capacity(void) {
+    EXPECT(anomaly_runtime_pressure_queue_storage_capacity(24, 12, 24, 24) == 24,
+           "runtime pressure queue storage: existing capacity satisfies request");
+    EXPECT(anomaly_runtime_pressure_queue_storage_capacity(0, 1, 24, 24) == 24,
+           "runtime pressure queue storage: initial capacity is used for first allocation");
+    EXPECT(anomaly_runtime_pressure_queue_storage_capacity(2, 5, 4, 24) == 8,
+           "runtime pressure queue storage: capacity doubles until request fits");
+    EXPECT(anomaly_runtime_pressure_queue_storage_capacity(5000, 6000, 4, 7000) == 6024,
+           "runtime pressure queue storage: large capacity grows in 1024-frame chunks");
+    EXPECT(anomaly_runtime_pressure_queue_storage_capacity(0, 30, 24, 24) == 0,
+           "runtime pressure queue storage: request above hard cap is rejected");
+    EXPECT(anomaly_runtime_pressure_queue_storage_capacity(-1, 1, 0, 24) == 1,
+           "runtime pressure queue storage: invalid current and initial capacities normalize");
+    EXPECT(anomaly_runtime_pressure_queue_storage_capacity(0, 1, 24, 0) == 0,
+           "runtime pressure queue storage: nonpositive hard capacity is rejected");
+}
+
+static void test_runtime_pressure_mode_names(void) {
+    EXPECT(strcmp(anomaly_runtime_pressure_mode_name(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_NORMAL),
+                  "normal") == 0,
+           "runtime pressure mode name: normal is named");
+    EXPECT(strcmp(anomaly_runtime_pressure_mode_name(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_ANALYZE_ALTERNATE),
+                  "analyze-alternate") == 0,
+           "runtime pressure mode name: analyze alternate is named");
+    EXPECT(strcmp(anomaly_runtime_pressure_mode_name(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE),
+                  "bypass-alternate") == 0,
+           "runtime pressure mode name: bypass alternate is named");
+    EXPECT(strcmp(anomaly_runtime_pressure_mode_name(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL),
+                  "bypass-all") == 0,
+           "runtime pressure mode name: bypass all is named");
+    EXPECT(strcmp(anomaly_runtime_pressure_mode_name(
+                   (anomaly_runtime_pressure_mode_t)99),
+                  "unknown") == 0,
+           "runtime pressure mode name: invalid mode is unknown");
+}
+
+static void test_runtime_handoff_frame_readiness(void) {
+    anomaly_runtime_handoff_frame_t frame =
+        anomaly_runtime_handoff_frame_make(12, 3, 40000, 41000, 640, 480, true);
+
+    EXPECT(anomaly_runtime_handoff_frame_ready(frame),
+           "runtime handoff frame: valid frame is ready");
+
+    frame.has_frame = false;
+    EXPECT(!anomaly_runtime_handoff_frame_ready(frame),
+           "runtime handoff frame: missing frame is not ready");
+
+    frame = anomaly_runtime_handoff_frame_make(12, 3, 40000, 41000, 0, 480, true);
+    EXPECT(!anomaly_runtime_handoff_frame_ready(frame),
+           "runtime handoff frame: invalid width is not ready");
+
+    frame = anomaly_runtime_handoff_frame_make(12, 3, 40000, 41000, 640, -1, true);
+    EXPECT(!anomaly_runtime_handoff_frame_ready(frame),
+           "runtime handoff frame: invalid height is not ready");
+}
+
+static void test_runtime_handoff_generation_staleness(void) {
+    anomaly_runtime_handoff_frame_t frame =
+        anomaly_runtime_handoff_frame_make(12, 3, 40000, 41000, 640, 480, true);
+
+    EXPECT(!anomaly_runtime_handoff_frame_is_stale(frame, 3),
+           "runtime handoff generation: matching generation is current");
+    EXPECT(anomaly_runtime_handoff_frame_is_stale(frame, 4),
+           "runtime handoff generation: mismatched generation is stale");
+}
+
+static void test_runtime_handoff_decides_analysis_and_forwarding(void) {
+    anomaly_runtime_handoff_frame_t frame =
+        anomaly_runtime_handoff_frame_make(12, 3, 40000, 41000, 640, 480, true);
+
+    anomaly_runtime_handoff_decision_t decision =
+        anomaly_runtime_handoff_decide(frame, true, 3, false);
+    EXPECT(decision.action == ANOMALY_RUNTIME_HANDOFF_ACTION_ANALYZE &&
+           decision.reason == ANOMALY_RUNTIME_HANDOFF_REASON_ANALYZE_READY,
+           "runtime handoff decision: ready enabled current frame is analyzed");
+
+    decision = anomaly_runtime_handoff_decide(frame, false, 3, false);
+    EXPECT(decision.action == ANOMALY_RUNTIME_HANDOFF_ACTION_FORWARD_WITHOUT_ANALYSIS &&
+           decision.reason == ANOMALY_RUNTIME_HANDOFF_REASON_PROCESSING_DISABLED,
+           "runtime handoff decision: disabled processing forwards without analysis");
+
+    decision = anomaly_runtime_handoff_decide(frame, true, 4, false);
+    EXPECT(decision.action == ANOMALY_RUNTIME_HANDOFF_ACTION_FORWARD_WITHOUT_ANALYSIS &&
+           decision.reason == ANOMALY_RUNTIME_HANDOFF_REASON_STALE_GENERATION,
+           "runtime handoff decision: stale generation forwards without analysis");
+
+    decision = anomaly_runtime_handoff_decide(frame, true, 3, true);
+    EXPECT(decision.action == ANOMALY_RUNTIME_HANDOFF_ACTION_FORWARD_WITHOUT_ANALYSIS &&
+           decision.reason == ANOMALY_RUNTIME_HANDOFF_REASON_PRESSURE_BYPASS,
+           "runtime handoff decision: pressure bypass forwards without analysis");
+
+    frame.has_frame = false;
+    decision = anomaly_runtime_handoff_decide(frame, true, 3, false);
+    EXPECT(decision.action == ANOMALY_RUNTIME_HANDOFF_ACTION_FORWARD_WITHOUT_ANALYSIS &&
+           decision.reason == ANOMALY_RUNTIME_HANDOFF_REASON_INVALID_FRAME,
+           "runtime handoff decision: invalid frame forwards without analysis");
+}
+
+static void test_runtime_handoff_reason_names(void) {
+    EXPECT(strcmp(anomaly_runtime_handoff_reason_name(
+                   ANOMALY_RUNTIME_HANDOFF_REASON_ANALYZE_READY),
+                  "analyze-ready") == 0,
+           "runtime handoff reason name: analyze ready is named");
+    EXPECT(strcmp(anomaly_runtime_handoff_reason_name(
+                   ANOMALY_RUNTIME_HANDOFF_REASON_PROCESSING_DISABLED),
+                  "processing-disabled") == 0,
+           "runtime handoff reason name: processing disabled is named");
+    EXPECT(strcmp(anomaly_runtime_handoff_reason_name(
+                   ANOMALY_RUNTIME_HANDOFF_REASON_STALE_GENERATION),
+                  "stale-generation") == 0,
+           "runtime handoff reason name: stale generation is named");
+    EXPECT(strcmp(anomaly_runtime_handoff_reason_name(
+                   ANOMALY_RUNTIME_HANDOFF_REASON_PRESSURE_BYPASS),
+                  "pressure-bypass") == 0,
+           "runtime handoff reason name: pressure bypass is named");
+    EXPECT(strcmp(anomaly_runtime_handoff_reason_name(
+                   ANOMALY_RUNTIME_HANDOFF_REASON_INVALID_FRAME),
+                  "invalid-frame") == 0,
+           "runtime handoff reason name: invalid frame is named");
+    EXPECT(strcmp(anomaly_runtime_handoff_reason_name(
+                   (anomaly_runtime_handoff_reason_t)99),
+                  "unknown") == 0,
+           "runtime handoff reason name: invalid reason is unknown");
+}
+
+static void test_runtime_handoff_outcome_counts_analyzed_frame(void) {
+    anomaly_runtime_handoff_decision_t decision = {
+        .action = ANOMALY_RUNTIME_HANDOFF_ACTION_ANALYZE,
+        .reason = ANOMALY_RUNTIME_HANDOFF_REASON_ANALYZE_READY,
+    };
+    anomaly_runtime_handoff_outcome_t outcome =
+        anomaly_runtime_handoff_outcome_for_decision(decision, false);
+
+    EXPECT(outcome.processed_delta == 1 &&
+           outcome.skipped_delta == 0 &&
+           outcome.forwarded_without_analysis_delta == 0 &&
+           outcome.annotated_delta == 0,
+           "runtime handoff outcome: analyzed frame counts processed only");
+}
+
+static void test_runtime_handoff_outcome_counts_annotated_frame(void) {
+    anomaly_runtime_handoff_decision_t decision = {
+        .action = ANOMALY_RUNTIME_HANDOFF_ACTION_ANALYZE,
+        .reason = ANOMALY_RUNTIME_HANDOFF_REASON_ANALYZE_READY,
+    };
+    anomaly_runtime_handoff_outcome_t outcome =
+        anomaly_runtime_handoff_outcome_for_decision(decision, true);
+
+    EXPECT(outcome.processed_delta == 1 &&
+           outcome.skipped_delta == 0 &&
+           outcome.forwarded_without_analysis_delta == 0 &&
+           outcome.annotated_delta == 1,
+           "runtime handoff outcome: analyzed overlay counts annotated");
+}
+
+static void test_runtime_handoff_outcome_counts_forwarded_frame(void) {
+    anomaly_runtime_handoff_decision_t decision = {
+        .action = ANOMALY_RUNTIME_HANDOFF_ACTION_FORWARD_WITHOUT_ANALYSIS,
+        .reason = ANOMALY_RUNTIME_HANDOFF_REASON_PRESSURE_BYPASS,
+    };
+    anomaly_runtime_handoff_outcome_t outcome =
+        anomaly_runtime_handoff_outcome_for_decision(decision, true);
+
+    EXPECT(outcome.processed_delta == 1 &&
+           outcome.skipped_delta == 1 &&
+           outcome.forwarded_without_analysis_delta == 1 &&
+           outcome.annotated_delta == 1,
+           "runtime handoff outcome: forwarded overlay preserves existing annotated-count behavior");
+}
+
+static void test_runtime_handoff_outcome_handles_unknown_action(void) {
+    anomaly_runtime_handoff_decision_t decision = {
+        .action = (anomaly_runtime_handoff_action_t)99,
+        .reason = ANOMALY_RUNTIME_HANDOFF_REASON_INVALID_FRAME,
+    };
+    anomaly_runtime_handoff_outcome_t outcome =
+        anomaly_runtime_handoff_outcome_for_decision(decision, false);
+
+    EXPECT(outcome.processed_delta == 1 &&
+           outcome.skipped_delta == 1 &&
+           outcome.forwarded_without_analysis_delta == 1 &&
+           outcome.annotated_delta == 0,
+           "runtime handoff outcome: unknown action is treated as forwarded");
+}
+
 static void test_detector_facade_annotation_cadence_contract(void) {
     EXPECT(anomaly_detector_annotation_cadence_allows_update(0, 15),
            "detector facade annotation cadence: first frame may publish");
@@ -17284,6 +17993,36 @@ int main(void) {
     test_detector_facade_process_args_make_allows_optional_fields();
     test_detector_facade_default_window_frames_contract();
     test_detector_facade_realtime_default_config_contract();
+    test_detector_facade_runtime_budget_defaults();
+    test_detector_facade_runtime_budget_normalizes_thresholds();
+    test_detector_facade_runtime_budget_selects_processing_mode();
+    test_detector_facade_runtime_budget_names_modes();
+    test_detector_facade_runtime_budget_trim_keep_latest_frames();
+    test_detector_facade_runtime_budget_render_queue_hard_cap();
+    test_detector_facade_runtime_budget_target_latency_ms();
+    test_detector_facade_runtime_budget_source_interval_estimate();
+    test_detector_facade_runtime_budget_apply_pts_source_interval();
+    test_detector_facade_runtime_budget_stall_estimate_ms();
+    test_detector_facade_runtime_budget_proven_gap_ms();
+    test_detector_facade_runtime_budget_decay_toward_floor_ms();
+    test_detector_facade_runtime_budget_desired_render_interval_ms();
+    test_runtime_pressure_thresholds_round_up_and_clamp();
+    test_runtime_pressure_default_policy_matches_bridge_constants();
+    test_runtime_pressure_explicit_policy_constructor();
+    test_runtime_pressure_selects_modes_and_recovers();
+    test_runtime_pressure_bypass_decision();
+    test_runtime_pressure_backlog_frame_capacity();
+    test_runtime_pressure_oldest_drop_count_for_admission();
+    test_runtime_pressure_queue_storage_capacity();
+    test_runtime_pressure_mode_names();
+    test_runtime_handoff_frame_readiness();
+    test_runtime_handoff_generation_staleness();
+    test_runtime_handoff_decides_analysis_and_forwarding();
+    test_runtime_handoff_reason_names();
+    test_runtime_handoff_outcome_counts_analyzed_frame();
+    test_runtime_handoff_outcome_counts_annotated_frame();
+    test_runtime_handoff_outcome_counts_forwarded_frame();
+    test_runtime_handoff_outcome_handles_unknown_action();
     test_detector_facade_annotation_cadence_contract();
     test_detector_facade_annotation_cadence_visibility_state_contract();
     test_detector_facade_annotation_cadence_snapshot_contract();

@@ -8,6 +8,9 @@ add_executable(anomaly_test
     test_anomaly.c
     ../../app/src/main/cpp/anomaly_detector.c
     ../../app/src/main/cpp/anomaly_detector_annotation.c
+    ../../app/src/main/cpp/anomaly_runtime_budget.c
+    ../../app/src/main/cpp/anomaly_runtime_handoff.c
+    ../../app/src/main/cpp/anomaly_runtime_pressure.c
     ../../app/src/main/cpp/anomaly_analysis.c
     ../../app/src/main/cpp/anomaly_buffer.c
     ../../app/src/main/cpp/anomaly_roi_tracks.c
@@ -43,6 +46,9 @@ add_executable(anomaly_video_test
     anomaly_video_test.c
     ../../app/src/main/cpp/anomaly_detector.c
     ../../app/src/main/cpp/anomaly_detector_annotation.c
+    ../../app/src/main/cpp/anomaly_runtime_budget.c
+    ../../app/src/main/cpp/anomaly_runtime_handoff.c
+    ../../app/src/main/cpp/anomaly_runtime_pressure.c
     ../../app/src/main/cpp/anomaly_analysis.c
     ../../app/src/main/cpp/anomaly_buffer.c
     ../../app/src/main/cpp/anomaly_roi_tracks.c

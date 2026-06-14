@@ -13,6 +13,9 @@ add_library(
     ffmpeg_bridge.c
     anomaly_detector.c
     anomaly_detector_annotation.c
+    anomaly_runtime_budget.c
+    anomaly_runtime_handoff.c
+    anomaly_runtime_pressure.c
     anomaly_analysis.c
     anomaly_buffer.c
     anomaly_roi_tracks.c

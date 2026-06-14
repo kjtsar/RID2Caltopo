@@ -147,6 +147,8 @@ public class WaypointTrack {
     private static final String GEOJSON_MIME_TYPE = "application/geo+json";
 	// map trackLabel to WaypointTrack.
 	private static HashMap<String, WaypointTrack> TrackMap = new HashMap<>();
+    @Nullable
+    private static ExecutorService TrackArchiveExecutorPool = null;
 
     private CtDroneSpec droneSpec;
     
@@ -219,7 +221,7 @@ public class WaypointTrack {
 
 	public static void ArchiveTrack(@NonNull String trackLabel) {
 		WaypointTrack track = TrackMap.remove(trackLabel);
-		if (null != track) track.archive();
+		if (null != track) QueueTrackArchive(track);
 	}
 
     public static void ArchiveTracks() {
@@ -234,6 +236,24 @@ public class WaypointTrack {
 			if (null != track) track.archive();
 		}
 	}
+
+    @NonNull
+    private static synchronized ExecutorService GetTrackArchiveExecutorPool() {
+        if (TrackArchiveExecutorPool == null ||
+                TrackArchiveExecutorPool.isShutdown() ||
+                TrackArchiveExecutorPool.isTerminated()) {
+            TrackArchiveExecutorPool = Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "r2c-track-archive");
+                thread.setDaemon(true);
+                return thread;
+            });
+        }
+        return TrackArchiveExecutorPool;
+    }
+
+    private static void QueueTrackArchive(@NonNull WaypointTrack track) {
+        GetTrackArchiveExecutorPool().submit(track::archive);
+    }
 
     private void absorb(@NonNull WaypointTrack other, @NonNull CtDroneSpec updatedDroneSpec) {
         this.droneSpec = updatedDroneSpec;

@@ -54,6 +54,66 @@ class MediaMtxLogParserTest {
     }
 
     @Test
+    fun parseLine_rtmpAcceptSucceeded_emitsPublishDiagnosticWithPathAndConnection() {
+        val result = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.123:48174] RTMP accept succeeded: publish=true path=/1sar34DjN2 query=",
+        )
+
+        val diagnostic = result.event as MediaMTXEvent.RtmpPublishDiagnostic
+        assertEquals("1sar34DjN2", diagnostic.path)
+        assertEquals("192.168.1.123:48174", diagnostic.publisherConnId)
+        assertEquals("accept_succeeded", diagnostic.phase)
+    }
+
+    @Test
+    fun parseLine_rtmpReaderInitialized_emitsSetupTimingDiagnostic() {
+        val result = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.123:34130] RTMP publish: reader initialized for path '1sar34DjN2' in 1.103496616s with 1 RTMP tracks (videoOnly=true)",
+        )
+
+        val diagnostic = result.event as MediaMTXEvent.RtmpPublishDiagnostic
+        assertEquals("1sar34DjN2", diagnostic.path)
+        assertEquals("192.168.1.123:34130", diagnostic.publisherConnId)
+        assertEquals("reader_initialized", diagnostic.phase)
+        assertEquals(1103L, diagnostic.elapsedMs)
+        assertEquals("1 RTMP tracks (videoOnly=true)", diagnostic.detail)
+    }
+
+    @Test
+    fun parseLine_rtmpPublisherInactive_emitsIdleDiagnosticBeforeClose() {
+        val result = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.123:47054] RTMP publisher inactive for 30s on path '1sar34DjN2', closing connection",
+        )
+
+        val diagnostic = result.event as MediaMTXEvent.RtmpPublishDiagnostic
+        assertEquals("1sar34DjN2", diagnostic.path)
+        assertEquals("192.168.1.123:47054", diagnostic.publisherConnId)
+        assertEquals("publisher_inactive", diagnostic.phase)
+        assertEquals(30_000L, diagnostic.elapsedMs)
+    }
+
+    @Test
+    fun parseLine_rtmpPublishIdle_emitsIdleDiagnosticWithFractionalSeconds() {
+        val result = MediaMtxLogParser.parseLine(
+            MediaMtxParserState(),
+            "[RTMP] [conn 192.168.1.123:47054] RTMP publish idle for 30.3s on path '1sar34DjN2' (connBytesReceived=654124478 pathBytesReceived=1339016668 pathPacketsReceived=954239 pathUnitsReceived=63059)",
+        )
+
+        val diagnostic = result.event as MediaMTXEvent.RtmpPublishDiagnostic
+        assertEquals("1sar34DjN2", diagnostic.path)
+        assertEquals("192.168.1.123:47054", diagnostic.publisherConnId)
+        assertEquals("publish_idle", diagnostic.phase)
+        assertEquals(30_300L, diagnostic.elapsedMs)
+        assertEquals(
+            "connBytesReceived=654124478 pathBytesReceived=1339016668 pathPacketsReceived=954239 pathUnitsReceived=63059",
+            diagnostic.detail,
+        )
+    }
+
+    @Test
     fun parseLine_hlsCreated_emitsHlsStarted() {
         val result = MediaMtxLogParser.parseLine(
             MediaMtxParserState(),

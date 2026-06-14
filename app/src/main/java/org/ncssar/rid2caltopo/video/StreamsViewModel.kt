@@ -68,6 +68,7 @@ import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
+import org.ncssar.rid2caltopo.video.CoordinateFormatter
 import org.ncssar.rid2caltopo.video.PlaybackIndicatorState
 import org.ncssar.rid2caltopo.video.LocalPlaybackAnnotationType
 import org.ncssar.rid2caltopo.video.LocalPlaybackAnnotationVerdict
@@ -281,6 +282,10 @@ internal fun buildClueCaptureSummary(clue: PendingClue): String {
         clue.lng,
         clue.alt * METERS_TO_FEET,
     )
+    CoordinateFormatter.format(clue.lat, clue.lng, CoordinateDisplayFormat.USNG)
+        .removePrefix("loc:")
+        .takeIf { it.isNotBlank() && it != "unknown" }
+        ?.let { lines += "  USNG: $it" }
     lines += clue.headingDeg?.let {
         String.format(Locale.US, "  Heading used for clue: %.1f\u00b0", it)
     } ?: "  Heading used for clue: N/A"

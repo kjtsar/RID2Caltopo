@@ -955,6 +955,14 @@ private class LocalMarkerInfoWindow(
     }
 }
 
+internal enum class MarkerInfoWindowTapAction {
+    Show,
+    Close
+}
+
+internal fun markerInfoWindowTapAction(isInfoWindowShown: Boolean): MarkerInfoWindowTapAction =
+    if (isInfoWindowShown) MarkerInfoWindowTapAction.Close else MarkerInfoWindowTapAction.Show
+
 private data class DroneLabelDrawSpec(
     val designator: String,
     val position: GeoPoint,
@@ -3330,6 +3338,7 @@ internal fun SplitMapPane(
                 val tapOverlay = MapEventsOverlay(
                     object : MapEventsReceiver {
                         override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                            InfoWindow.closeAllInfoWindowsOn(mapView)
                             onSingleTapFocus?.invoke()
                             return false
                         }
@@ -3520,6 +3529,13 @@ internal fun SplitMapPane(
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = markerTitle
                         snippet = markerSnippet
+                        setOnMarkerClickListener { tappedMarker, _ ->
+                            when (markerInfoWindowTapAction(tappedMarker.isInfoWindowShown)) {
+                                MarkerInfoWindowTapAction.Close -> tappedMarker.closeInfoWindow()
+                                MarkerInfoWindowTapAction.Show -> tappedMarker.showInfoWindow()
+                            }
+                            true
+                        }
                     }
                     marker.infoWindow = LocalMarkerInfoWindow(
                         mapView = mapView,
@@ -3583,6 +3599,13 @@ internal fun SplitMapPane(
                             markerId = null,
                             onDelete = null
                         )
+                        marker.setOnMarkerClickListener { tappedMarker, _ ->
+                            when (markerInfoWindowTapAction(tappedMarker.isInfoWindowShown)) {
+                                MarkerInfoWindowTapAction.Close -> tappedMarker.closeInfoWindow()
+                                MarkerInfoWindowTapAction.Show -> tappedMarker.showInfoWindow()
+                            }
+                            true
+                        }
                     }
                     if (!isKnownArtifactSymbol(point.markerSymbol) && unknownSymbolsSeen.add(point.markerSymbol)) {
                         if (CTDebugEnabled(MAP_PANE_TAG))  CTDebug(MAP_PANE_TAG, "Unknown marker-symbol encountered: '${point.markerSymbol}'")

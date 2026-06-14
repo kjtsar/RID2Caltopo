@@ -8,6 +8,12 @@ import org.ncssar.rid2caltopo.data.PilotDisplayPreference
 
 class MapPanePilotDisplayTest {
     @Test
+    fun markerInfoWindowTapAction_togglesVisibleInfoWindowClosed() {
+        assertEquals(MarkerInfoWindowTapAction.Show, markerInfoWindowTapAction(isInfoWindowShown = false))
+        assertEquals(MarkerInfoWindowTapAction.Close, markerInfoWindowTapAction(isInfoWindowShown = true))
+    }
+
+    @Test
     fun droneStatusLabel_includesExplicitUnitsAndHeading() {
         assertEquals(
             "ATO:125' AGL:90' RNG:420' HDG:273°",

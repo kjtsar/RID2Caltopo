@@ -93,6 +93,47 @@ import org.opendroneid.android.bluetooth.WiFiScanner
 import androidx.documentfile.provider.DocumentFile
 
 private const val EMPTY_STREAMS_SETTINGS_DESIGNATOR = "__empty_streams_defaults__"
+internal const val STREAM_PIP_ASPECT_RATIO = 16f / 9f
+private const val STREAM_PIP_FRAME_PADDING_DP = 24f
+
+internal data class StreamPipInsetSize(
+    val width: Float,
+    val height: Float
+)
+
+internal fun streamPipInsetSize(
+    maxWidth: Float,
+    maxHeight: Float,
+    insetFraction: Float,
+    aspectRatio: Float = STREAM_PIP_ASPECT_RATIO,
+    padding: Float = STREAM_PIP_FRAME_PADDING_DP
+): StreamPipInsetSize {
+    val safeAspectRatio = if (aspectRatio.isFinite() && aspectRatio > 0f) aspectRatio else 1f
+    val maxInsetWidth = (maxWidth - padding).coerceAtLeast(1f)
+    val maxInsetHeight = (maxHeight - padding).coerceAtLeast(1f)
+    val desiredWidth = maxInsetWidth * insetFraction
+    val insetWidth = minOf(desiredWidth, maxInsetHeight * safeAspectRatio)
+    return StreamPipInsetSize(width = insetWidth, height = insetWidth / safeAspectRatio)
+}
+
+internal fun streamPipHasStreamContent(visibleStreamCount: Int, focusedPath: String?): Boolean =
+    visibleStreamCount > 0 || focusedPath != null
+
+internal data class StreamTileFocusPresentation(
+    val effectiveFocused: Boolean,
+    val showFocusBorder: Boolean
+)
+
+internal fun streamTileFocusPresentation(
+    displayedTileCount: Int,
+    explicitlyFocused: Boolean
+): StreamTileFocusPresentation {
+    val singleDisplayedTile = displayedTileCount == 1
+    return StreamTileFocusPresentation(
+        effectiveFocused = singleDisplayedTile || explicitlyFocused,
+        showFocusBorder = !singleDisplayedTile && explicitlyFocused
+    )
+}
 
 private class OpenCapturedVideoDocument : ActivityResultContract<Uri?, Uri?>() {
     override fun createIntent(context: android.content.Context, input: Uri?): Intent {
@@ -186,13 +227,17 @@ fun StreamsScreen(
         serverExitReason.isNotEmpty() -> "\uD83D\uDD34 Server exited: $serverExitReason"
         else             -> "\uD83D\uDFE1 Starting"
     }
+    val streams by viewModel.streams.collectAsStateWithLifecycle()
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
+    val visibleStreamCount = streams.values.count { viewModel.isStreamVisible(it) }
+    val pipHasStreamContent = streamPipHasStreamContent(visibleStreamCount, focusedPath)
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
     val persistedLayoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
+    val streamPipUiState = viewModel.streamPipUiState
     val layoutMode = when (externalContentMode) {
         ExternalDisplayContentMode.StreamsGrid,
         ExternalDisplayContentMode.ObserverMode -> StreamsLayoutMode.Streams
@@ -269,6 +314,14 @@ fun StreamsScreen(
                             onClick = { showSignalLossPanel = true }
                         )
                         ResumeProximityAlertButton()
+                        if (externalContentMode == null) {
+                            LayoutToggleChip(
+                                label = if (streamPipUiState.enabled) "PiP:On" else "PiP:Off",
+                                selected = streamPipUiState.enabled,
+                                onClick = { viewModel.setStreamPipEnabled(!streamPipUiState.enabled) }
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
                         if (layoutMode != StreamsLayoutMode.Both) {
                             LayoutToggleChip(
                                 label = "Split",
@@ -310,6 +363,43 @@ fun StreamsScreen(
 
                     StreamsLayoutMode.Map -> {
                         SplitMapPane(viewModel = viewModel, modifier = Modifier.fillMaxSize())
+                    }
+                }
+
+                val pipEnabled = streamPipUiState.enabled && externalContentMode == null
+                if (pipEnabled && layoutMode == StreamsLayoutMode.Streams && pipHasStreamContent) {
+                    StreamPipInsetFrame(
+                        editorMode = streamPipUiState.editorMode,
+                        insetFraction = streamPipUiState.insetFraction,
+                        aspectRatio = STREAM_PIP_ASPECT_RATIO,
+                        onTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) },
+                        onLongPress = { viewModel.toggleStreamPipEditorModeFromLongPress() },
+                        onResizeFractionChange = { next -> viewModel.setStreamPipInsetFraction(next) }
+                    ) {
+                        SplitMapPane(
+                            viewModel = viewModel,
+                            modifier = Modifier.fillMaxSize(),
+                            presentationMode = MapPanePresentationMode.Inset
+                        )
+                    }
+                }
+
+                if (pipEnabled && layoutMode == StreamsLayoutMode.Map && pipHasStreamContent) {
+                    StreamPipInsetFrame(
+                        editorMode = streamPipUiState.editorMode,
+                        insetFraction = streamPipUiState.insetFraction,
+                        aspectRatio = STREAM_PIP_ASPECT_RATIO,
+                        onTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
+                        onLongPress = { viewModel.toggleStreamPipEditorModeFromLongPress() },
+                        onResizeFractionChange = { next -> viewModel.setStreamPipInsetFraction(next) }
+                    ) {
+                        StreamsGrid(
+                            viewModel = viewModel,
+                            allowCapturedVideoPicker = false,
+                            onMapStatusTap = onMapStatusTap,
+                            showTileControls = false,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
                 }
 
@@ -616,6 +706,81 @@ private fun SplitStreamsAndMap(
 }
 
 @Composable
+private fun StreamPipInsetFrame(
+    editorMode: Boolean,
+    insetFraction: Float,
+    aspectRatio: Float,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
+    onResizeFractionChange: (Float) -> Unit,
+    content: @Composable () -> Unit
+) {
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        val insetSize = streamPipInsetSize(
+            maxWidth = maxWidth.value,
+            maxHeight = maxHeight.value,
+            insetFraction = insetFraction,
+            aspectRatio = aspectRatio
+        )
+        val maxInsetWidth = (maxWidth - STREAM_PIP_FRAME_PADDING_DP.dp).coerceAtLeast(1.dp)
+        val density = LocalDensity.current
+        val latestInsetFraction by rememberUpdatedState(insetFraction)
+        val latestOnResizeFractionChange by rememberUpdatedState(onResizeFractionChange)
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(12.dp)
+                .width(insetSize.width.dp)
+                .height(insetSize.height.dp)
+                .clip(MaterialTheme.shapes.small)
+                .background(MaterialTheme.colorScheme.surface)
+        ) {
+            content()
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .pointerInput(editorMode) {
+                        detectTapGestures(
+                            onTap = { onTap() },
+                            onLongPress = { onLongPress() }
+                        )
+                    }
+            )
+            if (editorMode) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .width(44.dp)
+                        .height(44.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f))
+                        .pointerInput(maxInsetWidth, density) {
+                            var dragStartFraction = 0f
+                            var accumulatedDragFraction = 0f
+                            detectDragGestures(
+                                onDragStart = {
+                                    dragStartFraction = latestInsetFraction
+                                    accumulatedDragFraction = 0f
+                                },
+                                onDrag = { _, dragAmount ->
+                                    val deltaPx = -dragAmount.x - dragAmount.y
+                                    val denominatorPx = with(density) { maxInsetWidth.toPx() }
+                                    if (denominatorPx > 0f) {
+                                        accumulatedDragFraction += deltaPx / denominatorPx
+                                        latestOnResizeFractionChange(dragStartFraction + accumulatedDragFraction)
+                                    }
+                                }
+                            )
+                        }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun LayoutToggleChip(
     label: String,
     selected: Boolean,
@@ -667,6 +832,7 @@ private fun StreamsGrid(
     viewModel: StreamsViewModel,
     allowCapturedVideoPicker: Boolean,
     onMapStatusTap: () -> Unit,
+    showTileControls: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val tag = "StreamsGrid"
@@ -759,6 +925,10 @@ private fun StreamsGrid(
                         items = visibleEntries,
                         key = { it.key }
                     ) { (path, info) ->
+                        val focusPresentation = streamTileFocusPresentation(
+                            displayedTileCount = visibleEntries.size,
+                            explicitlyFocused = focusedPath == path
+                        )
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -781,6 +951,9 @@ private fun StreamsGrid(
                                 onToggleFocus = {
                                     viewModel.toggleFocus(path)
                                 },
+                                showTileControls = showTileControls,
+                                effectiveFocused = focusPresentation.effectiveFocused,
+                                showFocusBorder = focusPresentation.showFocusBorder,
                             )
                         }
                     }

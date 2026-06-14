@@ -195,7 +195,57 @@ import org.ncssar.rid2caltopo.video.mapcache.TileFetchPriorityScheduler
 
 // Constants
 internal const val MAP_PANE_TAG = "SplitMapPane"
+
+internal enum class MapPanePresentationMode {
+    Full,
+    Inset
+}
+
+internal fun mapPaneMarkerScale(mode: MapPanePresentationMode): Float =
+    when (mode) {
+        MapPanePresentationMode.Full -> 1.0f
+        MapPanePresentationMode.Inset -> 0.55f
+    }
+
+internal fun mapPaneLineScale(mode: MapPanePresentationMode): Float =
+    when (mode) {
+        MapPanePresentationMode.Full -> 1.0f
+        MapPanePresentationMode.Inset -> 0.65f
+    }
+
+internal fun mapPaneInsetViewportZoom(
+    fullWidthPx: Int?,
+    fullHeightPx: Int?,
+    insetWidthPx: Int,
+    insetHeightPx: Int,
+    fullZoom: Double
+): Double {
+    if (!fullZoom.isFinite()) return fullZoom
+    val fullWidth = fullWidthPx?.takeIf { it > 0 } ?: return fullZoom
+    val fullHeight = fullHeightPx?.takeIf { it > 0 } ?: return fullZoom
+    if (insetWidthPx <= 0 || insetHeightPx <= 0) return fullZoom
+    val widthRatio = fullWidth.toDouble() / insetWidthPx.toDouble()
+    val heightRatio = fullHeight.toDouble() / insetHeightPx.toDouble()
+    val scaleRatio = maxOf(widthRatio, heightRatio).takeIf { it.isFinite() && it > 1.0 } ?: return fullZoom
+    return (fullZoom - kotlin.math.ln(scaleRatio) / kotlin.math.ln(2.0)).coerceAtLeast(0.0)
+}
+
+internal fun shouldFollowFocusedDrone(
+    presentationMode: MapPanePresentationMode,
+    followFocusedDroneEnabled: Boolean,
+    hasFocusedDroneTelemetry: Boolean,
+    operatorAdjustedViewport: Boolean
+): Boolean {
+    if (!followFocusedDroneEnabled || !hasFocusedDroneTelemetry) return false
+    return presentationMode == MapPanePresentationMode.Inset || !operatorAdjustedViewport
+}
+
+internal fun cachedArtifactOverlayState(overlayState: Any?): ArtifactOverlayState =
+    overlayState as? ArtifactOverlayState ?: ArtifactOverlayState()
+
 internal const val MAP_PANE_VERBOSE_LOGS = false
+private const val INSET_FOLLOW_INTERVAL_MS = 500L
+private const val INSET_FOLLOW_MIN_MOVE_METERS = 1.0
 internal const val LOCAL_DEVICE_SYMBOL = "radiotower"
 internal const val LOCAL_DEVICE_COLOR_HEALTHY = "0000FF"
 internal const val LOCAL_DEVICE_COLOR_STARTING = "808080"
@@ -963,6 +1013,12 @@ internal enum class MarkerInfoWindowTapAction {
 internal fun markerInfoWindowTapAction(isInfoWindowShown: Boolean): MarkerInfoWindowTapAction =
     if (isInfoWindowShown) MarkerInfoWindowTapAction.Close else MarkerInfoWindowTapAction.Show
 
+private fun consumeInsetMarkerTaps(marker: Marker, isInsetMode: Boolean) {
+    if (!isInsetMode) return
+    marker.infoWindow = null
+    marker.setOnMarkerClickListener { _, _ -> true }
+}
+
 private data class DroneLabelDrawSpec(
     val designator: String,
     val position: GeoPoint,
@@ -1167,6 +1223,13 @@ internal fun needsBaseTileProviderRestart(
 ): Boolean =
     currentSourceName != desiredTileSource.name()
 
+internal fun needsViewportTileProviderRestart(
+    previousTileZoom: Int,
+    currentTileZoom: Int,
+    baseSourceChanged: Boolean
+): Boolean =
+    false
+
 internal fun visibleTileNetworkActive(suppressLiveMapNetwork: Boolean): Boolean =
     !suppressLiveMapNetwork
 
@@ -1295,19 +1358,35 @@ private fun restartTileProviderForViewportIntent(
 internal fun SplitMapPane(
     viewModel: StreamsViewModel,
     modifier: Modifier = Modifier,
-    onSingleTapFocus: (() -> Unit)? = null
+    onSingleTapFocus: (() -> Unit)? = null,
+    presentationMode: MapPanePresentationMode = MapPanePresentationMode.Full
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val uiScope = rememberCoroutineScope()
+    val isInsetMode = presentationMode == MapPanePresentationMode.Inset
+    val markerScale = mapPaneMarkerScale(presentationMode)
+    val lineScale = mapPaneLineScale(presentationMode)
     val restoredViewport = viewModel.mapViewportState()?.takeIf {
         isUsableMapViewportState(it.latitude, it.longitude, it.zoom)
+    }
+    val followFocusedDroneEnabled = viewModel.followFocusedDroneEnabled
+    fun persistFullMapViewport(mapView: MapView) {
+        if (isInsetMode) return
+        if (mapView.width <= 0 || mapView.height <= 0) return
+        viewModel.persistMapViewportState(
+            center = mapView.mapCenter,
+            zoom = mapView.zoomLevelDouble,
+            widthPx = mapView.width,
+            heightPx = mapView.height
+        )
     }
     val baseLayer = viewModel.baseLayer
     var settingsMenuExpanded by remember { mutableStateOf(false) }
     var mapManagementMenuExpanded by remember { mutableStateOf(false) }
     var baseLayerMenuExpanded by remember { mutableStateOf(false) }
     var badTilesMenuExpanded by remember { mutableStateOf(false) }
+    var currentMapView by remember { mutableStateOf<MapView?>(null) }
     var mapReloadInFlight by remember { mutableStateOf(false) }
     var showMapCacheSizeDialog by remember { mutableStateOf(false) }
     var showMapTileAgeDialog by remember { mutableStateOf(false) }
@@ -1376,7 +1455,9 @@ internal fun SplitMapPane(
     var badTileDialogState by remember { mutableStateOf<BadTileDialogState?>(null) }
     var quarantineMatchingHash by remember { mutableStateOf(true) }
     val mapName = viewModel.mapName
-    val artifactStoreById = remember { LinkedHashMap<String, JSONObject>() }
+    val artifactRenderCache = viewModel.mapArtifactRenderCache
+    val artifactStoreById = artifactRenderCache.featuresById
+    fun cachedOverlayState(): ArtifactOverlayState = cachedArtifactOverlayState(artifactRenderCache.overlayState)
     val localTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val currentFlightTrackPointsByMappedId = remember { mutableStateMapOf<String, MutableList<LocalTrackPoint>>() }
     val localTrackMappedIdsByRemoteId = remember { mutableStateMapOf<String, MutableSet<String>>() }
@@ -1387,7 +1468,9 @@ internal fun SplitMapPane(
     var colorPickerTarget by remember { mutableStateOf<PilotColorPickerTarget?>(null) }
     var localDeviceRefreshToken by remember { mutableIntStateOf(0) }
     val managedOverlays = remember { mutableListOf<Overlay>() }
-    var artifactOverlayState by remember { mutableStateOf(ArtifactOverlayState()) }
+    var artifactOverlayState: ArtifactOverlayState by remember {
+        mutableStateOf(cachedOverlayState())
+    }
     var mapBackgroundWorkStatus by remember { mutableStateOf<MapPaneBackgroundWorkStatus?>(null) }
     var artifactHydrationJob by remember { mutableStateOf<Job?>(null) }
     var artifactHydrationRunId by remember { mutableIntStateOf(0) }
@@ -1396,8 +1479,9 @@ internal fun SplitMapPane(
     var lastRenderStats by remember { mutableStateOf("") }
     var lastAlignmentStats by remember { mutableStateOf("") }
     var initialViewportApplied by remember { mutableStateOf(restoredViewport != null) }
+    var insetRestoredViewportApplied by remember { mutableStateOf(false) }
     var initialViewportArtifactCount by remember { mutableStateOf(-1) }
-    var restoredViewportStartupCheckComplete by remember { mutableStateOf(restoredViewport == null) }
+    var restoredViewportStartupCheckComplete by remember { mutableStateOf(true) }
     var restoredViewportStartupWaitLogged by remember { mutableStateOf(false) }
     var restoredViewportStartupCheckStartedAtMs by remember { mutableStateOf(System.currentTimeMillis()) }
     var operatorAdjustedViewport by remember { mutableStateOf(false) }
@@ -1407,6 +1491,7 @@ internal fun SplitMapPane(
     val droneMarkerIcon = remember(context) { ContextCompat.getDrawable(context, R.drawable.ic_drone_marker) }
     val symbolMarkerCache = remember { LinkedHashMap<String, Drawable>() }
     val caltopoMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
+    val scaledRemoteMarkerCache = remember { mutableStateMapOf<String, Drawable>() }
     val caltopoMarkerPending = remember { HashSet<String>() }
     val unknownSymbolsSeen = remember { LinkedHashSet<String>() }
     val iconCacheService = remember(context) { CaltopoIconCacheService(context) }
@@ -1467,9 +1552,13 @@ internal fun SplitMapPane(
     }
     val renderLatencyKeyByDesignator = remember { mutableStateMapOf<String, String>() }
     val complianceByDesignator = remember { mutableStateMapOf<String, DroneComplianceState>() }
+    var fullArtifactHydrationQueued by remember { mutableStateOf(false) }
     // Tracks which drone's info-window bubble is open so it can be restored after each overlay rebuild.
     var openBubbleDesignator by remember { mutableStateOf<String?>(null) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
+    var lastInsetFollowAtMs by remember { mutableStateOf(0L) }
+    var lastInsetFollowDesignator by remember { mutableStateOf<String?>(null) }
+    var lastInsetFollowPoint by remember { mutableStateOf<GeoPoint?>(null) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val proximityMapFocusTarget by viewModel.proximityMapFocusTarget.collectAsStateWithLifecycle()
     val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
@@ -2571,6 +2660,7 @@ internal fun SplitMapPane(
         val runId = artifactHydrationRunId + 1
         artifactHydrationRunId = runId
         val replaceIfEmpty = artifactStoreById.isEmpty()
+        val hydrationStartVersion = artifactRenderCache.featureVersion
         val hiddenFoldersSnapshot = hiddenFolderIds.toSet()
         val hiddenItemsSnapshot = hiddenItemIds.toSet()
         val appContext = context.applicationContext
@@ -2604,19 +2694,38 @@ internal fun SplitMapPane(
                 }
                 if (artifactHydrationRunId != runId) return@launch
                 if (result != null) {
-                    artifactStoreById.clear()
-                    artifactStoreById.putAll(result.featuresById)
+                    val cacheChangedDuringHydration = artifactRenderCache.featureVersion != hydrationStartVersion
+                    val mergedFeatures = artifactRenderCache.mergedHydrationFeatures(
+                        hydratedFeatures = result.featuresById,
+                        hydrationStartVersion = hydrationStartVersion
+                    )
+                    val mergedOverlayState = if (cacheChangedDuringHydration) {
+                        withContext(Dispatchers.Default) {
+                            buildArtifactOverlayState(
+                                mergedFeatures.values.toList(),
+                                hiddenFoldersSnapshot,
+                                hiddenItemsSnapshot,
+                                pilotArchiveTrackColorForCallsign = { pilotKey ->
+                                    PilotDisplayPrefs.load(appContext, pilotKey).archiveTrackColor
+                                }
+                            )
+                        }
+                    } else {
+                        result.overlayState
+                    }
+                    artifactRenderCache.replace(mergedFeatures, mergedOverlayState)
                     result.folderDefaults.forEach { folderDefault ->
                         viewModel.applyCaltopoFolderDefault(
                             folderDefault.folderId,
                             folderDefault.initiallyVisible
                         )
                     }
-                    artifactOverlayState = result.overlayState
-                    if (MAP_PANE_VERBOSE_LOGS || result.featuresById.isNotEmpty() || artifactOverlayState.totalFeatures > 0) {
+                    artifactOverlayState = mergedOverlayState
+                    if (MAP_PANE_VERBOSE_LOGS || mergedFeatures.isNotEmpty() || artifactOverlayState.totalFeatures > 0) {
                         if (CTDebugEnabled(MAP_PANE_TAG)) CTDebug(
                             MAP_PANE_TAG,
-                            "Hydrated artifacts from snapshot ($reason): cached=${result.featuresById.size}, renderable=${artifactOverlayState.totalFeatures}"
+                            "Hydrated artifacts from snapshot ($reason): cached=${mergedFeatures.size}, " +
+                                "renderable=${artifactOverlayState.totalFeatures} mergedDeltas=$cacheChangedDuringHydration"
                         )
                     }
                 }
@@ -2659,6 +2768,7 @@ internal fun SplitMapPane(
                     )
                 }
                 if (artifactOverlayRebuildRunId != runId) return@launch
+                artifactRenderCache.updateOverlay(computed)
                 artifactOverlayState = computed
                 if (CaltopoClient.DebugLevel >= CaltopoClient.DebugLevelInfo) CTInfo(
                     MAP_PANE_TAG,
@@ -2682,6 +2792,14 @@ internal fun SplitMapPane(
     }
 
     LaunchedEffect(mapName) {
+        if (artifactRenderCache.resetIfMapChanged(mapName)) {
+            artifactOverlayState = cachedOverlayState()
+        } else {
+            val cached = cachedOverlayState()
+            if (artifactOverlayState.totalFeatures == 0 && cached.totalFeatures > 0) {
+                artifactOverlayState = cached
+            }
+        }
         val persistedViewport = viewModel.mapViewportState()?.takeIf {
             isUsableMapViewportState(it.latitude, it.longitude, it.zoom)
         }
@@ -2694,13 +2812,14 @@ internal fun SplitMapPane(
         lastAlignmentStats = ""
         lastCacheStats = ""
         lastLocalDeviceMarkerStats = ""
+        insetRestoredViewportApplied = false
         localDeviceViewportRescueApplied = false
         viewModel.altitudeCoordinator.onMapReconnect()
         renderLatencyKeyByDesignator.clear()
         complianceByDesignator.clear()
         initialViewportApplied = persistedViewport != null
         initialViewportArtifactCount = -1
-        restoredViewportStartupCheckComplete = persistedViewport == null
+        restoredViewportStartupCheckComplete = true
         restoredViewportStartupWaitLogged = false
         restoredViewportStartupCheckStartedAtMs = System.currentTimeMillis()
         operatorAdjustedViewport = false
@@ -2718,6 +2837,8 @@ internal fun SplitMapPane(
         onDispose {
             artifactHydrationJob?.cancel()
             artifactOverlayRebuildJob?.cancel()
+            currentMapView?.let(::persistFullMapViewport)
+            currentMapView = null
             latestTileMapProvider.detach()
             latestTileFetchPriorityScheduler.close()
         }
@@ -3030,6 +3151,15 @@ internal fun SplitMapPane(
         startArtifactHydration("listener-init")
         val listener = CaltopoMap.ArtifactListener { feature, source, _ ->
             if (source == "full") {
+                uiScope.launch(Dispatchers.Main.immediate) {
+                    if (fullArtifactHydrationQueued) {
+                        return@launch
+                    }
+                    fullArtifactHydrationQueued = true
+                    startArtifactHydration("ingest-full") {
+                        fullArtifactHydrationQueued = false
+                    }
+                }
                 return@ArtifactListener
             }
             uiScope.launch(Dispatchers.Main.immediate) {
@@ -3039,9 +3169,9 @@ internal fun SplitMapPane(
                 }
 
                 if (isArtifactDelete(feature)) {
-                    artifactStoreById.remove(featureId)
+                    artifactRenderCache.removeFeature(featureId)
                 } else {
-                    artifactStoreById[featureId] = feature
+                    artifactRenderCache.putFeature(featureId, feature)
                     // Auto-hide folders the server marks as not visible, on first encounter.
                     // Delegates to ViewModel so the choice persists across navigation.
                     val props = feature.optJSONObject("properties")
@@ -3206,7 +3336,8 @@ internal fun SplitMapPane(
             factory = {
                 configureOsmdroid(context)
                 MapView(context).apply {
-                    setMultiTouchControls(true)
+                    currentMapView = this
+                    setMultiTouchControls(!isInsetMode)
                     setTileProvider(tileMapProvider)
                     setUseDataConnection(true)
                     tileMapProvider.setUseDataConnection(true)
@@ -3216,7 +3347,7 @@ internal fun SplitMapPane(
                             MotionEvent.ACTION_DOWN,
                             MotionEvent.ACTION_POINTER_DOWN,
                             MotionEvent.ACTION_MOVE -> {
-                                if (!operatorAdjustedViewport) {
+                                if (!isInsetMode && !operatorAdjustedViewport) {
                                     operatorAdjustedViewport = true
                                     CTDebug(MAP_PANE_TAG, "Map viewport operator-adjusted; suppressing startup recenter")
                                 }
@@ -3234,24 +3365,36 @@ internal fun SplitMapPane(
                     addMapListener(
                         object : MapListener {
                             override fun onScroll(event: ScrollEvent?): Boolean {
-                                viewModel.persistMapViewportState(mapCenter, zoomLevelDouble)
+                                if (!isInsetMode) {
+                                    persistFullMapViewport(this@apply)
+                                }
                                 return false
                             }
 
                             override fun onZoom(event: ZoomEvent?): Boolean {
-                                viewModel.persistMapViewportState(mapCenter, zoomLevelDouble)
+                                if (!isInsetMode) {
+                                    persistFullMapViewport(this@apply)
+                                }
                                 val eventZoom = event?.zoomLevel ?: zoomLevelDouble
                                 val eventTileZoom = TileSystem.getInputTileZoomLevel(eventZoom)
                                 if (visibleTileZoom != eventTileZoom) {
+                                    val previousTileZoom = visibleTileZoom
                                     visibleTileZoom = eventTileZoom
-                                    tileMapProvider = restartTileProviderForViewportIntent(
-                                        mapView = this@apply,
-                                        context = context,
-                                        tileSource = latestBaseTileSource,
-                                        tileWriter = tileCacheWriter,
-                                        reason = "zoom-change",
-                                        zoom = eventTileZoom
-                                    )
+                                    if (needsViewportTileProviderRestart(
+                                            previousTileZoom = previousTileZoom,
+                                            currentTileZoom = eventTileZoom,
+                                            baseSourceChanged = false
+                                        )
+                                    ) {
+                                        tileMapProvider = restartTileProviderForViewportIntent(
+                                            mapView = this@apply,
+                                            context = context,
+                                            tileSource = latestBaseTileSource,
+                                            tileWriter = tileCacheWriter,
+                                            reason = "zoom-change",
+                                            zoom = eventTileZoom
+                                        )
+                                    }
                                 }
                                 return false
                             }
@@ -3287,8 +3430,14 @@ internal fun SplitMapPane(
                     tileIoActiveUntilMs = uiNowWallMsec + TILE_IO_ACTIVE_GRACE_MS
                 }
                 if (visibleTileZoom != currentTileZoom) {
+                    val previousTileZoom = visibleTileZoom
                     visibleTileZoom = currentTileZoom
-                    if (!baseSourceChanged) {
+                    if (needsViewportTileProviderRestart(
+                            previousTileZoom = previousTileZoom,
+                            currentTileZoom = currentTileZoom,
+                            baseSourceChanged = baseSourceChanged
+                        )
+                    ) {
                         tileMapProvider = restartTileProviderForViewportIntent(
                             mapView = mapView,
                             context = context,
@@ -3397,7 +3546,7 @@ internal fun SplitMapPane(
                     val polygonBoundary = Polyline(mapView).apply {
                         setPoints(closedPolylinePoints(polygonSpec.points))
                         title = polygonSpec.title
-                        applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth)
+                        applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth * lineScale)
                     }
                     mapView.overlays.add(polygonBoundary)
                     managedOverlays.add(polygonBoundary)
@@ -3422,11 +3571,13 @@ internal fun SplitMapPane(
                     val polygonBoundary = Polyline(mapView).apply {
                         setPoints(closedPolylinePoints(polygonSpec.points))
                         title = polygonSpec.title
-                        applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth)
+                        applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth * lineScale)
                         polygonSpec.notice?.let { notice ->
-                            setOnClickListener { _, _, _ ->
-                                selectedNotam = notice
-                                true
+                            if (!isInsetMode) {
+                                setOnClickListener { _, _, _ ->
+                                    selectedNotam = notice
+                                    true
+                                }
                             }
                         }
                     }
@@ -3438,7 +3589,7 @@ internal fun SplitMapPane(
                     val line = Polyline(mapView).apply {
                         setPoints(lineSpec.points)
                         title = lineSpec.title
-                        applyPolylineStyle(this, lineSpec.color, lineSpec.width)
+                        applyPolylineStyle(this, lineSpec.color, lineSpec.width * lineScale)
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -3448,10 +3599,12 @@ internal fun SplitMapPane(
                     val line = Polyline(mapView).apply {
                         setPoints(lineSpec.points)
                         title = lineSpec.title
-                        applyPolylineStyle(this, lineSpec.color, lineSpec.width)
-                        setOnClickListener { _, _, _ ->
-                            selectedNotam = lineSpec.notice
-                            true
+                        applyPolylineStyle(this, lineSpec.color, lineSpec.width * lineScale)
+                        if (!isInsetMode) {
+                            setOnClickListener { _, _, _ ->
+                                selectedNotam = lineSpec.notice
+                                true
+                            }
                         }
                     }
                     mapView.overlays.add(line)
@@ -3491,7 +3644,7 @@ internal fun SplitMapPane(
                     val line = Polyline(mapView).apply {
                         setPoints(points.map { GeoPoint(it.lat, it.lng) })
                         title = "Flight track: $mappedId (${points.size})"
-                        applyPolylineStyle(this, trackColor, 2.0f)
+                        applyPolylineStyle(this, trackColor, 2.0f * lineScale)
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -3506,7 +3659,7 @@ internal fun SplitMapPane(
                     val line = Polyline(mapView).apply {
                         setPoints(points.map { GeoPoint(it.lat, it.lng) })
                         title = "Local track: $mappedId (${points.size})"
-                        applyPolylineStyle(this, trackColor, 4.0f)
+                        applyPolylineStyle(this, trackColor, 4.0f * lineScale)
                     }
                     mapView.overlays.add(line)
                     managedOverlays.add(line)
@@ -3524,34 +3677,40 @@ internal fun SplitMapPane(
                             resources = context.resources,
                             symbol = "clue",
                             colorHex = "#F9A825",
-                            cache = symbolMarkerCache
+                            cache = symbolMarkerCache,
+                            scale = markerScale
                         )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = markerTitle
                         snippet = markerSnippet
-                        setOnMarkerClickListener { tappedMarker, _ ->
-                            when (markerInfoWindowTapAction(tappedMarker.isInfoWindowShown)) {
-                                MarkerInfoWindowTapAction.Close -> tappedMarker.closeInfoWindow()
-                                MarkerInfoWindowTapAction.Show -> tappedMarker.showInfoWindow()
+                        if (!isInsetMode) {
+                            setOnMarkerClickListener { tappedMarker, _ ->
+                                when (markerInfoWindowTapAction(tappedMarker.isInfoWindowShown)) {
+                                    MarkerInfoWindowTapAction.Close -> tappedMarker.closeInfoWindow()
+                                    MarkerInfoWindowTapAction.Show -> tappedMarker.showInfoWindow()
+                                }
+                                true
                             }
-                            true
                         }
                     }
-                    marker.infoWindow = LocalMarkerInfoWindow(
-                        mapView = mapView,
-                        titleText = markerTitle,
-                        descriptionText = markerSnippet,
-                        thumbnail = snapshot?.thumbnail,
-                        onOpenSnapshot = snapshot?.fullImage?.let { fullImage ->
-                            { openClueSnapshotInExternalViewer(context, snapshot.title, fullImage) }
-                        },
-                        markerId = point.id,
-                        onDelete = { markerId ->
-                            if (viewModel.deleteLocalMapMarker(markerId)) {
-                                mapView.invalidate()
+                    if (!isInsetMode) {
+                        marker.infoWindow = LocalMarkerInfoWindow(
+                            mapView = mapView,
+                            titleText = markerTitle,
+                            descriptionText = markerSnippet,
+                            thumbnail = snapshot?.thumbnail,
+                            onOpenSnapshot = snapshot?.fullImage?.let { fullImage ->
+                                { openClueSnapshotInExternalViewer(context, snapshot.title, fullImage) }
+                            },
+                            markerId = point.id,
+                            onDelete = { markerId ->
+                                if (viewModel.deleteLocalMapMarker(markerId)) {
+                                    mapView.invalidate()
+                                }
                             }
-                        }
-                    )
+                        )
+                    }
+                    consumeInsetMarkerTaps(marker, isInsetMode)
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
                 }
@@ -3577,17 +3736,26 @@ internal fun SplitMapPane(
                     }
                     val marker = Marker(mapView).apply {
                         position = GeoPoint(point.lat, point.lng)
-                        icon = (remoteIcon?.constantState?.newDrawable(context.resources)?.mutate())
+                        icon = remoteIcon?.let { icon ->
+                            cachedScaledRemoteMarkerDrawable(
+                                resources = context.resources,
+                                source = icon,
+                                cache = scaledRemoteMarkerCache,
+                                cacheKey = remoteCacheKey,
+                                scale = markerScale
+                            )
+                        }
                             ?: markerIconForArtifactSymbol(
                                 resources = context.resources,
                                 symbol = point.markerSymbol,
                                 colorHex = point.markerColor,
-                                cache = symbolMarkerCache
+                                cache = symbolMarkerCache,
+                                scale = markerScale
                             )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = point.title
                     }
-                    viewModel.clueSnapshotForTitle(point.title)?.let { snapshot ->
+                    if (!isInsetMode) viewModel.clueSnapshotForTitle(point.title)?.let { snapshot ->
                         marker.infoWindow = LocalMarkerInfoWindow(
                             mapView = mapView,
                             titleText = point.title,
@@ -3607,6 +3775,7 @@ internal fun SplitMapPane(
                             true
                         }
                     }
+                    consumeInsetMarkerTaps(marker, isInsetMode)
                     if (!isKnownArtifactSymbol(point.markerSymbol) && unknownSymbolsSeen.add(point.markerSymbol)) {
                         if (CTDebugEnabled(MAP_PANE_TAG))  CTDebug(MAP_PANE_TAG, "Unknown marker-symbol encountered: '${point.markerSymbol}'")
                     }
@@ -3617,20 +3786,27 @@ internal fun SplitMapPane(
                 notamOverlayState.points.forEach { point ->
                     val marker = Marker(mapView).apply {
                         position = point.point
-                        icon = buildNotamMarkerIcon(context, point.color)
+                        icon = scaleDrawableBitmap(
+                            resources = context.resources,
+                            drawable = buildNotamMarkerIcon(context, point.color),
+                            scale = markerScale
+                        )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         title = point.title
-                        setOnMarkerClickListener { _, _ ->
-                            if (point.notices.size == 1) {
-                                selectedNotamGroup = null
-                                selectedNotam = point.notices.first()
-                            } else {
-                                selectedNotam = null
-                                selectedNotamGroup = point.notices
+                        if (!isInsetMode) {
+                            setOnMarkerClickListener { _, _ ->
+                                if (point.notices.size == 1) {
+                                    selectedNotamGroup = null
+                                    selectedNotam = point.notices.first()
+                                } else {
+                                    selectedNotam = null
+                                    selectedNotamGroup = point.notices
+                                }
+                                true
                             }
-                            true
                         }
                     }
+                    consumeInsetMarkerTaps(marker, isInsetMode)
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
                 }
@@ -3659,12 +3835,21 @@ internal fun SplitMapPane(
                     }
                     val localMarker = Marker(mapView).apply {
                         position = GeoPoint(myLocation.latitude, myLocation.longitude)
-                        icon = (localRemoteIcon?.constantState?.newDrawable(context.resources)?.mutate())
+                        icon = localRemoteIcon?.let { icon ->
+                            cachedScaledRemoteMarkerDrawable(
+                                resources = context.resources,
+                                source = icon,
+                                cache = scaledRemoteMarkerCache,
+                                cacheKey = localCacheKey,
+                                scale = markerScale
+                            )
+                        }
                             ?: markerIconForArtifactSymbol(
                                 resources = context.resources,
                                 symbol = LOCAL_DEVICE_SYMBOL,
                                 colorHex = localDeviceColor,
-                                cache = symbolMarkerCache
+                                cache = symbolMarkerCache,
+                                scale = markerScale
                             )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         val localDeviceName = R2CActivity.MyDeviceName
@@ -3677,6 +3862,7 @@ internal fun SplitMapPane(
                         snippet = statusLines.firstOrNull().orEmpty()
                         setSubDescription(statusLines.drop(1).joinToString("<br/>"))
                     }
+                    consumeInsetMarkerTaps(localMarker, isInsetMode)
                     mapView.overlays.add(localMarker)
                     managedOverlays.add(localMarker)
                     val mapCenter = mapView.mapCenter
@@ -3686,7 +3872,8 @@ internal fun SplitMapPane(
                             kotlin.math.abs(mapCenter.longitude) < 0.000001
                     val operationalContentPresent =
                         dronePoints.isNotEmpty() || artifactOverlayState.totalFeatures > 0
-                    if (!localDeviceViewportRescueApplied &&
+                    if (!isInsetMode &&
+                        !localDeviceViewportRescueApplied &&
                         !localDeviceVisible &&
                         defaultViewportCenter &&
                         !operationalContentPresent &&
@@ -3694,7 +3881,9 @@ internal fun SplitMapPane(
                     ) {
                         mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
                         mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
-                        viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                        if (!isInsetMode) {
+                            persistFullMapViewport(mapView)
+                        }
                         initialViewportApplied = true
                         restoredViewportStartupCheckComplete = true
                         localDeviceViewportRescueApplied = true
@@ -3808,7 +3997,7 @@ internal fun SplitMapPane(
                                     applyPolylineStyle(
                                         this,
                                         trackColorInt(pilotPreference.activeTrackColor, DEFAULT_ACTIVE_TRACK_COLOR),
-                                        2.0f
+                                        2.0f * lineScale
                                     )
                                 }
                                 mapView.overlays.add(bearingOverlay)
@@ -3830,41 +4019,47 @@ internal fun SplitMapPane(
                             baseIcon = droneMarkerIcon,
                             tint = markerTint,
                             headingDeg = headingDeg,
+                            scale = markerScale
                         )
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                        setOnMarkerClickListener { tappedMarker, _ ->
-                            if (focusedPath != point.designator) {
-                                viewModel.toggleFocus(point.designator)
+                        if (!isInsetMode) {
+                            setOnMarkerClickListener { tappedMarker, _ ->
+                                if (focusedPath != point.designator) {
+                                    viewModel.toggleFocus(point.designator)
+                                }
+                                if (tappedMarker.isInfoWindowShown) {
+                                    tappedMarker.closeInfoWindow()
+                                    openBubbleDesignator = null
+                                } else {
+                                    openBubbleDesignator = point.designator
+                                }
+                                true
                             }
-                            if (tappedMarker.isInfoWindowShown) {
-                                tappedMarker.closeInfoWindow()
-                                openBubbleDesignator = null
-                            } else {
-                                openBubbleDesignator = point.designator
-                            }
-                            true
                         }
                     }
+                    consumeInsetMarkerTaps(marker, isInsetMode)
                     mapView.overlays.add(marker)
                     managedOverlays.add(marker)
 
-                    val labelText = droneStatusLabelText(
-                        atoFeet = labelAtoFeet,
-                        aglFeet = labelAglFeet,
-                        aglStale = labelAglStale,
-                        rangeFeet = labelRangeFeet,
-                        headingDeg = headingDeg
-                    )
-                    val nameDrawable = buildDroneNameLabelDrawable(context.resources, point.designator)
-                    val statusDrawable = buildDroneStatusLabelDrawable(context.resources, labelText)
-                    droneLabelSpecs.add(
-                        DroneLabelDrawSpec(
-                            designator = point.designator,
-                            position = GeoPoint(renderLat, renderLng),
-                            nameDrawable = nameDrawable,
-                            statusDrawable = statusDrawable
+                    if (!isInsetMode) {
+                        val labelText = droneStatusLabelText(
+                            atoFeet = labelAtoFeet,
+                            aglFeet = labelAglFeet,
+                            aglStale = labelAglStale,
+                            rangeFeet = labelRangeFeet,
+                            headingDeg = headingDeg
                         )
-                    )
+                        val nameDrawable = buildDroneNameLabelDrawable(context.resources, point.designator)
+                        val statusDrawable = buildDroneStatusLabelDrawable(context.resources, labelText)
+                        droneLabelSpecs.add(
+                            DroneLabelDrawSpec(
+                                designator = point.designator,
+                                position = GeoPoint(renderLat, renderLng),
+                                nameDrawable = nameDrawable,
+                                statusDrawable = statusDrawable
+                            )
+                        )
+                    }
                 }
                 if (droneLabelSpecs.isNotEmpty()) {
                     val labelOverlay = DroneLabelOverlay(droneLabelSpecs)
@@ -3950,7 +4145,7 @@ internal fun SplitMapPane(
                 }
 
                 val restoredStartupViewport = restoredViewport
-                if (!restoredViewportStartupCheckComplete && restoredStartupViewport != null) {
+                if (!isInsetMode && !restoredViewportStartupCheckComplete && restoredStartupViewport != null) {
                     val startupMyLocation = CaltopoMap.GetMyLocation()
                     val startupLocationValid =
                         startupMyLocation != null &&
@@ -3989,7 +4184,9 @@ internal fun SplitMapPane(
                         startupLocationValid && !restoredViewportUsefulForMyLocation -> {
                             mapView.controller.setCenter(GeoPoint(startupMyLocation.latitude, startupMyLocation.longitude))
                             mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
-                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                            if (!isInsetMode) {
+                                persistFullMapViewport(mapView)
+                            }
                             initialViewportApplied = true
                             initialViewportArtifactCount = artifactOverlayState.totalFeatures
                             action = if (startupLocationFresh) {
@@ -4038,7 +4235,7 @@ internal fun SplitMapPane(
                 }
 
                 val shouldApplyInitialViewport =
-                    !operatorAdjustedViewport && (
+                    !isInsetMode && !operatorAdjustedViewport && (
                         !initialViewportApplied ||
                         (
                             initialViewportArtifactCount == 0 &&
@@ -4057,7 +4254,9 @@ internal fun SplitMapPane(
                         viewportPoints.size >= 2 -> {
                             val bounds = boundingBoxFromPoints(viewportPoints)
                             mapView.zoomToBoundingBox(bounds, true, 96)
-                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                            if (!isInsetMode) {
+                                persistFullMapViewport(mapView)
+                            }
                             CTDebug(
                                 MAP_PANE_TAG,
                                 String.format(
@@ -4075,7 +4274,9 @@ internal fun SplitMapPane(
                         myLocation != null -> {
                             mapView.controller.setCenter(GeoPoint(myLocation.latitude, myLocation.longitude))
                             mapView.controller.setZoom(15.0)
-                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                            if (!isInsetMode) {
+                                persistFullMapViewport(mapView)
+                            }
                             CTDebug(
                                 MAP_PANE_TAG,
                                 String.format(
@@ -4094,7 +4295,9 @@ internal fun SplitMapPane(
                         focusPoint != null -> {
                             mapView.controller.setCenter(GeoPoint(focusPoint.lat, focusPoint.lng))
                             mapView.controller.setZoom(14.0)
-                            viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                            if (!isInsetMode) {
+                                persistFullMapViewport(mapView)
+                            }
                             CTDebug(
                                 MAP_PANE_TAG,
                                 String.format(
@@ -4113,7 +4316,7 @@ internal fun SplitMapPane(
                     initialViewportArtifactCount = artifactOverlayState.totalFeatures
                 }
 
-                proximityMapFocusTarget?.let { focusTarget ->
+                if (!isInsetMode) proximityMapFocusTarget?.let { focusTarget ->
                     if (mapView.width > 0 && mapView.height > 0) {
                         val focusPoints = listOf(
                             GeoPoint(focusTarget.firstLat, focusTarget.firstLng),
@@ -4128,7 +4331,9 @@ internal fun SplitMapPane(
                         } else {
                             mapView.zoomToBoundingBox(boundingBoxFromPoints(focusPoints), true, 96)
                         }
-                        viewModel.persistMapViewportState(mapView.mapCenter, mapView.zoomLevelDouble)
+                        if (!isInsetMode) {
+                            persistFullMapViewport(mapView)
+                        }
                         initialViewportApplied = true
                         viewModel.clearProximityMapFocus(focusTarget.requestId)
                     }
@@ -4185,6 +4390,59 @@ internal fun SplitMapPane(
                         }
                     }
                 }
+                if (isInsetMode && !insetRestoredViewportApplied && restoredViewport != null) {
+                    val insetWidth = mapView.width
+                    val insetHeight = mapView.height
+                    if (insetWidth > 0 && insetHeight > 0) {
+                        mapView.controller.setCenter(GeoPoint(restoredViewport.latitude, restoredViewport.longitude))
+                        mapView.controller.setZoom(
+                            mapPaneInsetViewportZoom(
+                                fullWidthPx = restoredViewport.widthPx,
+                                fullHeightPx = restoredViewport.heightPx,
+                                insetWidthPx = insetWidth,
+                                insetHeightPx = insetHeight,
+                                fullZoom = restoredViewport.zoom
+                            )
+                        )
+                        insetRestoredViewportApplied = true
+                    }
+                }
+                val focusDesignator = focusedPath
+                val followFocusPoint = focusDesignator?.let { focus ->
+                    dronePoints.firstOrNull { it.designator == focus }
+                }
+                val shouldFollowFocusedDrone = shouldFollowFocusedDrone(
+                    presentationMode = presentationMode,
+                    followFocusedDroneEnabled = followFocusedDroneEnabled,
+                    hasFocusedDroneTelemetry = followFocusPoint != null,
+                    operatorAdjustedViewport = operatorAdjustedViewport
+                )
+                if (!shouldFollowFocusedDrone) {
+                    lastInsetFollowDesignator = null
+                    lastInsetFollowPoint = null
+                }
+                if (shouldFollowFocusedDrone && followFocusPoint != null) {
+                    val nowMs = System.currentTimeMillis()
+                    val focusChanged = lastInsetFollowDesignator != focusDesignator
+                    if (focusChanged || nowMs - lastInsetFollowAtMs >= INSET_FOLLOW_INTERVAL_MS) {
+                        val target = GeoPoint(followFocusPoint.lat, followFocusPoint.lng)
+                        val previous = lastInsetFollowPoint.takeUnless { focusChanged }
+                        val movedEnough = previous == null ||
+                            previous.distanceToAsDouble(target) >= INSET_FOLLOW_MIN_MOVE_METERS
+                        if (movedEnough) {
+                            mapView.controller.setCenter(target)
+                            if (restoredViewport == null && mapView.zoomLevelDouble < 14.0) {
+                                mapView.controller.setZoom(14.0)
+                            }
+                            if (!isInsetMode) {
+                                persistFullMapViewport(mapView)
+                            }
+                            lastInsetFollowDesignator = focusDesignator
+                            lastInsetFollowPoint = target
+                        }
+                        lastInsetFollowAtMs = nowMs
+                    }
+                }
                 mapView.invalidate()
             }
         )
@@ -4223,22 +4481,23 @@ internal fun SplitMapPane(
             }
         }
 
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(6.dp)
-        ) {
-            IconButton(
-                onClick = { settingsMenuExpanded = true },
+        if (!isInsetMode) {
+            Box(
                 modifier = Modifier
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Settings,
-                    contentDescription = "Map settings"
-                )
-            }
-            DropdownMenu(
+                IconButton(
+                    onClick = { settingsMenuExpanded = true },
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Settings,
+                        contentDescription = "Map settings"
+                    )
+                }
+                DropdownMenu(
                 expanded = settingsMenuExpanded,
                 onDismissRequest = {
                     settingsMenuExpanded = false
@@ -4298,6 +4557,16 @@ internal fun SplitMapPane(
                 expanded = mapManagementMenuExpanded,
                 onDismissRequest = { mapManagementMenuExpanded = false }
             ) {
+                DropdownMenuItem(
+                    text = { Text(if (followFocusedDroneEnabled) "Follow Focused Drone: On" else "Follow Focused Drone: Off") },
+                    onClick = {
+                        val enabled = !followFocusedDroneEnabled
+                        if (enabled) {
+                            operatorAdjustedViewport = false
+                        }
+                        viewModel.setFollowFocusedDroneEnabled(enabled)
+                    }
+                )
                 DropdownMenuItem(
                     text = { Text(if (mapReloadInFlight) "Reload Map..." else "Reload Map") },
                     onClick = {
@@ -4418,6 +4687,7 @@ internal fun SplitMapPane(
                     }
                 )
             }
+        }
         }
 
         if (showMutualAidPackageDialog) {
@@ -5003,38 +5273,56 @@ internal fun SplitMapPane(
             )
         }
 
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .navigationBarsPadding()
-                .padding(start = 6.dp, end = 6.dp, bottom = 6.dp)
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
-                .padding(horizontal = 4.dp, vertical = 1.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        if (isInsetMode) {
             Text(
-                text = "© OpenStreetMap contributors",
-                fontSize = 8.sp,
-                lineHeight = 8.sp,
+                text = if (contourOverlayEnabled) "© OSM · USGS" else "© OSM",
+                fontSize = 6.sp,
+                lineHeight = 6.sp,
+                maxLines = 1,
                 color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.clickable {
-                    uriHandler.openUri("https://www.openstreetmap.org/copyright")
-                }
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 3.dp, bottom = 3.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.56f))
+                    .padding(horizontal = 2.dp, vertical = 1.dp)
+                    .clickable {
+                        uriHandler.openUri("https://www.openstreetmap.org/copyright")
+                    }
             )
-            Text(
-                text = "DEM: USGS National Geospatial Program",
-                fontSize = 8.sp,
-                lineHeight = 8.sp,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            if (contourOverlayEnabled) {
+        } else {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .navigationBarsPadding()
+                    .padding(start = 6.dp, end = 6.dp, bottom = 6.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "Contours: USGS The National Map",
+                    text = "© OpenStreetMap contributors",
+                    fontSize = 8.sp,
+                    lineHeight = 8.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.clickable {
+                        uriHandler.openUri("https://www.openstreetmap.org/copyright")
+                    }
+                )
+                Text(
+                    text = "DEM: USGS National Geospatial Program",
                     fontSize = 8.sp,
                     lineHeight = 8.sp,
                     color = MaterialTheme.colorScheme.onSurface
                 )
+                if (contourOverlayEnabled) {
+                    Text(
+                        text = "Contours: USGS The National Map",
+                        fontSize = 8.sp,
+                        lineHeight = 8.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
         }
     }
@@ -6584,9 +6872,11 @@ private fun buildDroneMarkerDrawable(
     resources: android.content.res.Resources,
     baseIcon: Drawable?,
     tint: Int?,
-    headingDeg: Double?
+    headingDeg: Double?,
+    scale: Float = 1.0f
 ): Drawable? {
     if (baseIcon == null) return null
+    val safeScale = drawableScaleOrDefault(scale)
     val density = resources.displayMetrics.density
     val icon = baseIcon.constantState?.newDrawable(resources)?.mutate() ?: baseIcon.mutate()
     if (tint != null) {
@@ -6595,22 +6885,29 @@ private fun buildDroneMarkerDrawable(
         icon.clearColorFilter()
     }
 
-    val iconW = if (icon.intrinsicWidth > 0) icon.intrinsicWidth else (18f * density).toInt()
-    val iconH = if (icon.intrinsicHeight > 0) icon.intrinsicHeight else (18f * density).toInt()
-    val overlayReach = (18f * density).toInt()
-    val pad = maxOf((4f * density).toInt(), overlayReach)
+    val iconW = if (icon.intrinsicWidth > 0) {
+        scaledDimension(icon.intrinsicWidth, safeScale)
+    } else {
+        (18f * density * safeScale).roundToInt().coerceAtLeast(1)
+    }
+    val iconH = if (icon.intrinsicHeight > 0) {
+        scaledDimension(icon.intrinsicHeight, safeScale)
+    } else {
+        (18f * density * safeScale).roundToInt().coerceAtLeast(1)
+    }
+    val overlayReach = (18f * density * safeScale).roundToInt().coerceAtLeast(1)
+    val pad = maxOf((4f * density * safeScale).roundToInt().coerceAtLeast(1), overlayReach)
     val width = iconW + pad * 2
     val height = iconH + pad * 2
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
     val cx = width / 2f
     val cy = height / 2f
-    val radius = (maxOf(iconW, iconH) / 2f) + (2.5f * density)
-    val headingStart = radius + (0.5f * density)
-    val headingTip = radius + (9.0f * density)
-    val headingPointerLen = 3.8f * density
-    val cameraStart = radius + (0.7f * density)
-    val cameraEnd = radius + (9.0f * density)
+    val scaledDensity = density * safeScale
+    val radius = (maxOf(iconW, iconH) / 2f) + (2.5f * scaledDensity)
+    val headingStart = radius + (0.5f * scaledDensity)
+    val headingTip = radius + (9.0f * scaledDensity)
+    val headingPointerLen = 3.8f * scaledDensity
 
     val haloFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AndroidColor.parseColor("#CCFFFFFF")
@@ -6619,27 +6916,21 @@ private fun buildDroneMarkerDrawable(
     val haloStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AndroidColor.parseColor("#99000000")
         style = Paint.Style.STROKE
-        strokeWidth = 1.5f * density
+        strokeWidth = 1.5f * scaledDensity
     }
     val overlayHalo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AndroidColor.parseColor("#B3000000")
         style = Paint.Style.STROKE
-        strokeWidth = 3.2f * density
+        strokeWidth = 3.2f * scaledDensity
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
     val headingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AndroidColor.parseColor("#FFF8E1")
         style = Paint.Style.STROKE
-        strokeWidth = 2.0f * density
+        strokeWidth = 2.0f * scaledDensity
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-    }
-    val cameraPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = AndroidColor.parseColor("#7FDBFF")
-        style = Paint.Style.STROKE
-        strokeWidth = 1.8f * density
-        strokeCap = Paint.Cap.ROUND
     }
 
     headingDeg?.takeIf { it.isFinite() }?.let { bearing ->
@@ -6695,19 +6986,70 @@ private fun markerIconForArtifactSymbol(
     resources: android.content.res.Resources,
     symbol: String,
     colorHex: String?,
-    cache: MutableMap<String, Drawable>
+    cache: MutableMap<String, Drawable>,
+    scale: Float = 1.0f
 ): Drawable {
     val normalizedSymbol = symbol.ifBlank { "point" }
     val normalizedColor = normalizeMarkerColor(colorHex, normalizedSymbol)
-    val cacheKey = "$normalizedSymbol|$normalizedColor"
+    val safeScale = drawableScaleOrDefault(scale)
+    val cacheKey = "$normalizedSymbol|$normalizedColor|${"%.3f".format(Locale.US, safeScale)}"
     val cached = cache[cacheKey]
     if (cached != null) {
         return cached.constantState?.newDrawable(resources)?.mutate() ?: cached
     }
 
-    val icon = buildCaltopoLikeSymbolDrawable(resources, normalizedSymbol, normalizedColor)
+    val icon = scaleDrawableBitmap(
+        resources = resources,
+        drawable = buildCaltopoLikeSymbolDrawable(resources, normalizedSymbol, normalizedColor),
+        scale = safeScale
+    )
     cache[cacheKey] = icon
     return icon.constantState?.newDrawable(resources)?.mutate() ?: icon
+}
+
+private fun drawableScaleOrDefault(scale: Float): Float =
+    if (scale.isFinite() && scale > 0f) scale else 1.0f
+
+private fun scaledDimension(value: Int, scale: Float): Int =
+    (value * scale).roundToInt().coerceAtLeast(1)
+
+private fun scaleDrawableBitmap(
+    resources: android.content.res.Resources,
+    drawable: Drawable,
+    scale: Float
+): Drawable {
+    if (scale == 1.0f) return drawable
+    val width = scaledDimension(drawable.intrinsicWidth.takeIf { it > 0 } ?: 1, scale)
+    val height = scaledDimension(drawable.intrinsicHeight.takeIf { it > 0 } ?: 1, scale)
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val previousBounds = Rect(drawable.bounds)
+    drawable.setBounds(0, 0, width, height)
+    drawable.draw(canvas)
+    drawable.setBounds(previousBounds)
+    return BitmapDrawable(resources, bitmap)
+}
+
+private fun cachedScaledRemoteMarkerDrawable(
+    resources: android.content.res.Resources,
+    source: Drawable,
+    cache: MutableMap<String, Drawable>,
+    cacheKey: String,
+    scale: Float
+): Drawable {
+    val safeScale = drawableScaleOrDefault(scale)
+    val scaledCacheKey = "$cacheKey|${"%.3f".format(Locale.US, safeScale)}"
+    val cached = cache[scaledCacheKey]
+    if (cached != null) {
+        return cached.constantState?.newDrawable(resources)?.mutate() ?: cached
+    }
+    val scaled = scaleDrawableBitmap(
+        resources = resources,
+        drawable = source.constantState?.newDrawable(resources)?.mutate() ?: source.mutate(),
+        scale = safeScale
+    )
+    cache[scaledCacheKey] = scaled
+    return scaled.constantState?.newDrawable(resources)?.mutate() ?: scaled
 }
 
 private fun symbolGlyphForMarkerSymbol(symbol: String): String? {

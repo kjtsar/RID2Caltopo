@@ -50,7 +50,8 @@ fun DesignatorIndicator(
     viewModel: StreamsViewModel,
     streamState: StreamState,
     streamErrorDetail: String?,
-    onLongPress: () -> Unit
+    onLongPress: () -> Unit,
+    interactionEnabled: Boolean = true
 ) {
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
     val errorSummary = formatStreamErrorDetail(streamErrorDetail)
@@ -76,7 +77,9 @@ fun DesignatorIndicator(
             fillColor = Color.White,
             outlineColor = Color.Black
         )
-        val helperText = if (focusedPath == streamDesignator) {
+        val helperText = if (!interactionEnabled) {
+            "Captured video playback."
+        } else if (focusedPath == streamDesignator) {
             "Captured video playback. Use the tile controls to review playback settings."
         } else {
             "Tap to focus. Use the tile controls to review playback settings."
@@ -123,16 +126,10 @@ fun DesignatorIndicator(
                 if (showCompactTopTelemetry) "" else formatCompactTelemetry(droneDisplayState)
             )
         }
-        is DesignatorState.Yellow -> Triple(
+        else -> Triple(
             indicatorPaletteFor(designatorState),
             null,
-            "Long-press to match telemetry (mapStatus:${mapStatus})"
-        )
-
-        DesignatorState.Red -> Triple(
-            indicatorPaletteFor(designatorState),
-            null,
-            "No telemetry available (mapStatus:${mapStatus})"
+            designatorDetailText(designatorState, mapStatus, interactionEnabled)
         )
     }
     Column {
@@ -189,20 +186,28 @@ fun DesignatorIndicator(
                 modifier = Modifier
                     .padding(horizontal = 10.dp)
                     .background(Color.Transparent)
-                    .clickable { coordinateMenuExpanded = true }
-            )
-            DropdownMenu(
-                expanded = coordinateMenuExpanded,
-                onDismissRequest = { coordinateMenuExpanded = false }
-            ) {
-                CoordinateDisplayFormat.values().forEach { format ->
-                    DropdownMenuItem(
-                        text = { Text(format.label) },
-                        onClick = {
-                            coordinateMenuExpanded = false
-                            viewModel.setCoordinateDisplayFormat(format)
+                    .then(
+                        if (interactionEnabled) {
+                            Modifier.clickable { coordinateMenuExpanded = true }
+                        } else {
+                            Modifier
                         }
                     )
+            )
+            if (interactionEnabled) {
+                DropdownMenu(
+                    expanded = coordinateMenuExpanded,
+                    onDismissRequest = { coordinateMenuExpanded = false }
+                ) {
+                    CoordinateDisplayFormat.values().forEach { format ->
+                        DropdownMenuItem(
+                            text = { Text(format.label) },
+                            onClick = {
+                                coordinateMenuExpanded = false
+                                viewModel.setCoordinateDisplayFormat(format)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -276,6 +281,20 @@ internal fun indicatorPaletteFor(designatorState: DesignatorState): IndicatorPal
         fillColor = Color(0xFFFF0000),
         outlineColor = Color(0xFF00D4FF)
     )
+}
+
+internal fun designatorDetailText(
+    designatorState: DesignatorState,
+    mapStatus: String,
+    interactionEnabled: Boolean
+): String = when (designatorState) {
+    is DesignatorState.Yellow -> if (interactionEnabled) {
+        "Long-press to match telemetry (mapStatus:${mapStatus})"
+    } else {
+        "Telemetry not attached (mapStatus:${mapStatus})"
+    }
+    DesignatorState.Red -> "No telemetry available (mapStatus:${mapStatus})"
+    is DesignatorState.Green -> ""
 }
 
 internal fun formatLiveState(

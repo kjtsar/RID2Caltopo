@@ -99,10 +99,18 @@ fun StreamTile(
     onCloseStream: () -> Unit,
     onRestartServer: () -> Unit,
     onToggleFocus: () -> Unit,
+    showTileControls: Boolean = true,
+    effectiveFocused: Boolean? = null,
+    showFocusBorder: Boolean? = null,
 ) {
     val tag="StreamTile"
     val clueCaptureSlowMs = 250L
-    val textureViewRef = remember {mutableStateOf<TextureView?>(null)}
+    val clueCaptureTargetRef = remember(streamDesignator, streamRevision) {
+        mutableStateOf<StreamClueCaptureTarget?>(null)
+    }
+    var renderedFrameCount by remember(streamDesignator, streamRevision) { mutableIntStateOf(0) }
+    var pendingClueCaptureRequestId by remember(streamDesignator, streamRevision) { mutableLongStateOf(0L) }
+    var handledClueCaptureRequestId by remember(streamDesignator, streamRevision) { mutableLongStateOf(0L) }
     var showPicker by remember { mutableStateOf(false) }
     var showUnmatchDialog by remember { mutableStateOf(false) }
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
@@ -117,9 +125,12 @@ fun StreamTile(
         val removeConsumer = viewModel.addAltitudeConsumer()
         onDispose { removeConsumer() }
     }
-    val isFocused = (focusedPath == streamDesignator)
+    val explicitlyFocused = focusedPath == streamDesignator
+    val isFocused = effectiveFocused ?: explicitlyFocused
+    val drawFocusBorder = showFocusBorder ?: explicitlyFocused
     val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
     val isLocalPlaybackPaused = if (isLocalPlayback) viewModel.isLocalPlaybackPaused(streamDesignator) else false
+    val tileInteractionsEnabled = showTileControls
     val pauseLocalPlaybackOnOpen = if (isLocalPlayback) viewModel.pauseLocalPlaybackOnOpenEnabled() else false
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
@@ -159,7 +170,8 @@ fun StreamTile(
     val showAnomalyLegendControls = anomalyConfig.enabled
     val showLegendControls = showLocalPlaybackLegendControls || showAnomalyLegendControls
     val showLocalPlaybackShell = isLocalPlayback && streamState != StreamState.ERROR
-    val showOverlayControls = (isFocused || isLocalPlayback) &&
+    val showOverlayControls = showTileControls &&
+        (isFocused || isLocalPlayback) &&
         (streamState == StreamState.LIVE || showLocalPlaybackShell)
     var streamTileSize by remember(streamDesignator) { mutableStateOf(IntSize.Zero) }
     var zoomScale by remember(streamDesignator, streamRevision) { mutableStateOf(1f) }
@@ -207,11 +219,90 @@ fun StreamTile(
         zoomOffset = clampZoomOffset(zoomOffset, zoomScale)
     }
 
+    fun captureClueSnapshot(reason: String): Boolean {
+        val clueTapStartedAtMs = System.currentTimeMillis()
+        fun logClueTapIfSlow(step: String, elapsedMs: Long, bitmap: Bitmap? = null) {
+            if (elapsedMs < clueCaptureSlowMs) return
+            val bitmapSummary = bitmap?.let { " bitmap=${it.width}x${it.height}" } ?: ""
+            CaltopoClient.CTWarn(
+                tag,
+                "clue double-tap slow step=$step elapsedMs=$elapsedMs " +
+                    "designator=$streamDesignator reason=$reason zoom=$zoomScale offset=${zoomOffset.x},${zoomOffset.y}$bitmapSummary"
+            )
+        }
+
+        val captureTarget = clueCaptureTargetRef.value
+        if (!streamClueCaptureReady(
+                hasCaptureTarget = captureTarget != null,
+                renderedFrameCount = renderedFrameCount,
+                requiresRenderedFrame = captureTarget?.requiresRenderedFrame ?: true
+            ) || captureTarget == null
+        ) {
+            CTDebug(
+                tag,
+                "Capture target not ready yet for clue capture reason=$reason " +
+                    "target=${captureTarget?.label ?: "none"} " +
+                    "requiresRenderedFrame=${captureTarget?.requiresRenderedFrame ?: true} " +
+                    "renderedFrames=$renderedFrameCount"
+            )
+            return false
+        }
+
+        val captureStartedAtMs = System.currentTimeMillis()
+        val bitmap = captureTarget.textureView.bitmap
+        logClueTapIfSlow(
+            "${captureTarget.label}.bitmap",
+            System.currentTimeMillis() - captureStartedAtMs,
+            bitmap
+        )
+        if (bitmap == null) {
+            CTDebug(
+                tag,
+                "Failed to capture bitmap from ${captureTarget.label} " +
+                    "reason=$reason renderedFrames=$renderedFrameCount"
+            )
+            return false
+        }
+
+        val zoomStartedAtMs = System.currentTimeMillis()
+        val clueBitmap = zoomedSnapshotBitmap(
+            source = bitmap,
+            scale = zoomScale,
+            offset = zoomOffset,
+        )
+        logClueTapIfSlow(
+            "zoomedSnapshotBitmap",
+            System.currentTimeMillis() - zoomStartedAtMs,
+            clueBitmap
+        )
+        val viewModelStartedAtMs = System.currentTimeMillis()
+        viewModel.onSnapshotCaptured(streamDesignator, clueBitmap)
+        logClueTapIfSlow(
+            "StreamsViewModel.onSnapshotCaptured",
+            System.currentTimeMillis() - viewModelStartedAtMs,
+            clueBitmap
+        )
+        logClueTapIfSlow(
+            "total",
+            System.currentTimeMillis() - clueTapStartedAtMs,
+            clueBitmap
+        )
+        return true
+    }
+
+    LaunchedEffect(pendingClueCaptureRequestId, renderedFrameCount, clueCaptureTargetRef.value) {
+        val requestId = pendingClueCaptureRequestId
+        if (requestId == 0L || requestId == handledClueCaptureRequestId) return@LaunchedEffect
+        if (captureClueSnapshot("deferred")) {
+            handledClueCaptureRequestId = requestId
+        }
+    }
+
     Box(
         modifier = Modifier
             .border(
-                width = if (isFocused) 3.dp else 0.dp,
-                color = if (isFocused) Color.Yellow else Color.Transparent
+                width = if (drawFocusBorder) 3.dp else 0.dp,
+                color = if (drawFocusBorder) Color.Yellow else Color.Transparent
             )
             .aspectRatio(16f / 9f)
             .onSizeChanged { streamTileSize = it }
@@ -236,7 +327,21 @@ fun StreamTile(
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f),
                 viewModel = viewModel,
-                onTextureViewReady = { tv -> textureViewRef.value = tv }
+                onTextureViewReady = { tv ->
+                    clueCaptureTargetRef.value = StreamClueCaptureTarget(
+                        textureView = tv,
+                        requiresRenderedFrame = true,
+                        label = "ffmpeg-texture"
+                    )
+                },
+                onPlayerTextureViewReady = { tv ->
+                    clueCaptureTargetRef.value = StreamClueCaptureTarget(
+                        textureView = tv,
+                        requiresRenderedFrame = false,
+                        label = "player-texture"
+                    )
+                },
+                onTextureFrameUpdated = { renderedFrameCount = it }
             )
             if (isLocalPlayback) {
                 if (currentFrameAnnotations.isNotEmpty()) {
@@ -407,7 +512,7 @@ fun StreamTile(
             modifier = Modifier
                 .matchParentSize()
                 .then(
-                    if (isLocalPlayback && isLocalPlaybackPaused) {
+                    if (!tileInteractionsEnabled || (isLocalPlayback && isLocalPlaybackPaused)) {
                         Modifier
                     } else {
                         Modifier.pointerInput(streamDesignator, designatorState, currentIsFocused, currentDesignatorState) {
@@ -433,67 +538,22 @@ fun StreamTile(
                                     }
                                 },
                                 onDoubleTap = {
-                                    val clueTapStartedAtMs = System.currentTimeMillis()
-                                    fun logClueTapIfSlow(step: String, elapsedMs: Long, bitmap: Bitmap? = null) {
-                                        if (elapsedMs < clueCaptureSlowMs) return
-                                        val bitmapSummary = bitmap?.let { " bitmap=${it.width}x${it.height}" } ?: ""
-                                        CaltopoClient.CTWarn(
-                                            tag,
-                                            "clue double-tap slow step=$step elapsedMs=$elapsedMs " +
-                                                "designator=$streamDesignator zoom=$zoomScale offset=${zoomOffset.x},${zoomOffset.y}$bitmapSummary"
-                                        )
-                                    }
                                     if (isLocalPlayback) return@detectTapGestures
                                     if (!currentIsFocused) {
-                                        CaltopoClient.ShowToast("Single-tap view to focus before submitting clue.")
-                                        return@detectTapGestures
+                                        viewModel.ensureFocus(streamDesignator)
                                     }
                                     if (currentDesignatorState !is DesignatorState.Green) {
                                         CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
                                         return@detectTapGestures
                                     }
 
-                                    val tv = textureViewRef.value
-                                    if (tv == null) {
-                                        CTDebug(tag, "TextureView not ready yet")
-                                        return@detectTapGestures
+                                    if (captureClueSnapshot("immediate")) {
+                                        pendingClueCaptureRequestId = 0L
+                                        handledClueCaptureRequestId = 0L
+                                    } else {
+                                        pendingClueCaptureRequestId += 1L
+                                        CaltopoClient.ShowToast("Preparing video frame for clue...")
                                     }
-
-                                    val captureStartedAtMs = System.currentTimeMillis()
-                                    val bitmap = tv.bitmap
-                                    logClueTapIfSlow(
-                                        "TextureView.bitmap",
-                                        System.currentTimeMillis() - captureStartedAtMs,
-                                        bitmap
-                                    )
-                                    if (bitmap == null) {
-                                        CTDebug(tag, "Failed to capture bitmap from TextureView")
-                                        return@detectTapGestures
-                                    }
-
-                                    val zoomStartedAtMs = System.currentTimeMillis()
-                                    val clueBitmap = zoomedSnapshotBitmap(
-                                        source = bitmap,
-                                        scale = zoomScale,
-                                        offset = zoomOffset,
-                                    )
-                                    logClueTapIfSlow(
-                                        "zoomedSnapshotBitmap",
-                                        System.currentTimeMillis() - zoomStartedAtMs,
-                                        clueBitmap
-                                    )
-                                    val viewModelStartedAtMs = System.currentTimeMillis()
-                                    viewModel.onSnapshotCaptured(streamDesignator, clueBitmap)
-                                    logClueTapIfSlow(
-                                        "StreamsViewModel.onSnapshotCaptured",
-                                        System.currentTimeMillis() - viewModelStartedAtMs,
-                                        clueBitmap
-                                    )
-                                    logClueTapIfSlow(
-                                        "total",
-                                        System.currentTimeMillis() - clueTapStartedAtMs,
-                                        clueBitmap
-                                    )
                                 }
                             )
                         }
@@ -866,13 +926,15 @@ fun StreamTile(
             streamErrorDetail = streamErrorDetail,
             viewModel = viewModel,
             onLongPress = {
+                if (!tileInteractionsEnabled) return@DesignatorIndicator
                 if (isLocalPlayback) return@DesignatorIndicator
                 when (designatorState) {
                     is DesignatorState.Yellow -> showPicker = true
                     is DesignatorState.Green  -> showUnmatchDialog = true
                     else -> {}
                 }
-            }
+            },
+            interactionEnabled = tileInteractionsEnabled
         )
         if (showUnmatchDialog && designatorState is DesignatorState.Green) {
             val greenState = designatorState as DesignatorState.Green
@@ -1522,6 +1584,19 @@ private fun unzoomedStreamPoint(
     )
 }
 
+internal data class StreamClueCaptureTarget(
+    val textureView: TextureView,
+    val requiresRenderedFrame: Boolean,
+    val label: String
+)
+
+internal fun streamClueCaptureReady(
+    hasCaptureTarget: Boolean,
+    renderedFrameCount: Int,
+    requiresRenderedFrame: Boolean
+): Boolean =
+    hasCaptureTarget && (!requiresRenderedFrame || renderedFrameCount > 0)
+
 internal fun zoomedSnapshotBitmap(
     source: Bitmap,
     scale: Float,
@@ -1801,7 +1876,9 @@ fun StreamPlayer(
     designator: String,
     streamRevision: Long,
     modifier: Modifier = Modifier,
-    onTextureViewReady: (TextureView) -> Unit
+    onTextureViewReady: (TextureView) -> Unit,
+    onPlayerTextureViewReady: (TextureView) -> Unit = {},
+    onTextureFrameUpdated: (Int) -> Unit = {}
 ) {
     val tag = "StreamPlayer"
     val surfaceTag = "StreamTile"
@@ -1810,7 +1887,11 @@ fun StreamPlayer(
     if (!viewModel.useFfmpegRender(designator)) {
         val player = viewModel.getExoPlayerFor(designator)
         if (player != null) {
-            StreamPlayerView(player = player, modifier = modifier, onPlayerViewReady = {})
+            StreamPlayerView(
+                player = player,
+                modifier = modifier,
+                onPlayerTextureViewReady = onPlayerTextureViewReady
+            )
         } else {
             Box(modifier = modifier.background(Color.Black))
         }
@@ -1878,6 +1959,7 @@ fun StreamPlayer(
 
                     override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {
                         surfaceFrameCount += 1
+                        onTextureFrameUpdated(surfaceFrameCount)
                         val now = System.currentTimeMillis()
                         if (updateLogCount < 3 || now - lastUpdatedLogAtMs >= 5_000L) {
                             lastUpdatedLogAtMs = now

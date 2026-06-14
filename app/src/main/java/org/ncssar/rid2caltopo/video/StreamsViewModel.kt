@@ -68,6 +68,7 @@ import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
+import org.ncssar.rid2caltopo.video.MapArtifactRenderCache
 import org.ncssar.rid2caltopo.video.CoordinateFormatter
 import org.ncssar.rid2caltopo.video.PlaybackIndicatorState
 import org.ncssar.rid2caltopo.video.LocalPlaybackAnnotationType
@@ -160,7 +161,9 @@ fun clueSnapshotForTitle(
 data class MapViewportState(
     val latitude: Double,
     val longitude: Double,
-    val zoom: Double
+    val zoom: Double,
+    val widthPx: Int? = null,
+    val heightPx: Int? = null
 )
 
 private fun isUsablePersistedMapViewportState(latitude: Double, longitude: Double, zoom: Double): Boolean {
@@ -173,6 +176,36 @@ enum class StreamsLayoutMode {
     Both,
     Streams,
     Map
+}
+
+data class StreamPipUiState(
+    val enabled: Boolean,
+    val insetFraction: Float,
+    val editorMode: Boolean = false
+) {
+    fun withEnabled(nextEnabled: Boolean): StreamPipUiState =
+        copy(enabled = nextEnabled, editorMode = if (nextEnabled) editorMode else false)
+
+    fun withEditorLongPress(): StreamPipUiState =
+        copy(editorMode = enabled && !editorMode)
+
+    companion object {
+        fun fromPersisted(enabled: Boolean, insetFraction: Float): StreamPipUiState =
+            StreamPipUiState(
+                enabled = enabled,
+                insetFraction = clampStreamPipInsetFraction(insetFraction),
+                editorMode = false
+            )
+    }
+}
+
+internal const val STREAM_PIP_MIN_INSET_FRACTION = 0.22f
+internal const val STREAM_PIP_DEFAULT_INSET_FRACTION = 0.33f
+internal const val STREAM_PIP_MAX_INSET_FRACTION = 0.55f
+
+internal fun clampStreamPipInsetFraction(value: Float): Float {
+    if (!value.isFinite()) return STREAM_PIP_DEFAULT_INSET_FRACTION
+    return value.coerceIn(STREAM_PIP_MIN_INSET_FRACTION, STREAM_PIP_MAX_INSET_FRACTION)
 }
 
 data class ProximityMapFocusTarget(
@@ -774,6 +807,8 @@ class StreamsViewModel(
     // --- Map Folders visibility state ---
     // Persisted in the ViewModel so user selections survive navigation away and back.
 
+    internal val mapArtifactRenderCache = MapArtifactRenderCache()
+
     /** Folder IDs whose contents should be hidden on the local map. */
     val hiddenFolderIds = mutableStateSetOf<String>()
 
@@ -815,6 +850,24 @@ class StreamsViewModel(
     val mapName: String? by _mapName
     private val _layoutMode = MutableStateFlow(StreamsLayoutMode.Both)
     val layoutMode: StateFlow<StreamsLayoutMode> = _layoutMode.asStateFlow()
+    private val streamPipPrefs by lazy {
+        getApplication<Application>()
+            .applicationContext
+            .getSharedPreferences("stream_pip_prefs", android.content.Context.MODE_PRIVATE)
+    }
+    private val _streamPipUiState = mutableStateOf(
+        StreamPipUiState.fromPersisted(
+            enabled = streamPipPrefs.getBoolean("enabled", false),
+            insetFraction = streamPipPrefs.getFloat("inset_fraction", STREAM_PIP_DEFAULT_INSET_FRACTION)
+        )
+    )
+    val streamPipUiState: StreamPipUiState
+        get() = _streamPipUiState.value
+    private val _followFocusedDroneEnabled = mutableStateOf(
+        streamPipPrefs.getBoolean("follow_focused_drone_enabled", true)
+    )
+    val followFocusedDroneEnabled: Boolean
+        get() = _followFocusedDroneEnabled.value
     private val _proximityMapFocusTarget = MutableStateFlow<ProximityMapFocusTarget?>(null)
     val proximityMapFocusTarget: StateFlow<ProximityMapFocusTarget?> = _proximityMapFocusTarget.asStateFlow()
     private val _coordinateDisplayFormat = mutableStateOf<CoordinateDisplayFormat>(
@@ -1359,6 +1412,34 @@ class StreamsViewModel(
         _layoutMode.value = layoutMode
     }
 
+    fun setStreamPipEnabled(enabled: Boolean) {
+        val next = _streamPipUiState.value.withEnabled(enabled)
+        _streamPipUiState.value = next
+        streamPipPrefs.edit().putBoolean("enabled", next.enabled).apply()
+    }
+
+    fun setStreamPipEditorMode(editorMode: Boolean) {
+        _streamPipUiState.value = _streamPipUiState.value.copy(
+            editorMode = editorMode && _streamPipUiState.value.enabled
+        )
+    }
+
+    fun toggleStreamPipEditorModeFromLongPress() {
+        _streamPipUiState.value = _streamPipUiState.value.withEditorLongPress()
+    }
+
+    fun setStreamPipInsetFraction(insetFraction: Float) {
+        val clamped = clampStreamPipInsetFraction(insetFraction)
+        _streamPipUiState.value = _streamPipUiState.value.copy(insetFraction = clamped)
+        streamPipPrefs.edit().putFloat("inset_fraction", clamped).apply()
+    }
+
+    fun setFollowFocusedDroneEnabled(enabled: Boolean) {
+        if (_followFocusedDroneEnabled.value == enabled) return
+        _followFocusedDroneEnabled.value = enabled
+        streamPipPrefs.edit().putBoolean("follow_focused_drone_enabled", enabled).apply()
+    }
+
     fun showMapOnly() {
         _layoutMode.value = StreamsLayoutMode.Map
     }
@@ -1381,14 +1462,16 @@ class StreamsViewModel(
 
     fun mapViewportState(): MapViewportState? = persistedMapViewportState
 
-    fun persistMapViewportState(center: IGeoPoint?, zoom: Double) {
+    fun persistMapViewportState(center: IGeoPoint?, zoom: Double, widthPx: Int? = null, heightPx: Int? = null) {
         val lat = center?.latitude ?: return
         val lng = center.longitude
         if (!isUsablePersistedMapViewportState(lat, lng, zoom)) return
         persistedMapViewportState = MapViewportState(
             latitude = lat,
             longitude = lng,
-            zoom = zoom
+            zoom = zoom,
+            widthPx = widthPx?.takeIf { it > 0 },
+            heightPx = heightPx?.takeIf { it > 0 }
         )
     }
 

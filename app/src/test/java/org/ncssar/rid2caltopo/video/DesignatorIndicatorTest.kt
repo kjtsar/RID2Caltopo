@@ -39,4 +39,24 @@ class DesignatorIndicatorTest {
             )
         )
     }
+
+    @Test
+    fun designatorDetailText_omitsLongPressPromptWhenInteractionsAreDisabled() {
+        assertEquals(
+            "Long-press to match telemetry (mapStatus:Standalone)",
+            designatorDetailText(
+                designatorState = DesignatorState.Yellow(emptyMap()),
+                mapStatus = "Standalone",
+                interactionEnabled = true
+            )
+        )
+        assertEquals(
+            "Telemetry not attached (mapStatus:Standalone)",
+            designatorDetailText(
+                designatorState = DesignatorState.Yellow(emptyMap()),
+                mapStatus = "Standalone",
+                interactionEnabled = false
+            )
+        )
+    }
 }

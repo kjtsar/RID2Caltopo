@@ -60,6 +60,90 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun needsViewportTileProviderRestart_neverRestartsForZoomBookkeepingOnly() {
+        assertEquals(
+            false,
+            needsViewportTileProviderRestart(
+                previousTileZoom = 16,
+                currentTileZoom = 18,
+                baseSourceChanged = false
+            )
+        )
+        assertEquals(
+            false,
+            needsViewportTileProviderRestart(
+                previousTileZoom = 16,
+                currentTileZoom = 18,
+                baseSourceChanged = true
+            )
+        )
+    }
+
+    @Test
+    fun mapArtifactRenderCache_preservesOverlayForSameMapRemount() {
+        val cache = MapArtifactRenderCache()
+        assertEquals(true, cache.resetIfMapChanged("map-a"))
+        cache.replace(
+            features = linkedMapOf("feature-1" to JSONObject("""{"id":"feature-1"}""")),
+            overlayState = ArtifactOverlayState(totalFeatures = 1)
+        )
+
+        assertEquals(false, cache.resetIfMapChanged("map-a"))
+        assertEquals(1, cachedArtifactOverlayState(cache.overlayState).totalFeatures)
+        assertEquals(1, cache.featuresById.size)
+    }
+
+    @Test
+    fun mapArtifactRenderCache_clearsOverlayWhenMapChanges() {
+        val cache = MapArtifactRenderCache()
+        cache.resetIfMapChanged("map-a")
+        cache.replace(
+            features = linkedMapOf("feature-1" to JSONObject("""{"id":"feature-1"}""")),
+            overlayState = ArtifactOverlayState(totalFeatures = 1)
+        )
+
+        assertEquals(true, cache.resetIfMapChanged("map-b"))
+        assertEquals(0, cachedArtifactOverlayState(cache.overlayState).totalFeatures)
+        assertEquals(0, cache.featuresById.size)
+    }
+
+    @Test
+    fun mapArtifactRenderCache_mergesDeltasThatArriveDuringHydration() {
+        val cache = MapArtifactRenderCache()
+        cache.resetIfMapChanged("map-a")
+        val hydrationStartVersion = cache.featureVersion
+
+        cache.putFeature("feature-2", JSONObject("""{"id":"feature-2"}"""))
+
+        val merged = cache.mergedHydrationFeatures(
+            hydratedFeatures = linkedMapOf("feature-1" to JSONObject("""{"id":"feature-1"}""")),
+            hydrationStartVersion = hydrationStartVersion
+        )
+
+        assertEquals(listOf("feature-1", "feature-2"), merged.keys.toList())
+    }
+
+    @Test
+    fun mapArtifactRenderCache_preservesDeletesThatArriveDuringHydration() {
+        val cache = MapArtifactRenderCache()
+        cache.resetIfMapChanged("map-a")
+        cache.replace(
+            features = linkedMapOf("feature-1" to JSONObject("""{"id":"feature-1"}""")),
+            overlayState = ArtifactOverlayState(totalFeatures = 1)
+        )
+        val hydrationStartVersion = cache.featureVersion
+
+        cache.removeFeature("feature-1")
+
+        val merged = cache.mergedHydrationFeatures(
+            hydratedFeatures = linkedMapOf("feature-1" to JSONObject("""{"id":"feature-1"}""")),
+            hydrationStartVersion = hydrationStartVersion
+        )
+
+        assertEquals(emptyList<String>(), merged.keys.toList())
+    }
+
+    @Test
     fun visibleTileNetworkActive_staysEnabledUnlessOfflinePrepSuppressesNetwork() {
         assertEquals(true, visibleTileNetworkActive(suppressLiveMapNetwork = false))
         assertEquals(false, visibleTileNetworkActive(suppressLiveMapNetwork = true))

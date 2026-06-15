@@ -172,6 +172,16 @@ def review_metric(score: dict[str, object] | None, name: str) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def pressure_metric(score: dict[str, object] | None, name: str) -> float:
+    if score is None:
+        return 0.0
+    pressure = score.get("detection_pressure", {})
+    if not isinstance(pressure, dict):
+        return 0.0
+    value = pressure.get(name, 0.0)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -209,7 +219,9 @@ def main() -> int:
         "review_pos,review_neg,review_missed,first_hit_s,first_box_avg_s,"
         "hit_dist_p50_norm,hit_dist_p90_norm,hit_dist_p90_px_1080p,"
         "hit_dist_max_norm,miss_dist_p50_norm,miss_dist_p90_norm,"
-        "fp_dist_p50_norm,shadow_equal"
+        "fp_dist_p50_norm,pressure_frames,pressure_events,pressure_area_p90,"
+        "pressure_area_max,pressure_streak,off_target_events,off_target_streak,"
+        "shadow_equal"
     )
     all_shadow_equal = True
     for case in CASES:
@@ -229,7 +241,10 @@ def main() -> int:
                 "{precision:.3f},{recall:.3f},{tp},{fp},{pos},{neg},{missed},"
                 "{first_hit:.3f},{latency:.3f},{hit_p50:.4f},{hit_p90:.4f},"
                 "{hit_p90_px:.2f},{hit_max:.4f},{miss_p50:.4f},{miss_p90:.4f},"
-                "{fp_p50:.4f},{shadow_equal}".format(
+                "{fp_p50:.4f},{pressure_frames},{pressure_events},"
+                "{pressure_area_p90:.4f},{pressure_area_max:.4f},"
+                "{pressure_streak},{off_target_events},{off_target_streak},"
+                "{shadow_equal}".format(
                     case=case.label,
                     mode=mode,
                     realtime=metric(summary, "realtime_factor"),
@@ -260,6 +275,13 @@ def main() -> int:
                     miss_p50=review_metric(score, "miss_distance_p50_norm"),
                     miss_p90=review_metric(score, "miss_distance_p90_norm"),
                     fp_p50=review_metric(score, "false_positive_distance_p50_norm"),
+                    pressure_frames=int(pressure_metric(score, "box_frame_count")),
+                    pressure_events=int(pressure_metric(score, "box_event_count")),
+                    pressure_area_p90=pressure_metric(score, "box_area_p90_norm"),
+                    pressure_area_max=pressure_metric(score, "box_area_max_norm"),
+                    pressure_streak=int(pressure_metric(score, "max_box_frame_streak")),
+                    off_target_events=int(pressure_metric(score, "off_target_box_event_count")),
+                    off_target_streak=int(pressure_metric(score, "max_off_target_box_frame_streak")),
                     shadow_equal="yes" if shadow_equal else "NO",
                 )
             )

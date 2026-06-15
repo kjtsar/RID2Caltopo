@@ -79,6 +79,19 @@ class AnomalyConfigTest {
     }
 
     @Test
+    fun motionEnabled_tracksOnlyOperatorMotionToggle() {
+        val withPersistedAppearance = AnomalyConfig(
+            algorithms = setOf(AnomalyAlgorithm.ThermalHotspot, AnomalyAlgorithm.Motion),
+        )
+        val appearanceOnly = AnomalyConfig(
+            algorithms = setOf(AnomalyAlgorithm.ThermalHotspot),
+        )
+
+        assertTrue(withPersistedAppearance.motionEnabled)
+        assertFalse(appearanceOnly.motionEnabled)
+    }
+
+    @Test
     fun toNativeConfig_defaultMotionSensitivityMapsToNeutralScale() {
         val native = AnomalyConfig(
             motionEvidenceSensitivity = 0.60f,
@@ -158,7 +171,7 @@ class AnomalyConfigTest {
     }
 
     @Test
-    fun forLocalPlaybackReview_enablesDetectionAndUsesRealtimeStrideWhenUntuned() {
+    fun forLocalPlaybackReview_enablesDetectionWithoutChangingRealtimeConfig() {
         val config = AnomalyConfig(
             enabled = false,
             appearanceSelection = AppearanceAnomalySelection.Color,
@@ -174,29 +187,36 @@ class AnomalyConfigTest {
         assertEquals(config.algorithms, reviewConfig.algorithms)
         assertEquals(config.sensitivity, reviewConfig.sensitivity, 0.001f)
         assertEquals(config.thermalPolarity, reviewConfig.thermalPolarity)
-        assertEquals(AnomalyStrideMode.Fixed, reviewConfig.strideMode)
-        assertEquals(2, reviewConfig.frameStride)
-        assertEquals(2, reviewConfig.adaptiveMinStrideFrames)
+        assertEquals(config.strideMode, reviewConfig.strideMode)
+        assertEquals(config.frameStride, reviewConfig.frameStride)
+        assertEquals(config.adaptiveMinStrideFrames, reviewConfig.adaptiveMinStrideFrames)
+        assertEquals(config.adaptiveMaxStrideSeconds, reviewConfig.adaptiveMaxStrideSeconds)
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
-        assertEquals(AnomalyStrideMode.Fixed.nativeValue, native.strideMode)
-        assertEquals(2, native.frameStride)
+        assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
+        assertEquals(4, native.frameStride)
     }
 
     @Test
-    fun forLocalPlaybackReview_usesCapturedPlaybackSensitivityWhenUntuned() {
+    fun forLocalPlaybackReview_keepsRealtimeSensitivityAndStrideWhenUntuned() {
         val reviewConfig = AnomalyConfig().forLocalPlaybackReview()
 
-        assertEquals(0.59f, reviewConfig.sensitivity, 0.001f)
-        assertTrue(reviewConfig.algorithms.isEmpty())
+        assertEquals(0.42f, reviewConfig.sensitivity, 0.001f)
+        assertTrue(reviewConfig.motionEnabled)
+        assertEquals(AnomalyStrideMode.Fixed, reviewConfig.strideMode)
+        assertEquals(1, reviewConfig.frameStride)
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
-        assertEquals(3.04f, native.scoreThreshold, 0.01f)
-        assertEquals(AnomalyAlgorithm.ThermalHotspot.nativeMask, native.algorithmMask)
+        assertEquals(4.81f, native.scoreThreshold, 0.01f)
+        assertEquals(1, native.frameStride)
+        assertEquals(
+            AnomalyAlgorithm.ThermalHotspot.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
+            native.algorithmMask
+        )
     }
 
     @Test
-    fun forLocalPlaybackReview_treatsPersistedCapturedPlaybackDefaultsAsUntuned() {
+    fun forLocalPlaybackReview_preservesPersistedCapturedPlaybackSettings() {
         val reviewConfig = AnomalyConfig(
             enabled = false,
             appearanceSelection = AppearanceAnomalySelection.Auto,
@@ -210,16 +230,19 @@ class AnomalyConfigTest {
 
         assertTrue(reviewConfig.enabled)
         assertEquals(0.59f, reviewConfig.sensitivity, 0.001f)
-        assertTrue(reviewConfig.algorithms.isEmpty())
+        assertTrue(reviewConfig.motionEnabled)
         assertEquals(AnomalyStrideMode.Fixed, reviewConfig.strideMode)
         assertEquals(2, reviewConfig.frameStride)
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
-        assertEquals(AnomalyAlgorithm.ThermalHotspot.nativeMask, native.algorithmMask)
+        assertEquals(
+            AnomalyAlgorithm.ThermalHotspot.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
+            native.algorithmMask
+        )
     }
 
     @Test
-    fun forLocalPlaybackReview_treatsExplicitThermalCapturedPlaybackDefaultsAsUntuned() {
+    fun forLocalPlaybackReview_preservesExplicitThermalCapturedPlaybackSettings() {
         val reviewConfig = AnomalyConfig(
             enabled = false,
             appearanceSelection = AppearanceAnomalySelection.Thermal,
@@ -233,10 +256,15 @@ class AnomalyConfigTest {
 
         assertTrue(reviewConfig.enabled)
         assertEquals(AppearanceAnomalySelection.Thermal, reviewConfig.appearanceSelection)
-        assertTrue(reviewConfig.algorithms.isEmpty())
+        assertEquals(0.59f, reviewConfig.sensitivity, 0.001f)
+        assertEquals(2, reviewConfig.frameStride)
+        assertTrue(reviewConfig.motionEnabled)
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
-        assertEquals(AnomalyAlgorithm.ThermalHotspot.nativeMask, native.algorithmMask)
+        assertEquals(
+            AnomalyAlgorithm.ThermalHotspot.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
+            native.algorithmMask
+        )
     }
 
     @Test
@@ -266,6 +294,7 @@ class AnomalyConfigTest {
         assertEquals(setOf(AnomalyAlgorithm.Motion), config.algorithms)
         assertEquals(ThermalPolarity.BlackHot, config.thermalPolarity)
         assertEquals(MotionRegistrationMode.Affine, config.registrationMode)
+        assertEquals(MovementEstimatorMode.LayeredActive, config.movementEstimatorMode)
         assertEquals(AnomalyStrideMode.Fixed, config.strideMode)
         assertEquals(1, config.frameStride)
         assertEquals(2, config.adaptiveMinStrideFrames)
@@ -274,6 +303,9 @@ class AnomalyConfigTest {
         assertEquals(0.42f, config.sensitivity)
         assertEquals(2, config.minHits)
         assertEquals(10.0f, config.thermalMinDelta)
+
+        val native = config.toNativeConfig(sourceFps = 30.0f)
+        assertEquals(MovementEstimatorMode.LayeredActive.nativeValue, native.movementEstimatorMode)
     }
 
     @Test

@@ -198,6 +198,69 @@ def quantile(values: list[float], percentile: float) -> float | None:
     return values[low] * (1.0 - fraction) + values[high] * fraction
 
 
+def max_consecutive_frame_streak(frames: Iterable[int]) -> int:
+    best = 0
+    current = 0
+    previous: int | None = None
+    for frame in sorted(set(frames)):
+        if previous is not None and frame == previous + 1:
+            current += 1
+        else:
+            current = 1
+        best = max(best, current)
+        previous = frame
+    return best
+
+
+def detection_matches_positive_annotation(
+    detection: Detection,
+    annotations: Iterable[Annotation],
+    time_window_s: float,
+) -> bool:
+    for annotation in annotations:
+        if annotation.review_kind not in POSITIVE_KINDS:
+            continue
+        if abs(detection.time_s - annotation.time_s) > time_window_s:
+            continue
+        if detection.contains(annotation.x, annotation.y):
+            return True
+    return False
+
+
+def summarize_detection_pressure(
+    detections: list[Detection],
+    annotations: list[Annotation],
+    time_window_s: float,
+) -> dict[str, float | int | None]:
+    areas = [max(0.0, detection.w) * max(0.0, detection.h) for detection in detections]
+    box_frames = [detection.frame for detection in detections]
+    off_target = [
+        detection for detection in detections
+        if not detection_matches_positive_annotation(detection, annotations, time_window_s)
+    ]
+    off_target_frames = [detection.frame for detection in off_target]
+
+    return {
+        "box_frame_count": len(set(box_frames)),
+        "box_event_count": len(detections),
+        "box_area_sum_norm": sum(areas),
+        "box_area_mean_norm": (statistics.fmean(areas) if areas else None),
+        "box_area_p50_norm": quantile(areas, 0.50),
+        "box_area_p90_norm": quantile(areas, 0.90),
+        "box_area_max_norm": (max(areas) if areas else None),
+        "max_box_frame_streak": max_consecutive_frame_streak(box_frames),
+        "off_target_box_event_count": len(off_target),
+        "off_target_box_frame_count": len(set(off_target_frames)),
+        "max_off_target_box_frame_streak": max_consecutive_frame_streak(off_target_frames),
+    }
+
+
+def format_optional_float(value: object, digits: int = 4) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.{digits}f}"
+    return "n/a"
+
+
 def score_review(
     annotations: list[Annotation],
     detections: list[Detection],
@@ -358,6 +421,7 @@ def score_review(
         "latency_to_first_box_avg_s": (statistics.fmean(track_latencies) if track_latencies else None),
         "latency_to_first_box_p95_s": quantile(track_latencies, 0.95),
         "latency_to_first_box_max_s": (max(track_latencies) if track_latencies else None),
+        "detection_pressure": summarize_detection_pressure(detections, annotations, time_window_s),
         "by_review_kind": by_kind,
         "details": detailed_rows,
     }
@@ -460,6 +524,18 @@ def summarize(
                 f"p50 {score['false_positive_distance_p50_norm']:.4f} "
                 f"max {score['false_positive_distance_max_norm']:.4f} norm"
             )
+        pressure = score["detection_pressure"]
+        lines.append(
+            "  Box pressure: "
+            f"frames {pressure['box_frame_count']}, "
+            f"events {pressure['box_event_count']}, "
+            f"area p50/p90/max {format_optional_float(pressure['box_area_p50_norm'])}/"
+            f"{format_optional_float(pressure['box_area_p90_norm'])}/"
+            f"{format_optional_float(pressure['box_area_max_norm'])}, "
+            f"streak {pressure['max_box_frame_streak']}, "
+            f"off-target events {pressure['off_target_box_event_count']}, "
+            f"off-target streak {pressure['max_off_target_box_frame_streak']}"
+        )
         if score["by_review_kind"]:
             lines.append("  By review_kind:")
             for kind, stats in sorted(score["by_review_kind"].items()):

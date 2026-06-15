@@ -169,6 +169,42 @@ bool anomaly_detector_runtime_budget_should_trim_render_queue(
     return buffered_span_ms >= threshold_ms;
 }
 
+bool anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+        bool local_file_source,
+        bool ad_enabled,
+        bool ad_thread_started,
+        bool ad_sync_ready,
+        bool render_thread_stop,
+        int render_queue_depth,
+        int64_t buffered_span_ms,
+        int64_t target_latency_ms) {
+    if (!local_file_source ||
+        !ad_enabled ||
+        !ad_thread_started ||
+        !ad_sync_ready ||
+        render_thread_stop ||
+        render_queue_depth <= 0 ||
+        target_latency_ms <= 0) {
+        return false;
+    }
+    if (buffered_span_ms < 0) {
+        buffered_span_ms = 0;
+    }
+    return buffered_span_ms < target_latency_ms;
+}
+
+bool anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+        bool local_file_source,
+        bool processing_enabled,
+        bool render_thread_stop,
+        anomaly_detector_runtime_budget_t budget) {
+    if (!local_file_source || !processing_enabled || render_thread_stop) {
+        return false;
+    }
+    budget = anomaly_detector_runtime_budget_normalize(budget);
+    return budget.render_backlog_seconds < budget.cursory_backlog_seconds;
+}
+
 int anomaly_detector_runtime_budget_queue_tail_index(
         int head,
         int depth,
@@ -1128,7 +1164,7 @@ anomaly_detector_runtime_budget_local_ad_overlay_action(
     if (attached_to_pending_render) {
         return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_ATTACHED;
     }
-    return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_FORWARD_LATE;
+    return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE;
 }
 
 anomaly_detector_runtime_budget_local_ad_route_t

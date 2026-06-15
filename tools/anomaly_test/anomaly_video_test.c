@@ -79,6 +79,7 @@ typedef struct {
     float min_area_fraction;
     app_thermal_polarity_t thermal_polarity;
     app_registration_mode_t registration_mode;
+    int movement_estimator_mode;
     float scan_zone;
     int min_hits;
     float thermal_min_delta;
@@ -113,7 +114,7 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.show_candidate_blobs = false;
     cfg.troubleshooting_debug = false;
     cfg.color_algorithm_enabled = false;
-    cfg.motion_algorithm_enabled = false;
+    cfg.motion_algorithm_enabled = true;
     cfg.saliency_enabled = false;
     cfg.appearance_selection = APP_APPEARANCE_AUTO;
     cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
@@ -126,6 +127,7 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.min_area_fraction = APP_DEFAULT_MIN_AREA_FRACTION;
     cfg.thermal_polarity = APP_THERMAL_POLARITY_BLACK_HOT;
     cfg.registration_mode = APP_REGISTRATION_AFFINE;
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
     cfg.scan_zone = APP_DEFAULT_SCAN_ZONE;
     cfg.min_hits = APP_DEFAULT_MIN_HITS;
     cfg.thermal_min_delta = APP_DEFAULT_THERMAL_MIN_DELTA;
@@ -222,6 +224,10 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
         app_cfg->registration_mode == APP_REGISTRATION_AFFINE
             ? ANOMALY_REGISTRATION_AFFINE
             : ANOMALY_REGISTRATION_GMV;
+    native_cfg->movement_estimator_mode = app_clampi(
+            app_cfg->movement_estimator_mode,
+            ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+            ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE);
     native_cfg->stride_mode =
         color_realtime_stride_default ||
         app_cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE
@@ -2059,6 +2065,7 @@ int main(int argc, char **argv) {
     int requested_color_frontend_mode = cfg.color_frontend_mode;
     int requested_movement_estimator_mode = cfg.movement_estimator_mode;
     bool color_frontend_overridden = false;
+    bool movement_estimator_overridden = false;
 
     // Probe state (--probe cx,cy).
     int    probe_active  = 0;
@@ -2102,6 +2109,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Error: --movement-estimator expects legacy-affine, layered-shadow, or layered-active\n");
                 return 1;
             }
+            movement_estimator_overridden = true;
             cfg.movement_estimator_mode = requested_movement_estimator_mode;
         }
         else if (!strcmp(argv[i], "--stride")    && i+1 < argc) cfg.frame_stride      = atoi(argv[++i]);
@@ -2300,7 +2308,9 @@ int main(int argc, char **argv) {
         if (color_frontend_overridden) {
             cfg.color_frontend_mode = requested_color_frontend_mode;
         }
-        cfg.movement_estimator_mode = requested_movement_estimator_mode;
+        if (movement_estimator_overridden) {
+            cfg.movement_estimator_mode = requested_movement_estimator_mode;
+        }
     }
     bool app_qualification_ready = app_parity_mode && app_display_output;
     if (app_parity_mode && !app_display_output) {

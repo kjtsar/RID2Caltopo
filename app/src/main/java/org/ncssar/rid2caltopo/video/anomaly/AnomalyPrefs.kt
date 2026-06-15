@@ -65,6 +65,7 @@ object AnomalyPrefs {
                 scanZone = 0.50f,
                 frameStride = 1,
                 sensitivity = 0.42f,
+                movementEstimatorMode = MovementEstimatorMode.LayeredActive,
             )
         } else {
             config

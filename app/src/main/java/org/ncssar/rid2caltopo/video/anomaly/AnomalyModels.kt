@@ -10,8 +10,6 @@ private const val DEFAULT_FRAME_STRIDE = 1
 private const val DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES = 2
 private const val DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS = 1.0f
 private const val COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES = 4
-private const val LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE = 2
-private const val LOCAL_PLAYBACK_REVIEW_DEFAULT_SENSITIVITY = 0.59f
 private val DEFAULT_NON_APPEARANCE_ALGORITHMS = setOf(AnomalyAlgorithm.Motion)
 
 enum class AnomalyAlgorithm(
@@ -156,7 +154,7 @@ data class AnomalyConfig(
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.BlackHot,
     val registrationMode: MotionRegistrationMode = MotionRegistrationMode.Affine,
-    val movementEstimatorMode: MovementEstimatorMode = MovementEstimatorMode.LegacyAffine,
+    val movementEstimatorMode: MovementEstimatorMode = MovementEstimatorMode.LayeredActive,
     val scanZone: Float = 0.50f,
     val minHits: Int = 2,
     val thermalMinDelta: Float = 10.0f,
@@ -167,6 +165,9 @@ data class AnomalyConfig(
         get() = algorithms.filterNot {
             it == AnomalyAlgorithm.ThermalHotspot || it == AnomalyAlgorithm.ColorOutlier
         }.toSet()
+
+    val motionEnabled: Boolean
+        get() = nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)
 
     val sensitivityLabel: String
         get() = String.format(Locale.US, "%d%%", (sensitivity.coerceIn(0f, 1f) * 100f).toInt())
@@ -229,30 +230,7 @@ data class AnomalyConfig(
     }
 
     fun forLocalPlaybackReview(): AnomalyConfig {
-        val enabledConfig = copy(enabled = true)
-        if (!hasDefaultOrCapturedPlaybackStrideSettings()) return enabledConfig
-        val usesDefaultSensitivity = hasDefaultOrCapturedPlaybackSensitivity()
-        return enabledConfig.copy(
-            strideMode = AnomalyStrideMode.Fixed,
-            frameStride = LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE,
-            adaptiveMinStrideFrames = DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES,
-            adaptiveMaxStrideSeconds = DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS,
-            algorithms = if (
-                usesDefaultSensitivity &&
-                appearanceSelection != AppearanceAnomalySelection.Color &&
-                algorithms == DEFAULT_NON_APPEARANCE_ALGORITHMS &&
-                !saliencyEnabled
-            ) {
-                emptySet()
-            } else {
-                algorithms
-            },
-            sensitivity = if (usesDefaultSensitivity) {
-                LOCAL_PLAYBACK_REVIEW_DEFAULT_SENSITIVITY
-            } else {
-                sensitivity
-            },
-        )
+        return copy(enabled = true)
     }
 
     fun withColorRealtimeStrideDefaultsIfUnmodified(): AnomalyConfig {
@@ -270,21 +248,6 @@ data class AnomalyConfig(
             frameStride == DEFAULT_FRAME_STRIDE &&
             adaptiveMinStrideFrames == DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES &&
             abs(adaptiveMaxStrideSeconds - DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS) < 0.001f
-    }
-
-    private fun hasDefaultOrCapturedPlaybackStrideSettings(): Boolean {
-        return hasDefaultRealtimeStrideSettings() ||
-            (
-                strideMode == AnomalyStrideMode.Fixed &&
-                    frameStride == LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE &&
-                    adaptiveMinStrideFrames == DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES &&
-                    abs(adaptiveMaxStrideSeconds - DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS) < 0.001f
-                )
-    }
-
-    private fun hasDefaultOrCapturedPlaybackSensitivity(): Boolean {
-        return abs(sensitivity - 0.42f) < 0.001f ||
-            abs(sensitivity - LOCAL_PLAYBACK_REVIEW_DEFAULT_SENSITIVITY) < 0.001f
     }
 
     fun toggledAlgorithm(algorithm: AnomalyAlgorithm): AnomalyConfig {

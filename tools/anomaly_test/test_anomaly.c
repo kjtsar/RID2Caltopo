@@ -7702,6 +7702,89 @@ static void test_target_tracks_update_matches_existing_and_preserves_publish_con
            "target tracks update: matching observation refreshes lifecycle flags");
 }
 
+static void test_target_tracks_update_supported_thermal_hit_gets_persistence_bonus(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.next_target_track_id = 5;
+    state.target_tracks[1].active = true;
+    state.target_tracks[1].id = 4;
+    state.target_tracks[1].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[1].center_x_norm = 0.50f;
+    state.target_tracks[1].center_y_norm = 0.50f;
+    state.target_tracks[1].support_radius_norm = 0.020f;
+    state.target_tracks[1].confidence = 0.40f;
+    state.target_tracks[1].publish_confirmed = true;
+    state.target_tracks[1].hit_count = 3;
+    state.target_tracks[1].movement_window_frames = 5;
+    state.target_tracks[1].movement_valid_frames = 5;
+    state.target_tracks[1].movement_parallax_frames = 5;
+    state.target_tracks[1].movement_confidence_sum = 4.0f;
+    state.target_tracks[1].movement_independent_score_sum = 3.0f;
+    state.target_tracks[1].last_movement_residual_px = 18.0f;
+    state.target_tracks[1].last_movement_independent_score = 0.80f;
+
+    anomaly_target_observation_t obs;
+    memset(&obs, 0, sizeof(obs));
+    obs.valid = true;
+    obs.algorithm = ANOMALY_ALGO_THERMAL;
+    obs.center_x_norm = 0.505f;
+    obs.center_y_norm = 0.495f;
+    obs.confidence = 0.35f;
+    obs.publish_confirming = true;
+
+    anomaly_target_tracks_update_from_observations(
+            &state,
+            &obs,
+            1,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            1.0f);
+
+    const anomaly_target_track_t *track = &state.target_tracks[1];
+    EXPECT(track->hit_count == 4 && track->miss_count == 0,
+           "target tracks salience: supported thermal observation still refreshes lifecycle");
+    EXPECT_NEAR(track->confidence, 0.78f, 0.0001f,
+                "target tracks salience: persistent ME-contradicting thermal hit gets bonus");
+}
+
+static void test_target_tracks_update_unsupported_thermal_hit_does_not_get_persistence_bonus(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.next_target_track_id = 5;
+    state.target_tracks[1].active = true;
+    state.target_tracks[1].id = 4;
+    state.target_tracks[1].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[1].center_x_norm = 0.50f;
+    state.target_tracks[1].center_y_norm = 0.50f;
+    state.target_tracks[1].support_radius_norm = 0.020f;
+    state.target_tracks[1].confidence = 0.40f;
+    state.target_tracks[1].publish_confirmed = true;
+    state.target_tracks[1].hit_count = 3;
+    state.target_tracks[1].movement_window_frames = 5;
+    state.target_tracks[1].movement_valid_frames = 5;
+    state.target_tracks[1].movement_parallax_frames = 0;
+    state.target_tracks[1].movement_confidence_sum = 4.0f;
+    state.target_tracks[1].last_movement_residual_px = 2.0f;
+
+    anomaly_target_observation_t obs;
+    memset(&obs, 0, sizeof(obs));
+    obs.valid = true;
+    obs.algorithm = ANOMALY_ALGO_THERMAL;
+    obs.center_x_norm = 0.505f;
+    obs.center_y_norm = 0.495f;
+    obs.confidence = 0.35f;
+    obs.publish_confirming = true;
+
+    anomaly_target_tracks_update_from_observations(
+            &state,
+            &obs,
+            1,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            1.0f);
+
+    EXPECT_NEAR(state.target_tracks[1].confidence, 0.62f, 0.0001f,
+                "target tracks salience: unsupported recurring thermal hit keeps base gain only");
+}
+
 static void test_target_tracks_confirmed_color_rejects_loose_nonconfirming_drag(void) {
     anomaly_state_t state;
     memset(&state, 0, sizeof(state));
@@ -7804,6 +7887,56 @@ static void test_target_tracks_update_unmatched_ages_and_respects_registration_h
             0.25f);
     EXPECT(!state.target_tracks[0].active,
            "target tracks update: hard-degraded unmatched track clears");
+}
+
+static void test_target_tracks_update_unmatched_thermal_requires_support_for_revisit(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.next_target_track_id = 4;
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].id = 3;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].center_x_norm = 0.35f;
+    state.target_tracks[0].center_y_norm = 0.42f;
+    state.target_tracks[0].confidence = 0.80f;
+    state.target_tracks[0].hit_count = 5;
+    state.target_tracks[0].miss_count = 1;
+    state.target_tracks[0].hold_count = 5;
+    state.target_tracks[0].fresh_observation = false;
+    state.target_tracks[0].forced_revisit = true;
+
+    anomaly_target_tracks_update_from_observations(
+            &state,
+            NULL,
+            0,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            1.0f);
+
+    EXPECT(state.target_tracks[0].active && state.target_tracks[0].miss_count == 2,
+           "target tracks update: unsupported thermal miss should age without clearing");
+    EXPECT(!state.target_tracks[0].forced_revisit,
+           "target tracks update: unsupported thermal miss should stop forcing target-only revisit");
+
+    state.target_tracks[0].forced_revisit = true;
+    state.target_tracks[0].miss_count = 1;
+    state.target_tracks[0].confidence = 0.80f;
+    state.target_tracks[0].hold_count = 5;
+    state.target_tracks[0].movement_window_frames = 5;
+    state.target_tracks[0].movement_valid_frames = 5;
+    state.target_tracks[0].movement_parallax_frames = 5;
+    state.target_tracks[0].movement_confidence_sum = 4.0f;
+    state.target_tracks[0].last_movement_residual_px = 12.0f;
+
+    anomaly_target_tracks_update_from_observations(
+            &state,
+            NULL,
+            0,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            1.0f);
+
+    EXPECT(state.target_tracks[0].forced_revisit,
+           "target tracks update: supported thermal miss can still force target-only revisit");
 }
 
 static void test_target_tracks_update_empty_frame_returns_clear_intent_only_without_revisit_tracks(void) {
@@ -7981,6 +8114,7 @@ static void test_target_tracks_update_movement_evidence_records_independent_tile
     anomaly_debug_movement_t movement;
     memset(&movement, 0, sizeof(movement));
     movement.valid = true;
+    movement.mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
     movement.sample_count = 1;
     movement.tile_cols = ANOMALY_MOVEMENT_GRID_COLS;
     movement.tile_rows = ANOMALY_MOVEMENT_GRID_ROWS;
@@ -8017,6 +8151,47 @@ static void test_target_tracks_update_movement_evidence_records_independent_tile
                 "target tracks movement: AOI independent score mean records tile score");
     EXPECT_NEAR(movement.aoi_confidence_mean, 0.80f, 0.0001f,
                 "target tracks movement: AOI confidence mean records tile confidence");
+}
+
+static void test_target_tracks_update_movement_evidence_shadow_mode_does_not_mutate_tracks(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].center_x_norm = 0.25f;
+    state.target_tracks[0].center_y_norm = 0.40f;
+    state.target_tracks[0].movement_window_frames = 3;
+    state.target_tracks[0].movement_valid_frames = 2;
+    state.target_tracks[0].movement_independent_score_sum = 1.25f;
+    state.target_tracks[0].movement_confidence_sum = 1.50f;
+
+    anomaly_debug_movement_t movement;
+    memset(&movement, 0, sizeof(movement));
+    movement.valid = true;
+    movement.mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_SHADOW;
+    movement.sample_count = 1;
+    movement.tile_cols = ANOMALY_MOVEMENT_GRID_COLS;
+    movement.tile_rows = ANOMALY_MOVEMENT_GRID_ROWS;
+    movement.tiles[0].valid = true;
+    movement.tiles[0].center_x_norm = 0.25f;
+    movement.tiles[0].center_y_norm = 0.40f;
+    movement.tiles[0].dx_px = 12.0f;
+    movement.tiles[0].residual_px = 40.0f;
+    movement.tiles[0].confidence = 0.80f;
+    movement.tiles[0].layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+
+    anomaly_target_tracks_update_movement_evidence(&state, &movement);
+
+    EXPECT(movement.aoi_valid_count == 1 && movement.aoi_independent_count == 1,
+           "target tracks movement: shadow mode still reports AOI telemetry");
+    EXPECT(state.target_tracks[0].movement_window_frames == 3 &&
+           state.target_tracks[0].movement_valid_frames == 2,
+           "target tracks movement: shadow mode does not mutate movement windows");
+    EXPECT_NEAR(state.target_tracks[0].movement_independent_score_sum, 1.25f, 0.0001f,
+                "target tracks movement: shadow mode preserves independent score sum");
+    EXPECT_NEAR(state.target_tracks[0].movement_confidence_sum, 1.50f, 0.0001f,
+                "target tracks movement: shadow mode preserves confidence sum");
+    EXPECT_NEAR(state.target_tracks[0].last_movement_residual_px, 0.0f, 0.0001f,
+                "target tracks movement: shadow mode does not publish last residual onto track");
 }
 
 static void test_target_tracks_predict_invalid_registration_leaves_tracks_unchanged(void) {
@@ -11844,8 +12019,8 @@ static void test_detector_facade_realtime_default_config_contract(void) {
            "detector facade default config: algorithm mask is copied");
     EXPECT(cfg.registration_mode == ANOMALY_REGISTRATION_GMV,
            "detector facade default config: registration mode uses native GMV default");
-    EXPECT(cfg.movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
-           "detector facade default config: movement estimator default is legacy affine");
+    EXPECT(cfg.movement_estimator_mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE,
+           "detector facade default config: movement estimator default is layered active");
     EXPECT(cfg.stride_mode == ANOMALY_STRIDE_MODE_FIXED,
            "detector facade default config: default stride mode is fixed");
     EXPECT(cfg.frame_stride == 15,
@@ -12033,6 +12208,67 @@ static void test_detector_facade_runtime_budget_should_trim_render_queue(void) {
            "runtime budget render queue trim: invalid target latency disables trim");
     EXPECT(!anomaly_detector_runtime_budget_should_trim_render_queue(true, 0, 700),
            "runtime budget render queue trim: empty buffered span disables trim");
+}
+
+static void test_detector_facade_runtime_budget_should_wait_for_local_ad_buffer(void) {
+    EXPECT(anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                   true, true, true, true, false, 1, 0, 500),
+           "runtime budget local AD buffer: ready local sidecar waits below target span");
+    EXPECT(anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                   true, true, true, true, false, 8, 499, 500),
+           "runtime budget local AD buffer: waits until target span is reached");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    true, true, true, true, false, 8, 500, 500),
+           "runtime budget local AD buffer: releases at target span");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    true, true, true, true, true, 8, 100, 700),
+           "runtime budget local AD buffer: render stop drains without waiting");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    true, false, true, true, false, 1, 0, 700),
+           "runtime budget local AD buffer: disabled AD does not delay playback");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    true, true, false, true, false, 1, 0, 700),
+           "runtime budget local AD buffer: missing AD thread does not delay playback");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    false, true, true, true, false, 1, 0, 700),
+           "runtime budget local AD buffer: live sources do not use local sidecar delay");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    true, true, true, true, false, 0, 0, 700),
+           "runtime budget local AD buffer: empty queue has nothing to delay");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    true, true, true, true, false, 1, 0, 0),
+           "runtime budget local AD buffer: invalid target does not delay playback");
+}
+
+static void test_detector_facade_runtime_budget_should_wait_for_local_ad_processing(void) {
+    anomaly_detector_runtime_budget_t budget =
+            anomaly_detector_runtime_budget_make_default(30.0f);
+    budget.startup_elapsed_seconds = 1.0f;
+    budget.render_backlog_seconds = 0.20f;
+    EXPECT(anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                   true, true, false, budget),
+           "runtime budget local AD processing: waits below cursory backlog");
+
+    budget.render_backlog_seconds = 0.25f;
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                    true, true, false, budget),
+           "runtime budget local AD processing: starts at cursory backlog");
+
+    budget.render_backlog_seconds = 0.50f;
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                    true, true, false, budget),
+           "runtime budget local AD processing: keeps running at thorough backlog");
+
+    budget.render_backlog_seconds = 0.20f;
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                    false, true, false, budget),
+           "runtime budget local AD processing: live sources do not wait on local backlog");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                    true, false, false, budget),
+           "runtime budget local AD processing: disabled AD does not wait");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                    true, true, true, budget),
+           "runtime budget local AD processing: render stop drains without waiting");
 }
 
 static void test_detector_facade_runtime_budget_queue_tail_index(void) {
@@ -12828,8 +13064,8 @@ static void test_detector_facade_runtime_budget_local_ad_overlay_action(void) {
                    ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_ATTACHED,
            "runtime budget local AD overlay: attached pending slot remains attached");
     EXPECT(anomaly_detector_runtime_budget_local_ad_overlay_action(true, false) ==
-                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_FORWARD_LATE,
-           "runtime budget local AD overlay: late overlay forwards instead of disappearing");
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE,
+           "runtime budget local AD overlay: late overlay does not re-enter render queue out of order");
 }
 
 static void test_detector_facade_runtime_budget_local_ad_route(void) {
@@ -13883,6 +14119,53 @@ static void test_detector_facade_result_apply_annotation_visibility_cadence_hold
     EXPECT(fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f &&
            fabsf(view.boxes[0].top_norm - 0.40f) < 0.0001f,
            "detector facade visibility cadence: large target switch is held within window");
+}
+
+static void test_detector_facade_result_apply_annotation_visibility_cadence_holds_reappearance(void) {
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    memset(&result, 0, sizeof(result));
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    state.visibility.initialized = true;
+    state.visibility.annotations_visible = true;
+    state.visibility.last_update_frame_ordinal = 15;
+    state.box_count = 1;
+    state.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.boxes[0].left_norm = 0.20f;
+    state.boxes[0].right_norm = 0.30f;
+    state.boxes[0].top_norm = 0.40f;
+    state.boxes[0].bottom_norm = 0.50f;
+    state.boxes[0].weight = 1.0f;
+
+    result.box_count = 0;
+    anomaly_detector_annotation_view_t view =
+        anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 30, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0 &&
+           !state.visibility.annotations_visible &&
+           state.visibility.last_update_frame_ordinal == 30,
+           "detector facade visibility cadence: boundary disappearance clears thermal ROI");
+
+    result.box_count = 1;
+    result.boxes[0].algorithm = ANOMALY_ALGO_THERMAL;
+    result.boxes[0].left_norm = 0.45f;
+    result.boxes[0].right_norm = 0.55f;
+    result.boxes[0].top_norm = 0.10f;
+    result.boxes[0].bottom_norm = 0.20f;
+    result.boxes[0].weight = 1.0f;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 31, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0 &&
+           !state.visibility.annotations_visible &&
+           state.visibility.last_update_frame_ordinal == 30,
+           "detector facade visibility cadence: thermal reappearance is held within half-second window");
+
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 45, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           state.visibility.annotations_visible &&
+           state.visibility.last_update_frame_ordinal == 45,
+           "detector facade visibility cadence: thermal reappearance publishes at next half-second boundary");
 }
 
 static void test_detector_facade_annotation_snapshot_view_contract(void) {
@@ -19428,14 +19711,18 @@ int main(void) {
     test_target_tracks_allocate_full_uses_weakest_score();
     test_target_tracks_update_allocates_track_and_sets_lifecycle_fields();
     test_target_tracks_update_matches_existing_and_preserves_publish_confirmation();
+    test_target_tracks_update_supported_thermal_hit_gets_persistence_bonus();
+    test_target_tracks_update_unsupported_thermal_hit_does_not_get_persistence_bonus();
     test_target_tracks_confirmed_color_rejects_loose_nonconfirming_drag();
     test_target_tracks_update_unmatched_ages_and_respects_registration_health();
+    test_target_tracks_update_unmatched_thermal_requires_support_for_revisit();
     test_target_tracks_update_empty_frame_returns_clear_intent_only_without_revisit_tracks();
     test_target_tracks_predict_null_and_default_noop();
     test_target_tracks_predict_scene_discontinuity_clears();
     test_target_tracks_predict_invalid_and_hard_health_clear();
     test_target_tracks_decay_movement_evidence_clamps_windows();
     test_target_tracks_update_movement_evidence_records_independent_tile();
+    test_target_tracks_update_movement_evidence_shadow_mode_does_not_mutate_tracks();
     test_target_tracks_predict_invalid_registration_leaves_tracks_unchanged();
     test_target_tracks_predict_failed_inverse_marks_forced_revisit();
     test_target_tracks_predict_success_clamps_updates_quality_and_nonfresh_revisit();
@@ -19526,6 +19813,8 @@ int main(void) {
     test_detector_facade_runtime_budget_trim_keep_latest_frames();
     test_detector_facade_runtime_budget_render_queue_hard_cap();
     test_detector_facade_runtime_budget_should_trim_render_queue();
+    test_detector_facade_runtime_budget_should_wait_for_local_ad_buffer();
+    test_detector_facade_runtime_budget_should_wait_for_local_ad_processing();
     test_detector_facade_runtime_budget_queue_tail_index();
     test_detector_facade_runtime_budget_queue_offset_index();
     test_detector_facade_runtime_budget_queue_pop_state();
@@ -19589,6 +19878,7 @@ int main(void) {
     test_detector_facade_result_apply_annotation_cadence();
     test_detector_facade_result_apply_annotation_visibility_cadence_tracks_motion();
     test_detector_facade_result_apply_annotation_visibility_cadence_holds_jitter();
+    test_detector_facade_result_apply_annotation_visibility_cadence_holds_reappearance();
     test_detector_facade_annotation_snapshot_view_contract();
     test_detector_facade_process_output_combines_frame_and_annotations();
     test_detector_facade_process_output_apply_annotation_cadence();

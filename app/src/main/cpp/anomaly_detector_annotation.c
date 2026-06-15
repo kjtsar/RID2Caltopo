@@ -14,6 +14,22 @@ bool anomaly_detector_annotation_cadence_allows_update(
     return (frame_ordinal % (int64_t)cadence_frames) == 0;
 }
 
+static bool anomaly_detector_annotation_cadence_elapsed_since_update(
+        const anomaly_detector_annotation_cadence_state_t *state,
+        int64_t                                           frame_ordinal,
+        int                                               cadence_frames) {
+    if (state == NULL || frame_ordinal < 0) {
+        return false;
+    }
+    if (cadence_frames <= 1) {
+        return true;
+    }
+    if (!state->initialized || state->last_update_frame_ordinal < 0) {
+        return true;
+    }
+    return frame_ordinal - state->last_update_frame_ordinal >= (int64_t)cadence_frames;
+}
+
 void anomaly_detector_annotation_cadence_state_init(
         anomaly_detector_annotation_cadence_state_t *state) {
     if (state == NULL) {
@@ -228,6 +244,10 @@ anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_visi
         snapshot_state->visibility.initialized &&
         !snapshot_state->visibility.annotations_visible &&
         !anomaly_detector_annotation_cadence_allows_update(frame_ordinal, cadence_frames) &&
+        anomaly_detector_annotation_cadence_elapsed_since_update(
+                &snapshot_state->visibility,
+                frame_ordinal,
+                cadence_frames) &&
         anomaly_detector_annotation_view_has_immediate_thermal(
                 desired_annotations,
                 frame_ordinal,

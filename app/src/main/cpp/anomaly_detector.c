@@ -40,7 +40,7 @@ anomaly_detector_config_t anomaly_detector_config_make_realtime_default(
         .show_candidate_blobs = false,
         .algorithm_mask = algorithm_mask,
         .registration_mode = ANOMALY_REGISTRATION_GMV,
-        .movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE,
+        .movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE,
         .stride_mode = ANOMALY_STRIDE_MODE_FIXED,
         .frame_stride = window_frames,
         .adaptive_min_stride_frames = 2,

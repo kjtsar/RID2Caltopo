@@ -2160,6 +2160,35 @@ static int64_t buffered_span_ms_locked(const ffmpeg_session_t *session) {
             last_pts_us);
 }
 
+static anomaly_detector_runtime_budget_t local_ad_runtime_budget_from_backlog_ms(
+        int64_t buffered_span_ms) {
+    anomaly_detector_runtime_budget_t budget =
+            anomaly_detector_runtime_budget_make_default((float) RENDER_DEFAULT_FPS);
+    if (buffered_span_ms < 0) {
+        buffered_span_ms = 0;
+    }
+    budget.render_backlog_seconds = (float) buffered_span_ms / 1000.0f;
+    budget.startup_elapsed_seconds = budget.startup_skip_seconds;
+    return budget;
+}
+
+static int64_t local_ad_render_backlog_target_ms(void) {
+    anomaly_detector_runtime_budget_t budget =
+            anomaly_detector_runtime_budget_make_default((float) RENDER_DEFAULT_FPS);
+    budget = anomaly_detector_runtime_budget_normalize(budget);
+    return (int64_t) llroundf(budget.max_backlog_seconds * 1000.0f);
+}
+
+static int64_t local_render_backlog_ms(ffmpeg_session_t *session) {
+    if (session == NULL || !session->render_sync_ready) {
+        return 0;
+    }
+    pthread_mutex_lock(&session->render_lock);
+    int64_t buffered_span_ms = buffered_span_ms_locked(session);
+    pthread_mutex_unlock(&session->render_lock);
+    return buffered_span_ms;
+}
+
 static int64_t queue_pts_interval_ms_locked(const ffmpeg_session_t *session,
                                             int max_samples) {
     if (session == NULL ||
@@ -3676,6 +3705,27 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
             : RENDER_SOURCE_INTERVAL_DEFAULT_MS;
 
     bool local_file_source = is_local_file_source(session);
+    bool local_ad_enabled = false;
+    bool local_ad_thread_started = false;
+    bool local_ad_sync_ready = false;
+    if (local_file_source) {
+        pthread_mutex_lock(&g_lock);
+        local_ad_enabled = anomaly_processing_enabled_locked(session);
+        local_ad_thread_started = session->ad_thread_started;
+        local_ad_sync_ready = session->ad_sync_ready;
+        pthread_mutex_unlock(&g_lock);
+    }
+    if (anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                local_file_source,
+                local_ad_enabled,
+                local_ad_thread_started,
+                local_ad_sync_ready,
+                session->render_thread_stop,
+                session->render_queue_depth,
+                buffered_span_ms,
+                local_ad_render_backlog_target_ms())) {
+        return false;
+    }
     if (anomaly_detector_runtime_budget_should_trim_render_queue(
                 local_file_source,
                 buffered_span_ms,
@@ -3979,6 +4029,32 @@ static void *ad_thread_main(void *arg) {
         bool process_enabled = anomaly_processing_enabled_locked(session);
         pthread_mutex_unlock(&g_lock);
 
+        int frame_stride_override = 0;
+        if (is_local_file_source(session) && process_enabled) {
+            anomaly_detector_runtime_budget_t budget =
+                    local_ad_runtime_budget_from_backlog_ms(local_render_backlog_ms(session));
+            while (session_running(session) &&
+                   !session->ad_thread_stop &&
+                   anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                           true,
+                           process_enabled,
+                           session->render_thread_stop,
+                           budget)) {
+                usleep(5000);
+                budget = local_ad_runtime_budget_from_backlog_ms(
+                        local_render_backlog_ms(session));
+            }
+            if (!session_running(session) || session->ad_thread_stop) {
+                clear_render_queue_slot(&packet);
+                break;
+            }
+            anomaly_detector_processing_mode_t processing_mode =
+                    anomaly_detector_runtime_budget_processing_mode(budget);
+            if (processing_mode == ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY) {
+                frame_stride_override = 2;
+            }
+        }
+
         bool skipped = false;
 
         bool bypass_for_pressure = false;
@@ -4004,7 +4080,7 @@ static void *ad_thread_main(void *arg) {
                                                        packet.frame,
                                                        packet.source_ts_us,
                                                        &analyzed,
-                                                       0);
+                                                       frame_stride_override);
             packet.analyzed = analyzed;
         }
         if (session_stopping(session)) {

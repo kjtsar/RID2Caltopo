@@ -735,7 +735,7 @@ fun StreamTile(
                                 detectTapGestures(onTap = { viewModel.toggleShowCandidateBlobs(streamDesignator) })
                             }
                         )
-                        if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) {
+                        if (anomalyConfig.motionEnabled) {
                             Text(
                                 text = "Motion ${anomalyConfig.motionEvidenceSensitivityLabel}",
                                 color = Color.White,
@@ -795,7 +795,7 @@ fun StreamTile(
                                 )
                             }
                         }
-                        if (anomalyConfig.resolvedAlgorithms(viewModel.resolvedAppearanceModeFor(streamDesignator)).contains(AnomalyAlgorithm.Motion)) {
+                        if (anomalyConfig.motionEnabled) {
                             OutlinedLegendText(
                                 text = "Motion",
                                 fillColor = Color.Green,
@@ -1229,7 +1229,7 @@ internal fun AnomalySettingsDialogs(
                         TextButton(onClick = {
                             viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
                         }) {
-                            Text(if (anomalyConfig.nonAppearanceAlgorithms.contains(AnomalyAlgorithm.Motion)) "On" else "Off")
+                            Text(if (anomalyConfig.motionEnabled) "On" else "Off")
                         }
                     }
                     Row(

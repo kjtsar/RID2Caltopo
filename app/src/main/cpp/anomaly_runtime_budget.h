@@ -146,6 +146,22 @@ bool anomaly_detector_runtime_budget_should_trim_render_queue(
         int64_t buffered_span_ms,
         int64_t target_latency_ms);
 
+bool anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+        bool local_file_source,
+        bool ad_enabled,
+        bool ad_thread_started,
+        bool ad_sync_ready,
+        bool render_thread_stop,
+        int render_queue_depth,
+        int64_t buffered_span_ms,
+        int64_t target_latency_ms);
+
+bool anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+        bool local_file_source,
+        bool processing_enabled,
+        bool render_thread_stop,
+        anomaly_detector_runtime_budget_t budget);
+
 int anomaly_detector_runtime_budget_queue_tail_index(
         int head,
         int depth,

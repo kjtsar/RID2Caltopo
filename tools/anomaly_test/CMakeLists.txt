@@ -98,7 +98,7 @@ add_test(
 set_tests_properties(
     anomaly_video_app_defaults_local_playback_config
     PROPERTIES
-        PASS_REGULAR_EXPRESSION "algorithm  = 2 \\(thermal \\)"
+        PASS_REGULAR_EXPRESSION "algorithm  = 6 \\(thermal motion \\).*movement   = layered_active"
 )
 add_test(
     NAME anomaly_video_powerhouse1_app_local_opening_recall

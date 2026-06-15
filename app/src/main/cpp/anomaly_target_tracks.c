@@ -9,7 +9,11 @@
 #include <string.h>
 
 #define ANOMALY_TARGET_MAX_CARRIED_MISSES 6
+#define ANOMALY_TARGET_MAX_UNSUPPORTED_THERMAL_REVISIT_MISSES 1
+#define ANOMALY_TARGET_MAX_SUPPORTED_THERMAL_REVISIT_MISSES 2
+#define ANOMALY_TARGET_MIN_REVISIT_THERMAL_RESIDUAL_PX 8.0f
 #define ANOMALY_TARGET_CONFIDENCE_HIT_GAIN 0.22f
+#define ANOMALY_TARGET_CONFIDENCE_ME_PERSISTENCE_GAIN 0.16f
 #define ANOMALY_TARGET_CONFIDENCE_MISS_DECAY 0.22f
 #define ANOMALY_TARGET_CONFIRMED_COLOR_LOCK_GATE 0.040f
 
@@ -115,6 +119,50 @@ static bool anomaly_target_tracks_should_apply_local_residual(
     return true;
 }
 
+static bool anomaly_target_tracks_has_supported_thermal_revisit(
+        const anomaly_target_track_t *track) {
+    if (track == NULL || !track->active || track->algorithm != ANOMALY_ALGO_THERMAL) {
+        return false;
+    }
+    if (track->movement_valid_frames < 3 || track->movement_window_frames < 3) return false;
+    if (track->movement_parallax_frames * 2 < track->movement_valid_frames) return false;
+    if (!isfinite(track->movement_confidence_sum) || track->movement_valid_frames <= 0) {
+        return false;
+    }
+    float mean_confidence =
+        track->movement_confidence_sum / (float)track->movement_valid_frames;
+    if (mean_confidence < 0.55f) return false;
+    if (!isfinite(track->last_movement_residual_px)) return false;
+    return track->last_movement_residual_px >= ANOMALY_TARGET_MIN_REVISIT_THERMAL_RESIDUAL_PX;
+}
+
+static bool anomaly_target_tracks_has_me_persistent_thermal_support(
+        const anomaly_target_track_t *track) {
+    if (!anomaly_target_tracks_has_supported_thermal_revisit(track)) return false;
+    if (track->hit_count < 2) return false;
+    if (track->movement_independent_score_sum < 1.0f &&
+        track->last_movement_independent_score < 0.35f) {
+        return false;
+    }
+    return true;
+}
+
+static bool anomaly_target_tracks_should_force_revisit_after_miss(
+        const anomaly_target_track_t *track,
+        anomaly_registration_health_t registration_health) {
+    if (track == NULL || registration_health < ANOMALY_REG_HEALTH_SOFT_DEGRADED) {
+        return false;
+    }
+    if (track->algorithm != ANOMALY_ALGO_THERMAL || !track->publish_confirmed) {
+        return track->miss_count <= ANOMALY_TARGET_MAX_CARRIED_MISSES;
+    }
+    int max_thermal_misses =
+        anomaly_target_tracks_has_supported_thermal_revisit(track)
+            ? ANOMALY_TARGET_MAX_SUPPORTED_THERMAL_REVISIT_MISSES
+            : ANOMALY_TARGET_MAX_UNSUPPORTED_THERMAL_REVISIT_MISSES;
+    return track->miss_count <= max_thermal_misses;
+}
+
 bool anomaly_target_tracks_update_from_observations(
         anomaly_state_t                    *state,
         const anomaly_target_observation_t *observations,
@@ -154,8 +202,12 @@ bool anomaly_target_tracks_update_from_observations(
         track->half_w_norm = obs->half_w_norm;
         track->half_h_norm = obs->half_h_norm;
         track->support_radius_norm = obs->support_radius_norm;
-        track->confidence = clampf(fmaxf(track->confidence, obs->confidence) +
-                                   ANOMALY_TARGET_CONFIDENCE_HIT_GAIN,
+        float hit_gain = ANOMALY_TARGET_CONFIDENCE_HIT_GAIN;
+        if (obs->algorithm == ANOMALY_ALGO_THERMAL &&
+            anomaly_target_tracks_has_me_persistent_thermal_support(track)) {
+            hit_gain += ANOMALY_TARGET_CONFIDENCE_ME_PERSISTENCE_GAIN;
+        }
+        track->confidence = clampf(fmaxf(track->confidence, obs->confidence) + hit_gain,
                                    0.0f,
                                    1.0f);
         if (obs->publish_confirming) {
@@ -178,8 +230,7 @@ bool anomaly_target_tracks_update_from_observations(
         track->hold_count--;
         track->confidence = clampf(track->confidence - ANOMALY_TARGET_CONFIDENCE_MISS_DECAY, 0.0f, 1.0f);
         track->forced_revisit =
-            registration_health >= ANOMALY_REG_HEALTH_SOFT_DEGRADED &&
-            track->miss_count <= ANOMALY_TARGET_MAX_CARRIED_MISSES;
+            anomaly_target_tracks_should_force_revisit_after_miss(track, registration_health);
         if (track->hold_count <= 0 ||
             track->miss_count > ANOMALY_TARGET_MAX_CARRIED_MISSES ||
             registration_health <= ANOMALY_REG_HEALTH_HARD_DEGRADED ||
@@ -275,6 +326,8 @@ void anomaly_target_tracks_update_movement_evidence(
 
     anomaly_motion_movement_snapshot_t movement_snapshot =
         anomaly_motion_estimator_make_movement_snapshot(movement);
+    bool can_mutate_track_evidence =
+        movement->mode == ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
     float independent_sum = 0.0f;
     float confidence_sum = 0.0f;
     for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
@@ -297,32 +350,34 @@ void anomaly_target_tracks_update_movement_evidence(
         bool parallax = anomaly_motion_estimator_tile_is_parallax_like(&tile);
         bool unstable = tile.layer_class == ANOMALY_MOVEMENT_LAYER_UNSTABLE;
 
-        if (track->movement_window_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
-            track->movement_window_frames++;
+        if (can_mutate_track_evidence) {
+            if (track->movement_window_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+                track->movement_window_frames++;
+            }
+            if (track->movement_valid_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+                track->movement_valid_frames++;
+            }
+            if (independent && track->movement_independent_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+                track->movement_independent_frames++;
+            } else if (!independent && track->movement_independent_frames > 0 &&
+                       track->movement_window_frames >= ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+                track->movement_independent_frames--;
+            }
+            if (parallax && track->movement_parallax_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+                track->movement_parallax_frames++;
+            } else if (!parallax && track->movement_parallax_frames > 0 &&
+                       track->movement_window_frames >= ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
+                track->movement_parallax_frames--;
+            }
+            track->movement_independent_score_sum =
+                clampf(track->movement_independent_score_sum * 0.92f + independent_score, 0.0f, 30.0f);
+            track->movement_confidence_sum =
+                clampf(track->movement_confidence_sum * 0.92f + tile.confidence, 0.0f, 30.0f);
+            track->last_movement_dx_px = tile.dx_px;
+            track->last_movement_dy_px = tile.dy_px;
+            track->last_movement_residual_px = tile.residual_px;
+            track->last_movement_independent_score = independent_score;
         }
-        if (track->movement_valid_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
-            track->movement_valid_frames++;
-        }
-        if (independent && track->movement_independent_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
-            track->movement_independent_frames++;
-        } else if (!independent && track->movement_independent_frames > 0 &&
-                   track->movement_window_frames >= ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
-            track->movement_independent_frames--;
-        }
-        if (parallax && track->movement_parallax_frames < ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
-            track->movement_parallax_frames++;
-        } else if (!parallax && track->movement_parallax_frames > 0 &&
-                   track->movement_window_frames >= ANOMALY_AOI_MOVEMENT_WINDOW_FRAMES) {
-            track->movement_parallax_frames--;
-        }
-        track->movement_independent_score_sum =
-            clampf(track->movement_independent_score_sum * 0.92f + independent_score, 0.0f, 30.0f);
-        track->movement_confidence_sum =
-            clampf(track->movement_confidence_sum * 0.92f + tile.confidence, 0.0f, 30.0f);
-        track->last_movement_dx_px = tile.dx_px;
-        track->last_movement_dy_px = tile.dy_px;
-        track->last_movement_residual_px = tile.residual_px;
-        track->last_movement_independent_score = independent_score;
 
         movement->aoi_valid_count++;
         if (independent) movement->aoi_independent_count++;

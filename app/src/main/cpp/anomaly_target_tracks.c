@@ -8,13 +8,14 @@
 #include <math.h>
 #include <string.h>
 
-#define ANOMALY_TARGET_MAX_CARRIED_MISSES 6
+#define ANOMALY_TARGET_MAX_CARRIED_MISSES ANOMALY_ACC_HOLD_FRAMES
 #define ANOMALY_TARGET_MAX_UNSUPPORTED_THERMAL_REVISIT_MISSES 1
 #define ANOMALY_TARGET_MAX_SUPPORTED_THERMAL_REVISIT_MISSES 2
 #define ANOMALY_TARGET_MIN_REVISIT_THERMAL_RESIDUAL_PX 8.0f
 #define ANOMALY_TARGET_CONFIDENCE_HIT_GAIN 0.22f
 #define ANOMALY_TARGET_CONFIDENCE_ME_PERSISTENCE_GAIN 0.16f
 #define ANOMALY_TARGET_CONFIDENCE_MISS_DECAY 0.22f
+#define ANOMALY_TARGET_CONFIDENCE_POSITIONAL_MISS_DECAY 0.04f
 #define ANOMALY_TARGET_CONFIRMED_COLOR_LOCK_GATE 0.040f
 
 void anomaly_target_tracks_clear_track(anomaly_target_track_t *track) {
@@ -97,6 +98,7 @@ static bool anomaly_target_tracks_should_apply_local_residual(
         const anomaly_target_tracks_registration_prediction_t *prediction) {
     if (track == NULL || prediction == NULL) return false;
     if (!track->active || track->algorithm != ANOMALY_ALGO_THERMAL) return false;
+    if (!track->fresh_observation) return false;
     if (prediction->frame_width <= 1 || prediction->frame_height <= 1) return false;
     if (track->movement_valid_frames < 3 || track->movement_window_frames < 3) return false;
     if (track->movement_parallax_frames * 2 < track->movement_valid_frames) return false;
@@ -136,6 +138,27 @@ static bool anomaly_target_tracks_has_supported_thermal_revisit(
     return track->last_movement_residual_px >= ANOMALY_TARGET_MIN_REVISIT_THERMAL_RESIDUAL_PX;
 }
 
+static bool anomaly_target_tracks_has_positional_thermal_support(
+        const anomaly_target_track_t *track) {
+    if (track == NULL || !track->active || track->algorithm != ANOMALY_ALGO_THERMAL) {
+        return false;
+    }
+    if (!track->publish_confirmed || track->hit_count < 2 || track->hold_count <= 0) {
+        return false;
+    }
+    if (!isfinite(track->last_registration_quality) || track->last_registration_quality < 0.55f) {
+        return false;
+    }
+    if (track->movement_valid_frames < 3 || track->movement_window_frames < 3) return false;
+    if (track->movement_parallax_frames * 2 < track->movement_valid_frames) return false;
+    if (!isfinite(track->movement_confidence_sum) || track->movement_valid_frames <= 0) {
+        return false;
+    }
+    float mean_confidence =
+        track->movement_confidence_sum / (float)track->movement_valid_frames;
+    return mean_confidence >= 0.55f;
+}
+
 static bool anomaly_target_tracks_has_me_persistent_thermal_support(
         const anomaly_target_track_t *track) {
     if (!anomaly_target_tracks_has_supported_thermal_revisit(track)) return false;
@@ -156,10 +179,12 @@ static bool anomaly_target_tracks_should_force_revisit_after_miss(
     if (track->algorithm != ANOMALY_ALGO_THERMAL || !track->publish_confirmed) {
         return track->miss_count <= ANOMALY_TARGET_MAX_CARRIED_MISSES;
     }
-    int max_thermal_misses =
-        anomaly_target_tracks_has_supported_thermal_revisit(track)
-            ? ANOMALY_TARGET_MAX_SUPPORTED_THERMAL_REVISIT_MISSES
-            : ANOMALY_TARGET_MAX_UNSUPPORTED_THERMAL_REVISIT_MISSES;
+    int max_thermal_misses = ANOMALY_TARGET_MAX_UNSUPPORTED_THERMAL_REVISIT_MISSES;
+    if (anomaly_target_tracks_has_positional_thermal_support(track)) {
+        max_thermal_misses = ANOMALY_TARGET_MAX_CARRIED_MISSES;
+    } else if (anomaly_target_tracks_has_supported_thermal_revisit(track)) {
+        max_thermal_misses = ANOMALY_TARGET_MAX_SUPPORTED_THERMAL_REVISIT_MISSES;
+    }
     return track->miss_count <= max_thermal_misses;
 }
 
@@ -228,7 +253,11 @@ bool anomaly_target_tracks_update_from_observations(
         track->fresh_observation = false;
         track->miss_count++;
         track->hold_count--;
-        track->confidence = clampf(track->confidence - ANOMALY_TARGET_CONFIDENCE_MISS_DECAY, 0.0f, 1.0f);
+        bool positional_carry = anomaly_target_tracks_has_positional_thermal_support(track);
+        float miss_decay = positional_carry
+                ? ANOMALY_TARGET_CONFIDENCE_POSITIONAL_MISS_DECAY
+                : ANOMALY_TARGET_CONFIDENCE_MISS_DECAY;
+        track->confidence = clampf(track->confidence - miss_decay, 0.0f, 1.0f);
         track->forced_revisit =
             anomaly_target_tracks_should_force_revisit_after_miss(track, registration_health);
         if (track->hold_count <= 0 ||

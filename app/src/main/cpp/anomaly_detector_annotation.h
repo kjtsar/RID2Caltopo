@@ -40,10 +40,25 @@ typedef struct {
 anomaly_detector_annotation_view_t anomaly_detector_result_annotations(
         const anomaly_detector_result_t *result);
 
+#define ANOMALY_DETECTOR_MAX_STABLE_ANNOTATION_SLOTS 8
+
+typedef struct {
+    bool initialized;
+    bool active;
+    int algorithm;
+    uint64_t hit_mask;
+    int64_t last_seen_frame_ordinal;
+    int64_t published_until_frame_ordinal;
+    anomaly_detector_annotation_t box;
+} anomaly_detector_annotation_stability_slot_t;
+
 typedef struct {
     anomaly_detector_annotation_cadence_state_t visibility;
     anomaly_detector_annotation_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
     int box_count;
+    int64_t stability_last_frame_ordinal;
+    anomaly_detector_annotation_stability_slot_t
+        stable_slots[ANOMALY_DETECTOR_MAX_STABLE_ANNOTATION_SLOTS];
 } anomaly_detector_annotation_cadence_snapshot_state_t;
 
 void anomaly_detector_annotation_cadence_snapshot_state_init(
@@ -69,6 +84,12 @@ anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_visi
         anomaly_detector_annotation_cadence_snapshot_state_t   *snapshot_state,
         int64_t                                                frame_ordinal,
         int                                                    cadence_frames);
+
+anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_stability(
+        const anomaly_detector_result_t                       *result,
+        anomaly_detector_annotation_cadence_snapshot_state_t   *snapshot_state,
+        int64_t                                                frame_ordinal,
+        int                                                    window_frames);
 
 #ifdef __cplusplus
 }

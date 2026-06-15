@@ -2727,7 +2727,7 @@ int main(int argc, char **argv) {
         output_annotations = anomaly_detector_result_annotations(&result);
         if (app_display_output) {
             output_annotations =
-                anomaly_detector_result_apply_annotation_visibility_cadence(
+                anomaly_detector_result_apply_annotation_stability(
                         &result,
                         &display_cadence,
                         display_analyzed_frame_count,

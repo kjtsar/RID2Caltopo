@@ -1194,7 +1194,7 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
     anomaly_detector_annotation_view_t stable_annotations =
             !use_stable_overlay_draw
                     ? anomaly_detector_result_annotations(&result)
-                    : anomaly_detector_result_apply_annotation_visibility_cadence(
+                    : anomaly_detector_result_apply_annotation_stability(
                             &result,
                             &session->anomaly_annotation_cadence,
                             session->anomaly_process_frame_count,

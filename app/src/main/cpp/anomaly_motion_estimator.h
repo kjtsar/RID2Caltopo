@@ -72,6 +72,8 @@ float anomaly_motion_estimator_appearance_zoom_motion_scale(float registration_s
 
 float anomaly_motion_estimator_appearance_broad_motion_scale(float global_motion_load);
 
+float anomaly_motion_estimator_appearance_parallax_motion_scale(float suppression_scale);
+
 float anomaly_motion_estimator_appearance_global_motion_load(
         int strong_global_samples,
         int global_count);
@@ -238,6 +240,20 @@ bool anomaly_motion_estimator_query_snapshot_at_norm(
         float                                    x_norm,
         float                                    y_norm,
         anomaly_debug_movement_tile_t           *tile_out);
+
+bool anomaly_motion_estimator_apply_local_residual_prediction(
+        const anomaly_motion_movement_snapshot_t *snapshot,
+        float                                    x_norm,
+        float                                    y_norm,
+        int                                      frame_width,
+        int                                      frame_height,
+        float                                   *x_out,
+        float                                   *y_out);
+
+bool anomaly_motion_estimator_allow_motion_override_at(
+        const anomaly_motion_movement_snapshot_t *snapshot,
+        float                                    x_norm,
+        float                                    y_norm);
 
 float anomaly_motion_estimator_tile_flow_magnitude_px(
         const anomaly_debug_movement_tile_t *tile);

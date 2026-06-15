@@ -88,6 +88,33 @@ static bool anomaly_target_tracks_should_hold_confirmed_color_lock(
     return dist > gate;
 }
 
+static bool anomaly_target_tracks_should_apply_local_residual(
+        const anomaly_target_track_t                         *track,
+        const anomaly_target_tracks_registration_prediction_t *prediction) {
+    if (track == NULL || prediction == NULL) return false;
+    if (!track->active || track->algorithm != ANOMALY_ALGO_THERMAL) return false;
+    if (prediction->frame_width <= 1 || prediction->frame_height <= 1) return false;
+    if (track->movement_valid_frames < 3 || track->movement_window_frames < 3) return false;
+    if (track->movement_parallax_frames * 2 < track->movement_valid_frames) return false;
+    float mean_confidence =
+        track->movement_confidence_sum / (float)track->movement_valid_frames;
+    if (mean_confidence < 0.55f) return false;
+    if (!isfinite(track->last_movement_dx_px) ||
+        !isfinite(track->last_movement_dy_px) ||
+        !isfinite(track->last_movement_residual_px)) {
+        return false;
+    }
+    if (track->last_movement_residual_px < 0.5f ||
+        track->last_movement_residual_px > 96.0f) {
+        return false;
+    }
+    if (fabsf(track->last_movement_dx_px) > 64.0f ||
+        fabsf(track->last_movement_dy_px) > 64.0f) {
+        return false;
+    }
+    return true;
+}
+
 bool anomaly_target_tracks_update_from_observations(
         anomaly_state_t                    *state,
         const anomaly_target_observation_t *observations,
@@ -195,6 +222,10 @@ void anomaly_target_tracks_predict_with_registration(
                     &ny)) {
             track->forced_revisit = true;
             continue;
+        }
+        if (anomaly_target_tracks_should_apply_local_residual(track, prediction)) {
+            nx -= track->last_movement_dx_px / (float)(prediction->frame_width - 1);
+            ny -= track->last_movement_dy_px / (float)(prediction->frame_height - 1);
         }
         track->center_x_norm = clamp01f(nx);
         track->center_y_norm = clamp01f(ny);

@@ -59,4 +59,9 @@ bool anomaly_target_observation_near_existing(
         int                                 observation_count,
         const anomaly_target_observation_t *candidate);
 
+bool anomaly_target_observation_replace_thermal_correction(
+        anomaly_target_observation_t       *observations,
+        int                                 observation_count,
+        const anomaly_target_observation_t *candidate);
+
 #endif

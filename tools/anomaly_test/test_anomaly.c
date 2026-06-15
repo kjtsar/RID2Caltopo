@@ -2654,7 +2654,7 @@ thermal_target_provisional_fixture(void) {
     provisional.final_score = 2.35f;
     provisional.score_eligible = true;
     provisional.shape_eligible = true;
-    provisional.candidate_rank = 8;
+    provisional.candidate_rank = 0.73f;
     provisional.selected_rank = 9;
     provisional.selected_score = 3.45f;
     provisional.near_existing_skip = true;
@@ -2692,9 +2692,10 @@ static void test_result_publish_thermal_debug_target_provisional_copies_fields(v
     EXPECT(result.thermal_debug.target.provisional_score_eligible &&
            result.thermal_debug.target.provisional_shape_eligible,
            "result builder thermal target provisional: eligibility flags are copied");
-    EXPECT(result.thermal_debug.target.provisional_candidate_rank == 8 &&
-           result.thermal_debug.target.provisional_selected_rank == 9,
-           "result builder thermal target provisional: ranks are copied");
+    EXPECT_NEAR(result.thermal_debug.target.provisional_candidate_rank, 0.73f, 0.0001f,
+                "result builder thermal target provisional: candidate rank is copied");
+    EXPECT(result.thermal_debug.target.provisional_selected_rank == 9,
+           "result builder thermal target provisional: selected rank is copied");
     EXPECT_NEAR(result.thermal_debug.target.provisional_selected_score, 3.45f, 0.0001f,
                 "result builder thermal target provisional: selected score is copied");
     EXPECT(result.thermal_debug.target.provisional_near_existing_skip,
@@ -5771,6 +5772,156 @@ static void test_result_build_boxes_stale_color_target_is_not_published(void) {
            "result builder: fresh confirmed color lock still publishes");
 }
 
+static void test_result_build_boxes_carried_thermal_target_publishes_before_motion_fallback(void) {
+    anomaly_state_t state;
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION);
+    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    memset(&state, 0, sizeof(state));
+    memset(boxes, 0, sizeof(boxes));
+    cfg.min_area_fraction = 0.01f;
+    cfg.min_hits = 2;
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].hit_count = 7;
+    state.target_tracks[0].miss_count = 2;
+    state.target_tracks[0].hold_count = ANOMALY_ACC_HOLD_FRAMES - 2;
+    state.target_tracks[0].confidence = 0.60f;
+    state.target_tracks[0].center_x_norm = 0.33f;
+    state.target_tracks[0].center_y_norm = 0.33f;
+    state.target_tracks[0].half_w_norm = 0.016f;
+    state.target_tracks[0].half_h_norm = 0.016f;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[0].fresh_observation = false;
+    state.target_tracks[0].movement_window_frames = 5;
+    state.target_tracks[0].movement_valid_frames = 5;
+    state.target_tracks[0].movement_parallax_frames = 5;
+    state.target_tracks[0].movement_confidence_sum = 4.0f;
+    state.target_tracks[0].last_movement_residual_px = 12.0f;
+
+    state.acc_active[2] = true;
+    state.acc_hits[2] = 5;
+    state.acc_cx[2] = 0.60f;
+    state.acc_cy[2] = 0.74f;
+
+    int count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 1 && boxes[0].algorithm == ANOMALY_ALGO_THERMAL,
+           "result builder: carried thermal lock publishes before off-target motion fallback");
+    EXPECT_NEAR((boxes[0].left_norm + boxes[0].right_norm) * 0.5f, 0.33f, 0.0001f,
+                "result builder: carried thermal lock preserves last target x");
+
+    state.target_tracks[0].miss_count = 3;
+    state.target_tracks[0].fresh_observation = false;
+    memset(boxes, 0, sizeof(boxes));
+    count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 0,
+           "result builder: stale thermal lock suppresses off-target motion fallback");
+
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LEGACY_AFFINE;
+    state.target_tracks[0].miss_count = 1;
+    memset(boxes, 0, sizeof(boxes));
+    count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 0,
+           "result builder: legacy mode does not carry stale thermal locks");
+}
+
+static void test_result_build_boxes_carried_thermal_target_requires_residual_support(void) {
+    anomaly_state_t state;
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION);
+    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    memset(&state, 0, sizeof(state));
+    memset(boxes, 0, sizeof(boxes));
+    cfg.min_area_fraction = 0.01f;
+    cfg.min_hits = 2;
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].hit_count = 7;
+    state.target_tracks[0].miss_count = 2;
+    state.target_tracks[0].hold_count = ANOMALY_ACC_HOLD_FRAMES - 2;
+    state.target_tracks[0].confidence = 0.60f;
+    state.target_tracks[0].center_x_norm = 0.33f;
+    state.target_tracks[0].center_y_norm = 0.33f;
+    state.target_tracks[0].half_w_norm = 0.016f;
+    state.target_tracks[0].half_h_norm = 0.016f;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[0].fresh_observation = false;
+    state.target_tracks[0].movement_window_frames = 5;
+    state.target_tracks[0].movement_valid_frames = 5;
+    state.target_tracks[0].movement_parallax_frames = 5;
+    state.target_tracks[0].movement_confidence_sum = 4.0f;
+    state.target_tracks[0].last_movement_residual_px = 1.0f;
+
+    state.acc_active[2] = true;
+    state.acc_hits[2] = 5;
+    state.acc_cx[2] = 0.60f;
+    state.acc_cy[2] = 0.74f;
+
+    int count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 0,
+           "result builder: low-residual stale thermal lock does not publish or fall back");
+}
+
+static void test_result_build_boxes_carried_thermal_target_suppresses_secondary_thermal_track(void) {
+    anomaly_state_t state;
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION);
+    anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    memset(&state, 0, sizeof(state));
+    memset(boxes, 0, sizeof(boxes));
+    cfg.min_area_fraction = 0.01f;
+    cfg.min_hits = 2;
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].hit_count = 7;
+    state.target_tracks[0].miss_count = 2;
+    state.target_tracks[0].hold_count = ANOMALY_ACC_HOLD_FRAMES - 2;
+    state.target_tracks[0].confidence = 0.60f;
+    state.target_tracks[0].center_x_norm = 0.33f;
+    state.target_tracks[0].center_y_norm = 0.33f;
+    state.target_tracks[0].half_w_norm = 0.016f;
+    state.target_tracks[0].half_h_norm = 0.016f;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[0].fresh_observation = false;
+    state.target_tracks[0].movement_window_frames = 5;
+    state.target_tracks[0].movement_valid_frames = 5;
+    state.target_tracks[0].movement_parallax_frames = 5;
+    state.target_tracks[0].movement_confidence_sum = 4.0f;
+    state.target_tracks[0].last_movement_residual_px = 12.0f;
+
+    state.target_tracks[1].active = true;
+    state.target_tracks[1].publish_confirmed = true;
+    state.target_tracks[1].hit_count = 3;
+    state.target_tracks[1].miss_count = 0;
+    state.target_tracks[1].hold_count = ANOMALY_ACC_HOLD_FRAMES;
+    state.target_tracks[1].confidence = 0.72f;
+    state.target_tracks[1].center_x_norm = 0.18f;
+    state.target_tracks[1].center_y_norm = 0.88f;
+    state.target_tracks[1].half_w_norm = 0.016f;
+    state.target_tracks[1].half_h_norm = 0.016f;
+    state.target_tracks[1].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[1].fresh_observation = true;
+
+    int count = anomaly_result_build_boxes(
+            &state, &cfg, ANOMALY_ALGO_MOTION, boxes, ANOMALY_MAX_BOXES_PER_FRAME);
+
+    EXPECT(count == 1,
+           "result builder: carried thermal target suppresses secondary thermal ROI");
+    EXPECT_NEAR((boxes[0].left_norm + boxes[0].right_norm) * 0.5f, 0.33f, 0.0001f,
+                "result builder: carried thermal target remains the published ROI");
+}
+
 static void test_result_build_boxes_color_target_suppresses_secondary_color_track(void) {
     anomaly_state_t state;
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION);
@@ -6855,6 +7006,73 @@ static void test_target_revisit_adaptive_risk_and_weak_lock(void) {
            "target revisit risk: less than half valid movement frames marks weak lock");
 }
 
+static void test_target_revisit_global_motion_penalty_policy(void) {
+    anomaly_debug_movement_tile_t tile;
+    memset(&tile, 0, sizeof(tile));
+    tile.valid = true;
+    tile.layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+
+    anomaly_target_track_t track;
+    memset(&track, 0, sizeof(track));
+    track.active = true;
+    track.algorithm = ANOMALY_ALGO_THERMAL;
+    track.publish_confirmed = true;
+    track.hit_count = 4;
+
+    EXPECT(!anomaly_target_revisit_should_apply_global_motion_penalty(
+                   &track,
+                   &tile,
+                   0.45f,
+                   4.9f,
+                   5.0f),
+           "target revisit penalty: confirmed thermal locks ignore global parallax");
+
+    track.publish_confirmed = false;
+    EXPECT(anomaly_target_revisit_should_apply_global_motion_penalty(
+                   &track,
+                   &tile,
+                   0.45f,
+                   4.9f,
+                   5.0f),
+           "target revisit penalty: provisional thermal locks apply global parallax");
+
+    track.publish_confirmed = true;
+    track.algorithm = ANOMALY_ALGO_COLOR;
+    EXPECT(anomaly_target_revisit_should_apply_global_motion_penalty(
+                   &track,
+                   &tile,
+                   0.45f,
+                   4.9f,
+                   5.0f),
+           "target revisit penalty: non-thermal locks apply global parallax");
+
+    track.algorithm = ANOMALY_ALGO_THERMAL;
+    tile.layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    EXPECT(!anomaly_target_revisit_should_apply_global_motion_penalty(
+                   &track,
+                   &tile,
+                   0.45f,
+                   4.9f,
+                   5.0f),
+           "target revisit penalty: independent local motion is not global parallax");
+
+    tile.layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+    EXPECT(!anomaly_target_revisit_should_apply_global_motion_penalty(
+                   &track,
+                   &tile,
+                   0.20f,
+                   4.9f,
+                   5.0f),
+           "target revisit penalty: low parallax load does not apply global parallax");
+    EXPECT(!anomaly_target_revisit_should_apply_global_motion_penalty(
+                   &track,
+                   &tile,
+                   0.45f,
+                   5.25f,
+                   5.0f),
+           "target revisit penalty: already-strong scores do not apply global parallax");
+}
+
 static void test_target_revisit_radius_scaling_and_clamps(void) {
     anomaly_target_track_t track;
     memset(&track, 0, sizeof(track));
@@ -7903,6 +8121,46 @@ static void test_target_tracks_predict_success_clamps_updates_quality_and_nonfre
                 "target tracks predict: successful inverse should update non-fresh center y");
     EXPECT(state.target_tracks[1].forced_revisit,
            "target tracks predict: non-fresh successful inverse should force revisit");
+}
+
+static void test_target_tracks_predict_applies_stable_local_residual(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].center_x_norm = 0.50f;
+    state.target_tracks[0].center_y_norm = 0.50f;
+    state.target_tracks[0].fresh_observation = true;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[0].movement_window_frames = 5;
+    state.target_tracks[0].movement_valid_frames = 5;
+    state.target_tracks[0].movement_parallax_frames = 5;
+    state.target_tracks[0].movement_confidence_sum = 4.0f;
+    state.target_tracks[0].last_movement_dx_px = 20.0f;
+    state.target_tracks[0].last_movement_dy_px = -10.0f;
+    state.target_tracks[0].last_movement_residual_px = 22.0f;
+    target_tracks_test_registration_t reg = {
+        .valid = true,
+        .invert_ok = true,
+        .dx = 0.02f,
+        .dy = -0.01f,
+    };
+    anomaly_target_tracks_registration_prediction_t prediction = {
+        .registration = &reg,
+        .health = ANOMALY_REG_HEALTH_HEALTHY,
+        .quality = 0.90f,
+        .scene_discontinuity = false,
+        .valid = target_tracks_test_registration_valid,
+        .invert_point = target_tracks_test_registration_invert,
+        .frame_width = 1000,
+        .frame_height = 500,
+    };
+
+    anomaly_target_tracks_predict_with_registration(&state, &prediction);
+
+    EXPECT_NEAR(state.target_tracks[0].center_x_norm, 0.50f, 0.0001f,
+                "target tracks predict: stable local residual offsets global x prediction");
+    EXPECT_NEAR(state.target_tracks[0].center_y_norm, 0.51f, 0.0001f,
+                "target tracks predict: stable local residual offsets global y prediction");
 }
 
 static void test_appearance_detector_interface_contract(void) {
@@ -9333,6 +9591,76 @@ static void test_color_detector_reviewed_fp_cluster_helper(void) {
            "reviewed FP cluster: unrelated negative coordinates are allowed");
 }
 
+static void test_thermal_detector_reviewed_fp_cluster_helper(void) {
+    EXPECT(anomaly_thermal_candidate_near_reviewed_fp_cluster(
+                   ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_X,
+                   ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_Y),
+           "thermal reviewed FP cluster: exact center is rejected");
+    EXPECT(anomaly_thermal_candidate_near_reviewed_fp_cluster(
+                   ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_X + ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_RADIUS,
+                   ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_Y),
+           "thermal reviewed FP cluster: radius boundary is rejected");
+    EXPECT(!anomaly_thermal_candidate_near_reviewed_fp_cluster(
+                   ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_X + ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_RADIUS + 0.001f,
+                   ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_Y),
+           "thermal reviewed FP cluster: outside radius is allowed");
+    EXPECT(!anomaly_thermal_candidate_near_reviewed_fp_cluster(-0.10f, -0.10f),
+           "thermal reviewed FP cluster: unrelated negative coordinates are allowed");
+}
+
+static void test_thermal_detector_weak_parallax_singleton_helper(void) {
+    EXPECT(anomaly_thermal_provisional_candidate_is_weak_parallax_singleton(
+                   1.0f,
+                   1.0f,
+                   2.78f,
+                   2.80f,
+                   true,
+                   true,
+                   false,
+                   0.98f),
+           "thermal provisional parallax singleton: weak singleton is rejected");
+    EXPECT(!anomaly_thermal_provisional_candidate_is_weak_parallax_singleton(
+                    2.0f,
+                    2.0f,
+                    2.78f,
+                    2.80f,
+                    true,
+                    true,
+                    false,
+                    0.98f),
+           "thermal provisional parallax singleton: compact multi-cell blob is allowed");
+    EXPECT(!anomaly_thermal_provisional_candidate_is_weak_parallax_singleton(
+                    1.0f,
+                    1.0f,
+                    3.25f,
+                    2.80f,
+                    true,
+                    true,
+                    false,
+                    0.98f),
+           "thermal provisional parallax singleton: strong singleton is allowed");
+    EXPECT(!anomaly_thermal_provisional_candidate_is_weak_parallax_singleton(
+                    1.0f,
+                    1.0f,
+                    2.78f,
+                    2.80f,
+                    true,
+                    false,
+                    true,
+                    0.98f),
+           "thermal provisional parallax singleton: independent motion is allowed");
+    EXPECT(!anomaly_thermal_provisional_candidate_is_weak_parallax_singleton(
+                    1.0f,
+                    1.0f,
+                    2.78f,
+                    2.80f,
+                    true,
+                    true,
+                    false,
+                    0.40f),
+           "thermal provisional parallax singleton: low-confidence movement is allowed");
+}
+
 static anomaly_target_observation_t color_track_support_test_obs(
         float cx,
         float cy,
@@ -10441,6 +10769,48 @@ static void test_thermal_blob_candidate_rank_ordering(void) {
            "thermal rank: smaller span wins when area ties");
 }
 
+static void test_thermal_blob_candidate_rank_prefers_score_when_retention_missing(void) {
+    anomaly_thermal_blob_candidate_t singleton = make_thermal_rank_candidate();
+    singleton.retention_rank_valid = false;
+    singleton.area = 1.0f;
+    singleton.span = 1.0f;
+    singleton.candidate.thermal_score = 0.70f;
+    singleton.peak_delta = 80.0f;
+    singleton.quality = 1.05f;
+
+    anomaly_thermal_blob_candidate_t compact_target = make_thermal_rank_candidate();
+    compact_target.retention_rank_valid = false;
+    compact_target.area = 3.0f;
+    compact_target.span = 2.0f;
+    compact_target.candidate.thermal_score = 1.42f;
+    compact_target.peak_delta = 100.0f;
+    compact_target.quality = 0.70f;
+
+    EXPECT(anomaly_thermal_blob_candidate_compare_rank(&compact_target, &singleton) < 0,
+           "thermal rank: missing retention falls back to score before singleton area");
+}
+
+static void test_thermal_blob_candidate_rank_keeps_low_quality_fragment_behind_singleton(void) {
+    anomaly_thermal_blob_candidate_t singleton = make_thermal_rank_candidate();
+    singleton.retention_rank_valid = false;
+    singleton.area = 1.0f;
+    singleton.span = 1.0f;
+    singleton.candidate.thermal_score = 0.70f;
+    singleton.peak_delta = 80.0f;
+    singleton.quality = 1.05f;
+
+    anomaly_thermal_blob_candidate_t interface_fragment = make_thermal_rank_candidate();
+    interface_fragment.retention_rank_valid = false;
+    interface_fragment.area = 4.0f;
+    interface_fragment.span = 3.0f;
+    interface_fragment.candidate.thermal_score = 1.96f;
+    interface_fragment.peak_delta = 95.0f;
+    interface_fragment.quality = 0.32f;
+
+    EXPECT(anomaly_thermal_blob_candidate_compare_rank(&interface_fragment, &singleton) > 0,
+           "thermal rank: low-quality missing-retention fragment stays behind singleton area");
+}
+
 static void test_color_blob_candidate_rank_ordering(void) {
     anomaly_color_blob_candidate_t base = make_color_rank_candidate();
     anomaly_color_blob_candidate_t challenger = base;
@@ -10510,6 +10880,128 @@ static void test_thermal_blob_candidate_rank_lookup(void) {
            "thermal rank lookup: exact first coordinate returns rank");
     EXPECT(anomaly_appearance_find_thermal_blob_candidate_rank(candidates, 3, 7, 8) == 1,
            "thermal rank lookup: duplicate coordinate returns first rank");
+}
+
+static anomaly_thermal_provisional_reserve_candidate_t
+thermal_provisional_reserve_candidate_fixture(void) {
+    anomaly_thermal_provisional_reserve_candidate_t candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.valid = true;
+    candidate.movement_tile_valid = true;
+    candidate.movement_parallax = true;
+    candidate.movement_independent = false;
+    candidate.movement_confidence = 0.96f;
+    candidate.final_score = 4.25f;
+    candidate.score_threshold = 2.80f;
+    candidate.area = 2.0f;
+    candidate.span = 2.0f;
+    candidate.fill = 0.50f;
+    candidate.center_share = 0.56f;
+    candidate.quality = 0.64f;
+    candidate.patch_support = 4.10f;
+    return candidate;
+}
+
+static void test_thermal_provisional_reserve_selects_compact_candidate_under_topn_pressure(void) {
+    int eligible_indices[] = {4, 6, 3, 0, 2, 1, 5, 7};
+    anomaly_thermal_provisional_reserve_candidate_t candidates[8];
+    memset(candidates, 0, sizeof(candidates));
+    for (int i = 0; i < 8; i++) {
+        candidates[i] = thermal_provisional_reserve_candidate_fixture();
+        candidates[i].fill = 1.0f;
+        candidates[i].center_share = 0.52f;
+        candidates[i].patch_support = 3.30f;
+        candidates[i].quality = 0.76f;
+        candidates[i].final_score = 4.80f;
+    }
+    candidates[1] = thermal_provisional_reserve_candidate_fixture();
+
+    int reserve = anomaly_appearance_select_thermal_provisional_reserve(
+            eligible_indices,
+            8,
+            4,
+            candidates,
+            8);
+
+    EXPECT(reserve == 1,
+           "thermal provisional reserve: compact half-fill candidate outside keep window is reserved");
+}
+
+static void test_thermal_provisional_reserve_rejects_reviewed_fp_and_existing_keep(void) {
+    int eligible_indices[] = {1, 4, 6, 3, 0, 2};
+    anomaly_thermal_provisional_reserve_candidate_t candidates[7];
+    memset(candidates, 0, sizeof(candidates));
+    for (int i = 0; i < 7; i++) {
+        candidates[i] = thermal_provisional_reserve_candidate_fixture();
+        candidates[i].fill = 1.0f;
+    }
+    candidates[1] = thermal_provisional_reserve_candidate_fixture();
+
+    EXPECT(anomaly_appearance_select_thermal_provisional_reserve(
+                   eligible_indices,
+                   6,
+                   4,
+                   candidates,
+                   7) == -1,
+           "thermal provisional reserve: candidate already inside keep window is not duplicated");
+
+    eligible_indices[0] = 4;
+    eligible_indices[1] = 6;
+    eligible_indices[2] = 3;
+    eligible_indices[3] = 0;
+    eligible_indices[4] = 2;
+    eligible_indices[5] = 1;
+    candidates[1] = thermal_provisional_reserve_candidate_fixture();
+    candidates[1].near_reviewed_fp_cluster = true;
+    EXPECT(anomaly_appearance_select_thermal_provisional_reserve(
+                   eligible_indices,
+                   6,
+                   4,
+                   candidates,
+                   7) == -1,
+           "thermal provisional reserve: reviewed FP cluster candidate is not reserved");
+}
+
+static void test_thermal_provisional_reserve_rejects_overbright_fixed_hotspot(void) {
+    int eligible_indices[] = {4, 6, 3, 0, 2, 1};
+    anomaly_thermal_provisional_reserve_candidate_t candidates[7];
+    memset(candidates, 0, sizeof(candidates));
+    for (int i = 0; i < 7; i++) {
+        candidates[i] = thermal_provisional_reserve_candidate_fixture();
+        candidates[i].fill = 1.0f;
+    }
+    candidates[1] = thermal_provisional_reserve_candidate_fixture();
+    candidates[1].final_score = candidates[1].score_threshold + 4.0f;
+    candidates[1].patch_support = candidates[1].score_threshold + 3.7f;
+
+    EXPECT(anomaly_appearance_select_thermal_provisional_reserve(
+                   eligible_indices,
+                   6,
+                   4,
+                   candidates,
+                   7) == -1,
+           "thermal provisional reserve: overbright fixed hotspot is not reserved");
+}
+
+static void test_thermal_provisional_reserve_allows_faint_compact_target(void) {
+    int eligible_indices[] = {4, 6, 3, 0, 2, 1};
+    anomaly_thermal_provisional_reserve_candidate_t candidates[7];
+    memset(candidates, 0, sizeof(candidates));
+    for (int i = 0; i < 7; i++) {
+        candidates[i] = thermal_provisional_reserve_candidate_fixture();
+        candidates[i].fill = 1.0f;
+    }
+    candidates[1] = thermal_provisional_reserve_candidate_fixture();
+    candidates[1].final_score = candidates[1].score_threshold + 1.65f;
+    candidates[1].patch_support = candidates[1].score_threshold + 1.34f;
+
+    EXPECT(anomaly_appearance_select_thermal_provisional_reserve(
+                   eligible_indices,
+                   6,
+                   4,
+                   candidates,
+                   7) == 1,
+           "thermal provisional reserve: faint compact target remains eligible");
 }
 
 static void test_color_blob_candidate_rank_lookup(void) {
@@ -11117,6 +11609,55 @@ static void test_target_observation_duplicate_suppression(void) {
     EXPECT(!anomaly_target_observation_near_existing(
                 observations, 1, &invalid_candidate),
            "target observation: invalid candidate is not suppressed");
+}
+
+static void test_target_observation_thermal_correction_replaces_stale_nearby_observation(void) {
+    anomaly_target_observation_t observations[1];
+    memset(observations, 0, sizeof(observations));
+    observations[0].valid = true;
+    observations[0].algorithm = ANOMALY_ALGO_THERMAL;
+    observations[0].center_x_norm = 0.316f;
+    observations[0].center_y_norm = 0.258f;
+    observations[0].support_radius_norm = 0.034f;
+    observations[0].confidence = 0.95f;
+    observations[0].publish_confirming = true;
+
+    anomaly_target_observation_t correction;
+    memset(&correction, 0, sizeof(correction));
+    correction.valid = true;
+    correction.algorithm = ANOMALY_ALGO_THERMAL;
+    correction.center_x_norm = 0.316f;
+    correction.center_y_norm = 0.288f;
+    correction.support_radius_norm = 0.034f;
+    correction.confidence = 0.56f;
+    correction.publish_confirming = false;
+
+    EXPECT(anomaly_target_observation_replace_thermal_correction(
+                observations, 1, &correction),
+           "target observation: thermal correction replaces stale nearby thermal observation");
+    EXPECT_NEAR(observations[0].center_y_norm, 0.288f, 0.0001f,
+                "target observation: replacement copies corrected thermal center");
+    EXPECT(!observations[0].publish_confirming,
+           "target observation: replacement preserves candidate confirmation state");
+}
+
+static void test_target_observation_thermal_correction_keeps_true_duplicate_suppressed(void) {
+    anomaly_target_observation_t observations[1];
+    memset(observations, 0, sizeof(observations));
+    observations[0].valid = true;
+    observations[0].algorithm = ANOMALY_ALGO_THERMAL;
+    observations[0].center_x_norm = 0.316f;
+    observations[0].center_y_norm = 0.288f;
+    observations[0].support_radius_norm = 0.034f;
+
+    anomaly_target_observation_t duplicate = observations[0];
+    duplicate.center_y_norm = 0.302f;
+
+    EXPECT(!anomaly_target_observation_replace_thermal_correction(
+                observations, 1, &duplicate),
+           "target observation: nearly overlapping thermal duplicate is not treated as correction");
+    EXPECT_NEAR(observations[0].center_y_norm, 0.288f, 0.0001f,
+                "target observation: duplicate leaves existing thermal center unchanged");
 }
 
 // ── anomaly_detector_process facade tests ──────────────────────────────────
@@ -13211,6 +13752,54 @@ static void test_detector_facade_result_apply_annotation_visibility_cadence_trac
            view.box_count == 0,
            "detector facade visibility cadence: first within-window appearance is held invisible");
 
+    result.boxes[0].weight = 1.0f;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 6, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade visibility cadence: early thermal appearance still waits for warmup");
+
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 7, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade visibility cadence: high-confidence thermal still waits before cadence warmup");
+
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 16, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f,
+           "detector facade visibility cadence: high-confidence thermal appearance publishes after warmup");
+
+    result.boxes[0].left_norm = 0.24f;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 17, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.24f) < 0.0001f,
+           "detector facade visibility cadence: high-confidence thermal position refreshes while visible");
+
+    result.box_count = 0;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 18, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           fabsf(view.boxes[0].left_norm - 0.24f) < 0.0001f,
+           "detector facade visibility cadence: immediate thermal appearance is held after publication");
+
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 30, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade visibility cadence: immediate thermal appearance clears on boundary disappearance");
+
+    state.visibility.initialized = true;
+    state.visibility.annotations_visible = false;
+    state.visibility.last_update_frame_ordinal = 0;
+    state.box_count = 0;
+    result.box_count = 1;
+    result.boxes[0].left_norm = 0.20f;
+    result.boxes[0].weight = 0.50f;
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 16, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0,
+           "detector facade visibility cadence: low-confidence thermal appearance remains cadence gated");
+
     view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 15, 15);
     EXPECT(view.boxes == state.boxes &&
            view.box_count == 1 &&
@@ -14189,6 +14778,109 @@ static void test_motion_estimator_appearance_broad_motion_scale_contract(void) {
                 "motion appearance broad scale: high load remains clamped to legacy minimum");
 }
 
+static void test_motion_estimator_appearance_parallax_motion_scale_contract(void) {
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_parallax_motion_scale(1.0f), 1.0f, 0.0001f,
+                "motion appearance parallax scale: unsuppressed sidecar stays neutral");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_parallax_motion_scale(0.82f), 0.82f, 0.0001f,
+                "motion appearance parallax scale: sidecar suppression carries through");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_parallax_motion_scale(0.05f), 0.20f, 0.0001f,
+                "motion appearance parallax scale: pathological suppression clamps to motion floor");
+    EXPECT_NEAR(anomaly_motion_estimator_appearance_parallax_motion_scale(NAN), 1.0f, 0.0001f,
+                "motion appearance parallax scale: non-finite suppression is neutral");
+}
+
+static void test_motion_estimator_local_residual_prediction_contract(void) {
+    anomaly_debug_movement_t movement;
+    memset(&movement, 0, sizeof(movement));
+    movement.valid = true;
+    movement.sample_count = 1;
+    movement.tile_cols = ANOMALY_MOVEMENT_GRID_COLS;
+    movement.tile_rows = ANOMALY_MOVEMENT_GRID_ROWS;
+    movement.tiles[0].valid = true;
+    movement.tiles[0].center_x_norm = 0.50f;
+    movement.tiles[0].center_y_norm = 0.50f;
+    movement.tiles[0].dx_px = 20.0f;
+    movement.tiles[0].dy_px = -10.0f;
+    movement.tiles[0].residual_px = 22.0f;
+    movement.tiles[0].confidence = 0.80f;
+    movement.tiles[0].layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+    anomaly_motion_movement_snapshot_t snapshot =
+        anomaly_motion_estimator_make_movement_snapshot(&movement);
+    float out_x = 0.0f;
+    float out_y = 0.0f;
+
+    EXPECT(anomaly_motion_estimator_apply_local_residual_prediction(
+                   &snapshot,
+                   0.52f,
+                   0.49f,
+                   1000,
+                   500,
+                   &out_x,
+                   &out_y),
+           "motion local residual prediction: parallax tile applies correction");
+    EXPECT_NEAR(out_x, 0.50f, 0.0001f,
+                "motion local residual prediction: dx subtracts from global x");
+    EXPECT_NEAR(out_y, 0.51f, 0.0001f,
+                "motion local residual prediction: dy subtracts from global y");
+
+    movement.tiles[0].confidence = 0.20f;
+    snapshot = anomaly_motion_estimator_make_movement_snapshot(&movement);
+    EXPECT(!anomaly_motion_estimator_apply_local_residual_prediction(
+                    &snapshot,
+                    0.52f,
+                    0.49f,
+                    1000,
+                    500,
+                    &out_x,
+                    &out_y),
+           "motion local residual prediction: low-confidence tile is ignored");
+}
+
+static void test_motion_estimator_motion_override_policy_vetoes_parallax_tile(void) {
+    anomaly_debug_movement_t movement;
+    memset(&movement, 0, sizeof(movement));
+    movement.valid = true;
+    movement.sample_count = 1;
+    movement.tile_cols = ANOMALY_MOVEMENT_GRID_COLS;
+    movement.tile_rows = ANOMALY_MOVEMENT_GRID_ROWS;
+    movement.tiles[0].valid = true;
+    movement.tiles[0].center_x_norm = 0.60f;
+    movement.tiles[0].center_y_norm = 0.76f;
+    movement.tiles[0].dx_px = 8.0f;
+    movement.tiles[0].dy_px = 4.0f;
+    movement.tiles[0].residual_px = 9.0f;
+    movement.tiles[0].confidence = 0.88f;
+    movement.tiles[0].layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+    anomaly_motion_movement_snapshot_t snapshot =
+        anomaly_motion_estimator_make_movement_snapshot(&movement);
+
+    EXPECT(!anomaly_motion_estimator_allow_motion_override_at(
+                    &snapshot,
+                    0.60f,
+                    0.76f),
+           "motion override policy: high-confidence parallax tile vetoes separate thermal override");
+
+    movement.tiles[0].layer_class = ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER;
+    movement.tiles[0].residual_px = 40.0f;
+    snapshot = anomaly_motion_estimator_make_movement_snapshot(&movement);
+    EXPECT(anomaly_motion_estimator_allow_motion_override_at(
+                   &snapshot,
+                   0.60f,
+                   0.76f),
+           "motion override policy: independent local motion can promote thermal override");
+
+    movement.tiles[0].layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+    movement.tiles[0].confidence = 0.20f;
+    snapshot = anomaly_motion_estimator_make_movement_snapshot(&movement);
+    EXPECT(anomaly_motion_estimator_allow_motion_override_at(
+                   &snapshot,
+                   0.60f,
+                   0.76f),
+           "motion override policy: low-confidence parallax tile does not veto override");
+    EXPECT(anomaly_motion_estimator_allow_motion_override_at(NULL, 0.60f, 0.76f),
+           "motion override policy: missing movement snapshot preserves legacy override");
+}
+
 static void test_motion_estimator_appearance_global_stats_defaults(void) {
     anomaly_motion_appearance_global_stats_t stats = {
         .mean = 10.0f,
@@ -14874,6 +15566,35 @@ static bool motion_estimator_test_find_residual(
     return true;
 }
 
+static bool motion_estimator_test_find_banded_residual(
+        const uint8_t *curr_luma,
+        const uint8_t *prev_luma,
+        int motion_w,
+        int motion_h,
+        int mx,
+        int my,
+        int pred_x,
+        int pred_y,
+        int patch_half,
+        int search_radius,
+        int *best_dx_out,
+        int *best_dy_out,
+        int *best_sad_out) {
+    (void)curr_luma;
+    (void)prev_luma;
+    (void)motion_w;
+    (void)motion_h;
+    (void)mx;
+    (void)pred_x;
+    (void)pred_y;
+    (void)patch_half;
+    (void)search_radius;
+    if (best_dx_out != NULL) *best_dx_out = (my < 14) ? -1 : 1;
+    if (best_dy_out != NULL) *best_dy_out = 0;
+    if (best_sad_out != NULL) *best_sad_out = 0;
+    return true;
+}
+
 static bool motion_estimator_test_registration_valid(
         const anomaly_motion_estimator_registration_t *registration) {
     return registration != NULL;
@@ -15252,6 +15973,48 @@ static void test_motion_estimator_sidecar_displacement_magnitude_contract(void) 
                 0.0f,
                 0.0001f,
                 "motion sidecar displacement magnitude: invalid motion step returns zero");
+}
+
+static void test_motion_estimator_sidecar_neighbor_delta_resets_each_row(void) {
+    static uint8_t curr_luma[32 * 32];
+    static uint8_t prev_luma[32 * 32];
+    static int registration_anchor;
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    anomaly_motion_estimator_sidecar_ops_t ops = {
+        .project_cell = motion_estimator_test_project_cell,
+        .find_residual_displacement = motion_estimator_test_find_banded_residual,
+        .registration_valid = motion_estimator_test_registration_valid,
+    };
+    anomaly_motion_estimator_sidecar_input_t input;
+    anomaly_debug_movement_t movement;
+    memset(curr_luma, 30, sizeof(curr_luma));
+    memset(prev_luma, 28, sizeof(prev_luma));
+    memset(&input, 0, sizeof(input));
+    memset(&movement, 0, sizeof(movement));
+    cfg.movement_estimator_mode = ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+    input.cfg = &cfg;
+    input.registration = (const anomaly_motion_estimator_registration_t *)&registration_anchor;
+    input.curr_luma = curr_luma;
+    input.prev_luma = prev_luma;
+    input.motion_w = 32;
+    input.motion_h = 32;
+    input.motion_step = 2;
+    input.width = 64;
+    input.height = 64;
+    input.roi_x0 = 0;
+    input.roi_x1 = 64;
+    input.roi_y0 = 0;
+    input.roi_y1 = 64;
+    input.ops = &ops;
+
+    anomaly_motion_estimator_estimate_sidecar(&input, &movement);
+
+    EXPECT(movement.valid && movement.sample_count == ANOMALY_MOVEMENT_TILE_COUNT,
+           "motion sidecar row bands: synthetic banded flow samples every tile");
+    EXPECT(movement.unstable_count == 0,
+           "motion sidecar row bands: row boundary flow changes are not instability");
+    EXPECT(movement.coherent_near_count == ANOMALY_MOVEMENT_TILE_COUNT,
+           "motion sidecar row bands: coherent bands are counted as parallax");
 }
 
 static void test_motion_estimator_init_appearance_scorer_input_copies_contract_fields(void) {
@@ -18607,6 +19370,9 @@ int main(void) {
     test_result_build_boxes_target_tracks_take_priority();
     test_result_build_boxes_color_target_suppresses_motion_support_track();
     test_result_build_boxes_stale_color_target_is_not_published();
+    test_result_build_boxes_carried_thermal_target_publishes_before_motion_fallback();
+    test_result_build_boxes_carried_thermal_target_requires_residual_support();
+    test_result_build_boxes_carried_thermal_target_suppresses_secondary_thermal_track();
     test_result_build_boxes_color_target_suppresses_secondary_color_track();
     test_result_build_boxes_accumulator_fallback_and_persist_filter();
     test_result_build_boxes_saliency_aux_current_gate_noop();
@@ -18645,6 +19411,7 @@ int main(void) {
     test_roi_state_summarize_cells_counts_flags_and_scores();
     test_target_revisit_null_defaults_and_track_count();
     test_target_revisit_adaptive_risk_and_weak_lock();
+    test_target_revisit_global_motion_penalty_policy();
     test_target_revisit_radius_scaling_and_clamps();
     test_target_revisit_point_inside_gate_closest_match();
     test_target_revisit_annotate_roi_cells_no_op_filters();
@@ -18672,10 +19439,17 @@ int main(void) {
     test_target_tracks_predict_invalid_registration_leaves_tracks_unchanged();
     test_target_tracks_predict_failed_inverse_marks_forced_revisit();
     test_target_tracks_predict_success_clamps_updates_quality_and_nonfresh_revisit();
+    test_target_tracks_predict_applies_stable_local_residual();
 
     test_thermal_blob_candidate_rank_ordering();
+    test_thermal_blob_candidate_rank_prefers_score_when_retention_missing();
+    test_thermal_blob_candidate_rank_keeps_low_quality_fragment_behind_singleton();
     test_color_blob_candidate_rank_ordering();
     test_thermal_blob_candidate_rank_lookup();
+    test_thermal_provisional_reserve_selects_compact_candidate_under_topn_pressure();
+    test_thermal_provisional_reserve_rejects_reviewed_fp_and_existing_keep();
+    test_thermal_provisional_reserve_rejects_overbright_fixed_hotspot();
+    test_thermal_provisional_reserve_allows_faint_compact_target();
     test_color_blob_candidate_rank_lookup();
     test_appearance_ranked_index_insert_rejects_invalid_inputs();
     test_appearance_ranked_index_insert_orders_and_clamps();
@@ -18716,6 +19490,8 @@ int main(void) {
     test_color_detector_support_patch_radius_helper();
     test_color_detector_support_scalar_formula_helpers();
     test_color_detector_reviewed_fp_cluster_helper();
+    test_thermal_detector_reviewed_fp_cluster_helper();
+    test_thermal_detector_weak_parallax_singleton_helper();
     test_color_detector_track_support_match_invalid_defaults();
     test_color_detector_track_support_match_filters_and_gate();
     test_color_detector_track_support_match_closest_in_gate();
@@ -18733,6 +19509,8 @@ int main(void) {
     test_color_candidate_target_observation_conversion();
     test_thermal_candidate_target_observation_conversion();
     test_target_observation_duplicate_suppression();
+    test_target_observation_thermal_correction_replaces_stale_nearby_observation();
+    test_target_observation_thermal_correction_keeps_true_duplicate_suppressed();
 
     test_detector_facade_matches_process_frame();
     test_detector_facade_structured_args_match_positional_process();
@@ -18834,6 +19612,9 @@ int main(void) {
     test_motion_estimator_structure_scale_strong_corner();
     test_motion_estimator_appearance_zoom_motion_scale_contract();
     test_motion_estimator_appearance_broad_motion_scale_contract();
+    test_motion_estimator_appearance_parallax_motion_scale_contract();
+    test_motion_estimator_local_residual_prediction_contract();
+    test_motion_estimator_motion_override_policy_vetoes_parallax_tile();
     test_motion_estimator_appearance_global_stats_defaults();
     test_motion_estimator_appearance_global_stats_variance_floor();
     test_motion_estimator_appearance_global_stats_motion_floor_minimum();
@@ -18863,6 +19644,7 @@ int main(void) {
     test_motion_estimator_sidecar_tile_confidence_contract();
     test_motion_estimator_sidecar_tile_displacement_px_contract();
     test_motion_estimator_sidecar_displacement_magnitude_contract();
+    test_motion_estimator_sidecar_neighbor_delta_resets_each_row();
     test_motion_estimator_init_appearance_scorer_input_null_safe();
     test_motion_estimator_init_appearance_scorer_input_copies_contract_fields();
     test_motion_estimator_sync_appearance_scorer_state_null_safe();

@@ -212,6 +212,8 @@ def score_review(
     missed_annotations = 0
     near_miss_annotations = 0
     avg_hit_distance: list[float] = []
+    miss_distances: list[float] = []
+    false_positive_distances: list[float] = []
     by_kind: dict[str, dict[str, float]] = {}
     detailed_rows: list[dict] = []
 
@@ -237,12 +239,15 @@ def score_review(
                 missed_annotations += 1
                 if best is not None:
                     near_miss_annotations += 1
+                    if dist is not None:
+                        miss_distances.append(dist)
                 outcome = "miss"
         elif ann.review_kind in NEGATIVE_KINDS:
             negative_total += 1
             if inside:
                 false_positive_annotations += 1
                 if dist is not None:
+                    false_positive_distances.append(dist)
                     kind_stats["dist_sum"] += dist
                 kind_stats["matched"] += 1.0
                 kind_stats["inside"] += 1.0
@@ -281,6 +286,7 @@ def score_review(
 
     tracks = build_positive_tracks(annotations, track_gap_s=track_gap_s, track_join_radius=track_join_radius)
     track_latencies: list[float] = []
+    track_first_hit_times: list[float] = []
     matched_tracks = 0
     for track in tracks:
         first_ann = track.annotations[0]
@@ -293,6 +299,7 @@ def score_review(
                 break
         if hit_time is not None:
             matched_tracks += 1
+            track_first_hit_times.append(hit_time)
             track_latencies.append(max(0.0, hit_time - first_ann.time_s))
 
     precision = (
@@ -317,9 +324,37 @@ def score_review(
         "reviewed_precision": precision,
         "reviewed_recall": recall,
         "avg_hit_distance": (statistics.fmean(avg_hit_distance) if avg_hit_distance else None),
+        "hit_distance_p50_norm": quantile(avg_hit_distance, 0.50),
+        "hit_distance_p90_norm": quantile(avg_hit_distance, 0.90),
+        "hit_distance_max_norm": (max(avg_hit_distance) if avg_hit_distance else None),
+        "hit_distance_p50_px_1080p": (
+            quantile(avg_hit_distance, 0.50) * 1080.0 if avg_hit_distance else None
+        ),
+        "hit_distance_p90_px_1080p": (
+            quantile(avg_hit_distance, 0.90) * 1080.0 if avg_hit_distance else None
+        ),
+        "hit_distance_max_px_1080p": (
+            max(avg_hit_distance) * 1080.0 if avg_hit_distance else None
+        ),
+        "miss_distance_min_norm": (min(miss_distances) if miss_distances else None),
+        "miss_distance_p50_norm": quantile(miss_distances, 0.50),
+        "miss_distance_p90_norm": quantile(miss_distances, 0.90),
+        "miss_distance_max_norm": (max(miss_distances) if miss_distances else None),
+        "miss_distance_p50_px_1080p": (
+            quantile(miss_distances, 0.50) * 1080.0 if miss_distances else None
+        ),
+        "false_positive_distance_p50_norm": quantile(false_positive_distances, 0.50),
+        "false_positive_distance_max_norm": (
+            max(false_positive_distances) if false_positive_distances else None
+        ),
         "positive_tracks": len(tracks),
         "matched_tracks": matched_tracks,
         "missed_tracks": len(tracks) - matched_tracks,
+        "first_hit_time_s_min": (min(track_first_hit_times) if track_first_hit_times else None),
+        "first_hit_time_s_avg": (statistics.fmean(track_first_hit_times) if track_first_hit_times else None),
+        "first_hit_time_s_p95": quantile(track_first_hit_times, 0.95),
+        "first_hit_time_s_max": (max(track_first_hit_times) if track_first_hit_times else None),
+        "first_hit_latency_s_min": (min(track_latencies) if track_latencies else None),
         "latency_to_first_box_avg_s": (statistics.fmean(track_latencies) if track_latencies else None),
         "latency_to_first_box_p95_s": quantile(track_latencies, 0.95),
         "latency_to_first_box_max_s": (max(track_latencies) if track_latencies else None),
@@ -397,9 +432,33 @@ def summarize(
             lines.append(
                 "  Tracks: "
                 f"{score['matched_tracks']}/{score['positive_tracks']} matched, "
+                f"first-hit {score['first_hit_time_s_min']:.3f}s, "
                 f"latency avg {score['latency_to_first_box_avg_s']:.3f}s, "
                 f"p95 {score['latency_to_first_box_p95_s']:.3f}s, "
                 f"max {score['latency_to_first_box_max_s']:.3f}s"
+            )
+        if score["hit_distance_p50_norm"] is not None:
+            lines.append(
+                "  Hit distance: "
+                f"p50 {score['hit_distance_p50_norm']:.4f} "
+                f"p90 {score['hit_distance_p90_norm']:.4f} "
+                f"max {score['hit_distance_max_norm']:.4f} norm "
+                f"(p90 {score['hit_distance_p90_px_1080p']:.1f}px @1080p)"
+            )
+        if score["miss_distance_p50_norm"] is not None:
+            lines.append(
+                "  Miss nearest-distance: "
+                f"min {score['miss_distance_min_norm']:.4f} "
+                f"p50 {score['miss_distance_p50_norm']:.4f} "
+                f"p90 {score['miss_distance_p90_norm']:.4f} "
+                f"max {score['miss_distance_max_norm']:.4f} norm "
+                f"(p50 {score['miss_distance_p50_px_1080p']:.1f}px @1080p)"
+            )
+        if score["false_positive_distance_p50_norm"] is not None:
+            lines.append(
+                "  Reviewed FP distance: "
+                f"p50 {score['false_positive_distance_p50_norm']:.4f} "
+                f"max {score['false_positive_distance_max_norm']:.4f} norm"
             )
         if score["by_review_kind"]:
             lines.append("  By review_kind:")

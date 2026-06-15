@@ -1,5 +1,6 @@
 #include "anomaly_appearance_candidates.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -109,6 +110,25 @@ int anomaly_thermal_blob_candidate_compare_rank(
     if (lhs->retention_rank_valid && rhs->retention_rank_valid) {
         if (lhs->retention_rank > rhs->retention_rank) return -1;
         if (lhs->retention_rank < rhs->retention_rank) return 1;
+    }
+
+    if (!lhs->retention_rank_valid && !rhs->retention_rank_valid) {
+        bool lhs_compact_score_fallback =
+            lhs->area >= 2.0f && lhs->area <= 4.0f &&
+            lhs->span <= 3.0f &&
+            lhs->quality >= 0.35f &&
+            lhs->candidate.thermal_score >= 1.0f;
+        bool rhs_compact_score_fallback =
+            rhs->area >= 2.0f && rhs->area <= 4.0f &&
+            rhs->span <= 3.0f &&
+            rhs->quality >= 0.35f &&
+            rhs->candidate.thermal_score >= 1.0f;
+        if (lhs_compact_score_fallback || rhs_compact_score_fallback) {
+            if (lhs_compact_score_fallback && !rhs_compact_score_fallback) return -1;
+            if (!lhs_compact_score_fallback && rhs_compact_score_fallback) return 1;
+            if (lhs->candidate.thermal_score > rhs->candidate.thermal_score) return -1;
+            if (lhs->candidate.thermal_score < rhs->candidate.thermal_score) return 1;
+        }
     }
 
     if (lhs->area < rhs->area) return -1;
@@ -422,4 +442,57 @@ void anomaly_appearance_insert_ranked_index(
         indices[insert_at] = index;
     }
     if (*count < capacity) (*count)++;
+}
+
+int anomaly_appearance_select_thermal_provisional_reserve(
+        const int *eligible_indices,
+        int eligible_count,
+        int keep_count,
+        const anomaly_thermal_provisional_reserve_candidate_t *candidates,
+        int candidate_count) {
+    if (eligible_indices == NULL || candidates == NULL ||
+        eligible_count <= 0 || candidate_count <= 0 || keep_count < 0) {
+        return -1;
+    }
+    if (keep_count > eligible_count) keep_count = eligible_count;
+
+    int best_index = -1;
+    float best_score = -1.0f;
+    for (int ri = keep_count; ri < eligible_count; ri++) {
+        int ci = eligible_indices[ri];
+        if (ci < 0 || ci >= candidate_count) continue;
+        const anomaly_thermal_provisional_reserve_candidate_t *candidate =
+            &candidates[ci];
+        if (!candidate->valid || candidate->near_reviewed_fp_cluster) continue;
+        if (!isfinite(candidate->final_score) ||
+            !isfinite(candidate->score_threshold) ||
+            !isfinite(candidate->movement_confidence)) {
+            continue;
+        }
+        if (!candidate->movement_tile_valid ||
+            !candidate->movement_parallax ||
+            candidate->movement_independent ||
+            candidate->movement_confidence < 0.90f) {
+            continue;
+        }
+        if (candidate->final_score < candidate->score_threshold + 1.25f) continue;
+        if (candidate->final_score > candidate->score_threshold + 2.00f) continue;
+        if (candidate->area < 1.5f || candidate->area > 2.5f) continue;
+        if (candidate->span < 1.5f || candidate->span > 2.5f) continue;
+        if (candidate->fill < 0.35f || candidate->fill > 0.70f) continue;
+        if (candidate->center_share < 0.54f) continue;
+        if (candidate->quality < 0.60f) continue;
+        if (candidate->patch_support < candidate->score_threshold + 1.15f) continue;
+
+        float score =
+            0.40f * (candidate->final_score - candidate->score_threshold) +
+            0.25f * candidate->patch_support +
+            0.20f * candidate->center_share +
+            0.15f * candidate->quality;
+        if (score > best_score) {
+            best_score = score;
+            best_index = ci;
+        }
+    }
+    return best_index;
 }

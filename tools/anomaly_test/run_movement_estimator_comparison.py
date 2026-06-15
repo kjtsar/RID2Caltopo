@@ -44,6 +44,22 @@ CASES = (
         review=Path("app/src/test/resources/vidcap/PowerHouse1.review.json"),
     ),
     Case(
+        label="powerhouse2-ir",
+        video=Path("app/src/test/resources/vidcap/PowerHouse2.mp4"),
+        time_start=0.0,
+        time_end=2.1,
+        args=("--registration", "affine", "--stride", "1", "-p", "bh", "-a", "6", "-t", "2.8", "-m", "2", "-s", "0.80"),
+        review=Path("app/src/test/resources/vidcap/PowerHouse2.review.json"),
+    ),
+    Case(
+        label="powerhouse3-ir",
+        video=Path("app/src/test/resources/vidcap/PowerHouse3.mp4"),
+        time_start=0.0,
+        time_end=4.1,
+        args=("--registration", "affine", "--stride", "1", "-p", "bh", "-a", "6", "-t", "2.8", "-m", "2", "-s", "0.80"),
+        review=Path("app/src/test/resources/vidcap/PowerHouse3.review.json"),
+    ),
+    Case(
         label="red1-visible",
         video=Path("app/src/test/resources/vidcap/Red1.mp4"),
         time_start=0.0,
@@ -190,7 +206,10 @@ def main() -> int:
         "case,mode,realtime,detect_frames,total_boxes,total_ms,move_ms,motion_ms,"
         "parallax_load,suppress,aoi_valid,aoi_independent,aoi_parallax,"
         "aoi_ind_score,review_precision,review_recall,review_tp,review_fp,"
-        "review_pos,review_neg,review_missed,first_box_avg_s,shadow_equal"
+        "review_pos,review_neg,review_missed,first_hit_s,first_box_avg_s,"
+        "hit_dist_p50_norm,hit_dist_p90_norm,hit_dist_p90_px_1080p,"
+        "hit_dist_max_norm,miss_dist_p50_norm,miss_dist_p90_norm,"
+        "fp_dist_p50_norm,shadow_equal"
     )
     all_shadow_equal = True
     for case in CASES:
@@ -207,7 +226,10 @@ def main() -> int:
                 "{case},{mode},{realtime:.3f},{detections},{boxes},{total_ms:.3f},"
                 "{move_ms:.3f},{motion_ms:.3f},{parallax:.3f},{suppress:.3f},"
                 "{aoi_valid},{aoi_independent},{aoi_parallax},{aoi_score:.3f},"
-                "{precision:.3f},{recall:.3f},{tp},{fp},{pos},{neg},{missed},{latency:.3f},{shadow_equal}".format(
+                "{precision:.3f},{recall:.3f},{tp},{fp},{pos},{neg},{missed},"
+                "{first_hit:.3f},{latency:.3f},{hit_p50:.4f},{hit_p90:.4f},"
+                "{hit_p90_px:.2f},{hit_max:.4f},{miss_p50:.4f},{miss_p90:.4f},"
+                "{fp_p50:.4f},{shadow_equal}".format(
                     case=case.label,
                     mode=mode,
                     realtime=metric(summary, "realtime_factor"),
@@ -229,7 +251,15 @@ def main() -> int:
                     pos=int(review_metric(score, "positive_annotation_count")),
                     neg=int(review_metric(score, "negative_annotation_count")),
                     missed=int(review_metric(score, "missed_annotations")),
+                    first_hit=review_metric(score, "first_hit_time_s_min"),
                     latency=review_metric(score, "latency_to_first_box_avg_s"),
+                    hit_p50=review_metric(score, "hit_distance_p50_norm"),
+                    hit_p90=review_metric(score, "hit_distance_p90_norm"),
+                    hit_p90_px=review_metric(score, "hit_distance_p90_px_1080p"),
+                    hit_max=review_metric(score, "hit_distance_max_norm"),
+                    miss_p50=review_metric(score, "miss_distance_p50_norm"),
+                    miss_p90=review_metric(score, "miss_distance_p90_norm"),
+                    fp_p50=review_metric(score, "false_positive_distance_p50_norm"),
                     shadow_equal="yes" if shadow_equal else "NO",
                 )
             )

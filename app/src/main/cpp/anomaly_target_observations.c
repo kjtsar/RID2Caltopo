@@ -192,3 +192,32 @@ bool anomaly_target_observation_near_existing(
     }
     return false;
 }
+
+bool anomaly_target_observation_replace_thermal_correction(
+        anomaly_target_observation_t       *observations,
+        int                                 observation_count,
+        const anomaly_target_observation_t *candidate) {
+    if (observations == NULL ||
+        candidate == NULL ||
+        !candidate->valid ||
+        candidate->algorithm != ANOMALY_ALGO_THERMAL) {
+        return false;
+    }
+
+    for (int oi = 0; oi < observation_count; oi++) {
+        anomaly_target_observation_t *obs = &observations[oi];
+        if (!obs->valid || obs->algorithm != ANOMALY_ALGO_THERMAL) continue;
+        float dx = obs->center_x_norm - candidate->center_x_norm;
+        float dy = obs->center_y_norm - candidate->center_y_norm;
+        float dist = sqrtf(dx * dx + dy * dy);
+        float support = fmaxf(obs->support_radius_norm, candidate->support_radius_norm);
+        float duplicate_gate = fmaxf(0.022f, support * 0.55f);
+        float correction_gate = fmaxf(0.022f, support * 1.20f);
+        if (dist > duplicate_gate && dist <= correction_gate) {
+            *obs = *candidate;
+            return true;
+        }
+    }
+
+    return false;
+}

@@ -33,3 +33,10 @@ bool anomaly_target_revisit_point_inside_gate(
         int                    min_hits,
         int                   *track_index_out,
         float                 *gate_radius_out);
+
+bool anomaly_target_revisit_should_apply_global_motion_penalty(
+        const anomaly_target_track_t         *track,
+        const anomaly_debug_movement_tile_t  *tile,
+        float                                 parallax_load,
+        float                                 score,
+        float                                 score_threshold);

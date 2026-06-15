@@ -21,6 +21,8 @@ typedef struct {
     bool                                            scene_discontinuity;
     anomaly_target_tracks_registration_valid_fn     valid;
     anomaly_target_tracks_registration_invert_fn    invert_point;
+    int                                             frame_width;
+    int                                             frame_height;
 } anomaly_target_tracks_registration_prediction_t;
 
 void anomaly_target_tracks_clear_track(anomaly_target_track_t *track);

@@ -15,6 +15,8 @@ static float anomaly_result_clampf(float v, float lo, float hi) {
 }
 
 #define ANOMALY_RESULT_MAX_STALE_COLOR_MISSES 3
+#define ANOMALY_RESULT_MAX_CARRIED_THERMAL_MISSES 2
+#define ANOMALY_RESULT_MIN_CARRIED_THERMAL_RESIDUAL_PX 8.0f
 
 static bool anomaly_result_is_stale_color_target_track(const anomaly_target_track_t *track) {
     return track != NULL &&
@@ -25,13 +27,38 @@ static bool anomaly_result_is_stale_color_target_track(const anomaly_target_trac
            track->miss_count > ANOMALY_RESULT_MAX_STALE_COLOR_MISSES;
 }
 
-static bool anomaly_result_is_stale_thermal_target_track(const anomaly_target_track_t *track) {
+static bool anomaly_result_allows_carried_thermal_targets(const anomaly_config_t *cfg) {
+    return anomaly_motion_estimator_normalize_movement_mode(cfg) ==
+           ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE;
+}
+
+static bool anomaly_result_has_carried_thermal_motion_support(
+        const anomaly_target_track_t *track,
+        const anomaly_config_t       *cfg) {
+    if (!anomaly_result_allows_carried_thermal_targets(cfg) || track == NULL) return false;
+    if (track->movement_valid_frames < 3 || track->movement_window_frames < 3) return false;
+    if (track->movement_parallax_frames * 2 < track->movement_valid_frames) return false;
+    if (!isfinite(track->movement_confidence_sum) || track->movement_valid_frames <= 0) return false;
+    float mean_confidence =
+        track->movement_confidence_sum / (float)track->movement_valid_frames;
+    if (mean_confidence < 0.55f) return false;
+    if (!isfinite(track->last_movement_residual_px)) return false;
+    return track->last_movement_residual_px >= ANOMALY_RESULT_MIN_CARRIED_THERMAL_RESIDUAL_PX;
+}
+
+static bool anomaly_result_is_stale_thermal_target_track(
+        const anomaly_target_track_t *track,
+        const anomaly_config_t       *cfg) {
+    int max_carried_misses =
+        anomaly_result_has_carried_thermal_motion_support(track, cfg)
+            ? ANOMALY_RESULT_MAX_CARRIED_THERMAL_MISSES
+            : 0;
     return track != NULL &&
            track->active &&
            track->publish_confirmed &&
            track->algorithm == ANOMALY_ALGO_THERMAL &&
            !track->fresh_observation &&
-           track->miss_count > 0;
+           track->miss_count > max_carried_misses;
 }
 
 int anomaly_result_build_boxes(
@@ -59,6 +86,7 @@ int anomaly_result_build_boxes(
     int min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
     bool color_target_track_published = false;
     bool stale_color_lock_pending = false;
+    bool stale_thermal_lock_pending = false;
     if ((cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
         (cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE)) != 0) {
         for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
@@ -75,13 +103,26 @@ int anomaly_result_build_boxes(
             }
         }
     }
+    if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 &&
+        (cfg->algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE)) != 0) {
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            const anomaly_target_track_t *track = &state->target_tracks[ti];
+            if (track->active &&
+                track->publish_confirmed &&
+                track->hit_count >= min_hits &&
+                anomaly_result_is_stale_thermal_target_track(track, cfg)) {
+                stale_thermal_lock_pending = true;
+            }
+        }
+    }
     int box_count = 0;
     bool emitted_color_target_track = false;
+    bool emitted_carried_thermal_target_track = false;
     for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS && box_count < max_boxes; ti++) {
         const anomaly_target_track_t *track = &state->target_tracks[ti];
         if (!track->active || !track->publish_confirmed || track->hit_count < min_hits) continue;
         if (anomaly_result_is_stale_color_target_track(track) ||
-            anomaly_result_is_stale_thermal_target_track(track) ||
+            anomaly_result_is_stale_thermal_target_track(track, cfg) ||
             (stale_color_lock_pending && track->algorithm == ANOMALY_ALGO_COLOR)) {
             continue;
         }
@@ -94,6 +135,10 @@ int anomaly_result_build_boxes(
             (track->algorithm == ANOMALY_ALGO_MOTION ||
              track->algorithm == ANOMALY_ALGO_MOTION_TOLERANCE ||
              track->algorithm == motion_box_algorithm)) {
+            continue;
+        }
+        if (emitted_carried_thermal_target_track &&
+            track->algorithm == ANOMALY_ALGO_THERMAL) {
             continue;
         }
         int rgb_idx = 3;
@@ -118,10 +163,15 @@ int anomaly_result_build_boxes(
             if (track->algorithm == ANOMALY_ALGO_COLOR) {
                 emitted_color_target_track = true;
             }
+            if (anomaly_result_has_carried_thermal_motion_support(track, cfg) &&
+                track->algorithm == ANOMALY_ALGO_THERMAL &&
+                !track->fresh_observation) {
+                emitted_carried_thermal_target_track = true;
+            }
         }
     }
     if (box_count > 0) return box_count;
-    if (stale_color_lock_pending) return 0;
+    if (stale_color_lock_pending || stale_thermal_lock_pending) return 0;
     for (int ai = 0; ai < 4 && box_count < max_boxes; ai++) {
         if (saliency_primary && ai != 3) continue;
         if (!state->acc_active[ai]) continue;

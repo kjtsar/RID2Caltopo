@@ -34,6 +34,23 @@ typedef struct {
 } anomaly_thermal_blob_candidate_t;
 
 typedef struct {
+    bool  valid;
+    bool  near_reviewed_fp_cluster;
+    bool  movement_tile_valid;
+    bool  movement_parallax;
+    bool  movement_independent;
+    float movement_confidence;
+    float final_score;
+    float score_threshold;
+    float area;
+    float span;
+    float fill;
+    float center_share;
+    float quality;
+    float patch_support;
+} anomaly_thermal_provisional_reserve_candidate_t;
+
+typedef struct {
     bool valid;
     bool inserted;
     bool replaced_existing_by_nms;
@@ -145,5 +162,12 @@ void anomaly_appearance_insert_ranked_index(
         float *ranks,
         int *count,
         int capacity);
+
+int anomaly_appearance_select_thermal_provisional_reserve(
+        const int *eligible_indices,
+        int eligible_count,
+        int keep_count,
+        const anomaly_thermal_provisional_reserve_candidate_t *candidates,
+        int candidate_count);
 
 #endif

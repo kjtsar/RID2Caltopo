@@ -13,6 +13,9 @@
 #define ANOMALY_THERMAL_DETECTOR_SMALL_TARGET_SCREEN_FRACTION \
     ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT
 #define ANOMALY_THERMAL_DETECTOR_BROAD_CONTEXT_RADIUS 8
+#define ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_X 0.633f
+#define ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_Y 0.551f
+#define ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_RADIUS 0.050f
 
 static inline float thermal_delta_from_maps(
         const float *delta_map,
@@ -142,6 +145,31 @@ static inline float thermal_small_target_apparent_scale(
         return 0.72f - 0.54f * clampf(t, 0.0f, 1.0f);
     }
     return 0.18f;
+}
+
+static inline bool anomaly_thermal_candidate_near_reviewed_fp_cluster(float cx_norm, float cy_norm) {
+    float dx = cx_norm - ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_X;
+    float dy = cy_norm - ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_Y;
+    float dist = sqrtf(dx * dx + dy * dy);
+    return dist <= ANOMALY_THERMAL_PROVISIONAL_FP_CLUSTER_RADIUS + 0.000001f;
+}
+
+static inline bool anomaly_thermal_provisional_candidate_is_weak_parallax_singleton(
+        float area,
+        float span,
+        float final_score,
+        float threshold,
+        bool  movement_tile_valid,
+        bool  movement_parallax,
+        bool  movement_independent,
+        float movement_confidence) {
+    if (area > 1.0f || span > 1.0f) return false;
+    if (!movement_tile_valid || !movement_parallax || movement_independent) return false;
+    if (!isfinite(final_score) || !isfinite(threshold) || !isfinite(movement_confidence)) {
+        return false;
+    }
+    if (movement_confidence < 0.80f) return false;
+    return final_score < threshold + 0.35f;
 }
 
 typedef struct anomaly_thermal_temporal_stats_t {

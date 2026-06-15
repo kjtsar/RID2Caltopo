@@ -235,7 +235,7 @@ typedef struct {
     float final_score;
     bool score_eligible;
     bool shape_eligible;
-    int candidate_rank;
+    float candidate_rank;
     int selected_rank;
     float selected_score;
     bool near_existing_skip;

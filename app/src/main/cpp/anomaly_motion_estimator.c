@@ -294,6 +294,11 @@ float anomaly_motion_estimator_appearance_broad_motion_scale(float global_motion
     return broad_motion_scale;
 }
 
+float anomaly_motion_estimator_appearance_parallax_motion_scale(float suppression_scale) {
+    if (!isfinite(suppression_scale)) return 1.0f;
+    return clampf(suppression_scale, 0.20f, 1.0f);
+}
+
 float anomaly_motion_estimator_appearance_global_motion_load(
         int strong_global_samples,
         int global_count) {
@@ -542,6 +547,56 @@ bool anomaly_motion_estimator_tile_is_independent(
     if (tile == NULL || !tile->valid) return false;
     return tile->layer_class == ANOMALY_MOVEMENT_LAYER_LOCAL_OUTLIER &&
            independent_score >= 0.50f;
+}
+
+bool anomaly_motion_estimator_apply_local_residual_prediction(
+        const anomaly_motion_movement_snapshot_t *snapshot,
+        float                                    x_norm,
+        float                                    y_norm,
+        int                                      frame_width,
+        int                                      frame_height,
+        float                                   *x_out,
+        float                                   *y_out) {
+    if (x_out != NULL) *x_out = x_norm;
+    if (y_out != NULL) *y_out = y_norm;
+    if (snapshot == NULL || frame_width <= 1 || frame_height <= 1 ||
+        x_out == NULL || y_out == NULL ||
+        !isfinite(x_norm) || !isfinite(y_norm)) {
+        return false;
+    }
+    anomaly_debug_movement_tile_t tile;
+    if (!anomaly_motion_estimator_query_snapshot_at_norm(snapshot, x_norm, y_norm, &tile)) {
+        return false;
+    }
+    if (!anomaly_motion_estimator_tile_is_parallax_like(&tile)) return false;
+    if (tile.confidence < 0.55f) return false;
+    if (!isfinite(tile.dx_px) || !isfinite(tile.dy_px) || !isfinite(tile.residual_px)) {
+        return false;
+    }
+    if (tile.residual_px < 0.5f || tile.residual_px > 96.0f) return false;
+    if (fabsf(tile.dx_px) > 64.0f || fabsf(tile.dy_px) > 64.0f) return false;
+
+    *x_out = clampf(x_norm - (tile.dx_px / (float)frame_width), 0.0f, 1.0f);
+    *y_out = clampf(y_norm - (tile.dy_px / (float)frame_height), 0.0f, 1.0f);
+    return true;
+}
+
+bool anomaly_motion_estimator_allow_motion_override_at(
+        const anomaly_motion_movement_snapshot_t *snapshot,
+        float                                    x_norm,
+        float                                    y_norm) {
+    if (snapshot == NULL || !isfinite(x_norm) || !isfinite(y_norm)) return true;
+    anomaly_debug_movement_tile_t tile;
+    if (!anomaly_motion_estimator_query_snapshot_at_norm(snapshot, x_norm, y_norm, &tile)) {
+        return true;
+    }
+    if (tile.confidence < 0.55f) return true;
+    if (anomaly_motion_estimator_tile_is_independent(
+                &tile,
+                anomaly_motion_estimator_tile_independent_score(&tile))) {
+        return true;
+    }
+    return !anomaly_motion_estimator_tile_is_parallax_like(&tile);
 }
 
 float anomaly_motion_estimator_nearest_candidate_support_norm(
@@ -834,6 +889,7 @@ void anomaly_motion_estimator_estimate_sidecar(
     bool have_prev_flow = false;
 
     for (int gy = 0; gy < grid_rows; gy++) {
+        have_prev_flow = false;
         int my = roi_mgy0 + ((roi_mgy1 - roi_mgy0) * (gy * 2 + 1)) / (grid_rows * 2);
         my = clamp_i32(my, 1, input->motion_h - 2);
         for (int gx = 0; gx < grid_cols; gx++) {

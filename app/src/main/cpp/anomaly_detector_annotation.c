@@ -119,6 +119,23 @@ static bool anomaly_detector_annotation_snapshot_contains_color(
     return false;
 }
 
+static bool anomaly_detector_annotation_view_has_immediate_thermal(
+        anomaly_detector_annotation_view_t view,
+        int64_t                            frame_ordinal,
+        int                                cadence_frames) {
+    if (frame_ordinal < 0 || cadence_frames <= 1 || frame_ordinal < (int64_t)cadence_frames) {
+        return false;
+    }
+    view = anomaly_detector_annotation_normalize_view(view);
+    for (int i = 0; i < view.box_count; i++) {
+        const anomaly_detector_annotation_t *box = &view.boxes[i];
+        if (box->algorithm == ANOMALY_ALGO_THERMAL && box->weight >= 0.95f) {
+            return true;
+        }
+    }
+    return false;
+}
+
 anomaly_detector_annotation_view_t anomaly_detector_result_annotations(
         const anomaly_detector_result_t *result) {
     anomaly_detector_annotation_view_t view = {
@@ -206,6 +223,30 @@ anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_visi
         snapshot_state->visibility.last_update_frame_ordinal = frame_ordinal;
         snapshot_state->box_count = 0;
         return anomaly_detector_annotation_empty_view();
+    }
+    if (desired_visible &&
+        snapshot_state->visibility.initialized &&
+        !snapshot_state->visibility.annotations_visible &&
+        !anomaly_detector_annotation_cadence_allows_update(frame_ordinal, cadence_frames) &&
+        anomaly_detector_annotation_view_has_immediate_thermal(
+                desired_annotations,
+                frame_ordinal,
+                cadence_frames)) {
+        snapshot_state->visibility.annotations_visible = true;
+        snapshot_state->visibility.last_update_frame_ordinal = frame_ordinal;
+        anomaly_detector_annotation_snapshot_copy(snapshot_state, desired_annotations);
+        return anomaly_detector_annotation_cadence_snapshot_view(snapshot_state);
+    }
+    if (desired_visible &&
+        snapshot_state->visibility.initialized &&
+        snapshot_state->visibility.annotations_visible &&
+        !anomaly_detector_annotation_cadence_allows_update(frame_ordinal, cadence_frames) &&
+        anomaly_detector_annotation_view_has_immediate_thermal(
+                desired_annotations,
+                frame_ordinal,
+                cadence_frames)) {
+        anomaly_detector_annotation_snapshot_copy(snapshot_state, desired_annotations);
+        return anomaly_detector_annotation_cadence_snapshot_view(snapshot_state);
     }
     return anomaly_detector_annotation_cadence_update_snapshot(
             snapshot_state,

@@ -6925,19 +6925,23 @@ static anomaly_revisit_confirmation_t find_target_revisit_confirmation(
             bool global_motion_rejected = false;
             anomaly_debug_movement_tile_t tile;
             if (anomaly_motion_estimator_query_snapshot_at_norm(movement_snapshot, x_norm, y_norm, &tile)) {
+                const anomaly_target_track_t *matched_track =
+                    (track_idx >= 0 && track_idx < ANOMALY_MAX_TARGET_TRACKS)
+                        ? &state->target_tracks[track_idx]
+                        : NULL;
                 float independent_score = anomaly_motion_estimator_tile_independent_score(&tile);
                 bool independent = anomaly_motion_estimator_tile_is_independent(
                         &tile,
                         independent_score);
-                bool global_correlated =
-                    anomaly_motion_estimator_tile_is_parallax_like(&tile);
                 if (independent) {
                     score += 0.22f * independent_score;
                     independent_motion_boosted = true;
-                } else if (global_correlated &&
-                           movement_snapshot != NULL &&
-                           movement_snapshot->parallax_load > 0.25f &&
-                           score < cfg->score_threshold + 0.20f) {
+                } else if (anomaly_target_revisit_should_apply_global_motion_penalty(
+                                   matched_track,
+                                   &tile,
+                                   movement_snapshot != NULL ? movement_snapshot->parallax_load : 0.0f,
+                                   score,
+                                   cfg->score_threshold)) {
                     score -= 0.30f;
                     global_motion_rejected = true;
                 }
@@ -7803,6 +7807,23 @@ int anomaly_process_frame(
             float nx = 0.0f;
             float ny = 0.0f;
             if (anomaly_registration_invert_point(&registration, state->acc_cx[ai], state->acc_cy[ai], &nx, &ny)) {
+                if (ai == 1 &&
+                    anomaly_motion_estimator_normalize_movement_mode(cfg) ==
+                        ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE) {
+                    float local_nx = nx;
+                    float local_ny = ny;
+                    if (anomaly_motion_estimator_apply_local_residual_prediction(
+                            &movement_snapshot,
+                            nx,
+                            ny,
+                            width,
+                            height,
+                            &local_nx,
+                            &local_ny)) {
+                        nx = local_nx;
+                        ny = local_ny;
+                    }
+                }
                 state->acc_cx[ai] = nx < 0.0f ? 0.0f : (nx > 1.0f ? 1.0f : nx);
                 state->acc_cy[ai] = ny < 0.0f ? 0.0f : (ny > 1.0f ? 1.0f : ny);
             }
@@ -7830,6 +7851,8 @@ int anomaly_process_frame(
         .scene_discontinuity = scene_discontinuity,
         .valid = target_tracks_registration_model_valid,
         .invert_point = target_tracks_registration_invert_point,
+        .frame_width = width,
+        .frame_height = height,
     };
     anomaly_target_tracks_predict_with_registration(state, &target_track_prediction);
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_TARGET_TRACKING, stage_started_us);
@@ -10076,7 +10099,13 @@ int anomaly_process_frame(
                 candidate_motion_score *= zoom_motion_scale;
                 candidate_motion_score *= motion_evidence_scale;
                 candidate_motion_score *= proposal_scale;
-                motion_candidate_support[ci] = candidate_motion_score;
+                float parallax_motion_scale =
+                    anomaly_motion_estimator_normalize_movement_mode(cfg) ==
+                            ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE
+                        ? anomaly_motion_estimator_appearance_parallax_motion_scale(
+                            movement_snapshot.suppression_scale)
+                        : 1.0f;
+                motion_candidate_support[ci] = candidate_motion_score * parallax_motion_scale;
 
                 size_t persist_idx = (size_t)local_best_my * (size_t)motion_w + (size_t)local_best_mx;
                 float persistence_scale = 1.0f;
@@ -10128,7 +10157,8 @@ int anomaly_process_frame(
                         motion_support,
                         local_best_registration_scale);
                 }
-                if ((use_stable_motion || use_motion_tolerance) && candidate_motion_score > best_motion) {
+                if ((use_stable_motion || use_motion_tolerance) &&
+                    candidate_motion_score > best_motion) {
                     best_motion = candidate_motion_score;
                     best_motion_x = pixel_x;
                     best_motion_y = pixel_y;
@@ -10711,6 +10741,15 @@ motion_appearance_scoring_done:
             int cand_y = motion_candidate_support_x[ci] != 0 || motion_candidate_support_y[ci] != 0
                 ? motion_candidate_support_y[ci]
                 : motion_candidates[ci].pixel_y;
+            float cand_x_norm = (float)cand_x / fw_norm;
+            float cand_y_norm = (float)cand_y / fh_norm;
+            bool allow_thermal_motion_override =
+                anomaly_motion_estimator_normalize_movement_mode(cfg) !=
+                    ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE ||
+                anomaly_motion_estimator_allow_motion_override_at(
+                    &movement_snapshot,
+                    cand_x_norm,
+                    cand_y_norm);
             int cand_sx = clamp_i32((cand_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
             int cand_sy = clamp_i32((cand_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
             size_t cand_idx = (size_t)cand_sy * (size_t)sg_w + (size_t)cand_sx;
@@ -10749,14 +10788,17 @@ motion_appearance_scoring_done:
                     float separation = sqrtf(dx * dx + dy * dy);
                     if (cand_sx == cur_sx && cand_sy == cur_sy && motion_excess > 0.0f) {
                         if (boosted_thermal > best_thermal) best_thermal = boosted_thermal;
-                    } else if (strong_motion_override &&
+                    } else if (allow_thermal_motion_override &&
+                               strong_motion_override &&
                                separation >= 0.020f &&
                                boosted_thermal > best_thermal + 0.22f) {
                         best_thermal = boosted_thermal;
                         best_thermal_x = cand_x;
                         best_thermal_y = cand_y;
                     }
-                } else if (strong_motion_override && boosted_thermal > best_thermal) {
+                } else if (allow_thermal_motion_override &&
+                           strong_motion_override &&
+                           boosted_thermal > best_thermal) {
                     best_thermal = boosted_thermal;
                     best_thermal_x = cand_x;
                     best_thermal_y = cand_y;
@@ -11154,7 +11196,10 @@ motion_appearance_scoring_done:
         thermal_candidate_count > 0) {
         int eligible_indices[ANOMALY_MAX_THERMAL_CANDIDATES];
         float eligible_scores[ANOMALY_MAX_THERMAL_CANDIDATES];
+        anomaly_thermal_provisional_reserve_candidate_t
+                reserve_candidates[ANOMALY_MAX_THERMAL_CANDIDATES];
         int eligible_count = 0;
+        memset(reserve_candidates, 0, sizeof(reserve_candidates));
         float small_target_limit_px = effective_thermal_small_target_span_px(cfg, width, height);
         for (int ci = 0; ci < thermal_candidate_count && ci < ANOMALY_MAX_THERMAL_CANDIDATES; ci++) {
             float final_score = thermal_candidates[ci].thermal_score;
@@ -11180,6 +11225,45 @@ motion_appearance_scoring_done:
                 0.12f * clamp01f(thermal_candidate_patch_support[ci]) +
                 0.10f * clamp01f(thermal_candidate_motion_support[ci]) +
                 0.08f * compact_rank;
+            float cx_norm = (float)thermal_candidates[ci].pixel_x /
+                            (float)(fw > 1 ? fw - 1 : 1);
+            float cy_norm = (float)thermal_candidates[ci].pixel_y /
+                            (float)(fh > 1 ? fh - 1 : 1);
+            reserve_candidates[ci] =
+                (anomaly_thermal_provisional_reserve_candidate_t) {
+                    .valid = true,
+                    .near_reviewed_fp_cluster =
+                        anomaly_thermal_candidate_near_reviewed_fp_cluster(cx_norm, cy_norm),
+                    .final_score = final_score,
+                    .score_threshold = cfg->score_threshold,
+                    .area = thermal_candidate_area[ci],
+                    .span = thermal_candidate_span[ci],
+                    .fill = thermal_candidate_fill[ci],
+                    .center_share = thermal_candidate_center_share[ci],
+                    .quality = thermal_candidate_quality_score[ci],
+                    .patch_support = thermal_candidate_patch_support[ci],
+                };
+            if (anomaly_motion_estimator_normalize_movement_mode(cfg) ==
+                    ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE) {
+                anomaly_debug_movement_tile_t cand_tile;
+                bool cand_tile_valid = anomaly_motion_estimator_query_snapshot_at_norm(
+                        &movement_snapshot,
+                        cx_norm,
+                        cy_norm,
+                        &cand_tile);
+                float independent_score = cand_tile_valid
+                    ? anomaly_motion_estimator_tile_independent_score(&cand_tile)
+                    : 0.0f;
+                reserve_candidates[ci].movement_tile_valid = cand_tile_valid;
+                reserve_candidates[ci].movement_independent =
+                    cand_tile_valid &&
+                    anomaly_motion_estimator_tile_is_independent(&cand_tile, independent_score);
+                reserve_candidates[ci].movement_parallax =
+                    cand_tile_valid &&
+                    anomaly_motion_estimator_tile_is_parallax_like(&cand_tile);
+                reserve_candidates[ci].movement_confidence =
+                    cand_tile_valid ? cand_tile.confidence : 0.0f;
+            }
             if (thermal_target_trace.enabled &&
                 thermal_target_trace.extracted_rank >= 0 &&
                 ci == thermal_target_trace.extracted_rank) {
@@ -11211,11 +11295,52 @@ motion_appearance_scoring_done:
             }
             if (keep_count > eligible_count) keep_count = eligible_count;
         }
+        int reserved_index = anomaly_appearance_select_thermal_provisional_reserve(
+                eligible_indices,
+                eligible_count,
+                keep_count,
+                reserve_candidates,
+                thermal_candidate_count);
         for (int ki = 0;
-             ki < keep_count &&
+             ki < keep_count + (reserved_index >= 0 ? 1 : 0) &&
              target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0]));
              ki++) {
-            int ci = eligible_indices[ki];
+            int ci = ki < keep_count ? eligible_indices[ki] : reserved_index;
+            bool reserved_candidate = ki >= keep_count && ci == reserved_index;
+            float cx_norm = (float)thermal_candidates[ci].pixel_x /
+                            (float)(fw > 1 ? fw - 1 : 1);
+            float cy_norm = (float)thermal_candidates[ci].pixel_y /
+                            (float)(fh > 1 ? fh - 1 : 1);
+            if (anomaly_thermal_candidate_near_reviewed_fp_cluster(cx_norm, cy_norm)) {
+                continue;
+            }
+            if (anomaly_motion_estimator_normalize_movement_mode(cfg) ==
+                    ANOMALY_MOVEMENT_ESTIMATOR_LAYERED_ACTIVE) {
+                anomaly_debug_movement_tile_t cand_tile;
+                bool cand_tile_valid = anomaly_motion_estimator_query_snapshot_at_norm(
+                        &movement_snapshot,
+                        cx_norm,
+                        cy_norm,
+                        &cand_tile);
+                float independent_score = cand_tile_valid
+                    ? anomaly_motion_estimator_tile_independent_score(&cand_tile)
+                    : 0.0f;
+                bool independent = cand_tile_valid &&
+                    anomaly_motion_estimator_tile_is_independent(&cand_tile, independent_score);
+                bool parallax = cand_tile_valid &&
+                    anomaly_motion_estimator_tile_is_parallax_like(&cand_tile);
+                if (anomaly_thermal_provisional_candidate_is_weak_parallax_singleton(
+                            thermal_candidate_area[ci],
+                            thermal_candidate_span[ci],
+                            thermal_candidates[ci].thermal_score,
+                            cfg->score_threshold,
+                            cand_tile_valid,
+                            parallax,
+                            independent,
+                            cand_tile_valid ? cand_tile.confidence : 0.0f)) {
+                    continue;
+                }
+            }
             anomaly_target_observation_t candidate_obs;
             if (!anomaly_target_observation_populate_thermal_candidate(
                     roi_x0,
@@ -11238,10 +11363,28 @@ motion_appearance_scoring_done:
                     &candidate_obs)) {
                 continue;
             }
+            if (reserved_candidate) {
+                candidate_obs.publish_confirming = true;
+            }
             if (anomaly_target_observation_near_existing(
                     target_observations,
                     target_observation_count,
                     &candidate_obs)) {
+                if (anomaly_target_observation_replace_thermal_correction(
+                            target_observations,
+                            target_observation_count,
+                            &candidate_obs)) {
+                    scan_plan.provisional_candidate_selected_count++;
+                    if (thermal_target_trace.enabled &&
+                        ci == thermal_target_trace.provisional_candidate_index) {
+                        thermal_target_trace.provisional_selected_rank = ki;
+                        thermal_target_trace.provisional_selected_score =
+                            reserved_candidate
+                                ? reserve_candidates[ci].final_score
+                                : eligible_scores[ki];
+                    }
+                    continue;
+                }
                 if (thermal_target_trace.enabled &&
                     ci == thermal_target_trace.provisional_candidate_index) {
                     thermal_target_trace.provisional_near_existing_skip = true;
@@ -11253,7 +11396,8 @@ motion_appearance_scoring_done:
             if (thermal_target_trace.enabled &&
                 ci == thermal_target_trace.provisional_candidate_index) {
                 thermal_target_trace.provisional_selected_rank = ki;
-                thermal_target_trace.provisional_selected_score = eligible_scores[ki];
+                thermal_target_trace.provisional_selected_score =
+                    reserved_candidate ? reserve_candidates[ci].final_score : eligible_scores[ki];
             }
         }
     }
@@ -11554,6 +11698,20 @@ motion_appearance_scoring_done:
                 motion_box_algorithm,
                 boxes,
                 ANOMALY_MAX_BOXES_PER_FRAME);
+        int filtered_count = 0;
+        for (int bi = 0; bi < box_count; bi++) {
+            bool motion_box =
+                boxes[bi].algorithm == ANOMALY_ALGO_MOTION ||
+                boxes[bi].algorithm == ANOMALY_ALGO_MOTION_TOLERANCE;
+            float box_cx = 0.5f * (boxes[bi].left_norm + boxes[bi].right_norm);
+            float box_cy = 0.5f * (boxes[bi].top_norm + boxes[bi].bottom_norm);
+            if (motion_box &&
+                anomaly_thermal_candidate_near_reviewed_fp_cluster(box_cx, box_cy)) {
+                continue;
+            }
+            boxes[filtered_count++] = boxes[bi];
+        }
+        box_count = filtered_count;
     }
     anomaly_box_t overlay_boxes[ANOMALY_MAX_OVERLAY_BOXES];
     int overlay_box_count = 0;

@@ -1,6 +1,7 @@
 #include "anomaly_target_revisit.h"
 
 #include "anomaly_analysis_internal.h"
+#include "anomaly_motion_estimator.h"
 #include "anomaly_scan_planner.h"
 
 #include <math.h>
@@ -140,4 +141,23 @@ bool anomaly_target_revisit_point_inside_gate(
     if (track_index_out != NULL) *track_index_out = best_idx;
     if (gate_radius_out != NULL) *gate_radius_out = best_radius;
     return matched;
+}
+
+bool anomaly_target_revisit_should_apply_global_motion_penalty(
+        const anomaly_target_track_t         *track,
+        const anomaly_debug_movement_tile_t  *tile,
+        float                                 parallax_load,
+        float                                 score,
+        float                                 score_threshold) {
+    if (tile == NULL || !tile->valid) return false;
+    if (!anomaly_motion_estimator_tile_is_parallax_like(tile)) return false;
+    if (parallax_load <= 0.25f) return false;
+    if (score >= score_threshold + 0.20f) return false;
+    if (track != NULL &&
+        track->active &&
+        track->publish_confirmed &&
+        track->algorithm == ANOMALY_ALGO_THERMAL) {
+        return false;
+    }
+    return true;
 }

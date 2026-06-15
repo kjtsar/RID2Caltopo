@@ -95,6 +95,7 @@
 #define ANOMALY_TARGET_CANDIDATE_KEEP_MIN 2
 #define ANOMALY_TARGET_CANDIDATE_KEEP_MAX 4
 #define ANOMALY_TARGET_CANDIDATE_SCORE_SLACK 0.75f
+#define ANOMALY_THERMAL_SCORE_THRESHOLD_SCALE 0.62f
 #define ANOMALY_COLOR_PROVISIONAL_KEEP_MAX 2
 #define ANOMALY_COLOR_PROVISIONAL_SCORE_SLACK 1.05f
 #define ANOMALY_MAX_COLOR_CANDIDATES 6
@@ -133,6 +134,14 @@ static inline int popcount_u8(uint8_t value) {
         value >>= 1u;
     }
     return count;
+}
+
+float anomaly_thermal_effective_score_threshold(float score_threshold) {
+    if (!isfinite(score_threshold)) return 1.0f;
+    float scaled = score_threshold * ANOMALY_THERMAL_SCORE_THRESHOLD_SCALE;
+    if (scaled < 1.0f) return 1.0f;
+    if (scaled > score_threshold) return score_threshold;
+    return scaled;
 }
 
 static int compare_float_qsort(const void *a, const void *b) {
@@ -8116,6 +8125,7 @@ int anomaly_process_frame(
     int   best_persist_x = 0, best_persist_y = 0;
     int   best_thermal_candidate_idx = -1;
     float best_thermal_candidate_score = -1.0f;
+    float thermal_score_threshold = anomaly_thermal_effective_score_threshold(cfg->score_threshold);
     anomaly_debug_candidate_t saliency_top[ANOMALY_DEBUG_TOP_CANDIDATES];
     memset(saliency_top, 0, sizeof(saliency_top));
     int saliency_top_count = 0;
@@ -9574,7 +9584,7 @@ int anomaly_process_frame(
                 float retention_rank = thermal_blob_candidates[ci].retention_rank;
                 if (sample_step > 1) {
                     float score_rank =
-                        clampf((final_score - cfg->score_threshold + 0.25f) / 2.50f, 0.0f, 1.0f);
+                        clampf((final_score - thermal_score_threshold + 0.25f) / 2.50f, 0.0f, 1.0f);
                     float patch_rank = clampf((patch_support - 0.08f) / 0.40f, 0.0f, 1.0f);
                     float motion_rank = clampf((motion_support - 0.06f) / 0.28f, 0.0f, 1.0f);
                     float area_pref = area <= 1.0f ? 0.70f
@@ -9604,7 +9614,7 @@ int anomaly_process_frame(
                 thermal_candidate_singleton_score_scale[ci] = singleton_score_scale;
                 thermal_candidate_retention_rank_debug[ci] = retention_rank;
                 thermal_candidate_singleton_blob_debug[ci] = coarse_singleton_blob;
-                bool candidate_plausible = final_score >= cfg->score_threshold;
+                bool candidate_plausible = final_score >= thermal_score_threshold;
                 thermal_candidate_above_threshold[ci] = candidate_plausible;
                 if (candidate_plausible) {
                     if (best_thermal_candidate_idx < 0 ||
@@ -9619,7 +9629,7 @@ int anomaly_process_frame(
                     best_thermal_x = thermal_candidates[ci].pixel_x;
                     best_thermal_y = thermal_candidates[ci].pixel_y;
                 }
-                if (final_score > cfg->score_threshold &&
+                if (final_score > thermal_score_threshold &&
                     span_px > 0.0f &&
                     span_px <= small_target_limit_px &&
                     (best_small_span_px < 0.0f || span_px < best_small_span_px)) {
@@ -10321,7 +10331,7 @@ motion_appearance_scoring_done:
                     sg_w, sg_h,
                     roi_x0, roi_y0, sample_step,
                     &best_persist, &best_persist_x, &best_persist_y);
-            if (best_thermal >= cfg->score_threshold && bg_valid &&
+            if (best_thermal >= thermal_score_threshold && bg_valid &&
                 (best_persist < cfg->score_threshold || (best_persist_x > 0 || best_persist_y > 0))) {
                 int persist_sx = clamp_i32((best_persist_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
                 int persist_sy = clamp_i32((best_persist_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
@@ -10462,8 +10472,8 @@ motion_appearance_scoring_done:
                     R);
         if (revisit_confirmation.valid) {
             float promoted_score = revisit_confirmation.score;
-            if (promoted_score < cfg->score_threshold) {
-                promoted_score = cfg->score_threshold;
+            if (promoted_score < thermal_score_threshold) {
+                promoted_score = thermal_score_threshold;
             }
             if (promoted_score >= best_thermal) {
                 best_thermal = promoted_score;
@@ -10510,7 +10520,7 @@ motion_appearance_scoring_done:
         raw_cx[0] = (float)best_color_x   / fw;
         raw_cy[0] = (float)best_color_y   / fh;
     }
-    bool thermal_raw_publishable = best_thermal >= cfg->score_threshold;
+    bool thermal_raw_publishable = best_thermal >= thermal_score_threshold;
     if (thermal_candidate_count > 0 && best_thermal_candidate_idx < 0) {
         thermal_raw_publishable = false;
     }
@@ -10731,7 +10741,7 @@ motion_appearance_scoring_done:
                     }
                 }
                 float boosted_thermal = thermal_base + (ANOMALY_THERMAL_MOTION_BOOST * motion_excess * reliability);
-                if (best_thermal >= cfg->score_threshold) {
+                if (best_thermal >= thermal_score_threshold) {
                     int cur_sx = clamp_i32((best_thermal_x - roi_x0 + (sample_step / 2)) / sample_step, 0, sg_w - 1);
                     int cur_sy = clamp_i32((best_thermal_y - roi_y0 + (sample_step / 2)) / sample_step, 0, sg_h - 1);
                     float dx = ((float)cand_x - (float)best_thermal_x) / fw_norm;
@@ -10793,7 +10803,7 @@ motion_appearance_scoring_done:
         int derived_persist_algorithm = 0;
 
         if ((cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0 &&
-            best_thermal >= cfg->score_threshold) {
+            best_thermal >= thermal_score_threshold) {
             float support = 0.0f;
             float motion_support = 0.0f;
             if (state->scratch_patch_selection != NULL) {
@@ -10816,7 +10826,7 @@ motion_appearance_scoring_done:
                 use_publish_transition_gating &&
                 singleton_blob &&
                 motion_support < 0.20f &&
-                (!thermal_publish_settled || best_thermal < cfg->score_threshold + 0.65f);
+                (!thermal_publish_settled || best_thermal < thermal_score_threshold + 0.65f);
             if (!weak_singleton) {
                 derived_persist =
                     best_thermal +
@@ -11560,7 +11570,7 @@ motion_appearance_scoring_done:
                 best_blob_overlay_score = thermal_candidates[ci].thermal_score;
             }
         }
-        float overlay_score_floor = cfg->score_threshold;
+        float overlay_score_floor = thermal_score_threshold;
         if (best_blob_overlay_score > overlay_score_floor) {
             float stronger_floor = best_blob_overlay_score - ANOMALY_THERMAL_BLOB_OVERLAY_SCORE_MARGIN;
             if (stronger_floor > overlay_score_floor) overlay_score_floor = stronger_floor;

@@ -3,6 +3,7 @@ project(anomaly_test C)
 
 set(CMAKE_C_STANDARD 11)
 option(ANOMALY_DEBUG_TIMING "Enable anomaly detector stage timing instrumentation" OFF)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 add_executable(anomaly_test
     test_anomaly.c
@@ -80,3 +81,38 @@ target_link_libraries(anomaly_video_test m)
 
 enable_testing()
 add_test(NAME anomaly_test COMMAND anomaly_test)
+add_test(
+    NAME anomaly_video_app_defaults_local_playback_config
+    COMMAND anomaly_video_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/test/resources/vidcap/PowerHouse1.mp4
+        --app-defaults
+        --app-display-output
+        --no-video
+        --time-end
+        0.1
+        -c
+        ${CMAKE_CURRENT_BINARY_DIR}/app_defaults_config_probe.csv
+        --summary-json
+        ${CMAKE_CURRENT_BINARY_DIR}/app_defaults_config_probe.json
+)
+set_tests_properties(
+    anomaly_video_app_defaults_local_playback_config
+    PROPERTIES
+        PASS_REGULAR_EXPRESSION "algorithm  = 2 \\(thermal \\)"
+)
+add_test(
+    NAME anomaly_video_powerhouse1_app_local_opening_recall
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/check_app_local_powerhouse1_opening.py
+        --binary
+        $<TARGET_FILE:anomaly_video_test>
+        --clip
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/test/resources/vidcap/PowerHouse1.mp4
+        --review
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/test/resources/vidcap/PowerHouse1.review.json
+        --out-csv
+        ${CMAKE_CURRENT_BINARY_DIR}/powerhouse1_app_local_opening.csv
+        --out-summary
+        ${CMAKE_CURRENT_BINARY_DIR}/powerhouse1_app_local_opening_summary.json
+)

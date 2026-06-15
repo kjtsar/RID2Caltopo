@@ -25,6 +25,15 @@ static bool anomaly_result_is_stale_color_target_track(const anomaly_target_trac
            track->miss_count > ANOMALY_RESULT_MAX_STALE_COLOR_MISSES;
 }
 
+static bool anomaly_result_is_stale_thermal_target_track(const anomaly_target_track_t *track) {
+    return track != NULL &&
+           track->active &&
+           track->publish_confirmed &&
+           track->algorithm == ANOMALY_ALGO_THERMAL &&
+           !track->fresh_observation &&
+           track->miss_count > 0;
+}
+
 int anomaly_result_build_boxes(
         const anomaly_state_t  *state,
         const anomaly_config_t *cfg,
@@ -72,6 +81,7 @@ int anomaly_result_build_boxes(
         const anomaly_target_track_t *track = &state->target_tracks[ti];
         if (!track->active || !track->publish_confirmed || track->hit_count < min_hits) continue;
         if (anomaly_result_is_stale_color_target_track(track) ||
+            anomaly_result_is_stale_thermal_target_track(track) ||
             (stale_color_lock_pending && track->algorithm == ANOMALY_ALGO_COLOR)) {
             continue;
         }

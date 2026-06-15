@@ -32,6 +32,90 @@ typedef struct {
     int64_t render_interval_ms;
 } anomaly_detector_runtime_budget_render_interval_t;
 
+typedef struct {
+    int64_t pts_us;
+    bool repaired;
+} anomaly_detector_runtime_budget_local_playback_pts_t;
+
+typedef struct {
+    int oldest_index;
+    int newest_index;
+    bool valid;
+} anomaly_detector_runtime_budget_local_playback_timing_indices_t;
+
+typedef struct {
+    int slot_index;
+    int history_offset;
+    bool valid;
+} anomaly_detector_runtime_budget_local_playback_history_slot_t;
+
+typedef struct {
+    int history_offset;
+    int64_t step_budget;
+    bool replay_active;
+    bool render_from_history;
+    bool reset_tracking;
+} anomaly_detector_runtime_budget_local_playback_step_t;
+
+typedef struct {
+    int slot_index;
+    int next_index;
+    int count;
+    bool valid;
+} anomaly_detector_runtime_budget_local_playback_append_t;
+
+typedef struct {
+    int64_t step_budget;
+    bool advance;
+    bool consume_step;
+} anomaly_detector_runtime_budget_local_playback_advance_t;
+
+typedef struct {
+    bool clear_render_queue;
+    bool clear_ad_queue;
+    bool reset_render_timing;
+    bool clear_step_budget;
+    bool clear_history_replay;
+} anomaly_detector_runtime_budget_local_playback_pause_t;
+
+typedef struct {
+    int64_t elapsed_ms;
+    bool observing;
+    bool finalize;
+} anomaly_detector_runtime_budget_startup_observation_t;
+
+typedef struct {
+    int64_t lag_ms;
+    int64_t lag_budget_ms;
+    bool severe_lag;
+    bool periodic_log;
+    bool update_log_timestamp;
+} anomaly_detector_runtime_budget_render_lag_t;
+
+typedef enum {
+    ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE = 0,
+    ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_ATTACHED = 1,
+    ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_FORWARD_LATE = 2,
+} anomaly_detector_runtime_budget_local_ad_overlay_action_t;
+
+typedef enum {
+    ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_RENDER_FIRST = 0,
+    ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_INLINE_REVIEW = 1,
+} anomaly_detector_runtime_budget_local_ad_route_t;
+
+typedef struct {
+    int head;
+    int depth;
+    bool valid;
+} anomaly_detector_runtime_budget_queue_pop_t;
+
+typedef struct {
+    int drop_count;
+    int head;
+    int depth;
+    bool valid;
+} anomaly_detector_runtime_budget_queue_trim_t;
+
 anomaly_detector_runtime_budget_t anomaly_detector_runtime_budget_make_default(
         float frame_rate_fps);
 
@@ -56,6 +140,39 @@ int anomaly_detector_runtime_budget_render_queue_hard_cap(
         int min_extra_frames,
         int min_hard_cap_frames,
         int max_hard_cap_frames);
+
+bool anomaly_detector_runtime_budget_should_trim_render_queue(
+        bool local_file_source,
+        int64_t buffered_span_ms,
+        int64_t target_latency_ms);
+
+int anomaly_detector_runtime_budget_queue_tail_index(
+        int head,
+        int depth,
+        int capacity);
+
+int anomaly_detector_runtime_budget_queue_offset_index(
+        int head,
+        int offset,
+        int capacity);
+
+anomaly_detector_runtime_budget_queue_pop_t anomaly_detector_runtime_budget_queue_pop_state(
+        int head,
+        int depth,
+        int capacity);
+
+anomaly_detector_runtime_budget_queue_trim_t anomaly_detector_runtime_budget_queue_trim_state(
+        int head,
+        int depth,
+        int keep_latest,
+        int capacity);
+
+int anomaly_detector_runtime_budget_render_queue_storage_capacity(
+        int current_capacity,
+        int min_capacity,
+        int initial_capacity,
+        int growth_threshold,
+        int growth_step);
 
 int64_t anomaly_detector_runtime_budget_target_latency_ms(
         int64_t stall_estimate_ms,
@@ -121,6 +238,157 @@ anomaly_detector_runtime_budget_desired_render_interval_ms(
         int adjust_base_pct,
         int adjust_max_pct,
         int smoothing_pct);
+
+int64_t anomaly_detector_runtime_budget_current_render_interval_ms(
+        int64_t smoothed_interval_ms,
+        int64_t source_interval_ms,
+        int default_fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms);
+
+int64_t anomaly_detector_runtime_budget_interval_from_fps(
+        double fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms);
+
+int64_t anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+        int64_t nominal_interval_ms,
+        int64_t pts_interval_ms,
+        int default_fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms,
+        int64_t max_reasonable_interval_ms);
+
+int64_t anomaly_detector_runtime_budget_local_playback_pace_delay_ms(
+        int64_t nominal_interval_ms,
+        int64_t previous_pts_us,
+        int64_t pts_us,
+        int64_t previous_admit_at_ms,
+        int64_t now_ms,
+        int default_fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms,
+        int64_t max_reasonable_interval_ms);
+
+anomaly_detector_runtime_budget_local_playback_pts_t
+anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+        int64_t pts_us,
+        int64_t last_pts_us,
+        int64_t nominal_interval_ms,
+        int64_t source_interval_ms,
+        int default_fps);
+
+anomaly_detector_runtime_budget_local_playback_timing_indices_t
+anomaly_detector_runtime_budget_local_playback_timing_indices(
+        int timing_next,
+        int timing_count,
+        int capacity);
+
+bool anomaly_detector_runtime_budget_local_playback_timing_span_is_valid(
+        int64_t first_pts_us,
+        int64_t last_pts_us,
+        int64_t first_render_at_ms,
+        int64_t last_render_at_ms);
+
+anomaly_detector_runtime_budget_local_playback_history_slot_t
+anomaly_detector_runtime_budget_local_playback_history_slot(
+        int history_next,
+        int history_count,
+        int requested_offset,
+        int capacity);
+
+anomaly_detector_runtime_budget_local_playback_step_t
+anomaly_detector_runtime_budget_local_playback_step_forward(
+        int requested_frame_count,
+        int current_history_offset,
+        bool history_replay_active,
+        int64_t current_step_budget,
+        int64_t max_step_budget);
+
+anomaly_detector_runtime_budget_local_playback_step_t
+anomaly_detector_runtime_budget_local_playback_step_back(
+        int current_history_offset,
+        int history_count);
+
+anomaly_detector_runtime_budget_local_playback_append_t
+anomaly_detector_runtime_budget_local_playback_append(
+        int current_next,
+        int current_count,
+        int capacity);
+
+anomaly_detector_runtime_budget_local_playback_advance_t
+anomaly_detector_runtime_budget_local_playback_advance(
+        bool paused,
+        int64_t current_step_budget);
+
+anomaly_detector_runtime_budget_local_playback_pause_t
+anomaly_detector_runtime_budget_local_playback_pause(
+        bool paused);
+
+anomaly_detector_runtime_budget_startup_observation_t
+anomaly_detector_runtime_budget_startup_observation(
+        bool active,
+        int64_t now_ms,
+        int64_t started_at_ms,
+        int64_t observe_ms);
+
+anomaly_detector_runtime_budget_render_lag_t
+anomaly_detector_runtime_budget_render_lag(
+        int64_t now_ms,
+        int64_t scheduled_due_ms,
+        int64_t interval_ms,
+        int64_t base_interval_ms,
+        int64_t last_lag_log_at_ms,
+        int64_t lag_log_interval_ms);
+
+anomaly_detector_runtime_budget_local_ad_overlay_action_t
+anomaly_detector_runtime_budget_local_ad_overlay_action(
+        bool overlay_present,
+        bool attached_to_pending_render);
+
+anomaly_detector_runtime_budget_local_ad_route_t
+anomaly_detector_runtime_budget_local_ad_route(
+        bool ad_enabled,
+        bool ad_thread_started,
+        bool ad_sync_ready);
+
+int64_t anomaly_detector_runtime_budget_advance_render_due_ms(
+        int64_t scheduled_due_ms,
+        int64_t interval_ms,
+        int64_t now_ms);
+
+int64_t anomaly_detector_runtime_budget_pts_interval_from_span_ms(
+        int64_t first_pts_us,
+        int64_t last_pts_us,
+        int valid_count,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms);
+
+int64_t anomaly_detector_runtime_budget_buffered_span_ms(
+        int64_t first_pts_us,
+        int64_t last_pts_us);
+
+bool anomaly_detector_runtime_budget_decode_delta_is_gap(
+        int64_t delta_ms,
+        int64_t source_interval_ms,
+        int64_t default_source_interval_ms,
+        int64_t gap_floor_ms);
+
+bool anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+        int64_t delta_ms,
+        int64_t source_interval_ms,
+        int64_t default_source_interval_ms,
+        int64_t min_sample_ms,
+        int64_t max_sample_ms,
+        int min_source_pct,
+        int max_source_pct);
+
+bool anomaly_detector_runtime_budget_decode_stall_active(
+        int64_t now_ms,
+        int64_t last_decode_at_ms,
+        int64_t source_interval_ms,
+        int64_t gap_floor_ms,
+        int interval_multiplier);
 
 const char *anomaly_detector_processing_mode_name(
         anomaly_detector_processing_mode_t mode);

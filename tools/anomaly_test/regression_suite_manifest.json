@@ -66,6 +66,15 @@
         "--stride",
         "1"
       ]
+    },
+    {
+      "id": "app-local-playback-defaults",
+      "label": "App local playback defaults",
+      "description": "Captured-playback release gate using the same app-derived local review config and app-visible output stream applied by StreamsViewModel.",
+      "detector_args": [
+        "--app-defaults",
+        "--app-display-output"
+      ]
     }
   ],
   "source_clips": [

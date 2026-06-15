@@ -104,6 +104,16 @@ bool anomaly_runtime_pressure_should_bypass_analysis(
     return false;
 }
 
+bool anomaly_runtime_pressure_should_bypass_analysis_for_source(
+        anomaly_runtime_pressure_mode_t mode,
+        int64_t pressure_frame_counter,
+        bool local_file_source) {
+    (void) local_file_source;
+    return anomaly_runtime_pressure_should_bypass_analysis(
+            mode,
+            pressure_frame_counter);
+}
+
 int anomaly_runtime_pressure_backlog_frame_capacity(
         int64_t backlog_ms,
         int64_t source_interval_ms,

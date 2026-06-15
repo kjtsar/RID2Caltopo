@@ -11,6 +11,9 @@ class StreamRenderRouterTest {
     private fun liveInfo(designator: String) =
         StreamInfo(designator = designator, state = StreamState.LIVE)
 
+    private fun localPlaybackInfo(designator: String) =
+        StreamInfo(designator = designator, state = StreamState.LIVE, isLocalPlayback = true)
+
     private fun nonLiveInfo(designator: String, state: StreamState = StreamState.CONNECTING) =
         StreamInfo(designator = designator, state = state)
 
@@ -115,6 +118,38 @@ class StreamRenderRouterTest {
             "d2" to liveInfo("d2"),
         )
         assertFalse(useFfmpeg("d1", streams, focusedDesignator = "d1", displayedTileCount = 2))
+    }
+
+    @Test
+    fun focusedLocalPlayback_usesFfmpegEvenWhenLayoutReportsMultipleTiles() {
+        val streams = mapOf(
+            "PowerHouse1.mp4" to localPlaybackInfo("PowerHouse1.mp4"),
+            "d2" to liveInfo("d2"),
+        )
+        assertTrue(
+            useFfmpeg(
+                "PowerHouse1.mp4",
+                streams,
+                focusedDesignator = "PowerHouse1.mp4",
+                displayedTileCount = 2,
+            )
+        )
+    }
+
+    @Test
+    fun localPlaybackWithoutFocus_usesFfmpegEvenWhenOtherTilesAreDisplayed() {
+        val streams = mapOf(
+            "PowerHouse1.mp4" to localPlaybackInfo("PowerHouse1.mp4"),
+            "d2" to liveInfo("d2"),
+        )
+        assertTrue(
+            useFfmpeg(
+                "PowerHouse1.mp4",
+                streams,
+                focusedDesignator = null,
+                displayedTileCount = 2,
+            )
+        )
     }
 
     // --- Transition: sole stream gains a second stream ---

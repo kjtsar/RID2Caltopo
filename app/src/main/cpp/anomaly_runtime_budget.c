@@ -153,6 +153,146 @@ int anomaly_detector_runtime_budget_render_queue_hard_cap(
     return hard_cap;
 }
 
+bool anomaly_detector_runtime_budget_should_trim_render_queue(
+        bool local_file_source,
+        int64_t buffered_span_ms,
+        int64_t target_latency_ms) {
+    if (buffered_span_ms <= 0 || target_latency_ms <= 0) {
+        return false;
+    }
+    int64_t threshold_ms = target_latency_ms;
+    if (!local_file_source) {
+        threshold_ms = target_latency_ms > INT64_MAX / 2
+                ? INT64_MAX
+                : target_latency_ms * 2;
+    }
+    return buffered_span_ms >= threshold_ms;
+}
+
+int anomaly_detector_runtime_budget_queue_tail_index(
+        int head,
+        int depth,
+        int capacity) {
+    if (capacity <= 0) {
+        return 0;
+    }
+    int normalized_head = head % capacity;
+    if (normalized_head < 0) {
+        normalized_head += capacity;
+    }
+    if (depth < 0) {
+        depth = 0;
+    }
+    return (normalized_head + depth) % capacity;
+}
+
+int anomaly_detector_runtime_budget_queue_offset_index(
+        int head,
+        int offset,
+        int capacity) {
+    if (capacity <= 0) {
+        return 0;
+    }
+    int normalized_head = head % capacity;
+    if (normalized_head < 0) {
+        normalized_head += capacity;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+    return (normalized_head + offset) % capacity;
+}
+
+anomaly_detector_runtime_budget_queue_pop_t anomaly_detector_runtime_budget_queue_pop_state(
+        int head,
+        int depth,
+        int capacity) {
+    anomaly_detector_runtime_budget_queue_pop_t pop = {
+        .head = 0,
+        .depth = 0,
+        .valid = false,
+    };
+    if (capacity <= 0 || depth <= 0) {
+        return pop;
+    }
+    int normalized_head = head % capacity;
+    if (normalized_head < 0) {
+        normalized_head += capacity;
+    }
+    pop.depth = depth - 1;
+    if (pop.depth > 0) {
+        pop.head = (normalized_head + 1) % capacity;
+    }
+    pop.valid = true;
+    return pop;
+}
+
+anomaly_detector_runtime_budget_queue_trim_t anomaly_detector_runtime_budget_queue_trim_state(
+        int head,
+        int depth,
+        int keep_latest,
+        int capacity) {
+    anomaly_detector_runtime_budget_queue_trim_t trim = {
+        .drop_count = 0,
+        .head = 0,
+        .depth = 0,
+        .valid = false,
+    };
+    if (capacity <= 0 || depth < 0) {
+        return trim;
+    }
+    int normalized_head = head % capacity;
+    if (normalized_head < 0) {
+        normalized_head += capacity;
+    }
+    trim.head = normalized_head;
+    trim.depth = depth;
+    if (keep_latest < 1 || depth <= keep_latest) {
+        return trim;
+    }
+    trim.drop_count = depth - keep_latest;
+    trim.head = (normalized_head + trim.drop_count) % capacity;
+    trim.depth = keep_latest;
+    trim.valid = true;
+    return trim;
+}
+
+int anomaly_detector_runtime_budget_render_queue_storage_capacity(
+        int current_capacity,
+        int min_capacity,
+        int initial_capacity,
+        int growth_threshold,
+        int growth_step) {
+    if (min_capacity < 1) {
+        min_capacity = 1;
+    }
+    if (current_capacity >= min_capacity) {
+        return current_capacity;
+    }
+    if (initial_capacity < 1) {
+        initial_capacity = 1;
+    }
+    if (growth_threshold < 1) {
+        growth_threshold = 1;
+    }
+    if (growth_step < 1) {
+        growth_step = 1;
+    }
+
+    int new_capacity = current_capacity;
+    if (new_capacity < initial_capacity) {
+        new_capacity = initial_capacity;
+    }
+    while (new_capacity < min_capacity) {
+        if (new_capacity < growth_threshold) {
+            new_capacity *= 2;
+        } else {
+            new_capacity += growth_step;
+        }
+    }
+    return new_capacity;
+}
+
 int64_t anomaly_detector_runtime_budget_target_latency_ms(
         int64_t stall_estimate_ms,
         int64_t proven_gap_ms,
@@ -555,6 +695,593 @@ anomaly_detector_runtime_budget_desired_render_interval_ms(
         .render_interval_ms = smoothed_interval_ms,
     };
     return interval;
+}
+
+int64_t anomaly_detector_runtime_budget_current_render_interval_ms(
+        int64_t smoothed_interval_ms,
+        int64_t source_interval_ms,
+        int default_fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms) {
+    if (min_interval_ms < 0) {
+        min_interval_ms = 0;
+    }
+    if (max_interval_ms < min_interval_ms) {
+        max_interval_ms = min_interval_ms;
+    }
+    int64_t interval_ms = smoothed_interval_ms;
+    if (interval_ms <= 0) {
+        interval_ms = source_interval_ms;
+    }
+    if (interval_ms <= 0) {
+        interval_ms = default_fps > 0
+                ? (1000 + (default_fps / 2)) / default_fps
+                : 1;
+    }
+    return anomaly_detector_budget_clamp_i64(
+            interval_ms,
+            min_interval_ms,
+            max_interval_ms);
+}
+
+int64_t anomaly_detector_runtime_budget_interval_from_fps(
+        double fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms) {
+    if (!(fps > 1.0)) {
+        return 0;
+    }
+    if (min_interval_ms < 0) {
+        min_interval_ms = 0;
+    }
+    if (max_interval_ms < min_interval_ms) {
+        max_interval_ms = min_interval_ms;
+    }
+    int64_t interval_ms = (int64_t) llround(1000.0 / fps);
+    return anomaly_detector_budget_clamp_i64(
+            interval_ms,
+            min_interval_ms,
+            max_interval_ms);
+}
+
+int64_t anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+        int64_t nominal_interval_ms,
+        int64_t pts_interval_ms,
+        int default_fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms,
+        int64_t max_reasonable_interval_ms) {
+    int64_t target_interval_ms = nominal_interval_ms;
+    if (pts_interval_ms > 0) {
+        if (nominal_interval_ms > 0) {
+            int64_t min_reasonable_ms = nominal_interval_ms / 2;
+            int64_t max_reasonable_ms = nominal_interval_ms * 2;
+            if (min_reasonable_ms < min_interval_ms) {
+                min_reasonable_ms = min_interval_ms;
+            }
+            if (max_reasonable_interval_ms > 0 &&
+                max_reasonable_ms > max_reasonable_interval_ms) {
+                max_reasonable_ms = max_reasonable_interval_ms;
+            }
+            if (pts_interval_ms >= min_reasonable_ms &&
+                pts_interval_ms <= max_reasonable_ms) {
+                target_interval_ms = pts_interval_ms;
+            }
+        } else {
+            target_interval_ms = pts_interval_ms;
+        }
+    }
+    if (target_interval_ms <= 0) {
+        target_interval_ms =
+                anomaly_detector_runtime_budget_current_render_interval_ms(
+                        0,
+                        0,
+                        default_fps,
+                        min_interval_ms,
+                        max_interval_ms);
+    }
+    return target_interval_ms;
+}
+
+int64_t anomaly_detector_runtime_budget_local_playback_pace_delay_ms(
+        int64_t nominal_interval_ms,
+        int64_t previous_pts_us,
+        int64_t pts_us,
+        int64_t previous_admit_at_ms,
+        int64_t now_ms,
+        int default_fps,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms,
+        int64_t max_reasonable_interval_ms) {
+    if (previous_admit_at_ms <= 0 || now_ms <= 0) {
+        return 0;
+    }
+    int64_t pts_interval_ms = 0;
+    if (previous_pts_us > 0 && pts_us > previous_pts_us) {
+        pts_interval_ms = (pts_us - previous_pts_us) / 1000;
+    }
+    int64_t target_interval_ms =
+            anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+                    nominal_interval_ms,
+                    pts_interval_ms,
+                    default_fps,
+                    min_interval_ms,
+                    max_interval_ms,
+                    max_reasonable_interval_ms);
+    int64_t target_at_ms = previous_admit_at_ms + target_interval_ms;
+    if (target_at_ms <= now_ms) {
+        return 0;
+    }
+    return target_at_ms - now_ms;
+}
+
+anomaly_detector_runtime_budget_local_playback_pts_t
+anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+        int64_t pts_us,
+        int64_t last_pts_us,
+        int64_t nominal_interval_ms,
+        int64_t source_interval_ms,
+        int default_fps) {
+    int64_t interval_us = nominal_interval_ms > 0
+            ? nominal_interval_ms * 1000
+            : source_interval_ms * 1000;
+    if (interval_us <= 0) {
+        interval_us = default_fps > 0
+                ? (1000000 + (default_fps / 2)) / default_fps
+                : 1;
+    }
+
+    anomaly_detector_runtime_budget_local_playback_pts_t normalized = {
+        .pts_us = pts_us,
+        .repaired = false,
+    };
+    if (pts_us <= 0) {
+        if (last_pts_us > 0) {
+            normalized.pts_us = last_pts_us + interval_us;
+        }
+        return normalized;
+    }
+    if (last_pts_us > 0 && pts_us <= last_pts_us) {
+        normalized.pts_us = last_pts_us + interval_us;
+        normalized.repaired = true;
+    }
+    return normalized;
+}
+
+anomaly_detector_runtime_budget_local_playback_timing_indices_t
+anomaly_detector_runtime_budget_local_playback_timing_indices(
+        int timing_next,
+        int timing_count,
+        int capacity) {
+    anomaly_detector_runtime_budget_local_playback_timing_indices_t indices = {
+        .oldest_index = 0,
+        .newest_index = 0,
+        .valid = false,
+    };
+    if (capacity <= 0 || timing_count < 2) {
+        return indices;
+    }
+    if (timing_count > capacity) {
+        timing_count = capacity;
+    }
+    int normalized_next = timing_next % capacity;
+    if (normalized_next < 0) {
+        normalized_next += capacity;
+    }
+    indices.oldest_index = (normalized_next - timing_count + capacity) % capacity;
+    indices.newest_index = (normalized_next - 1 + capacity) % capacity;
+    indices.valid = true;
+    return indices;
+}
+
+bool anomaly_detector_runtime_budget_local_playback_timing_span_is_valid(
+        int64_t first_pts_us,
+        int64_t last_pts_us,
+        int64_t first_render_at_ms,
+        int64_t last_render_at_ms) {
+    return first_pts_us > 0 &&
+           last_pts_us > first_pts_us &&
+           first_render_at_ms > 0 &&
+           last_render_at_ms > first_render_at_ms;
+}
+
+anomaly_detector_runtime_budget_local_playback_history_slot_t
+anomaly_detector_runtime_budget_local_playback_history_slot(
+        int history_next,
+        int history_count,
+        int requested_offset,
+        int capacity) {
+    anomaly_detector_runtime_budget_local_playback_history_slot_t slot = {
+        .slot_index = 0,
+        .history_offset = 0,
+        .valid = false,
+    };
+    if (capacity <= 0 || history_count <= 0) {
+        return slot;
+    }
+    if (history_count > capacity) {
+        history_count = capacity;
+    }
+    int history_offset = requested_offset;
+    if (history_offset < 0) {
+        history_offset = 0;
+    }
+    if (history_offset >= history_count) {
+        history_offset = history_count - 1;
+    }
+
+    int normalized_next = history_next % capacity;
+    if (normalized_next < 0) {
+        normalized_next += capacity;
+    }
+    int newest_index = (normalized_next - 1 + capacity) % capacity;
+    slot.slot_index = (newest_index - history_offset + capacity) % capacity;
+    slot.history_offset = history_offset;
+    slot.valid = true;
+    return slot;
+}
+
+anomaly_detector_runtime_budget_local_playback_step_t
+anomaly_detector_runtime_budget_local_playback_step_forward(
+        int requested_frame_count,
+        int current_history_offset,
+        bool history_replay_active,
+        int64_t current_step_budget,
+        int64_t max_step_budget) {
+    anomaly_detector_runtime_budget_local_playback_step_t step = {
+        .history_offset = current_history_offset > 0 ? current_history_offset : 0,
+        .step_budget = current_step_budget > 0 ? current_step_budget : 0,
+        .replay_active = history_replay_active,
+        .render_from_history = false,
+        .reset_tracking = false,
+    };
+    int64_t step_count = requested_frame_count > 0
+            ? (int64_t) requested_frame_count
+            : 1;
+    if (step_count == 1 && step.history_offset > 0) {
+        step.history_offset -= 1;
+        step.replay_active = true;
+        step.render_from_history = true;
+        return step;
+    }
+
+    step.reset_tracking = history_replay_active;
+    step.history_offset = 0;
+    step.replay_active = false;
+    if (max_step_budget < 0) {
+        max_step_budget = 0;
+    }
+    if (step.step_budget > max_step_budget - step_count) {
+        step.step_budget = max_step_budget;
+    } else {
+        step.step_budget += step_count;
+    }
+    return step;
+}
+
+anomaly_detector_runtime_budget_local_playback_step_t
+anomaly_detector_runtime_budget_local_playback_step_back(
+        int current_history_offset,
+        int history_count) {
+    anomaly_detector_runtime_budget_local_playback_step_t step = {
+        .history_offset = current_history_offset > 0 ? current_history_offset : 0,
+        .step_budget = 0,
+        .replay_active = false,
+        .render_from_history = false,
+        .reset_tracking = false,
+    };
+    if (history_count <= 0) {
+        step.history_offset = 0;
+        return step;
+    }
+    int max_offset = history_count - 1;
+    if (step.history_offset < max_offset) {
+        step.history_offset += 1;
+    } else {
+        step.history_offset = max_offset;
+    }
+    step.replay_active = true;
+    step.render_from_history = true;
+    return step;
+}
+
+anomaly_detector_runtime_budget_local_playback_append_t
+anomaly_detector_runtime_budget_local_playback_append(
+        int current_next,
+        int current_count,
+        int capacity) {
+    anomaly_detector_runtime_budget_local_playback_append_t append = {
+        .slot_index = 0,
+        .next_index = 0,
+        .count = 0,
+        .valid = false,
+    };
+    if (capacity <= 0) {
+        return append;
+    }
+    int slot_index = current_next % capacity;
+    if (slot_index < 0) {
+        slot_index += capacity;
+    }
+    int count = current_count;
+    if (count < 0) {
+        count = 0;
+    }
+    if (count < capacity) {
+        count += 1;
+    } else {
+        count = capacity;
+    }
+    append.slot_index = slot_index;
+    append.next_index = (slot_index + 1) % capacity;
+    append.count = count;
+    append.valid = true;
+    return append;
+}
+
+anomaly_detector_runtime_budget_local_playback_advance_t
+anomaly_detector_runtime_budget_local_playback_advance(
+        bool paused,
+        int64_t current_step_budget) {
+    anomaly_detector_runtime_budget_local_playback_advance_t advance = {
+        .step_budget = current_step_budget > 0 ? current_step_budget : 0,
+        .advance = false,
+        .consume_step = false,
+    };
+    if (!paused) {
+        advance.advance = true;
+        return advance;
+    }
+    if (advance.step_budget > 0) {
+        advance.step_budget -= 1;
+        advance.advance = true;
+        advance.consume_step = true;
+    }
+    return advance;
+}
+
+anomaly_detector_runtime_budget_local_playback_pause_t
+anomaly_detector_runtime_budget_local_playback_pause(
+        bool paused) {
+    anomaly_detector_runtime_budget_local_playback_pause_t state = {
+        .clear_render_queue = false,
+        .clear_ad_queue = false,
+        .reset_render_timing = false,
+        .clear_step_budget = false,
+        .clear_history_replay = false,
+    };
+    if (paused) {
+        state.clear_render_queue = true;
+        state.clear_ad_queue = true;
+        return state;
+    }
+    state.reset_render_timing = true;
+    state.clear_step_budget = true;
+    state.clear_history_replay = true;
+    return state;
+}
+
+anomaly_detector_runtime_budget_startup_observation_t
+anomaly_detector_runtime_budget_startup_observation(
+        bool active,
+        int64_t now_ms,
+        int64_t started_at_ms,
+        int64_t observe_ms) {
+    anomaly_detector_runtime_budget_startup_observation_t observation = {
+        .elapsed_ms = 0,
+        .observing = false,
+        .finalize = false,
+    };
+    if (!active) {
+        return observation;
+    }
+    observation.elapsed_ms = now_ms - started_at_ms;
+    if (observation.elapsed_ms < 0) {
+        observation.elapsed_ms = 0;
+    }
+    if (observe_ms > 0 && observation.elapsed_ms < observe_ms) {
+        observation.observing = true;
+    } else {
+        observation.finalize = true;
+    }
+    return observation;
+}
+
+anomaly_detector_runtime_budget_render_lag_t
+anomaly_detector_runtime_budget_render_lag(
+        int64_t now_ms,
+        int64_t scheduled_due_ms,
+        int64_t interval_ms,
+        int64_t base_interval_ms,
+        int64_t last_lag_log_at_ms,
+        int64_t lag_log_interval_ms) {
+    anomaly_detector_runtime_budget_render_lag_t lag = {
+        .lag_ms = now_ms - scheduled_due_ms,
+        .lag_budget_ms = 0,
+        .severe_lag = false,
+        .periodic_log = false,
+        .update_log_timestamp = false,
+    };
+    if (interval_ms < 0) {
+        interval_ms = 0;
+    }
+    if (base_interval_ms < 0) {
+        base_interval_ms = 0;
+    }
+    if (lag_log_interval_ms < 0) {
+        lag_log_interval_ms = 0;
+    }
+    lag.lag_budget_ms = interval_ms - lag.lag_ms;
+    lag.periodic_log = (now_ms - last_lag_log_at_ms) >= lag_log_interval_ms;
+    lag.severe_lag = lag.lag_ms >= (base_interval_ms * 2);
+    lag.update_log_timestamp = lag.severe_lag || lag.periodic_log;
+    return lag;
+}
+
+anomaly_detector_runtime_budget_local_ad_overlay_action_t
+anomaly_detector_runtime_budget_local_ad_overlay_action(
+        bool overlay_present,
+        bool attached_to_pending_render) {
+    if (!overlay_present) {
+        return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE;
+    }
+    if (attached_to_pending_render) {
+        return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_ATTACHED;
+    }
+    return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_FORWARD_LATE;
+}
+
+anomaly_detector_runtime_budget_local_ad_route_t
+anomaly_detector_runtime_budget_local_ad_route(
+        bool ad_enabled,
+        bool ad_thread_started,
+        bool ad_sync_ready) {
+    (void) ad_enabled;
+    (void) ad_thread_started;
+    (void) ad_sync_ready;
+    return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_RENDER_FIRST;
+}
+
+int64_t anomaly_detector_runtime_budget_advance_render_due_ms(
+        int64_t scheduled_due_ms,
+        int64_t interval_ms,
+        int64_t now_ms) {
+    if (interval_ms <= 0) {
+        return now_ms;
+    }
+    if (scheduled_due_ms <= 0) {
+        scheduled_due_ms = now_ms;
+    }
+    int64_t next_due_ms = scheduled_due_ms + interval_ms;
+    if (next_due_ms <= now_ms) {
+        int64_t skipped_ticks = ((now_ms - next_due_ms) / interval_ms) + 1;
+        next_due_ms += skipped_ticks * interval_ms;
+    }
+    return next_due_ms;
+}
+
+int64_t anomaly_detector_runtime_budget_pts_interval_from_span_ms(
+        int64_t first_pts_us,
+        int64_t last_pts_us,
+        int valid_count,
+        int64_t min_interval_ms,
+        int64_t max_interval_ms) {
+    if (valid_count < 2 || last_pts_us <= first_pts_us) {
+        return 0;
+    }
+    if (min_interval_ms < 0) {
+        min_interval_ms = 0;
+    }
+    if (max_interval_ms < min_interval_ms) {
+        max_interval_ms = min_interval_ms;
+    }
+    int64_t frame_gaps = (int64_t) valid_count - 1;
+    int64_t span_us = last_pts_us - first_pts_us;
+    int64_t interval_ms =
+            (span_us + (frame_gaps * 500LL)) /
+            (frame_gaps * 1000LL);
+    return anomaly_detector_budget_clamp_i64(
+            interval_ms,
+            min_interval_ms,
+            max_interval_ms);
+}
+
+int64_t anomaly_detector_runtime_budget_buffered_span_ms(
+        int64_t first_pts_us,
+        int64_t last_pts_us) {
+    if (first_pts_us <= 0 || last_pts_us <= first_pts_us) {
+        return 0;
+    }
+    return (last_pts_us - first_pts_us) / 1000;
+}
+
+bool anomaly_detector_runtime_budget_decode_delta_is_gap(
+        int64_t delta_ms,
+        int64_t source_interval_ms,
+        int64_t default_source_interval_ms,
+        int64_t gap_floor_ms) {
+    if (gap_floor_ms < 0) {
+        gap_floor_ms = 0;
+    }
+    if (delta_ms < gap_floor_ms) {
+        return false;
+    }
+    if (default_source_interval_ms <= 0) {
+        default_source_interval_ms = 1;
+    }
+    int64_t reference_ms = source_interval_ms > 0
+            ? source_interval_ms
+            : default_source_interval_ms;
+    int64_t threshold_ms = (reference_ms * 7 + 3) / 4;
+    if (threshold_ms < gap_floor_ms) {
+        threshold_ms = gap_floor_ms;
+    }
+    return delta_ms >= threshold_ms;
+}
+
+bool anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+        int64_t delta_ms,
+        int64_t source_interval_ms,
+        int64_t default_source_interval_ms,
+        int64_t min_sample_ms,
+        int64_t max_sample_ms,
+        int min_source_pct,
+        int max_source_pct) {
+    if (min_sample_ms < 0) {
+        min_sample_ms = 0;
+    }
+    if (max_sample_ms < min_sample_ms) {
+        max_sample_ms = min_sample_ms;
+    }
+    if (delta_ms < min_sample_ms || delta_ms > max_sample_ms) {
+        return false;
+    }
+    if (default_source_interval_ms <= 0) {
+        default_source_interval_ms = 1;
+    }
+    if (min_source_pct < 0) {
+        min_source_pct = 0;
+    }
+    if (max_source_pct < min_source_pct) {
+        max_source_pct = min_source_pct;
+    }
+    int64_t reference_ms = source_interval_ms > 0
+            ? source_interval_ms
+            : default_source_interval_ms;
+    int64_t min_ms = (reference_ms * min_source_pct + 99) / 100;
+    int64_t max_ms = (reference_ms * max_source_pct + 99) / 100;
+    if (min_ms < min_sample_ms) {
+        min_ms = min_sample_ms;
+    }
+    if (max_ms > max_sample_ms) {
+        max_ms = max_sample_ms;
+    }
+    return delta_ms >= min_ms && delta_ms <= max_ms;
+}
+
+bool anomaly_detector_runtime_budget_decode_stall_active(
+        int64_t now_ms,
+        int64_t last_decode_at_ms,
+        int64_t source_interval_ms,
+        int64_t gap_floor_ms,
+        int interval_multiplier) {
+    if (last_decode_at_ms <= 0 || now_ms < last_decode_at_ms) {
+        return false;
+    }
+    if (source_interval_ms <= 0) {
+        source_interval_ms = 1;
+    }
+    if (gap_floor_ms < 0) {
+        gap_floor_ms = 0;
+    }
+    if (interval_multiplier < 0) {
+        interval_multiplier = 0;
+    }
+    int64_t stall_threshold_ms = source_interval_ms * interval_multiplier;
+    if (stall_threshold_ms < gap_floor_ms) {
+        stall_threshold_ms = gap_floor_ms;
+    }
+    return (now_ms - last_decode_at_ms) >= stall_threshold_ms;
 }
 
 const char *anomaly_detector_processing_mode_name(

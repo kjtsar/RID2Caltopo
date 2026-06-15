@@ -31,7 +31,7 @@
 #include <string.h>
 #include <time.h>
 
-#define APP_DEFAULT_SENSITIVITY 0.42f
+#define APP_DEFAULT_SENSITIVITY 0.59f
 #define APP_DEFAULT_MOTION_EVIDENCE_SENSITIVITY 0.60f
 #define APP_DEFAULT_MIN_AREA_FRACTION 0.0015f
 #define APP_DEFAULT_SCAN_ZONE 0.50f
@@ -42,6 +42,7 @@
 #define APP_DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES 2
 #define APP_DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS 1.0f
 #define APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES 4
+#define APP_LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE 2
 
 typedef enum {
     APP_APPEARANCE_AUTO = 0,
@@ -96,6 +97,14 @@ static int app_clampi(int value, int min_value, int max_value) {
     return value;
 }
 
+static float app_motion_evidence_scale_for_sensitivity(float sensitivity) {
+    float clamped = app_clampf(sensitivity, 0.0f, 1.0f);
+    float scale = clamped <= 0.60f
+        ? 0.25f + (clamped * 1.25f)
+        : 1.0f + ((clamped - 0.60f) * 2.5f);
+    return app_clampf(scale, 0.25f, 2.0f);
+}
+
 static app_anomaly_config_t default_app_cfg(void) {
     app_anomaly_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -104,11 +113,11 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.show_candidate_blobs = false;
     cfg.troubleshooting_debug = false;
     cfg.color_algorithm_enabled = false;
-    cfg.motion_algorithm_enabled = true;
+    cfg.motion_algorithm_enabled = false;
     cfg.saliency_enabled = false;
     cfg.appearance_selection = APP_APPEARANCE_AUTO;
     cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
-    cfg.frame_stride = APP_DEFAULT_FRAME_STRIDE;
+    cfg.frame_stride = APP_LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE;
     cfg.adaptive_min_stride_frames = APP_DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES;
     cfg.adaptive_max_stride_seconds = APP_DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS;
     cfg.pixel_step = 0;
@@ -193,8 +202,7 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
         (float)pow(15.0, 1.0 - (double)sensitivity);
     score_threshold = app_clampf(score_threshold, 1.0f, 15.0f);
     float motion_evidence_scale =
-        0.25f + (1.75f * motion_sensitivity * motion_sensitivity);
-    motion_evidence_scale = app_clampf(motion_evidence_scale, 0.25f, 2.0f);
+        app_motion_evidence_scale_for_sensitivity(motion_sensitivity);
     float area_scale = 0.10f + (4.90f * sensitivity * sensitivity);
     float effective_min_area_fraction =
         app_clampf(app_cfg->min_area_fraction * area_scale, 0.00005f, 0.03f);
@@ -1986,7 +1994,7 @@ static void usage(const char *prog) {
         "\n"
         "App-parity mode:\n"
         "  --app-defaults   Derive native detector config from the app's Kotlin\n"
-        "                   AnomalyConfig defaults and mapping logic\n"
+        "                   captured-playback review defaults and mapping logic\n"
         "                   Add --app-display-output when qualifying app-visible\n"
         "                   behavior; without it CSV/video report raw detector boxes.\n"
         "  --app-appearance <auto|thermal|color>\n"

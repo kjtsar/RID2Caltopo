@@ -1292,3 +1292,5 @@ bool anomaly_probe_thermal_point(
     float                   point_y_norm,
     anomaly_probe_t        *probe_out
 );
+
+float anomaly_thermal_effective_score_threshold(float score_threshold);

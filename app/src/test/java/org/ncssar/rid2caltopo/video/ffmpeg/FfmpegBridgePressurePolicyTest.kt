@@ -24,6 +24,38 @@ class FfmpegBridgePressurePolicyTest {
         )
     }
 
+    @Test
+    fun localPlaybackRenderControlUsesBacklogIntervalController() {
+        val bridgeSource = ffmpegBridgeSource()
+        val functionStart = bridgeSource.indexOf("static int64_t compute_desired_render_interval_ms_locked")
+        assertTrue(
+            "native bridge should have render interval control function",
+            functionStart >= 0
+        )
+        val localBranchStart = bridgeSource.indexOf(
+            "if (is_local_file_source(session)) {",
+            startIndex = functionStart
+        )
+        assertTrue(
+            "native bridge should have a local-file render control branch",
+            localBranchStart >= 0
+        )
+        val localBranchEnd = bridgeSource.indexOf(
+            "return smoothed_interval_ms;",
+            startIndex = localBranchStart + 1
+        )
+        assertTrue(
+            "local render control should return the smoothed backlog-aware interval",
+            localBranchEnd > localBranchStart
+        )
+        val localBranch = bridgeSource.substring(localBranchStart, localBranchEnd)
+
+        assertTrue(
+            "local playback should use the backlog-aware render interval controller",
+            localBranch.contains("anomaly_detector_runtime_budget_desired_render_interval_ms")
+        )
+    }
+
     private fun ffmpegBridgeSource(): String {
         val projectDir = File(System.getProperty("user.dir"))
         val candidates = listOf(

@@ -10,6 +10,9 @@ private const val DEFAULT_FRAME_STRIDE = 1
 private const val DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES = 2
 private const val DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS = 1.0f
 private const val COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES = 4
+private const val LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE = 2
+private const val LOCAL_PLAYBACK_REVIEW_DEFAULT_SENSITIVITY = 0.59f
+private val DEFAULT_NON_APPEARANCE_ALGORITHMS = setOf(AnomalyAlgorithm.Motion)
 
 enum class AnomalyAlgorithm(
     val nativeMask: Int,
@@ -140,7 +143,7 @@ data class AnomalyConfig(
     val showHotOverlay: Boolean = false,
     val showCandidateBlobs: Boolean = false,
     val troubleshootingDebug: Boolean = false,
-    val algorithms: Set<AnomalyAlgorithm> = setOf(AnomalyAlgorithm.Motion),
+    val algorithms: Set<AnomalyAlgorithm> = DEFAULT_NON_APPEARANCE_ALGORITHMS,
     val saliencyEnabled: Boolean = false,
     val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
     val strideMode: AnomalyStrideMode = AnomalyStrideMode.Fixed,
@@ -225,6 +228,33 @@ data class AnomalyConfig(
         }
     }
 
+    fun forLocalPlaybackReview(): AnomalyConfig {
+        val enabledConfig = copy(enabled = true)
+        if (!hasDefaultOrCapturedPlaybackStrideSettings()) return enabledConfig
+        val usesDefaultSensitivity = hasDefaultOrCapturedPlaybackSensitivity()
+        return enabledConfig.copy(
+            strideMode = AnomalyStrideMode.Fixed,
+            frameStride = LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE,
+            adaptiveMinStrideFrames = DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES,
+            adaptiveMaxStrideSeconds = DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS,
+            algorithms = if (
+                usesDefaultSensitivity &&
+                appearanceSelection != AppearanceAnomalySelection.Color &&
+                algorithms == DEFAULT_NON_APPEARANCE_ALGORITHMS &&
+                !saliencyEnabled
+            ) {
+                emptySet()
+            } else {
+                algorithms
+            },
+            sensitivity = if (usesDefaultSensitivity) {
+                LOCAL_PLAYBACK_REVIEW_DEFAULT_SENSITIVITY
+            } else {
+                sensitivity
+            },
+        )
+    }
+
     fun withColorRealtimeStrideDefaultsIfUnmodified(): AnomalyConfig {
         if (!hasDefaultRealtimeStrideSettings()) return this
         return copy(
@@ -240,6 +270,21 @@ data class AnomalyConfig(
             frameStride == DEFAULT_FRAME_STRIDE &&
             adaptiveMinStrideFrames == DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES &&
             abs(adaptiveMaxStrideSeconds - DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS) < 0.001f
+    }
+
+    private fun hasDefaultOrCapturedPlaybackStrideSettings(): Boolean {
+        return hasDefaultRealtimeStrideSettings() ||
+            (
+                strideMode == AnomalyStrideMode.Fixed &&
+                    frameStride == LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE &&
+                    adaptiveMinStrideFrames == DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES &&
+                    abs(adaptiveMaxStrideSeconds - DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS) < 0.001f
+                )
+    }
+
+    private fun hasDefaultOrCapturedPlaybackSensitivity(): Boolean {
+        return abs(sensitivity - 0.42f) < 0.001f ||
+            abs(sensitivity - LOCAL_PLAYBACK_REVIEW_DEFAULT_SENSITIVITY) < 0.001f
     }
 
     fun toggledAlgorithm(algorithm: AnomalyAlgorithm): AnomalyConfig {
@@ -261,8 +306,7 @@ data class AnomalyConfig(
         val motionSensitivityClamped = motionEvidenceSensitivity.coerceIn(0f, 1f)
         // Logarithmic curve: 0% → ~15σ (essentially silent), 60% → ~2.8σ (default), 100% → 1.0σ.
         val scoreThreshold = 15.0.pow(1.0 - sensitivityClamped.toDouble()).toFloat().coerceIn(1.0f, 15.0f)
-        val motionEvidenceScale =
-            (0.25f + (1.75f * motionSensitivityClamped * motionSensitivityClamped)).coerceIn(0.25f, 2.0f)
+        val motionEvidenceScale = motionEvidenceScaleForSensitivity(motionSensitivityClamped)
         val areaScale = 0.10f + (4.90f * sensitivityClamped * sensitivityClamped)
         val effectiveMinAreaFraction = (minAreaFraction * areaScale).coerceIn(0.00005f, 0.03f)
         val nativeColorFrontendMode = when {
@@ -318,6 +362,15 @@ data class AnomalyConfig(
             smallTargetScreenFraction = smallTargetScreenFraction.coerceIn(0.0015f, 0.03f),
             colorFrontendMode = nativeColorFrontendMode,
         )
+    }
+
+    private fun motionEvidenceScaleForSensitivity(sensitivity: Float): Float {
+        val clamped = sensitivity.coerceIn(0f, 1f)
+        return if (clamped <= 0.60f) {
+            0.25f + (clamped * 1.25f)
+        } else {
+            1.0f + ((clamped - 0.60f) * 2.5f)
+        }.coerceIn(0.25f, 2.0f)
     }
 }
 

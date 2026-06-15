@@ -1210,7 +1210,7 @@ class StreamsViewModel(
             this[designator] = pendingInfo
         }
         if (!_anomalyConfigByDesignator.containsKey(designator)) {
-            _anomalyConfigByDesignator[designator] = defaultAnomalyConfig
+            _anomalyConfigByDesignator[designator] = defaultAnomalyConfig.forLocalPlaybackReview()
         }
         localPlaybackPausedState[designator] = localPlaybackPauseOnOpenEnabled
         ffmpegProbeService?.setLocalPlaybackPaused(designator, localPlaybackPauseOnOpenEnabled)
@@ -2095,13 +2095,6 @@ class StreamsViewModel(
     }
 
     private fun shouldUseFfmpegRender(designator: String): Boolean {
-        val info = streamInfoByDesignator[designator]
-        if (info?.isLocalPlayback == true) {
-            return ffmpegProbeService != null &&
-                _focusedPath.value == designator &&
-                displayedTileCountForCurrentLayout() == 1 &&
-                info.state == StreamState.LIVE
-        }
         return StreamRenderRouter.useFfmpeg(
             designator = designator,
             liveStreams = streamInfoByDesignator,
@@ -2209,6 +2202,14 @@ class StreamsViewModel(
             val republishDetected = designator in republished
             val useFfmpeg = streamsUiActive && shouldUseFfmpegRender(designator)
             val wasUsingFfmpeg = renderRouteByDesignator[designator] == true
+            if (info.isLocalPlayback && (newlyLive || wasUsingFfmpeg != useFfmpeg)) {
+                CTDebug(
+                    tag,
+                    "Local playback route $designator state=${info.state} focused=${_focusedPath.value} " +
+                        "useFfmpeg=$useFfmpeg ffmpegAvailable=${ffmpegProbeService != null} " +
+                        "streamsUiActive=$streamsUiActive displayedTiles=${displayedTileCountForCurrentLayout()}"
+                )
+            }
             ffmpegProbeService?.updateSourcePath(designator, info.sourcePath)
             renderRouteByDesignator[designator] = useFfmpeg
             ffmpegProbeService?.setRenderEnabled(designator, useFfmpeg)
@@ -2734,7 +2735,13 @@ class StreamsViewModel(
         val updates = mutableListOf<AnomalyPolicyUpdate>()
         desiredDesignators.forEach { designator ->
             val config = effectiveAnomalyConfigFor(designator)
-            val enableForDesignator = focused == designator && config.enabled
+            val isLocalPlayback = _localPlaybackEntries.value.containsKey(designator)
+            val enableForDesignator = StreamRenderRouter.shouldEnableNativeAnomaly(
+                designator = designator,
+                focusedDesignator = focused,
+                isLocalPlayback = isLocalPlayback,
+                configEnabled = config.enabled,
+            )
             val update = AnomalyPolicyUpdate(
                 designator = designator,
                 thermalPaused = enableForDesignator && thermalPause,

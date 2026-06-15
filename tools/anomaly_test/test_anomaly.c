@@ -1172,6 +1172,15 @@ static void test_debug_populate_registration_model_copies_fields_and_anchors(voi
            "debug registration populate: debug anchors are copied");
 }
 
+static void test_thermal_effective_score_threshold_calibrates_app_default(void) {
+    EXPECT_NEAR(anomaly_thermal_effective_score_threshold(4.81f), 2.9822f, 0.0002f,
+                "thermal threshold: app default gets thermal-specific calibration");
+    EXPECT_NEAR(anomaly_thermal_effective_score_threshold(1.20f), 1.0f, 0.0001f,
+                "thermal threshold: low sensitivity floor stays publishable");
+    EXPECT_NEAR(anomaly_thermal_effective_score_threshold(NAN), 1.0f, 0.0001f,
+                "thermal threshold: invalid input falls back to floor");
+}
+
 static void test_result_build_boxes_invalid_inputs_return_zero(void) {
     anomaly_state_t state;
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
@@ -11470,6 +11479,144 @@ static void test_detector_facade_runtime_budget_render_queue_hard_cap(void) {
            "runtime budget render hard cap: malformed max bound preserves minimum hard cap");
 }
 
+static void test_detector_facade_runtime_budget_should_trim_render_queue(void) {
+    EXPECT(!anomaly_detector_runtime_budget_should_trim_render_queue(true, 699, 700),
+           "runtime budget render queue trim: local playback stays under target latency");
+    EXPECT(anomaly_detector_runtime_budget_should_trim_render_queue(true, 700, 700),
+           "runtime budget render queue trim: local playback trims at target latency");
+    EXPECT(!anomaly_detector_runtime_budget_should_trim_render_queue(false, 1399, 700),
+           "runtime budget render queue trim: live playback keeps headroom below double target");
+    EXPECT(anomaly_detector_runtime_budget_should_trim_render_queue(false, 1400, 700),
+           "runtime budget render queue trim: live playback trims at double target");
+    EXPECT(!anomaly_detector_runtime_budget_should_trim_render_queue(true, 700, 0),
+           "runtime budget render queue trim: invalid target latency disables trim");
+    EXPECT(!anomaly_detector_runtime_budget_should_trim_render_queue(true, 0, 700),
+           "runtime budget render queue trim: empty buffered span disables trim");
+}
+
+static void test_detector_facade_runtime_budget_queue_tail_index(void) {
+    EXPECT(anomaly_detector_runtime_budget_queue_tail_index(0, 0, 24) == 0,
+           "runtime budget queue tail: empty queue tail is head");
+    EXPECT(anomaly_detector_runtime_budget_queue_tail_index(5, 3, 24) == 8,
+           "runtime budget queue tail: tail advances by depth");
+    EXPECT(anomaly_detector_runtime_budget_queue_tail_index(22, 4, 24) == 2,
+           "runtime budget queue tail: tail wraps around capacity");
+    EXPECT(anomaly_detector_runtime_budget_queue_tail_index(48, 3, 24) == 3,
+           "runtime budget queue tail: oversized head is normalized");
+    EXPECT(anomaly_detector_runtime_budget_queue_tail_index(-1, 2, 24) == 1,
+           "runtime budget queue tail: negative head wraps before adding depth");
+    EXPECT(anomaly_detector_runtime_budget_queue_tail_index(5, -3, 24) == 5,
+           "runtime budget queue tail: negative depth is treated as zero");
+    EXPECT(anomaly_detector_runtime_budget_queue_tail_index(5, 3, 0) == 0,
+           "runtime budget queue tail: non-positive capacity returns zero");
+}
+
+static void test_detector_facade_runtime_budget_queue_offset_index(void) {
+    EXPECT(anomaly_detector_runtime_budget_queue_offset_index(5, 0, 24) == 5,
+           "runtime budget queue offset: zero offset returns normalized head");
+    EXPECT(anomaly_detector_runtime_budget_queue_offset_index(5, 3, 24) == 8,
+           "runtime budget queue offset: positive offset advances index");
+    EXPECT(anomaly_detector_runtime_budget_queue_offset_index(22, 4, 24) == 2,
+           "runtime budget queue offset: offset wraps around capacity");
+    EXPECT(anomaly_detector_runtime_budget_queue_offset_index(48, 3, 24) == 3,
+           "runtime budget queue offset: oversized head is normalized");
+    EXPECT(anomaly_detector_runtime_budget_queue_offset_index(-2, 3, 24) == 1,
+           "runtime budget queue offset: negative head wraps before adding offset");
+    EXPECT(anomaly_detector_runtime_budget_queue_offset_index(5, -3, 24) == 5,
+           "runtime budget queue offset: negative offset is treated as zero");
+    EXPECT(anomaly_detector_runtime_budget_queue_offset_index(5, 3, 0) == 0,
+           "runtime budget queue offset: non-positive capacity returns zero");
+}
+
+static void test_detector_facade_runtime_budget_queue_pop_state(void) {
+    anomaly_detector_runtime_budget_queue_pop_t pop =
+            anomaly_detector_runtime_budget_queue_pop_state(5, 3, 24);
+    EXPECT(pop.valid && pop.head == 6 && pop.depth == 2,
+           "runtime budget queue pop: head advances and depth decrements");
+
+    pop = anomaly_detector_runtime_budget_queue_pop_state(23, 2, 24);
+    EXPECT(pop.valid && pop.head == 0 && pop.depth == 1,
+           "runtime budget queue pop: head wraps around capacity");
+
+    pop = anomaly_detector_runtime_budget_queue_pop_state(7, 1, 24);
+    EXPECT(pop.valid && pop.head == 0 && pop.depth == 0,
+           "runtime budget queue pop: empty queue resets head to zero");
+
+    pop = anomaly_detector_runtime_budget_queue_pop_state(49, 4, 24);
+    EXPECT(pop.valid && pop.head == 2 && pop.depth == 3,
+           "runtime budget queue pop: oversized head is normalized before advance");
+
+    pop = anomaly_detector_runtime_budget_queue_pop_state(-1, 2, 24);
+    EXPECT(pop.valid && pop.head == 0 && pop.depth == 1,
+           "runtime budget queue pop: negative head wraps before advance");
+
+    pop = anomaly_detector_runtime_budget_queue_pop_state(5, 0, 24);
+    EXPECT(!pop.valid && pop.head == 0 && pop.depth == 0,
+           "runtime budget queue pop: empty depth is invalid and normalized");
+
+    pop = anomaly_detector_runtime_budget_queue_pop_state(5, -3, 24);
+    EXPECT(!pop.valid && pop.head == 0 && pop.depth == 0,
+           "runtime budget queue pop: negative depth is invalid and normalized");
+
+    pop = anomaly_detector_runtime_budget_queue_pop_state(5, 3, 0);
+    EXPECT(!pop.valid && pop.head == 0 && pop.depth == 0,
+           "runtime budget queue pop: non-positive capacity is invalid");
+}
+
+static void test_detector_facade_runtime_budget_queue_trim_state(void) {
+    anomaly_detector_runtime_budget_queue_trim_t trim =
+            anomaly_detector_runtime_budget_queue_trim_state(5, 12, 8, 24);
+    EXPECT(trim.valid && trim.drop_count == 4 && trim.head == 9 && trim.depth == 8,
+           "runtime budget queue trim: drops oldest slots and keeps latest depth");
+
+    trim = anomaly_detector_runtime_budget_queue_trim_state(20, 12, 8, 24);
+    EXPECT(trim.valid && trim.drop_count == 4 && trim.head == 0 && trim.depth == 8,
+           "runtime budget queue trim: advanced head wraps around capacity");
+
+    trim = anomaly_detector_runtime_budget_queue_trim_state(48, 12, 8, 24);
+    EXPECT(trim.valid && trim.drop_count == 4 && trim.head == 4 && trim.depth == 8,
+           "runtime budget queue trim: oversized head is normalized before advance");
+
+    trim = anomaly_detector_runtime_budget_queue_trim_state(-2, 12, 8, 24);
+    EXPECT(trim.valid && trim.drop_count == 4 && trim.head == 2 && trim.depth == 8,
+           "runtime budget queue trim: negative head wraps before advance");
+
+    trim = anomaly_detector_runtime_budget_queue_trim_state(5, 8, 8, 24);
+    EXPECT(!trim.valid && trim.drop_count == 0 && trim.head == 5 && trim.depth == 8,
+           "runtime budget queue trim: already bounded queue is unchanged");
+
+    trim = anomaly_detector_runtime_budget_queue_trim_state(5, 12, 0, 24);
+    EXPECT(!trim.valid && trim.drop_count == 0 && trim.head == 5 && trim.depth == 12,
+           "runtime budget queue trim: non-positive keep is unchanged");
+
+    trim = anomaly_detector_runtime_budget_queue_trim_state(5, 12, 8, 0);
+    EXPECT(!trim.valid && trim.drop_count == 0 && trim.head == 0 && trim.depth == 0,
+           "runtime budget queue trim: non-positive capacity is invalid and normalized");
+
+    trim = anomaly_detector_runtime_budget_queue_trim_state(5, -3, 8, 24);
+    EXPECT(!trim.valid && trim.drop_count == 0 && trim.head == 0 && trim.depth == 0,
+           "runtime budget queue trim: negative depth is invalid and normalized");
+}
+
+static void test_detector_facade_runtime_budget_render_queue_storage_capacity(void) {
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(24, 12, 24, 4096, 1024) == 24,
+           "runtime budget render queue storage: existing capacity satisfies request");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(0, 1, 24, 4096, 1024) == 24,
+           "runtime budget render queue storage: initial capacity is used for first allocation");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(24, 25, 24, 4096, 1024) == 48,
+           "runtime budget render queue storage: capacity doubles below growth threshold");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(3000, 5000, 24, 4096, 1024) == 6000,
+           "runtime budget render queue storage: doubling can cross the threshold");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(5000, 6000, 24, 4096, 1024) == 6024,
+           "runtime budget render queue storage: large capacity grows in fixed steps");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(-1, 1, 0, 4096, 1024) == 1,
+           "runtime budget render queue storage: invalid current and initial capacities normalize");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(0, 0, 24, 4096, 1024) == 24,
+           "runtime budget render queue storage: nonpositive requests normalize to one");
+    EXPECT(anomaly_detector_runtime_budget_render_queue_storage_capacity(4096, 4097, 24, 4096, 0) == 4097,
+           "runtime budget render queue storage: nonpositive growth step still advances");
+}
+
 static void test_detector_facade_runtime_budget_target_latency_ms(void) {
     EXPECT(anomaly_detector_runtime_budget_target_latency_ms(200, 0, 250, 200, 1000, 5000) == 1000,
            "runtime budget target latency: stall floor and min target are honored");
@@ -11690,6 +11837,571 @@ static void test_detector_facade_runtime_budget_desired_render_interval_ms(void)
            "runtime budget render interval: invalid source interval normalizes to one");
 }
 
+static void test_detector_facade_runtime_budget_current_render_interval_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_current_render_interval_ms(40, 33, 30, 5, 1000) == 40,
+           "runtime budget current render interval: smoothed interval wins");
+    EXPECT(anomaly_detector_runtime_budget_current_render_interval_ms(0, 42, 30, 5, 1000) == 42,
+           "runtime budget current render interval: source interval is fallback");
+    EXPECT(anomaly_detector_runtime_budget_current_render_interval_ms(0, 0, 30, 5, 1000) == 33,
+           "runtime budget current render interval: default fps is rounded to milliseconds");
+    EXPECT(anomaly_detector_runtime_budget_current_render_interval_ms(2, 42, 30, 5, 1000) == 5,
+           "runtime budget current render interval: minimum interval clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_current_render_interval_ms(2000, 42, 30, 5, 1000) == 1000,
+           "runtime budget current render interval: maximum interval clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_current_render_interval_ms(0, 0, 0, 5, 1000) == 5,
+           "runtime budget current render interval: invalid default fps still returns bounded interval");
+}
+
+static void test_detector_facade_runtime_budget_interval_from_fps(void) {
+    EXPECT(anomaly_detector_runtime_budget_interval_from_fps(30.0, 5, 1000) == 33,
+           "runtime budget fps interval: 30 fps rounds to 33 ms");
+    EXPECT(anomaly_detector_runtime_budget_interval_from_fps(29.97, 5, 1000) == 33,
+           "runtime budget fps interval: NTSC-like fps rounds to nearest millisecond");
+    EXPECT(anomaly_detector_runtime_budget_interval_from_fps(240.0, 5, 1000) == 5,
+           "runtime budget fps interval: minimum interval clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_interval_from_fps(1.1, 5, 1000) == 909,
+           "runtime budget fps interval: slow valid fps converts to interval");
+    EXPECT(anomaly_detector_runtime_budget_interval_from_fps(0.0, 5, 1000) == 0,
+           "runtime budget fps interval: non-positive fps is rejected");
+    EXPECT(anomaly_detector_runtime_budget_interval_from_fps(1.0, 5, 1000) == 0,
+           "runtime budget fps interval: one fps is rejected to match bridge guard");
+    EXPECT(anomaly_detector_runtime_budget_interval_from_fps(30.0, 40, 20) == 40,
+           "runtime budget fps interval: malformed bounds preserve minimum interval");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_target_interval_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+                   40, 45, 30, 5, 1000, 250) == 45,
+           "runtime budget local playback target: reasonable pts interval overrides nominal");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+                   40, 10, 30, 5, 1000, 250) == 40,
+           "runtime budget local playback target: too-fast pts interval keeps nominal");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+                   40, 90, 30, 5, 1000, 250) == 40,
+           "runtime budget local playback target: too-slow pts interval keeps nominal");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+                   0, 45, 30, 5, 1000, 250) == 45,
+           "runtime budget local playback target: missing nominal uses positive pts interval");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+                   0, 0, 30, 5, 1000, 250) == 33,
+           "runtime budget local playback target: missing inputs use default fps interval");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_target_interval_ms(
+                   20, 400, 30, 5, 1000, 250) == 20,
+           "runtime budget local playback target: max reasonable cap limits pts interval");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_pace_delay_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_playback_pace_delay_ms(
+                   33, 0, 0, 0, 1000, 30, 5, 1000, 250) == 0,
+           "runtime budget local playback pace: first admitted frame does not wait");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_pace_delay_ms(
+                   33, 1000000, 1033333, 1000, 1010, 30, 5, 1000, 250) == 23,
+           "runtime budget local playback pace: early decode waits until next source interval");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_pace_delay_ms(
+                   33, 1000000, 1033333, 1000, 1040, 30, 5, 1000, 250) == 0,
+           "runtime budget local playback pace: late decode does not wait");
+    EXPECT(anomaly_detector_runtime_budget_local_playback_pace_delay_ms(
+                   40, 1000000, 1045000, 1000, 1010, 30, 5, 1000, 250) == 35,
+           "runtime budget local playback pace: reasonable pts interval drives target wait");
+}
+
+static void test_detector_facade_runtime_budget_normalize_local_playback_pts_us(void) {
+    anomaly_detector_runtime_budget_local_playback_pts_t pts =
+            anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+                    2000000, 1000000, 40, 33, 30);
+    EXPECT(pts.pts_us == 2000000 && !pts.repaired,
+           "runtime budget local playback pts: monotonic input is preserved");
+
+    pts = anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+            900000, 1000000, 40, 33, 30);
+    EXPECT(pts.pts_us == 1040000 && pts.repaired,
+           "runtime budget local playback pts: non-monotonic input advances by nominal interval");
+
+    pts = anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+            1000000, 1000000, 0, 25, 30);
+    EXPECT(pts.pts_us == 1025000 && pts.repaired,
+           "runtime budget local playback pts: source interval is fallback repair interval");
+
+    pts = anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+            0, 1000000, 0, 0, 30);
+    EXPECT(pts.pts_us == 1033333 && !pts.repaired,
+           "runtime budget local playback pts: missing raw pts synthesizes from default fps without repair flag");
+
+    pts = anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+            0, 0, 40, 33, 30);
+    EXPECT(pts.pts_us == 0 && !pts.repaired,
+           "runtime budget local playback pts: missing raw and last pts stay missing");
+
+    pts = anomaly_detector_runtime_budget_normalize_local_playback_pts_us(
+            1000000, 900000, 0, 0, 0);
+    EXPECT(pts.pts_us == 1000000 && !pts.repaired,
+           "runtime budget local playback pts: monotonic input does not need fallback interval");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_timing_indices(void) {
+    anomaly_detector_runtime_budget_local_playback_timing_indices_t indices =
+            anomaly_detector_runtime_budget_local_playback_timing_indices(5, 1, 24);
+    EXPECT(!indices.valid,
+           "runtime budget local playback timing indices: at least two samples are required");
+
+    indices = anomaly_detector_runtime_budget_local_playback_timing_indices(5, 3, 24);
+    EXPECT(indices.valid && indices.oldest_index == 2 && indices.newest_index == 4,
+           "runtime budget local playback timing indices: unwrapped history selects oldest and newest");
+
+    indices = anomaly_detector_runtime_budget_local_playback_timing_indices(1, 4, 24);
+    EXPECT(indices.valid && indices.oldest_index == 21 && indices.newest_index == 0,
+           "runtime budget local playback timing indices: wrapped history selects oldest and newest");
+
+    indices = anomaly_detector_runtime_budget_local_playback_timing_indices(24, 24, 24);
+    EXPECT(indices.valid && indices.oldest_index == 0 && indices.newest_index == 23,
+           "runtime budget local playback timing indices: full history ending at capacity is normalized");
+
+    indices = anomaly_detector_runtime_budget_local_playback_timing_indices(100, 3, 24);
+    EXPECT(indices.valid && indices.oldest_index == 1 && indices.newest_index == 3,
+           "runtime budget local playback timing indices: oversized next index is normalized");
+
+    indices = anomaly_detector_runtime_budget_local_playback_timing_indices(5, 3, 0);
+    EXPECT(!indices.valid,
+           "runtime budget local playback timing indices: non-positive capacity is invalid");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_timing_span_validity(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_playback_timing_span_is_valid(
+                   1000000, 1100000, 2000, 2033),
+           "runtime budget local playback timing span: increasing pts and render times are valid");
+    EXPECT(!anomaly_detector_runtime_budget_local_playback_timing_span_is_valid(
+                   0, 1100000, 2000, 2033),
+           "runtime budget local playback timing span: missing first pts is invalid");
+    EXPECT(!anomaly_detector_runtime_budget_local_playback_timing_span_is_valid(
+                   1000000, 1000000, 2000, 2033),
+           "runtime budget local playback timing span: non-increasing pts is invalid");
+    EXPECT(!anomaly_detector_runtime_budget_local_playback_timing_span_is_valid(
+                   1000000, 1100000, 0, 2033),
+           "runtime budget local playback timing span: missing first render time is invalid");
+    EXPECT(!anomaly_detector_runtime_budget_local_playback_timing_span_is_valid(
+                   1000000, 1100000, 2033, 2033),
+           "runtime budget local playback timing span: non-increasing render time is invalid");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_history_slot(void) {
+    anomaly_detector_runtime_budget_local_playback_history_slot_t slot =
+            anomaly_detector_runtime_budget_local_playback_history_slot(5, 0, 0, 24);
+    EXPECT(!slot.valid,
+           "runtime budget local playback history slot: empty history is invalid");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(5, 3, 0, 24);
+    EXPECT(slot.valid && slot.slot_index == 4 && slot.history_offset == 0,
+           "runtime budget local playback history slot: newest offset selects previous next slot");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(5, 3, 2, 24);
+    EXPECT(slot.valid && slot.slot_index == 2 && slot.history_offset == 2,
+           "runtime budget local playback history slot: requested offset walks backward");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(1, 4, 1, 24);
+    EXPECT(slot.valid && slot.slot_index == 23 && slot.history_offset == 1,
+           "runtime budget local playback history slot: wrapped history walks backward");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(5, 3, -4, 24);
+    EXPECT(slot.valid && slot.slot_index == 4 && slot.history_offset == 0,
+           "runtime budget local playback history slot: negative offsets clamp to newest");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(5, 3, 99, 24);
+    EXPECT(slot.valid && slot.slot_index == 2 && slot.history_offset == 2,
+           "runtime budget local playback history slot: oversized offsets clamp to oldest available");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(24, 24, 23, 24);
+    EXPECT(slot.valid && slot.slot_index == 0 && slot.history_offset == 23,
+           "runtime budget local playback history slot: full history ending at capacity normalizes newest index");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(100, 3, 0, 24);
+    EXPECT(slot.valid && slot.slot_index == 3 && slot.history_offset == 0,
+           "runtime budget local playback history slot: oversized next index is normalized");
+
+    slot = anomaly_detector_runtime_budget_local_playback_history_slot(5, 3, 0, 0);
+    EXPECT(!slot.valid,
+           "runtime budget local playback history slot: non-positive capacity is invalid");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_step_forward(void) {
+    anomaly_detector_runtime_budget_local_playback_step_t step =
+            anomaly_detector_runtime_budget_local_playback_step_forward(
+                    1, 3, true, 7, INT64_MAX);
+    EXPECT(step.history_offset == 2 &&
+           step.step_budget == 7 &&
+           step.replay_active &&
+           step.render_from_history &&
+           !step.reset_tracking,
+           "runtime budget local playback step forward: single step walks toward live history");
+
+    step = anomaly_detector_runtime_budget_local_playback_step_forward(
+            0, 0, false, 7, INT64_MAX);
+    EXPECT(step.history_offset == 0 &&
+           step.step_budget == 8 &&
+           !step.replay_active &&
+           !step.render_from_history &&
+           !step.reset_tracking,
+           "runtime budget local playback step forward: nonpositive frame count advances one decoder step");
+
+    step = anomaly_detector_runtime_budget_local_playback_step_forward(
+            5, 2, true, 7, INT64_MAX);
+    EXPECT(step.history_offset == 0 &&
+           step.step_budget == 12 &&
+           !step.replay_active &&
+           !step.render_from_history &&
+           step.reset_tracking,
+           "runtime budget local playback step forward: multi-step leaves replay mode and advances decoder");
+
+    step = anomaly_detector_runtime_budget_local_playback_step_forward(
+            10, 0, false, INT64_MAX - 3, INT64_MAX);
+    EXPECT(step.history_offset == 0 &&
+           step.step_budget == INT64_MAX &&
+           !step.replay_active &&
+           !step.render_from_history,
+           "runtime budget local playback step forward: decoder step budget saturates");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_step_back(void) {
+    anomaly_detector_runtime_budget_local_playback_step_t step =
+            anomaly_detector_runtime_budget_local_playback_step_back(0, 0);
+    EXPECT(!step.render_from_history &&
+           !step.replay_active &&
+           step.history_offset == 0,
+           "runtime budget local playback step back: empty history does not render");
+
+    step = anomaly_detector_runtime_budget_local_playback_step_back(0, 4);
+    EXPECT(step.render_from_history &&
+           step.replay_active &&
+           step.history_offset == 1,
+           "runtime budget local playback step back: first back step moves to previous frame");
+
+    step = anomaly_detector_runtime_budget_local_playback_step_back(3, 4);
+    EXPECT(step.render_from_history &&
+           step.replay_active &&
+           step.history_offset == 3,
+           "runtime budget local playback step back: oldest available frame clamps offset");
+
+    step = anomaly_detector_runtime_budget_local_playback_step_back(-2, 4);
+    EXPECT(step.render_from_history &&
+           step.replay_active &&
+           step.history_offset == 1,
+           "runtime budget local playback step back: negative offset starts from newest frame");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_append(void) {
+    anomaly_detector_runtime_budget_local_playback_append_t append =
+            anomaly_detector_runtime_budget_local_playback_append(0, 0, 24);
+    EXPECT(append.valid &&
+           append.slot_index == 0 &&
+           append.next_index == 1 &&
+           append.count == 1,
+           "runtime budget local playback append: empty ring writes next slot and increments count");
+
+    append = anomaly_detector_runtime_budget_local_playback_append(5, 3, 24);
+    EXPECT(append.valid &&
+           append.slot_index == 5 &&
+           append.next_index == 6 &&
+           append.count == 4,
+           "runtime budget local playback append: partial ring advances next and count");
+
+    append = anomaly_detector_runtime_budget_local_playback_append(23, 24, 24);
+    EXPECT(append.valid &&
+           append.slot_index == 23 &&
+           append.next_index == 0 &&
+           append.count == 24,
+           "runtime budget local playback append: full ring wraps next and keeps count capped");
+
+    append = anomaly_detector_runtime_budget_local_playback_append(100, 99, 24);
+    EXPECT(append.valid &&
+           append.slot_index == 4 &&
+           append.next_index == 5 &&
+           append.count == 24,
+           "runtime budget local playback append: oversized state normalizes next and caps count");
+
+    append = anomaly_detector_runtime_budget_local_playback_append(-1, 3, 24);
+    EXPECT(append.valid &&
+           append.slot_index == 23 &&
+           append.next_index == 0 &&
+           append.count == 4,
+           "runtime budget local playback append: negative next wraps to a valid slot");
+
+    append = anomaly_detector_runtime_budget_local_playback_append(0, 0, 0);
+    EXPECT(!append.valid,
+           "runtime budget local playback append: non-positive capacity is invalid");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_advance(void) {
+    anomaly_detector_runtime_budget_local_playback_advance_t advance =
+            anomaly_detector_runtime_budget_local_playback_advance(false, 0);
+    EXPECT(advance.advance &&
+           !advance.consume_step &&
+           advance.step_budget == 0,
+           "runtime budget local playback advance: unpaused playback advances without consuming steps");
+
+    advance = anomaly_detector_runtime_budget_local_playback_advance(false, 4);
+    EXPECT(advance.advance &&
+           !advance.consume_step &&
+           advance.step_budget == 4,
+           "runtime budget local playback advance: unpaused playback preserves pending steps");
+
+    advance = anomaly_detector_runtime_budget_local_playback_advance(true, 3);
+    EXPECT(advance.advance &&
+           advance.consume_step &&
+           advance.step_budget == 2,
+           "runtime budget local playback advance: paused playback consumes one pending step");
+
+    advance = anomaly_detector_runtime_budget_local_playback_advance(true, 1);
+    EXPECT(advance.advance &&
+           advance.consume_step &&
+           advance.step_budget == 0,
+           "runtime budget local playback advance: final pending step reaches zero");
+
+    advance = anomaly_detector_runtime_budget_local_playback_advance(true, 0);
+    EXPECT(!advance.advance &&
+           !advance.consume_step &&
+           advance.step_budget == 0,
+           "runtime budget local playback advance: paused playback without steps waits");
+
+    advance = anomaly_detector_runtime_budget_local_playback_advance(true, -5);
+    EXPECT(!advance.advance &&
+           !advance.consume_step &&
+           advance.step_budget == 0,
+           "runtime budget local playback advance: negative step budget normalizes to zero");
+}
+
+static void test_detector_facade_runtime_budget_local_playback_pause(void) {
+    anomaly_detector_runtime_budget_local_playback_pause_t pause =
+            anomaly_detector_runtime_budget_local_playback_pause(true);
+    EXPECT(pause.clear_render_queue &&
+           pause.clear_ad_queue &&
+           !pause.reset_render_timing &&
+           !pause.clear_step_budget &&
+           !pause.clear_history_replay,
+           "runtime budget local playback pause: pausing drains pending playback work");
+
+    pause = anomaly_detector_runtime_budget_local_playback_pause(false);
+    EXPECT(!pause.clear_render_queue &&
+           !pause.clear_ad_queue &&
+           pause.reset_render_timing &&
+           pause.clear_step_budget &&
+           pause.clear_history_replay,
+           "runtime budget local playback pause: resuming resets playback timing and transient step state");
+}
+
+static void test_detector_facade_runtime_budget_startup_observation(void) {
+    anomaly_detector_runtime_budget_startup_observation_t observation =
+            anomaly_detector_runtime_budget_startup_observation(false, 1200, 1000, 500);
+    EXPECT(!observation.observing &&
+           !observation.finalize &&
+           observation.elapsed_ms == 0,
+           "runtime budget startup observation: inactive observation does nothing");
+
+    observation = anomaly_detector_runtime_budget_startup_observation(true, 1200, 1000, 500);
+    EXPECT(observation.observing &&
+           !observation.finalize &&
+           observation.elapsed_ms == 200,
+           "runtime budget startup observation: elapsed time below window keeps observing");
+
+    observation = anomaly_detector_runtime_budget_startup_observation(true, 1500, 1000, 500);
+    EXPECT(!observation.observing &&
+           observation.finalize &&
+           observation.elapsed_ms == 500,
+           "runtime budget startup observation: exact window boundary finalizes");
+
+    observation = anomaly_detector_runtime_budget_startup_observation(true, 1750, 1000, 500);
+    EXPECT(!observation.observing &&
+           observation.finalize &&
+           observation.elapsed_ms == 750,
+           "runtime budget startup observation: elapsed time beyond window finalizes");
+
+    observation = anomaly_detector_runtime_budget_startup_observation(true, 900, 1000, 500);
+    EXPECT(observation.observing &&
+           !observation.finalize &&
+           observation.elapsed_ms == 0,
+           "runtime budget startup observation: negative elapsed time clamps to zero");
+
+    observation = anomaly_detector_runtime_budget_startup_observation(true, 1200, 1000, 0);
+    EXPECT(!observation.observing &&
+           observation.finalize &&
+           observation.elapsed_ms == 200,
+           "runtime budget startup observation: nonpositive observe window finalizes immediately");
+}
+
+static void test_detector_facade_runtime_budget_render_lag(void) {
+    anomaly_detector_runtime_budget_render_lag_t lag =
+            anomaly_detector_runtime_budget_render_lag(1100, 1000, 33, 33, 1050, 250);
+    EXPECT(lag.lag_ms == 100 &&
+           lag.lag_budget_ms == -67 &&
+           lag.severe_lag &&
+           !lag.periodic_log &&
+           lag.update_log_timestamp,
+           "runtime budget render lag: severe lag updates log timestamp");
+
+    lag = anomaly_detector_runtime_budget_render_lag(1100, 1000, 200, 100, 1000, 250);
+    EXPECT(lag.lag_ms == 100 &&
+           lag.lag_budget_ms == 100 &&
+           !lag.severe_lag &&
+           !lag.periodic_log &&
+           !lag.update_log_timestamp,
+           "runtime budget render lag: non-severe non-periodic lag preserves log timestamp");
+
+    lag = anomaly_detector_runtime_budget_render_lag(1300, 1000, 200, 100, 1000, 250);
+    EXPECT(lag.lag_ms == 300 &&
+           lag.lag_budget_ms == -100 &&
+           lag.severe_lag &&
+           lag.periodic_log &&
+           lag.update_log_timestamp,
+           "runtime budget render lag: periodic and severe lag both request log timestamp update");
+
+    lag = anomaly_detector_runtime_budget_render_lag(1249, 1000, 200, 200, 1000, 250);
+    EXPECT(lag.periodic_log == false &&
+           !lag.update_log_timestamp,
+           "runtime budget render lag: periodic interval is exclusive below threshold");
+
+    lag = anomaly_detector_runtime_budget_render_lag(1250, 1000, 200, 200, 1000, 250);
+    EXPECT(lag.periodic_log &&
+           lag.update_log_timestamp,
+           "runtime budget render lag: periodic interval is inclusive at threshold");
+
+    lag = anomaly_detector_runtime_budget_render_lag(900, 1000, 33, 33, 800, 250);
+    EXPECT(lag.lag_ms == -100 &&
+           lag.lag_budget_ms == 133 &&
+           !lag.severe_lag,
+           "runtime budget render lag: early renders keep negative lag arithmetic");
+
+    lag = anomaly_detector_runtime_budget_render_lag(1100, 1000, -5, -10, 1000, -1);
+    EXPECT(lag.lag_ms == 100 &&
+           lag.lag_budget_ms == -100 &&
+           lag.severe_lag &&
+           lag.periodic_log,
+           "runtime budget render lag: malformed intervals normalize to zero thresholds");
+}
+
+static void test_detector_facade_runtime_budget_local_ad_overlay_action(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_ad_overlay_action(false, false) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE,
+           "runtime budget local AD overlay: missing overlay has no render action");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_overlay_action(false, true) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE,
+           "runtime budget local AD overlay: attached without overlay is ignored");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_overlay_action(true, true) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_ATTACHED,
+           "runtime budget local AD overlay: attached pending slot remains attached");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_overlay_action(true, false) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_FORWARD_LATE,
+           "runtime budget local AD overlay: late overlay forwards instead of disappearing");
+}
+
+static void test_detector_facade_runtime_budget_local_ad_route(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_ad_route(false, true, true) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_RENDER_FIRST,
+           "runtime budget local AD route: disabled AD renders first");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_route(true, false, true) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_RENDER_FIRST,
+           "runtime budget local AD route: missing worker renders first");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_route(true, true, false) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_RENDER_FIRST,
+           "runtime budget local AD route: unsynchronized worker renders first");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_route(true, true, true) ==
+                   ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_RENDER_FIRST,
+           "runtime budget local AD route: ready worker still renders first for responsive sidecar review");
+}
+
+static void test_detector_facade_runtime_budget_advance_render_due_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_advance_render_due_ms(1000, 33, 1000) == 1033,
+           "runtime budget render due: exactly due advances one interval");
+    EXPECT(anomaly_detector_runtime_budget_advance_render_due_ms(1000, 33, 1010) == 1033,
+           "runtime budget render due: small lag still advances one interval");
+    EXPECT(anomaly_detector_runtime_budget_advance_render_due_ms(1000, 33, 1033) == 1066,
+           "runtime budget render due: landing on next due skips one more interval");
+    EXPECT(anomaly_detector_runtime_budget_advance_render_due_ms(1000, 33, 1200) == 1231,
+           "runtime budget render due: large lag skips missed intervals");
+    EXPECT(anomaly_detector_runtime_budget_advance_render_due_ms(1000, 0, 1200) == 1200,
+           "runtime budget render due: invalid interval falls back to now");
+    EXPECT(anomaly_detector_runtime_budget_advance_render_due_ms(0, 33, 1200) == 1233,
+           "runtime budget render due: missing scheduled due starts from now");
+}
+
+static void test_detector_facade_runtime_budget_pts_interval_from_span_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_pts_interval_from_span_ms(1000000, 1099000, 4, 5, 1000) == 33,
+           "runtime budget pts interval: span is rounded over frame gaps");
+    EXPECT(anomaly_detector_runtime_budget_pts_interval_from_span_ms(1000000, 1100000, 4, 5, 1000) == 33,
+           "runtime budget pts interval: exact fractional interval rounds down when below half");
+    EXPECT(anomaly_detector_runtime_budget_pts_interval_from_span_ms(1000000, 1101000, 4, 5, 1000) == 34,
+           "runtime budget pts interval: fractional interval rounds up when at least half");
+    EXPECT(anomaly_detector_runtime_budget_pts_interval_from_span_ms(1000000, 1001000, 4, 5, 1000) == 5,
+           "runtime budget pts interval: minimum interval clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_pts_interval_from_span_ms(1000000, 5000000, 2, 5, 1000) == 1000,
+           "runtime budget pts interval: maximum interval clamp is honored");
+    EXPECT(anomaly_detector_runtime_budget_pts_interval_from_span_ms(1000000, 1099000, 1, 5, 1000) == 0,
+           "runtime budget pts interval: at least two valid timestamps are required");
+    EXPECT(anomaly_detector_runtime_budget_pts_interval_from_span_ms(1099000, 1000000, 4, 5, 1000) == 0,
+           "runtime budget pts interval: non-positive span is rejected");
+}
+
+static void test_detector_facade_runtime_budget_buffered_span_ms(void) {
+    EXPECT(anomaly_detector_runtime_budget_buffered_span_ms(1000000, 1250000) == 250,
+           "runtime budget buffered span: positive PTS span converts microseconds to milliseconds");
+    EXPECT(anomaly_detector_runtime_budget_buffered_span_ms(1000000, 1250999) == 250,
+           "runtime budget buffered span: conversion truncates partial milliseconds");
+    EXPECT(anomaly_detector_runtime_budget_buffered_span_ms(0, 1250000) == 0,
+           "runtime budget buffered span: missing first PTS is rejected");
+    EXPECT(anomaly_detector_runtime_budget_buffered_span_ms(1000000, 0) == 0,
+           "runtime budget buffered span: missing last PTS is rejected");
+    EXPECT(anomaly_detector_runtime_budget_buffered_span_ms(1250000, 1000000) == 0,
+           "runtime budget buffered span: non-positive span is rejected");
+}
+
+static void test_detector_facade_runtime_budget_decode_delta_gap_classification(void) {
+    EXPECT(!anomaly_detector_runtime_budget_decode_delta_is_gap(249, 100, 33, 250),
+           "runtime budget decode delta gap: floor rejects short deltas");
+    EXPECT(anomaly_detector_runtime_budget_decode_delta_is_gap(250, 100, 33, 250),
+           "runtime budget decode delta gap: floor is inclusive when source threshold is lower");
+    EXPECT(!anomaly_detector_runtime_budget_decode_delta_is_gap(174, 100, 33, 0),
+           "runtime budget decode delta gap: seven-quarter source threshold rejects lower delta");
+    EXPECT(anomaly_detector_runtime_budget_decode_delta_is_gap(175, 100, 33, 0),
+           "runtime budget decode delta gap: seven-quarter source threshold is inclusive");
+    EXPECT(!anomaly_detector_runtime_budget_decode_delta_is_gap(57, 0, 33, 0),
+           "runtime budget decode delta gap: invalid source interval uses default interval threshold");
+    EXPECT(anomaly_detector_runtime_budget_decode_delta_is_gap(58, 0, 33, 0),
+           "runtime budget decode delta gap: default interval threshold rounds up");
+}
+
+static void test_detector_facade_runtime_budget_decode_delta_plausible_cadence(void) {
+    EXPECT(!anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+                   19, 33, 33, 20, 1000, 50, 150),
+           "runtime budget cadence sample: minimum sample bound rejects short deltas");
+    EXPECT(anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+                   20, 33, 33, 20, 1000, 50, 150),
+           "runtime budget cadence sample: minimum sample bound is inclusive");
+    EXPECT(anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+                   50, 33, 33, 20, 1000, 50, 150),
+           "runtime budget cadence sample: maximum source percentage is inclusive");
+    EXPECT(!anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+                   51, 33, 33, 20, 1000, 50, 150),
+           "runtime budget cadence sample: maximum source percentage rejects larger deltas");
+    EXPECT(anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+                   42, 0, 33, 20, 1000, 50, 150),
+           "runtime budget cadence sample: invalid source interval uses default interval");
+    EXPECT(!anomaly_detector_runtime_budget_decode_delta_is_plausible_cadence(
+                   1001, 33, 33, 20, 1000, 50, 150),
+           "runtime budget cadence sample: maximum sample bound rejects long deltas");
+}
+
+static void test_detector_facade_runtime_budget_decode_stall_active(void) {
+    EXPECT(!anomaly_detector_runtime_budget_decode_stall_active(1000, 0, 33, 150, 3),
+           "runtime budget decode stall: missing decode timestamp is inactive");
+    EXPECT(!anomaly_detector_runtime_budget_decode_stall_active(1000, 900, 33, 150, 3),
+           "runtime budget decode stall: gap floor rejects shorter silence");
+    EXPECT(anomaly_detector_runtime_budget_decode_stall_active(1050, 900, 33, 150, 3),
+           "runtime budget decode stall: gap floor threshold is inclusive");
+    EXPECT(!anomaly_detector_runtime_budget_decode_stall_active(1199, 1000, 100, 150, 2),
+           "runtime budget decode stall: source-relative threshold rejects shorter silence");
+    EXPECT(anomaly_detector_runtime_budget_decode_stall_active(1200, 1000, 100, 150, 2),
+           "runtime budget decode stall: source-relative threshold is inclusive");
+    EXPECT(anomaly_detector_runtime_budget_decode_stall_active(1150, 1000, 0, 150, 3),
+           "runtime budget decode stall: invalid source interval still honors gap floor");
+}
+
 static void test_runtime_pressure_thresholds_round_up_and_clamp(void) {
     EXPECT(anomaly_runtime_pressure_depth_threshold(24, 50) == 12,
            "runtime pressure threshold: 50 percent of 24 is 12");
@@ -11824,6 +12536,39 @@ static void test_runtime_pressure_bypass_decision(void) {
            "runtime pressure bypass: bypass all drops every frame");
 }
 
+static void test_runtime_pressure_bypass_decision_for_source(void) {
+    EXPECT(!anomaly_runtime_pressure_should_bypass_analysis_for_source(
+                    ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+                    1,
+                    true),
+           "runtime pressure source bypass: local playback keeps odd alternate frames");
+    EXPECT(anomaly_runtime_pressure_should_bypass_analysis_for_source(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+                   2,
+                   true),
+           "runtime pressure source bypass: local playback bypasses even alternate frames under pressure");
+    EXPECT(anomaly_runtime_pressure_should_bypass_analysis_for_source(
+                    ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+                    1,
+                    true),
+           "runtime pressure source bypass: local playback honors bypass-all pressure");
+    EXPECT(!anomaly_runtime_pressure_should_bypass_analysis_for_source(
+                    ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+                    1,
+                    false),
+           "runtime pressure source bypass: live playback keeps odd alternate frames");
+    EXPECT(anomaly_runtime_pressure_should_bypass_analysis_for_source(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALTERNATE,
+                   2,
+                   false),
+           "runtime pressure source bypass: live playback drops even alternate frames");
+    EXPECT(anomaly_runtime_pressure_should_bypass_analysis_for_source(
+                   ANOMALY_RUNTIME_PRESSURE_MODE_BYPASS_ALL,
+                   1,
+                   false),
+           "runtime pressure source bypass: live playback drops bypass-all frames");
+}
+
 static void test_runtime_pressure_backlog_frame_capacity(void) {
     EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(500, 40, 33, 2, 24) == 13,
            "runtime pressure backlog capacity: 500ms at 40ms rounds up to 13 frames");
@@ -11837,6 +12582,8 @@ static void test_runtime_pressure_backlog_frame_capacity(void) {
            "runtime pressure backlog capacity: hard capacity is honored");
     EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(500, 33, 33, 2, 0) == 0,
            "runtime pressure backlog capacity: nonpositive hard capacity returns zero");
+    EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(150, 33, 33, 2, 24) == 5,
+           "runtime pressure backlog capacity: local playback sidecar window stays short");
 }
 
 static void test_runtime_pressure_oldest_drop_count_for_admission(void) {
@@ -17723,6 +18470,7 @@ int main(void) {
     test_debug_registration_invalid_reason_names();
     test_debug_populate_registration_model_noops_null_inputs();
     test_debug_populate_registration_model_copies_fields_and_anchors();
+    test_thermal_effective_score_threshold_calibrates_app_default();
     test_result_build_boxes_invalid_inputs_return_zero();
     test_result_publish_boxes_null_result_safe();
     test_result_publish_boxes_zero_count();
@@ -17999,6 +18747,12 @@ int main(void) {
     test_detector_facade_runtime_budget_names_modes();
     test_detector_facade_runtime_budget_trim_keep_latest_frames();
     test_detector_facade_runtime_budget_render_queue_hard_cap();
+    test_detector_facade_runtime_budget_should_trim_render_queue();
+    test_detector_facade_runtime_budget_queue_tail_index();
+    test_detector_facade_runtime_budget_queue_offset_index();
+    test_detector_facade_runtime_budget_queue_pop_state();
+    test_detector_facade_runtime_budget_queue_trim_state();
+    test_detector_facade_runtime_budget_render_queue_storage_capacity();
     test_detector_facade_runtime_budget_target_latency_ms();
     test_detector_facade_runtime_budget_source_interval_estimate();
     test_detector_facade_runtime_budget_apply_pts_source_interval();
@@ -18006,11 +18760,35 @@ int main(void) {
     test_detector_facade_runtime_budget_proven_gap_ms();
     test_detector_facade_runtime_budget_decay_toward_floor_ms();
     test_detector_facade_runtime_budget_desired_render_interval_ms();
+    test_detector_facade_runtime_budget_current_render_interval_ms();
+    test_detector_facade_runtime_budget_interval_from_fps();
+    test_detector_facade_runtime_budget_local_playback_target_interval_ms();
+    test_detector_facade_runtime_budget_local_playback_pace_delay_ms();
+    test_detector_facade_runtime_budget_normalize_local_playback_pts_us();
+    test_detector_facade_runtime_budget_local_playback_timing_indices();
+    test_detector_facade_runtime_budget_local_playback_timing_span_validity();
+    test_detector_facade_runtime_budget_local_playback_history_slot();
+    test_detector_facade_runtime_budget_local_playback_step_forward();
+    test_detector_facade_runtime_budget_local_playback_step_back();
+    test_detector_facade_runtime_budget_local_playback_append();
+    test_detector_facade_runtime_budget_local_playback_advance();
+    test_detector_facade_runtime_budget_local_playback_pause();
+    test_detector_facade_runtime_budget_startup_observation();
+    test_detector_facade_runtime_budget_render_lag();
+    test_detector_facade_runtime_budget_local_ad_overlay_action();
+    test_detector_facade_runtime_budget_local_ad_route();
+    test_detector_facade_runtime_budget_advance_render_due_ms();
+    test_detector_facade_runtime_budget_pts_interval_from_span_ms();
+    test_detector_facade_runtime_budget_buffered_span_ms();
+    test_detector_facade_runtime_budget_decode_delta_gap_classification();
+    test_detector_facade_runtime_budget_decode_delta_plausible_cadence();
+    test_detector_facade_runtime_budget_decode_stall_active();
     test_runtime_pressure_thresholds_round_up_and_clamp();
     test_runtime_pressure_default_policy_matches_bridge_constants();
     test_runtime_pressure_explicit_policy_constructor();
     test_runtime_pressure_selects_modes_and_recovers();
     test_runtime_pressure_bypass_decision();
+    test_runtime_pressure_bypass_decision_for_source();
     test_runtime_pressure_backlog_frame_capacity();
     test_runtime_pressure_oldest_drop_count_for_admission();
     test_runtime_pressure_queue_storage_capacity();

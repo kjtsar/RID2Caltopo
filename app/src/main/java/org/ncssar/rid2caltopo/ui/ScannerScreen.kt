@@ -226,5 +226,9 @@ private fun currentBuildVersion(): String = buildConfigString("BUILD_VERSION")
 
 private fun currentBuildTime(): String = buildConfigString("BUILD_TIME")
 
-private fun buildConfigString(fieldName: String): String =
-    BuildConfig::class.java.getField(fieldName).get(null) as String
+internal fun buildConfigString(
+    fieldName: String,
+    buildConfigClass: Class<*> = BuildConfig::class.java
+): String =
+    runCatching { buildConfigClass.getField(fieldName).get(null) as String }
+        .getOrDefault("unknown")

@@ -14,4 +14,14 @@ class ScannerScreenStatusTextTest {
         assertEquals("", lines[2])
         assertEquals("Scanner Status", lines[3])
     }
+
+    @Test
+    fun buildConfigString_returnsUnknownWhenFieldIsMissing() {
+        assertEquals(
+            "unknown",
+            buildConfigString("BUILD_VERSION", BuildConfigWithoutVersion::class.java)
+        )
+    }
+
+    private class BuildConfigWithoutVersion
 }

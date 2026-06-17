@@ -1,6 +1,9 @@
 package org.ncssar.rid2caltopo.app
 
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
 import android.app.Application
+import android.os.Build
 import com.google.firebase.FirebaseApp
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import org.ncssar.rid2caltopo.BuildConfig
@@ -30,6 +33,7 @@ class R2CApplication : Application() {
         R2CMqttManager.InitializeNetworkAddressMonitor(this)
         MapCacheStartupMaintenance.ensureStarted(this)
         MainThreadStallMonitor.start()
+        logHistoricalProcessExitReasons()
         CTDebug(TAG, "onCreate().")
     }
 
@@ -48,6 +52,54 @@ class R2CApplication : Application() {
             CTError(TAG, "Crashlytics startup probe failed: ${error.javaClass.simpleName}: ${error.message}")
         }
     }
+
+    private fun logHistoricalProcessExitReasons() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        runCatching {
+            val activityManager = getSystemService(ActivityManager::class.java) ?: return
+            val exitReasons = activityManager.getHistoricalProcessExitReasons(packageName, 0, 5)
+            if (exitReasons.isEmpty()) {
+                CTDebug(TAG, "Historical process exit info unavailable.")
+                return
+            }
+            exitReasons.forEachIndexed { index, info ->
+                CTDebug(
+                    TAG,
+                    "Historical process exit #$index: " +
+                        "pid=${info.pid} timestamp=${info.timestamp} " +
+                        "reason=${reasonName(info.reason)}(${info.reason}) " +
+                        "status=${info.status} importance=${info.importance} " +
+                        "pss=${info.pss} rss=${info.rss} " +
+                        "description='${info.description.orEmpty()}'"
+                )
+            }
+        }.onFailure { error ->
+            CTError(TAG, "Historical process exit probe failed: ${error.javaClass.simpleName}: ${error.message}")
+        }
+    }
+
+    private fun reasonName(reason: Int): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            when (reason) {
+                ApplicationExitInfo.REASON_ANR -> "ANR"
+                ApplicationExitInfo.REASON_CRASH -> "CRASH"
+                ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
+                ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
+                ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCE_USAGE"
+                ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
+                ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INITIALIZATION_FAILURE"
+                ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY"
+                ApplicationExitInfo.REASON_OTHER -> "OTHER"
+                ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE"
+                ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
+                ApplicationExitInfo.REASON_UNKNOWN -> "UNKNOWN"
+                ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
+                ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
+                else -> "UNRECOGNIZED"
+            }
+        } else {
+            "UNAVAILABLE"
+        }
 
     companion object {
         private var instance: R2CApplication? = null;

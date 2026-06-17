@@ -107,12 +107,13 @@ fun StreamTile(
 ) {
     val tag="StreamTile"
     val clueCaptureSlowMs = 250L
-    val clueCaptureTargetRef = remember(streamDesignator, streamRevision) {
+    val clueCaptureStateKey = streamClueCaptureStateKey(streamDesignator, streamRevision)
+    val clueCaptureTargetRef = remember(clueCaptureStateKey) {
         mutableStateOf<StreamClueCaptureTarget?>(null)
     }
-    var renderedFrameCount by remember(streamDesignator, streamRevision) { mutableIntStateOf(0) }
-    var pendingClueCaptureRequestId by remember(streamDesignator, streamRevision) { mutableLongStateOf(0L) }
-    var handledClueCaptureRequestId by remember(streamDesignator, streamRevision) { mutableLongStateOf(0L) }
+    var renderedFrameCount by remember(clueCaptureStateKey) { mutableIntStateOf(0) }
+    var pendingClueCaptureRequestId by remember(clueCaptureStateKey) { mutableLongStateOf(0L) }
+    var handledClueCaptureRequestId by remember(clueCaptureStateKey) { mutableLongStateOf(0L) }
     var showPicker by remember { mutableStateOf(false) }
     var showUnmatchDialog by remember { mutableStateOf(false) }
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
@@ -237,6 +238,16 @@ fun StreamTile(
         }
     }
 
+    fun registerClueCaptureTarget(target: StreamClueCaptureTarget) {
+        val previous = clueCaptureTargetRef.value
+        if (previous?.textureView !== target.textureView ||
+            previous.requiresRenderedFrame != target.requiresRenderedFrame
+        ) {
+            renderedFrameCount = 0
+        }
+        clueCaptureTargetRef.value = target
+    }
+
     fun captureClueSnapshot(reason: String): Boolean {
         val clueTapStartedAtMs = System.currentTimeMillis()
         fun logClueTapIfSlow(step: String, elapsedMs: Long, bitmap: Bitmap? = null) {
@@ -345,17 +356,21 @@ fun StreamTile(
                 fillFrame = fillContainer,
                 viewModel = viewModel,
                 onTextureViewReady = { tv ->
-                    clueCaptureTargetRef.value = StreamClueCaptureTarget(
-                        textureView = tv,
-                        requiresRenderedFrame = true,
-                        label = "ffmpeg-texture"
+                    registerClueCaptureTarget(
+                        StreamClueCaptureTarget(
+                            textureView = tv,
+                            requiresRenderedFrame = true,
+                            label = "ffmpeg-texture"
+                        )
                     )
                 },
                 onPlayerTextureViewReady = { tv ->
-                    clueCaptureTargetRef.value = StreamClueCaptureTarget(
-                        textureView = tv,
-                        requiresRenderedFrame = false,
-                        label = "player-texture"
+                    registerClueCaptureTarget(
+                        StreamClueCaptureTarget(
+                            textureView = tv,
+                            requiresRenderedFrame = false,
+                            label = "player-texture"
+                        )
                     )
                 },
                 onTextureFrameUpdated = { renderedFrameCount = it }
@@ -1596,6 +1611,11 @@ internal data class StreamClueCaptureTarget(
     val label: String
 )
 
+internal fun streamClueCaptureStateKey(
+    designator: String,
+    @Suppress("UNUSED_PARAMETER") streamRevision: Long
+): String = designator
+
 internal fun streamClueCaptureReady(
     hasCaptureTarget: Boolean,
     renderedFrameCount: Int,
@@ -1988,8 +2008,8 @@ fun StreamPlayer(
                     "FFmpeg TextureView update rebound for $designator oldViewId=${attachedTextureView?.let { System.identityHashCode(it) }} newViewId=${System.identityHashCode(textureView)}"
                 )
                 attachedTextureView = textureView
-                onTextureViewReady(textureView)
             }
+            onTextureViewReady(textureView)
         }
     )
 

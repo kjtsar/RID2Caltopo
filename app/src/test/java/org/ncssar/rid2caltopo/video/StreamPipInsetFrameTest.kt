@@ -128,6 +128,19 @@ class StreamPipInsetFrameTest {
     }
 
     @Test
+    fun streamClueCaptureStateKey_survivesStreamRevisionChanges() {
+        assertEquals(
+            streamClueCaptureStateKey(designator = "1sar34DjN2", streamRevision = 2L),
+            streamClueCaptureStateKey(designator = "1sar34DjN2", streamRevision = 3L)
+        )
+        assertEquals(
+            false,
+            streamClueCaptureStateKey(designator = "1sar34DjN2", streamRevision = 2L) ==
+                streamClueCaptureStateKey(designator = "neo2", streamRevision = 2L)
+        )
+    }
+
+    @Test
     fun streamTileFocusPresentation_treatsSingleDisplayedTileAsFocusedWithoutBorder() {
         assertEquals(
             StreamTileFocusPresentation(effectiveFocused = true, showFocusBorder = false),

@@ -222,13 +222,21 @@ internal fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.da
     return builder.toString().trimEnd()
 }
 
-private fun currentBuildVersion(): String = buildConfigString("BUILD_VERSION")
+private fun currentBuildVersion(): String = BuildConfig.BUILD_VERSION
 
-private fun currentBuildTime(): String = buildConfigString("BUILD_TIME")
+private fun currentBuildTime(): String = BuildConfig.BUILD_TIME
 
 internal fun buildConfigString(
     fieldName: String,
     buildConfigClass: Class<*> = BuildConfig::class.java
 ): String =
-    runCatching { buildConfigClass.getField(fieldName).get(null) as String }
-        .getOrDefault("unknown")
+    if (buildConfigClass == BuildConfig::class.java) {
+        when (fieldName) {
+            "BUILD_VERSION" -> BuildConfig.BUILD_VERSION
+            "BUILD_TIME" -> BuildConfig.BUILD_TIME
+            else -> "unknown"
+        }
+    } else {
+        runCatching { buildConfigClass.getField(fieldName).get(null) as String }
+            .getOrDefault("unknown")
+    }

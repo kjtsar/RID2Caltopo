@@ -1,19 +1,13 @@
 package org.ncssar.rid2caltopo.ui
 
 import android.location.Location
-import android.media.AudioAttributes
-import android.media.MediaPlayer
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.ncssar.rid2caltopo.R
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoMap
@@ -548,58 +542,19 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
 
 @Composable
 fun DroneSignalLossAlertHost() {
-    val context = LocalContext.current
     val alert by DroneSignalLossAlertCenter.uiState.collectAsState()
-    val player = remember(context) {
-        try {
-            MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ALARM)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-                context.resources.openRawResourceFd(R.raw.arrest_flatline_tail)?.use { afd ->
-                    setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-                }
-                isLooping = true
-                prepare()
-            }
-        } catch (e: Exception) {
-            CaltopoClient.CTWarn(SIGNAL_LOSS_ALERT_TAG, "Unable to prepare signal-loss alert tone.", e)
-            null
-        }
-    }
 
     LaunchedEffect(Unit) {
         DroneSignalLossAlertCenter.ensureRegistered()
     }
 
-    DisposableEffect(player) {
-        onDispose {
-            try {
-                player?.release()
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    LaunchedEffect(alert?.flightKey, alert?.volumeFraction) {
-        val mediaPlayer = player ?: return@LaunchedEffect
-        val currentAlert = alert
-        if (currentAlert == null) {
-            if (mediaPlayer.isPlaying) {
-                mediaPlayer.pause()
-                mediaPlayer.seekTo(0)
-            }
-            return@LaunchedEffect
-        }
-
-        val volume = currentAlert.volumeFraction.coerceIn(0f, 1f)
-        mediaPlayer.setVolume(volume, volume)
-        if (!mediaPlayer.isPlaying) {
-            mediaPlayer.seekTo(0)
-            mediaPlayer.start()
-        }
+    LaunchedEffect(alert?.flightKey) {
+        val currentAlert = alert ?: return@LaunchedEffect
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.DroneTelemetry,
+            sourceKey = currentAlert.flightKey,
+            nowMs = System.currentTimeMillis(),
+            cooldownMs = CaltopoClient.LOSS_OF_SIGNAL_TONE_DURATION_SECONDS * 1000L
+        )
     }
 }

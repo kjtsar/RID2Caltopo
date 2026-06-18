@@ -1,8 +1,6 @@
 package org.ncssar.rid2caltopo.ui
 
 import android.content.Context
-import android.media.AudioManager
-import android.media.ToneGenerator
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -23,11 +21,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -895,26 +891,15 @@ fun ProximityAlertHost(
 ) {
     val context = LocalContext.current
     val alert by ProximityAlertCenter.uiState.collectAsState()
-    val toneGenerator = remember(alert?.alertInstanceId) {
-        try {
-            ToneGenerator(AudioManager.STREAM_ALARM, CaltopoClient.GetToneGeneratorAlarmVolumePercent())
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    DisposableEffect(toneGenerator) {
-        onDispose { toneGenerator?.release() }
-    }
 
     LaunchedEffect(alert?.alertInstanceId) {
         if (alert != null) {
-            val tone = if (alert?.highSeverity == true) {
-                ToneGenerator.TONE_CDMA_HIGH_SS
-            } else {
-                ToneGenerator.TONE_PROP_BEEP
-            }
-            toneGenerator?.startTone(tone, 700)
+            SpokenWarningCenter.requestWarning(
+                kind = SpokenWarningKind.Proximity,
+                sourceKey = alert?.pairKey ?: "proximity",
+                nowMs = System.currentTimeMillis(),
+                cooldownMs = 30_000L
+            )
             vibrateBriefly(context)
         }
     }
@@ -942,26 +927,15 @@ fun ProximityAlertHost(
 fun ComplianceAlertHost() {
     val context = LocalContext.current
     val alert by ComplianceAlertCenter.uiState.collectAsState()
-    val toneGenerator = remember(alert?.alertInstanceId) {
-        try {
-            ToneGenerator(AudioManager.STREAM_ALARM, CaltopoClient.GetToneGeneratorAlarmVolumePercent())
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    DisposableEffect(toneGenerator) {
-        onDispose { toneGenerator?.release() }
-    }
 
     LaunchedEffect(alert?.alertInstanceId) {
         alert?.let { uiState ->
-            val tone = if (uiState.highSeverity) {
-                ToneGenerator.TONE_CDMA_HIGH_SS
-            } else {
-                ToneGenerator.TONE_PROP_BEEP
-            }
-            toneGenerator?.startTone(tone, if (uiState.highSeverity) 350 else 220)
+            SpokenWarningCenter.requestWarning(
+                kind = SpokenWarningKind.Altitude,
+                sourceKey = uiState.mappedId,
+                nowMs = System.currentTimeMillis(),
+                cooldownMs = 15_000L
+            )
             vibrateBriefly(context)
             val staleSuffix = if (uiState.staleDem) " (DEM AGL may be stale)" else ""
             val toastMessage = if (uiState.highSeverity) {

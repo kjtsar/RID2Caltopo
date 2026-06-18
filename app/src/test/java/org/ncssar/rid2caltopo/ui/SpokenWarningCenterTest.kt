@@ -1,0 +1,86 @@
+package org.ncssar.rid2caltopo.ui
+
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class SpokenWarningCenterTest {
+    @After
+    fun tearDown() {
+        SpokenWarningCenter.resetForTests()
+    }
+
+    @Test
+    fun requestWarning_emitsProblemLabel() {
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.Altitude,
+            sourceKey = "drone-a",
+            nowMs = 1_000L,
+            cooldownMs = 0L,
+            volumeFraction = 0.75f
+        )
+
+        val request = SpokenWarningCenter.requests.value
+        assertEquals(SpokenWarningKind.Altitude, request?.kind)
+        assertEquals("Altitude", request?.phrase)
+        assertEquals(0.75f, request?.volumeFraction)
+    }
+
+    @Test
+    fun requestWarning_suppressesRepeatedProblemInsideCooldown() {
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.ControllerSignalStrength,
+            sourceKey = "stream-controller",
+            nowMs = 1_000L,
+            cooldownMs = 30_000L
+        )
+        val first = SpokenWarningCenter.requests.value
+
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.ControllerSignalStrength,
+            sourceKey = "stream-controller",
+            nowMs = 10_000L,
+            cooldownMs = 30_000L
+        )
+
+        assertTrue(first === SpokenWarningCenter.requests.value)
+    }
+
+    @Test
+    fun requestWarning_allowsRepeatedProblemAfterCooldown() {
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.DroneTelemetry,
+            sourceKey = "flight-a",
+            nowMs = 1_000L,
+            cooldownMs = 30_000L
+        )
+        val first = SpokenWarningCenter.requests.value
+
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.DroneTelemetry,
+            sourceKey = "flight-a",
+            nowMs = 31_000L,
+            cooldownMs = 30_000L
+        )
+
+        val second = SpokenWarningCenter.requests.value
+        assertEquals(SpokenWarningKind.DroneTelemetry, second?.kind)
+        assertTrue(first !== second)
+    }
+
+    @Test
+    fun resetForTests_clearsCurrentRequest() {
+        SpokenWarningCenter.requestWarning(
+            kind = SpokenWarningKind.Proximity,
+            sourceKey = "pair-a",
+            nowMs = 1_000L,
+            cooldownMs = 0L
+        )
+
+        SpokenWarningCenter.resetForTests()
+
+        assertNull(SpokenWarningCenter.requests.value)
+    }
+}

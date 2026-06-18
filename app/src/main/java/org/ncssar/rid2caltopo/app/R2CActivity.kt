@@ -80,6 +80,7 @@ import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
 import org.ncssar.rid2caltopo.ui.ComplianceAlertHost
+import org.ncssar.rid2caltopo.ui.ControllerSignalStrengthAlertHost
 import org.ncssar.rid2caltopo.ui.DroneSignalLossAlertHost
 import org.ncssar.rid2caltopo.ui.DroneSpecConfirmationDialog
 import org.ncssar.rid2caltopo.ui.MainScreen
@@ -89,6 +90,7 @@ import org.ncssar.rid2caltopo.ui.ProximityAlertHost
 import org.ncssar.rid2caltopo.ui.R2CViewModel
 import org.ncssar.rid2caltopo.ui.R2CViewModelFactory
 import org.ncssar.rid2caltopo.ui.ScannerScreen
+import org.ncssar.rid2caltopo.ui.SpokenWarningAlertHost
 import org.ncssar.rid2caltopo.ui.theme.RID2CaltopoTheme
 import org.ncssar.rid2caltopo.video.StreamsScreen
 import org.opendroneid.android.Constants
@@ -564,6 +566,8 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 )
                 ComplianceAlertHost()
                 DroneSignalLossAlertHost()
+                ControllerSignalStrengthAlertHost()
+                SpokenWarningAlertHost()
                 if (maPackageImportState !is org.ncssar.rid2caltopo.data.MutualAidPackageImportState.Idle) {
                     MutualAidPackageImportDialog(
                         state = maPackageImportState,

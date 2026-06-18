@@ -107,7 +107,7 @@ fun DroneItem(drone: CtDroneSpec,
         ) {
             Column(
                 modifier = Modifier
-                    .width(28.dp)
+                    .width(R2CViewColumnLayout.publishStatusColumnWidthDp.dp)
                     .fillMaxHeight()
                     .background(MaterialTheme.colorScheme.surface),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -126,7 +126,7 @@ fun DroneItem(drone: CtDroneSpec,
                 }
             }
             Column(
-                modifier = Modifier.width(200.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
+                modifier = Modifier.width(R2CViewColumnLayout.trackLabelColumnWidthDp.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
                 OutlinedButton(
@@ -149,7 +149,7 @@ fun DroneItem(drone: CtDroneSpec,
             }
 
             Column(
-                modifier = Modifier.width(240.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
+                modifier = Modifier.width(R2CViewColumnLayout.remoteIdColumnWidthDp.dp).background(MaterialTheme.colorScheme.surface).padding(1.dp)
                     .fillMaxWidth().fillMaxHeight()
             ) {
                 Text(
@@ -163,7 +163,7 @@ fun DroneItem(drone: CtDroneSpec,
             // BT4 count
             Column(
                 modifier = Modifier
-                    .width(80.dp)
+                    .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -177,7 +177,7 @@ fun DroneItem(drone: CtDroneSpec,
             // BT4 signal bars
             Column(
                 modifier = Modifier
-                    .width(40.dp)
+                    .width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 2.dp, vertical = 2.dp)
                     .fillMaxHeight(),
@@ -191,7 +191,7 @@ fun DroneItem(drone: CtDroneSpec,
             // BT5 count
             Column(
                 modifier = Modifier
-                    .width(80.dp)
+                    .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -205,7 +205,7 @@ fun DroneItem(drone: CtDroneSpec,
             // BT5 signal bars
             Column(
                 modifier = Modifier
-                    .width(40.dp)
+                    .width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 2.dp, vertical = 2.dp)
                     .fillMaxHeight(),
@@ -219,7 +219,7 @@ fun DroneItem(drone: CtDroneSpec,
             // WiFi count
             Column(
                 modifier = Modifier
-                    .width(80.dp)
+                    .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -233,7 +233,7 @@ fun DroneItem(drone: CtDroneSpec,
             // WiFi signal bars
             Column(
                 modifier = Modifier
-                    .width(40.dp)
+                    .width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 2.dp, vertical = 2.dp)
                     .fillMaxHeight(),
@@ -247,7 +247,7 @@ fun DroneItem(drone: CtDroneSpec,
             // NaN (WNAN) count
             Column(
                 modifier = Modifier
-                    .width(80.dp)
+                    .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -261,7 +261,7 @@ fun DroneItem(drone: CtDroneSpec,
             // NaN signal bars
             Column(
                 modifier = Modifier
-                    .width(40.dp)
+                    .width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 2.dp, vertical = 2.dp)
                     .fillMaxHeight(),
@@ -274,7 +274,14 @@ fun DroneItem(drone: CtDroneSpec,
             }
             Column(
                 modifier = Modifier
-                    .width( 80.dp)
+                    .width(R2CViewColumnLayout.r2cWaypointColumnWidthDp.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(1.dp)
+                    .fillMaxHeight()
+            ) {}
+            Column(
+                modifier = Modifier
+                    .width(R2CViewColumnLayout.totalColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -287,7 +294,7 @@ fun DroneItem(drone: CtDroneSpec,
             }
             Column(
                 modifier = Modifier
-                    .width( 125.dp)
+                    .width(R2CViewColumnLayout.flightDurationColumnWidthDp.dp)
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(1.dp)
                     .fillMaxHeight(),
@@ -299,6 +306,13 @@ fun DroneItem(drone: CtDroneSpec,
                     fontSize=14.sp,
                     textAlign = TextAlign.Right)
             }
+            Column(
+                modifier = Modifier
+                    .width(R2CViewColumnLayout.r2cRttColumnWidthDp.dp)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(1.dp)
+                    .fillMaxHeight()
+            ) {}
         }
     }
 }

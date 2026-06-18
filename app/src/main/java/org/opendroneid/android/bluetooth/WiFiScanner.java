@@ -243,6 +243,15 @@ public class WiFiScanner {
         return sdf.format(new Date());
     }
 
+    static boolean runWifiAwareSubscribeForTesting(@NonNull Runnable subscribeAction) {
+        try {
+            subscribeAction.run();
+            return true;
+        } catch (SecurityException se) {
+            CTError(TAG, "wifiAwareSession.subscribe() permission/security error:\n", se);
+            return false;
+        }
+    }
 
     private final AttachCallback attachCallback = new AttachCallback() {
         @Override
@@ -265,7 +274,7 @@ public class WiFiScanner {
             }
 
             CaltopoClient.CTDebug(TAG,"onAttached(): wifiAwareSession starting subscription.");
-            wifiAwareSession.subscribe(config, new DiscoverySessionCallback() {
+            runWifiAwareSubscribeForTesting(() -> wifiAwareSession.subscribe(config, new DiscoverySessionCallback() {
                 @Override
                 public void onSubscribeStarted(@NonNull SubscribeDiscoverySession session) {
                     CaltopoClient.CTInfo(TAG, "onSubscribeStarted");
@@ -290,7 +299,7 @@ public class WiFiScanner {
                     CTError(TAG, "onSessionConfigFailed()");
 
                 }
-            }, null);
+            }, null));
         }
 
         @Override

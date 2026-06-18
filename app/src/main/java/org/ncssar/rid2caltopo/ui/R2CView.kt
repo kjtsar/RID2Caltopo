@@ -208,7 +208,7 @@ fun RidmapHeader() {
             .padding(2.dp),
     ) {
         Column(
-            modifier = Modifier.width(28.dp)
+            modifier = Modifier.width(R2CViewColumnLayout.publishStatusColumnWidthDp.dp)
         ) {
             Box(
                 modifier = Modifier
@@ -218,7 +218,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(R2CViewColumnLayout.trackLabelColumnWidthDp.dp)
         ) {
             Text(
                 text = "",
@@ -238,7 +238,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(200.dp)
+            modifier = Modifier.width(R2CViewColumnLayout.remoteIdColumnWidthDp.dp)
         ) {
             Text(
                 text = "",
@@ -258,7 +258,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(640.dp)
+            modifier = Modifier.width(R2CViewColumnLayout.waypointsReceivedHeaderWidthDp.dp)
         ) {
             Text(
                 text = "Waypoints Received",
@@ -275,47 +275,47 @@ fun RidmapHeader() {
                 Text(
                     text = "BT4:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
-                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
+                Box(modifier = Modifier.width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "BT5:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
-                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
+                Box(modifier = Modifier.width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "WiFi:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
-                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
+                Box(modifier = Modifier.width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "NaN:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(R2CViewColumnLayout.transportCountColumnWidthDp.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Right,
                     fontSize = 18.sp
                 )
-                Box(modifier = Modifier.width(40.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
+                Box(modifier = Modifier.width(R2CViewColumnLayout.transportSignalColumnWidthDp.dp).height(25.dp).background(MaterialTheme.colorScheme.surface))
                 Text(
                     text = "R2C:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(R2CViewColumnLayout.r2cWaypointColumnWidthDp.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Right,
@@ -324,7 +324,7 @@ fun RidmapHeader() {
                 Text(
                     text = "Total:",
                     modifier = Modifier
-                        .width(80.dp)
+                        .width(R2CViewColumnLayout.totalColumnWidthDp.dp)
                         .height(25.dp)
                         .background(MaterialTheme.colorScheme.surface),
                     textAlign = TextAlign.Right,
@@ -333,7 +333,7 @@ fun RidmapHeader() {
             }
         }
         Column(
-            modifier = Modifier.width(125.dp)
+            modifier = Modifier.width(R2CViewColumnLayout.flightDurationColumnWidthDp.dp)
         ) {
             Text(
                 text = "Flight",
@@ -355,7 +355,7 @@ fun RidmapHeader() {
             )
         }
         Column(
-            modifier = Modifier.width(125.dp)
+            modifier = Modifier.width(R2CViewColumnLayout.r2cRttColumnWidthDp.dp)
         ) {
             Text(
                 text = "",

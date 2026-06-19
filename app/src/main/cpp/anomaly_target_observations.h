@@ -3,6 +3,8 @@
 
 #include <stdbool.h>
 
+#include "anomaly_analysis.h"
+
 typedef struct {
     bool  valid;
     bool  publish_confirming;
@@ -63,5 +65,11 @@ bool anomaly_target_observation_replace_thermal_correction(
         anomaly_target_observation_t       *observations,
         int                                 observation_count,
         const anomaly_target_observation_t *candidate);
+
+float anomaly_target_observation_score_track_support_bonus(
+        const anomaly_state_t              *state,
+        const anomaly_target_observation_t *obs,
+        float                               registration_quality,
+        float                               local_motion_support);
 
 #endif

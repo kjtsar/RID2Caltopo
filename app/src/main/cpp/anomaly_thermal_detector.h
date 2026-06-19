@@ -110,6 +110,32 @@ static inline int effective_thermal_parent_mass_radius_cells(int sample_step) {
         0);
 }
 
+static inline bool anomaly_thermal_support_map_required(int algorithm_mask) {
+    bool thermal_enabled = (algorithm_mask & ANOMALY_ALGO_THERMAL) != 0;
+    bool persist_enabled = (algorithm_mask & ANOMALY_ALGO_PERSIST) != 0;
+    bool motion_enabled =
+        (algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE)) != 0;
+    bool color_enabled = (algorithm_mask & ANOMALY_ALGO_COLOR) != 0;
+    return thermal_enabled || persist_enabled || (motion_enabled && !color_enabled);
+}
+
+static inline bool anomaly_thermal_spatial_scores_required(
+        bool detection_active,
+        int  algorithm_mask,
+        bool bg_valid) {
+    if (!detection_active) return false;
+    if ((algorithm_mask & ANOMALY_ALGO_THERMAL) != 0) {
+        return !bg_valid;
+    }
+    if ((algorithm_mask & ANOMALY_ALGO_PERSIST) != 0) {
+        return true;
+    }
+    bool motion_enabled =
+        (algorithm_mask & (ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE)) != 0;
+    bool color_enabled = (algorithm_mask & ANOMALY_ALGO_COLOR) != 0;
+    return motion_enabled && !color_enabled;
+}
+
 static inline float effective_thermal_small_target_span_px(
         const anomaly_config_t *cfg,
         int                     frame_w,

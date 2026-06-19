@@ -8566,6 +8566,37 @@ static void test_thermal_detector_delta_and_radius_helpers(void) {
            "thermal apparent scale: oversized target is strongly discounted");
 }
 
+static void test_thermal_detector_support_map_policy_for_color_motion(void) {
+    EXPECT(anomaly_thermal_support_map_required(ANOMALY_ALGO_THERMAL),
+           "thermal support policy: thermal detector needs support map");
+    EXPECT(anomaly_thermal_support_map_required(ANOMALY_ALGO_PERSIST | ANOMALY_ALGO_COLOR),
+           "thermal support policy: persist detector keeps spatial support");
+    EXPECT(anomaly_thermal_support_map_required(ANOMALY_ALGO_MOTION),
+           "thermal support policy: motion-only keeps spatial support");
+    EXPECT(!anomaly_thermal_support_map_required(ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION),
+           "thermal support policy: color motion can use color support without thermal map");
+    EXPECT(!anomaly_thermal_spatial_scores_required(
+                false,
+                ANOMALY_ALGO_THERMAL,
+                false),
+           "thermal spatial policy: inactive detection skips scoring");
+    EXPECT(anomaly_thermal_spatial_scores_required(
+                true,
+                ANOMALY_ALGO_THERMAL,
+                false),
+           "thermal spatial policy: thermal detector uses spatial fallback before background warmup");
+    EXPECT(!anomaly_thermal_spatial_scores_required(
+                true,
+                ANOMALY_ALGO_THERMAL,
+                true),
+           "thermal spatial policy: warmed thermal detector uses temporal scoring instead");
+    EXPECT(!anomaly_thermal_spatial_scores_required(
+                true,
+                ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION,
+                false),
+           "thermal spatial policy: color motion skips thermal spatial scoring");
+}
+
 static void test_thermal_detector_probe_and_context_helpers(void) {
     const float luma[9] = {
         10.0f, 10.0f, 10.0f,
@@ -9990,6 +10021,7 @@ static anomaly_target_observation_t color_track_support_test_obs(
     anomaly_target_observation_t obs;
     memset(&obs, 0, sizeof(obs));
     obs.valid = true;
+    obs.algorithm = ANOMALY_ALGO_COLOR;
     obs.center_x_norm = cx;
     obs.center_y_norm = cy;
     obs.support_radius_norm = support_radius;
@@ -10193,6 +10225,100 @@ static void test_color_detector_track_persistence_bonus_disagreement_formula(voi
         base_expected + disagreement_expected,
         0.0001f,
         "color track persistence bonus: disagreement branch preserves exact formula");
+}
+
+static void test_target_observation_track_support_bonus_rejects_invalid_and_cross_mode(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    anomaly_target_observation_t obs =
+        color_track_support_test_obs(0.50f, 0.50f, 0.040f);
+    obs.algorithm = ANOMALY_ALGO_THERMAL;
+
+    EXPECT_NEAR(anomaly_target_observation_score_track_support_bonus(NULL, &obs, 0.80f, 1.0f),
+                0.0f, 0.0001f,
+                "target observation track support: NULL state returns zero");
+    EXPECT_NEAR(anomaly_target_observation_score_track_support_bonus(&state, NULL, 0.80f, 1.0f),
+                0.0f, 0.0001f,
+                "target observation track support: NULL observation returns zero");
+    obs.valid = false;
+    EXPECT_NEAR(anomaly_target_observation_score_track_support_bonus(&state, &obs, 0.80f, 1.0f),
+                0.0f, 0.0001f,
+                "target observation track support: invalid observation returns zero");
+    obs.valid = true;
+    EXPECT_NEAR(anomaly_target_observation_score_track_support_bonus(&state, &obs, 0.54f, 1.0f),
+                0.0f, 0.0001f,
+                "target observation track support: low registration returns zero");
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[0].center_x_norm = 0.50f;
+    state.target_tracks[0].center_y_norm = 0.50f;
+    state.target_tracks[0].support_radius_norm = 0.040f;
+    state.target_tracks[0].confidence = 1.0f;
+    state.target_tracks[0].last_registration_quality = 1.0f;
+    EXPECT_NEAR(anomaly_target_observation_score_track_support_bonus(&state, &obs, 0.80f, 1.0f),
+                0.0f, 0.0001f,
+                "target observation track support: cross-mode track does not reinforce thermal");
+}
+
+static void test_target_observation_track_support_bonus_thermal_same_mode_formula(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    anomaly_target_observation_t obs =
+        color_track_support_test_obs(0.50f, 0.50f, 0.040f);
+    obs.algorithm = ANOMALY_ALGO_THERMAL;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_THERMAL;
+    state.target_tracks[0].center_x_norm = 0.50f;
+    state.target_tracks[0].center_y_norm = 0.50f;
+    state.target_tracks[0].support_radius_norm = 0.040f;
+    state.target_tracks[0].confidence = 0.80f;
+    state.target_tracks[0].last_registration_quality = 0.90f;
+
+    float registration_quality = 0.775f;
+    float lock_factor = anomaly_color_clampf((registration_quality - 0.55f) / 0.45f, 0.0f, 1.0f);
+    float expected = (0.16f + 0.34f) * 0.80f * lock_factor;
+    EXPECT_NEAR(
+        anomaly_target_observation_score_track_support_bonus(&state, &obs, registration_quality, 1.0f),
+        expected,
+        0.0001f,
+        "target observation track support: thermal same-mode track uses base formula");
+}
+
+static void test_target_observation_track_support_bonus_persist_disagreement_formula(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    anomaly_target_observation_t obs =
+        color_track_support_test_obs(0.56f, 0.50f, 0.050f);
+    obs.algorithm = ANOMALY_ALGO_THERMAL;
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_PERSIST;
+    state.target_tracks[0].center_x_norm = 0.50f;
+    state.target_tracks[0].center_y_norm = 0.50f;
+    state.target_tracks[0].support_radius_norm = 0.050f;
+    state.target_tracks[0].confidence = 0.80f;
+    state.target_tracks[0].last_registration_quality = 1.0f;
+
+    float dist = 0.060f;
+    float gate = ANOMALY_TARGET_MATCH_GATE + 0.25f * 0.050f;
+    float closeness = anomaly_color_clampf(1.0f - dist / gate, 0.0f, 1.0f);
+    float base_expected =
+        (0.16f + 0.34f * closeness) *
+        0.80f *
+        1.0f;
+    float relative_offset = anomaly_color_clampf((dist / 0.050f) - 0.18f, 0.0f, 1.0f);
+    float disagreement_expected =
+        0.20f *
+        relative_offset *
+        0.75f *
+        1.0f;
+    EXPECT_NEAR(
+        anomaly_target_observation_score_track_support_bonus(&state, &obs, 1.0f, 0.75f),
+        base_expected + disagreement_expected,
+        0.0001f,
+        "target observation track support: persist track can reinforce thermal disagreement");
 }
 
 static void test_color_detector_support_patch_score_helper(void) {
@@ -20131,6 +20257,7 @@ int main(void) {
 
     test_appearance_detector_interface_contract();
     test_thermal_detector_delta_and_radius_helpers();
+    test_thermal_detector_support_map_policy_for_color_motion();
     test_thermal_detector_probe_and_context_helpers();
     test_thermal_detector_temporal_stats_helper();
     test_thermal_state_lifecycle_helpers();
@@ -20157,6 +20284,9 @@ int main(void) {
     test_color_detector_track_persistence_bonus_rejects_invalid_inputs();
     test_color_detector_track_persistence_bonus_base_formula();
     test_color_detector_track_persistence_bonus_disagreement_formula();
+    test_target_observation_track_support_bonus_rejects_invalid_and_cross_mode();
+    test_target_observation_track_support_bonus_thermal_same_mode_formula();
+    test_target_observation_track_support_bonus_persist_disagreement_formula();
     test_color_detector_support_patch_score_helper();
     test_color_detector_local_uv_support_helper();
     test_color_detector_blob_neighbor_similarity_helper();

@@ -2,6 +2,7 @@
 
 #include "anomaly_analysis.h"
 #include "anomaly_analysis_internal.h"
+#include "anomaly_target_matching.h"
 
 #include <math.h>
 #include <string.h>
@@ -220,4 +221,87 @@ bool anomaly_target_observation_replace_thermal_correction(
     }
 
     return false;
+}
+
+static bool target_observation_track_can_support(
+        const anomaly_target_track_t       *track,
+        const anomaly_target_observation_t *obs) {
+    if (track == NULL || obs == NULL || !track->active || !obs->valid) return false;
+    return track->algorithm == obs->algorithm || track->algorithm == ANOMALY_ALGO_PERSIST;
+}
+
+static int target_observation_find_best_track_support_match(
+        const anomaly_state_t              *state,
+        const anomaly_target_observation_t *obs,
+        float                              *dist_out,
+        float                              *gate_out) {
+    if (dist_out != NULL) *dist_out = 0.0f;
+    if (gate_out != NULL) *gate_out = 0.0f;
+    if (state == NULL || obs == NULL || !obs->valid) return -1;
+
+    int best_idx = -1;
+    float best_dist = 0.0f;
+    float best_gate = 0.0f;
+    for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+        const anomaly_target_track_t *track = &state->target_tracks[ti];
+        if (!target_observation_track_can_support(track, obs)) continue;
+        float dx = obs->center_x_norm - track->center_x_norm;
+        float dy = obs->center_y_norm - track->center_y_norm;
+        float dist = sqrtf(dx * dx + dy * dy);
+        float gate = ANOMALY_TARGET_MATCH_GATE +
+                     0.25f * fmaxf(track->support_radius_norm, obs->support_radius_norm);
+        if (dist > gate) continue;
+        if (best_idx < 0 || dist < best_dist) {
+            best_idx = ti;
+            best_dist = dist;
+            best_gate = gate;
+        }
+    }
+
+    if (best_idx >= 0) {
+        if (dist_out != NULL) *dist_out = best_dist;
+        if (gate_out != NULL) *gate_out = best_gate;
+    }
+    return best_idx;
+}
+
+float anomaly_target_observation_score_track_support_bonus(
+        const anomaly_state_t              *state,
+        const anomaly_target_observation_t *obs,
+        float                               registration_quality,
+        float                               local_motion_support) {
+    if (state == NULL || obs == NULL || !obs->valid) return 0.0f;
+    if (registration_quality < 0.55f) return 0.0f;
+
+    float dist = 0.0f;
+    float gate = 0.0f;
+    int track_idx =
+        target_observation_find_best_track_support_match(state, obs, &dist, &gate);
+    if (track_idx < 0 || gate <= 0.0f) return 0.0f;
+
+    const anomaly_target_track_t *track = &state->target_tracks[track_idx];
+    float track_lock = fminf(registration_quality, track->last_registration_quality);
+    if (track_lock < 0.55f) return 0.0f;
+
+    float closeness = clamp01f(1.0f - (dist / gate));
+    float lock_factor = clampf((track_lock - 0.55f) / 0.45f, 0.0f, 1.0f);
+    float base_bonus =
+        (0.16f + 0.34f * closeness) *
+        clamp01f(track->confidence) *
+        lock_factor;
+
+    float support_radius =
+        fmaxf(track->support_radius_norm, fmaxf(obs->support_radius_norm, 0.01f));
+    float disagreement_bonus = 0.0f;
+    if (dist > support_radius * 0.18f && dist < gate * 0.95f) {
+        float relative_offset =
+            clampf((dist / support_radius) - 0.18f, 0.0f, 1.0f);
+        disagreement_bonus =
+            0.20f *
+            relative_offset *
+            clamp01f(local_motion_support) *
+            lock_factor;
+    }
+
+    return base_bonus + disagreement_bonus;
 }

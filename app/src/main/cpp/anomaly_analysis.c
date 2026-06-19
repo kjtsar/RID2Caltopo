@@ -7926,7 +7926,7 @@ int anomaly_process_frame(
     bool need_thermal_support_map =
         anomaly_detection_active &&
         !color_stride_hold_frame &&
-        (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION | ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0;
+        anomaly_thermal_support_map_required(cfg->algorithm_mask);
     bool need_color_support_map = color_algorithm_enabled && !color_stride_hold_frame;
 
     int color_phase_index = 0;
@@ -8094,10 +8094,10 @@ int anomaly_process_frame(
         true,
         scene_discontinuity);
     bool compute_spatial_thermal_scores =
-        anomaly_detection_active &&
-        (cfg->algorithm_mask & (ANOMALY_ALGO_THERMAL | ANOMALY_ALGO_MOTION |
-                                ANOMALY_ALGO_MOTION_TOLERANCE | ANOMALY_ALGO_PERSIST)) != 0 &&
-        !(bg_valid && (cfg->algorithm_mask & ANOMALY_ALGO_THERMAL) != 0);
+        anomaly_thermal_spatial_scores_required(
+            anomaly_detection_active,
+            cfg->algorithm_mask,
+            bg_valid);
 
     // ── Per-pixel scoring ────────────────────────────────────────────────
     // Thermal: integral-image local window of radius ANOMALY_THERMAL_WIN_RADIUS
@@ -10870,10 +10870,41 @@ motion_appearance_scoring_done:
                 motion_support < 0.20f &&
                 (!thermal_publish_settled || best_thermal < thermal_score_threshold + 0.65f);
             if (!weak_singleton) {
-                derived_persist =
+                float thermal_derived =
                     best_thermal +
                     (0.55f * support) +
                     (0.25f * motion_support);
+                if (best_thermal_candidate_idx >= 0 &&
+                    best_thermal_candidate_idx < thermal_candidate_count) {
+                    anomaly_target_observation_t thermal_obs;
+                    if (anomaly_target_observation_populate_thermal_candidate(
+                            roi_x0,
+                            roi_y0,
+                            sample_step,
+                            thermal_candidate_min_x[best_thermal_candidate_idx],
+                            thermal_candidate_min_y[best_thermal_candidate_idx],
+                            thermal_candidate_max_x[best_thermal_candidate_idx],
+                            thermal_candidate_max_y[best_thermal_candidate_idx],
+                            thermal_candidates[best_thermal_candidate_idx].pixel_x,
+                            thermal_candidates[best_thermal_candidate_idx].pixel_y,
+                            best_thermal,
+                            thermal_candidate_quality_score[best_thermal_candidate_idx],
+                            thermal_candidate_isolation_rank[best_thermal_candidate_idx],
+                            thermal_candidate_patch_support[best_thermal_candidate_idx],
+                            thermal_candidate_motion_support[best_thermal_candidate_idx],
+                            thermal_score_threshold,
+                            fw,
+                            fh,
+                            &thermal_obs)) {
+                        thermal_derived +=
+                            anomaly_target_observation_score_track_support_bonus(
+                                state,
+                                &thermal_obs,
+                                anomaly_registration_health_confidence(registration_health),
+                                motion_support);
+                    }
+                }
+                derived_persist = thermal_derived;
                 derived_persist_x = best_thermal_x;
                 derived_persist_y = best_thermal_y;
                 derived_persist_algorithm = ANOMALY_ALGO_THERMAL;

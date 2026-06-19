@@ -151,39 +151,11 @@ static inline float anomaly_color_score_track_persistence_bonus(
         const anomaly_target_observation_t *obs,
         float                               registration_quality,
         float                               local_motion_support) {
-    if (state == NULL || obs == NULL || !obs->valid) return 0.0f;
-    if (registration_quality < 0.55f) return 0.0f;
-
-    float dist = 0.0f;
-    float gate = 0.0f;
-    int track_idx =
-        anomaly_color_find_best_track_support_match(state, obs, &dist, &gate);
-    if (track_idx < 0 || gate <= 0.0f) return 0.0f;
-
-    const anomaly_target_track_t *track = &state->target_tracks[track_idx];
-    float track_lock = fminf(registration_quality, track->last_registration_quality);
-    if (track_lock < 0.55f) return 0.0f;
-
-    float closeness = anomaly_color_clamp01f(1.0f - (dist / gate));
-    float base_bonus =
-        (0.16f + 0.34f * closeness) *
-        anomaly_color_clamp01f(track->confidence) *
-        anomaly_color_clampf((track_lock - 0.55f) / 0.45f, 0.0f, 1.0f);
-
-    float support_radius =
-        fmaxf(track->support_radius_norm, fmaxf(obs->support_radius_norm, 0.01f));
-    float disagreement_bonus = 0.0f;
-    if (dist > support_radius * 0.18f && dist < gate * 0.95f) {
-        float relative_offset =
-            anomaly_color_clampf((dist / support_radius) - 0.18f, 0.0f, 1.0f);
-        disagreement_bonus =
-            0.20f *
-            relative_offset *
-            anomaly_color_clamp01f(local_motion_support) *
-            anomaly_color_clampf((track_lock - 0.55f) / 0.45f, 0.0f, 1.0f);
-    }
-
-    return base_bonus + disagreement_bonus;
+    return anomaly_target_observation_score_track_support_bonus(
+        state,
+        obs,
+        registration_quality,
+        local_motion_support);
 }
 
 static inline float anomaly_color_support_seed_floor(

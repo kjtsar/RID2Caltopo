@@ -952,25 +952,65 @@ static inline float anomaly_color_blob_neighbor_similarity(
     return 0.50f * bin_similarity + 0.35f * chroma_similarity + 0.15f * luma_similarity;
 }
 
+static inline void anomaly_color_compute_blob_cohesion_weights_region(
+        anomaly_roi_state_t *roi_state,
+        int                  color_frontend_mode,
+        int                  sg_w,
+        int                  sg_h,
+        int                  min_sx,
+        int                  min_sy,
+        int                  max_sx,
+        int                  max_sy);
+
 static inline void anomaly_color_compute_blob_cohesion_weights(
         anomaly_roi_state_t *roi_state,
         int                  color_frontend_mode,
         int                  sg_w,
         int                  sg_h) {
+    anomaly_color_compute_blob_cohesion_weights_region(
+        roi_state,
+        color_frontend_mode,
+        sg_w,
+        sg_h,
+        0,
+        0,
+        sg_w - 1,
+        sg_h - 1);
+}
+
+static inline void anomaly_color_compute_blob_cohesion_weights_region(
+        anomaly_roi_state_t *roi_state,
+        int                  color_frontend_mode,
+        int                  sg_w,
+        int                  sg_h,
+        int                  min_sx,
+        int                  min_sy,
+        int                  max_sx,
+        int                  max_sy) {
     if (roi_state == NULL || roi_state->color_valid_mask == NULL ||
-        roi_state->color_contrast_weight == NULL || sg_w <= 0 || sg_h <= 0) {
+        roi_state->color_contrast_weight == NULL || sg_w <= 0 || sg_h <= 0 ||
+        max_sx < min_sx || max_sy < min_sy) {
         return;
     }
+    if (min_sx < 0) min_sx = 0;
+    if (min_sy < 0) min_sy = 0;
+    if (max_sx >= sg_w) max_sx = sg_w - 1;
+    if (max_sy >= sg_h) max_sy = sg_h - 1;
+    if (max_sx < min_sx || max_sy < min_sy) return;
+
     if (color_frontend_mode == ANOMALY_COLOR_FRONTEND_LEGACY) {
-        size_t count = (size_t)sg_w * (size_t)sg_h;
-        for (size_t idx = 0; idx < count; idx++) {
-            roi_state->color_contrast_weight[idx] =
-                roi_state->color_valid_mask[idx] != 0u ? 1.0f : 0.0f;
+        for (int sy = min_sy; sy <= max_sy; sy++) {
+            for (int sx = min_sx; sx <= max_sx; sx++) {
+                size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+                roi_state->color_contrast_weight[idx] =
+                    roi_state->color_valid_mask[idx] != 0u ? 1.0f : 0.0f;
+            }
         }
         return;
     }
-    for (int sy = 0; sy < sg_h; sy++) {
-        for (int sx = 0; sx < sg_w; sx++) {
+
+    for (int sy = min_sy; sy <= max_sy; sy++) {
+        for (int sx = min_sx; sx <= max_sx; sx++) {
             size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
             if (roi_state->color_valid_mask[idx] == 0u) {
                 roi_state->color_contrast_weight[idx] = 0.0f;

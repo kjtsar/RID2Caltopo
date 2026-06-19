@@ -10708,6 +10708,68 @@ static void test_color_detector_blob_cohesion_weights_helper(void) {
                 "color blob cohesion: fresh coherent full neighborhood preserves formula");
 }
 
+static void test_color_detector_blob_cohesion_weights_region_helper(void) {
+    enum { W = 5, H = 5, COUNT = W * H, CENTER = 12, OUTSIDE = 0 };
+    anomaly_roi_state_t roi;
+    memset(&roi, 0, sizeof(roi));
+
+    uint8_t valid[COUNT];
+    float weights[COUNT];
+    float color_u[COUNT];
+    float color_v[COUNT];
+    float color_luma[COUNT];
+    uint8_t u_bin[COUNT];
+    uint8_t v_bin[COUNT];
+
+    for (int i = 0; i < COUNT; i++) {
+        valid[i] = 1u;
+        weights[i] = -3.0f;
+        color_u[i] = 10.0f;
+        color_v[i] = 20.0f;
+        color_luma[i] = 100.0f;
+        u_bin[i] = 5u;
+        v_bin[i] = 6u;
+    }
+    roi.color_valid_mask = valid;
+    roi.color_contrast_weight = weights;
+    roi.color_u = color_u;
+    roi.color_v = color_v;
+    roi.color_luma = color_luma;
+    roi.color_u_bin = u_bin;
+    roi.color_v_bin = v_bin;
+
+    anomaly_color_compute_blob_cohesion_weights_region(
+            &roi,
+            ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
+            W,
+            H,
+            1,
+            1,
+            3,
+            3);
+    float expected_full_cohesion = 0.80f * 1.0f + 0.20f * 1.0f;
+    float expected_full_weight = 0.80f + 0.35f * expected_full_cohesion;
+    EXPECT_NEAR(weights[CENTER], expected_full_weight, 0.0001f,
+                "color blob cohesion region: computes selected region with same formula");
+    EXPECT_NEAR(weights[OUTSIDE], -3.0f, 0.0001f,
+                "color blob cohesion region: leaves cells outside region untouched");
+
+    for (int i = 0; i < COUNT; i++) weights[i] = -3.0f;
+    anomaly_color_compute_blob_cohesion_weights_region(
+            &roi,
+            ANOMALY_COLOR_FRONTEND_LEGACY,
+            W,
+            H,
+            2,
+            2,
+            1,
+            1);
+    for (int i = 0; i < COUNT; i++) {
+        EXPECT_NEAR(weights[i], -3.0f, 0.0001f,
+                    "color blob cohesion region: invalid bounds are no-op");
+    }
+}
+
 static void test_color_detector_candidate_bbox_norm_helper(void) {
     float left = -1.0f;
     float top = -1.0f;
@@ -20291,6 +20353,7 @@ int main(void) {
     test_color_detector_local_uv_support_helper();
     test_color_detector_blob_neighbor_similarity_helper();
     test_color_detector_blob_cohesion_weights_helper();
+    test_color_detector_blob_cohesion_weights_region_helper();
     test_color_detector_candidate_bbox_norm_helper();
     test_color_detector_contrast_helpers();
     test_color_detector_target_telemetry();

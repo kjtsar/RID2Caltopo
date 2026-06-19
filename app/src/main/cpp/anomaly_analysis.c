@@ -8058,7 +8058,6 @@ int anomaly_process_frame(
         anomaly_color_history_recent_scale_for_recovery(color_history_recovery_frames_remaining);
     if (need_color_support) {
         anomaly_roi_state_t *roi_state = &state->roi_state;
-        anomaly_color_compute_blob_cohesion_weights(roi_state, color_frontend_mode, sg_w, sg_h);
         if (anomaly_color_hist_ensure_capacity(&state->scratch_color_hist, &state->scratch_color_hist_bins) &&
             anomaly_color_hist_ensure_capacity(&state->color_recent_hist, &state->color_recent_hist_bins)) {
             color_frame_hist = state->scratch_color_hist;
@@ -8625,6 +8624,15 @@ int anomaly_process_frame(
         color_blob_target_trace.target_sy = color_target_sy;
         if (color_post_max_sx >= color_post_min_sx &&
             color_post_max_sy >= color_post_min_sy) {
+            anomaly_color_compute_blob_cohesion_weights_region(
+                    &state->roi_state,
+                    color_frontend_mode,
+                    sg_w,
+                    sg_h,
+                    color_post_min_sx,
+                    color_post_min_sy,
+                    color_post_max_sx,
+                    color_post_max_sy);
             if (color_target_valid &&
                 color_target_sx >= color_post_min_sx &&
                 color_target_sx <= color_post_max_sx &&

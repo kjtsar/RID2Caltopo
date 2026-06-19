@@ -1,5 +1,6 @@
 package org.ncssar.rid2caltopo.notam
 
+import org.ncssar.rid2caltopo.airspace.OperatingArea
 import java.util.Locale
 
 internal data class HumanizedNotam(
@@ -35,9 +36,9 @@ internal object NotamHumanizer {
 
         val summaryParts = mutableListOf<String>()
         when {
-            intersectsPilotBubble -> summaryParts += "Intersects the pilot's 1 NM operating area."
+            intersectsPilotBubble -> summaryParts += "Intersects the pilot's ${OperatingArea.displayLabel}."
             horizontalIntersectsPilotBubble && verticallyIntersectsPilotBand == false ->
-                summaryParts += "Overlaps the pilot's 1 NM operating area horizontally, but stays above the 400 ft AGL operating ceiling."
+                summaryParts += "Overlaps the pilot's ${OperatingArea.displayLabel} horizontally, but stays above the 400 ft AGL operating ceiling."
             proximityText.isNotBlank() -> summaryParts += "$proximityText from current location."
         }
         areaSummary(sourceText)?.let(summaryParts::add)

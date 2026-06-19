@@ -62,6 +62,7 @@ import org.ncssar.rid2caltopo.app.LogArchiveDayOption
 import org.ncssar.rid2caltopo.app.canDeleteArchiveCleanupSelection
 import org.ncssar.rid2caltopo.app.defaultSelectedArchiveCleanupDirectories
 import org.ncssar.rid2caltopo.app.formatArchiveSize
+import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.data.AppUpdateAdvisory
 import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -300,6 +301,7 @@ fun MainScreen(
     var locationOverrideError by remember { mutableStateOf<String?>(null) }
     var locationOverrideLabel by remember { mutableStateOf(formatLocationOverride(CaltopoMap.GetMyLocationOverride())) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
+    val airspaceUiState by AirspaceCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by streamsViewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
@@ -695,6 +697,7 @@ fun MainScreen(
     if (showNotamPanel) {
         NotamPanel(
             state = notamUiState,
+            airspaceState = airspaceUiState,
             onDismiss = { showNotamPanel = false }
         )
     }
@@ -1116,6 +1119,7 @@ fun MainScreen(
                 item(key = "notam_chip") {
                     NotamStatusChip(
                         state = notamUiState,
+                        airspaceState = airspaceUiState,
                         onClick = { showNotamPanel = true }
                     )
                 }

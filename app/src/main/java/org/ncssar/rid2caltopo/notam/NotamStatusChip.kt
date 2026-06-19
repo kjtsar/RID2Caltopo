@@ -13,16 +13,35 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import org.ncssar.rid2caltopo.airspace.AirspaceChipSeverity
+import org.ncssar.rid2caltopo.airspace.AirspaceUiState
 
 @Composable
 fun NotamStatusChip(
     state: NotamUiState,
+    airspaceState: AirspaceUiState? = null,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     outerPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
 ) {
-    if (!state.visible) return
-    val colors = when (state.chipSeverity) {
+    if (!state.visible && airspaceState == null) return
+    val useAirspaceLabel = airspaceState != null && (
+        !state.visible ||
+            airspaceState.chipSeverity == AirspaceChipSeverity.Caution ||
+            (airspaceState.chipSeverity == AirspaceChipSeverity.Neutral && airspaceState.errorMessage != null)
+        )
+    val displaySeverity = when {
+        !useAirspaceLabel -> state.chipSeverity
+        airspaceState?.chipSeverity == AirspaceChipSeverity.Caution -> NotamChipSeverity.Caution
+        airspaceState?.chipSeverity == AirspaceChipSeverity.Normal -> NotamChipSeverity.Normal
+        else -> NotamChipSeverity.Neutral
+    }
+    val displayLabel = if (useAirspaceLabel) {
+        airspaceState?.chipLabel.orEmpty()
+    } else {
+        state.chipLabel
+    }
+    val colors = when (displaySeverity) {
         NotamChipSeverity.Danger -> AssistChipDefaults.assistChipColors(
             containerColor = Color(0xFFD32F2F),
             labelColor = Color.White
@@ -46,7 +65,7 @@ fun NotamStatusChip(
     ) {
         AssistChip(
             onClick = onClick,
-            label = { Text(state.chipLabel) },
+            label = { Text(displayLabel) },
             colors = colors
         )
     }

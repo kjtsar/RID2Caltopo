@@ -1630,7 +1630,7 @@ internal fun SplitMapPane(
                         Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     val metaText = buildString {
-                        if (notice.intersectsPilotBubble) append("intersects 1 NM operating area")
+                        if (notice.intersectsPilotBubble) append("intersects 1 mi operating area")
                         if (notice.effectiveText.isNotBlank()) {
                             if (isNotBlank()) append(" • ")
                             append(notice.effectiveText)

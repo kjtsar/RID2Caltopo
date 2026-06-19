@@ -93,6 +93,12 @@ fun CaltopoSettingsScreen(
                         valueRange = 0f..100f,
                         steps = 19
                     )
+                    Button(
+                        onClick = { SpokenWarningCenter.requestAudioAlarmTest() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Audio Alarm Test")
+                    }
                 }
                 OutlinedTextField(
                     value = maxIdleTimeInMinutes,

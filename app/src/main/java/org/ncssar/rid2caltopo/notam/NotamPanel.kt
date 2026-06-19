@@ -17,6 +17,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import org.ncssar.rid2caltopo.airspace.AirspaceUiState
+import org.ncssar.rid2caltopo.airspace.OperatingArea
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.video.CoordinateDisplayFormat
@@ -25,6 +27,7 @@ import org.ncssar.rid2caltopo.video.CoordinateFormatter
 @Composable
 fun NotamPanel(
     state: NotamUiState,
+    airspaceState: AirspaceUiState? = null,
     onDismiss: () -> Unit
 ) {
     val expandedIds = remember { mutableStateListOf<String>() }
@@ -63,6 +66,16 @@ fun NotamPanel(
                 }
                 if (state.statusLine.isNotBlank()) {
                     Text(state.statusLine, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                airspaceState?.takeIf { it.summary.isNotBlank() || it.detail.isNotBlank() }?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text("Airspace", fontWeight = FontWeight.SemiBold)
+                    if (it.summary.isNotBlank()) {
+                        Text(it.summary, color = MaterialTheme.colorScheme.onSurface)
+                    }
+                    if (it.detail.isNotBlank()) {
+                        Text(it.detail, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
                 state.errorMessage?.takeIf { it.isNotBlank() }?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -107,7 +120,7 @@ fun NotamPanel(
                                     Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 val metaText = buildString {
-                                    if (nearestHidden.intersectsPilotBubble) append("intersects 1 NM operating area")
+                                    if (nearestHidden.intersectsPilotBubble) append("intersects ${OperatingArea.displayLabel}")
                                     if (nearestHidden.effectiveText.isNotBlank()) {
                                         if (isNotBlank()) append(" • ")
                                         append(nearestHidden.effectiveText)
@@ -166,7 +179,7 @@ fun NotamPanel(
                             Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         val metaText = buildString {
-                            if (notice.intersectsPilotBubble) append("intersects 1 NM operating area")
+                            if (notice.intersectsPilotBubble) append("intersects ${OperatingArea.displayLabel}")
                             if (notice.effectiveText.isNotBlank()) {
                                 if (isNotBlank()) append(" • ")
                                 append(notice.effectiveText)

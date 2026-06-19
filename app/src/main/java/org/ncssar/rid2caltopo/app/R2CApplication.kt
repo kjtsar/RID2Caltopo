@@ -7,6 +7,7 @@ import android.os.Build
 import com.google.firebase.FirebaseApp
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import org.ncssar.rid2caltopo.BuildConfig
+import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.data.AppConfigStore
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
@@ -29,6 +30,7 @@ class R2CApplication : Application() {
         initializeCrashlyticsProbe()
         AppConfigStore.initialize(this)
         FaaConfigManager.refreshIfNeededOnStartup(this)
+        AirspaceCenter.initialize(this)
         NotamCenter.initialize(this)
         R2CMqttManager.InitializeNetworkAddressMonitor(this)
         MapCacheStartupMaintenance.ensureStarted(this)

@@ -2,6 +2,7 @@ package org.ncssar.rid2caltopo.notam
 
 import android.graphics.Color
 import android.location.Location
+import org.ncssar.rid2caltopo.airspace.OperatingArea
 import org.osmdroid.util.GeoPoint
 import java.util.Locale
 import kotlin.math.asin
@@ -45,7 +46,6 @@ internal data class NotamMapOverlayState(
 internal object NotamMapOverlayAdapter {
     private const val PILOT_RING_ID = "notam_pilot_ring"
     private const val EARTH_RADIUS_NM = 3440.065
-    private const val PILOT_RING_RADIUS_NM = 1.0
     private const val PILOT_RING_STROKE = 3.5f
     private const val NOTAM_POLYGON_STROKE = 4.0f
     private const val NOTAM_LINE_STROKE = 5.0f
@@ -63,11 +63,11 @@ internal object NotamMapOverlayAdapter {
             polygons += NotamMapPolygonSpec(
                 id = PILOT_RING_ID,
                 notice = null,
-                points = buildCircle(location.latitude, location.longitude, PILOT_RING_RADIUS_NM),
+                points = buildCircle(location.latitude, location.longitude, OperatingArea.radiusNm),
                 strokeColor = Color.parseColor("#1976D2"),
                 fillColor = Color.parseColor("#101976D2"),
                 strokeWidth = PILOT_RING_STROKE,
-                title = "Pilot 1 NM operating area"
+                title = "Pilot ${OperatingArea.displayLabel}"
             )
         }
 

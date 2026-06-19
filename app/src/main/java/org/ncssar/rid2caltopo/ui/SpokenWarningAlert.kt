@@ -28,6 +28,7 @@ data class SpokenWarningRequest(
     val requestId: Long,
     val kind: SpokenWarningKind,
     val phrase: String,
+    val phrases: List<String>,
     val volumeFraction: Float,
 )
 
@@ -50,16 +51,49 @@ object SpokenWarningCenter {
         cooldownMs: Long = 0L,
         volumeFraction: Float = 1.0f,
     ) {
-        val key = WarningKey(kind, sourceKey)
+        requestWarningSequence(
+            kinds = listOf(kind),
+            sourceKey = sourceKey,
+            nowMs = nowMs,
+            cooldownMs = cooldownMs,
+            volumeFraction = volumeFraction
+        )
+    }
+
+    fun requestWarningSequence(
+        kinds: List<SpokenWarningKind>,
+        sourceKey: String,
+        nowMs: Long = System.currentTimeMillis(),
+        cooldownMs: Long = 0L,
+        volumeFraction: Float = 1.0f,
+    ) {
+        val firstKind = kinds.firstOrNull() ?: return
+        val key = WarningKey(firstKind, sourceKey)
         val lastRequestedAtMs = lastRequestedAtMsByKey[key]
         if (lastRequestedAtMs != null && nowMs - lastRequestedAtMs < cooldownMs) return
 
         lastRequestedAtMsByKey[key] = nowMs
+        val phrases = kinds.map { it.phrase }
         _requests.value = SpokenWarningRequest(
             requestId = nextRequestId++,
-            kind = kind,
-            phrase = kind.phrase,
+            kind = firstKind,
+            phrase = firstKind.phrase,
+            phrases = phrases,
             volumeFraction = volumeFraction.coerceIn(0f, 1f),
+        )
+    }
+
+    fun requestAudioAlarmTest(nowMs: Long = System.currentTimeMillis()) {
+        requestWarningSequence(
+            kinds = listOf(
+                SpokenWarningKind.DroneTelemetry,
+                SpokenWarningKind.Altitude,
+                SpokenWarningKind.Proximity,
+                SpokenWarningKind.ControllerSignalStrength
+            ),
+            sourceKey = "audio-alarm-test",
+            nowMs = nowMs,
+            cooldownMs = 0L
         )
     }
 
@@ -112,11 +146,13 @@ fun SpokenWarningAlertHost() {
         val params = Bundle().apply {
             putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volume)
         }
-        tts.speak(
-            currentRequest.phrase,
-            TextToSpeech.QUEUE_FLUSH,
-            params,
-            "r2c-spoken-warning-${currentRequest.requestId}"
-        )
+        currentRequest.phrases.forEachIndexed { index, phrase ->
+            tts.speak(
+                phrase,
+                if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                params,
+                "r2c-spoken-warning-${currentRequest.requestId}-$index"
+            )
+        }
     }
 }

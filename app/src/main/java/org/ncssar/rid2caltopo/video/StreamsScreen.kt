@@ -84,6 +84,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.ncssar.rid2caltopo.app.MediaMTXService
+import org.ncssar.rid2caltopo.airspace.AirspaceCenter
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
 import org.ncssar.rid2caltopo.data.CaltopoNode
@@ -287,6 +288,7 @@ fun StreamsScreen(
     val pipHasStreamContent = streamPipHasStreamContent(visibleStreamCount, focusedPath)
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
+    val airspaceUiState by AirspaceCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
@@ -331,6 +333,7 @@ fun StreamsScreen(
                         ) {
                             NotamStatusChip(
                                 state = notamUiState,
+                                airspaceState = airspaceUiState,
                                 onClick = { showNotamPanel = true },
                                 outerPadding = PaddingValues(0.dp)
                             )
@@ -527,6 +530,7 @@ fun StreamsScreen(
     if (showNotamPanel) {
         NotamPanel(
             state = notamUiState,
+            airspaceState = airspaceUiState,
             onDismiss = { showNotamPanel = false }
         )
     }

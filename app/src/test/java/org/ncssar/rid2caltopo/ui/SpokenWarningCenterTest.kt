@@ -29,6 +29,28 @@ class SpokenWarningCenterTest {
     }
 
     @Test
+    fun requestWarningSequence_emitsAllProblemLabelsInOrder() {
+        SpokenWarningCenter.requestWarningSequence(
+            kinds = listOf(
+                SpokenWarningKind.DroneTelemetry,
+                SpokenWarningKind.Altitude,
+                SpokenWarningKind.Proximity,
+                SpokenWarningKind.ControllerSignalStrength
+            ),
+            sourceKey = "audio-alarm-test",
+            nowMs = 1_000L,
+            cooldownMs = 0L
+        )
+
+        val request = SpokenWarningCenter.requests.value
+        assertEquals("Drone Telemetry", request?.phrase)
+        assertEquals(
+            listOf("Drone Telemetry", "Altitude", "Proximity", "Controller Signal Strength"),
+            request?.phrases
+        )
+    }
+
+    @Test
     fun requestWarning_suppressesRepeatedProblemInsideCooldown() {
         SpokenWarningCenter.requestWarning(
             kind = SpokenWarningKind.ControllerSignalStrength,

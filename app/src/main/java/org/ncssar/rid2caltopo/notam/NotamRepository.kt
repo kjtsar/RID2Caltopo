@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.ncssar.rid2caltopo.airspace.OperatingArea
 import org.json.JSONArray
 import org.json.JSONObject
 import org.ncssar.rid2caltopo.app.R2CApplication
@@ -352,7 +353,7 @@ internal class NotamRepository {
         val proximity = fallbackRadiusArea?.let { distanceToRadiusArea(current, it) }
             ?: geometry?.let { distanceToGeometry(current, it) }
         val distanceNm = proximity?.distanceNm
-        val horizontalIntersectsPilotBubble = distanceNm != null && distanceNm <= 1.0
+        val horizontalIntersectsPilotBubble = distanceNm != null && distanceNm <= OperatingArea.radiusNm
         val altitudeBand = parseAltitudeBand(notamText, rawText)
         val operatingBand = resolveOperatingAltitudeBand(current)
         val verticallyIntersectsPilotBand = altitudeBand?.overlaps(operatingBand)

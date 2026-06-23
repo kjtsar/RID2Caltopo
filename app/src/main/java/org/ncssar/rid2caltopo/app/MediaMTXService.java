@@ -231,7 +231,10 @@ public class MediaMTXService extends Service {
             MediaMTXStructuredDispatcher.addListener(event -> {
                 if (!CaltopoClient.GetCaptureVideoStreamsFlag()) return Unit.INSTANCE;
                 if (event instanceof MediaMTXEvent.StreamStopped) {
-                    MediaMTXRecordingSync.syncAll(appContext, ((MediaMTXEvent.StreamStopped) event).getPath());
+                    MediaMTXEvent.StreamStopped stopped = (MediaMTXEvent.StreamStopped) event;
+                    if (stopped.getPublisherConnId() != null && !stopped.getPublisherConnId().isEmpty()) {
+                        MediaMTXRecordingSync.syncAll(appContext, stopped.getPath());
+                    }
                 }
                 return Unit.INSTANCE;
             });

@@ -28,7 +28,7 @@ class AnomalyConfigTest {
         assertEquals(expectedMask, native.algorithmMask)
         assertEquals(MotionRegistrationMode.Affine.nativeValue, native.registrationMode)
         assertEquals(AnomalyStrideMode.Fixed.nativeValue, native.strideMode)
-        assertEquals(10, native.frameStride)
+        assertEquals(33, native.frameStride)
         assertTrue(native.scoreThreshold in 1.0f..15.0f)
         assertTrue(native.minAreaFraction in 0.00005f..0.03f)
         assertEquals(ThermalPolarity.BlackHot.nativeValue, native.thermalPolarity)
@@ -128,8 +128,8 @@ class AnomalyConfigTest {
         assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask, native.algorithmMask)
         assertEquals(ColorFrontendMode.FreshRgba.nativeValue, native.colorFrontendMode)
         assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
-        assertEquals(4, native.frameStride)
-        assertEquals(4, native.adaptiveMinStrideFrames)
+        assertEquals(30, native.frameStride)
+        assertEquals(30, native.adaptiveMinStrideFrames)
     }
 
     @Test
@@ -141,9 +141,21 @@ class AnomalyConfigTest {
 
         assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask, native.algorithmMask)
         assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
-        assertEquals(4, native.frameStride)
-        assertEquals(4, native.adaptiveMinStrideFrames)
+        assertEquals(30, native.frameStride)
+        assertEquals(30, native.adaptiveMinStrideFrames)
         assertEquals(30, native.adaptiveMaxStrideFrames)
+        assertEquals(1, native.pixelStep)
+    }
+
+    @Test
+    fun toNativeConfig_colorPixelStepOverrideRemainsManual() {
+        val native = AnomalyConfig(
+            appearanceSelection = AppearanceAnomalySelection.Color,
+            algorithms = emptySet(),
+            pixelStep = 3,
+        ).toNativeConfig(sourceFps = 29.97f)
+
+        assertEquals(3, native.pixelStep)
     }
 
     @Test
@@ -166,8 +178,8 @@ class AnomalyConfigTest {
 
         assertEquals(AppearanceAnomalySelection.Color, config.appearanceSelection)
         assertEquals(AnomalyStrideMode.Adaptive, config.strideMode)
-        assertEquals(4, config.frameStride)
-        assertEquals(4, config.adaptiveMinStrideFrames)
+        assertEquals(30, config.frameStride)
+        assertEquals(30, config.adaptiveMinStrideFrames)
     }
 
     @Test
@@ -194,20 +206,20 @@ class AnomalyConfigTest {
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
         assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
-        assertEquals(4, native.frameStride)
+        assertEquals(30, native.frameStride)
     }
 
     @Test
     fun forLocalPlaybackReview_keepsRealtimeSensitivityAndStrideWhenUntuned() {
         val reviewConfig = AnomalyConfig().forLocalPlaybackReview()
 
-        assertEquals(0.42f, reviewConfig.sensitivity, 0.001f)
+        assertEquals(0.59f, reviewConfig.sensitivity, 0.001f)
         assertTrue(reviewConfig.motionEnabled)
         assertEquals(AnomalyStrideMode.Fixed, reviewConfig.strideMode)
         assertEquals(1, reviewConfig.frameStride)
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
-        assertEquals(4.81f, native.scoreThreshold, 0.01f)
+        assertEquals(3.04f, native.scoreThreshold, 0.01f)
         assertEquals(1, native.frameStride)
         assertEquals(
             AnomalyAlgorithm.ThermalHotspot.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
@@ -300,7 +312,7 @@ class AnomalyConfigTest {
         assertEquals(2, config.adaptiveMinStrideFrames)
         assertEquals(1.0f, config.adaptiveMaxStrideSeconds)
         assertEquals(0.50f, config.scanZone)
-        assertEquals(0.42f, config.sensitivity)
+        assertEquals(0.59f, config.sensitivity)
         assertEquals(2, config.minHits)
         assertEquals(10.0f, config.thermalMinDelta)
 

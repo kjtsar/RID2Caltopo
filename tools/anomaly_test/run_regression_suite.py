@@ -113,6 +113,22 @@ def thermal_target_stage_sort_key(stage: str) -> tuple[int, str]:
     return (order.get(stage, 99), stage)
 
 
+def color_target_stage_sort_key(stage: str) -> tuple[int, str]:
+    order = {
+        "winner": 0,
+        "extracted": 1,
+        "rejected_by_winner_gate": 2,
+        "no_candidate": 3,
+        "support_map_rejected": 4,
+        "local_support_rejected": 5,
+        "rarity_rejected": 6,
+        "invalid_sample": 7,
+        "outside_scan_zone": 8,
+        "none": 9,
+    }
+    return (order.get(stage, 99), stage)
+
+
 def point_in_bbox(annotation: dict, candidate: dict) -> bool:
     return (
         candidate["bbox_left_norm"] <= annotation["x_norm"] <= candidate["bbox_right_norm"]
@@ -277,6 +293,219 @@ def summarize_thermal_telemetry(
         "miss_count": len(sorted_results),
         "no_candidate_frames": no_candidate_frames,
         "nearby_extracted_count": extracted_near_target,
+        "clusters": clusters,
+        "misses": results,
+        "markdown": "\n".join(lines).rstrip() + "\n",
+    }
+
+
+def summarize_color_telemetry(
+    review_path: Path,
+    telemetry_path: Path,
+    start_s: float | None,
+    end_s: float | None,
+    detail_rows: list[dict],
+    time_tolerance_s: float = 0.05,
+) -> dict:
+    annotations = load_review(review_path, start_s=start_s, end_s=end_s)
+    miss_rows = [
+        row for row in detail_rows
+        if row["review_kind"] in POSITIVE_KINDS and row["outcome"] == "miss"
+    ]
+    telemetry_frames = load_thermal_debug_jsonl(telemetry_path)
+    results: list[dict] = []
+    extracted_near_target = 0
+    no_candidate_frames = 0
+    stage_counts: dict[str, int] = {}
+    target_stage_counts: dict[str, int] = {}
+    component_reject_counts: dict[str, int] = {}
+    for miss in miss_rows:
+        frame = min(
+            telemetry_frames,
+            key=lambda item: abs(item["time_s"] - miss["time_s"]),
+            default=None,
+        )
+        if frame is None or abs(frame["time_s"] - miss["time_s"]) > time_tolerance_s:
+            results.append(
+                {
+                    "time_s": miss["time_s"],
+                    "x_norm": miss["x_norm"],
+                    "y_norm": miss["y_norm"],
+                    "review_kind": miss["review_kind"],
+                    "scenario": miss["scenario"],
+                    "outcome": "no_telemetry_frame",
+                }
+            )
+            continue
+
+        candidates = list(frame.get("candidates", []))
+        winner = None
+        winner_idx = int(frame.get("winning_candidate_index", -1))
+        for candidate in candidates:
+            if int(candidate.get("index", -1)) == winner_idx:
+                winner = candidate
+                break
+        if winner is None and 0 <= winner_idx < len(candidates):
+            winner = candidates[winner_idx]
+        elif winner is None and candidates:
+            winner = max(candidates, key=lambda item: item.get("final_score", -1.0))
+
+        nearby = None
+        nearby_inside = False
+        nearby_distance = None
+        if candidates:
+            nearby = min(candidates, key=lambda item: candidate_distance(miss, item))
+            nearby_distance = candidate_distance(miss, nearby)
+            nearby_inside = point_in_bbox(miss, nearby)
+            if nearby_inside or nearby_distance <= 0.035:
+                extracted_near_target += 1
+        else:
+            no_candidate_frames += 1
+
+        target = dict(frame.get("target", {}))
+        target_stage = str(target.get("stage", "none"))
+        target_stage_counts[target_stage] = target_stage_counts.get(target_stage, 0) + 1
+        component_rejection_reason = str(target.get("component_rejection_reason", 0))
+        if component_rejection_reason != "0":
+            component_reject_counts[component_rejection_reason] = (
+                component_reject_counts.get(component_rejection_reason, 0) + 1
+            )
+
+        outcome = target_stage
+        if nearby is not None and (nearby_inside or (nearby_distance or 1.0) <= 0.035):
+            outcome = "candidate_near_target"
+        elif not candidates:
+            outcome = "no_candidates"
+        stage_counts[outcome] = stage_counts.get(outcome, 0) + 1
+
+        results.append(
+            {
+                "time_s": miss["time_s"],
+                "x_norm": miss["x_norm"],
+                "y_norm": miss["y_norm"],
+                "review_kind": miss["review_kind"],
+                "scenario": miss["scenario"],
+                "note": miss.get("note", ""),
+                "frame_time_s": frame["time_s"],
+                "candidate_count": frame.get("candidate_count", 0),
+                "winner": winner,
+                "nearby": nearby,
+                "nearby_contains_target": nearby_inside,
+                "nearby_distance": nearby_distance,
+                "target": target,
+                "target_stage": target_stage,
+                "outcome": outcome,
+            }
+        )
+
+    clusters: list[dict] = []
+    sorted_results = sorted(
+        [row for row in results if "candidate_count" in row],
+        key=lambda item: item["time_s"],
+    )
+    current: dict | None = None
+    for row in sorted_results:
+        if current is None or row["time_s"] - current["end_s"] > 0.45:
+            current = {
+                "start_s": row["time_s"],
+                "end_s": row["time_s"],
+                "miss_count": 0,
+                "target_extracted_count": 0,
+                "winner_contains_target_count": 0,
+                "candidate_less_frames": 0,
+                "target_stage_counts": {},
+                "rows": [],
+            }
+            clusters.append(current)
+        current["end_s"] = row["time_s"]
+        current["miss_count"] += 1
+        stage = row.get("target_stage", "none")
+        current["target_stage_counts"][stage] = current["target_stage_counts"].get(stage, 0) + 1
+        if row.get("nearby") is not None and (row["nearby_contains_target"] or (row["nearby_distance"] or 1.0) <= 0.035):
+            current["target_extracted_count"] += 1
+        if row.get("winner") is not None and point_in_bbox(row, row["winner"]):
+            current["winner_contains_target_count"] += 1
+        if row.get("candidate_count", 0) == 0:
+            current["candidate_less_frames"] += 1
+        current["rows"].append(row)
+
+    lines = [
+        f"# Color Telemetry: {review_path.name}",
+        "",
+        f"- Missed positive annotations analyzed: {len(sorted_results)}",
+        f"- Misses with no color candidates at all: {no_candidate_frames}",
+        f"- Misses with a nearby retained color candidate: {extracted_near_target}",
+        "",
+        "## Target Stage Counts",
+        "",
+    ]
+    for stage, count in sorted(target_stage_counts.items(), key=lambda item: color_target_stage_sort_key(item[0])):
+        lines.append(f"- {stage}: {count}")
+    if component_reject_counts:
+        lines += ["", "## Component Rejection Reasons", ""]
+        for reason, count in sorted(component_reject_counts.items()):
+            lines.append(f"- {reason}: {count}")
+    lines += ["", "## Miss Clusters", ""]
+    for cluster in clusters:
+        stage_text = ", ".join(
+            f"{stage}={count}"
+            for stage, count in sorted(cluster["target_stage_counts"].items(), key=lambda item: color_target_stage_sort_key(item[0]))
+        )
+        lines.append(
+            f"- {cluster['start_s']:.3f}s to {cluster['end_s']:.3f}s: "
+            f"{cluster['miss_count']} misses, "
+            f"nearby retained candidate on {cluster['target_extracted_count']}, "
+            f"winner covered target on {cluster['winner_contains_target_count']}, "
+            f"candidate-less frames {cluster['candidate_less_frames']}, "
+            f"stages: {stage_text}"
+        )
+        for row in cluster["rows"][:8]:
+            target = row.get("target", {})
+            winner = row.get("winner")
+            nearby = row.get("nearby")
+            winner_text = (
+                "none"
+                if winner is None
+                else f"xy=({winner['x_norm']:.3f},{winner['y_norm']:.3f}) "
+                     f"score={winner['final_score']:.3f} area={winner['area']:.1f} span={winner['span']:.1f} "
+                     f"common={winner.get('scene_commonness', 0.0):.3f} "
+                     f"ringC={winner.get('local_ring_chroma_contrast', 0.0):.1f}"
+            )
+            nearby_text = (
+                "none"
+                if nearby is None
+                else f"xy=({nearby['x_norm']:.3f},{nearby['y_norm']:.3f}) "
+                     f"d={row['nearby_distance']:.3f} inside={'Y' if row['nearby_contains_target'] else 'N'} "
+                     f"score={nearby['final_score']:.3f} area={nearby['area']:.1f} span={nearby['span']:.1f} "
+                     f"common={nearby.get('scene_commonness', 0.0):.3f} "
+                     f"ringC={nearby.get('local_ring_chroma_contrast', 0.0):.1f}"
+            )
+            lines.append(
+                f"  miss t={row['time_s']:.3f}s target=({row['x_norm']:.3f},{row['y_norm']:.3f}) "
+                f"stage={row.get('target_stage', 'none')} "
+                f"compact={float(target.get('support_map_compact_prominence', 0.0)):.2f} "
+                f"peak={float(target.get('support_map_local_peak', 0.0)):.2f} "
+                f"ring_mean={float(target.get('support_map_ring_mean', 0.0)):.2f} "
+                f"component_area={float(target.get('component_area', 0.0)):.1f} "
+                f"component_span={float(target.get('component_span', 0.0)):.1f} "
+                f"component_reject={int(target.get('component_rejection_reason', 0))} "
+                f"winner={winner_text} nearby={nearby_text}"
+            )
+            if row.get("note"):
+                lines.append(f"    note: {row['note']}")
+        if len(cluster["rows"]) > 8:
+            lines.append(f"  ... {len(cluster['rows']) - 8} more misses in cluster")
+        lines.append("")
+
+    return {
+        "review_path": str(review_path),
+        "telemetry_path": str(telemetry_path),
+        "miss_count": len(sorted_results),
+        "no_candidate_frames": no_candidate_frames,
+        "nearby_extracted_count": extracted_near_target,
+        "stage_counts": stage_counts,
+        "target_stage_counts": target_stage_counts,
+        "component_reject_counts": component_reject_counts,
         "clusters": clusters,
         "misses": results,
         "markdown": "\n".join(lines).rstrip() + "\n",
@@ -623,6 +852,20 @@ def main() -> int:
                 excerpt_result["color_debug_jsonl_path"] = str(color_debug_jsonl_path)
                 if color_target_written:
                     excerpt_result["color_target_csv_path"] = str(color_target_csv_path)
+                color_summary = summarize_color_telemetry(
+                    review_path=review_path,
+                    telemetry_path=color_debug_jsonl_path,
+                    start_s=excerpt.get("start_s"),
+                    end_s=excerpt.get("end_s"),
+                    detail_rows=review_metrics["csv_results"][0]["score"]["details"],
+                    time_tolerance_s=0.05,
+                )
+                color_summary_json = excerpt_dir / "color_debug_summary.json"
+                color_summary_md = excerpt_dir / "color_debug_summary.md"
+                color_summary_json.write_text(json.dumps(color_summary, indent=2) + "\n")
+                color_summary_md.write_text(color_summary["markdown"])
+                excerpt_result["color_telemetry_summary_json"] = str(color_summary_json)
+                excerpt_result["color_telemetry_summary_md"] = str(color_summary_md)
             if profile["id"] in telemetry_profiles:
                 thermal_summary = summarize_thermal_telemetry(
                     review_path=review_path,
@@ -732,6 +975,8 @@ def main() -> int:
             ]
             if item.get("color_debug_jsonl_path"):
                 lines.append(f"- Color debug JSONL: `{item['color_debug_jsonl_path']}`")
+            if item.get("color_telemetry_summary_md"):
+                lines.append(f"- Color telemetry: `{item['color_telemetry_summary_md']}`")
             if item.get("thermal_telemetry_summary_md"):
                 lines.append(f"- Thermal telemetry: `{item['thermal_telemetry_summary_md']}`")
             lines.append("")

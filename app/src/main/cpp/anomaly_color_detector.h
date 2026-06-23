@@ -817,6 +817,31 @@ static inline float anomaly_color_score_hist_family_rarity(
     return 1.0f / (float)(family + 1);
 }
 
+static inline float anomaly_color_nearest_common_hist_bin_distance(
+        const uint8_t *hist,
+        int            center_u_bin,
+        int            center_v_bin,
+        int            min_count) {
+    if (hist == NULL ||
+        center_u_bin < 0 || center_u_bin >= ANOMALY_COLOR_U_BINS ||
+        center_v_bin < 0 || center_v_bin >= ANOMALY_COLOR_V_BINS) {
+        return -1.0f;
+    }
+    if (min_count < 1) min_count = 1;
+    float best = -1.0f;
+    for (int u_bin = 0; u_bin < ANOMALY_COLOR_U_BINS; u_bin++) {
+        for (int v_bin = 0; v_bin < ANOMALY_COLOR_V_BINS; v_bin++) {
+            int key = anomaly_color_hist_key(u_bin, v_bin);
+            if ((int)hist[key] < min_count) continue;
+            int du = u_bin - center_u_bin;
+            int dv = v_bin - center_v_bin;
+            float dist = sqrtf((float)(du * du + dv * dv));
+            if (best < 0.0f || dist < best) best = dist;
+        }
+    }
+    return best;
+}
+
 static inline float anomaly_color_candidate_scene_commonness(
         float hist_current_count,
         float hist_recent_count,

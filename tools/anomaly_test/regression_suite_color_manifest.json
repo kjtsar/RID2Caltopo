@@ -9,8 +9,8 @@
   "profiles": [
     {
       "id": "visible-color-baseline",
-      "label": "Visible color baseline",
-      "description": "Color-outlier-first visible-light profile with motion support enabled and thermal disabled.",
+      "label": "Visible color legacy coarse baseline",
+      "description": "Color-outlier-first visible-light profile with motion support enabled and legacy auto detail sampling.",
       "detector_args": [
         "-a",
         "5",
@@ -24,6 +24,17 @@
         "affine",
         "--stride",
         "1"
+      ]
+    },
+    {
+      "id": "visible-color-app-dense-stride",
+      "label": "Visible color app dense stride mode",
+      "description": "App-parity visible-color profile: dense 1px full refreshes with stride/target-only cadence and app-visible output.",
+      "detector_args": [
+        "--app-defaults",
+        "--app-appearance",
+        "color",
+        "--app-display-output"
       ]
     },
     {

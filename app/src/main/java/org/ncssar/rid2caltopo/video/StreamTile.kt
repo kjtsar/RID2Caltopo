@@ -116,6 +116,7 @@ fun StreamTile(
     var handledClueCaptureRequestId by remember(clueCaptureStateKey) { mutableLongStateOf(0L) }
     var showPicker by remember { mutableStateOf(false) }
     var showUnmatchDialog by remember { mutableStateOf(false) }
+    var pendingPairingWarning by remember { mutableStateOf<StreamTelemetryPairingWarning?>(null) }
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
     var showAnomalySettingsDialog by remember { mutableStateOf(false) }
     var showSensitivityDialog by remember { mutableStateOf(false) }
@@ -232,7 +233,14 @@ fun StreamTile(
     fun openTelemetryPairingControl() {
         if (!tileInteractionsEnabled || isLocalPlayback) return
         when (designatorState) {
-            is DesignatorState.Yellow -> showPicker = true
+            is DesignatorState.Yellow -> {
+                val decision = viewModel.streamPairingControlDecision(streamDesignator)
+                if (decision.kind == StreamTelemetryPairingControlAction.ShowWarning && decision.warning != null) {
+                    pendingPairingWarning = decision.warning
+                } else {
+                    showPicker = true
+                }
+            }
             is DesignatorState.Green -> showUnmatchDialog = true
             else -> {}
         }
@@ -455,7 +463,7 @@ fun StreamTile(
 
         // ATO / AGL / HDG overlay — shown whenever the stream is live and we have a linked drone.
         if (streamState == StreamState.LIVE && !isLocalPlayback && showStandaloneTelemetryOverlay) {
-            val displayState = viewModel.droneDisplayStateFor(streamDesignator)
+            val displayState = viewModel.droneDisplayStateForStream(streamDesignator)
             val atoStr = displayState?.atoFt
                 ?.let { "${"%.0f".format(it)}ATO" } ?: "--ATO"
             val aglStr = displayState?.aglFt
@@ -565,7 +573,7 @@ fun StreamTile(
                                     if (!currentIsFocused) {
                                         viewModel.ensureFocus(streamDesignator)
                                     }
-                                    if (currentDesignatorState !is DesignatorState.Green) {
+                                    if (!viewModel.hasPairedTelemetry(streamDesignator)) {
                                         CaltopoClient.ShowToast("Long-press to pair with a drone before submitting clue.")
                                         return@detectTapGestures
                                     }
@@ -966,13 +974,13 @@ fun StreamTile(
                     Text(
                         "Stream \"$streamDesignator\" is paired with Remote ID:\n" +
                             "${greenState.droneSpecState.remoteId}\n\n" +
-                            "Unmatch to remove the pairing, or Remap to choose a different drone."
+                            "Unmatch clears any current-run pairing. Remap lets you choose a different drone for this run."
                     )
                 },
                 confirmButton = {
                     TextButton(onClick = {
                         CTDebug(tag, "StreamTile($streamDesignator) Unmatch confirmed")
-                        greenState.droneSpecState.changeMappedId("")
+                        viewModel.clearStreamTelemetry(streamDesignator)
                         showUnmatchDialog = false
                     }) { Text("Unmatch") }
                 },
@@ -981,7 +989,7 @@ fun StreamTile(
                         TextButton(onClick = { showUnmatchDialog = false }) { Text("Cancel") }
                         TextButton(onClick = {
                             CTDebug(tag, "StreamTile($streamDesignator) Remap: clearing pairing and opening picker")
-                            greenState.droneSpecState.changeMappedId("")
+                            viewModel.clearStreamTelemetry(streamDesignator)
                             showUnmatchDialog = false
                             showPicker = true
                         }) { Text("Remap") }
@@ -989,15 +997,51 @@ fun StreamTile(
                 }
             )
         }
-        if (showPicker && designatorState is DesignatorState.Yellow) {
+        if (showPicker) {
             DroneSpecPickerDialog(
-                droneSpecStates = (designatorState as DesignatorState.Yellow).candidates,
-                onSelect = { (selectedStreamDesignator, droneSpecState) ->
-                    CTDebug(tag, "DroneSpecPickerDialog() User mapped '${streamDesignator}' to ${selectedStreamDesignator}:${droneSpecState.remoteId}")
-                    droneSpecState.changeMappedId(streamDesignator)
-                    showPicker = false
+                droneSpecStates = viewModel.droneStates,
+                onSelect = { (selectedMappedId, droneSpecState) ->
+                    CTDebug(tag, "DroneSpecPickerDialog() User paired stream '${streamDesignator}' to telemetry ${selectedMappedId}:${droneSpecState.remoteId}")
+                    val warning = viewModel.streamPairingWarning(
+                        streamDesignator = streamDesignator,
+                        remoteId = droneSpecState.remoteId,
+                        mappedId = droneSpecState.mappedId
+                    )
+                    if (warning != null) {
+                        pendingPairingWarning = warning
+                        showPicker = false
+                    } else {
+                        viewModel.bindStreamTelemetry(streamDesignator, droneSpecState.remoteId)
+                        showPicker = false
+                    }
                 },
                 onDismiss = {showPicker = false}
+            )
+        }
+        pendingPairingWarning?.let { warning ->
+            AlertDialog(
+                onDismissRequest = { pendingPairingWarning = null },
+                title = { Text("Controller Designator Mismatch") },
+                text = {
+                    Text(
+                        "The ${warning.droneLabel} drone with Remote ID \"${warning.remoteId}\" " +
+                            "is currently configured for controller designator " +
+                            "\"${warning.configuredStreamDesignator}\".\n\n" +
+                            "It is recommended that you change the RTMP stream designator to " +
+                            "\"${warning.configuredStreamDesignator}\" instead of " +
+                            "\"${warning.streamDesignator}\" so other tablets can connect to it."
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        CTDebug(tag, "StreamTile($streamDesignator) Pair Anyway runtime override remoteId=${warning.remoteId}")
+                        viewModel.bindStreamTelemetry(warning.streamDesignator, warning.remoteId)
+                        pendingPairingWarning = null
+                    }) { Text("Pair Anyway") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingPairingWarning = null }) { Text("Cancel") }
+                }
             )
         }
         if (anomalyConfig.enabled && isLocalPlayback && isLocalPlaybackPaused && pendingAnnotationPoint != null && currentFrameTimestampUs != null) {

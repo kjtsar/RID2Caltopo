@@ -5453,6 +5453,14 @@ static anomaly_result_color_debug_candidate_publication_t result_builder_color_c
     candidate.hist_current_count = 5.5f;
     candidate.hist_recent_count = 6.5f;
     candidate.hist_rarity_score = 0.35f;
+    candidate.center_u = 17.0f;
+    candidate.center_v = -9.0f;
+    candidate.center_luma = 128.0f;
+    candidate.local_ring_chroma_contrast = 14.0f;
+    candidate.local_ring_luma_contrast = 22.0f;
+    candidate.local_ring_neighbor_count = 11;
+    candidate.current_nearest_hist_distance = 1.25f;
+    candidate.recent_nearest_hist_distance = 2.50f;
     candidate.small_target_span_ratio = 0.25f;
     candidate.small_target_area_ratio = 0.15f;
     candidate.scene_commonness = 0.05f;
@@ -5563,6 +5571,22 @@ static void test_result_publish_color_debug_candidates_publishes_and_caps(void) 
            fabsf(first->hist_recent_count - 6.5f) < 0.0001f &&
            fabsf(first->hist_rarity_score - 0.35f) < 0.0001f,
            "result builder color candidates: histogram fields are copied");
+    EXPECT_NEAR(first->center_u, 17.0f, 0.0001f,
+                "result builder color candidates: center u is copied");
+    EXPECT_NEAR(first->center_v, -9.0f, 0.0001f,
+                "result builder color candidates: center v is copied");
+    EXPECT_NEAR(first->center_luma, 128.0f, 0.0001f,
+                "result builder color candidates: center luma is copied");
+    EXPECT_NEAR(first->local_ring_chroma_contrast, 14.0f, 0.0001f,
+                "result builder color candidates: local ring chroma contrast is copied");
+    EXPECT_NEAR(first->local_ring_luma_contrast, 22.0f, 0.0001f,
+                "result builder color candidates: local ring luma contrast is copied");
+    EXPECT(first->local_ring_neighbor_count == 11,
+           "result builder color candidates: local ring neighbor count is copied");
+    EXPECT_NEAR(first->current_nearest_hist_distance, 1.25f, 0.0001f,
+                "result builder color candidates: current nearest hist distance is copied");
+    EXPECT_NEAR(first->recent_nearest_hist_distance, 2.50f, 0.0001f,
+                "result builder color candidates: recent nearest hist distance is copied");
     EXPECT_NEAR(first->small_target_span_ratio, 0.25f, 0.0001f,
                 "result builder color candidates: small target span ratio is copied");
     EXPECT_NEAR(first->small_target_area_ratio, 0.15f, 0.0001f,
@@ -8859,6 +8883,21 @@ static void test_color_detector_histogram_and_rarity_helpers(void) {
                 0.1f,
                 0.0001f,
                 "color rarity: direct rarity uses current and recent counts");
+    EXPECT_NEAR(anomaly_color_nearest_common_hist_bin_distance(
+                    current_hist, 2, 2, 2),
+                0.0f,
+                0.0001f,
+                "color hist distance: populated center bin reports zero distance");
+    EXPECT_NEAR(anomaly_color_nearest_common_hist_bin_distance(
+                    current_hist, 5, 2, 2),
+                3.0f,
+                0.0001f,
+                "color hist distance: nearest populated bin distance is measured in bin space");
+    EXPECT_NEAR(anomaly_color_nearest_common_hist_bin_distance(
+                    current_hist, 5, 2, 5),
+                -1.0f,
+                0.0001f,
+                "color hist distance: no common bin reports sentinel");
 
     memset(current_hist, 0, sizeof(current_hist));
     memset(recent_hist, 0, sizeof(recent_hist));
@@ -12573,6 +12612,67 @@ static void test_detector_facade_runtime_budget_should_wait_for_local_ad_buffer(
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
                     true, true, true, true, false, 1, 0, 0),
            "runtime budget local AD buffer: invalid target does not delay playback");
+}
+
+static void test_detector_facade_runtime_budget_local_ad_startup_preroll(void) {
+    anomaly_detector_runtime_budget_local_ad_startup_preroll_t preroll =
+            anomaly_detector_runtime_budget_local_ad_startup_preroll(
+                    true, false, true, true, true, false, 4, 1100, 1000, 12, 800);
+    EXPECT(preroll.wait && !preroll.complete && preroll.elapsed_ms == 100,
+           "runtime budget local AD startup preroll: waits below render depth and max delay");
+
+    preroll = anomaly_detector_runtime_budget_local_ad_startup_preroll(
+            true, false, true, true, true, false, 12, 1100, 1000, 12, 800);
+    EXPECT(!preroll.wait && preroll.complete,
+           "runtime budget local AD startup preroll: releases at target render depth");
+
+    preroll = anomaly_detector_runtime_budget_local_ad_startup_preroll(
+            true, false, true, true, true, false, 4, 1800, 1000, 12, 800);
+    EXPECT(!preroll.wait && preroll.complete,
+           "runtime budget local AD startup preroll: releases at max startup delay");
+
+    preroll = anomaly_detector_runtime_budget_local_ad_startup_preroll(
+            true, false, true, false, true, false, 12, 1100, 1000, 12, 800);
+    EXPECT(!preroll.wait && !preroll.complete,
+           "runtime budget local AD startup preroll: missing AD thread does not consume preroll");
+
+    preroll = anomaly_detector_runtime_budget_local_ad_startup_preroll(
+            false, false, true, true, true, false, 4, 1100, 1000, 12, 800);
+    EXPECT(!preroll.wait && preroll.complete,
+           "runtime budget local AD startup preroll: live sources do not use local preroll");
+
+    preroll = anomaly_detector_runtime_budget_local_ad_startup_preroll(
+            true, true, true, true, true, false, 0, 1100, 1000, 12, 800);
+    EXPECT(!preroll.wait && preroll.complete,
+           "runtime budget local AD startup preroll: completed preroll remains open");
+}
+
+static void test_detector_facade_runtime_budget_local_ad_cadence(void) {
+    anomaly_detector_runtime_budget_local_ad_cadence_t cadence =
+            anomaly_detector_runtime_budget_local_ad_cadence(
+                    true, true, 1, 30, 5);
+    EXPECT(!cadence.analyze && cadence.prediction_only && cadence.frame_stride_override == 0,
+           "runtime budget local AD cadence: skips non-eval local frames");
+
+    cadence = anomaly_detector_runtime_budget_local_ad_cadence(
+            true, true, 5, 30, 5);
+    EXPECT(cadence.analyze && !cadence.prediction_only && cadence.frame_stride_override == 6,
+           "runtime budget local AD cadence: evaluates every fifth frame with derived full stride");
+
+    cadence = anomaly_detector_runtime_budget_local_ad_cadence(
+            true, true, 30, 30, 5);
+    EXPECT(cadence.analyze && cadence.frame_stride_override == 6,
+           "runtime budget local AD cadence: thirty decoded frames maps to a full scan opportunity");
+
+    cadence = anomaly_detector_runtime_budget_local_ad_cadence(
+            false, true, 1, 30, 5);
+    EXPECT(cadence.analyze && !cadence.prediction_only && cadence.frame_stride_override == 0,
+           "runtime budget local AD cadence: live sources are not locally throttled");
+
+    cadence = anomaly_detector_runtime_budget_local_ad_cadence(
+            true, false, 1, 30, 5);
+    EXPECT(cadence.analyze && !cadence.prediction_only && cadence.frame_stride_override == 0,
+           "runtime budget local AD cadence: disabled processing leaves handoff policy alone");
 }
 
 static void test_detector_facade_runtime_budget_should_wait_for_local_ad_processing(void) {
@@ -18801,6 +18901,42 @@ static void test_color_fresh_oversized_blob_is_not_candidate(void) {
     anomaly_state_cleanup(&st);
 }
 
+static void test_color_fresh_compact_red_patch_survives_red_field(void) {
+    const int W = 1280, H = 720;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    uint8_t *frame = make_gray_frame(W, H, 118);
+    stamp_color_rect(frame, W * 4, W, H, 360, 190, 560, 330, 154, 54, 48);
+    stamp_color_rect(frame, W * 4, W, H, W / 2 - 3, H / 2 - 3, 7, 7, 238, 24, 20);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.small_target_screen_fraction = 1.0f / 24.0f;
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+
+    anomaly_result_t res;
+    int boxes = anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 0, &res);
+    EXPECT(boxes > 0, "color red-field rescue: compact red patch survives similar red field");
+    EXPECT(res.color_debug.candidate_count > 0,
+           "color red-field rescue: compact red patch is retained as a candidate");
+    EXPECT(res.color_debug.winning_candidate_index >= 0,
+           "color red-field rescue: compact red patch can win");
+    if (res.color_debug.winning_candidate_index >= 0 &&
+        res.color_debug.winning_candidate_index < res.color_debug.candidate_count) {
+        const anomaly_debug_color_candidate_t *winner =
+            &res.color_debug.candidates[res.color_debug.winning_candidate_index];
+        float cx = (winner->bbox_left_norm + winner->bbox_right_norm) * 0.5f;
+        float cy = (winner->bbox_top_norm + winner->bbox_bottom_norm) * 0.5f;
+        EXPECT(fabsf(cx - 0.5f) < 0.08f && fabsf(cy - 0.5f) < 0.08f,
+               "color red-field rescue: winning compact patch stays near embedded red target");
+    }
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
 static void test_color_fresh_ranking_prefers_peak_unique_blob_over_plateau(void) {
     const int W = 200, H = 160;
     anomaly_state_t st;
@@ -20379,6 +20515,8 @@ int main(void) {
     test_detector_facade_runtime_budget_render_queue_hard_cap();
     test_detector_facade_runtime_budget_should_trim_render_queue();
     test_detector_facade_runtime_budget_should_wait_for_local_ad_buffer();
+    test_detector_facade_runtime_budget_local_ad_startup_preroll();
+    test_detector_facade_runtime_budget_local_ad_cadence();
     test_detector_facade_runtime_budget_should_wait_for_local_ad_processing();
     test_detector_facade_runtime_budget_queue_tail_index();
     test_detector_facade_runtime_budget_queue_offset_index();
@@ -20591,6 +20729,7 @@ int main(void) {
     test_color_dense_span_reject_reports_measured_area();
     test_color_fresh_compact_unique_blob_survives();
     test_color_fresh_oversized_blob_is_not_candidate();
+    test_color_fresh_compact_red_patch_survives_red_field();
     test_color_fresh_ranking_prefers_peak_unique_blob_over_plateau();
     test_black_hot_thermal();
     test_high_threshold_no_detection();

@@ -41,8 +41,8 @@
 #define APP_DEFAULT_FRAME_STRIDE 1
 #define APP_DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES 2
 #define APP_DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS 1.0f
-#define APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES 4
-#define APP_LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE 2
+#define APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES 30
+#define APP_LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE 1
 
 typedef enum {
     APP_APPEARANCE_AUTO = 0,
@@ -238,7 +238,7 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
                 ? APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES
                 : app_cfg->frame_stride,
             1,
-            10);
+            33);
     native_cfg->adaptive_min_stride_frames =
         app_clampi(
             color_realtime_stride_default
@@ -250,7 +250,11 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
         app_clampi(33, native_cfg->adaptive_min_stride_frames, 33);
     native_cfg->adaptive_max_stride_seconds =
         app_clampf(app_cfg->adaptive_max_stride_seconds, 0.1f, 10.0f);
-    native_cfg->pixel_step = app_clampi(app_cfg->pixel_step, 0, 8);
+    native_cfg->pixel_step =
+        app_cfg->appearance_selection == APP_APPEARANCE_COLOR &&
+        app_cfg->pixel_step <= 0
+            ? 1
+            : app_clampi(app_cfg->pixel_step, 0, 8);
     native_cfg->score_threshold = score_threshold;
     native_cfg->motion_evidence_scale = motion_evidence_scale;
     native_cfg->min_area_fraction = effective_min_area_fraction;
@@ -447,6 +451,9 @@ static const char *timing_stage_name(anomaly_timing_stage_t stage) {
         case ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP: return "sampled_grid_prep";
         case ANOMALY_TIMING_STAGE_THERMAL_SCORING: return "thermal_scoring";
         case ANOMALY_TIMING_STAGE_COLOR_SCORING: return "color_scoring";
+        case ANOMALY_TIMING_STAGE_COLOR_SEED_SCORING: return "color_seed_scoring";
+        case ANOMALY_TIMING_STAGE_COLOR_BLOB_EXTRACTION: return "color_blob_extraction";
+        case ANOMALY_TIMING_STAGE_COLOR_CANDIDATE_RANKING: return "color_candidate_ranking";
         case ANOMALY_TIMING_STAGE_MOTION_SCORING: return "motion_scoring";
         case ANOMALY_TIMING_STAGE_SALIENCY_SCORING: return "saliency_scoring";
         case ANOMALY_TIMING_STAGE_TARGET_TRACKING: return "target_tracking";
@@ -454,6 +461,59 @@ static const char *timing_stage_name(anomaly_timing_stage_t stage) {
         case ANOMALY_TIMING_STAGE_COUNT:
         default:
             return "unknown";
+    }
+}
+
+typedef struct {
+    anomaly_rescan_mode_t mode;
+    const char *json_name;
+    const char *display_name;
+} rescan_mode_timing_desc_t;
+
+static const rescan_mode_timing_desc_t kRescanTimingModes[] = {
+    { ANOMALY_RESCAN_MODE_FULL, "full", "full" },
+    { ANOMALY_RESCAN_MODE_PARTIAL, "partial", "partial" },
+    { ANOMALY_RESCAN_MODE_TARGET_ONLY, "target_only", "target-only" },
+    { ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP, "appearance_stride_skip", "stride-skip" },
+};
+
+typedef struct {
+    int frame_count;
+    int64_t frame_total_us;
+    int64_t frame_min_us;
+    int64_t frame_max_us;
+    int64_t stage_total_us[ANOMALY_TIMING_STAGE_COUNT];
+    int64_t stage_min_us[ANOMALY_TIMING_STAGE_COUNT];
+    int64_t stage_max_us[ANOMALY_TIMING_STAGE_COUNT];
+} timing_accumulator_t;
+
+static int rescan_timing_mode_index(anomaly_rescan_mode_t mode) {
+    for (size_t i = 0; i < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]); i++) {
+        if (kRescanTimingModes[i].mode == mode) return (int)i;
+    }
+    return -1;
+}
+
+static void timing_accumulator_add(timing_accumulator_t *acc,
+                                   const anomaly_debug_timing_t *timing) {
+    if (acc == NULL || timing == NULL || !timing->compiled) return;
+
+    acc->frame_count++;
+    acc->frame_total_us += timing->total_us;
+    if (acc->frame_count == 1 || timing->total_us < acc->frame_min_us) {
+        acc->frame_min_us = timing->total_us;
+    }
+    if (timing->total_us > acc->frame_max_us) {
+        acc->frame_max_us = timing->total_us;
+    }
+    for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
+        acc->stage_total_us[stage] += timing->stage_us[stage];
+        if (acc->frame_count == 1 || timing->stage_us[stage] < acc->stage_min_us[stage]) {
+            acc->stage_min_us[stage] = timing->stage_us[stage];
+        }
+        if (timing->stage_us[stage] > acc->stage_max_us[stage]) {
+            acc->stage_max_us[stage] = timing->stage_us[stage];
+        }
     }
 }
 
@@ -1723,6 +1783,10 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
                 "\"quality\":%.6f,\"isolation_score\":%.6f,\"ring_fraction\":%.6f,"
                 "\"support_mass\":%.6f,\"contrast_weight\":%.6f,\"hist_key\":%d,"
                 "\"hist_current_count\":%.6f,\"hist_recent_count\":%.6f,\"hist_rarity_score\":%.6f,"
+                "\"center_u\":%.6f,\"center_v\":%.6f,\"center_luma\":%.6f,"
+                "\"local_ring_chroma_contrast\":%.6f,\"local_ring_luma_contrast\":%.6f,"
+                "\"local_ring_neighbor_count\":%d,"
+                "\"current_nearest_hist_distance\":%.6f,\"recent_nearest_hist_distance\":%.6f,"
                 "\"small_target_span_ratio\":%.6f,\"small_target_area_ratio\":%.6f,"
                 "\"scene_commonness\":%.6f,\"retention_rank\":%.6f,\"above_threshold\":%s}",
                 (i == 0) ? "" : ",",
@@ -1752,6 +1816,14 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
                 (double)c->hist_current_count,
                 (double)c->hist_recent_count,
                 (double)c->hist_rarity_score,
+                (double)c->center_u,
+                (double)c->center_v,
+                (double)c->center_luma,
+                (double)c->local_ring_chroma_contrast,
+                (double)c->local_ring_luma_contrast,
+                c->local_ring_neighbor_count,
+                (double)c->current_nearest_hist_distance,
+                (double)c->recent_nearest_hist_distance,
                 (double)c->small_target_span_ratio,
                 (double)c->small_target_area_ratio,
                 (double)c->scene_commonness,
@@ -2640,10 +2712,13 @@ int main(int argc, char **argv) {
     int    adaptive_stride_frame_count = 0;
     double adaptive_motion_load_sum = 0.0;
     int64_t stage_timing_total_us[ANOMALY_TIMING_STAGE_COUNT] = {0};
+    int64_t stage_timing_min_us[ANOMALY_TIMING_STAGE_COUNT] = {0};
     int64_t stage_timing_max_us[ANOMALY_TIMING_STAGE_COUNT] = {0};
     int64_t frame_timing_total_us = 0;
+    int64_t frame_timing_min_us = 0;
     int64_t frame_timing_max_us = 0;
     int    timing_frame_count = 0;
+    timing_accumulator_t rescan_timing[sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0])] = {0};
     int    movement_frame_count = 0;
     int64_t movement_background_count = 0;
     int64_t movement_coherent_near_count = 0;
@@ -2800,14 +2875,24 @@ int main(int argc, char **argv) {
         if (result.timing.compiled) {
             timing_frame_count++;
             frame_timing_total_us += result.timing.total_us;
+            if (timing_frame_count == 1 || result.timing.total_us < frame_timing_min_us) {
+                frame_timing_min_us = result.timing.total_us;
+            }
             if (result.timing.total_us > frame_timing_max_us) {
                 frame_timing_max_us = result.timing.total_us;
             }
             for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
                 stage_timing_total_us[stage] += result.timing.stage_us[stage];
+                if (timing_frame_count == 1 || result.timing.stage_us[stage] < stage_timing_min_us[stage]) {
+                    stage_timing_min_us[stage] = result.timing.stage_us[stage];
+                }
                 if (result.timing.stage_us[stage] > stage_timing_max_us[stage]) {
                     stage_timing_max_us[stage] = result.timing.stage_us[stage];
                 }
+            }
+            int rescan_timing_index = rescan_timing_mode_index(result.rescan_mode);
+            if (rescan_timing_index >= 0) {
+                timing_accumulator_add(&rescan_timing[rescan_timing_index], &result.timing);
             }
         }
         if (result.movement_debug.valid) {
@@ -2984,14 +3069,28 @@ int main(int argc, char **argv) {
         }
     }
     if (timing_frame_count > 0) {
-        fprintf(stderr, "  Stage timing     : avg-total=%.2f ms max-total=%.2f ms\n",
+        fprintf(stderr, "  Stage timing     : avg-total=%.2f ms min-total=%.2f ms max-total=%.2f ms\n",
                 (double)frame_timing_total_us / (double)timing_frame_count / 1000.0,
+                (double)frame_timing_min_us / 1000.0,
                 (double)frame_timing_max_us / 1000.0);
         for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
-            fprintf(stderr, "    %-18s avg=%.2f ms max=%.2f ms\n",
+            fprintf(stderr, "    %-24s avg=%.2f ms min=%.2f ms max=%.2f ms\n",
                     timing_stage_name((anomaly_timing_stage_t)stage),
                     (double)stage_timing_total_us[stage] / (double)timing_frame_count / 1000.0,
+                    (double)stage_timing_min_us[stage] / 1000.0,
                     (double)stage_timing_max_us[stage] / 1000.0);
+        }
+        fprintf(stderr, "  Rescan timing    :\n");
+        for (size_t mode_i = 0; mode_i < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]); mode_i++) {
+            const timing_accumulator_t *acc = &rescan_timing[mode_i];
+            fprintf(stderr, "    %-12s frames=%d avg=%.2f ms min=%.2f ms max=%.2f ms\n",
+                    kRescanTimingModes[mode_i].display_name,
+                    acc->frame_count,
+                    acc->frame_count > 0
+                        ? (double)acc->frame_total_us / (double)acc->frame_count / 1000.0
+                        : 0.0,
+                    (double)acc->frame_min_us / 1000.0,
+                    (double)acc->frame_max_us / 1000.0);
         }
     }
     fprintf(stderr, "  CSV written      : %s\n", output_csv);
@@ -3138,16 +3237,49 @@ int main(int argc, char **argv) {
                     timing_frame_count > 0
                         ? ((double)frame_timing_total_us / (double)timing_frame_count / 1000.0)
                         : 0.0);
+            fprintf(summary, "    \"min_total_ms\": %.6f,\n",
+                    (double)frame_timing_min_us / 1000.0);
             fprintf(summary, "    \"max_total_ms\": %.6f,\n",
                     (double)frame_timing_max_us / 1000.0);
+            fprintf(summary, "    \"by_rescan_mode\": {\n");
+            for (size_t mode_i = 0; mode_i < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]); mode_i++) {
+                const timing_accumulator_t *acc = &rescan_timing[mode_i];
+                fprintf(summary, "      \"%s\": {\n", kRescanTimingModes[mode_i].json_name);
+                fprintf(summary, "        \"frame_count\": %d,\n", acc->frame_count);
+                fprintf(summary, "        \"avg_total_ms\": %.6f,\n",
+                        acc->frame_count > 0
+                            ? (double)acc->frame_total_us / (double)acc->frame_count / 1000.0
+                            : 0.0);
+                fprintf(summary, "        \"min_total_ms\": %.6f,\n",
+                        (double)acc->frame_min_us / 1000.0);
+                fprintf(summary, "        \"max_total_ms\": %.6f,\n",
+                        (double)acc->frame_max_us / 1000.0);
+                fprintf(summary, "        \"stages\": {\n");
+                for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
+                    fprintf(summary,
+                            "          \"%s\": { \"avg_ms\": %.6f, \"min_ms\": %.6f, \"max_ms\": %.6f }%s\n",
+                            timing_stage_name((anomaly_timing_stage_t)stage),
+                            acc->frame_count > 0
+                                ? ((double)acc->stage_total_us[stage] / (double)acc->frame_count / 1000.0)
+                                : 0.0,
+                            (double)acc->stage_min_us[stage] / 1000.0,
+                            (double)acc->stage_max_us[stage] / 1000.0,
+                            (stage + 1) < ANOMALY_TIMING_STAGE_COUNT ? "," : "");
+                }
+                fprintf(summary, "        }\n");
+                fprintf(summary, "      }%s\n",
+                        (mode_i + 1) < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]) ? "," : "");
+            }
+            fprintf(summary, "    },\n");
             fprintf(summary, "    \"stages\": {\n");
             for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
                 fprintf(summary,
-                        "      \"%s\": { \"avg_ms\": %.6f, \"max_ms\": %.6f }%s\n",
+                        "      \"%s\": { \"avg_ms\": %.6f, \"min_ms\": %.6f, \"max_ms\": %.6f }%s\n",
                         timing_stage_name((anomaly_timing_stage_t)stage),
                         timing_frame_count > 0
                             ? ((double)stage_timing_total_us[stage] / (double)timing_frame_count / 1000.0)
                             : 0.0,
+                        (double)stage_timing_min_us[stage] / 1000.0,
                         (double)stage_timing_max_us[stage] / 1000.0,
                         (stage + 1) < ANOMALY_TIMING_STAGE_COUNT ? "," : "");
             }

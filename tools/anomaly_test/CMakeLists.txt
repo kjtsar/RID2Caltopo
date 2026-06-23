@@ -101,6 +101,31 @@ set_tests_properties(
         PASS_REGULAR_EXPRESSION "algorithm  = 6 \\(thermal motion \\).*movement   = layered_active"
 )
 add_test(
+    NAME anomaly_video_color_app_defaults_dense_full_scan_config
+    COMMAND anomaly_video_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/test/resources/vidcap/Red1.mp4
+        --app-defaults
+        --app-appearance
+        color
+        --app-stride-mode
+        adaptive
+        --app-adaptive-min-stride-frames
+        10
+        --app-display-output
+        --no-video
+        --time-end
+        0.1
+        -c
+        ${CMAKE_CURRENT_BINARY_DIR}/color_app_defaults_config_probe.csv
+        --summary-json
+        ${CMAKE_CURRENT_BINARY_DIR}/color_app_defaults_config_probe.json
+)
+set_tests_properties(
+    anomaly_video_color_app_defaults_dense_full_scan_config
+    PROPERTIES
+        PASS_REGULAR_EXPRESSION "algorithm  = 5 \\(color motion \\).*stride     = adaptive fixed=[0-9]+ adaptive=10\\.\\.30 frames.*pixel_step = 1"
+)
+add_test(
     NAME anomaly_video_powerhouse1_app_local_opening_recall
     COMMAND
         ${Python3_EXECUTABLE}

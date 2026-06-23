@@ -21,7 +21,8 @@ object MediaMtxLogParser {
     private val pathRegex = Regex("""\[path ([^\]]+)]\s*(.+)""")
     private val startRegex = Regex("""MediaMTX (v[0-9]+\.[0-9]+\.[0-9]+)""")
     private val hlsEventRegex = Regex("""\[HLS]\s+\[muxer ([^\]]+)]\s+(.+)""")
-    private val rtspNoPublishingRegex = Regex("""no one is publishing to path '([^']+)'""")
+    private val rtspNoPublishingRegex =
+        Regex("""(?:no one is publishing to path|no stream is available on path) '([^']+)'""")
     private val rtmpPublishingRegex =
         Regex("""\[RTMP]\s+\[conn ([^\]]+)]\s+is publishing to path '([^']+)'""")
     private val rtmpAcceptSucceededRegex =
@@ -110,13 +111,15 @@ object MediaMtxLogParser {
                     MediaMTXEvent.StreamPublisherHandoff(path)
                 }
 
-                rem.contains("created") -> {
-                    suppressStopForPath.remove(path)
-                    MediaMTXEvent.StreamConnecting(path)
-                }
+                rem.contains("created") -> null
                 rem.contains("destroyed") -> {
-                    pathPublisherConnMap.remove(path)?.let { publisherHandoffClosingConns.remove(it) }
-                    emitStop(path)
+                    val publisherConn = pathPublisherConnMap.remove(path)
+                    publisherConn?.let { publisherHandoffClosingConns.remove(it) }
+                    if (publisherConn != null || suppressStopForPath.contains(path)) {
+                        emitStop(path)
+                    } else {
+                        null
+                    }
                 }
                 else -> null
             }
@@ -297,11 +300,18 @@ object MediaMtxLogParser {
 
         val rtspNoPublishingMatch = rtspNoPublishingRegex.find(line)
         if (rtspNoPublishingMatch != null) {
-            pathPublisherConnMap.remove(rtspNoPublishingMatch.groupValues[1])?.let {
+            val path = rtspNoPublishingMatch.groupValues[1]
+            val publisherConn = pathPublisherConnMap.remove(path)
+            publisherConn?.let {
                 publisherHandoffClosingConns.remove(it)
             }
+            val event = if (publisherConn != null || suppressStopForPath.contains(path)) {
+                emitStop(path)
+            } else {
+                null
+            }
             return MediaMtxParserResult(
-                emitStop(rtspNoPublishingMatch.groupValues[1]),
+                event,
                 updatedState(),
             )
         }

@@ -64,7 +64,7 @@ object AnomalyPrefs {
                 algorithms = setOf(AnomalyAlgorithm.Motion),
                 scanZone = 0.50f,
                 frameStride = 1,
-                sensitivity = 0.42f,
+                sensitivity = 0.59f,
                 movementEstimatorMode = MovementEstimatorMode.LayeredActive,
             )
         } else {
@@ -106,7 +106,7 @@ object AnomalyPrefs {
             saliencyEnabled = prefs.getBoolean(KEY_SALIENCY_ENABLED, defaults.saliencyEnabled),
             appearanceSelection = appearanceSelection,
             strideMode = strideMode,
-            frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 10),
+            frameStride = prefs.getInt(KEY_FRAME_STRIDE, defaults.frameStride).coerceIn(1, 33),
             adaptiveMinStrideFrames = prefs
                 .getInt(KEY_ADAPTIVE_MIN_STRIDE_FRAMES, defaults.adaptiveMinStrideFrames)
                 .coerceIn(2, 33),
@@ -151,7 +151,7 @@ object AnomalyPrefs {
             .putBoolean(KEY_SALIENCY_ENABLED, normalized.saliencyEnabled)
             .putString(KEY_APPEARANCE_SELECTION, normalized.appearanceSelection.name)
             .putString(KEY_STRIDE_MODE, normalized.strideMode.name)
-            .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 10))
+            .putInt(KEY_FRAME_STRIDE, normalized.frameStride.coerceIn(1, 33))
             .putInt(KEY_ADAPTIVE_MIN_STRIDE_FRAMES, normalized.adaptiveMinStrideFrames.coerceIn(2, 33))
             .putFloat(
                 KEY_ADAPTIVE_MAX_STRIDE_SECONDS,

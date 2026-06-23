@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video
 
 import OverLimitDroneUiState
+import StreamsLayoutMode
 import StreamsViewModel
 import android.app.Activity
 import android.content.Intent
@@ -130,6 +131,13 @@ internal fun streamPipInsetSize(
 
 internal fun streamPipHasStreamContent(visibleStreamCount: Int, focusedPath: String?): Boolean =
     visibleStreamCount > 0 || focusedPath != null
+
+internal fun streamPipInsetTapLayoutMode(currentLayoutMode: StreamsLayoutMode): StreamsLayoutMode =
+    when (currentLayoutMode) {
+        StreamsLayoutMode.Streams -> StreamsLayoutMode.Map
+        StreamsLayoutMode.Map -> StreamsLayoutMode.Streams
+        StreamsLayoutMode.Both -> StreamsLayoutMode.Both
+    }
 
 internal data class StreamsFullScreenChrome(
     val showTopBar: Boolean,
@@ -451,28 +459,37 @@ fun StreamsScreen(
 
                 val pipEnabled = streamPipUiState.enabled && externalContentMode == null
                 if (pipEnabled && layoutMode == StreamsLayoutMode.Streams && pipHasStreamContent) {
+                    val swapToMap = {
+                        val nextLayout = streamPipInsetTapLayoutMode(layoutMode)
+                        viewModel.setLayoutMode(nextLayout)
+                    }
                     StreamPipInsetFrame(
                         editorMode = streamPipUiState.editorMode,
                         insetFraction = streamPipUiState.insetFraction,
                         aspectRatio = STREAM_PIP_ASPECT_RATIO,
-                        onTap = { viewModel.setLayoutMode(StreamsLayoutMode.Map) },
+                        onTap = swapToMap,
                         onLongPress = { viewModel.toggleStreamPipEditorModeFromLongPress() },
                         onResizeFractionChange = { next -> viewModel.setStreamPipInsetFraction(next) }
                     ) {
                         SplitMapPane(
                             viewModel = viewModel,
                             modifier = Modifier.fillMaxSize(),
+                            onSingleTapFocus = swapToMap,
                             presentationMode = MapPanePresentationMode.Inset
                         )
                     }
                 }
 
                 if (pipEnabled && layoutMode == StreamsLayoutMode.Map && pipHasStreamContent) {
+                    val swapToStreams = {
+                        val nextLayout = streamPipInsetTapLayoutMode(layoutMode)
+                        viewModel.setLayoutMode(nextLayout)
+                    }
                     StreamPipInsetFrame(
                         editorMode = streamPipUiState.editorMode,
                         insetFraction = streamPipUiState.insetFraction,
                         aspectRatio = STREAM_PIP_ASPECT_RATIO,
-                        onTap = { viewModel.setLayoutMode(StreamsLayoutMode.Streams) },
+                        onTap = swapToStreams,
                         onLongPress = { viewModel.toggleStreamPipEditorModeFromLongPress() },
                         onResizeFractionChange = { next -> viewModel.setStreamPipInsetFraction(next) }
                     ) {

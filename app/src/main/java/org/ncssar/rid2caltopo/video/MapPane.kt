@@ -218,7 +218,8 @@ internal fun mapPaneInsetViewportZoom(
     fullHeightPx: Int?,
     insetWidthPx: Int,
     insetHeightPx: Int,
-    fullZoom: Double
+    fullZoom: Double,
+    maxZoom: Double = MAP_DISPLAY_MAX_ZOOM
 ): Double {
     if (!fullZoom.isFinite()) return fullZoom
     val fullWidth = fullWidthPx?.takeIf { it > 0 } ?: return fullZoom
@@ -227,7 +228,18 @@ internal fun mapPaneInsetViewportZoom(
     val widthRatio = fullWidth.toDouble() / insetWidthPx.toDouble()
     val heightRatio = fullHeight.toDouble() / insetHeightPx.toDouble()
     val scaleRatio = maxOf(widthRatio, heightRatio).takeIf { it.isFinite() && it > 1.0 } ?: return fullZoom
-    return (fullZoom - kotlin.math.ln(scaleRatio) / kotlin.math.ln(2.0)).coerceAtLeast(0.0)
+    return (fullZoom - kotlin.math.ln(scaleRatio) / kotlin.math.ln(2.0))
+        .coerceIn(0.0, maxZoom.takeIf { it.isFinite() && it >= 0.0 } ?: MAP_DISPLAY_MAX_ZOOM)
+}
+
+internal fun mapPaneInitialViewportZoom(
+    presentationMode: MapPanePresentationMode,
+    restoredZoom: Double,
+    maxZoom: Double
+): Double {
+    if (presentationMode != MapPanePresentationMode.Inset) return restoredZoom
+    val safeMaxZoom = maxZoom.takeIf { it.isFinite() && it >= 0.0 } ?: MAP_DISPLAY_MAX_ZOOM
+    return restoredZoom.coerceAtMost(safeMaxZoom)
 }
 
 internal fun shouldFollowFocusedDrone(
@@ -239,6 +251,22 @@ internal fun shouldFollowFocusedDrone(
     if (!followFocusedDroneEnabled || !hasFocusedDroneTelemetry) return false
     return presentationMode == MapPanePresentationMode.Inset || !operatorAdjustedViewport
 }
+
+internal fun mapPaneShouldReplayCachedArtifacts(
+    presentationMode: MapPanePresentationMode,
+    cachedFeatureCount: Int
+): Boolean = presentationMode == MapPanePresentationMode.Full && cachedFeatureCount <= 0
+
+internal fun mapPaneShouldRequestArtifactRefreshOnMount(
+    presentationMode: MapPanePresentationMode,
+    cachedFeatureCount: Int
+): Boolean = false
+
+internal fun mapPaneCanZoomToBoundingBox(
+    mapWidthPx: Int,
+    mapHeightPx: Int,
+    pointCount: Int
+): Boolean = mapWidthPx > 0 && mapHeightPx > 0 && pointCount >= 2
 
 internal fun cachedArtifactOverlayState(overlayState: Any?): ArtifactOverlayState =
     overlayState as? ArtifactOverlayState ?: ArtifactOverlayState()
@@ -3222,8 +3250,15 @@ internal fun SplitMapPane(
             }
         }
 
-        CaltopoMap.AddArtifactListener(listener)
-        CaltopoMap.RequestMapRefreshNow()
+        val cachedFeatureCount = artifactRenderCache.featuresById.size
+        val replayCachedArtifacts = mapPaneShouldReplayCachedArtifacts(
+            presentationMode = presentationMode,
+            cachedFeatureCount = cachedFeatureCount
+        )
+        CaltopoMap.AddArtifactListener(listener, replayCachedArtifacts)
+        if (mapPaneShouldRequestArtifactRefreshOnMount(presentationMode, cachedFeatureCount)) {
+            CaltopoMap.RequestMapRefreshNow()
+        }
         onDispose {
             CaltopoMap.RemoveArtifactListener(listener)
         }
@@ -3390,7 +3425,13 @@ internal fun SplitMapPane(
                     val initialViewport = restoredViewport
                     if (initialViewport != null) {
                         controller.setCenter(GeoPoint(initialViewport.latitude, initialViewport.longitude))
-                        controller.setZoom(initialViewport.zoom)
+                        controller.setZoom(
+                            mapPaneInitialViewportZoom(
+                                presentationMode = presentationMode,
+                                restoredZoom = initialViewport.zoom,
+                                maxZoom = tileMapProvider.tileSource.maximumZoomLevel.toDouble()
+                            )
+                        )
                     } else {
                         controller.setZoom(14.0)
                     }
@@ -3520,7 +3561,9 @@ internal fun SplitMapPane(
                     object : MapEventsReceiver {
                         override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
                             InfoWindow.closeAllInfoWindowsOn(mapView)
-                            onSingleTapFocus?.invoke()
+                            if (!isInsetMode) {
+                                onSingleTapFocus?.invoke()
+                            }
                             return false
                         }
 
@@ -4282,8 +4325,13 @@ internal fun SplitMapPane(
                         addAll(artifactPoints)
                         if (myLocation != null) add(GeoPoint(myLocation.latitude, myLocation.longitude))
                     }
+                    var appliedInitialViewportThisUpdate = false
                     when {
-                        viewportPoints.size >= 2 -> {
+                        mapPaneCanZoomToBoundingBox(
+                            mapWidthPx = mapView.width,
+                            mapHeightPx = mapView.height,
+                            pointCount = viewportPoints.size
+                        ) -> {
                             val bounds = boundingBoxFromPoints(viewportPoints)
                             mapView.zoomToBoundingBox(bounds, true, 96)
                             if (!isInsetMode) {
@@ -4301,6 +4349,30 @@ internal fun SplitMapPane(
                                     mapView.zoomLevelDouble
                                 )
                             )
+                            appliedInitialViewportThisUpdate = true
+                        }
+
+                        viewportPoints.isNotEmpty() -> {
+                            val point = viewportPoints.first()
+                            mapView.controller.setCenter(point)
+                            mapView.controller.setZoom(STARTUP_MY_LOCATION_MIN_ZOOM)
+                            if (!isInsetMode) {
+                                persistFullMapViewport(mapView)
+                            }
+                            CTDebug(
+                                MAP_PANE_TAG,
+                                String.format(
+                                    Locale.US,
+                                    "Initial viewport: mode=single-point pointCount=%d measured=%sx%s center=%.6f,%.6f zoom=%.2f",
+                                    viewportPoints.size,
+                                    mapView.width,
+                                    mapView.height,
+                                    mapView.mapCenter.latitude,
+                                    mapView.mapCenter.longitude,
+                                    mapView.zoomLevelDouble
+                                )
+                            )
+                            appliedInitialViewportThisUpdate = mapView.width > 0 && mapView.height > 0
                         }
 
                         myLocation != null -> {
@@ -4322,6 +4394,7 @@ internal fun SplitMapPane(
                                     mapView.zoomLevelDouble
                                 )
                             )
+                            appliedInitialViewportThisUpdate = true
                         }
 
                         focusPoint != null -> {
@@ -4342,27 +4415,28 @@ internal fun SplitMapPane(
                                     mapView.zoomLevelDouble
                                 )
                             )
+                            appliedInitialViewportThisUpdate = true
                         }
                     }
-                    initialViewportApplied = true
+                    initialViewportApplied = appliedInitialViewportThisUpdate
                     initialViewportArtifactCount = artifactOverlayState.totalFeatures
                 }
 
                 if (!isInsetMode) proximityMapFocusTarget?.let { focusTarget ->
+                    val focusPoints = listOf(
+                        GeoPoint(focusTarget.firstLat, focusTarget.firstLng),
+                        GeoPoint(focusTarget.secondLat, focusTarget.secondLng)
+                    )
+                    val samePoint =
+                        kotlin.math.abs(focusTarget.firstLat - focusTarget.secondLat) < 1e-7 &&
+                            kotlin.math.abs(focusTarget.firstLng - focusTarget.secondLng) < 1e-7
+                    if (samePoint || !mapPaneCanZoomToBoundingBox(mapView.width, mapView.height, focusPoints.size)) {
+                        mapView.controller.setCenter(focusPoints.first())
+                        mapView.controller.setZoom(MAP_DISPLAY_MAX_ZOOM)
+                    } else {
+                        mapView.zoomToBoundingBox(boundingBoxFromPoints(focusPoints), true, 96)
+                    }
                     if (mapView.width > 0 && mapView.height > 0) {
-                        val focusPoints = listOf(
-                            GeoPoint(focusTarget.firstLat, focusTarget.firstLng),
-                            GeoPoint(focusTarget.secondLat, focusTarget.secondLng)
-                        )
-                        val samePoint =
-                            kotlin.math.abs(focusTarget.firstLat - focusTarget.secondLat) < 1e-7 &&
-                                kotlin.math.abs(focusTarget.firstLng - focusTarget.secondLng) < 1e-7
-                        if (samePoint) {
-                            mapView.controller.setCenter(focusPoints.first())
-                            mapView.controller.setZoom(MAP_DISPLAY_MAX_ZOOM)
-                        } else {
-                            mapView.zoomToBoundingBox(boundingBoxFromPoints(focusPoints), true, 96)
-                        }
                         if (!isInsetMode) {
                             persistFullMapViewport(mapView)
                         }
@@ -4433,7 +4507,8 @@ internal fun SplitMapPane(
                                 fullHeightPx = restoredViewport.heightPx,
                                 insetWidthPx = insetWidth,
                                 insetHeightPx = insetHeight,
-                                fullZoom = restoredViewport.zoom
+                                fullZoom = restoredViewport.zoom,
+                                maxZoom = baseTileSource.maximumZoomLevel.toDouble()
                             )
                         )
                         insetRestoredViewportApplied = true

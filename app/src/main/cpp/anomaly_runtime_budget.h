@@ -92,6 +92,18 @@ typedef struct {
     bool update_log_timestamp;
 } anomaly_detector_runtime_budget_render_lag_t;
 
+typedef struct {
+    int64_t elapsed_ms;
+    bool wait;
+    bool complete;
+} anomaly_detector_runtime_budget_local_ad_startup_preroll_t;
+
+typedef struct {
+    bool analyze;
+    bool prediction_only;
+    int frame_stride_override;
+} anomaly_detector_runtime_budget_local_ad_cadence_t;
+
 typedef enum {
     ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE = 0,
     ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_ATTACHED = 1,
@@ -356,6 +368,28 @@ anomaly_detector_runtime_budget_render_lag(
         int64_t base_interval_ms,
         int64_t last_lag_log_at_ms,
         int64_t lag_log_interval_ms);
+
+anomaly_detector_runtime_budget_local_ad_startup_preroll_t
+anomaly_detector_runtime_budget_local_ad_startup_preroll(
+        bool local_file_source,
+        bool preroll_complete,
+        bool ad_enabled,
+        bool ad_thread_started,
+        bool ad_sync_ready,
+        bool render_thread_stop,
+        int render_queue_depth,
+        int64_t now_ms,
+        int64_t started_at_ms,
+        int target_render_queue_depth,
+        int64_t max_wait_ms);
+
+anomaly_detector_runtime_budget_local_ad_cadence_t
+anomaly_detector_runtime_budget_local_ad_cadence(
+        bool local_file_source,
+        bool processing_enabled,
+        int64_t decoded_frame_ordinal,
+        int full_scan_stride_frames,
+        int target_eval_interval_frames);
 
 anomaly_detector_runtime_budget_local_ad_overlay_action_t
 anomaly_detector_runtime_budget_local_ad_overlay_action(

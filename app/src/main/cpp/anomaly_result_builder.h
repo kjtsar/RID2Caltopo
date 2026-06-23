@@ -610,6 +610,14 @@ typedef struct {
     float hist_current_count;
     float hist_recent_count;
     float hist_rarity_score;
+    float center_u;
+    float center_v;
+    float center_luma;
+    float local_ring_chroma_contrast;
+    float local_ring_luma_contrast;
+    int local_ring_neighbor_count;
+    float current_nearest_hist_distance;
+    float recent_nearest_hist_distance;
     float small_target_span_ratio;
     float small_target_area_ratio;
     float scene_commonness;

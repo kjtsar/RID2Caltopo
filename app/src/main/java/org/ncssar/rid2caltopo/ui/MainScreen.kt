@@ -41,6 +41,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -141,6 +142,22 @@ sealed interface MainScreenItem {
 
 private fun shouldOfferDriveRestore(context: Context): Boolean {
     return !AppConfigStore.hasMeaningfulConfig(context) && CaltopoClient.GetArchiveUri() == null
+}
+
+internal fun shouldLaunchArchiveDirPicker(
+    archiveUriMissing: Boolean,
+    forceArchiveDirPrompt: Boolean,
+    driveRestoreEligibilityLoaded: Boolean,
+    showDriveRestoreDialog: Boolean,
+    driveSyncInProgress: Boolean,
+    archiveDirPickerOpen: Boolean
+): Boolean {
+    return archiveUriMissing &&
+        !archiveDirPickerOpen &&
+        (
+            forceArchiveDirPrompt ||
+                (driveRestoreEligibilityLoaded && !showDriveRestoreDialog && !driveSyncInProgress)
+            )
 }
 
 internal suspend fun <T> readMutualAidPackagePreviewOffMain(
@@ -919,9 +936,11 @@ fun MainScreen(
 
 
     // Launcher for selecting an archive directory
+    var archiveDirPickerOpen by rememberSaveable { mutableStateOf(false) }
     val queryArchiveDirLauncher = rememberLauncherForActivityResult(
         contract = OpenArchiveDir(),
         onResult = { uri ->
+            archiveDirPickerOpen = false
             if (null != uri) {
                 CTDebug(tag, "queryArchiveDirLauncher() returned: '${uri}'")
                 context.contentResolver.takePersistableUriPermission(
@@ -932,13 +951,23 @@ fun MainScreen(
             }
         }
     )
-    LaunchedEffect(showDriveRestoreDialog, driveSyncInProgress, forceArchiveDirPrompt, driveRestoreEligibilityLoaded) {
+    LaunchedEffect(
+        showDriveRestoreDialog,
+        driveSyncInProgress,
+        forceArchiveDirPrompt,
+        driveRestoreEligibilityLoaded
+    ) {
         val archiveUriMissing = withContext(Dispatchers.IO) {
             null == CaltopoClient.GetArchiveUri()
         }
-        val shouldPromptArchiveDir =
-            archiveUriMissing &&
-                (forceArchiveDirPrompt || (driveRestoreEligibilityLoaded && !showDriveRestoreDialog && !driveSyncInProgress))
+        val shouldPromptArchiveDir = shouldLaunchArchiveDirPicker(
+            archiveUriMissing = archiveUriMissing,
+            forceArchiveDirPrompt = forceArchiveDirPrompt,
+            driveRestoreEligibilityLoaded = driveRestoreEligibilityLoaded,
+            showDriveRestoreDialog = showDriveRestoreDialog,
+            driveSyncInProgress = driveSyncInProgress,
+            archiveDirPickerOpen = archiveDirPickerOpen
+        )
         if (shouldPromptArchiveDir) {
             val initialUri = withContext(Dispatchers.IO) {
                 CaltopoClient.GetArchiveUriSelectionHint()
@@ -952,6 +981,7 @@ fun MainScreen(
             CaltopoClient.ShowToast(prompt)
             CTDebug(tag, "LaunchedEffect() requesting archiveDir initialUri='${initialUri ?: "<none>"}'")
             forceArchiveDirPrompt = false
+            archiveDirPickerOpen = true
             queryArchiveDirLauncher.launch(initialUri)
         }
     }

@@ -125,7 +125,7 @@ android {
             }
             externalNativeBuild {
                 cmake {
-                    arguments "-DANOMALY_DEBUG_TIMING=OFF"
+                    arguments "-DANOMALY_DEBUG_TIMING=ON"
                 }
             }
         }

@@ -2,20 +2,13 @@
 """Run a fixed visible-color performance benchmark matrix.
 
 This keeps color-path performance tracking on a stable, repeatable harness
-instead of relying only on noisy in-app timing. The default matrix is aligned
-to the current app-style visible-light settings:
+instead of relying only on noisy in-app timing. The matrix tracks the legacy
+coarse visible-light profile, the current app-parity dense stride profile, and
+the dense every-frame comparison profile:
 
-  - color only
-  - affine registration
-  - score threshold 2.8
-  - min hits 2
-  - scan zone 0.80
-  - stride 1
-  - small target fraction 1/200
-
-Two profiles are included:
-  - app-like auto detail
-  - dense gold comparison (`--pixel-step 1`)
+  - legacy coarse auto detail
+  - app dense stride/defaults (`--app-defaults --app-appearance color`)
+  - dense gold comparison (`--pixel-step 1` every frame)
 
 Each profile runs over fixed 10s windows from Color1/2/3 and writes per-case
 summary JSON plus one aggregate report JSON for before/after diffing.
@@ -70,8 +63,8 @@ CASES = (
 
 PROFILES = (
     Profile(
-        id="visible-color-app-like-auto",
-        label="Visible color app-like auto detail",
+        id="visible-color-legacy-auto",
+        label="Visible color legacy auto detail",
         detector_args=(
             "-a", "1",
             "-t", "2.8",
@@ -80,6 +73,15 @@ PROFILES = (
             "--registration", "affine",
             "--stride", "1",
             "--small-target-fraction", "0.005",
+        ),
+    ),
+    Profile(
+        id="visible-color-app-dense-stride",
+        label="Visible color app dense stride",
+        detector_args=(
+            "--app-defaults",
+            "--app-appearance", "color",
+            "--app-display-output",
         ),
     ),
     Profile(
@@ -99,7 +101,7 @@ PROFILES = (
 )
 
 
-def stage_avg_ms(summary: dict[str, object], stage_name: str) -> float:
+def stage_metric_ms(summary: dict[str, object], stage_name: str, metric_name: str) -> float:
     stage_timing = summary.get("stage_timing", {})
     if not isinstance(stage_timing, dict):
         return 0.0
@@ -109,8 +111,16 @@ def stage_avg_ms(summary: dict[str, object], stage_name: str) -> float:
     stage = stages.get(stage_name, {})
     if not isinstance(stage, dict):
         return 0.0
-    value = stage.get("avg_ms", 0.0)
+    value = stage.get(metric_name, 0.0)
     return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def stage_avg_ms(summary: dict[str, object], stage_name: str) -> float:
+    return stage_metric_ms(summary, stage_name, "avg_ms")
+
+
+def stage_max_ms(summary: dict[str, object], stage_name: str) -> float:
+    return stage_metric_ms(summary, stage_name, "max_ms")
 
 
 def build_command(
@@ -145,8 +155,16 @@ def aggregate_profile_metrics(results: list[dict[str, object]]) -> dict[str, flo
             "case_count": 0.0,
             "avg_realtime_factor": 0.0,
             "avg_total_ms": 0.0,
+            "max_total_ms": 0.0,
             "avg_sampled_grid_prep_ms": 0.0,
             "avg_color_scoring_ms": 0.0,
+            "max_color_scoring_ms": 0.0,
+            "avg_color_seed_scoring_ms": 0.0,
+            "max_color_seed_scoring_ms": 0.0,
+            "avg_color_blob_extraction_ms": 0.0,
+            "max_color_blob_extraction_ms": 0.0,
+            "avg_color_candidate_ranking_ms": 0.0,
+            "max_color_candidate_ranking_ms": 0.0,
             "avg_scan_planning_ms": 0.0,
             "avg_refresh_mask_build_ms": 0.0,
         }
@@ -155,8 +173,16 @@ def aggregate_profile_metrics(results: list[dict[str, object]]) -> dict[str, flo
         "case_count": count,
         "avg_realtime_factor": sum(float(r["realtime_factor"]) for r in results) / count,
         "avg_total_ms": sum(float(r["avg_total_ms"]) for r in results) / count,
+        "max_total_ms": max(float(r["max_total_ms"]) for r in results),
         "avg_sampled_grid_prep_ms": sum(float(r["sampled_grid_prep_ms"]) for r in results) / count,
         "avg_color_scoring_ms": sum(float(r["color_scoring_ms"]) for r in results) / count,
+        "max_color_scoring_ms": max(float(r["max_color_scoring_ms"]) for r in results),
+        "avg_color_seed_scoring_ms": sum(float(r["color_seed_scoring_ms"]) for r in results) / count,
+        "max_color_seed_scoring_ms": max(float(r["max_color_seed_scoring_ms"]) for r in results),
+        "avg_color_blob_extraction_ms": sum(float(r["color_blob_extraction_ms"]) for r in results) / count,
+        "max_color_blob_extraction_ms": max(float(r["max_color_blob_extraction_ms"]) for r in results),
+        "avg_color_candidate_ranking_ms": sum(float(r["color_candidate_ranking_ms"]) for r in results) / count,
+        "max_color_candidate_ranking_ms": max(float(r["max_color_candidate_ranking_ms"]) for r in results),
         "avg_scan_planning_ms": sum(float(r["scan_planning_ms"]) for r in results) / count,
         "avg_refresh_mask_build_ms": sum(float(r["refresh_mask_build_ms"]) for r in results) / count,
     }
@@ -216,6 +242,9 @@ def main() -> int:
                 print(f"  -> {case.label}")
                 subprocess.run(cmd, check=True)
                 summary = json.loads(summary_json.read_text())
+                stage_timing = summary.get("stage_timing", {})
+                if not isinstance(stage_timing, dict):
+                    stage_timing = {}
                 result = {
                     "case": case.label,
                     "video": str(video),
@@ -225,9 +254,18 @@ def main() -> int:
                     "csv_path": str(csv_path),
                     "frame_count": int(summary.get("frame_count", 0)),
                     "realtime_factor": float(summary.get("realtime_factor", 0.0)),
-                    "avg_total_ms": float(summary.get("stage_timing", {}).get("avg_total_ms", 0.0)),
+                    "avg_total_ms": float(stage_timing.get("avg_total_ms", 0.0)),
+                    "min_total_ms": float(stage_timing.get("min_total_ms", 0.0)),
+                    "max_total_ms": float(stage_timing.get("max_total_ms", 0.0)),
                     "sampled_grid_prep_ms": stage_avg_ms(summary, "sampled_grid_prep"),
                     "color_scoring_ms": stage_avg_ms(summary, "color_scoring"),
+                    "max_color_scoring_ms": stage_max_ms(summary, "color_scoring"),
+                    "color_seed_scoring_ms": stage_avg_ms(summary, "color_seed_scoring"),
+                    "max_color_seed_scoring_ms": stage_max_ms(summary, "color_seed_scoring"),
+                    "color_blob_extraction_ms": stage_avg_ms(summary, "color_blob_extraction"),
+                    "max_color_blob_extraction_ms": stage_max_ms(summary, "color_blob_extraction"),
+                    "color_candidate_ranking_ms": stage_avg_ms(summary, "color_candidate_ranking"),
+                    "max_color_candidate_ranking_ms": stage_max_ms(summary, "color_candidate_ranking"),
                     "scan_planning_ms": stage_avg_ms(summary, "scan_planning"),
                     "refresh_mask_build_ms": stage_avg_ms(summary, "refresh_mask_build"),
                 }
@@ -250,8 +288,13 @@ def main() -> int:
         aggregates = profile["aggregates"]
         print(f"  avg realtime:          {float(aggregates['avg_realtime_factor']):.2f}x")
         print(f"  avg total ms:          {float(aggregates['avg_total_ms']):.2f}")
+        print(f"  max total ms:          {float(aggregates['max_total_ms']):.2f}")
         print(f"  avg sampled-grid ms:   {float(aggregates['avg_sampled_grid_prep_ms']):.2f}")
         print(f"  avg color-scoring ms:  {float(aggregates['avg_color_scoring_ms']):.2f}")
+        print(f"  max color-scoring ms:  {float(aggregates['max_color_scoring_ms']):.2f}")
+        print(f"  avg color seed ms:     {float(aggregates['avg_color_seed_scoring_ms']):.2f}")
+        print(f"  avg color blob ms:     {float(aggregates['avg_color_blob_extraction_ms']):.2f}")
+        print(f"  avg color ranking ms:  {float(aggregates['avg_color_candidate_ranking_ms']):.2f}")
         print(f"  avg scan-plan ms:      {float(aggregates['avg_scan_planning_ms']):.2f}")
         print(f"  avg refresh-mask ms:   {float(aggregates['avg_refresh_mask_build_ms']):.2f}")
 

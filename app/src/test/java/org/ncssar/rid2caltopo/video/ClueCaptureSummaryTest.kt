@@ -1,4 +1,6 @@
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Test
 import org.ncssar.rid2caltopo.data.CtDroneSpec
 
@@ -29,5 +31,44 @@ class ClueCaptureSummaryTest {
         )
 
         assertTrue(summary.contains("  USNG: 18S VK "))
+    }
+
+    @Test
+    fun streamTelemetryDisplayStateUsesPairedMappedIdBeforeStreamDesignator() {
+        val streamState = DroneDisplayState(
+            headingDeg = 90.0,
+            aglFt = 100.0,
+            atoFt = 120.0
+        )
+        val pairedState = DroneDisplayState(
+            headingDeg = 180.0,
+            aglFt = 200.0,
+            atoFt = 220.0
+        )
+
+        val resolved = streamTelemetryDisplayState(
+            streamDesignator = "NCSSAR_MTRC4TD",
+            pairedMappedId = "1SAR138DjMtrc4td",
+            displayStateByDesignator = mapOf(
+                "NCSSAR_MTRC4TD" to streamState,
+                "1SAR138DjMtrc4td" to pairedState
+            )
+        )
+
+        assertSame(pairedState, resolved)
+    }
+
+    @Test
+    fun streamTelemetrySummaryLabelUsesPairedMappedIdBeforeStreamDesignator() {
+        val droneSpec = CtDroneSpec("RID123").apply {
+            setMappedId("1SAR138DjMtrc4td")
+        }
+
+        val label = streamTelemetrySummaryDesignatorLabel(
+            streamDesignator = "NCSSAR_MTRC4TD",
+            droneSpec = droneSpec
+        )
+
+        assertEquals("1SAR138DjMtrc4td", label)
     }
 }

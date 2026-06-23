@@ -34,6 +34,44 @@ class MapPanePresentationModeTest {
     }
 
     @Test
+    fun mapPaneInsetViewportZoom_clampsToBaseLayerMaximumZoom() {
+        assertEquals(
+            19.0,
+            mapPaneInsetViewportZoom(
+                fullWidthPx = 1280,
+                fullHeightPx = 720,
+                insetWidthPx = 320,
+                insetHeightPx = 180,
+                fullZoom = 22.0,
+                maxZoom = 19.0
+            ),
+            0.0001
+        )
+    }
+
+    @Test
+    fun mapPaneInitialViewportZoom_clampsInsetModeToBaseLayerMaximumZoom() {
+        assertEquals(
+            19.0,
+            mapPaneInitialViewportZoom(
+                presentationMode = MapPanePresentationMode.Inset,
+                restoredZoom = 22.0,
+                maxZoom = 19.0
+            ),
+            0.0001
+        )
+        assertEquals(
+            22.0,
+            mapPaneInitialViewportZoom(
+                presentationMode = MapPanePresentationMode.Full,
+                restoredZoom = 22.0,
+                maxZoom = 19.0
+            ),
+            0.0001
+        )
+    }
+
+    @Test
     fun mapPaneInsetViewportZoom_keepsZoomWhenSizeIsUnknown() {
         assertEquals(
             14.0,
@@ -84,6 +122,82 @@ class MapPanePresentationModeTest {
                 followFocusedDroneEnabled = true,
                 hasFocusedDroneTelemetry = true,
                 operatorAdjustedViewport = true
+            )
+        )
+    }
+
+    @Test
+    fun mapPaneArtifactMountPolicy_keepsInsetMapLightweight() {
+        assertFalse(
+            mapPaneShouldReplayCachedArtifacts(
+                presentationMode = MapPanePresentationMode.Inset,
+                cachedFeatureCount = 0
+            )
+        )
+        assertFalse(
+            mapPaneShouldRequestArtifactRefreshOnMount(
+                presentationMode = MapPanePresentationMode.Inset,
+                cachedFeatureCount = 0
+            )
+        )
+    }
+
+    @Test
+    fun mapPaneArtifactMountPolicy_replaysOnlyWhenFullMapCacheIsEmpty() {
+        assertTrue(
+            mapPaneShouldReplayCachedArtifacts(
+                presentationMode = MapPanePresentationMode.Full,
+                cachedFeatureCount = 0
+            )
+        )
+        assertFalse(
+            mapPaneShouldReplayCachedArtifacts(
+                presentationMode = MapPanePresentationMode.Full,
+                cachedFeatureCount = 12
+            )
+        )
+        assertFalse(
+            mapPaneShouldRequestArtifactRefreshOnMount(
+                presentationMode = MapPanePresentationMode.Full,
+                cachedFeatureCount = 0
+            )
+        )
+        assertFalse(
+            mapPaneShouldRequestArtifactRefreshOnMount(
+                presentationMode = MapPanePresentationMode.Full,
+                cachedFeatureCount = 12
+            )
+        )
+    }
+
+    @Test
+    fun mapPaneCanZoomToBoundingBox_requiresMeasuredMapAndMultiplePoints() {
+        assertFalse(
+            mapPaneCanZoomToBoundingBox(
+                mapWidthPx = 0,
+                mapHeightPx = 720,
+                pointCount = 2
+            )
+        )
+        assertFalse(
+            mapPaneCanZoomToBoundingBox(
+                mapWidthPx = 1280,
+                mapHeightPx = 0,
+                pointCount = 2
+            )
+        )
+        assertFalse(
+            mapPaneCanZoomToBoundingBox(
+                mapWidthPx = 1280,
+                mapHeightPx = 720,
+                pointCount = 1
+            )
+        )
+        assertTrue(
+            mapPaneCanZoomToBoundingBox(
+                mapWidthPx = 1280,
+                mapHeightPx = 720,
+                pointCount = 2
             )
         )
     }

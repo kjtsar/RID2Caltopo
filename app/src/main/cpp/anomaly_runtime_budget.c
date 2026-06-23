@@ -1154,6 +1154,92 @@ anomaly_detector_runtime_budget_render_lag(
     return lag;
 }
 
+anomaly_detector_runtime_budget_local_ad_startup_preroll_t
+anomaly_detector_runtime_budget_local_ad_startup_preroll(
+        bool local_file_source,
+        bool preroll_complete,
+        bool ad_enabled,
+        bool ad_thread_started,
+        bool ad_sync_ready,
+        bool render_thread_stop,
+        int render_queue_depth,
+        int64_t now_ms,
+        int64_t started_at_ms,
+        int target_render_queue_depth,
+        int64_t max_wait_ms) {
+    anomaly_detector_runtime_budget_local_ad_startup_preroll_t preroll = {
+        .elapsed_ms = now_ms - started_at_ms,
+        .wait = false,
+        .complete = preroll_complete,
+    };
+    if (preroll.elapsed_ms < 0) {
+        preroll.elapsed_ms = 0;
+    }
+    if (preroll.complete) {
+        return preroll;
+    }
+    if (!local_file_source) {
+        preroll.complete = true;
+        return preroll;
+    }
+    if (!ad_enabled || !ad_thread_started || !ad_sync_ready || render_thread_stop) {
+        return preroll;
+    }
+    if (target_render_queue_depth <= 0 && max_wait_ms <= 0) {
+        preroll.complete = true;
+        return preroll;
+    }
+    if (target_render_queue_depth > 0 && render_queue_depth >= target_render_queue_depth) {
+        preroll.complete = true;
+        return preroll;
+    }
+    if (max_wait_ms > 0 && preroll.elapsed_ms >= max_wait_ms) {
+        preroll.complete = true;
+        return preroll;
+    }
+    preroll.wait = true;
+    return preroll;
+}
+
+anomaly_detector_runtime_budget_local_ad_cadence_t
+anomaly_detector_runtime_budget_local_ad_cadence(
+        bool local_file_source,
+        bool processing_enabled,
+        int64_t decoded_frame_ordinal,
+        int full_scan_stride_frames,
+        int target_eval_interval_frames) {
+    anomaly_detector_runtime_budget_local_ad_cadence_t cadence = {
+        .analyze = true,
+        .prediction_only = false,
+        .frame_stride_override = 0,
+    };
+    if (!local_file_source || !processing_enabled) {
+        return cadence;
+    }
+    if (decoded_frame_ordinal <= 0) {
+        decoded_frame_ordinal = 1;
+    }
+    if (target_eval_interval_frames < 1) {
+        target_eval_interval_frames = 1;
+    }
+    if (full_scan_stride_frames < target_eval_interval_frames) {
+        full_scan_stride_frames = target_eval_interval_frames;
+    }
+    if ((decoded_frame_ordinal % target_eval_interval_frames) != 0) {
+        cadence.analyze = false;
+        cadence.prediction_only = true;
+        return cadence;
+    }
+    int derived_stride =
+            (full_scan_stride_frames + target_eval_interval_frames - 1) /
+            target_eval_interval_frames;
+    if (derived_stride < 1) {
+        derived_stride = 1;
+    }
+    cadence.frame_stride_override = derived_stride;
+    return cadence;
+}
+
 anomaly_detector_runtime_budget_local_ad_overlay_action_t
 anomaly_detector_runtime_budget_local_ad_overlay_action(
         bool overlay_present,

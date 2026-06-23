@@ -9,7 +9,7 @@ import kotlin.math.sqrt
 private const val DEFAULT_FRAME_STRIDE = 1
 private const val DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES = 2
 private const val DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS = 1.0f
-private const val COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES = 4
+private const val COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES = 30
 private val DEFAULT_NON_APPEARANCE_ALGORITHMS = setOf(AnomalyAlgorithm.Motion)
 
 enum class AnomalyAlgorithm(
@@ -149,7 +149,7 @@ data class AnomalyConfig(
     val adaptiveMinStrideFrames: Int = 2,
     val adaptiveMaxStrideSeconds: Float = 1.0f,
     val pixelStep: Int = 0,
-    val sensitivity: Float = 0.42f,
+    val sensitivity: Float = 0.59f,
     val motionEvidenceSensitivity: Float = 0.60f,
     val minAreaFraction: Float = 0.0015f,
     val thermalPolarity: ThermalPolarity = ThermalPolarity.BlackHot,
@@ -279,7 +279,12 @@ data class AnomalyConfig(
         }
         val colorRealtimeStrideDefault =
             resolvedAppearanceMode == AppearanceAnomalyMode.Color && hasDefaultRealtimeStrideSettings()
-        val fixedFrameStride = frameStride.coerceIn(1, 10)
+        val nativePixelStep = if (resolvedAppearanceMode == AppearanceAnomalyMode.Color && pixelStep <= 0) {
+            1
+        } else {
+            pixelStep.coerceIn(0, 8)
+        }
+        val fixedFrameStride = frameStride.coerceIn(1, 33)
         val nativeStrideMode = if (colorRealtimeStrideDefault) {
             AnomalyStrideMode.Adaptive
         } else {
@@ -314,7 +319,7 @@ data class AnomalyConfig(
             adaptiveMinStrideFrames = adaptiveMinFrames,
             adaptiveMaxStrideFrames = adaptiveMaxFrames,
             adaptiveMaxStrideSeconds = adaptiveMaxSeconds,
-            pixelStep = pixelStep.coerceIn(0, 8),
+            pixelStep = nativePixelStep,
             scoreThreshold = scoreThreshold,
             motionEvidenceScale = motionEvidenceScale,
             minAreaFraction = effectiveMinAreaFraction,

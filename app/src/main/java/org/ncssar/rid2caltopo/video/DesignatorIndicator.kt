@@ -60,7 +60,7 @@ fun DesignatorIndicator(
     val errorSummary = formatStreamErrorDetail(streamErrorDetail)
     val renderDelayMs = viewModel.renderDelayMsFor(streamDesignator)
     val playbackIndicatorState = viewModel.playbackIndicatorStateFor(streamDesignator)
-    val droneDisplayState = viewModel.droneDisplayStateFor(streamDesignator)
+    val droneDisplayState = viewModel.droneDisplayStateForStream(streamDesignator)
     val isLocalPlayback = viewModel.isLocalPlayback(streamDesignator)
     val coordinateDisplayFormat = viewModel.coordinateDisplayFormat
     var coordinateMenuExpanded by remember(streamDesignator) { mutableStateOf(false) }
@@ -119,13 +119,9 @@ fun DesignatorIndicator(
 
     val (palette, locationText, detailText) = when (designatorState) {
         is DesignatorState.Green -> {
-            val ds = viewModel.droneStates[streamDesignator]
+            val ds = designatorState.droneSpecState
             val location: String
-            if (ds != null) {
-                location = CoordinateFormatter.format(ds.lastLat, ds.lastLng, coordinateDisplayFormat)
-            } else {
-                location = "loc:unknown"
-            }
+            location = CoordinateFormatter.format(ds.lastLat, ds.lastLng, coordinateDisplayFormat)
             Triple(
                 indicatorPaletteFor(designatorState),
                 "$location (${coordinateDisplayFormat.label})",
@@ -148,7 +144,7 @@ fun DesignatorIndicator(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedIndicatorText(
-                    text = "$streamDesignator -",
+                    text = "${viewModel.streamTilePrimaryLabel(streamDesignator)} -",
                     style = MaterialTheme.typography.titleLarge,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -180,7 +176,7 @@ fun DesignatorIndicator(
             }
         } else {
             OutlinedIndicatorText(
-                text = "$streamDesignator - $streamStateText",
+                text = "${viewModel.streamTilePrimaryLabel(streamDesignator)} - $streamStateText",
                 style = MaterialTheme.typography.titleLarge,
                 maxLines = if (streamState == StreamState.ERROR) 2 else 1,
                 overflow = TextOverflow.Ellipsis,
@@ -407,9 +403,10 @@ fun DroneSpecPickerDialog(
                             .padding(8.dp)
                     ) {
                         Column {
-                            val (designator, droneSpecState) = droneSpecState
-                            Text("Designator: $designator")
-                            Text("Mapped ID: ${droneSpecState.mappedId} Remote ID: ${droneSpecState.remoteId}")
+                            val (mappedId, droneSpecState) = droneSpecState
+                            val displayMappedId = droneSpecState.mappedId.ifBlank { mappedId }
+                            Text("Mapped ID: $displayMappedId")
+                            Text("Remote ID: ${droneSpecState.remoteId}")
                         }
                     }
                 }

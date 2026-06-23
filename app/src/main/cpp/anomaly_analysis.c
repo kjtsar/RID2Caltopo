@@ -8455,6 +8455,7 @@ int anomaly_process_frame(
                 }
 #if ANOMALY_DEBUG_TIMING
                 anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SCORING, branch_started_us);
+                anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SEED_SCORING, branch_started_us);
 #endif
             }
             if (color_target_valid && sx == color_target_sx && sy == color_target_sy) {
@@ -8490,6 +8491,14 @@ int anomaly_process_frame(
     float color_candidate_hist_current_count[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_hist_recent_count[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_hist_rarity[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_center_u[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_center_v[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_center_luma[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_local_ring_chroma_contrast[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_local_ring_luma_contrast[ANOMALY_MAX_COLOR_CANDIDATES];
+    int color_candidate_local_ring_neighbor_count[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_current_nearest_hist_distance[ANOMALY_MAX_COLOR_CANDIDATES];
+    float color_candidate_recent_nearest_hist_distance[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_small_target_span_ratio[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_small_target_area_ratio[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_scene_commonness_score[ANOMALY_MAX_COLOR_CANDIDATES];
@@ -8747,6 +8756,9 @@ int anomaly_process_frame(
             color_seed_count > 0 &&
             color_seed_max_sx >= color_seed_min_sx &&
             color_seed_max_sy >= color_seed_min_sy) {
+#if ANOMALY_DEBUG_TIMING
+            int64_t color_blob_started_us = anomaly_timing_now_us();
+#endif
             extract_color_blob_candidates(
                     cfg,
                     state,
@@ -8793,6 +8805,9 @@ int anomaly_process_frame(
                     &color_blob_target_span_cells,
                     &color_blob_max_area_budget);
             color_coarse_component_count = color_blob_examined_count;
+#if ANOMALY_DEBUG_TIMING
+            anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_BLOB_EXTRACTION, color_blob_started_us);
+#endif
         }
         color_adaptive_source_coarse_count = color_coarse_component_count;
         if (rescan_mode == ANOMALY_RESCAN_MODE_FULL) {
@@ -8814,6 +8829,9 @@ int anomaly_process_frame(
         best_color_x = 0;
         best_color_y = 0;
         int color_min_hits = cfg->min_hits < 1 ? 1 : cfg->min_hits;
+#if ANOMALY_DEBUG_TIMING
+        int64_t color_candidate_started_us = anomaly_timing_now_us();
+#endif
         for (int ci = 0; ci < color_candidate_count; ci++) {
             float temporal_candidate_boost = anomaly_color_score_candidate_temporal_boost(
                 state,
@@ -8851,6 +8869,14 @@ int anomaly_process_frame(
             color_candidate_hist_current_count[ci] = 0.0f;
             color_candidate_hist_recent_count[ci] = 0.0f;
             color_candidate_hist_rarity[ci] = 0.0f;
+            color_candidate_center_u[ci] = 0.0f;
+            color_candidate_center_v[ci] = 0.0f;
+            color_candidate_center_luma[ci] = 0.0f;
+            color_candidate_local_ring_chroma_contrast[ci] = 0.0f;
+            color_candidate_local_ring_luma_contrast[ci] = 0.0f;
+            color_candidate_local_ring_neighbor_count[ci] = 0;
+            color_candidate_current_nearest_hist_distance[ci] = -1.0f;
+            color_candidate_recent_nearest_hist_distance[ci] = -1.0f;
             color_candidate_small_target_span_ratio[ci] = 0.0f;
             color_candidate_small_target_area_ratio[ci] = 0.0f;
             color_candidate_scene_commonness_score[ci] = 0.0f;
@@ -8864,11 +8890,35 @@ int anomaly_process_frame(
                     int u_bin = (int)state->roi_state.color_u_bin[cidx];
                     int v_bin = (int)state->roi_state.color_v_bin[cidx];
                     int key = anomaly_color_hist_key(u_bin, v_bin);
+                    color_candidate_center_u[ci] = state->roi_state.color_u != NULL
+                        ? state->roi_state.color_u[cidx]
+                        : 0.0f;
+                    color_candidate_center_v[ci] = state->roi_state.color_v != NULL
+                        ? state->roi_state.color_v[cidx]
+                        : 0.0f;
+                    color_candidate_center_luma[ci] = state->roi_state.color_luma != NULL
+                        ? state->roi_state.color_luma[cidx]
+                        : 0.0f;
+                    anomaly_color_compute_ring_contrast(
+                        &state->roi_state,
+                        sg_w,
+                        sg_h,
+                        color_candidates[ci].sg_x,
+                        color_candidates[ci].sg_y,
+                        1,
+                        3,
+                        &color_candidate_local_ring_chroma_contrast[ci],
+                        &color_candidate_local_ring_luma_contrast[ci],
+                        &color_candidate_local_ring_neighbor_count[ci]);
                     color_candidate_hist_key[ci] = key;
                     color_candidate_hist_current_count[ci] = (float)color_frame_hist[key];
                     color_candidate_hist_recent_count[ci] = color_frame_hist != NULL
                         ? (float)color_recent_hist_weighted[key]
                         : 0.0f;
+                    color_candidate_current_nearest_hist_distance[ci] =
+                        anomaly_color_nearest_common_hist_bin_distance(color_frame_hist, u_bin, v_bin, 2);
+                    color_candidate_recent_nearest_hist_distance[ci] =
+                        anomaly_color_nearest_common_hist_bin_distance(color_recent_hist_weighted, u_bin, v_bin, 2);
                     color_candidate_hist_rarity[ci] =
                         color_frontend_mode == ANOMALY_COLOR_FRONTEND_LEGACY
                             ? anomaly_color_score_hist_family_rarity(
@@ -9038,6 +9088,9 @@ int anomaly_process_frame(
                 best_color_y = color_blob_candidates[ci].candidate.pixel_y;
             }
         }
+#if ANOMALY_DEBUG_TIMING
+        anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_CANDIDATE_RANKING, color_candidate_started_us);
+#endif
         if (best_color_candidate_idx >= 0) {
             best_color = color_candidates[best_color_candidate_idx].color_score;
             best_color_x = color_candidates[best_color_candidate_idx].pixel_x;
@@ -12616,6 +12669,14 @@ motion_appearance_scoring_done:
                     .hist_current_count = color_candidate_hist_current_count[i],
                     .hist_recent_count = color_candidate_hist_recent_count[i],
                     .hist_rarity_score = color_candidate_hist_rarity[i],
+                    .center_u = color_candidate_center_u[i],
+                    .center_v = color_candidate_center_v[i],
+                    .center_luma = color_candidate_center_luma[i],
+                    .local_ring_chroma_contrast = color_candidate_local_ring_chroma_contrast[i],
+                    .local_ring_luma_contrast = color_candidate_local_ring_luma_contrast[i],
+                    .local_ring_neighbor_count = color_candidate_local_ring_neighbor_count[i],
+                    .current_nearest_hist_distance = color_candidate_current_nearest_hist_distance[i],
+                    .recent_nearest_hist_distance = color_candidate_recent_nearest_hist_distance[i],
                     .small_target_span_ratio = color_candidate_small_target_span_ratio[i],
                     .small_target_area_ratio = color_candidate_small_target_area_ratio[i],
                     .scene_commonness = color_candidate_scene_commonness_score[i],

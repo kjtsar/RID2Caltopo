@@ -150,6 +150,10 @@
 #define AD_INPUT_QUEUE_HARD_CAPACITY 24
 #define AD_INPUT_QUEUE_DEFAULT_BACKLOG_MS 750
 #define LOCAL_AD_INPUT_QUEUE_BACKLOG_MS 150
+#define LOCAL_AD_STARTUP_PREROLL_RENDER_DEPTH 30
+#define LOCAL_AD_STARTUP_PREROLL_MAX_WAIT_MS 1000
+#define LOCAL_AD_FULL_SCAN_STRIDE_FRAMES 30
+#define LOCAL_AD_TARGET_EVAL_INTERVAL_FRAMES 5
 #define AD_PRESSURE_ANALYZE_ALTERNATE_PCT 50
 #define AD_PRESSURE_BYPASS_ALTERNATE_PCT 66
 #define AD_PRESSURE_BYPASS_ALL_PCT 80
@@ -371,6 +375,9 @@ typedef struct ffmpeg_session_t {
     int64_t local_ad_sidecar_dropped_count;
     int64_t local_ad_sidecar_completed_count;
     int64_t local_ad_sidecar_late_count;
+    int64_t local_ad_startup_preroll_started_at_ms;
+    int64_t local_ad_startup_preroll_bypassed_count;
+    bool local_ad_startup_preroll_complete;
     int64_t ad_pressure_frame_counter;
     ad_pressure_mode_t ad_pressure_mode;
 #endif
@@ -1016,6 +1023,9 @@ static const char *timing_stage_short_name(anomaly_timing_stage_t stage) {
         case ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP: return "sample";
         case ANOMALY_TIMING_STAGE_THERMAL_SCORING: return "thermal";
         case ANOMALY_TIMING_STAGE_COLOR_SCORING: return "color";
+        case ANOMALY_TIMING_STAGE_COLOR_SEED_SCORING: return "cseed";
+        case ANOMALY_TIMING_STAGE_COLOR_BLOB_EXTRACTION: return "cblob";
+        case ANOMALY_TIMING_STAGE_COLOR_CANDIDATE_RANKING: return "crank";
         case ANOMALY_TIMING_STAGE_MOTION_SCORING: return "motion";
         case ANOMALY_TIMING_STAGE_SALIENCY_SCORING: return "persist";
         case ANOMALY_TIMING_STAGE_TARGET_TRACKING: return "track";
@@ -1051,6 +1061,22 @@ static void append_timing_summary(
     if (used + 1 < buffer_size) {
         buffer[used++] = ']';
         buffer[used] = '\0';
+    }
+}
+
+static void trace_set_anomaly_stage_timing_counters(
+        const anomaly_debug_timing_t *timing) {
+    if (timing == NULL || !timing->compiled) return;
+
+    trace_set_counter("RID2C ad_stage_total_us", timing->total_us);
+    for (int stage = 0; stage < ANOMALY_TIMING_STAGE_COUNT; stage++) {
+        char counter_name[64];
+        int written = snprintf(counter_name,
+                               sizeof(counter_name),
+                               "RID2C ad_stage_%s_us",
+                               timing_stage_short_name((anomaly_timing_stage_t)stage));
+        if (written <= 0 || (size_t)written >= sizeof(counter_name)) continue;
+        trace_set_counter(counter_name, timing->stage_us[stage]);
     }
 }
 
@@ -1266,6 +1292,7 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
             break;
     }
     trace_set_counter("RID2C anomaly_us", elapsed_us);
+    trace_set_anomaly_stage_timing_counters(&result.timing);
     trace_set_counter("RID2C reg_health", result.registration_health);
     trace_set_counter("RID2C rescan_mode", result.rescan_mode);
     char scan_reason_summary[192];
@@ -2866,6 +2893,9 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->local_ad_sidecar_dropped_count = 0;
         session->local_ad_sidecar_completed_count = 0;
         session->local_ad_sidecar_late_count = 0;
+        session->local_ad_startup_preroll_started_at_ms = monotonic_ms();
+        session->local_ad_startup_preroll_bypassed_count = 0;
+        session->local_ad_startup_preroll_complete = false;
         session->ad_pressure_frame_counter = 0;
         session->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
     }
@@ -2917,6 +2947,9 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     session->local_ad_sidecar_dropped_count = 0;
     session->local_ad_sidecar_completed_count = 0;
     session->local_ad_sidecar_late_count = 0;
+    session->local_ad_startup_preroll_started_at_ms = monotonic_ms();
+    session->local_ad_startup_preroll_bypassed_count = 0;
+    session->local_ad_startup_preroll_complete = false;
     session->ad_pressure_frame_counter = 0;
     session->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
 }
@@ -4030,6 +4063,7 @@ static void *ad_thread_main(void *arg) {
         pthread_mutex_unlock(&g_lock);
 
         int frame_stride_override = 0;
+        bool bypass_for_local_cadence = false;
         if (is_local_file_source(session) && process_enabled) {
             anomaly_detector_runtime_budget_t budget =
                     local_ad_runtime_budget_from_backlog_ms(local_render_backlog_ms(session));
@@ -4050,8 +4084,21 @@ static void *ad_thread_main(void *arg) {
             }
             anomaly_detector_processing_mode_t processing_mode =
                     anomaly_detector_runtime_budget_processing_mode(budget);
-            if (processing_mode == ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY) {
-                frame_stride_override = 2;
+            if (processing_mode == ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY ||
+                processing_mode == ANOMALY_DETECTOR_PROCESSING_MODE_THOROUGH) {
+                anomaly_detector_runtime_budget_local_ad_cadence_t cadence =
+                        anomaly_detector_runtime_budget_local_ad_cadence(
+                                true,
+                                process_enabled,
+                                session->ad_pressure_frame_counter,
+                                LOCAL_AD_FULL_SCAN_STRIDE_FRAMES,
+                                LOCAL_AD_TARGET_EVAL_INTERVAL_FRAMES);
+                bypass_for_local_cadence = !cadence.analyze;
+                frame_stride_override = cadence.frame_stride_override;
+                if (cadence.prediction_only) {
+                    trace_set_counter("RID2C local_ad_prediction_only",
+                                      session->ad_pressure_frame_counter);
+                }
             }
         }
 
@@ -4059,7 +4106,8 @@ static void *ad_thread_main(void *arg) {
 
         bool bypass_for_pressure = false;
         if (process_enabled && packet.generation_id == generation_id) {
-            bypass_for_pressure = anomaly_runtime_pressure_should_bypass_analysis_for_source(
+            bypass_for_pressure = bypass_for_local_cadence ||
+                    anomaly_runtime_pressure_should_bypass_analysis_for_source(
                     pressure_mode,
                     session->ad_pressure_frame_counter,
                     is_local_file_source(session));
@@ -4110,7 +4158,7 @@ static void *ad_thread_main(void *arg) {
              skipped ||
              overlay_present)) {
             ct_debug(TAG,
-                     "ad worker progress id=%lld designator=%s enq=%lld deq=%lld proc=%lld skip=%lld analyzed=%d overlay=%d mode=%s qDepth=%d ts=%.3fs",
+                     "ad worker progress id=%lld designator=%s enq=%lld deq=%lld proc=%lld skip=%lld analyzed=%d overlay=%d mode=%s cadenceSkip=%d qDepth=%d ts=%.3fs",
                      (long long) session->session_id,
                      session->designator,
                      (long long) session->ad_input_enqueued_count,
@@ -4120,6 +4168,7 @@ static void *ad_thread_main(void *arg) {
                     packet.analyzed ? 1 : 0,
                     overlay_present ? 1 : 0,
                      ad_pressure_mode_name(pressure_mode),
+                     bypass_for_local_cadence ? 1 : 0,
                      session->ad_input_queue_depth,
                      packet.source_ts_us > 0 ? ((double) packet.source_ts_us / 1000000.0) : 0.0);
         }
@@ -5109,6 +5158,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                         ad_enabled,
                                         ad_thread_started,
                                         ad_sync_ready);
+                        int render_queue_depth_after_enqueue = 0;
                         pthread_mutex_lock(&session->render_lock);
                         record_decode_timing_sample_locked(session, decoded_at_ms, pts_us);
                         enqueued = enqueue_render_frame(
@@ -5122,6 +5172,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                 pts_us,
                                 decoded_at_ms);
                         if (enqueued) {
+                            render_queue_depth_after_enqueue = session->render_queue_depth;
                             pthread_cond_signal(&session->render_cond);
                         }
                         pthread_mutex_unlock(&session->render_lock);
@@ -5132,23 +5183,60 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                         if (local_ad_route ==
                                     ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_ROUTE_RENDER_FIRST &&
                                 enqueued && ad_enabled && ad_thread_started && ad_sync_ready) {
-                            pthread_mutex_lock(&session->ad_lock);
-                            sidecar_enqueued = enqueue_local_ad_input_best_effort_locked(
-                                    session,
-                                    frame,
-                                    clean_history_frame,
-                                    frame_id,
-                                    generation_id,
-                                    pts_us,
-                                    decoded_at_ms);
-                            if (sidecar_enqueued) {
-                                pthread_cond_signal(&session->ad_cond);
+                            if (session->local_ad_startup_preroll_started_at_ms <= 0) {
+                                session->local_ad_startup_preroll_started_at_ms = decoded_at_ms;
                             }
-                            pthread_mutex_unlock(&session->ad_lock);
-                            decision = sidecar_enqueued ? "render-first-ad-sidecar"
-                                                        : "render-first-ad-dropped";
-                            reason = sidecar_enqueued ? "local-ad-best-effort"
-                                                      : "local-ad-pressure";
+                            anomaly_detector_runtime_budget_local_ad_startup_preroll_t preroll =
+                                    anomaly_detector_runtime_budget_local_ad_startup_preroll(
+                                            local_file_source,
+                                            session->local_ad_startup_preroll_complete,
+                                            ad_enabled,
+                                            ad_thread_started,
+                                            ad_sync_ready,
+                                            session->render_thread_stop,
+                                            render_queue_depth_after_enqueue,
+                                            decoded_at_ms,
+                                            session->local_ad_startup_preroll_started_at_ms,
+                                            LOCAL_AD_STARTUP_PREROLL_RENDER_DEPTH,
+                                            LOCAL_AD_STARTUP_PREROLL_MAX_WAIT_MS);
+                            if (preroll.complete && !session->local_ad_startup_preroll_complete) {
+                                session->local_ad_startup_preroll_complete = true;
+                                trace_set_counter("RID2C local_ad_preroll_complete", 1);
+                                if (session->anomaly_troubleshooting_debug) {
+                                    ct_debug(TAG,
+                                             "local AD startup preroll complete id=%lld designator=%s elapsedMs=%lld renderQ=%d bypassed=%lld",
+                                             (long long) session->session_id,
+                                             session->designator,
+                                             (long long) preroll.elapsed_ms,
+                                             render_queue_depth_after_enqueue,
+                                             (long long) session->local_ad_startup_preroll_bypassed_count);
+                                }
+                            }
+                            if (preroll.wait) {
+                                session->local_ad_startup_preroll_bypassed_count += 1;
+                                trace_set_counter("RID2C local_ad_preroll_bypass",
+                                                  session->local_ad_startup_preroll_bypassed_count);
+                                decision = "render-first-ad-preroll";
+                                reason = "local-ad-startup-preroll";
+                            } else {
+                                pthread_mutex_lock(&session->ad_lock);
+                                sidecar_enqueued = enqueue_local_ad_input_best_effort_locked(
+                                        session,
+                                        frame,
+                                        clean_history_frame,
+                                        frame_id,
+                                        generation_id,
+                                        pts_us,
+                                        decoded_at_ms);
+                                if (sidecar_enqueued) {
+                                    pthread_cond_signal(&session->ad_cond);
+                                }
+                                pthread_mutex_unlock(&session->ad_lock);
+                                decision = sidecar_enqueued ? "render-first-ad-sidecar"
+                                                            : "render-first-ad-dropped";
+                                reason = sidecar_enqueued ? "local-ad-best-effort"
+                                                          : "local-ad-pressure";
+                            }
                         } else if (enqueued) {
                             if (!ad_enabled) {
                                 reason = "ad-disabled";
@@ -5886,7 +5974,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                 (stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE)
                 ? ANOMALY_STRIDE_MODE_ADAPTIVE
                 : ANOMALY_STRIDE_MODE_FIXED;
-        session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (((int) frame_stride > 10) ? 10 : (int) frame_stride);
+        session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (((int) frame_stride > 33) ? 33 : (int) frame_stride);
         session->anomaly_cfg.adaptive_min_stride_frames = adaptive_min_frames;
         session->anomaly_cfg.adaptive_max_stride_frames = adaptive_max_frames;
         session->anomaly_cfg.adaptive_max_stride_seconds =

@@ -12,7 +12,9 @@ object MediaMTXBootstrap {
         MediaMTXStructuredDispatcher.addListener { event ->
             when (event) {
                 is MediaMTXEvent.StreamConnecting ->
-                    StreamRegistry.onStreamConnecting(event.path)
+                    if (shouldApplyStructuredStreamLifecycleEvent(event)) {
+                        StreamRegistry.onStreamConnecting(event.path)
+                    }
 
                 is MediaMTXEvent.StreamStarted ->
                     StreamRegistry.onStreamStarted(event.path, event.publisherConnId)
@@ -21,7 +23,9 @@ object MediaMTXBootstrap {
                     StreamRegistry.onStreamPublisherHandoff(event.path, event.publisherConnId)
 
                 is MediaMTXEvent.StreamStopped ->
-                    StreamRegistry.onStreamStopped(event.path, event.publisherConnId)
+                    if (shouldApplyStructuredStreamLifecycleEvent(event)) {
+                        StreamRegistry.onStreamStopped(event.path, event.publisherConnId)
+                    }
 
                 is MediaMTXEvent.StreamError ->
                     StreamRegistry.onStreamError(event.path, event.reason, event.publisherConnId)
@@ -63,3 +67,10 @@ object MediaMTXBootstrap {
         )
     }
 }
+
+internal fun shouldApplyStructuredStreamLifecycleEvent(event: MediaMTXEvent): Boolean =
+    when (event) {
+        is MediaMTXEvent.StreamConnecting -> false
+        is MediaMTXEvent.StreamStopped -> !event.publisherConnId.isNullOrBlank()
+        else -> true
+    }

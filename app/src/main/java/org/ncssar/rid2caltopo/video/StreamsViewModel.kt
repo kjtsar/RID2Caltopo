@@ -80,13 +80,23 @@ import org.ncssar.rid2caltopo.video.LocalPlaybackReviewFile
 import org.ncssar.rid2caltopo.video.LocalPlaybackScenario
 import org.ncssar.rid2caltopo.video.PendingLocalPlaybackReviewExport
 import org.ncssar.rid2caltopo.video.StreamInfo
+import org.ncssar.rid2caltopo.video.StreamTelemetryBindingStatus
+import org.ncssar.rid2caltopo.video.StreamTelemetryState
+import org.ncssar.rid2caltopo.video.StreamTelemetryPairingWarning
+import org.ncssar.rid2caltopo.video.StreamTelemetryPairingControlDecision
 import org.ncssar.rid2caltopo.video.StreamAdmissionGuardResult
 import org.ncssar.rid2caltopo.video.StreamAdmissionState
 import org.ncssar.rid2caltopo.video.StreamRegistry
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheSettings
 import org.ncssar.rid2caltopo.video.StreamState
+import org.ncssar.rid2caltopo.video.bindStreamToRemoteId
 import org.ncssar.rid2caltopo.video.buildLocalPlaybackFrameAnnotationSummary
+import org.ncssar.rid2caltopo.video.clearStreamTelemetryBinding
+import org.ncssar.rid2caltopo.video.configuredStreamTelemetryBindingMaps
 import org.ncssar.rid2caltopo.video.localPlaybackReviewFromJson
+import org.ncssar.rid2caltopo.video.resolveStreamTelemetryBinding
+import org.ncssar.rid2caltopo.video.streamTelemetryPairingControlAction
+import org.ncssar.rid2caltopo.video.streamTelemetryPairingWarning
 import org.ncssar.rid2caltopo.video.toJson
 import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 
@@ -610,8 +620,6 @@ class DroneSpecState(
     var mappedId by mutableStateOf(source.mappedId)
         private set
 
-    fun changeMappedId(id: String) { source.setMappedId(id) }
-
     fun updateFrom(spec: CtDroneSpec) {
         flightStartMsec = spec.startMsecTimestamp
         lastLat = spec.lastLat
@@ -632,6 +640,24 @@ data class DroneDisplayState(
     val aglUsesDem: Boolean = false,
     val atoFt: Double?,
 )
+
+internal fun streamTelemetryDisplayState(
+    streamDesignator: String,
+    pairedMappedId: String?,
+    displayStateByDesignator: Map<String, DroneDisplayState>
+): DroneDisplayState? {
+    val pairedDisplay = pairedMappedId
+        ?.takeIf { it.isNotBlank() }
+        ?.let { displayStateByDesignator[it] }
+    return pairedDisplay ?: displayStateByDesignator[streamDesignator]
+}
+
+internal fun streamTelemetrySummaryDesignatorLabel(
+    streamDesignator: String,
+    droneSpec: CtDroneSpec
+): String = droneSpec.mappedId
+    ?.takeIf { it.isNotBlank() }
+    ?: streamDesignator
 
 class StreamsViewModel(
     application: Application
@@ -767,6 +793,9 @@ class StreamsViewModel(
 
     private val _droneStates = mutableStateMapOf<String, DroneSpecState>()
     val droneStates: Map<String, DroneSpecState> get() = _droneStates
+    private val runtimeStreamTelemetryBindings = mutableStateMapOf<String, String>()
+    private var configuredStreamBindings by mutableStateOf<Map<String, String>>(emptyMap())
+    private var configuredStreamDesignatorsByRemoteId by mutableStateOf<Map<String, String>>(emptyMap())
     private val _anomalyConfigByDesignator = mutableStateMapOf<String, AnomalyConfig>()
     private val _detectedAppearanceModeByDesignator = mutableStateMapOf<String, AppearanceAnomalyMode>()
     private val appearanceObservationStateByDesignator = mutableMapOf<String, AppearanceObservationState>()
@@ -794,8 +823,17 @@ class StreamsViewModel(
      */
     fun addAltitudeConsumer(): () -> Unit = altitudeCoordinator.addConsumer()
 
-    fun droneDisplayStateFor(designator: String): DroneDisplayState? =
-        altitudeCoordinator.displayStateByDesignator[designator]
+    fun droneDisplayStateFor(mappedId: String): DroneDisplayState? =
+        altitudeCoordinator.displayStateByDesignator[mappedId]
+
+    fun droneDisplayStateForStream(streamDesignator: String): DroneDisplayState? {
+        val pairedMappedId = pairedDroneSpecStateFor(streamDesignator)?.mappedId
+        return streamTelemetryDisplayState(
+            streamDesignator = streamDesignator,
+            pairedMappedId = pairedMappedId,
+            displayStateByDesignator = altitudeCoordinator.displayStateByDesignator
+        )
+    }
 
     /**
      * No-op stub retained for any call sites not yet migrated.
@@ -896,6 +934,7 @@ class StreamsViewModel(
      * there are any active dronespecs.
      */
     override fun onDroneSpecsChanged(currentDrones: List<CtDroneSpec>) {
+        refreshConfiguredStreamBindings()
         val activeKeys = HashSet<String>(currentDrones.size)
         if (currentDrones.isNotEmpty()) {
             CTInfo(tag, "onDroneSpecsChanged(): received ${currentDrones.size} dronespecs.")
@@ -1380,14 +1419,91 @@ class StreamsViewModel(
 
     fun designatorStateFor(designator: String): DesignatorState {
         if (isLocalPlayback(designator)) return DesignatorState.Red
-        if (_droneStates.isEmpty()) return DesignatorState.Red
-
-        val dss = _droneStates[designator]
-        return if (dss != null) {
-            DesignatorState.Green(dss)
+        val resolution = resolveStreamTelemetryBinding(
+            streamDesignator = designator,
+            telemetryStates = streamTelemetryStates(),
+            runtimeStreamBindings = runtimeStreamTelemetryBindings,
+            configuredStreamBindings = configuredStreamBindings
+        )
+        if (resolution.status == StreamTelemetryBindingStatus.PAIRED) {
+            val pairedState = pairedDroneSpecStateFor(designator)
+            if (pairedState != null) return DesignatorState.Green(pairedState)
+        }
+        return if (resolution.status == StreamTelemetryBindingStatus.NO_TELEMETRY) {
+            DesignatorState.Red
         } else {
             DesignatorState.Yellow(droneStates)
         }
+    }
+
+    fun streamTilePrimaryLabel(streamDesignator: String): String {
+        if (isLocalPlayback(streamDesignator)) return streamDesignator
+        return resolveStreamTelemetryBinding(
+            streamDesignator = streamDesignator,
+            telemetryStates = streamTelemetryStates(),
+            runtimeStreamBindings = runtimeStreamTelemetryBindings,
+            configuredStreamBindings = configuredStreamBindings
+        ).primaryLabel
+    }
+
+    fun bindStreamTelemetry(streamDesignator: String, remoteId: String) {
+        bindStreamToRemoteId(runtimeStreamTelemetryBindings, streamDesignator, remoteId)
+    }
+
+    fun clearStreamTelemetry(streamDesignator: String) {
+        clearStreamTelemetryBinding(runtimeStreamTelemetryBindings, streamDesignator)
+    }
+
+    fun hasPairedTelemetry(streamDesignator: String): Boolean {
+        return pairedDroneSpecStateFor(streamDesignator) != null
+    }
+
+    fun streamPairingWarning(
+        streamDesignator: String,
+        remoteId: String,
+        mappedId: String
+    ): StreamTelemetryPairingWarning? {
+        return streamTelemetryPairingWarning(
+            streamDesignator = streamDesignator,
+            selectedTelemetry = StreamTelemetryState(remoteId = remoteId, mappedId = mappedId),
+            configuredStreamDesignatorByRemoteId = configuredStreamDesignatorsByRemoteId
+        )
+    }
+
+    fun streamPairingControlDecision(streamDesignator: String): StreamTelemetryPairingControlDecision {
+        return streamTelemetryPairingControlAction(
+            streamDesignator = streamDesignator,
+            candidateTelemetry = streamTelemetryStates(),
+            configuredStreamDesignatorByRemoteId = configuredStreamDesignatorsByRemoteId
+        )
+    }
+
+    private fun pairedDroneSpecStateFor(streamDesignator: String): DroneSpecState? {
+        val remoteId = resolveStreamTelemetryBinding(
+            streamDesignator = streamDesignator,
+            telemetryStates = streamTelemetryStates(),
+            runtimeStreamBindings = runtimeStreamTelemetryBindings,
+            configuredStreamBindings = configuredStreamBindings
+        ).telemetry?.remoteId ?: return null
+        return _droneStates.values.firstOrNull { it.remoteId == remoteId }
+    }
+
+    private fun streamTelemetryStates(): List<StreamTelemetryState> =
+        _droneStates.values.map { state ->
+            StreamTelemetryState(remoteId = state.remoteId, mappedId = state.mappedId)
+        }
+
+    private fun refreshConfiguredStreamBindings() {
+        val maps = configuredStreamTelemetryBindingMaps(
+            CaltopoClient.GetPersistedDroneSpecs().map { spec ->
+                StreamTelemetryState(
+                    remoteId = spec.remoteId?.trim().orEmpty(),
+                    mappedId = spec.mappedId?.trim().orEmpty()
+                )
+            }
+        )
+        configuredStreamBindings = maps.streamDesignatorToRemoteId
+        configuredStreamDesignatorsByRemoteId = maps.remoteIdToStreamDesignator
     }
 
     fun renderDelayMsFor(designator: String): Long? {
@@ -1495,7 +1611,8 @@ class StreamsViewModel(
                 )
             )
         }
-        val droneSpec = droneStates[designator]?.source
+        val pairedDroneState = pairedDroneSpecStateFor(designator) ?: droneStates[designator]
+        val droneSpec = pairedDroneState?.source
 
         if (droneSpec == null) {
             CTDebug(tag, "onSnapshotCaptured(${designator}): No associated dronespec.")
@@ -1510,7 +1627,11 @@ class StreamsViewModel(
         val clueLng = telemetry?.longitude ?: droneSpec.lastLng
         val clueAlt = telemetry?.altitudeMeters ?: droneSpec.lastAlt
         val clueTimestamp = telemetry?.sourceTimestampUs?.let { it / 1000L } ?: droneSpec.mostRecentMsecTimestamp
-        val displayState = altitudeCoordinator.displayStateByDesignator[designator]
+        val displayState = streamTelemetryDisplayState(
+            streamDesignator = designator,
+            pairedMappedId = droneSpec.mappedId,
+            displayStateByDesignator = altitudeCoordinator.displayStateByDesignator
+        )
         val headingSelection = selectClueHeading(
             telemetry = telemetry,
             displayHeadingDeg = displayState?.headingDeg,
@@ -2030,7 +2151,7 @@ class StreamsViewModel(
         if (telemetry == null && ridTelemetry == null) return null
 
         val lines = mutableListOf<String>()
-        lines += "Designator: $designator"
+        lines += "Designator: ${streamTelemetrySummaryDesignatorLabel(designator, droneSpec)}"
         lines += "Telemetry:"
         lines += String.format(
             Locale.US,
@@ -2041,7 +2162,11 @@ class StreamsViewModel(
         )
 
         // First three: Heading, AGL, ATO — use values computed by DroneAltitudeCoordinator
-        val display = altitudeCoordinator.displayStateByDesignator[designator]
+        val display = streamTelemetryDisplayState(
+            streamDesignator = designator,
+            pairedMappedId = droneSpec.mappedId,
+            displayStateByDesignator = altitudeCoordinator.displayStateByDesignator
+        )
         lines += if (display?.headingDeg != null)
             String.format(Locale.US, "  Heading: %.1f\u00b0", display.headingDeg)
         else
@@ -2953,6 +3078,7 @@ class StreamsViewModel(
 
     init {
         defaultAnomalyConfig = AnomalyPrefs.load(application.applicationContext)
+        refreshConfiguredStreamBindings()
         CaltopoMap.AddMapStatusListener(this)
         CaltopoClient.AddDroneSpecsChangedListener(this)
         StreamRegistry.setAdmissionGuard(::admissionGuardDecision)

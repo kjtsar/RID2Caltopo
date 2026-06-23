@@ -42,10 +42,26 @@ class MediaMtxParserLifecycleTest {
             )
         )
 
-        assertEquals(3, events.size)
-        assertTrue(events[0] is MediaMTXEvent.StreamConnecting)
-        assertTrue(events[1] is MediaMTXEvent.StreamStarted)
-        assertTrue(events[2] is MediaMTXEvent.StreamStopped)
+        assertEquals(2, events.size)
+        assertTrue(events[0] is MediaMTXEvent.StreamStarted)
+        assertTrue(events[1] is MediaMTXEvent.StreamStopped)
+    }
+
+    @Test
+    fun parseLine_rtspReaderProbeForMissingPath_doesNotEmitLifecycleEvents() {
+        val events = parseEvents(
+            listOf(
+                "[RTSP] [conn 127.0.0.1:41600] opened",
+                "[RTSP] [conn 127.0.0.1:41600] [c->s] OPTIONS rtsp://127.0.0.1:8554/1sar7mn4pr RTSP/1.0",
+                "[RTSP] [conn 127.0.0.1:41600] [c->s] DESCRIBE rtsp://127.0.0.1:8554/1sar7mn4pr RTSP/1.0",
+                "[path 1sar7mn4pr] created",
+                "[RTSP] [conn 127.0.0.1:41600] [s->c] RTSP/1.0 404 Not Found",
+                "[RTSP] [conn 127.0.0.1:41600] closed: no stream is available on path '1sar7mn4pr'",
+                "[path 1sar7mn4pr] destroyed: terminated",
+            )
+        )
+
+        assertTrue(events.isEmpty())
     }
 
     @Test
@@ -101,12 +117,11 @@ class MediaMtxParserLifecycleTest {
             flushTrailingFragment = false,
         )
 
-        assertEquals(2, recorder.events.size)
-        assertTrue(recorder.events[0] is MediaMTXEvent.StreamConnecting)
-        assertTrue(recorder.events[1] is MediaMTXEvent.StreamStarted)
+        assertEquals(1, recorder.events.size)
+        assertTrue(recorder.events[0] is MediaMTXEvent.StreamStarted)
         assertEquals(
             "autel/1SAR7EvMx4n",
-            (recorder.events[1] as MediaMTXEvent.StreamStarted).path,
+            (recorder.events[0] as MediaMTXEvent.StreamStarted).path,
         )
     }
 

@@ -526,10 +526,16 @@ public class CaltopoMap {
     }
 
     public static void AddArtifactListener(@NonNull ArtifactListener listener) {
+        AddArtifactListener(listener, true);
+    }
+
+    public static void AddArtifactListener(@NonNull ArtifactListener listener, boolean replayCachedArtifacts) {
         ArrayList<JSONObject> artifactSnapshot;
         synchronized (ArtifactLock) {
             ArtifactListeners.add(listener);
-            artifactSnapshot = new ArrayList<>(ArtifactFeaturesById.values());
+            artifactSnapshot = replayCachedArtifacts
+                    ? new ArrayList<>(ArtifactFeaturesById.values())
+                    : new ArrayList<>();
         }
         if (!artifactSnapshot.isEmpty()) {
             long now = System.currentTimeMillis();

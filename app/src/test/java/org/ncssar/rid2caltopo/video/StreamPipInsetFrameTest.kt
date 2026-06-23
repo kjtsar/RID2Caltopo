@@ -38,6 +38,13 @@ class StreamPipInsetFrameTest {
     }
 
     @Test
+    fun streamPipInsetTap_swapsBetweenStreamsAndMapLayouts() {
+        assertEquals(StreamsLayoutMode.Map, streamPipInsetTapLayoutMode(StreamsLayoutMode.Streams))
+        assertEquals(StreamsLayoutMode.Streams, streamPipInsetTapLayoutMode(StreamsLayoutMode.Map))
+        assertEquals(StreamsLayoutMode.Both, streamPipInsetTapLayoutMode(StreamsLayoutMode.Both))
+    }
+
+    @Test
     fun streamsFullScreenChrome_hidesTopBarOnlyWhenAllowedAndActive() {
         assertEquals(
             StreamsFullScreenChrome(showTopBar = true, showExitChip = false),

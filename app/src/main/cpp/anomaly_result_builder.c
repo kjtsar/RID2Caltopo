@@ -1135,6 +1135,14 @@ void anomaly_result_publish_color_debug_candidates(
         dbg->hist_current_count = src->hist_current_count;
         dbg->hist_recent_count = src->hist_recent_count;
         dbg->hist_rarity_score = src->hist_rarity_score;
+        dbg->center_u = src->center_u;
+        dbg->center_v = src->center_v;
+        dbg->center_luma = src->center_luma;
+        dbg->local_ring_chroma_contrast = src->local_ring_chroma_contrast;
+        dbg->local_ring_luma_contrast = src->local_ring_luma_contrast;
+        dbg->local_ring_neighbor_count = src->local_ring_neighbor_count;
+        dbg->current_nearest_hist_distance = src->current_nearest_hist_distance;
+        dbg->recent_nearest_hist_distance = src->recent_nearest_hist_distance;
         dbg->small_target_span_ratio = src->small_target_span_ratio;
         dbg->small_target_area_ratio = src->small_target_area_ratio;
         dbg->scene_commonness = src->scene_commonness;

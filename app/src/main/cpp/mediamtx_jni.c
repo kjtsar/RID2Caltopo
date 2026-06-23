@@ -274,19 +274,18 @@ static void emit_structured_event_for_line(JNIEnv *reader_env, const char *line)
             return;
         }
         if (strstr(rem, "created") != NULL) {
-            set_remove(suppressStopForPath, &suppressStopForPathCount, key);
-            emit_event_json_type_path(reader_env, "stream_connecting", key);
             return;
         }
         if (strstr(rem, "destroyed") != NULL) {
             map_remove(pathPublisherConnMap, &pathPublisherConnCount, key, value, sizeof(value));
             set_remove(publisherHandoffClosingConns, &publisherHandoffClosingConnsCount, value);
-            if (!set_contains(suppressStopForPath, suppressStopForPathCount, key)) {
+            if (value[0] != '\0' &&
+                !set_contains(suppressStopForPath, suppressStopForPathCount, key)) {
                 emit_event_json_type_path_conn(
                         reader_env,
                         "stream_stopped",
                         key,
-                        value[0] != '\0' ? value : NULL
+                        value
                 );
             }
             return;
@@ -386,12 +385,13 @@ static void emit_structured_event_for_line(JNIEnv *reader_env, const char *line)
             if (map_remove(pathPublisherConnMap, &pathPublisherConnCount, key, value, sizeof(value))) {
                 set_remove(publisherHandoffClosingConns, &publisherHandoffClosingConnsCount, value);
             }
-            if (!set_contains(suppressStopForPath, suppressStopForPathCount, key)) {
+            if (value[0] != '\0' &&
+                !set_contains(suppressStopForPath, suppressStopForPathCount, key)) {
                 emit_event_json_type_path_conn(
                         reader_env,
                         "stream_stopped",
                         key,
-                        value[0] != '\0' ? value : NULL
+                        value
                 );
             }
             return;

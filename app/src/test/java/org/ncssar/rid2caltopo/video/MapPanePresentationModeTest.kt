@@ -7,6 +7,16 @@ import org.junit.Test
 
 class MapPanePresentationModeTest {
     @Test
+    fun extractedViewportAndStartupConstants_remainSharedNamedDeclarations() {
+        assertEquals(500L, INSET_FOLLOW_INTERVAL_MS)
+        assertEquals(1.0, INSET_FOLLOW_MIN_MOVE_METERS, 0.0)
+        assertEquals(60_000L, STARTUP_MY_LOCATION_FRESH_MS)
+        assertEquals(20_000L, STARTUP_MY_LOCATION_WAIT_MS)
+        assertEquals(14.0, STARTUP_MY_LOCATION_MIN_ZOOM, 0.0)
+        assertEquals(20_037_508.342789244, WEB_MERCATOR_HALF_WORLD_METERS, 0.0)
+    }
+
+    @Test
     fun mapPaneMarkerScale_isSmallerForInsetMode() {
         assertEquals(1.0f, mapPaneMarkerScale(MapPanePresentationMode.Full), 0.0001f)
         assertEquals(0.55f, mapPaneMarkerScale(MapPanePresentationMode.Inset), 0.0001f)

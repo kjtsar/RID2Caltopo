@@ -569,6 +569,15 @@ static inline bool anomaly_color_frontend_uses_fresh_winner_gate(int color_front
            color_frontend_mode == ANOMALY_COLOR_FRONTEND_FRESH_YUV;
 }
 
+static inline bool anomaly_color_fresh_seed_should_skip_support(
+        int   color_frontend_mode,
+        float rarity,
+        bool  target_debug_sample) {
+    return anomaly_color_frontend_uses_fresh_winner_gate(color_frontend_mode) &&
+           !target_debug_sample &&
+           rarity < ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY;
+}
+
 static inline anomaly_color_winner_gate_reason_t anomaly_color_evaluate_fresh_winner_gate(
         float small_target_span_px,
         int   sample_step,

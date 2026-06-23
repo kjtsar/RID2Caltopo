@@ -30,6 +30,16 @@ int anomaly_detector_default_window_frames(float frame_rate_fps) {
     return frames > 0 ? frames : 1;
 }
 
+int anomaly_detector_sparse_overlay_window_frames(int target_eval_interval_frames) {
+    if (target_eval_interval_frames <= 1) {
+        return 1;
+    }
+    const int max_sparse_window_frames = 8;
+    return target_eval_interval_frames < max_sparse_window_frames
+               ? target_eval_interval_frames
+               : max_sparse_window_frames;
+}
+
 anomaly_detector_config_t anomaly_detector_config_make_realtime_default(
         int   algorithm_mask,
         float frame_rate_fps) {

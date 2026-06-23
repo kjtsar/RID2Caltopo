@@ -97,7 +97,11 @@ static bool anomaly_target_tracks_should_apply_local_residual(
         const anomaly_target_track_t                         *track,
         const anomaly_target_tracks_registration_prediction_t *prediction) {
     if (track == NULL || prediction == NULL) return false;
-    if (!track->active || track->algorithm != ANOMALY_ALGO_THERMAL) return false;
+    if (!track->active ||
+        (track->algorithm != ANOMALY_ALGO_THERMAL &&
+         track->algorithm != ANOMALY_ALGO_COLOR)) {
+        return false;
+    }
     if (!track->fresh_observation) return false;
     if (prediction->frame_width <= 1 || prediction->frame_height <= 1) return false;
     if (track->movement_valid_frames < 3 || track->movement_window_frames < 3) return false;

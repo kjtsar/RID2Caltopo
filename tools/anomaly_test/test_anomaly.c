@@ -8464,6 +8464,46 @@ static void test_target_tracks_predict_applies_stable_local_residual(void) {
                 "target tracks predict: stable local residual offsets global y prediction");
 }
 
+static void test_target_tracks_predict_applies_stable_local_residual_to_color(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].center_x_norm = 0.50f;
+    state.target_tracks[0].center_y_norm = 0.50f;
+    state.target_tracks[0].fresh_observation = true;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[0].movement_window_frames = 5;
+    state.target_tracks[0].movement_valid_frames = 5;
+    state.target_tracks[0].movement_parallax_frames = 5;
+    state.target_tracks[0].movement_confidence_sum = 4.0f;
+    state.target_tracks[0].last_movement_dx_px = 20.0f;
+    state.target_tracks[0].last_movement_dy_px = -10.0f;
+    state.target_tracks[0].last_movement_residual_px = 22.0f;
+    target_tracks_test_registration_t reg = {
+        .valid = true,
+        .invert_ok = true,
+        .dx = 0.02f,
+        .dy = -0.01f,
+    };
+    anomaly_target_tracks_registration_prediction_t prediction = {
+        .registration = &reg,
+        .health = ANOMALY_REG_HEALTH_HEALTHY,
+        .quality = 0.90f,
+        .scene_discontinuity = false,
+        .valid = target_tracks_test_registration_valid,
+        .invert_point = target_tracks_test_registration_invert,
+        .frame_width = 1000,
+        .frame_height = 500,
+    };
+
+    anomaly_target_tracks_predict_with_registration(&state, &prediction);
+
+    EXPECT_NEAR(state.target_tracks[0].center_x_norm, 0.50f, 0.0001f,
+                "target tracks predict: stable local residual offsets color x prediction");
+    EXPECT_NEAR(state.target_tracks[0].center_y_norm, 0.51f, 0.0001f,
+                "target tracks predict: stable local residual offsets color y prediction");
+}
+
 static void test_target_tracks_predict_nonfresh_thermal_uses_registration_only(void) {
     anomaly_state_t state;
     memset(&state, 0, sizeof(state));
@@ -9406,6 +9446,29 @@ static void test_color_detector_frontend_mode_helpers(void) {
            "color frontend mode: fresh RGBA uses fresh winner gate");
     EXPECT(anomaly_color_frontend_uses_fresh_winner_gate(ANOMALY_COLOR_FRONTEND_FRESH_YUV),
            "color frontend mode: fresh YUV uses fresh winner gate");
+}
+
+static void test_color_detector_fresh_seed_support_skip_helper(void) {
+    EXPECT(!anomaly_color_fresh_seed_should_skip_support(
+               ANOMALY_COLOR_FRONTEND_LEGACY,
+               ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 0.25f,
+               false),
+           "fresh seed support skip: legacy still allows support scoring");
+    EXPECT(anomaly_color_fresh_seed_should_skip_support(
+               ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
+               ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 0.25f,
+               false),
+           "fresh seed support skip: common fresh colors skip support scoring");
+    EXPECT(!anomaly_color_fresh_seed_should_skip_support(
+               ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
+               ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY,
+               false),
+           "fresh seed support skip: threshold fresh colors still allow support scoring");
+    EXPECT(!anomaly_color_fresh_seed_should_skip_support(
+               ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
+               ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 0.25f,
+               true),
+           "fresh seed support skip: target debug sample keeps support telemetry");
 }
 
 static void test_color_detector_candidate_temporal_boost_helper(void) {
@@ -12381,6 +12444,17 @@ static void test_detector_facade_default_window_frames_contract(void) {
            "detector facade default window: low fps keeps at least one frame");
 }
 
+static void test_detector_facade_sparse_overlay_window_contract(void) {
+    EXPECT(anomaly_detector_sparse_overlay_window_frames(5) == 5,
+           "detector facade sparse overlay window: follows target eval cadence");
+    EXPECT(anomaly_detector_sparse_overlay_window_frames(1) == 1,
+           "detector facade sparse overlay window: keeps single-frame cadence");
+    EXPECT(anomaly_detector_sparse_overlay_window_frames(0) == 1,
+           "detector facade sparse overlay window: invalid cadence stays positive");
+    EXPECT(anomaly_detector_sparse_overlay_window_frames(15) == 8,
+           "detector facade sparse overlay window: caps below the legacy half-second window");
+}
+
 static void test_detector_facade_realtime_default_config_contract(void) {
     anomaly_detector_config_t cfg =
         anomaly_detector_config_make_realtime_default(
@@ -14386,6 +14460,8 @@ static void test_detector_facade_annotation_stability_smooths_lit_roi_motion(voi
 
     EXPECT(smoothed_center_x > previous_center_x,
            "detector facade annotation stability: lit ROI can follow target motion");
+    EXPECT(smoothed_center_x > previous_center_x + 0.05f,
+           "detector facade annotation stability: lit ROI follows sparse target motion promptly");
     EXPECT(smoothed_center_x < 0.43f,
            "detector facade annotation stability: lit ROI does not snap to raw jump");
 }
@@ -18301,8 +18377,8 @@ static void test_registration_cache_store_sets_budget_and_copies_fields(void) {
 
     EXPECT(state.cached_registration_valid,
            "registration cache: valid model marks cache valid");
-    EXPECT(state.cached_registration_reuse_budget == 2,
-           "registration cache: very stable target-only model gets budget 2");
+    EXPECT(state.cached_registration_reuse_budget == 4,
+           "registration cache: very stable target-only model gets budget 4");
     EXPECT(state.cached_registration_mode == ANOMALY_REGISTRATION_AFFINE &&
            state.cached_registration_sample_step == 3 &&
            state.cached_registration_motion_step == 5,
@@ -18362,7 +18438,7 @@ static void test_registration_cache_try_load_copies_model_and_decrements_budget(
             22,
             11),
            "registration cache: matching cache gates load");
-    EXPECT(state.cached_registration_reuse_budget == 1,
+    EXPECT(state.cached_registration_reuse_budget == 3,
            "registration cache: successful load decrements reuse budget");
     EXPECT(loaded.debug_valid && loaded.similarity.valid,
            "registration cache: loaded model is debug and fit valid");
@@ -18400,7 +18476,7 @@ static void test_registration_cache_try_load_rejects_gate_mismatch(void) {
             22,
             11),
            "registration cache: non-affine mode does not load");
-    EXPECT(state.cached_registration_reuse_budget == 2,
+    EXPECT(state.cached_registration_reuse_budget == 4,
            "registration cache: failed load does not decrement budget");
     EXPECT(!anomaly_registration_cache_try_load(
             &loaded,
@@ -20466,6 +20542,7 @@ int main(void) {
     test_target_tracks_predict_failed_inverse_marks_forced_revisit();
     test_target_tracks_predict_success_clamps_updates_quality_and_nonfresh_revisit();
     test_target_tracks_predict_applies_stable_local_residual();
+    test_target_tracks_predict_applies_stable_local_residual_to_color();
     test_target_tracks_predict_nonfresh_thermal_uses_registration_only();
 
     test_thermal_blob_candidate_rank_ordering();
@@ -20510,6 +20587,7 @@ int main(void) {
     test_color_detector_sample_xy_helpers();
     test_color_detector_dense_seed_helpers();
     test_color_detector_frontend_mode_helpers();
+    test_color_detector_fresh_seed_support_skip_helper();
     test_color_detector_candidate_temporal_boost_helper();
     test_color_detector_temporal_rescue_helper();
     test_color_detector_contrast_rescue_helper();
@@ -20550,6 +20628,7 @@ int main(void) {
     test_detector_facade_process_args_make_copies_fields();
     test_detector_facade_process_args_make_allows_optional_fields();
     test_detector_facade_default_window_frames_contract();
+    test_detector_facade_sparse_overlay_window_contract();
     test_detector_facade_realtime_default_config_contract();
     test_detector_facade_runtime_budget_defaults();
     test_detector_facade_runtime_budget_normalizes_thresholds();

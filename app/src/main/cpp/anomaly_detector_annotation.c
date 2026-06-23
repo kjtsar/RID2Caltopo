@@ -465,7 +465,7 @@ static anomaly_detector_annotation_t anomaly_detector_annotation_smooth_publishe
     if (previous == NULL || current == NULL) {
         return current != NULL ? *current : (anomaly_detector_annotation_t){0};
     }
-    const float alpha = 0.25f;
+    const float alpha = 0.65f;
     anomaly_detector_annotation_t out = *current;
     out.left_norm = previous->left_norm + alpha * (current->left_norm - previous->left_norm);
     out.top_norm = previous->top_norm + alpha * (current->top_norm - previous->top_norm);

@@ -8372,70 +8372,81 @@ int anomaly_process_frame(
                         : color_hist_rarity_lut[hist_key];
                     roi_state->color_raw_score[idx] = rarity;
                     if (saliency_color_map != NULL) {
-                        int local_support = anomaly_color_local_uv_support_count(
-                            roi_state,
-                            sg_w,
-                            sg_h,
-                            sx,
-                            sy,
-                            u_bin,
-                            v_bin,
-                            ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS);
-                        if (local_support < ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
+                        bool target_debug_sample =
+                            color_target_valid &&
+                            sx == color_target_sx &&
+                            sy == color_target_sy;
+                        if (anomaly_color_fresh_seed_should_skip_support(
+                                color_frontend_mode,
+                                rarity,
+                                target_debug_sample)) {
                             saliency_color_map[idx] = 0.0f;
                         } else {
-                            float center_chroma = anomaly_color_sample_chroma_magnitude(roi_state, idx);
-                            float support_scale = clampf(
-                                0.60f + 0.20f * (float)(local_support - ANOMALY_COLOR_LOCAL_SUPPORT_MIN),
-                                0.60f,
-                                1.20f);
-                            float rarity_score = 0.0f;
-                            if (center_chroma >= 10.0f &&
-                                rarity >= ANOMALY_COLOR_RARITY_MIN) {
-                                rarity_score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
-                                               ANOMALY_COLOR_RARITY_SCALE;
-                            }
-                            float rescue_score = anomaly_color_score_contrast_rescue(
+                            int local_support = anomaly_color_local_uv_support_count(
                                 roi_state,
                                 sg_w,
                                 sg_h,
                                 sx,
                                 sy,
-                                !color_refresh_skip,
-                                local_support);
-                            float temporal_rescue_score =
-                                anomaly_color_frontend_allows_pre_support_temporal_rescue(color_frontend_mode)
-                                ? anomaly_color_score_temporal_rescue(
-                                    state,
-                                    cfg,
+                                u_bin,
+                                v_bin,
+                                ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS);
+                            if (local_support < ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
+                                saliency_color_map[idx] = 0.0f;
+                            } else {
+                                float center_chroma = anomaly_color_sample_chroma_magnitude(roi_state, idx);
+                                float support_scale = clampf(
+                                    0.60f + 0.20f * (float)(local_support - ANOMALY_COLOR_LOCAL_SUPPORT_MIN),
+                                    0.60f,
+                                    1.20f);
+                                float rarity_score = 0.0f;
+                                if (center_chroma >= 10.0f &&
+                                    rarity >= ANOMALY_COLOR_RARITY_MIN) {
+                                    rarity_score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
+                                                   ANOMALY_COLOR_RARITY_SCALE;
+                                }
+                                float rescue_score = anomaly_color_score_contrast_rescue(
+                                    roi_state,
                                     sg_w,
                                     sg_h,
                                     sx,
                                     sy,
                                     !color_refresh_skip,
-                                    local_support)
-                                : 0.0f;
-                            float seed_score = fmaxf(rarity_score, fmaxf(rescue_score, temporal_rescue_score));
-                            saliency_color_map[idx] = clampf(seed_score * support_scale, 0.0f, 4.0f);
-                            if (saliency_color_map[idx] > color_strongest_seed_score) {
-                                int key = anomaly_color_hist_key(u_bin, v_bin);
-                                color_strongest_seed_score = saliency_color_map[idx];
-                                color_strongest_seed_sx = sx;
-                                color_strongest_seed_sy = sy;
-                                color_strongest_seed_hist_key = key;
-                                color_strongest_seed_hist_current_count = (float)color_frame_hist[key];
-                                color_strongest_seed_hist_recent_count = color_frame_hist != NULL
-                                    ? (float)color_recent_hist_weighted[key]
+                                    local_support);
+                                float temporal_rescue_score =
+                                    anomaly_color_frontend_allows_pre_support_temporal_rescue(color_frontend_mode)
+                                    ? anomaly_color_score_temporal_rescue(
+                                        state,
+                                        cfg,
+                                        sg_w,
+                                        sg_h,
+                                        sx,
+                                        sy,
+                                        !color_refresh_skip,
+                                        local_support)
                                     : 0.0f;
-                                color_strongest_seed_hist_rarity = rarity;
-                                color_strongest_seed_local_support = local_support;
-                            }
-                            if (saliency_color_map[idx] >= 0.55f) {
-                                color_rarity_seed_count++;
-                                if (sx < color_rarity_seed_min_sx) color_rarity_seed_min_sx = sx;
-                                if (sy < color_rarity_seed_min_sy) color_rarity_seed_min_sy = sy;
-                                if (sx > color_rarity_seed_max_sx) color_rarity_seed_max_sx = sx;
-                                if (sy > color_rarity_seed_max_sy) color_rarity_seed_max_sy = sy;
+                                float seed_score = fmaxf(rarity_score, fmaxf(rescue_score, temporal_rescue_score));
+                                saliency_color_map[idx] = clampf(seed_score * support_scale, 0.0f, 4.0f);
+                                if (saliency_color_map[idx] > color_strongest_seed_score) {
+                                    int key = anomaly_color_hist_key(u_bin, v_bin);
+                                    color_strongest_seed_score = saliency_color_map[idx];
+                                    color_strongest_seed_sx = sx;
+                                    color_strongest_seed_sy = sy;
+                                    color_strongest_seed_hist_key = key;
+                                    color_strongest_seed_hist_current_count = (float)color_frame_hist[key];
+                                    color_strongest_seed_hist_recent_count = color_frame_hist != NULL
+                                        ? (float)color_recent_hist_weighted[key]
+                                        : 0.0f;
+                                    color_strongest_seed_hist_rarity = rarity;
+                                    color_strongest_seed_local_support = local_support;
+                                }
+                                if (saliency_color_map[idx] >= 0.55f) {
+                                    color_rarity_seed_count++;
+                                    if (sx < color_rarity_seed_min_sx) color_rarity_seed_min_sx = sx;
+                                    if (sy < color_rarity_seed_min_sy) color_rarity_seed_min_sy = sy;
+                                    if (sx > color_rarity_seed_max_sx) color_rarity_seed_max_sx = sx;
+                                    if (sy > color_rarity_seed_max_sy) color_rarity_seed_max_sy = sy;
+                                }
                             }
                         }
                     }

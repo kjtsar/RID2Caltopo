@@ -933,6 +933,41 @@ static void copy_anomaly_rgba_rows(uint8_t       *dst,
     }
 }
 
+static int64_t anomaly_abs_i64(int64_t value) {
+    return value < 0 ? -value : value;
+}
+
+static int64_t anomaly_annotation_center_milli(float start_norm, float end_norm) {
+    float center = (start_norm + end_norm) * 0.5f;
+    if (!isfinite(center)) {
+        return -1;
+    }
+    if (center < 0.0f) {
+        center = 0.0f;
+    } else if (center > 1.0f) {
+        center = 1.0f;
+    }
+    return (int64_t) (center * 10000.0f + 0.5f);
+}
+
+static int64_t anomaly_annotation_center_x_milli(
+        const anomaly_detector_annotation_view_t *view) {
+    if (view == NULL || view->boxes == NULL || view->box_count <= 0) {
+        return -1;
+    }
+    const anomaly_box_t *box = &view->boxes[0];
+    return anomaly_annotation_center_milli(box->left_norm, box->right_norm);
+}
+
+static int64_t anomaly_annotation_center_y_milli(
+        const anomaly_detector_annotation_view_t *view) {
+    if (view == NULL || view->boxes == NULL || view->box_count <= 0) {
+        return -1;
+    }
+    const anomaly_box_t *box = &view->boxes[0];
+    return anomaly_annotation_center_milli(box->top_norm, box->bottom_norm);
+}
+
 static AVFrame *clone_rgba_frame(const AVFrame *src) {
     if (src == NULL || src->width <= 0 || src->height <= 0) {
         ct_warn(TAG, "clone_rgba_frame invalid source");
@@ -1220,14 +1255,18 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
                                               width, height,
                                               source_ts_us, &result);
     trace_end_section();
+    anomaly_detector_annotation_view_t raw_annotations =
+            anomaly_detector_result_annotations(&result);
+    const int stable_overlay_window_frames =
+        anomaly_detector_sparse_overlay_window_frames(LOCAL_AD_TARGET_EVAL_INTERVAL_FRAMES);
     anomaly_detector_annotation_view_t stable_annotations =
             !use_stable_overlay_draw
-                    ? anomaly_detector_result_annotations(&result)
+                    ? raw_annotations
                     : anomaly_detector_result_apply_annotation_stability(
                             &result,
                             &session->anomaly_annotation_cadence,
                             session->anomaly_process_frame_count,
-                            anomaly_detector_default_window_frames((float) RENDER_DEFAULT_FPS));
+                            stable_overlay_window_frames);
     if (source_ts_us > 0) {
         session->anomaly_annotation_last_source_ts_us = source_ts_us;
     }
@@ -1250,6 +1289,31 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
                 stable_annotations.box_count);
     }
     bool annotated = stable_annotations.box_count > 0;
+    const int64_t raw_center_x_milli =
+            anomaly_annotation_center_x_milli(&raw_annotations);
+    const int64_t raw_center_y_milli =
+            anomaly_annotation_center_y_milli(&raw_annotations);
+    const int64_t stable_center_x_milli =
+            anomaly_annotation_center_x_milli(&stable_annotations);
+    const int64_t stable_center_y_milli =
+            anomaly_annotation_center_y_milli(&stable_annotations);
+    const int64_t center_delta_milli =
+            raw_center_x_milli >= 0 &&
+            raw_center_y_milli >= 0 &&
+            stable_center_x_milli >= 0 &&
+            stable_center_y_milli >= 0
+                    ? anomaly_abs_i64(raw_center_x_milli - stable_center_x_milli) +
+                      anomaly_abs_i64(raw_center_y_milli - stable_center_y_milli)
+                    : -1;
+    trace_set_counter("RID2C ad_raw_box_count", raw_box_count);
+    trace_set_counter("RID2C ad_stable_box_count", stable_annotations.box_count);
+    trace_set_counter("RID2C ad_annotated", annotated ? 1 : 0);
+    trace_set_counter("RID2C ad_stability_window_frames", stable_overlay_window_frames);
+    trace_set_counter("RID2C ad_raw_center_x_milli", raw_center_x_milli);
+    trace_set_counter("RID2C ad_raw_center_y_milli", raw_center_y_milli);
+    trace_set_counter("RID2C ad_stable_center_x_milli", stable_center_x_milli);
+    trace_set_counter("RID2C ad_stable_center_y_milli", stable_center_y_milli);
+    trace_set_counter("RID2C ad_center_delta_milli", center_delta_milli);
     int64_t elapsed_us = monotonic_us() - started_at_us;
     session->anomaly_process_frame_count += 1;
     session->anomaly_process_total_us += elapsed_us;
@@ -4182,6 +4246,7 @@ static void *ad_thread_main(void *arg) {
             break;
         }
         bool overlay_present = packet.overlay_frame != NULL;
+        trace_set_counter("RID2C local_ad_overlay_present", overlay_present ? 1 : 0);
         anomaly_runtime_handoff_outcome_t handoff_outcome =
                 anomaly_runtime_handoff_outcome_for_decision(handoff_decision,
                                                              overlay_present);
@@ -4245,6 +4310,10 @@ static void *ad_thread_main(void *arg) {
             session->local_ad_sidecar_completed_count += 1;
             trace_set_counter("RID2C local_ad_completed",
                               session->local_ad_sidecar_completed_count);
+            trace_set_counter("RID2C local_ad_overlay_attached", attached ? 1 : 0);
+            trace_set_counter("RID2C local_ad_overlay_forwarded_late", forwarded_late ? 1 : 0);
+            trace_set_counter("RID2C local_ad_overlay_missed",
+                              (overlay_present && !attached && !forwarded_late) ? 1 : 0);
             if (overlay_action ==
                 ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_FORWARD_LATE) {
                 session->local_ad_sidecar_late_count += 1;

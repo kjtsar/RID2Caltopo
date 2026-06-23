@@ -69,7 +69,7 @@ void anomaly_registration_cache_store(
                model->fit_det < 1.008f &&
                model->fit_min_scale >= 0.992f &&
                model->fit_max_scale <= 1.008f) {
-        state->cached_registration_reuse_budget = 2;
+        state->cached_registration_reuse_budget = 4;
     } else {
         state->cached_registration_reuse_budget = 1;
     }

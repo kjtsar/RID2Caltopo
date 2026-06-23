@@ -32,6 +32,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -1381,6 +1382,439 @@ private fun restartTileProviderForViewportIntent(
     return nextProvider
 }
 
+@Composable
+private fun MapPaneNotamDialogs(
+    selectedNotam: NearbyNotam?,
+    onSelectedNotamChange: (NearbyNotam?) -> Unit,
+    selectedNotamGroup: List<NearbyNotam>?,
+    onSelectedNotamGroupChange: (List<NearbyNotam>?) -> Unit
+) {
+    selectedNotam?.let { notice ->
+        AlertDialog(
+            onDismissRequest = { onSelectedNotamChange(null) },
+            title = { Text("NOTAM Detail") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (notice.proximityText.isNotBlank()) {
+                        Text(notice.proximityText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text(notice.title, style = MaterialTheme.typography.titleMedium)
+                    notice.rawReference.takeIf { it.isNotBlank() }?.let {
+                        Spacer(Modifier.height(6.dp))
+                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    val metaText = buildString {
+                        if (notice.intersectsPilotBubble) append("intersects 1 mi operating area")
+                        if (notice.effectiveText.isNotBlank()) {
+                            if (isNotBlank()) append(" • ")
+                            append(notice.effectiveText)
+                        }
+                    }
+                    if (metaText.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(metaText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (notice.summary.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(notice.summary)
+                    }
+                    if (notice.details.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(notice.details)
+                    }
+                    if (notice.rawText.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "FAA text: ${notice.rawTitle.ifBlank { notice.rawText }}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (notice.rawText.isNotBlank() && notice.rawText != notice.rawTitle) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Translation: ${notice.rawText}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { onSelectedNotamChange(null) }) { Text("Close") }
+            },
+            dismissButton = {}
+        )
+    }
+    selectedNotamGroup?.let { notices ->
+        AlertDialog(
+            onDismissRequest = { onSelectedNotamGroupChange(null) },
+            title = {
+                Text(if (notices.size == 1) "NOTAM Here" else "NOTAMs Here")
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    notices.forEach { notice ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onSelectedNotamGroupChange(null)
+                                    onSelectedNotamChange(notice)
+                                }
+                                .padding(vertical = 8.dp)
+                        ) {
+                            if (notice.proximityText.isNotBlank()) {
+                                Text(
+                                    notice.proximityText,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(notice.title, style = MaterialTheme.typography.titleMedium)
+                            notice.effectiveText.takeIf { it.isNotBlank() }?.let {
+                                Spacer(Modifier.height(4.dp))
+                                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { onSelectedNotamGroupChange(null) }) { Text("Close") }
+            },
+            dismissButton = {}
+        )
+    }
+}
+
+@Composable
+private fun MapPaneManagementDialogs(
+    context: Context,
+    badTileDialogState: BadTileDialogState?,
+    quarantineMatchingHash: Boolean,
+    onQuarantineMatchingHashChange: (Boolean) -> Unit,
+    onBadTileDialogStateChange: (BadTileDialogState?) -> Unit,
+    onRemoveBadTile: (BadTileDialogState, Boolean) -> Unit,
+    showMapFoldersDialog: Boolean,
+    onShowMapFoldersDialogChange: (Boolean) -> Unit,
+    artifactStoreById: Map<String, JSONObject>,
+    hiddenFolderIds: MutableSet<String>,
+    hiddenItemIds: MutableSet<String>,
+    onFolderVisibilityChanged: (String, Boolean) -> Unit,
+    onItemVisibilityChanged: (String, Boolean) -> Unit,
+    onAllItemsToggled: (List<String>, Boolean) -> Unit,
+    showBadTilesHowToDialog: Boolean,
+    onShowBadTilesHowToDialogChange: (Boolean) -> Unit,
+    showMapCacheSizeDialog: Boolean,
+    onShowMapCacheSizeDialogChange: (Boolean) -> Unit,
+    mapCacheSizeInput: String,
+    onMapCacheSizeInputChange: (String) -> Unit,
+    onMapCacheSizeSaved: (Long) -> Unit,
+    showMapTileAgeDialog: Boolean,
+    onShowMapTileAgeDialogChange: (Boolean) -> Unit,
+    mapTileAgeDaysInput: String,
+    onMapTileAgeDaysInputChange: (String) -> Unit,
+    onMapTileAgeSaved: (Long) -> Unit
+) {
+    badTileDialogState?.let { dlg ->
+        AlertDialog(
+            onDismissRequest = { onBadTileDialogStateChange(null) },
+            title = { Text("Remove Bad Tile?") },
+            text = {
+                Column {
+                    Text("Tile z=${dlg.zoom} x=${dlg.x} y=${dlg.y}")
+                    Text("Hash: ${dlg.hash.take(12)}...")
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = quarantineMatchingHash,
+                            onCheckedChange = onQuarantineMatchingHashChange
+                        )
+                        Text("Also quarantine same-hash tiles")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { onRemoveBadTile(dlg, quarantineMatchingHash) }) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { onBadTileDialogStateChange(null) }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showMapFoldersDialog) {
+        MapFoldersDialog(
+            folders = buildMapFolderUiStates(artifactStoreById),
+            hiddenFolderIds = hiddenFolderIds,
+            hiddenItemIds = hiddenItemIds,
+            onFolderVisibilityChanged = onFolderVisibilityChanged,
+            onItemVisibilityChanged = onItemVisibilityChanged,
+            onAllItemsToggled = onAllItemsToggled,
+            onDismiss = { onShowMapFoldersDialogChange(false) }
+        )
+    }
+
+    if (showBadTilesHowToDialog) {
+        AlertDialog(
+            onDismissRequest = { onShowBadTilesHowToDialogChange(false) },
+            title = { Text("Bad Tiles How To") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Use this when map tiles show a cached error page such as OpenStreetMap's \"Access blocked\" tile.")
+                    Text("1. Turn on Auto Remove Bad Tiles if you want quarantined tiles removed automatically when encountered.")
+                    Text("2. Long-press a bad tile on the map.")
+                    Text("3. In the Remove Bad Tile dialog, leave \"Also quarantine same-hash tiles\" checked and press Remove.")
+                    Text("4. The selected tile is removed from cache, and matching bad tiles can be suppressed across the map.")
+                    Text("Clear Bad Tile Flags removes the quarantine list only. It does not remove tiles already cached.")
+                    Text("Export Bad Tile Hashes saves the quarantined hashes for troubleshooting or sharing.")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { onShowBadTilesHowToDialogChange(false) }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
+
+    if (showMapCacheSizeDialog) {
+        AlertDialog(
+            onDismissRequest = { onShowMapCacheSizeDialogChange(false) },
+            title = { Text("Max Cache Size") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter the maximum tile cache size in decimal GB.")
+                    OutlinedTextField(
+                        value = mapCacheSizeInput,
+                        onValueChange = onMapCacheSizeInputChange,
+                        label = { Text("Decimal GB") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val gb = mapCacheSizeInput.toDoubleOrNull()
+                        if (gb == null || gb <= 0.0) {
+                            CaltopoClient.ShowToast("Enter a positive cache size in GB.")
+                            return@TextButton
+                        }
+                        onMapCacheSizeSaved((gb * 1_000_000_000.0).toLong())
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { onShowMapCacheSizeDialogChange(false) }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showMapTileAgeDialog) {
+        AlertDialog(
+            onDismissRequest = { onShowMapTileAgeDialogChange(false) },
+            title = { Text("Maximum Tile Age") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter the maximum tile retention age in days.")
+                    OutlinedTextField(
+                        value = mapTileAgeDaysInput,
+                        onValueChange = { onMapTileAgeDaysInputChange(it.filter { ch -> ch.isDigit() }) },
+                        label = { Text("Days") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val days = mapTileAgeDaysInput.toLongOrNull()
+                        if (days == null || days <= 0L) {
+                            CaltopoClient.ShowToast("Enter a positive tile age in days.")
+                            return@TextButton
+                        }
+                        onMapTileAgeSaved(days)
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { onShowMapTileAgeDialogChange(false) }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun BoxScope.MapPaneSettingsMenus(
+    context: Context,
+    settingsMenuExpanded: Boolean,
+    onSettingsMenuExpandedChange: (Boolean) -> Unit,
+    mapManagementMenuExpanded: Boolean,
+    onMapManagementMenuExpandedChange: (Boolean) -> Unit,
+    baseLayerMenuExpanded: Boolean,
+    onBaseLayerMenuExpandedChange: (Boolean) -> Unit,
+    badTilesMenuExpanded: Boolean,
+    onBadTilesMenuExpandedChange: (Boolean) -> Unit,
+    baseLayer: BaseLayerOption,
+    predictiveHeadEnabled: Boolean,
+    followFocusedDroneEnabled: Boolean,
+    mapReloadInFlight: Boolean,
+    mapName: String?,
+    autoRemoveBadTiles: Boolean,
+    contourOverlayEnabled: Boolean,
+    hasMapFolders: Boolean,
+    onTogglePredictiveHead: () -> Unit,
+    onDownloadMap: () -> Unit,
+    onOpenMapFolders: () -> Unit,
+    onToggleFollowFocusedDrone: () -> Unit,
+    onReloadMap: () -> Unit,
+    onOpenBadTiles: () -> Unit,
+    onOpenBadTilesHowTo: () -> Unit,
+    onOpenCacheSize: () -> Unit,
+    onOpenTileAge: () -> Unit,
+    onToggleAutoRemoveBadTiles: () -> Unit,
+    onClearBadTileFlags: () -> Unit,
+    onExportBadTileHashes: () -> Unit,
+    onBaseLayerSelected: (BaseLayerOption) -> Unit,
+    onToggleContours: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .padding(6.dp)
+    ) {
+        IconButton(
+            onClick = { onSettingsMenuExpandedChange(true) },
+            modifier = Modifier
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Settings,
+                contentDescription = "Map settings"
+            )
+        }
+        DropdownMenu(
+            expanded = settingsMenuExpanded,
+            onDismissRequest = {
+                onSettingsMenuExpandedChange(false)
+                onMapManagementMenuExpandedChange(false)
+                onBaseLayerMenuExpandedChange(false)
+                onBadTilesMenuExpandedChange(false)
+            }
+        ) {
+            DropdownMenuItem(
+                text = { Text("Layer: ${baseLayer.label}") },
+                onClick = {
+                    onSettingsMenuExpandedChange(false)
+                    onBaseLayerMenuExpandedChange(true)
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(if (predictiveHeadEnabled) "Predictive Head: On" else "Predictive Head: Off") },
+                onClick = onTogglePredictiveHead
+            )
+            DropdownMenuItem(
+                text = { Text("Download Map...") },
+                onClick = onDownloadMap
+            )
+            DropdownMenuItem(
+                text = { Text("Map Folders...") },
+                onClick = onOpenMapFolders,
+                enabled = hasMapFolders
+            )
+            DropdownMenuItem(
+                text = { Text("Map Management...") },
+                onClick = {
+                    onSettingsMenuExpandedChange(false)
+                    onMapManagementMenuExpandedChange(true)
+                }
+            )
+        }
+        DropdownMenu(
+            expanded = mapManagementMenuExpanded,
+            onDismissRequest = { onMapManagementMenuExpandedChange(false) }
+        ) {
+            DropdownMenuItem(
+                text = { Text(if (followFocusedDroneEnabled) "Follow Focused Drone: On" else "Follow Focused Drone: Off") },
+                onClick = onToggleFollowFocusedDrone
+            )
+            DropdownMenuItem(
+                text = { Text(if (mapReloadInFlight) "Reload Map..." else "Reload Map") },
+                onClick = onReloadMap,
+                enabled = mapName != null && !mapReloadInFlight
+            )
+            DropdownMenuItem(
+                text = { Text("Bad Tiles...") },
+                onClick = onOpenBadTiles
+            )
+            DropdownMenuItem(
+                text = { Text("Max Cache Size: ${MapCacheSettings.formatDecimalGb(MapCacheSettings.maxCacheBytes(context))}") },
+                onClick = onOpenCacheSize
+            )
+            DropdownMenuItem(
+                text = { Text("Maximum Tile Age: ${MapCacheSettings.formatTileAge(MapCacheSettings.maxTileAgeDays(context))}") },
+                onClick = onOpenTileAge
+            )
+        }
+        DropdownMenu(
+            expanded = badTilesMenuExpanded,
+            onDismissRequest = { onBadTilesMenuExpandedChange(false) }
+        ) {
+            DropdownMenuItem(
+                text = { Text("How To") },
+                onClick = onOpenBadTilesHowTo
+            )
+            DropdownMenuItem(
+                text = { Text(if (autoRemoveBadTiles) "Auto Remove Bad Tiles: On" else "Auto Remove Bad Tiles: Off") },
+                onClick = onToggleAutoRemoveBadTiles
+            )
+            DropdownMenuItem(
+                text = { Text("Clear Bad Tile Flags (${BadTilePolicy.blockedHashCount(context)})") },
+                onClick = onClearBadTileFlags
+            )
+            DropdownMenuItem(
+                text = { Text("Export Bad Tile Hashes") },
+                onClick = onExportBadTileHashes
+            )
+        }
+        DropdownMenu(
+            expanded = baseLayerMenuExpanded,
+            onDismissRequest = { onBaseLayerMenuExpandedChange(false) }
+        ) {
+            BaseLayerOption.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        val selected = if (option == baseLayer) " \u2713" else ""
+                        Text("${option.label}$selected")
+                    },
+                    onClick = { onBaseLayerSelected(option) }
+                )
+            }
+            DropdownMenuItem(
+                text = { Text(if (contourOverlayEnabled) "Contours: On" else "Contours: Off") },
+                onClick = onToggleContours
+            )
+        }
+    }
+}
+
 // SplitMapPane composable - extracted from StreamsScreen.kt (lines 648-2466)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1639,108 +2073,12 @@ internal fun SplitMapPane(
         }
     }
 
-    selectedNotam?.let { notice ->
-        AlertDialog(
-            onDismissRequest = { selectedNotam = null },
-            title = { Text("NOTAM Detail") },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    if (notice.proximityText.isNotBlank()) {
-                        Text(notice.proximityText, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Text(notice.title, style = MaterialTheme.typography.titleMedium)
-                    notice.rawReference.takeIf { it.isNotBlank() }?.let {
-                        Spacer(Modifier.height(6.dp))
-                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    val metaText = buildString {
-                        if (notice.intersectsPilotBubble) append("intersects 1 mi operating area")
-                        if (notice.effectiveText.isNotBlank()) {
-                            if (isNotBlank()) append(" • ")
-                            append(notice.effectiveText)
-                        }
-                    }
-                    if (metaText.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(metaText, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (notice.summary.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(notice.summary)
-                    }
-                    if (notice.details.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(notice.details)
-                    }
-                    if (notice.rawText.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "FAA text: ${notice.rawTitle.ifBlank { notice.rawText }}",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (notice.rawText.isNotBlank() && notice.rawText != notice.rawTitle) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "Translation: ${notice.rawText}",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { selectedNotam = null }) { Text("Close") }
-            },
-            dismissButton = {}
-        )
-    }
-    selectedNotamGroup?.let { notices ->
-        AlertDialog(
-            onDismissRequest = { selectedNotamGroup = null },
-            title = {
-                Text(if (notices.size == 1) "NOTAM Here" else "NOTAMs Here")
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    notices.forEach { notice ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    selectedNotamGroup = null
-                                    selectedNotam = notice
-                                }
-                                .padding(vertical = 8.dp)
-                        ) {
-                            if (notice.proximityText.isNotBlank()) {
-                                Text(
-                                    notice.proximityText,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Text(notice.title, style = MaterialTheme.typography.titleMedium)
-                            notice.effectiveText.takeIf { it.isNotBlank() }?.let {
-                                Spacer(Modifier.height(4.dp))
-                                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { selectedNotamGroup = null }) { Text("Close") }
-            },
-            dismissButton = {}
-        )
-    }
+    MapPaneNotamDialogs(
+        selectedNotam = selectedNotam,
+        onSelectedNotamChange = { selectedNotam = it },
+        selectedNotamGroup = selectedNotamGroup,
+        onSelectedNotamGroupChange = { selectedNotamGroup = it }
+    )
     val dronePoints = dronePointEntries.map { it.first }
     val localTailHeadOverrideCount = dronePointEntries.count { it.second }
     // GeoTIFF tile names covering all currently-visible drone positions.
@@ -2927,176 +3265,69 @@ internal fun SplitMapPane(
         }
     }
 
-    badTileDialogState?.let { dlg ->
-        AlertDialog(
-            onDismissRequest = { badTileDialogState = null },
-            title = { Text("Remove Bad Tile?") },
-            text = {
-                Column {
-                    Text("Tile z=${dlg.zoom} x=${dlg.x} y=${dlg.y}")
-                    Text("Hash: ${dlg.hash.take(12)}...")
-                    Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = quarantineMatchingHash,
-                            onCheckedChange = { quarantineMatchingHash = it }
-                        )
-                        Text("Also quarantine same-hash tiles")
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val source = tileMapProvider.tileSource
-                        tileCacheWriter.remove(source, dlg.tileIndex)
-                        if (quarantineMatchingHash) {
-                            BadTilePolicy.addBlockedHash(context, dlg.hash)
-                            CaltopoClient.ShowToast("Tile removed and hash quarantined.")
-                        } else {
-                            CaltopoClient.ShowToast("Tile removed from cache.")
-                        }
-                        badTileDialogState = null
-                    }
-                ) { Text("Remove") }
-            },
-            dismissButton = {
-                TextButton(onClick = { badTileDialogState = null }) { Text("Cancel") }
+    MapPaneManagementDialogs(
+        context = context,
+        badTileDialogState = badTileDialogState,
+        quarantineMatchingHash = quarantineMatchingHash,
+        onQuarantineMatchingHashChange = { quarantineMatchingHash = it },
+        onBadTileDialogStateChange = { badTileDialogState = it },
+        onRemoveBadTile = { dlg, quarantine ->
+            val source = tileMapProvider.tileSource
+            tileCacheWriter.remove(source, dlg.tileIndex)
+            if (quarantine) {
+                BadTilePolicy.addBlockedHash(context, dlg.hash)
+                CaltopoClient.ShowToast("Tile removed and hash quarantined.")
+            } else {
+                CaltopoClient.ShowToast("Tile removed from cache.")
             }
-        )
-    }
-
-    if (showMapFoldersDialog) {
-        val mapFolderUiStates = buildMapFolderUiStates(artifactStoreById)
-        MapFoldersDialog(
-            folders = mapFolderUiStates,
-            hiddenFolderIds = hiddenFolderIds,
-            hiddenItemIds = hiddenItemIds,
-            onFolderVisibilityChanged = { folderId, visible ->
-                if (visible) hiddenFolderIds.remove(folderId) else hiddenFolderIds.add(folderId)
-                startArtifactOverlayRebuild("folder-visibility")
-            },
-            onItemVisibilityChanged = { itemId, visible ->
-                if (visible) hiddenItemIds.remove(itemId) else hiddenItemIds.add(itemId)
-                startArtifactOverlayRebuild("item-visibility")
-            },
-            onAllItemsToggled = { itemIds, visible ->
-                if (visible) hiddenItemIds.removeAll(itemIds.toSet())
-                else hiddenItemIds.addAll(itemIds)
-                startArtifactOverlayRebuild("bulk-item-visibility")
-            },
-            onDismiss = { showMapFoldersDialog = false }
-        )
-    }
-
-    if (showBadTilesHowToDialog) {
-        AlertDialog(
-            onDismissRequest = { showBadTilesHowToDialog = false },
-            title = { Text("Bad Tiles How To") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Use this when map tiles show a cached error page such as OpenStreetMap's \"Access blocked\" tile.")
-                    Text("1. Turn on Auto Remove Bad Tiles if you want quarantined tiles removed automatically when encountered.")
-                    Text("2. Long-press a bad tile on the map.")
-                    Text("3. In the Remove Bad Tile dialog, leave \"Also quarantine same-hash tiles\" checked and press Remove.")
-                    Text("4. The selected tile is removed from cache, and matching bad tiles can be suppressed across the map.")
-                    Text("Clear Bad Tile Flags removes the quarantine list only. It does not remove tiles already cached.")
-                    Text("Export Bad Tile Hashes saves the quarantined hashes for troubleshooting or sharing.")
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showBadTilesHowToDialog = false }) {
-                    Text("OK")
-                }
-            }
-        )
-    }
-
-    if (showMapCacheSizeDialog) {
-        AlertDialog(
-            onDismissRequest = { showMapCacheSizeDialog = false },
-            title = { Text("Max Cache Size") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Enter the maximum tile cache size in decimal GB.")
-                    OutlinedTextField(
-                        value = mapCacheSizeInput,
-                        onValueChange = { mapCacheSizeInput = it },
-                        label = { Text("Decimal GB") },
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val gb = mapCacheSizeInput.toDoubleOrNull()
-                        if (gb == null || gb <= 0.0) {
-                            CaltopoClient.ShowToast("Enter a positive cache size in GB.")
-                            return@TextButton
-                        }
-                        val bytes = (gb * 1_000_000_000.0).toLong()
-                        MapCacheSettings.setMaxCacheBytes(context, bytes)
-                        offlinePrepTileCacheCapBytes = MapCachePolicy.tileCacheMaxBytes(context)
-                        mapCacheSizeInput = String.format(
-                            Locale.US,
-                            "%.1f",
-                            MapCacheSettings.maxCacheBytes(context).toDouble() / 1_000_000_000.0
-                        )
-                        showMapCacheSizeDialog = false
-                        CaltopoClient.ShowToast("Map cache size saved. Startup cache maintenance will use the new limit next launch.")
-                    }
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showMapCacheSizeDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    if (showMapTileAgeDialog) {
-        AlertDialog(
-            onDismissRequest = { showMapTileAgeDialog = false },
-            title = { Text("Maximum Tile Age") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Enter the maximum tile retention age in days.")
-                    OutlinedTextField(
-                        value = mapTileAgeDaysInput,
-                        onValueChange = { mapTileAgeDaysInput = it.filter { ch -> ch.isDigit() } },
-                        label = { Text("Days") },
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val days = mapTileAgeDaysInput.toLongOrNull()
-                        if (days == null || days <= 0L) {
-                            CaltopoClient.ShowToast("Enter a positive tile age in days.")
-                            return@TextButton
-                        }
-                        MapCacheSettings.setMaxTileAgeDays(context, days)
-                        mapTileAgeDaysInput = MapCacheSettings.maxTileAgeDays(context).toString()
-                        showMapTileAgeDialog = false
-                        CaltopoClient.ShowToast("Maximum tile age saved. Startup cache maintenance will use the new limit next launch.")
-                    }
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showMapTileAgeDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
+            badTileDialogState = null
+        },
+        showMapFoldersDialog = showMapFoldersDialog,
+        onShowMapFoldersDialogChange = { showMapFoldersDialog = it },
+        artifactStoreById = artifactStoreById,
+        hiddenFolderIds = hiddenFolderIds,
+        hiddenItemIds = hiddenItemIds,
+        onFolderVisibilityChanged = { folderId, visible ->
+            if (visible) hiddenFolderIds.remove(folderId) else hiddenFolderIds.add(folderId)
+            startArtifactOverlayRebuild("folder-visibility")
+        },
+        onItemVisibilityChanged = { itemId, visible ->
+            if (visible) hiddenItemIds.remove(itemId) else hiddenItemIds.add(itemId)
+            startArtifactOverlayRebuild("item-visibility")
+        },
+        onAllItemsToggled = { itemIds, visible ->
+            if (visible) hiddenItemIds.removeAll(itemIds.toSet())
+            else hiddenItemIds.addAll(itemIds)
+            startArtifactOverlayRebuild("bulk-item-visibility")
+        },
+        showBadTilesHowToDialog = showBadTilesHowToDialog,
+        onShowBadTilesHowToDialogChange = { showBadTilesHowToDialog = it },
+        showMapCacheSizeDialog = showMapCacheSizeDialog,
+        onShowMapCacheSizeDialogChange = { showMapCacheSizeDialog = it },
+        mapCacheSizeInput = mapCacheSizeInput,
+        onMapCacheSizeInputChange = { mapCacheSizeInput = it },
+        onMapCacheSizeSaved = { bytes ->
+            MapCacheSettings.setMaxCacheBytes(context, bytes)
+            offlinePrepTileCacheCapBytes = MapCachePolicy.tileCacheMaxBytes(context)
+            mapCacheSizeInput = String.format(
+                Locale.US,
+                "%.1f",
+                MapCacheSettings.maxCacheBytes(context).toDouble() / 1_000_000_000.0
+            )
+            showMapCacheSizeDialog = false
+            CaltopoClient.ShowToast("Map cache size saved. Startup cache maintenance will use the new limit next launch.")
+        },
+        showMapTileAgeDialog = showMapTileAgeDialog,
+        onShowMapTileAgeDialogChange = { showMapTileAgeDialog = it },
+        mapTileAgeDaysInput = mapTileAgeDaysInput,
+        onMapTileAgeDaysInputChange = { mapTileAgeDaysInput = it },
+        onMapTileAgeSaved = { days ->
+            MapCacheSettings.setMaxTileAgeDays(context, days)
+            mapTileAgeDaysInput = MapCacheSettings.maxTileAgeDays(context).toString()
+            showMapTileAgeDialog = false
+            CaltopoClient.ShowToast("Maximum tile age saved. Startup cache maintenance will use the new limit next launch.")
+        }
+    )
 
     colorPickerTarget?.let { target ->
         PilotTrackColorPickerDialog(
@@ -4589,98 +4820,56 @@ internal fun SplitMapPane(
         }
 
         if (!isInsetMode) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(6.dp)
-            ) {
-                IconButton(
-                    onClick = { settingsMenuExpanded = true },
-                    modifier = Modifier
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Settings,
-                        contentDescription = "Map settings"
-                    )
-                }
-                DropdownMenu(
-                expanded = settingsMenuExpanded,
-                onDismissRequest = {
+            MapPaneSettingsMenus(
+                context = context,
+                settingsMenuExpanded = settingsMenuExpanded,
+                onSettingsMenuExpandedChange = { settingsMenuExpanded = it },
+                mapManagementMenuExpanded = mapManagementMenuExpanded,
+                onMapManagementMenuExpandedChange = { mapManagementMenuExpanded = it },
+                baseLayerMenuExpanded = baseLayerMenuExpanded,
+                onBaseLayerMenuExpandedChange = { baseLayerMenuExpanded = it },
+                badTilesMenuExpanded = badTilesMenuExpanded,
+                onBadTilesMenuExpandedChange = { badTilesMenuExpanded = it },
+                baseLayer = baseLayer,
+                predictiveHeadEnabled = predictiveHeadEnabled,
+                followFocusedDroneEnabled = followFocusedDroneEnabled,
+                mapReloadInFlight = mapReloadInFlight,
+                mapName = mapName,
+                autoRemoveBadTiles = autoRemoveBadTiles,
+                contourOverlayEnabled = contourOverlayEnabled,
+                hasMapFolders = buildMapFolderUiStates(artifactStoreById).isNotEmpty(),
+                onTogglePredictiveHead = {
+                    predictiveHeadEnabled = !predictiveHeadEnabled
+                    CaltopoClient.SetPredictiveHeadEnabled(predictiveHeadEnabled)
                     settingsMenuExpanded = false
-                    mapManagementMenuExpanded = false
-                    baseLayerMenuExpanded = false
-                    badTilesMenuExpanded = false
-                }
-            ) {
-                DropdownMenuItem(
-                    text = { Text("Layer: ${baseLayer.label}") },
-                    onClick = {
-                        settingsMenuExpanded = false
-                        baseLayerMenuExpanded = true
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text(if (predictiveHeadEnabled) "Predictive Head: On" else "Predictive Head: Off") },
-                    onClick = {
-                        predictiveHeadEnabled = !predictiveHeadEnabled
-                        CaltopoClient.SetPredictiveHeadEnabled(predictiveHeadEnabled)
-                        settingsMenuExpanded = false
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Download Map...") },
-                    onClick = {
-                        offlinePrepIncludeContours = contourOverlayEnabled
-                        settingsMenuExpanded = false
-                        showOfflinePrepDialog = true
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Map Folders...") },
-                    onClick = {
-                        CTInfo(
-                            MAP_PANE_TAG,
-                            "Map Folders opened: " + mapFolderUiDebugSummary(
-                                folders = buildMapFolderUiStates(artifactStoreById),
-                                hiddenFolderIds = hiddenFolderIds,
-                                hiddenItemIds = hiddenItemIds
-                            )
+                },
+                onDownloadMap = {
+                    offlinePrepIncludeContours = contourOverlayEnabled
+                    settingsMenuExpanded = false
+                    showOfflinePrepDialog = true
+                },
+                onOpenMapFolders = {
+                    CTInfo(
+                        MAP_PANE_TAG,
+                        "Map Folders opened: " + mapFolderUiDebugSummary(
+                            folders = buildMapFolderUiStates(artifactStoreById),
+                            hiddenFolderIds = hiddenFolderIds,
+                            hiddenItemIds = hiddenItemIds
                         )
-                        settingsMenuExpanded = false
-                        showMapFoldersDialog = true
-                    },
-                    enabled = buildMapFolderUiStates(artifactStoreById).isNotEmpty()
-                )
-                DropdownMenuItem(
-                    text = { Text("Map Management...") },
-                    onClick = {
-                        settingsMenuExpanded = false
-                        mapManagementMenuExpanded = true
+                    )
+                    settingsMenuExpanded = false
+                    showMapFoldersDialog = true
+                },
+                onToggleFollowFocusedDrone = {
+                    val enabled = !followFocusedDroneEnabled
+                    if (enabled) {
+                        operatorAdjustedViewport = false
                     }
-                )
-            }
-            DropdownMenu(
-                expanded = mapManagementMenuExpanded,
-                onDismissRequest = { mapManagementMenuExpanded = false }
-            ) {
-                DropdownMenuItem(
-                    text = { Text(if (followFocusedDroneEnabled) "Follow Focused Drone: On" else "Follow Focused Drone: Off") },
-                    onClick = {
-                        val enabled = !followFocusedDroneEnabled
-                        if (enabled) {
-                            operatorAdjustedViewport = false
-                        }
-                        viewModel.setFollowFocusedDroneEnabled(enabled)
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text(if (mapReloadInFlight) "Reload Map..." else "Reload Map") },
-                    onClick = {
-                        mapManagementMenuExpanded = false
-                        if (mapReloadInFlight) {
-                            return@DropdownMenuItem
-                        }
+                    viewModel.setFollowFocusedDroneEnabled(enabled)
+                },
+                onReloadMap = {
+                    mapManagementMenuExpanded = false
+                    if (!mapReloadInFlight) {
                         mapReloadInFlight = true
                         CaltopoClient.ShowToast("Reloading map artifacts...")
                         CaltopoMap.ReloadMapArtifactsNow(
@@ -4699,102 +4888,58 @@ internal fun SplitMapPane(
                                 mapReloadInFlight = false
                             }
                         }
-                    },
-                    enabled = mapName != null && !mapReloadInFlight
-                )
-                DropdownMenuItem(
-                    text = { Text("Bad Tiles...") },
-                    onClick = {
-                        mapManagementMenuExpanded = false
-                        badTilesMenuExpanded = true
                     }
-                )
-                DropdownMenuItem(
-                    text = { Text("Max Cache Size: ${MapCacheSettings.formatDecimalGb(MapCacheSettings.maxCacheBytes(context))}") },
-                    onClick = {
-                        mapManagementMenuExpanded = false
-                        mapCacheSizeInput = String.format(
-                            Locale.US,
-                            "%.1f",
-                            MapCacheSettings.maxCacheBytes(context).toDouble() / 1_000_000_000.0
-                        )
-                        showMapCacheSizeDialog = true
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Maximum Tile Age: ${MapCacheSettings.formatTileAge(MapCacheSettings.maxTileAgeDays(context))}") },
-                    onClick = {
-                        mapManagementMenuExpanded = false
-                        mapTileAgeDaysInput = MapCacheSettings.maxTileAgeDays(context).toString()
-                        showMapTileAgeDialog = true
-                    }
-                )
-            }
-            DropdownMenu(
-                expanded = badTilesMenuExpanded,
-                onDismissRequest = { badTilesMenuExpanded = false }
-            ) {
-                DropdownMenuItem(
-                    text = { Text("How To") },
-                    onClick = {
-                        badTilesMenuExpanded = false
-                        showBadTilesHowToDialog = true
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text(if (autoRemoveBadTiles) "Auto Remove Bad Tiles: On" else "Auto Remove Bad Tiles: Off") },
-                    onClick = {
-                        autoRemoveBadTiles = !autoRemoveBadTiles
-                        badTilesMenuExpanded = false
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Clear Bad Tile Flags (${BadTilePolicy.blockedHashCount(context)})") },
-                    onClick = {
-                        BadTilePolicy.clearBlockedHashes(context)
-                        CaltopoClient.ShowToast("Bad tile flags cleared.")
-                        badTilesMenuExpanded = false
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Export Bad Tile Hashes") },
-                    onClick = {
-                        val exportedTo = exportBadTileHashes(context)
-                        if (exportedTo != null) {
-                            CaltopoClient.ShowToast("Exported bad tile hashes to $exportedTo")
-                        } else {
-                            CaltopoClient.ShowToast("Bad tile hash export failed.")
-                        }
-                        badTilesMenuExpanded = false
-                    }
-                )
-            }
-            DropdownMenu(
-                expanded = baseLayerMenuExpanded,
-                onDismissRequest = { baseLayerMenuExpanded = false }
-            ) {
-                BaseLayerOption.entries.forEach { option ->
-                    DropdownMenuItem(
-                        text = {
-                            val selected = if (option == baseLayer) " \u2713" else ""
-                            Text("${option.label}$selected")
-                        },
-                        onClick = {
-                            viewModel.setBaseLayer(option)
-                            baseLayerMenuExpanded = false
-                        }
+                },
+                onOpenBadTiles = {
+                    mapManagementMenuExpanded = false
+                    badTilesMenuExpanded = true
+                },
+                onOpenBadTilesHowTo = {
+                    badTilesMenuExpanded = false
+                    showBadTilesHowToDialog = true
+                },
+                onOpenCacheSize = {
+                    mapManagementMenuExpanded = false
+                    mapCacheSizeInput = String.format(
+                        Locale.US,
+                        "%.1f",
+                        MapCacheSettings.maxCacheBytes(context).toDouble() / 1_000_000_000.0
                     )
-                }
-                DropdownMenuItem(
-                    text = { Text(if (contourOverlayEnabled) "Contours: On" else "Contours: Off") },
-                    onClick = {
-                        contourOverlayEnabled = !contourOverlayEnabled
-                        MapCacheSettings.setContourOverlayEnabled(context, contourOverlayEnabled)
-                        baseLayerMenuExpanded = false
+                    showMapCacheSizeDialog = true
+                },
+                onOpenTileAge = {
+                    mapManagementMenuExpanded = false
+                    mapTileAgeDaysInput = MapCacheSettings.maxTileAgeDays(context).toString()
+                    showMapTileAgeDialog = true
+                },
+                onToggleAutoRemoveBadTiles = {
+                    autoRemoveBadTiles = !autoRemoveBadTiles
+                    badTilesMenuExpanded = false
+                },
+                onClearBadTileFlags = {
+                    BadTilePolicy.clearBlockedHashes(context)
+                    CaltopoClient.ShowToast("Bad tile flags cleared.")
+                    badTilesMenuExpanded = false
+                },
+                onExportBadTileHashes = {
+                    val exportedTo = exportBadTileHashes(context)
+                    if (exportedTo != null) {
+                        CaltopoClient.ShowToast("Exported bad tile hashes to $exportedTo")
+                    } else {
+                        CaltopoClient.ShowToast("Bad tile hash export failed.")
                     }
-                )
-            }
-        }
+                    badTilesMenuExpanded = false
+                },
+                onBaseLayerSelected = { option ->
+                    viewModel.setBaseLayer(option)
+                    baseLayerMenuExpanded = false
+                },
+                onToggleContours = {
+                    contourOverlayEnabled = !contourOverlayEnabled
+                    MapCacheSettings.setContourOverlayEnabled(context, contourOverlayEnabled)
+                    baseLayerMenuExpanded = false
+                }
+            )
         }
 
         if (showMutualAidPackageDialog) {

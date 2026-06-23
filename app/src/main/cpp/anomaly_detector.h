@@ -24,6 +24,7 @@ void anomaly_detector_state_cleanup(anomaly_detector_state_t *state);
 bool anomaly_detector_frame_input_ready(const anomaly_frame_input_t *frame);
 
 int anomaly_detector_default_window_frames(float frame_rate_fps);
+int anomaly_detector_sparse_overlay_window_frames(int target_eval_interval_frames);
 
 anomaly_detector_config_t anomaly_detector_config_make_realtime_default(
         int   algorithm_mask,

@@ -12651,27 +12651,37 @@ static void test_detector_facade_runtime_budget_local_ad_cadence(void) {
     anomaly_detector_runtime_budget_local_ad_cadence_t cadence =
             anomaly_detector_runtime_budget_local_ad_cadence(
                     true, true, 1, 30, 5);
-    EXPECT(!cadence.analyze && cadence.prediction_only && cadence.frame_stride_override == 0,
+    EXPECT(!cadence.analyze && cadence.prediction_only &&
+           !cadence.full_scan_due &&
+           cadence.frame_stride_override == 0,
            "runtime budget local AD cadence: skips non-eval local frames");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, true, 5, 30, 5);
-    EXPECT(cadence.analyze && !cadence.prediction_only && cadence.frame_stride_override == 6,
-           "runtime budget local AD cadence: evaluates every fifth frame with derived full stride");
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
+           !cadence.full_scan_due &&
+           cadence.frame_stride_override > 30,
+           "runtime budget local AD cadence: target-eval frames suppress analyzed-frame full refresh");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, true, 30, 30, 5);
-    EXPECT(cadence.analyze && cadence.frame_stride_override == 6,
-           "runtime budget local AD cadence: thirty decoded frames maps to a full scan opportunity");
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
+           cadence.full_scan_due &&
+           cadence.frame_stride_override == 1,
+           "runtime budget local AD cadence: thirty decoded frames forces a full scan opportunity");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             false, true, 1, 30, 5);
-    EXPECT(cadence.analyze && !cadence.prediction_only && cadence.frame_stride_override == 0,
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
+           !cadence.full_scan_due &&
+           cadence.frame_stride_override == 0,
            "runtime budget local AD cadence: live sources are not locally throttled");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, false, 1, 30, 5);
-    EXPECT(cadence.analyze && !cadence.prediction_only && cadence.frame_stride_override == 0,
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
+           !cadence.full_scan_due &&
+           cadence.frame_stride_override == 0,
            "runtime budget local AD cadence: disabled processing leaves handoff policy alone");
 }
 
@@ -20113,7 +20123,10 @@ static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(voi
     anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
     cfg.score_threshold = 2.0f;
     cfg.min_hits = 1;
+    cfg.stride_mode = ANOMALY_STRIDE_MODE_ADAPTIVE;
     cfg.frame_stride = 10;
+    cfg.adaptive_min_stride_frames = 10;
+    cfg.adaptive_max_stride_frames = 10;
 
     uint8_t *frame = make_gray_frame(W, H, 64);
     stamp_texture_field(frame, W * 4, W, H, 0);
@@ -20130,6 +20143,37 @@ static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(voi
            "periodic refresh: ~333ms cadence forces a full refresh");
     EXPECT((r3.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) != 0u,
            "periodic refresh: scan plan records the cadence-driven full rescan reason");
+
+    free(frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_fixed_stride_full_refresh_is_not_shortened_by_time_periodic(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+    cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
+    cfg.frame_stride = 30;
+
+    uint8_t *frame = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame, W * 4, W, H, 0);
+    stamp_color_patch(frame, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
+
+    anomaly_result_t r1, r2, r3;
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 1000, &r1);
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 100000, &r2);
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 400000, &r3);
+
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "fixed stride: stable follow-up frame refreshes the predicted target ROI");
+    EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "fixed stride: source-time periodic refresh does not shorten frame-stride cadence");
+    EXPECT((r3.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) == 0u,
+           "fixed stride: scan plan does not report periodic full refresh before frame stride");
 
     free(frame);
     anomaly_state_cleanup(&st);
@@ -20765,6 +20809,7 @@ int main(void) {
     test_small_target_caps_sample_step();
     test_explicit_detail_clamps_large_sample_grid();
     test_periodic_full_refresh_replaces_indefinite_target_only_reuse();
+    test_fixed_stride_full_refresh_is_not_shortened_by_time_periodic();
     test_scan_zone_growth_reallocates_scratch_buffers();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);

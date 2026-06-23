@@ -1208,9 +1208,11 @@ anomaly_detector_runtime_budget_local_ad_cadence(
         int64_t decoded_frame_ordinal,
         int full_scan_stride_frames,
         int target_eval_interval_frames) {
+    const int suppress_implicit_full_refresh_stride = 1000000;
     anomaly_detector_runtime_budget_local_ad_cadence_t cadence = {
         .analyze = true,
         .prediction_only = false,
+        .full_scan_due = false,
         .frame_stride_override = 0,
     };
     if (!local_file_source || !processing_enabled) {
@@ -1230,13 +1232,13 @@ anomaly_detector_runtime_budget_local_ad_cadence(
         cadence.prediction_only = true;
         return cadence;
     }
-    int derived_stride =
-            (full_scan_stride_frames + target_eval_interval_frames - 1) /
-            target_eval_interval_frames;
-    if (derived_stride < 1) {
-        derived_stride = 1;
+    cadence.full_scan_due =
+            (decoded_frame_ordinal % full_scan_stride_frames) == 0;
+    if (cadence.full_scan_due) {
+        cadence.frame_stride_override = 1;
+    } else {
+        cadence.frame_stride_override = suppress_implicit_full_refresh_stride;
     }
-    cadence.frame_stride_override = derived_stride;
     return cadence;
 }
 

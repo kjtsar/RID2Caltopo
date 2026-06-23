@@ -605,6 +605,15 @@ static bool color_component_near_predicted_color_target(
     return false;
 }
 
+static bool fresh_color_blob_is_too_common_for_dense_verify(
+        int                        color_frontend_mode,
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        peak_x,
+        int                        peak_y,
+        bool                       target_centered_rescue);
+
 static void record_color_target_trace_component(
         anomaly_color_blob_target_trace_t      *target_trace,
         int                                     sx,
@@ -1300,6 +1309,23 @@ static bool build_color_blob_candidate(
         }
     }
 
+    if (fresh_color_blob_is_too_common_for_dense_verify(
+            color_frontend_mode,
+            roi_state,
+            sg_w,
+            sg_h,
+            peak_x,
+            peak_y,
+            allow_target_centered_area_rescue)) {
+        if (reject_reason_out != NULL) *reject_reason_out = ANOMALY_COLOR_BLOB_REJECT_COMMONNESS;
+        if (reject_area_out != NULL) *reject_area_out = (float)area;
+        if (reject_span_out != NULL) *reject_span_out = span;
+        if (reject_ring_fraction_out != NULL) *reject_ring_fraction_out = ring_fraction;
+        if (reject_support_mass_out != NULL) *reject_support_mass_out = support_mass;
+        if (reject_quality_out != NULL) *reject_quality_out = quality;
+        return false;
+    }
+
     anomaly_dense_color_component_t dense_component;
     if (!verify_dense_color_component(
             rgba,
@@ -1902,6 +1928,28 @@ static void record_color_target_trace_component(
     target_trace->component_support_mass = accepted ? candidate->support_mass : reject_support_mass;
     target_trace->component_rejected = !accepted;
     target_trace->component_rejection_reason = reject_reason;
+}
+
+static bool fresh_color_blob_is_too_common_for_dense_verify(
+        int                        color_frontend_mode,
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        int                        peak_x,
+        int                        peak_y,
+        bool                       target_centered_rescue) {
+    if (color_frontend_mode == ANOMALY_COLOR_FRONTEND_LEGACY ||
+        target_centered_rescue ||
+        roi_state == NULL ||
+        roi_state->color_raw_score == NULL ||
+        sg_w <= 0 || sg_h <= 0 ||
+        peak_x < 0 || peak_x >= sg_w ||
+        peak_y < 0 || peak_y >= sg_h) {
+        return false;
+    }
+    size_t peak_idx = (size_t)peak_y * (size_t)sg_w + (size_t)peak_x;
+    float rarity = roi_state->color_raw_score[peak_idx];
+    return rarity < ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY;
 }
 
 typedef struct {
@@ -2865,6 +2913,8 @@ static void extract_color_blob_candidates(
                         if (reject_support_mass_count_out != NULL) (*reject_support_mass_count_out)++;
                     } else if (reject_reason == ANOMALY_COLOR_BLOB_REJECT_QUALITY) {
                         if (reject_quality_count_out != NULL) (*reject_quality_count_out)++;
+                    } else if (reject_reason == ANOMALY_COLOR_BLOB_REJECT_COMMONNESS) {
+                        if (reject_quality_count_out != NULL) (*reject_quality_count_out)++;
                     }
                     continue;
                 }
@@ -3180,6 +3230,8 @@ static void extract_color_blob_candidates(
                 } else if (reject_reason == ANOMALY_COLOR_BLOB_REJECT_SUPPORT_MASS) {
                     if (reject_support_mass_count_out != NULL) (*reject_support_mass_count_out)++;
                 } else if (reject_reason == ANOMALY_COLOR_BLOB_REJECT_QUALITY) {
+                    if (reject_quality_count_out != NULL) (*reject_quality_count_out)++;
+                } else if (reject_reason == ANOMALY_COLOR_BLOB_REJECT_COMMONNESS) {
                     if (reject_quality_count_out != NULL) (*reject_quality_count_out)++;
                 }
                 for (int qi = 0; qi < component_count; qi++) {
@@ -8042,7 +8094,11 @@ int anomaly_process_frame(
     uint8_t *color_frame_hist = NULL;
     uint8_t color_recent_hist_weighted[ANOMALY_COLOR_HIST_BINS];
     float color_family_rarity_lut[ANOMALY_COLOR_HIST_BINS];
-    for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) color_family_rarity_lut[i] = 0.0f;
+    float color_hist_rarity_lut[ANOMALY_COLOR_HIST_BINS];
+    for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) {
+        color_family_rarity_lut[i] = 0.0f;
+        color_hist_rarity_lut[i] = 0.0f;
+    }
     int color_hist_valid_samples = 0;
     bool color_history_recovery_trigger =
         state->frame_counter <= 1 ||
@@ -8078,6 +8134,12 @@ int anomaly_process_frame(
                 color_frame_hist,
                 color_recent_hist_weighted,
                 color_family_rarity_lut);
+            for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) {
+                color_hist_rarity_lut[i] = anomaly_color_score_hist_rarity(
+                    color_frame_hist,
+                    color_recent_hist_weighted,
+                    i);
+            }
         } else {
             color_frame_hist = NULL;
         }
@@ -8307,10 +8369,7 @@ int anomaly_process_frame(
                     int hist_key = anomaly_color_hist_key(u_bin, v_bin);
                     float rarity = color_frontend_mode == ANOMALY_COLOR_FRONTEND_LEGACY
                         ? color_family_rarity_lut[hist_key]
-                        : anomaly_color_score_hist_rarity(
-                            color_frame_hist,
-                            color_recent_hist_weighted,
-                            hist_key);
+                        : color_hist_rarity_lut[hist_key];
                     roi_state->color_raw_score[idx] = rarity;
                     if (saliency_color_map != NULL) {
                         int local_support = anomaly_color_local_uv_support_count(

@@ -550,6 +550,7 @@ typedef enum {
     ANOMALY_COLOR_BLOB_REJECT_RING = 2,
     ANOMALY_COLOR_BLOB_REJECT_SUPPORT_MASS = 3,
     ANOMALY_COLOR_BLOB_REJECT_QUALITY = 4,
+    ANOMALY_COLOR_BLOB_REJECT_COMMONNESS = 5,
 } anomaly_color_blob_reject_reason_t;
 
 typedef enum {

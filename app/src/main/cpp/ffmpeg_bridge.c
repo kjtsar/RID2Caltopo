@@ -41,6 +41,7 @@
 #include "anomaly_detector.h"
 #include "anomaly_runtime_handoff.h"
 #include "anomaly_runtime_pressure.h"
+#include "anomaly_target_revisit.h"
 #define RENDER_MIN_INTERVAL_MS 5
 #define RENDER_MAX_INTERVAL_MS 1000
 #define RENDER_DEFAULT_FPS 30
@@ -183,6 +184,7 @@ typedef struct {
     AVFrame *history_frame;
     AVFrame *overlay_frame;
     int64_t frame_id;
+    int64_t local_ad_cadence_ordinal;
     int64_t generation_id;
     int64_t source_ts_us;
     int64_t enqueued_at_ms;
@@ -378,6 +380,7 @@ typedef struct ffmpeg_session_t {
     int64_t local_ad_startup_preroll_started_at_ms;
     int64_t local_ad_startup_preroll_bypassed_count;
     bool local_ad_startup_preroll_complete;
+    int64_t local_ad_cadence_frame_counter;
     int64_t ad_pressure_frame_counter;
     ad_pressure_mode_t ad_pressure_mode;
 #endif
@@ -1650,6 +1653,8 @@ static const char *color_blob_reject_reason_name(int reason) {
             return "support-mass";
         case ANOMALY_COLOR_BLOB_REJECT_QUALITY:
             return "quality";
+        case ANOMALY_COLOR_BLOB_REJECT_COMMONNESS:
+            return "commonness";
         default:
             return "none";
     }
@@ -1747,6 +1752,25 @@ static ad_pressure_mode_t select_ad_pressure_mode_locked(ffmpeg_session_t *sessi
     return anomaly_runtime_pressure_select_mode(ad_pressure_policy_for_session(session),
                                                 session->ad_pressure_mode,
                                                 queue_depth_before_dequeue);
+}
+
+static bool local_ad_target_eval_has_no_revisit_work(ffmpeg_session_t *session,
+                                                     int64_t local_ad_cadence_ordinal) {
+    if (session == NULL ||
+        local_ad_cadence_ordinal <= 0 ||
+        !is_local_file_source(session) ||
+        (local_ad_cadence_ordinal % LOCAL_AD_TARGET_EVAL_INTERVAL_FRAMES) != 0 ||
+        (local_ad_cadence_ordinal % LOCAL_AD_FULL_SCAN_STRIDE_FRAMES) == 0 ||
+        !session->anomaly_lock_ready) {
+        return false;
+    }
+    if (pthread_mutex_trylock(&session->anomaly_lock) != 0) {
+        return false;
+    }
+    int target_revisit_count =
+            anomaly_target_revisit_track_count(&session->anomaly_state);
+    pthread_mutex_unlock(&session->anomaly_lock);
+    return target_revisit_count <= 0;
 }
 
 static anomaly_runtime_handoff_frame_t ad_handoff_frame_from_packet(
@@ -2779,6 +2803,7 @@ static void clear_render_queue_slot(render_queue_slot_t *slot) {
     av_frame_free(&slot->history_frame);
     av_frame_free(&slot->overlay_frame);
     slot->frame_id = 0;
+    slot->local_ad_cadence_ordinal = 0;
     slot->generation_id = 0;
     slot->source_ts_us = 0;
     slot->enqueued_at_ms = 0;
@@ -2896,6 +2921,7 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->local_ad_startup_preroll_started_at_ms = monotonic_ms();
         session->local_ad_startup_preroll_bypassed_count = 0;
         session->local_ad_startup_preroll_complete = false;
+        session->local_ad_cadence_frame_counter = 0;
         session->ad_pressure_frame_counter = 0;
         session->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
     }
@@ -2950,6 +2976,7 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     session->local_ad_startup_preroll_started_at_ms = monotonic_ms();
     session->local_ad_startup_preroll_bypassed_count = 0;
     session->local_ad_startup_preroll_complete = false;
+    session->local_ad_cadence_frame_counter = 0;
     session->ad_pressure_frame_counter = 0;
     session->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
 }
@@ -3483,6 +3510,7 @@ static bool enqueue_ad_input_frame_locked(ffmpeg_session_t *session,
                                           AVFrame *decoded,
                                           AVFrame *history_frame,
                                           int64_t frame_id,
+                                          int64_t local_ad_cadence_ordinal,
                                           int64_t generation_id,
                                           int64_t source_ts_us,
                                           int64_t enqueued_at_ms) {
@@ -3508,6 +3536,7 @@ static bool enqueue_ad_input_frame_locked(ffmpeg_session_t *session,
         }
     }
     slot->frame_id = frame_id;
+    slot->local_ad_cadence_ordinal = local_ad_cadence_ordinal;
     slot->generation_id = generation_id;
     slot->source_ts_us = source_ts_us;
     slot->enqueued_at_ms = enqueued_at_ms;
@@ -3561,6 +3590,7 @@ static bool enqueue_local_ad_input_best_effort_locked(ffmpeg_session_t *session,
                                                       AVFrame *decoded,
                                                       AVFrame *history_frame,
                                                       int64_t frame_id,
+                                                      int64_t local_ad_cadence_ordinal,
                                                       int64_t generation_id,
                                                       int64_t source_ts_us,
                                                       int64_t enqueued_at_ms) {
@@ -3593,6 +3623,7 @@ static bool enqueue_local_ad_input_best_effort_locked(ffmpeg_session_t *session,
             decoded,
             history_frame,
             frame_id,
+            local_ad_cadence_ordinal,
             generation_id,
             source_ts_us,
             enqueued_at_ms);
@@ -4086,18 +4117,33 @@ static void *ad_thread_main(void *arg) {
                     anomaly_detector_runtime_budget_processing_mode(budget);
             if (processing_mode == ANOMALY_DETECTOR_PROCESSING_MODE_CURSORY ||
                 processing_mode == ANOMALY_DETECTOR_PROCESSING_MODE_THOROUGH) {
+                int64_t local_ad_cadence_ordinal =
+                        packet.local_ad_cadence_ordinal > 0
+                        ? packet.local_ad_cadence_ordinal
+                        : packet.frame_id;
                 anomaly_detector_runtime_budget_local_ad_cadence_t cadence =
                         anomaly_detector_runtime_budget_local_ad_cadence(
                                 true,
                                 process_enabled,
-                                session->ad_pressure_frame_counter,
+                                local_ad_cadence_ordinal,
                                 LOCAL_AD_FULL_SCAN_STRIDE_FRAMES,
                                 LOCAL_AD_TARGET_EVAL_INTERVAL_FRAMES);
                 bypass_for_local_cadence = !cadence.analyze;
                 frame_stride_override = cadence.frame_stride_override;
                 if (cadence.prediction_only) {
                     trace_set_counter("RID2C local_ad_prediction_only",
-                                      session->ad_pressure_frame_counter);
+                                      local_ad_cadence_ordinal);
+                } else if (cadence.full_scan_due) {
+                    trace_set_counter("RID2C local_ad_full_scan_due",
+                                      local_ad_cadence_ordinal);
+                } else if (local_ad_target_eval_has_no_revisit_work(
+                                   session,
+                                   local_ad_cadence_ordinal)) {
+                    bypass_for_local_cadence = true;
+                    trace_set_counter("RID2C local_ad_no_target_prediction_only",
+                                      local_ad_cadence_ordinal);
+                    trace_set_counter("RID2C local_ad_prediction_only",
+                                      local_ad_cadence_ordinal);
                 }
             }
         }
@@ -5219,23 +5265,41 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                 decision = "render-first-ad-preroll";
                                 reason = "local-ad-startup-preroll";
                             } else {
-                                pthread_mutex_lock(&session->ad_lock);
-                                sidecar_enqueued = enqueue_local_ad_input_best_effort_locked(
-                                        session,
-                                        frame,
-                                        clean_history_frame,
-                                        frame_id,
-                                        generation_id,
-                                        pts_us,
-                                        decoded_at_ms);
-                                if (sidecar_enqueued) {
-                                    pthread_cond_signal(&session->ad_cond);
+                                session->local_ad_cadence_frame_counter += 1;
+                                anomaly_detector_runtime_budget_local_ad_cadence_t local_ad_prequeue_cadence =
+                                        anomaly_detector_runtime_budget_local_ad_cadence(
+                                                true,
+                                                ad_enabled,
+                                                session->local_ad_cadence_frame_counter,
+                                                LOCAL_AD_FULL_SCAN_STRIDE_FRAMES,
+                                                LOCAL_AD_TARGET_EVAL_INTERVAL_FRAMES);
+                                if (local_ad_prequeue_cadence.prediction_only) {
+                                    trace_set_counter("RID2C local_ad_prequeue_prediction_only",
+                                                      session->local_ad_cadence_frame_counter);
+                                    trace_set_counter("RID2C local_ad_prediction_only",
+                                                      session->local_ad_cadence_frame_counter);
+                                    decision = "render-first-ad-prediction-only";
+                                    reason = "local-ad-prequeue-cadence";
+                                } else {
+                                    pthread_mutex_lock(&session->ad_lock);
+                                    sidecar_enqueued = enqueue_local_ad_input_best_effort_locked(
+                                            session,
+                                            frame,
+                                            clean_history_frame,
+                                            frame_id,
+                                            session->local_ad_cadence_frame_counter,
+                                            generation_id,
+                                            pts_us,
+                                            decoded_at_ms);
+                                    if (sidecar_enqueued) {
+                                        pthread_cond_signal(&session->ad_cond);
+                                    }
+                                    pthread_mutex_unlock(&session->ad_lock);
+                                    decision = sidecar_enqueued ? "render-first-ad-sidecar"
+                                                                : "render-first-ad-dropped";
+                                    reason = sidecar_enqueued ? "local-ad-best-effort"
+                                                              : "local-ad-pressure";
                                 }
-                                pthread_mutex_unlock(&session->ad_lock);
-                                decision = sidecar_enqueued ? "render-first-ad-sidecar"
-                                                            : "render-first-ad-dropped";
-                                reason = sidecar_enqueued ? "local-ad-best-effort"
-                                                          : "local-ad-pressure";
                             }
                         } else if (enqueued) {
                             if (!ad_enabled) {
@@ -5277,6 +5341,7 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                     frame,
                                     clean_history_frame,
                                     frame_id,
+                                    0,
                                     generation_id,
                                     pts_us,
                                     decoded_at_ms);

@@ -678,6 +678,7 @@ bool anomaly_scan_planner_plan(
 
     int64_t scan_plan_started_us = anomaly_timing_now_us();
     bool force_periodic_full_refresh =
+        input->adaptive.adaptive_enabled &&
         periodic_full_refresh_due(state, input->frame_source_ts_us);
     anomaly_registration_health_t registration_health = input->base_registration_health;
     anomaly_scan_plan_t scan_plan = build_scan_plan(

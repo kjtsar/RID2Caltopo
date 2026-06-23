@@ -101,6 +101,7 @@ typedef struct {
 typedef struct {
     bool analyze;
     bool prediction_only;
+    bool full_scan_due;
     int frame_stride_override;
 } anomaly_detector_runtime_budget_local_ad_cadence_t;
 

@@ -2536,7 +2536,7 @@ internal fun SplitMapPane(
                     if (props?.optString("class") == "Folder") {
                         viewModel.applyCaltopoFolderDefault(featureId, props.optBoolean("visible", true))
                     } else {
-                        applySyntheticArtifactFolderDefault(props, viewModel)
+                        applySyntheticArtifactFolderDefault(props, viewModel::applyCaltopoFolderDefault)
                     }
                 }
 

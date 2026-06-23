@@ -1,6 +1,5 @@
 package org.ncssar.rid2caltopo.video
 
-import StreamsViewModel
 import android.graphics.Color as AndroidColor
 import org.json.JSONArray
 import org.json.JSONObject
@@ -330,10 +329,10 @@ private fun orphanFolderTitle(folderId: String): String {
 
 internal fun applySyntheticArtifactFolderDefault(
     properties: JSONObject?,
-    viewModel: StreamsViewModel
+    applyFolderDefault: (folderId: String, initiallyVisible: Boolean) -> Unit
 ) {
     syntheticArtifactFolderDefault(properties)?.let {
-        viewModel.applyCaltopoFolderDefault(it.folderId, it.initiallyVisible)
+        applyFolderDefault(it.folderId, it.initiallyVisible)
     }
 }
 
@@ -345,6 +344,8 @@ private fun syntheticArtifactFolderDefault(properties: JSONObject?): ArtifactFol
 }
 
 private fun isTrackLikeFeature(properties: JSONObject?, className: String): Boolean {
+    // Active drone tracks are rendered by the drone tracking system; suppress them
+    // here to avoid double-rendering. Archived tracks stay renderable as map-folder artifacts.
     if (className == "LiveTrack") return true
     val folderId = properties?.optString("folderId").orEmpty()
     val mapTrackFolderId = CaltopoMap.GetFolderId().orEmpty()

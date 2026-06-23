@@ -442,6 +442,57 @@ class MapPaneArtifactOverlayStateTest {
     }
 
     @Test
+    fun allArtifactGeoPoints_and_boundingBoxFromPoints_span_allArtifactGeometry() {
+        val state = ArtifactOverlayState(
+            points = listOf(
+                ArtifactPointSpec(
+                    id = "marker-1",
+                    lat = 38.2,
+                    lng = -121.9,
+                    title = "Marker",
+                    markerSymbol = "point",
+                    markerColor = "#ff0000"
+                )
+            ),
+            lines = listOf(
+                ArtifactLineSpec(
+                    id = "line-1",
+                    points = listOf(
+                        GeoPoint(39.0, -120.5),
+                        GeoPoint(37.8, -121.3)
+                    ),
+                    color = 0,
+                    width = 2f,
+                    title = "Line"
+                )
+            ),
+            polygons = listOf(
+                ArtifactPolygonSpec(
+                    id = "polygon-1",
+                    points = listOf(
+                        GeoPoint(37.5, -122.5),
+                        GeoPoint(37.7, -121.2),
+                        GeoPoint(37.6, -122.0),
+                        GeoPoint(37.5, -122.5)
+                    ),
+                    strokeColor = 0,
+                    fillColor = 0,
+                    strokeWidth = 2f,
+                    title = "Polygon"
+                )
+            )
+        )
+
+        val bounds = boundingBoxFromPoints(allArtifactGeoPoints(state))
+
+        assertEquals(7, allArtifactGeoPoints(state).size)
+        assertEquals(39.0, bounds.latNorth, 0.0)
+        assertEquals(-120.5, bounds.lonEast, 0.0)
+        assertEquals(37.5, bounds.latSouth, 0.0)
+        assertEquals(-122.5, bounds.lonWest, 0.0)
+    }
+
+    @Test
     fun buildArtifactOverlayState_ignoresItemsOutsideRepresentedFoldersAndHiddenBuiltIns() {
         val representedFolder = folderFeature("folder-visible", "Search Segment")
         val visibleLine = lineFeature("line-visible", "Represented Line", "folder-visible")

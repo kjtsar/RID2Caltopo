@@ -19,6 +19,7 @@ That makes normal feature work risky. Small UI or runtime changes can disturb un
 
 - Do not redesign map behavior, pilot display behavior, artifact rendering, offline prep, or drone follow policy in the first packet.
 - Do not change Color AD, anomaly detector, stream binding, tracker upload, or archive behavior.
+- Do not move stream playback, stream identity/binding, stream clue reporting, or stream-focused operator workflows into MapPane-owned files.
 - Do not move ownership of long-lived runtime state out of `SplitMapPane` yet unless required to preserve behavior.
 - Do not attempt a full ViewModel/controller rewrite in the first packet.
 
@@ -38,6 +39,8 @@ This avoids a large ownership rewrite while still reducing ART/runtime dispatch 
 - `SplitMapPane(...)`
 - top-level wiring between `StreamsViewModel`, map lifecycle, and extracted facades
 - temporary local state that has not yet moved behind a controller
+
+MapPane-owned files should contain map presentation and map interaction behavior only. Stream playback, stream clue reporting, stream telemetry binding, and stream-focused status/controls remain in the existing stream modules such as `StreamsScreen`, `StreamTile`, `StreamsViewModel`, `StreamRegistry`, and the stream/anomaly packages. If MapPane needs to interact with those workflows, the interface should be a small callback or display model rather than moving stream logic into a map-centric file.
 
 `MapPaneModels.kt` contains shared MapPane data structures and small policy helpers:
 

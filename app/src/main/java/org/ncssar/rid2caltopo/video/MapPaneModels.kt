@@ -146,6 +146,12 @@ internal data class LiveTileRequest(
     val requiresCurrentCached: Boolean
 )
 
+internal data class TilePriorityPoint(
+    val lat: Double,
+    val lng: Double,
+    val headingDeg: Double?
+)
+
 internal data class DroneMapPoint(
     val designator: String,
     val remoteId: String,

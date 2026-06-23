@@ -278,7 +278,7 @@ class MapPaneArtifactOverlayStateTest {
     @Test
     fun liveTilePriorityRequests_usesVisibleMapZoomForTabletAndDrones() {
         val tablet = GeoPoint(38.9000, -120.0000)
-        val drone = dronePoint("drone-visible", 38.9300, -119.9600, headingDeg = 0.0)
+        val drone = tilePriorityPoint(38.9300, -119.9600, headingDeg = 0.0)
 
         val requests = liveTilePriorityRequests(
             tabletLocation = tablet,
@@ -294,7 +294,7 @@ class MapPaneArtifactOverlayStateTest {
 
     @Test
     fun liveTilePriorityRequests_prioritizesRidBroadcastCurrentTileThenHeadingAdjacentTile() {
-        val drone = dronePoint("rid-drone-ne", 38.9300, -119.9600, headingDeg = 45.0)
+        val drone = tilePriorityPoint(38.9300, -119.9600, headingDeg = 45.0)
         val zoom = 16
 
         val requests = liveTilePriorityRequests(
@@ -317,7 +317,7 @@ class MapPaneArtifactOverlayStateTest {
     @Test
     fun liveTilePriorityRequests_clampsDisplayZoomToFetchableSourceZoom() {
         val tablet = GeoPoint(38.9000, -120.0000)
-        val drone = dronePoint("rid-drone-zoomed", 38.9300, -119.9600, headingDeg = 90.0)
+        val drone = tilePriorityPoint(38.9300, -119.9600, headingDeg = 90.0)
 
         val requests = liveTilePriorityRequests(
             tabletLocation = tablet,
@@ -333,8 +333,8 @@ class MapPaneArtifactOverlayStateTest {
 
     @Test
     fun droneTilePriorityRequests_ordersAllCurrentDroneTilesBeforeHeadingTiles() {
-        val westDrone = dronePoint("drone-west", 38.9000, -120.0000, headingDeg = 90.0)
-        val northDrone = dronePoint("drone-north", 38.9300, -119.9600, headingDeg = 0.0)
+        val westDrone = tilePriorityPoint(38.9000, -120.0000, headingDeg = 90.0)
+        val northDrone = tilePriorityPoint(38.9300, -119.9600, headingDeg = 0.0)
         val requests = droneTilePriorityRequests(listOf(westDrone, northDrone), 14)
 
         val westCurrent = tileIndexForTestPoint(GeoPoint(westDrone.lat, westDrone.lng), 14)
@@ -769,6 +769,17 @@ class MapPaneArtifactOverlayStateTest {
             lng = lng,
             altitudeM = 0.0,
             timestampMsec = 1L,
+            headingDeg = headingDeg
+        )
+
+    private fun tilePriorityPoint(
+        lat: Double,
+        lng: Double,
+        headingDeg: Double? = null
+    ): TilePriorityPoint =
+        TilePriorityPoint(
+            lat = lat,
+            lng = lng,
             headingDeg = headingDeg
         )
 

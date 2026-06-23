@@ -322,7 +322,7 @@ internal fun orderedTileIndexesForOfflinePrep(
 
 internal fun liveTilePriorityRequests(
     tabletLocation: GeoPoint?,
-    dronePoints: List<DroneMapPoint>,
+    dronePoints: List<TilePriorityPoint>,
     visibleZoom: Int
 ): List<LiveTileRequest> {
     val tileZoom = visibleZoom.coerceIn(0, OSM_MAX_ZOOM.toInt())
@@ -341,7 +341,7 @@ internal fun liveTilePriorityRequests(
 }
 
 internal fun droneTilePriorityRequests(
-    dronePoints: List<DroneMapPoint>,
+    dronePoints: List<TilePriorityPoint>,
     zoom: Int,
     existingTileIndexes: Set<Long> = emptySet()
 ): List<LiveTileRequest> {
@@ -349,7 +349,7 @@ internal fun droneTilePriorityRequests(
     val headingRequests = ArrayList<LiveTileRequest>()
     val addedCurrent = existingTileIndexes.toHashSet()
     val addedHeading = HashSet<Long>()
-    val currentTileByPoint = LinkedHashMap<DroneMapPoint, Long>()
+    val currentTileByPoint = LinkedHashMap<TilePriorityPoint, Long>()
 
     for (point in dronePoints) {
         val location = GeoPoint(point.lat, point.lng)

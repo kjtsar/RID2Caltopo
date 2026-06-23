@@ -1082,7 +1082,7 @@ internal fun SplitMapPane(
                 }?.let { GeoPoint(it.latitude, it.longitude) }
                 val requests = liveTilePriorityRequests(
                     tabletLocation = tabletLocation,
-                    dronePoints = passDronePoints,
+                    dronePoints = passDronePoints.map { TilePriorityPoint(it.lat, it.lng, it.headingDeg) },
                     visibleZoom = passZoom
                 )
                 if (requests.isEmpty()) {

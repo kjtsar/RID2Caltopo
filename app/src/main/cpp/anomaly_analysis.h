@@ -214,6 +214,7 @@ typedef struct {
     float thermal_min_delta;
     float small_target_screen_fraction;
     int   color_frontend_mode;
+    int   color_target_candidate_limit;
     bool  thermal_debug_target_enabled;
     float thermal_debug_target_x_norm;
     float thermal_debug_target_y_norm;

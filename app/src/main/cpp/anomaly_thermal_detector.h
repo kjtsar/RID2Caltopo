@@ -136,6 +136,19 @@ static inline bool anomaly_thermal_spatial_scores_required(
     return motion_enabled && !color_enabled;
 }
 
+static inline bool anomaly_sampled_grid_integral_images_required(
+        bool detection_active,
+        int  algorithm_mask,
+        bool bg_valid,
+        bool selective_refresh_active) {
+    if (anomaly_thermal_spatial_scores_required(detection_active, algorithm_mask, bg_valid)) {
+        return true;
+    }
+    return detection_active &&
+           selective_refresh_active &&
+           (algorithm_mask & ANOMALY_ALGO_THERMAL) != 0;
+}
+
 static inline float effective_thermal_small_target_span_px(
         const anomaly_config_t *cfg,
         int                     frame_w,

@@ -96,7 +96,7 @@
 #define ANOMALY_TARGET_CANDIDATE_KEEP_MAX 4
 #define ANOMALY_TARGET_CANDIDATE_SCORE_SLACK 0.75f
 #define ANOMALY_THERMAL_SCORE_THRESHOLD_SCALE 0.62f
-#define ANOMALY_COLOR_PROVISIONAL_KEEP_MAX 2
+#define ANOMALY_COLOR_PROVISIONAL_KEEP_MAX 4
 #define ANOMALY_COLOR_PROVISIONAL_SCORE_SLACK 1.05f
 #define ANOMALY_MAX_COLOR_CANDIDATES 6
 #define ANOMALY_COLOR_PARTIAL_SPARSE_FALLBACK_PERIOD 10
@@ -7555,6 +7555,68 @@ void anomaly_state_cleanup(anomaly_state_t *state) {
     anomaly_state_reset(state);
 }
 
+static bool anomaly_color_fast_hold_frame_eligible(
+        const anomaly_state_t  *state,
+        const anomaly_config_t *cfg,
+        bool                    color_algorithm_configured,
+        bool                    fixed_full_refresh_cadence_due,
+        int64_t                 source_ts_us) {
+    if (state == NULL || cfg == NULL || !color_algorithm_configured) return false;
+    int effective_stride = cfg->frame_stride > 0 ? cfg->frame_stride : 1;
+    if (cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE) {
+        int min_stride = cfg->adaptive_min_stride_frames > 0
+            ? cfg->adaptive_min_stride_frames
+            : effective_stride;
+        int max_stride = cfg->adaptive_max_stride_frames > 0
+            ? cfg->adaptive_max_stride_frames
+            : effective_stride;
+        min_stride = clamp_i32(min_stride, 1, 120);
+        max_stride = clamp_i32(max_stride, min_stride, 120);
+        effective_stride =
+            state->adaptive_effective_stride >= min_stride &&
+            state->adaptive_effective_stride <= max_stride
+                ? state->adaptive_effective_stride
+                : effective_stride;
+        effective_stride = clamp_i32(effective_stride, min_stride, max_stride);
+    }
+    if (effective_stride <= 1 || fixed_full_refresh_cadence_due) return false;
+    int target_revisit_count = anomaly_target_revisit_track_count(state);
+    if (target_revisit_count > 0) {
+        bool confirmed_color_target = false;
+        for (int i = 0; i < ANOMALY_MAX_TARGET_TRACKS; i++) {
+            const anomaly_target_track_t *track = &state->target_tracks[i];
+            if (track->active &&
+                track->algorithm == ANOMALY_ALGO_COLOR &&
+                track->publish_confirmed) {
+                confirmed_color_target = true;
+                break;
+            }
+        }
+        int64_t frames_since_full = state->last_full_refresh_frame_counter > 0
+            ? state->frame_counter - state->last_full_refresh_frame_counter
+            : 0;
+        bool adaptive_target_coast =
+            cfg->stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE &&
+            confirmed_color_target &&
+            frames_since_full > 2 &&
+            (state->frame_counter % 2) == 0;
+        if (!adaptive_target_coast) return false;
+    }
+
+    if (source_ts_us > 0 &&
+        state->last_full_refresh_source_ts_us > 0 &&
+        isfinite(cfg->adaptive_max_stride_seconds) &&
+        cfg->adaptive_max_stride_seconds > 0.0f) {
+        int64_t interval_us =
+            (int64_t)llroundf(cfg->adaptive_max_stride_seconds * 1000000.0f);
+        if (interval_us > 0 &&
+            (source_ts_us - state->last_full_refresh_source_ts_us) >= interval_us) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // ── Main processing ─────────────────────────────────────────────���──────────
 
 int anomaly_process_frame(
@@ -7692,6 +7754,65 @@ int anomaly_process_frame(
         }
     }
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_REGISTRATION_PREP, stage_started_us);
+
+    if (anomaly_color_fast_hold_frame_eligible(
+            state,
+            cfg,
+            color_algorithm_configured,
+            fixed_full_refresh_cadence_due,
+            source_ts_us)) {
+        anomaly_frame_history_update_motion_luma(state, curr_luma, motion_count, motion_w, motion_h);
+        anomaly_frame_history_update_registration_luma(
+                state,
+                curr_registration_luma != NULL ? curr_registration_luma : curr_luma,
+                motion_count,
+                motion_w,
+                motion_h);
+
+        anomaly_scan_plan_t scan_plan;
+        memset(&scan_plan, 0, sizeof(scan_plan));
+        scan_plan.valid = true;
+        scan_plan.mode = ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP;
+        scan_plan.sampled_width = sg_w;
+        scan_plan.sampled_height = sg_h;
+        scan_plan.total_samples = sg_w > 0 && sg_h > 0 ? sg_w * sg_h : 0;
+        scan_plan.target_revisit_track_count = anomaly_target_revisit_track_count(state);
+        scan_plan.reason_flags = ANOMALY_SCAN_REASON_NO_APPEARANCE_REFRESH;
+
+        anomaly_result_frame_metadata_t frame_metadata = {
+            .had_discontinuity = false,
+            .registration_ran_this_frame = false,
+            .appearance_refresh_ran_this_frame = false,
+            .registration_health = ANOMALY_REG_HEALTH_UNKNOWN,
+            .rescan_mode = ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+            .scan_plan = scan_plan,
+            .adaptive_effective_stride = frame_stride,
+            .adaptive_stable_frames = state->adaptive_stable_frames,
+            .adaptive_drop_hold_frames = state->adaptive_drop_hold_frames,
+            .adaptive_motion_load = 0.0f,
+            .adaptive_reason_flags = 0u,
+            .registration = NULL,
+            .movement_debug = NULL,
+        };
+        anomaly_result_publish_frame_metadata(result_out, &frame_metadata);
+
+        int box_count = 0;
+        bool publish_allowed =
+            !transition_warmup_block &&
+            !publish_hold_active;
+        if (anomaly_detection_active && publish_allowed && result_out != NULL) {
+            anomaly_box_t boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+            box_count = anomaly_result_build_boxes(
+                    state,
+                    cfg,
+                    ANOMALY_ALGO_MOTION,
+                    boxes,
+                    ANOMALY_MAX_BOXES_PER_FRAME);
+            anomaly_result_publish_boxes(result_out, boxes, box_count);
+        }
+        anomaly_result_finalize_timing(result_out, &timing, frame_started_us);
+        return box_count;
+    }
 
     int registration_mode = anomaly_registration_normalize_mode(cfg);
     stage_started_us = anomaly_timing_now_us();
@@ -7980,6 +8101,19 @@ int anomaly_process_frame(
         !color_stride_hold_frame &&
         anomaly_thermal_support_map_required(cfg->algorithm_mask);
     bool need_color_support_map = color_algorithm_enabled && !color_stride_hold_frame;
+    bool bg_valid = anomaly_thermal_state_bg_ready(
+        &state->thermal,
+        sg_w,
+        sg_h,
+        ANOMALY_THERMAL_BG_WARMUP,
+        true,
+        scene_discontinuity);
+    bool sampled_grid_needs_integral_images =
+        anomaly_sampled_grid_integral_images_required(
+            anomaly_detection_active,
+            cfg->algorithm_mask,
+            bg_valid,
+            selective_refresh_active);
 
     int color_phase_index = 0;
     int color_phase_x = 0;
@@ -8011,14 +8145,16 @@ int anomaly_process_frame(
             float lum2 = lum * lum;
             int idx = row_offset + sx;
             sg_luma[idx] = lum;
-            float a = (sy > 0) ? ii_sum[prev_row_offset + sx] : 0.0f;
-            float l = (sx > 0) ? ii_sum[idx - 1] : 0.0f;
-            float al = (sy > 0 && sx > 0) ? ii_sum[prev_row_offset + (sx - 1)] : 0.0f;
-            ii_sum[idx] = lum + a + l - al;
-            float a2 = (sy > 0) ? ii_sum2[prev_row_offset + sx] : 0.0f;
-            float l2 = (sx > 0) ? ii_sum2[idx - 1] : 0.0f;
-            float al2 = (sy > 0 && sx > 0) ? ii_sum2[prev_row_offset + (sx - 1)] : 0.0f;
-            ii_sum2[idx] = lum2 + a2 + l2 - al2;
+            if (sampled_grid_needs_integral_images) {
+                float a = (sy > 0) ? ii_sum[prev_row_offset + sx] : 0.0f;
+                float l = (sx > 0) ? ii_sum[idx - 1] : 0.0f;
+                float al = (sy > 0 && sx > 0) ? ii_sum[prev_row_offset + (sx - 1)] : 0.0f;
+                ii_sum[idx] = lum + a + l - al;
+                float a2 = (sy > 0) ? ii_sum2[prev_row_offset + sx] : 0.0f;
+                float l2 = (sx > 0) ? ii_sum2[idx - 1] : 0.0f;
+                float al2 = (sy > 0 && sx > 0) ? ii_sum2[prev_row_offset + (sx - 1)] : 0.0f;
+                ii_sum2[idx] = lum2 + a2 + l2 - al2;
+            }
             sum_l  += lum; sum_l2 += lum2;
             sample_count++;
         }
@@ -8147,13 +8283,6 @@ int anomaly_process_frame(
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP, stage_started_us);
 
     int black_hot = (cfg->thermal_polarity == ANOMALY_THERMAL_BLACK_HOT);
-    bool bg_valid = anomaly_thermal_state_bg_ready(
-        &state->thermal,
-        sg_w,
-        sg_h,
-        ANOMALY_THERMAL_BG_WARMUP,
-        true,
-        scene_discontinuity);
     bool compute_spatial_thermal_scores =
         anomaly_thermal_spatial_scores_required(
             anomaly_detection_active,
@@ -11311,9 +11440,14 @@ motion_appearance_scoring_done:
                     ANOMALY_MAX_COLOR_CANDIDATES);
         }
         scan_plan.provisional_candidate_count += eligible_count;
-        int keep_count = eligible_count < ANOMALY_COLOR_PROVISIONAL_KEEP_MAX
+        int color_candidate_limit = cfg->color_target_candidate_limit;
+        if (color_candidate_limit < 1) color_candidate_limit = 1;
+        if (color_candidate_limit > ANOMALY_COLOR_PROVISIONAL_KEEP_MAX) {
+            color_candidate_limit = ANOMALY_COLOR_PROVISIONAL_KEEP_MAX;
+        }
+        int keep_count = eligible_count < color_candidate_limit
             ? eligible_count
-            : ANOMALY_COLOR_PROVISIONAL_KEEP_MAX;
+            : color_candidate_limit;
         for (int ki = 0;
              ki < keep_count &&
              target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0]));

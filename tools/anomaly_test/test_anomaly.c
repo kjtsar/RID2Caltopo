@@ -8659,6 +8659,24 @@ static void test_thermal_detector_support_map_policy_for_color_motion(void) {
                 ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION,
                 false),
            "thermal spatial policy: color motion skips thermal spatial scoring");
+    EXPECT(!anomaly_sampled_grid_integral_images_required(
+                true,
+                ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION,
+                false,
+                true),
+           "sampled grid prep: color motion selective refresh skips thermal integral images");
+    EXPECT(anomaly_sampled_grid_integral_images_required(
+                true,
+                ANOMALY_ALGO_THERMAL,
+                false,
+                false),
+           "sampled grid prep: thermal spatial fallback needs integral images");
+    EXPECT(anomaly_sampled_grid_integral_images_required(
+                true,
+                ANOMALY_ALGO_THERMAL,
+                true,
+                true),
+           "sampled grid prep: thermal selective revisit needs integral images after warmup");
 }
 
 static void test_thermal_detector_probe_and_context_helpers(void) {
@@ -9459,11 +9477,16 @@ static void test_color_detector_fresh_seed_support_skip_helper(void) {
                ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 0.25f,
                false),
            "fresh seed support skip: common fresh colors skip support scoring");
+    EXPECT(anomaly_color_fresh_seed_should_skip_support(
+               ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
+               ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 2.0f,
+               false),
+           "fresh seed support skip: low-rank fresh colors skip local support work");
     EXPECT(!anomaly_color_fresh_seed_should_skip_support(
                ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
-               ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY,
+               ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 4.0f,
                false),
-           "fresh seed support skip: threshold fresh colors still allow support scoring");
+           "fresh seed support skip: ranking-anchor fresh colors still allow support scoring");
     EXPECT(!anomaly_color_fresh_seed_should_skip_support(
                ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
                ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY * 0.25f,
@@ -12501,6 +12524,8 @@ static void test_detector_facade_realtime_default_config_contract(void) {
                 "detector facade default config: small target size uses native default");
     EXPECT(cfg.color_frontend_mode == ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
            "detector facade default config: color algorithm uses fresh RGBA frontend");
+    EXPECT(cfg.color_target_candidate_limit == 1,
+           "detector facade default config: color realtime default keeps one target candidate");
 
     anomaly_detector_config_t fallback =
         anomaly_detector_config_make_realtime_default(ANOMALY_ALGO_MOTION, 0.0f);
@@ -18379,6 +18404,28 @@ static void test_registration_cache_store_sets_budget_and_copies_fields(void) {
            "registration cache: valid model marks cache valid");
     EXPECT(state.cached_registration_reuse_budget == 4,
            "registration cache: very stable target-only model gets budget 4");
+
+    anomaly_registration_cache_store(
+            &state,
+            &model,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP);
+    EXPECT(state.cached_registration_reuse_budget == 4,
+           "registration cache: stride-skip frames preserve existing reuse budget");
+
+    anomaly_registration_cache_store(
+            &state,
+            &model,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            ANOMALY_RESCAN_MODE_FULL);
+    EXPECT(state.cached_registration_reuse_budget == 12,
+           "registration cache: very stable full scan seeds short stride-skip reuse budget");
+
+    anomaly_registration_cache_store(
+            &state,
+            &model,
+            ANOMALY_REG_HEALTH_HEALTHY,
+            ANOMALY_RESCAN_MODE_TARGET_ONLY);
     EXPECT(state.cached_registration_mode == ANOMALY_REGISTRATION_AFFINE &&
            state.cached_registration_sample_step == 3 &&
            state.cached_registration_motion_step == 5,
@@ -19455,6 +19502,7 @@ static void test_color_stride_hold_blocks_new_non_cadence_roi(void) {
     int b2 = anomaly_process_frame(&st, &cfg, color_frame, W * 4, W, H, 0, &res); // hold
     anomaly_rescan_mode_t frame2_mode = res.rescan_mode;
     bool frame2_refreshed = res.appearance_refresh_ran_this_frame;
+    bool frame2_registered = res.registration_ran_this_frame;
     int b3 = anomaly_process_frame(&st, &cfg, color_frame, W * 4, W, H, 0, &res); // full
 
     EXPECT(b1 == 0, "color stride hold: plain full-refresh has no ROI");
@@ -19462,7 +19510,45 @@ static void test_color_stride_hold_blocks_new_non_cadence_roi(void) {
     EXPECT(frame2_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
            "color stride hold: non-cadence frame reports stride skip");
     EXPECT(!frame2_refreshed, "color stride hold: non-cadence frame does not refresh appearance");
+    EXPECT(!frame2_registered,
+           "color stride hold: non-cadence frame bypasses registration");
     EXPECT(b3 > 0, "color stride hold: cadence frame can acquire color ROI");
+
+    free(plain_frame);
+    free(color_frame);
+    anomaly_state_cleanup(&st);
+}
+
+static void test_color_adaptive_stride_hold_bypasses_registration_with_range(void) {
+    const int W = 160, H = 120;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 1.2f;
+    cfg.min_hits = 1;
+    cfg.stride_mode = ANOMALY_STRIDE_MODE_ADAPTIVE;
+    cfg.frame_stride = 3;
+    cfg.adaptive_min_stride_frames = 3;
+    cfg.adaptive_max_stride_frames = 6;
+    cfg.adaptive_max_stride_seconds = 10.0f;
+
+    uint8_t *plain_frame = make_gray_frame(W, H, 64);
+    uint8_t *color_frame = make_gray_frame(W, H, 64);
+    stamp_color_rect(color_frame, W * 4, W, H, W / 2 - 1, H / 2 - 1, 4, 4, 220, 20, 20);
+
+    anomaly_result_t res;
+    int b1 = anomaly_process_frame(&st, &cfg, plain_frame, W * 4, W, H, 0, &res);
+    int b2 = anomaly_process_frame(&st, &cfg, color_frame, W * 4, W, H, 0, &res);
+
+    EXPECT(b1 == 0, "color adaptive stride hold: plain full-refresh has no ROI");
+    EXPECT(b2 == 0, "color adaptive stride hold: new non-cadence color ROI is ignored");
+    EXPECT(res.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+           "color adaptive stride hold: non-cadence frame reports stride skip");
+    EXPECT(!res.appearance_refresh_ran_this_frame,
+           "color adaptive stride hold: non-cadence frame does not refresh appearance");
+    EXPECT(!res.registration_ran_this_frame,
+           "color adaptive stride hold: adaptive range still bypasses registration");
 
     free(plain_frame);
     free(color_frame);
@@ -20099,6 +20185,59 @@ static void test_scan_planner_target_only_mode_with_active_track(void) {
     anomaly_state_cleanup(&st);
 }
 
+static void test_color_adaptive_confirmed_target_can_coast_between_revisits(void) {
+    const int W = 640, H = 480;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.score_threshold = 2.0f;
+    cfg.min_hits = 1;
+    cfg.stride_mode = ANOMALY_STRIDE_MODE_ADAPTIVE;
+    cfg.frame_stride = 10;
+    cfg.adaptive_min_stride_frames = 10;
+    cfg.adaptive_max_stride_frames = 20;
+    cfg.adaptive_max_stride_seconds = 2.0f;
+
+    uint8_t *frame1 = make_gray_frame(W, H, 64);
+    uint8_t *frame2 = make_gray_frame(W, H, 64);
+    uint8_t *frame3 = make_gray_frame(W, H, 64);
+    uint8_t *frame4 = make_gray_frame(W, H, 64);
+    stamp_texture_field(frame1, W * 4, W, H, 0);
+    stamp_texture_field(frame2, W * 4, W, H, 0);
+    stamp_texture_field(frame3, W * 4, W, H, 0);
+    stamp_texture_field(frame4, W * 4, W, H, 0);
+    stamp_color_patch(frame1, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
+    stamp_color_patch(frame2, W * 4, W, H, W / 2 + 2, H / 2, 2, 255, 24, 24);
+    stamp_color_patch(frame3, W * 4, W, H, W / 2 + 4, H / 2, 2, 255, 24, 24);
+    stamp_color_patch(frame4, W * 4, W, H, W / 2 + 6, H / 2, 2, 255, 24, 24);
+
+    anomaly_result_t r1, r2, r3, r4;
+    anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 1000, &r1);
+    anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 34000, &r2);
+    anomaly_process_frame(&st, &cfg, frame3, W * 4, W, H, 67000, &r3);
+    anomaly_process_frame(&st, &cfg, frame4, W * 4, W, H, 100000, &r4);
+
+    EXPECT(r1.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
+           "target coast: first frame establishes target on full scan");
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "target coast: first follow-up still confirms target ROI");
+    EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "target coast: second follow-up still confirms target ROI");
+    EXPECT(r4.rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP,
+           "target coast: confirmed target can coast on alternating hold frame");
+    EXPECT(!r4.registration_ran_this_frame,
+           "target coast: alternating hold frame bypasses registration");
+    EXPECT(!r4.appearance_refresh_ran_this_frame,
+           "target coast: alternating hold frame skips appearance refresh");
+
+    free(frame1);
+    free(frame2);
+    free(frame3);
+    free(frame4);
+    anomaly_state_cleanup(&st);
+}
+
 static void test_color_target_track_uses_dense_candidate_geometry(void) {
     const int W = 640, H = 480;
     anomaly_state_t st;
@@ -20203,22 +20342,28 @@ static void test_periodic_full_refresh_replaces_indefinite_target_only_reuse(voi
     cfg.frame_stride = 10;
     cfg.adaptive_min_stride_frames = 10;
     cfg.adaptive_max_stride_frames = 10;
+    cfg.adaptive_max_stride_seconds = 1.0f;
 
     uint8_t *frame = make_gray_frame(W, H, 64);
     stamp_texture_field(frame, W * 4, W, H, 0);
     stamp_color_patch(frame, W * 4, W, H, W / 2, H / 2, 2, 255, 24, 24);
 
-    anomaly_result_t r1, r2, r3;
+    anomaly_result_t r1, r2, r3, r4;
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 1000, &r1);
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 100000, &r2);
     anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 400000, &r3);
+    anomaly_process_frame(&st, &cfg, frame, W * 4, W, H, 1101000, &r4);
 
     EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
            "periodic refresh: stable follow-up frame refreshes the predicted target ROI");
-    EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
-           "periodic refresh: ~333ms cadence forces a full refresh");
-    EXPECT((r3.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) != 0u,
-           "periodic refresh: scan plan records the cadence-driven full rescan reason");
+    EXPECT(r3.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "periodic refresh: adaptive color max interval is not shortened to legacy 333ms cadence");
+    EXPECT((r3.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) == 0u,
+           "periodic refresh: sub-interval target-only frame does not report periodic full refresh");
+    EXPECT(r4.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
+           "periodic refresh: adaptive color max interval still forces a safety full refresh");
+    EXPECT((r4.scan_plan.reason_flags & ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH) != 0u,
+           "periodic refresh: scan plan records the configured-interval full rescan reason");
 
     free(frame);
     anomaly_state_cleanup(&st);
@@ -20867,6 +21012,7 @@ int main(void) {
     test_accumulator_hold_after_miss();
     test_frame_stride_gates_full_refresh_only();
     test_color_stride_hold_blocks_new_non_cadence_roi();
+    test_color_adaptive_stride_hold_bypasses_registration_with_range();
     test_frame_stride_selective_frames_age_tracks();
     test_frame_stride_selective_still_runs_registration();
     test_large_motion_discontinuity_clears_rois();
@@ -20884,6 +21030,7 @@ int main(void) {
     test_scan_planner_selective_refresh_helper_too_broad_fallback();
     test_scan_planner_partial_mode_on_localized_exposure();
     test_scan_planner_target_only_mode_with_active_track();
+    test_color_adaptive_confirmed_target_can_coast_between_revisits();
     test_color_target_track_uses_dense_candidate_geometry();
     test_small_target_caps_sample_step();
     test_explicit_detail_clamps_large_sample_grid();

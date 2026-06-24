@@ -93,4 +93,22 @@ class StreamsViewModelResyncTest {
 
         assertEquals(null, focus)
     }
+
+    @Test
+    fun capturedVideoPlaybackPlan_replacesExistingLocalPlaybackInsteadOfCreatingDuplicate() {
+        val plan = capturedVideoPlaybackPlan(
+            normalizedName = "Red1.mp4",
+            activeStreams = emptyMap(),
+            localPlaybackEntries = mapOf(
+                "Red1.mp4" to StreamInfo(
+                    designator = "Red1.mp4",
+                    state = StreamState.CONNECTING,
+                    isLocalPlayback = true,
+                )
+            ),
+        )
+
+        assertEquals("Red1.mp4", plan.designator)
+        assertEquals(setOf("Red1.mp4"), plan.localPlaybackDesignatorsToClose)
+    }
 }

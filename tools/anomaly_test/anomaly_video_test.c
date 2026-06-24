@@ -42,7 +42,10 @@
 #define APP_DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES 2
 #define APP_DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS 1.0f
 #define APP_COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES 30
+#define APP_COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_FRAMES 60
+#define APP_COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_SECONDS 2.0f
 #define APP_LOCAL_PLAYBACK_REVIEW_FRAME_STRIDE 1
+#define APP_DEFAULT_COLOR_TARGET_CANDIDATE_LIMIT 1
 
 typedef enum {
     APP_APPEARANCE_AUTO = 0,
@@ -84,6 +87,7 @@ typedef struct {
     int min_hits;
     float thermal_min_delta;
     float small_target_screen_fraction;
+    int color_target_candidate_limit;
 } app_anomaly_config_t;
 
 static float app_clampf(float value, float min_value, float max_value) {
@@ -132,6 +136,7 @@ static app_anomaly_config_t default_app_cfg(void) {
     cfg.min_hits = APP_DEFAULT_MIN_HITS;
     cfg.thermal_min_delta = APP_DEFAULT_THERMAL_MIN_DELTA;
     cfg.small_target_screen_fraction = APP_DEFAULT_SMALL_TARGET_SCREEN_FRACTION;
+    cfg.color_target_candidate_limit = APP_DEFAULT_COLOR_TARGET_CANDIDATE_LIMIT;
     return cfg;
 }
 
@@ -247,9 +252,13 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
             2,
             33);
     native_cfg->adaptive_max_stride_frames =
-        app_clampi(33, native_cfg->adaptive_min_stride_frames, 33);
+        color_realtime_stride_default
+            ? APP_COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_FRAMES
+            : app_clampi(33, native_cfg->adaptive_min_stride_frames, 33);
     native_cfg->adaptive_max_stride_seconds =
-        app_clampf(app_cfg->adaptive_max_stride_seconds, 0.1f, 10.0f);
+        color_realtime_stride_default
+            ? APP_COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_SECONDS
+            : app_clampf(app_cfg->adaptive_max_stride_seconds, 0.1f, 10.0f);
     native_cfg->pixel_step =
         app_cfg->appearance_selection == APP_APPEARANCE_COLOR &&
         app_cfg->pixel_step <= 0
@@ -271,6 +280,8 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
         app_cfg->appearance_selection == APP_APPEARANCE_COLOR
             ? ANOMALY_COLOR_FRONTEND_FRESH_RGBA
             : ANOMALY_COLOR_FRONTEND_LEGACY;
+    native_cfg->color_target_candidate_limit =
+        app_clampi(app_cfg->color_target_candidate_limit, 1, 4);
 }
 
 // ── pixel-font frame-number overlay ───────────────────────────────────────
@@ -2044,6 +2055,9 @@ static void usage(const char *prog) {
         "  --pixel-step <n> Override appearance sampling step (default: 0=Auto)\n"
         "  --color-frontend <legacy|fresh-rgba|fresh-yuv>\n"
         "                   Visible-color frontend mode (default here: fresh-rgba)\n"
+        "  --color-target-candidates <1..4>\n"
+        "                   Color provisional target candidates to track\n"
+        "                   (default: 1)\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
         "  --small-target-fraction <f>\n"
         "                   Override the maximum normalized on-screen size\n"
@@ -2083,6 +2097,7 @@ static void usage(const char *prog) {
         "  --app-stride-mode <fixed|adaptive>\n"
         "  --app-adaptive-min-stride-frames <int>\n"
         "  --app-adaptive-max-stride-seconds <float>\n"
+        "  --app-color-target-candidates <1..4>\n"
         "                   These flags mirror the app-side config derivation in\n"
         "                   AnomalyModels.kt before the native bridge call.\n"
         "\n"
@@ -2133,6 +2148,7 @@ int main(int argc, char **argv) {
         .thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA,
         .small_target_screen_fraction = ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT,
         .color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
+        .color_target_candidate_limit = APP_DEFAULT_COLOR_TARGET_CANDIDATE_LIMIT,
     };
     int requested_color_frontend_mode = cfg.color_frontend_mode;
     int requested_movement_estimator_mode = cfg.movement_estimator_mode;
@@ -2217,6 +2233,9 @@ int main(int argc, char **argv) {
             }
             cfg.color_frontend_mode = requested_color_frontend_mode;
             color_frontend_overridden = true;
+        }
+        else if (!strcmp(argv[i], "--color-target-candidates") && i+1 < argc) {
+            cfg.color_target_candidate_limit = app_clampi(atoi(argv[++i]), 1, 4);
         }
         else if (!strcmp(argv[i], "--min-delta") && i+1 < argc) min_delta_override    = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--small-target-fraction") && i+1 < argc) {
@@ -2319,6 +2338,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--app-small-target-fraction") && i+1 < argc) {
             app_parity_mode = true;
             app_cfg.small_target_screen_fraction = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--app-color-target-candidates") && i+1 < argc) {
+            app_parity_mode = true;
+            app_cfg.color_target_candidate_limit = atoi(argv[++i]);
         }
         else if (!strcmp(argv[i], "-p")          && i+1 < argc) {
             cfg.thermal_polarity = strcmp(argv[++i], "bh") == 0
@@ -2430,7 +2453,7 @@ int main(int argc, char **argv) {
     cfg.adaptive_max_stride_frames = app_clampi(
             (int)floor(fps * (double)cfg.adaptive_max_stride_seconds + 0.5),
             cfg.adaptive_min_stride_frames,
-            33);
+            120);
     if (clip_time_start < 0.0) clip_time_start = 0.0;
     if (full_duration_s > 0.0) {
         clip_time_start = clamp_double(clip_time_start, 0.0, full_duration_s);

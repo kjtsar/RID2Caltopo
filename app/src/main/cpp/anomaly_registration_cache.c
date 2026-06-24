@@ -7,6 +7,9 @@ void anomaly_registration_cache_store(
         const anomaly_registration_model_t  *model,
         anomaly_registration_health_t        registration_health,
         anomaly_rescan_mode_t                rescan_mode) {
+    if (rescan_mode == ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP) {
+        return;
+    }
     if (state == NULL || model == NULL || !anomaly_registration_model_valid(model)) {
         if (state != NULL) {
             state->cached_registration_valid = false;
@@ -54,7 +57,8 @@ void anomaly_registration_cache_store(
         model->fit_det < 1.015f &&
         model->fit_min_scale >= 0.985f &&
         model->fit_max_scale <= 1.015f &&
-        (rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY ||
+        (rescan_mode == ANOMALY_RESCAN_MODE_FULL ||
+         rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY ||
          rescan_mode == ANOMALY_RESCAN_MODE_PARTIAL);
     if (!stable_affine) {
         state->cached_registration_reuse_budget = 0;
@@ -70,6 +74,18 @@ void anomaly_registration_cache_store(
                model->fit_min_scale >= 0.992f &&
                model->fit_max_scale <= 1.008f) {
         state->cached_registration_reuse_budget = 4;
+    } else if (rescan_mode == ANOMALY_RESCAN_MODE_FULL &&
+               model->tracked_match_count >= 56 &&
+               model->similarity.mean_residual <= 0.004f &&
+               model->fit_anchor_residual_max <= 0.020f &&
+               model->fit_motion_dx_std <= 0.006f &&
+               model->fit_motion_dy_std <= 0.006f &&
+               model->fit_quadrant_residual_spread <= 0.004f &&
+               model->fit_det > 0.992f &&
+               model->fit_det < 1.008f &&
+               model->fit_min_scale >= 0.992f &&
+               model->fit_max_scale <= 1.008f) {
+        state->cached_registration_reuse_budget = 12;
     } else {
         state->cached_registration_reuse_budget = 1;
     }

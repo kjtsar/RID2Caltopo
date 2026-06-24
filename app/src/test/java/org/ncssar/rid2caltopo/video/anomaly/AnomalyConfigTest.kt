@@ -143,8 +143,21 @@ class AnomalyConfigTest {
         assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
         assertEquals(30, native.frameStride)
         assertEquals(30, native.adaptiveMinStrideFrames)
-        assertEquals(30, native.adaptiveMaxStrideFrames)
+        assertEquals(60, native.adaptiveMaxStrideFrames)
+        assertEquals(2.0f, native.adaptiveMaxStrideSeconds)
         assertEquals(1, native.pixelStep)
+        assertEquals(1, native.colorTargetCandidateLimit)
+    }
+
+    @Test
+    fun toNativeConfig_colorCandidateLimitIsConfigurableAndClamped() {
+        val low = AnomalyConfig(colorTargetCandidateLimit = 0).toNativeConfig()
+        val high = AnomalyConfig(colorTargetCandidateLimit = 9).toNativeConfig()
+        val manual = AnomalyConfig(colorTargetCandidateLimit = 3).toNativeConfig()
+
+        assertEquals(1, low.colorTargetCandidateLimit)
+        assertEquals(4, high.colorTargetCandidateLimit)
+        assertEquals(3, manual.colorTargetCandidateLimit)
     }
 
     @Test
@@ -180,6 +193,107 @@ class AnomalyConfigTest {
         assertEquals(AnomalyStrideMode.Adaptive, config.strideMode)
         assertEquals(30, config.frameStride)
         assertEquals(30, config.adaptiveMinStrideFrames)
+    }
+
+    @Test
+    fun resetToRealtimeDefaults_usesColorBaseCaseForAutoDetectedColor() {
+        val tuned = AnomalyConfig(
+            enabled = true,
+            appearanceSelection = AppearanceAnomalySelection.Auto,
+            algorithms = setOf(AnomalyAlgorithm.Motion, AnomalyAlgorithm.PersistentDarkPatch),
+            saliencyEnabled = true,
+            showHotOverlay = true,
+            showCandidateBlobs = true,
+            troubleshootingDebug = true,
+            strideMode = AnomalyStrideMode.Fixed,
+            frameStride = 2,
+            adaptiveMinStrideFrames = 4,
+            adaptiveMaxStrideSeconds = 3.0f,
+            pixelStep = 3,
+            colorTargetCandidateLimit = 4,
+        )
+
+        val reset = tuned.resetToRealtimeDefaults(
+            resolvedAppearanceMode = AppearanceAnomalyMode.Color
+        )
+
+        assertTrue(reset.enabled)
+        assertEquals(AppearanceAnomalySelection.Auto, reset.appearanceSelection)
+        assertEquals(setOf(AnomalyAlgorithm.Motion), reset.algorithms)
+        assertFalse(reset.saliencyEnabled)
+        assertFalse(reset.showHotOverlay)
+        assertFalse(reset.showCandidateBlobs)
+        assertFalse(reset.troubleshootingDebug)
+        assertEquals(AnomalyStrideMode.Adaptive, reset.strideMode)
+        assertEquals(30, reset.frameStride)
+        assertEquals(30, reset.adaptiveMinStrideFrames)
+        assertEquals(2.0f, reset.adaptiveMaxStrideSeconds)
+        assertEquals(0, reset.pixelStep)
+        assertEquals(1, reset.colorTargetCandidateLimit)
+    }
+
+    @Test
+    fun resetToRealtimeDefaults_colorBaseCaseCarriesTwoSecondWindowToNative() {
+        val reset = AnomalyConfig(
+            enabled = true,
+            appearanceSelection = AppearanceAnomalySelection.Color,
+            frameStride = 4,
+            adaptiveMinStrideFrames = 4,
+            adaptiveMaxStrideSeconds = 0.25f,
+            colorTargetCandidateLimit = 4,
+        ).resetToRealtimeDefaults()
+
+        val native = reset.toNativeConfig(sourceFps = 29.97f)
+
+        assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
+        assertEquals(30, native.frameStride)
+        assertEquals(30, native.adaptiveMinStrideFrames)
+        assertEquals(60, native.adaptiveMaxStrideFrames)
+        assertEquals(2.0f, native.adaptiveMaxStrideSeconds)
+        assertEquals(1, native.colorTargetCandidateLimit)
+    }
+
+    @Test
+    fun resetToRealtimeDefaults_colorBaseCaseSurvivesSettingsApplyBounds() {
+        val reset = AnomalyConfig(
+            appearanceSelection = AppearanceAnomalySelection.Color,
+            frameStride = 2,
+            adaptiveMinStrideFrames = 2,
+            adaptiveMaxStrideSeconds = 0.5f,
+        ).resetToRealtimeDefaults()
+
+        val appliedFromDialog = reset.copy(
+            frameStride = reset.frameStride.coerceIn(1, 33),
+            adaptiveMinStrideFrames = reset.adaptiveMinStrideFrames.coerceIn(2, 33),
+            adaptiveMaxStrideSeconds = reset.adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f),
+        )
+        val native = appliedFromDialog.toNativeConfig(sourceFps = 29.97f)
+
+        assertEquals(30, appliedFromDialog.frameStride)
+        assertEquals(30, appliedFromDialog.adaptiveMinStrideFrames)
+        assertEquals(AnomalyStrideMode.Adaptive.nativeValue, native.strideMode)
+        assertEquals(30, native.frameStride)
+        assertEquals(30, native.adaptiveMinStrideFrames)
+        assertEquals(60, native.adaptiveMaxStrideFrames)
+    }
+
+    @Test
+    fun resetToRealtimeDefaults_keepsIrBaseCaseForThermal() {
+        val tuned = AnomalyConfig(
+            enabled = true,
+            appearanceSelection = AppearanceAnomalySelection.Thermal,
+            strideMode = AnomalyStrideMode.Adaptive,
+            frameStride = 9,
+            colorTargetCandidateLimit = 4,
+        )
+
+        val reset = tuned.resetToRealtimeDefaults()
+
+        assertTrue(reset.enabled)
+        assertEquals(AppearanceAnomalySelection.Thermal, reset.appearanceSelection)
+        assertEquals(AnomalyStrideMode.Fixed, reset.strideMode)
+        assertEquals(1, reset.frameStride)
+        assertEquals(1, reset.colorTargetCandidateLimit)
     }
 
     @Test

@@ -37,6 +37,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.abs
@@ -292,6 +293,30 @@ internal fun focusAfterStreamSync(
     if (currentFocus !in liveDesignators) return null
     if (newlyVisibleLiveDesignators.isNotEmpty()) return null
     return currentFocus
+}
+
+internal data class CapturedVideoPlaybackPlan(
+    val designator: String,
+    val localPlaybackDesignatorsToClose: Set<String>,
+)
+
+internal fun capturedVideoPlaybackPlan(
+    normalizedName: String,
+    activeStreams: Map<String, StreamInfo>,
+    localPlaybackEntries: Map<String, StreamInfo>,
+): CapturedVideoPlaybackPlan {
+    val localPlaybackDesignatorsToClose = localPlaybackEntries.keys.toSet()
+    val activeNames = activeStreams.keys
+    var designator = normalizedName
+    var suffix = 2
+    while (designator in activeNames) {
+        designator = "$normalizedName ($suffix)"
+        suffix += 1
+    }
+    return CapturedVideoPlaybackPlan(
+        designator = designator,
+        localPlaybackDesignatorsToClose = localPlaybackDesignatorsToClose,
+    )
 }
 
 private val clueTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
@@ -801,6 +826,7 @@ class StreamsViewModel(
     private val appearanceObservationStateByDesignator = mutableMapOf<String, AppearanceObservationState>()
     private var defaultAnomalyConfig by mutableStateOf(AnomalyConfig())
     private var lastCapturedVideoSelectionUri: Uri? by mutableStateOf(null)
+    private val capturedVideoOpenGeneration = AtomicLong(0L)
     private val _renderDelayMsByDesignator = mutableStateMapOf<String, Long>()
     private val _playbackIndicatorStateByDesignator = mutableStateMapOf<String, PlaybackIndicatorState>()
     private val renderRouteByDesignator = mutableStateMapOf<String, Boolean>()
@@ -1225,16 +1251,16 @@ class StreamsViewModel(
     fun openCapturedVideo(uri: Uri, displayName: String) {
         lastCapturedVideoSelectionUri = uri
         val normalizedName = displayName.ifBlank { "Captured Video" }
-        val existingNames = buildSet {
-            addAll(streams.value.keys)
-            addAll(_localPlaybackEntries.value.keys)
+        val openGeneration = capturedVideoOpenGeneration.incrementAndGet()
+        val plan = capturedVideoPlaybackPlan(
+            normalizedName = normalizedName,
+            activeStreams = StreamRegistry.streams.value,
+            localPlaybackEntries = _localPlaybackEntries.value,
+        )
+        plan.localPlaybackDesignatorsToClose.forEach { existingDesignator ->
+            closeLocalPlaybackEntry(existingDesignator, showToast = false)
         }
-        var designator = normalizedName
-        var suffix = 2
-        while (designator in existingNames) {
-            designator = "$normalizedName ($suffix)"
-            suffix += 1
-        }
+        val designator = plan.designator
 
         val pendingInfo = StreamInfo(
             designator = designator,
@@ -1287,6 +1313,13 @@ class StreamsViewModel(
                 )
             }
             withContext(Dispatchers.Main) {
+                if (capturedVideoOpenGeneration.get() != openGeneration) {
+                    resolvedInfo.playbackUri
+                        ?.takeIf { it.scheme.equals("file", ignoreCase = true) }
+                        ?.path
+                        ?.let { path -> runCatching { File(path).delete() } }
+                    return@withContext
+                }
                 val current = _localPlaybackEntries.value[designator] ?: return@withContext
                 localPlaybackReviewByDesignator[designator] = loadLocalPlaybackReviewFromDisk(resolvedInfo)
                     ?: LocalPlaybackReviewFile(
@@ -1305,30 +1338,37 @@ class StreamsViewModel(
         }
     }
 
-    fun closeStream(designator: String) {
-        _localPlaybackEntries.value[designator]?.let { localInfo ->
-            queueLocalPlaybackReviewExportIfNeeded(localInfo)
-            localPlaybackPausedState.remove(designator)
-            dirtyLocalPlaybackReviews.remove(designator)
-            localPlaybackReviewByDesignator.remove(designator)
-            _detectedAppearanceModeByDesignator.remove(designator)
-            appearanceObservationStateByDesignator.remove(designator)
-            _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
-                remove(designator)
+    private fun closeLocalPlaybackEntry(designator: String, showToast: Boolean): Boolean {
+        val localInfo = _localPlaybackEntries.value[designator] ?: return false
+        queueLocalPlaybackReviewExportIfNeeded(localInfo)
+        localPlaybackPausedState.remove(designator)
+        dirtyLocalPlaybackReviews.remove(designator)
+        localPlaybackReviewByDesignator.remove(designator)
+        _detectedAppearanceModeByDesignator.remove(designator)
+        appearanceObservationStateByDesignator.remove(designator)
+        _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
+            remove(designator)
+        }
+        localInfo.playbackUri
+            ?.takeIf { it.scheme.equals("file", ignoreCase = true) }
+            ?.path
+            ?.let { path ->
+                runCatching { File(path).delete() }
             }
-            localInfo.playbackUri
-                ?.takeIf { it.scheme.equals("file", ignoreCase = true) }
-                ?.path
-                ?.let { path ->
-                    runCatching { File(path).delete() }
-                }
-            dismissedStreamRevisions.remove(designator)
-            if (_focusedPath.value == designator) {
-                _focusedPath.value = null
-            }
-            applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-            syncStreamSessions(currentResyncSnapshot())
+        dismissedStreamRevisions.remove(designator)
+        if (_focusedPath.value == designator) {
+            _focusedPath.value = null
+        }
+        applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
+        syncStreamSessions(currentResyncSnapshot())
+        if (showToast) {
             CaltopoClient.ShowToast("Closed $designator.")
+        }
+        return true
+    }
+
+    fun closeStream(designator: String) {
+        if (closeLocalPlaybackEntry(designator, showToast = true)) {
             return
         }
         if (_focusedPath.value != designator) {
@@ -1946,17 +1986,9 @@ class StreamsViewModel(
 
     fun resetAnomalyRealtimeDefaults(designator: String) {
         updateAnomalyConfig(designator) { current ->
-            AnomalyConfig().copy(
-                enabled = current.enabled,
-                appearanceSelection = current.appearanceSelection,
-                thermalPolarity = current.thermalPolarity,
-            ).let { defaults ->
-                if (current.appearanceSelection == AppearanceAnomalySelection.Color) {
-                    defaults.withColorRealtimeStrideDefaultsIfUnmodified()
-                } else {
-                    defaults
-                }
-            }
+            current.resetToRealtimeDefaults(
+                resolvedAppearanceMode = resolvedAppearanceModeFor(designator)
+            )
         }
     }
 
@@ -2019,7 +2051,7 @@ class StreamsViewModel(
 
     fun setAnomalyFrameStride(designator: String, frameStride: Int) {
         updateAnomalyConfig(designator) { current ->
-            current.copy(frameStride = frameStride.coerceIn(1, 10))
+            current.copy(frameStride = frameStride.coerceIn(1, 33))
         }
     }
 
@@ -2099,6 +2131,12 @@ class StreamsViewModel(
     fun setMinHits(designator: String, minHits: Int) {
         updateAnomalyConfig(designator) { current ->
             current.copy(minHits = minHits.coerceIn(1, 10))
+        }
+    }
+
+    fun setColorTargetCandidateLimit(designator: String, limit: Int) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(colorTargetCandidateLimit = limit.coerceIn(1, 4))
         }
     }
 

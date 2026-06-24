@@ -1163,8 +1163,11 @@ internal fun AnomalySettingsDialogs(
         var minHitsValue by remember(streamDesignator, anomalyConfig.minHits) {
             mutableStateOf(anomalyConfig.minHits.coerceIn(1, 5))
         }
+        var colorTargetCandidateLimitValue by remember(streamDesignator, anomalyConfig.colorTargetCandidateLimit) {
+            mutableStateOf(anomalyConfig.colorTargetCandidateLimit.coerceIn(1, 4))
+        }
         var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
-            mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 10))
+            mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 33))
         }
         var adaptiveMinStrideValue by remember(streamDesignator, anomalyConfig.adaptiveMinStrideFrames) {
             mutableStateOf(anomalyConfig.adaptiveMinStrideFrames.coerceAtLeast(2))
@@ -1186,7 +1189,8 @@ internal fun AnomalySettingsDialogs(
             scanZoneValue = config.scanZone.coerceIn(0.5f, 1f)
             motionEvidenceSensitivityValue = config.motionEvidenceSensitivity.coerceIn(0f, 1f)
             minHitsValue = config.minHits.coerceIn(1, 5)
-            frameStrideValue = config.frameStride.coerceIn(1, 10)
+            colorTargetCandidateLimitValue = config.colorTargetCandidateLimit.coerceIn(1, 4)
+            frameStrideValue = config.frameStride.coerceIn(1, 33)
             adaptiveMinStrideValue = config.adaptiveMinStrideFrames.coerceAtLeast(2)
             adaptiveMaxStrideSecondsValue = config.adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f)
             pixelStepValue = config.pixelStep.coerceIn(0, 4)
@@ -1228,17 +1232,9 @@ internal fun AnomalySettingsDialogs(
                     ) {
                         Text("Reset to Realtime Defaults")
                         TextButton(onClick = {
-                            val defaults = AnomalyConfig().copy(
-                                enabled = anomalyConfig.enabled,
-                                appearanceSelection = anomalyConfig.appearanceSelection,
-                                thermalPolarity = anomalyConfig.thermalPolarity,
-                            ).let { defaults ->
-                                if (anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Color) {
-                                    defaults.withColorRealtimeStrideDefaultsIfUnmodified()
-                                } else {
-                                    defaults
-                                }
-                            }
+                            val defaults = anomalyConfig.resetToRealtimeDefaults(
+                                resolvedAppearanceMode = viewModel.resolvedAppearanceModeFor(streamDesignator)
+                            )
                             syncDialogValues(defaults)
                             viewModel.resetAnomalyRealtimeDefaults(streamDesignator)
                             CaltopoClient.ShowToast("Anomaly detector reset to realtime defaults.")
@@ -1415,6 +1411,13 @@ internal fun AnomalySettingsDialogs(
                         valueRange = 1f..5f,
                         steps = 3
                     )
+                    Text("Color Candidates $colorTargetCandidateLimitValue")
+                    Slider(
+                        value = colorTargetCandidateLimitValue.toFloat(),
+                        onValueChange = { colorTargetCandidateLimitValue = it.toInt().coerceIn(1, 4) },
+                        valueRange = 1f..4f,
+                        steps = 2
+                    )
                     Text("Frame Stride ${frameStrideValue}x")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1437,17 +1440,17 @@ internal fun AnomalySettingsDialogs(
                     }
                     Slider(
                         value = frameStrideValue.toFloat(),
-                        onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 10) },
-                        valueRange = 1f..10f,
-                        steps = 8
+                        onValueChange = { frameStrideValue = it.toInt().coerceIn(1, 33) },
+                        valueRange = 1f..33f,
+                        steps = 31
                     )
                     if (anomalyConfig.strideMode == AnomalyStrideMode.Adaptive) {
                         Text("Adaptive Min ${adaptiveMinStrideValue} frames")
                         Slider(
                             value = adaptiveMinStrideValue.toFloat(),
-                            onValueChange = { adaptiveMinStrideValue = it.toInt().coerceIn(2, 10) },
-                            valueRange = 2f..10f,
-                            steps = 7
+                            onValueChange = { adaptiveMinStrideValue = it.toInt().coerceIn(2, 33) },
+                            valueRange = 2f..33f,
+                            steps = 30
                         )
                         Text("Adaptive Max ${"%.1f".format(adaptiveMaxStrideSecondsValue)}s")
                         Slider(
@@ -1534,6 +1537,7 @@ internal fun AnomalySettingsDialogs(
                         viewModel.setMotionEvidenceSensitivity(streamDesignator, motionEvidenceSensitivityValue)
                         viewModel.setScanZone(streamDesignator, scanZoneValue)
                         viewModel.setMinHits(streamDesignator, minHitsValue)
+                        viewModel.setColorTargetCandidateLimit(streamDesignator, colorTargetCandidateLimitValue)
                         viewModel.setAnomalyFrameStride(streamDesignator, frameStrideValue)
                         viewModel.setAnomalyAdaptiveStride(
                             streamDesignator,

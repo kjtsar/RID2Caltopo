@@ -10,6 +10,8 @@ private const val DEFAULT_FRAME_STRIDE = 1
 private const val DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES = 2
 private const val DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS = 1.0f
 private const val COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES = 30
+private const val COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_FRAMES = 60
+private const val COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_SECONDS = 2.0f
 private val DEFAULT_NON_APPEARANCE_ALGORITHMS = setOf(AnomalyAlgorithm.Motion)
 
 enum class AnomalyAlgorithm(
@@ -127,6 +129,7 @@ data class NativeAnomalyConfig(
     val thermalMinDelta: Float,
     val smallTargetScreenFraction: Float,
     val colorFrontendMode: Int,
+    val colorTargetCandidateLimit: Int,
 )
 
 enum class ColorFrontendMode(val nativeValue: Int) {
@@ -160,6 +163,7 @@ data class AnomalyConfig(
     val thermalMinDelta: Float = 10.0f,
     val smallTargetScreenFraction: Float = 1.0f / 200.0f,
     val colorFrontendMode: ColorFrontendMode = ColorFrontendMode.Legacy,
+    val colorTargetCandidateLimit: Int = 1,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {
@@ -233,13 +237,31 @@ data class AnomalyConfig(
         return copy(enabled = true)
     }
 
+    fun resetToRealtimeDefaults(
+        resolvedAppearanceMode: AppearanceAnomalyMode? = null,
+    ): AnomalyConfig {
+        val reset = AnomalyConfig().copy(
+            enabled = enabled,
+            appearanceSelection = appearanceSelection,
+            thermalPolarity = thermalPolarity,
+        )
+        val resetAppearance = appearanceSelection.resolved(
+            resolvedAppearanceMode ?: AppearanceAnomalyMode.Thermal
+        )
+        return if (resetAppearance == AppearanceAnomalyMode.Color) {
+            reset.withColorRealtimeStrideDefaultsIfUnmodified()
+        } else {
+            reset
+        }
+    }
+
     fun withColorRealtimeStrideDefaultsIfUnmodified(): AnomalyConfig {
         if (!hasDefaultRealtimeStrideSettings()) return this
         return copy(
             strideMode = AnomalyStrideMode.Adaptive,
             frameStride = COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES,
             adaptiveMinStrideFrames = COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES,
-            adaptiveMaxStrideSeconds = DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS,
+            adaptiveMaxStrideSeconds = COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_SECONDS,
         )
     }
 
@@ -248,6 +270,13 @@ data class AnomalyConfig(
             frameStride == DEFAULT_FRAME_STRIDE &&
             adaptiveMinStrideFrames == DEFAULT_ADAPTIVE_MIN_STRIDE_FRAMES &&
             abs(adaptiveMaxStrideSeconds - DEFAULT_ADAPTIVE_MAX_STRIDE_SECONDS) < 0.001f
+    }
+
+    private fun hasColorRealtimeStrideSettings(): Boolean {
+        return strideMode == AnomalyStrideMode.Adaptive &&
+            frameStride == COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES &&
+            adaptiveMinStrideFrames == COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES &&
+            abs(adaptiveMaxStrideSeconds - COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_SECONDS) < 0.001f
     }
 
     fun toggledAlgorithm(algorithm: AnomalyAlgorithm): AnomalyConfig {
@@ -278,7 +307,8 @@ data class AnomalyConfig(
             else -> colorFrontendMode.nativeValue
         }
         val colorRealtimeStrideDefault =
-            resolvedAppearanceMode == AppearanceAnomalyMode.Color && hasDefaultRealtimeStrideSettings()
+            resolvedAppearanceMode == AppearanceAnomalyMode.Color &&
+                (hasDefaultRealtimeStrideSettings() || hasColorRealtimeStrideSettings())
         val nativePixelStep = if (resolvedAppearanceMode == AppearanceAnomalyMode.Color && pixelStep <= 0) {
             1
         } else {
@@ -290,13 +320,21 @@ data class AnomalyConfig(
         } else {
             strideMode
         }
-        val adaptiveHardCap = 33
+        val adaptiveHardCap = if (colorRealtimeStrideDefault) {
+            COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_FRAMES
+        } else {
+            33
+        }
         val adaptiveMinFrames = if (colorRealtimeStrideDefault) {
             COLOR_REALTIME_ADAPTIVE_MIN_STRIDE_FRAMES
         } else {
             adaptiveMinStrideFrames
         }.coerceIn(2, adaptiveHardCap)
-        val adaptiveMaxSeconds = adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f)
+        val adaptiveMaxSeconds = if (colorRealtimeStrideDefault) {
+            COLOR_REALTIME_ADAPTIVE_MAX_STRIDE_SECONDS
+        } else {
+            adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f)
+        }
         val derivedAdaptiveMaxFrames = sourceFps
             ?.takeIf { it.isFinite() && it > 0.0f }
             ?.let { (it * adaptiveMaxSeconds).roundToInt() }
@@ -329,6 +367,7 @@ data class AnomalyConfig(
             thermalMinDelta = thermalMinDelta.coerceIn(1.0f, 64.0f),
             smallTargetScreenFraction = smallTargetScreenFraction.coerceIn(0.0015f, 0.03f),
             colorFrontendMode = nativeColorFrontendMode,
+            colorTargetCandidateLimit = colorTargetCandidateLimit.coerceIn(1, 4),
         )
     }
 

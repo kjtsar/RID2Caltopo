@@ -87,6 +87,13 @@
       "source_path": "app/src/test/resources/vidcap/Red1.mp4",
       "preserve_full_source": true,
       "notes": "Short visible-light clip with a clearly contrasted red target and first reviewed color-AD functional annotations."
+    },
+    {
+      "id": "red2",
+      "label": "Red2.mp4",
+      "source_path": "app/src/test/resources/vidcap/Red2.mp4",
+      "preserve_full_source": true,
+      "notes": "Bottom-end tablet visible-color realtime sample with a small patio target and reviewed target-track annotations."
     }
   ],
   "excerpts": [
@@ -105,6 +112,22 @@
         "visible_color"
       ],
       "notes": "First reviewed visible-color regression case covering a short red target track that should be recoverable by color anomaly detection."
+    },
+    {
+      "id": "red2-tablet-patio-target",
+      "label": "Red2 reviewed tablet patio target",
+      "source_clip_id": "red2",
+      "start_s": 3.3,
+      "end_s": 7.4,
+      "review_status": "reviewed",
+      "review_path": "tools/anomaly_test/reviews/Red2.review.json",
+      "tags": [
+        "missed_target",
+        "small_true_target",
+        "visible_color",
+        "bottom_end_tablet_sample"
+      ],
+      "notes": "Reviewed target points for the small red patio target in the tablet realtime qualification sample."
     }
   ]
 }

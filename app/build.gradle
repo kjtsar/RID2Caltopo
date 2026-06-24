@@ -317,12 +317,55 @@ tasks.register("jacocoTestReport", JacocoReport) {
     ))
 }
 
+tasks.register("buildAnomalyVideoTest") {
+    group = "verification"
+    description = "Builds the host anomaly_video_test harness used by Color AD realtime qualification."
+    def anomalyTestDir = file("${rootDir}/tools/anomaly_test")
+    def anomalyTestBuildDir = file("${rootDir}/tools/anomaly_test/build")
+    inputs.files(fileTree("${rootDir}/tools/anomaly_test") {
+        include("*.c", "*.h", "CMakeLists.txt")
+    })
+    inputs.files(fileTree("${rootDir}/app/src/main/cpp") {
+        include("*.c", "*.h")
+    })
+    outputs.file("${rootDir}/tools/anomaly_test/build/anomaly_video_test")
+    doLast {
+        exec {
+            workingDir rootDir
+            commandLine "cmake", "-S", anomalyTestDir.absolutePath, "-B", anomalyTestBuildDir.absolutePath
+        }
+        exec {
+            workingDir rootDir
+            commandLine "cmake", "--build", anomalyTestBuildDir.absolutePath, "--target", "anomaly_video_test"
+        }
+    }
+}
+
+tasks.register("colorRealtimeQualification") {
+    group = "verification"
+    description = "Runs app-visible Color AD realtime qualification over Red clips."
+    dependsOn("buildAnomalyVideoTest")
+    outputs.upToDateWhen { false }
+    doLast {
+        exec {
+            workingDir rootDir
+            commandLine "python3",
+                    "tools/anomaly_test/run_color_realtime_qualification.py",
+                    "--binary",
+                    "tools/anomaly_test/build/anomaly_video_test",
+                    "--output-dir",
+                    "${buildDir}/reports/color-realtime-qualification",
+                    "--fail-on-regression"
+        }
+    }
+}
+
 tasks.register("releaseVerification") {
     group = "verification"
     description = "Runs all verification required before producing release artifacts."
     // connectedDebugAndroidTest requires a reachable adb device/emulator. Keep it
     // out of the default release gate until device-level tests are intentional.
-    dependsOn("testDebugUnitTest", "trackerCoordinationTests")
+    dependsOn("testDebugUnitTest", "trackerCoordinationTests", "colorRealtimeQualification")
     // dependsOn("connectedDebugAndroidTest")
 }
 

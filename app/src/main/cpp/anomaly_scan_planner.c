@@ -160,15 +160,29 @@ bool anomaly_scan_planner_build_prev_sample_lookup(
 
 static bool periodic_full_refresh_due(
         const anomaly_state_t *state,
+        const anomaly_config_t *cfg,
         int64_t                source_ts_us) {
     if (state == NULL) return false;
+    int64_t interval_us = ANOMALY_FULL_RESCAN_INTERVAL_US;
+    int interval_frames = ANOMALY_FULL_RESCAN_INTERVAL_FRAMES;
+    if (cfg != NULL) {
+        if (isfinite(cfg->adaptive_max_stride_seconds) &&
+            cfg->adaptive_max_stride_seconds > 0.0f) {
+            int64_t configured_us =
+                (int64_t)llroundf(cfg->adaptive_max_stride_seconds * 1000000.0f);
+            if (configured_us > interval_us) interval_us = configured_us;
+        }
+        if (cfg->adaptive_max_stride_frames > interval_frames) {
+            interval_frames = cfg->adaptive_max_stride_frames;
+        }
+    }
     if (source_ts_us > 0 && state->last_full_refresh_source_ts_us > 0) {
         return (source_ts_us - state->last_full_refresh_source_ts_us) >=
-               ANOMALY_FULL_RESCAN_INTERVAL_US;
+               interval_us;
     }
     if (state->last_full_refresh_frame_counter > 0) {
         return (state->frame_counter - state->last_full_refresh_frame_counter) >=
-               ANOMALY_FULL_RESCAN_INTERVAL_FRAMES;
+               interval_frames;
     }
     return false;
 }
@@ -679,7 +693,7 @@ bool anomaly_scan_planner_plan(
     int64_t scan_plan_started_us = anomaly_timing_now_us();
     bool force_periodic_full_refresh =
         input->adaptive.adaptive_enabled &&
-        periodic_full_refresh_due(state, input->frame_source_ts_us);
+        periodic_full_refresh_due(state, cfg, input->frame_source_ts_us);
     anomaly_registration_health_t registration_health = input->base_registration_health;
     anomaly_scan_plan_t scan_plan = build_scan_plan(
         state,

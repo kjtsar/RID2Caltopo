@@ -264,13 +264,30 @@ python3 tools/anomaly_test/run_visible_color_perf_benchmarks.py \
   --output-dir /tmp/visible_color_perf_bench
 ```
 
-The default matrix uses:
+The default matrix compares:
 
-- `-a 1` color only
-- `--registration affine`
-- `--stride 1`
-- `-t 2.8`
-- `-m 2`
+- `visible-color-legacy-auto` — legacy coarse color-only profile
+- `visible-color-app-dense-stride` — app-visible Color realtime defaults
+- `visible-color-dense-gold` — dense every-frame comparison profile
+
+Across fixed `0.0s–10.0s` windows from:
+
+- `Color1.mp4`
+- `Color2.mp4`
+- `Color3.mp4`
+
+The report includes per-case and aggregate:
+
+- `realtime_factor`
+- `stage_timing.avg_total_ms`
+- `sampled_grid_prep`
+- `color_scoring`
+- `scan_planning`
+- `refresh_mask_build`
+
+The aggregate JSON is written to:
+
+- `/tmp/visible_color_perf_bench/visible_color_perf_report.json`
 
 ### App-parity mode
 
@@ -316,32 +333,53 @@ you intentionally want the old native color path for comparison.
 When app-parity mode is enabled, the harness prints both the high-level app
 inputs and the derived native detector settings at startup and records the
 parity metadata into the CSV header.
-- `-s 0.8`
-- `--small-target-fraction 0.005` (`1/200`)
 
-It runs two profiles:
+### Color realtime qualification
 
-- `visible-color-app-like-auto`
-- `visible-color-dense-gold` (`--pixel-step 1`)
+Use the focused Red clip qualifier when changing visible-color realtime
+defaults, target-candidate limits, app-display smoothing, or Color stride
+policy:
 
-Across fixed `0.0s–10.0s` windows from:
+```sh
+python3 tools/anomaly_test/run_color_realtime_qualification.py \
+  --binary tools/anomaly_test/build/anomaly_video_test \
+  --output-dir /tmp/color_realtime_qualification \
+  --fail-on-regression
+```
 
-- `Color1.mp4`
-- `Color2.mp4`
-- `Color3.mp4`
+The runner replays app-visible Color defaults over:
 
-The report includes per-case and aggregate:
+- `Red1.mp4` with `Red1.review.json`
+- `Red2.mp4` with `tools/anomaly_test/reviews/Red2.review.json`
 
-- `realtime_factor`
-- `stage_timing.avg_total_ms`
-- `sampled_grid_prep`
-- `color_scoring`
-- `scan_planning`
-- `refresh_mask_build`
+For each clip it compares `--app-color-target-candidates 1` against `4`,
+runs a second candidate-`1` timing probe to reduce short-clip cold-start noise,
+writes per-run CSV/summary artifacts, and emits
+`color_realtime_qualification_report.json`. Both reviewed Red clips are scored
+with `review_eval.py`; Red2 also includes a geometry check for the small patio
+target so the candidate-limit base case remains tied to target behavior instead
+of only box counts. With `--fail-on-regression`, the command exits non-zero if
+candidate limit `1` diverges from limit `4`, repeated candidate-`1` probes
+diverge from each other, either reviewed Red clip drops below realtime, or Red2
+no longer matches the expected
+patio-target track.
 
-The aggregate JSON is written to:
+The report also lists visible-color source clips that are still awaiting
+review excerpts. Generate contact sheets and per-clip duration/fps/frame-count
+metadata for that backlog with:
 
-- `/tmp/visible_color_perf_bench/visible_color_perf_report.json`
+```sh
+python3 tools/anomaly_test/generate_visible_color_review_prep.py \
+  --output-dir /tmp/visible_color_review_prep
+```
+
+Each pending clip is marked `needs_review_excerpt` until a target-bearing
+interval is selected, a review sidecar is created, and that excerpt is added to
+the realtime qualification gate.
+
+The prep report points to one contact sheet and one ffprobe metadata JSON per
+pending source clip so review work can start from the same manifest entries the
+qualification gate reports.
 
 ## Preparing visible-color regression clips
 
@@ -376,10 +414,11 @@ python3 tools/anomaly_test/run_regression_suite.py \
   --output-dir /tmp/color_regression
 ```
 
-`Red1` is the first reviewed visible-color correctness guardrail in this suite.
-If a change touches color scoring, color candidate selection, or selective
-refresh behavior, rerun the color manifest and check `red1-opening-target-track`
-before considering the change safe.
+`Red1` and `Red2` are the current reviewed visible-color correctness guardrails
+in this suite. If a change touches color scoring, color candidate selection, or
+selective refresh behavior, rerun the color manifest and check
+`red1-opening-target-track` plus `red2-tablet-patio-target` before considering
+the change safe.
 
 For squinter-facing display checks, run the app-display stream and summarize
 its temporal stability:

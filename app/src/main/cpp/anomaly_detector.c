@@ -69,6 +69,7 @@ anomaly_detector_config_t anomaly_detector_config_make_realtime_default(
             (algorithm_mask & ANOMALY_ALGO_COLOR)
                 ? ANOMALY_COLOR_FRONTEND_FRESH_RGBA
                 : ANOMALY_COLOR_FRONTEND_LEGACY,
+        .color_target_candidate_limit = 1,
         .thermal_debug_target_enabled = false,
         .thermal_debug_target_x_norm = 0.0f,
         .thermal_debug_target_y_norm = 0.0f,

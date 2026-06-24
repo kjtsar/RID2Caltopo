@@ -27,6 +27,7 @@ object AnomalyPrefs {
     private const val KEY_MIN_HITS = "min_hits"
     private const val KEY_THERMAL_MIN_DELTA = "thermal_min_delta"
     private const val KEY_SMALL_TARGET_SCREEN_FRACTION = "small_target_screen_fraction"
+    private const val KEY_COLOR_TARGET_CANDIDATE_LIMIT = "color_target_candidate_limit"
 
     private fun migrateLegacyRealtimeDefaultsIfNeeded(config: AnomalyConfig): AnomalyConfig {
         val legacyAlgorithms = setOf(AnomalyAlgorithm.ThermalHotspot)
@@ -129,6 +130,9 @@ object AnomalyPrefs {
             smallTargetScreenFraction = prefs
                 .getFloat(KEY_SMALL_TARGET_SCREEN_FRACTION, defaults.smallTargetScreenFraction)
                 .coerceIn(0.0015f, 0.03f),
+            colorTargetCandidateLimit = prefs
+                .getInt(KEY_COLOR_TARGET_CANDIDATE_LIMIT, defaults.colorTargetCandidateLimit)
+                .coerceIn(1, 4),
         )
         val migrated = migrateLegacyRealtimeDefaultsIfNeeded(loaded)
         if (migrated != loaded) {
@@ -174,6 +178,7 @@ object AnomalyPrefs {
                 KEY_SMALL_TARGET_SCREEN_FRACTION,
                 normalized.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)
             )
+            .putInt(KEY_COLOR_TARGET_CANDIDATE_LIMIT, normalized.colorTargetCandidateLimit.coerceIn(1, 4))
             .apply()
     }
 }

@@ -5695,6 +5695,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.min_hits          = ANOMALY_DEFAULT_MIN_HITS;
     slot->anomaly_cfg.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
     slot->anomaly_cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
+    slot->anomaly_cfg.color_target_candidate_limit = 1;
     slot->anomaly_thermal_paused = false;
     slot->anomaly_runtime_disabled = false;
     slot->anomaly_troubleshooting_debug = false;
@@ -6072,7 +6073,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jint min_hits,
         jfloat thermal_min_delta,
         jfloat small_target_screen_fraction,
-        jint color_frontend_mode
+        jint color_frontend_mode,
+        jint color_target_candidate_limit
 ) {
     (void) env;
     (void) thiz;
@@ -6089,7 +6091,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         if (adaptive_min_frames < 2) adaptive_min_frames = 2;
         if (adaptive_min_frames > 33) adaptive_min_frames = 33;
         if (adaptive_max_frames < adaptive_min_frames) adaptive_max_frames = adaptive_min_frames;
-        if (adaptive_max_frames > 33) adaptive_max_frames = 33;
+        if (adaptive_max_frames > 120) adaptive_max_frames = 120;
         session->anomaly_cfg.enabled           = (enabled == JNI_TRUE);
         session->anomaly_cfg.show_hot_overlay  = (show_hot_overlay == JNI_TRUE);
         session->anomaly_cfg.show_candidate_blobs = (show_candidate_blobs == JNI_TRUE);
@@ -6108,7 +6110,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                 (stride_mode == ANOMALY_STRIDE_MODE_ADAPTIVE)
                 ? ANOMALY_STRIDE_MODE_ADAPTIVE
                 : ANOMALY_STRIDE_MODE_FIXED;
-        session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (((int) frame_stride > 33) ? 33 : (int) frame_stride);
+        session->anomaly_cfg.frame_stride      = ((int) frame_stride < 1) ? 1 : (((int) frame_stride > 120) ? 120 : (int) frame_stride);
         session->anomaly_cfg.adaptive_min_stride_frames = adaptive_min_frames;
         session->anomaly_cfg.adaptive_max_stride_frames = adaptive_max_frames;
         session->anomaly_cfg.adaptive_max_stride_seconds =
@@ -6132,13 +6134,16 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                 : ((color_frontend_mode == ANOMALY_COLOR_FRONTEND_FRESH_RGBA)
                     ? ANOMALY_COLOR_FRONTEND_FRESH_RGBA
                     : ANOMALY_COLOR_FRONTEND_LEGACY);
+        int color_candidate_limit = (int) color_target_candidate_limit;
+        session->anomaly_cfg.color_target_candidate_limit =
+                color_candidate_limit < 1 ? 1 : (color_candidate_limit > 4 ? 4 : color_candidate_limit);
         bool log_local_config =
                 is_local_file_source(session) &&
                 session->anomaly_cfg.enabled &&
                 session->anomaly_cfg.algorithm_mask != 0;
         if (session->anomaly_troubleshooting_debug || log_local_config) {
             ct_debug(TAG,
-                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d movement=%d strideMode=%d stride=%d adaptiveMin=%d adaptiveMaxFrames=%d adaptiveMaxSec=%.1f pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d thermalPause=%d runtimeDisabled=%d",
+                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d movement=%d strideMode=%d stride=%d adaptiveMin=%d adaptiveMaxFrames=%d adaptiveMaxSec=%.1f pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d colorCandidates=%d thermalPause=%d runtimeDisabled=%d",
                      (long long) session->session_id,
                      session->designator,
                      is_local_file_source(session) ? 1 : 0,
@@ -6156,6 +6161,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                      session->anomaly_cfg.min_hits,
                      session->anomaly_cfg.scan_zone,
                      session->anomaly_cfg.color_frontend_mode,
+                     session->anomaly_cfg.color_target_candidate_limit,
                      session->anomaly_thermal_paused ? 1 : 0,
                      session->anomaly_runtime_disabled ? 1 : 0);
         }

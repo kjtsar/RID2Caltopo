@@ -61,7 +61,8 @@ fun resolveStreamTelemetryBinding(
     runtimeStreamBindings: Map<String, String>,
     configuredStreamBindings: Map<String, String> = emptyMap()
 ): StreamTelemetryBindingResolution {
-    val boundRemoteId = runtimeStreamBindings[streamDesignator] ?: configuredStreamBindings[streamDesignator]
+    val boundRemoteId = runtimeStreamBindings[streamDesignator]
+        ?: configuredStreamBindings.valueForDesignator(streamDesignator)
     val boundTelemetry = boundRemoteId?.let { remoteId ->
         telemetryStates.firstOrNull { it.remoteId == remoteId }
     }
@@ -82,6 +83,15 @@ fun resolveStreamTelemetryBinding(
         primaryLabel = streamDesignator,
         telemetry = null
     )
+}
+
+private fun Map<String, String>.valueForDesignator(streamDesignator: String): String? {
+    this[streamDesignator]?.let { return it }
+    val trimmedDesignator = streamDesignator.trim()
+    if (trimmedDesignator.isBlank()) return null
+    return entries.firstOrNull { (configuredDesignator, _) ->
+        configuredDesignator.trim().equals(trimmedDesignator, ignoreCase = true)
+    }?.value
 }
 
 fun streamTelemetryPairingWarning(

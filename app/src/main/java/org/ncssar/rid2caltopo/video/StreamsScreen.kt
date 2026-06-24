@@ -139,6 +139,16 @@ internal fun streamPipInsetTapLayoutMode(currentLayoutMode: StreamsLayoutMode): 
         StreamsLayoutMode.Both -> StreamsLayoutMode.Both
     }
 
+internal fun shouldShowMapPipInset(
+    pipEnabled: Boolean,
+    layoutMode: StreamsLayoutMode
+): Boolean = pipEnabled && layoutMode == StreamsLayoutMode.Streams
+
+internal fun shouldShowStreamsPipInset(
+    pipEnabled: Boolean,
+    layoutMode: StreamsLayoutMode
+): Boolean = pipEnabled && layoutMode == StreamsLayoutMode.Map
+
 internal data class StreamsFullScreenChrome(
     val showTopBar: Boolean,
     val showExitChip: Boolean
@@ -154,6 +164,11 @@ internal fun streamsFullScreenChrome(
         showExitChip = active
     )
 }
+
+internal fun shouldShowEnterFullScreenChip(
+    fullScreen: Boolean,
+    externalContentActive: Boolean
+): Boolean = !fullScreen && !externalContentActive
 
 internal data class FullScreenExitChipLayout(
     val minWidthDp: Float,
@@ -292,8 +307,6 @@ fun StreamsScreen(
     }
     val streams by viewModel.streams.collectAsStateWithLifecycle()
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
-    val visibleStreamCount = streams.values.count { viewModel.isStreamVisible(it) }
-    val pipHasStreamContent = streamPipHasStreamContent(visibleStreamCount, focusedPath)
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val airspaceUiState by AirspaceCenter.uiState.collectAsStateWithLifecycle()
@@ -366,15 +379,6 @@ fun StreamsScreen(
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
-                                    .pointerInput(externalContentMode) {
-                                        detectTapGestures(
-                                            onTap = {
-                                                if (externalContentMode == null) {
-                                                    streamsFullScreen = true
-                                                }
-                                            }
-                                        )
-                                    }
                             )
                         }
                     },
@@ -392,6 +396,19 @@ fun StreamsScreen(
                     },
                     actions = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (
+                                shouldShowEnterFullScreenChip(
+                                    fullScreen = streamsFullScreen,
+                                    externalContentActive = externalContentMode != null
+                                )
+                            ) {
+                                LayoutToggleChip(
+                                    label = "Enter FS",
+                                    selected = false,
+                                    onClick = { streamsFullScreen = true }
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
                             ComplianceAlertBell(
                                 overLimitDrones = overLimitDrones,
                                 allOverLimitMuted = allOverLimitMuted,
@@ -458,7 +475,7 @@ fun StreamsScreen(
                 }
 
                 val pipEnabled = streamPipUiState.enabled && externalContentMode == null
-                if (pipEnabled && layoutMode == StreamsLayoutMode.Streams && pipHasStreamContent) {
+                if (shouldShowMapPipInset(pipEnabled = pipEnabled, layoutMode = layoutMode)) {
                     val swapToMap = {
                         val nextLayout = streamPipInsetTapLayoutMode(layoutMode)
                         viewModel.setLayoutMode(nextLayout)
@@ -480,7 +497,12 @@ fun StreamsScreen(
                     }
                 }
 
-                if (pipEnabled && layoutMode == StreamsLayoutMode.Map && pipHasStreamContent) {
+                if (
+                    shouldShowStreamsPipInset(
+                        pipEnabled = pipEnabled,
+                        layoutMode = layoutMode
+                    )
+                ) {
                     val swapToStreams = {
                         val nextLayout = streamPipInsetTapLayoutMode(layoutMode)
                         viewModel.setLayoutMode(nextLayout)

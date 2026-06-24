@@ -45,6 +45,49 @@ class StreamPipInsetFrameTest {
     }
 
     @Test
+    fun mapInsetVisibility_doesNotRequireStreamContent() {
+        assertEquals(
+            true,
+            shouldShowMapPipInset(
+                pipEnabled = true,
+                layoutMode = StreamsLayoutMode.Streams
+            )
+        )
+        assertEquals(
+            false,
+            shouldShowMapPipInset(
+                pipEnabled = true,
+                layoutMode = StreamsLayoutMode.Map
+            )
+        )
+    }
+
+    @Test
+    fun streamsInsetVisibility_showsEmptyStreamsPaneWithoutStreamContent() {
+        assertEquals(
+            true,
+            shouldShowStreamsPipInset(
+                pipEnabled = true,
+                layoutMode = StreamsLayoutMode.Map
+            )
+        )
+        assertEquals(
+            false,
+            shouldShowStreamsPipInset(
+                pipEnabled = false,
+                layoutMode = StreamsLayoutMode.Map
+            )
+        )
+        assertEquals(
+            false,
+            shouldShowStreamsPipInset(
+                pipEnabled = true,
+                layoutMode = StreamsLayoutMode.Streams
+            )
+        )
+    }
+
+    @Test
     fun streamsFullScreenChrome_hidesTopBarOnlyWhenAllowedAndActive() {
         assertEquals(
             StreamsFullScreenChrome(showTopBar = true, showExitChip = false),
@@ -57,6 +100,22 @@ class StreamPipInsetFrameTest {
         assertEquals(
             StreamsFullScreenChrome(showTopBar = true, showExitChip = false),
             streamsFullScreenChrome(fullScreen = true, externalContentActive = true)
+        )
+    }
+
+    @Test
+    fun enterFullScreenChip_showsOnlyWhenPhoneTopBarCanEnterFullScreen() {
+        assertEquals(
+            true,
+            shouldShowEnterFullScreenChip(fullScreen = false, externalContentActive = false)
+        )
+        assertEquals(
+            false,
+            shouldShowEnterFullScreenChip(fullScreen = true, externalContentActive = false)
+        )
+        assertEquals(
+            false,
+            shouldShowEnterFullScreenChip(fullScreen = false, externalContentActive = true)
         )
     }
 

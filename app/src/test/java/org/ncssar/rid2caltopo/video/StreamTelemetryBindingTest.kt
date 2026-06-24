@@ -100,6 +100,24 @@ class StreamTelemetryBindingTest {
     }
 
     @Test
+    fun configuredStreamBindingMatchesControllerDesignatorCaseInsensitively() {
+        val runtimeBindings = mutableMapOf<String, String>()
+        val configuredBindings = mapOf("NCSSAR_MTRC4TD" to "1581F8")
+
+        val resolved = resolveStreamTelemetryBinding(
+            streamDesignator = "ncssar_mtrc4td",
+            telemetryStates = listOf(testTelemetry(remoteId = "1581F8", mappedId = "NCSSAR_MTRC4TD")),
+            runtimeStreamBindings = runtimeBindings,
+            configuredStreamBindings = configuredBindings
+        )
+
+        assertEquals(StreamTelemetryBindingStatus.PAIRED, resolved.status)
+        assertEquals("NCSSAR_MTRC4TD", resolved.primaryLabel)
+        assertEquals("1581F8", resolved.telemetry?.remoteId)
+        assertNull(runtimeBindings["ncssar_mtrc4td"])
+    }
+
+    @Test
     fun pairAnywayRuntimeOverrideDoesNotPersistToConfiguredDefault() {
         val runtimeBindings = mutableMapOf<String, String>()
         val configuredBindings = mapOf("NCSSAR_MTRC4TD" to "1581F8")

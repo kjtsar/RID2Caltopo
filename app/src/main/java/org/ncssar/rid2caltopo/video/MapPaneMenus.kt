@@ -48,6 +48,7 @@ internal fun BoxScope.MapPaneSettingsMenus(
     onOpenBadTilesHowTo: () -> Unit,
     onOpenCacheSize: () -> Unit,
     onOpenTileAge: () -> Unit,
+    onOpenMutualAidPackage: () -> Unit,
     onToggleAutoRemoveBadTiles: () -> Unit,
     onClearBadTileFlags: () -> Unit,
     onExportBadTileHashes: () -> Unit,
@@ -130,6 +131,10 @@ internal fun BoxScope.MapPaneSettingsMenus(
             DropdownMenuItem(
                 text = { Text("Maximum Tile Age: ${MapCacheSettings.formatTileAge(MapCacheSettings.maxTileAgeDays(context))}") },
                 onClick = onOpenTileAge
+            )
+            DropdownMenuItem(
+                text = { Text("Export MA Package...") },
+                onClick = onOpenMutualAidPackage
             )
         }
         DropdownMenu(

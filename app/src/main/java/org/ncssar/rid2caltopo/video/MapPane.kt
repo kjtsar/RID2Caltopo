@@ -6,18 +6,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
-import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.Point
-import android.graphics.Rect
-import android.graphics.RectF
-import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.location.Location
-import android.os.StatFs
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
@@ -55,7 +48,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Checkbox
@@ -76,7 +68,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import org.ncssar.rid2caltopo.ui.MapFoldersDialog
-import org.ncssar.rid2caltopo.ui.MutualAidPackageShareDialog
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -115,9 +106,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.time.Instant
-import java.time.LocalDate
 import java.time.LocalDateTime
-import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Collections
@@ -159,9 +148,6 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebugEnabled
 import org.ncssar.rid2caltopo.data.CaltopoLiveTrack
 import org.ncssar.rid2caltopo.data.CaltopoMap
 import org.ncssar.rid2caltopo.data.WaypointTrack
-import org.ncssar.rid2caltopo.data.PeerCoordinator
-import org.ncssar.rid2caltopo.data.R2cRuntimeRegistry
-import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.data.MutualAidPackageManager
 import org.ncssar.rid2caltopo.data.MutualAidPackageTransferManager
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
@@ -176,12 +162,9 @@ import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamMapOverlayAdapter
 import org.ncssar.rid2caltopo.video.mapcache.CaltopoIconCacheService
 import org.ncssar.rid2caltopo.video.mapcache.BadTilePolicy
-import org.ncssar.rid2caltopo.video.mapcache.DemElevationService
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheDebug
 import org.ncssar.rid2caltopo.video.mapcache.MapCachePolicy
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheSettings
-import org.ncssar.rid2caltopo.video.mapcache.MapCacheRoot
-import org.ncssar.rid2caltopo.video.mapcache.MapCacheRootResolver
 import org.ncssar.rid2caltopo.video.mapcache.TileCacheMapProvider
 import org.ncssar.rid2caltopo.video.mapcache.TileDiskCacheWriter
 import org.ncssar.rid2caltopo.video.mapcache.TileFetchPriorityScheduler
@@ -574,8 +557,6 @@ internal fun SplitMapPane(
     var maPackageExpiryDateText by remember { mutableStateOf(defaultPackageExpiry.format(packageDateFormatter)) }
     var maPackageExpiryTimeText by remember { mutableStateOf(defaultPackageExpiry.format(packageTimeFormatter)) }
     var maPackageUseMapPaneExtents by remember { mutableStateOf(true) }
-    val exportRequestId by MutualAidExportCoordinator.requestId.collectAsState()
-    var lastHandledExportRequestId by remember { mutableStateOf(0L) }
     val activeShareSession by MutualAidPackageTransferManager.shareSession.collectAsState()
     var preparingMutualAidShare by remember { mutableStateOf(false) }
     val maximizeThroughputBlockedForOsm = baseLayer == BaseLayerOption.OpenStreetMap
@@ -1062,13 +1043,14 @@ internal fun SplitMapPane(
         return tileSourceForBaseLayer(baseLayer)
     }
 
-    fun parseMutualAidPackageExpiry(): Long {
-        return runCatching {
-            val date = LocalDate.parse(maPackageExpiryDateText.trim(), packageDateFormatter)
-            val time = LocalTime.parse(maPackageExpiryTimeText.trim(), packageTimeFormatter)
-            LocalDateTime.of(date, time).atZone(packageZoneId).toInstant().toEpochMilli()
-        }.getOrDefault(0L)
-    }
+    fun parseMutualAidPackageExpiry(): Long =
+        parseMutualAidPackageExpiry(
+            dateText = maPackageExpiryDateText,
+            timeText = maPackageExpiryTimeText,
+            zoneId = packageZoneId,
+            dateFormatter = packageDateFormatter,
+            timeFormatter = packageTimeFormatter
+        )
 
     fun currentOfflinePrepSelectionKey(): String? {
         val boundary =
@@ -1161,9 +1143,7 @@ internal fun SplitMapPane(
         }
     }
 
-    LaunchedEffect(exportRequestId) {
-        if (exportRequestId <= 0L || exportRequestId == lastHandledExportRequestId) return@LaunchedEffect
-        lastHandledExportRequestId = exportRequestId
+    fun openMutualAidPackageDialog() {
         maPackageIncident = CaltopoClient.GetIncident()
         maPackageOpPeriod = CaltopoClient.GetOpPeriod()
         maPackageMapId = CaltopoMap.GetMapId()
@@ -3579,6 +3559,16 @@ internal fun SplitMapPane(
                     mapTileAgeDaysInput = MapCacheSettings.maxTileAgeDays(context).toString()
                     showMapTileAgeDialog = true
                 },
+                onOpenMutualAidPackage = {
+                    mapManagementMenuExpanded = false
+                    if (!CaltopoClient.HasMutualAidTemplate()) {
+                        CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting an MA package.")
+                    } else if (CaltopoMap.GetMapId().isBlank()) {
+                        CaltopoClient.ShowToast("Connect to a CalTopo map before exporting an MA package.")
+                    } else {
+                        openMutualAidPackageDialog()
+                    }
+                },
                 onToggleAutoRemoveBadTiles = {
                     autoRemoveBadTiles = !autoRemoveBadTiles
                     badTilesMenuExpanded = false
@@ -3609,149 +3599,32 @@ internal fun SplitMapPane(
             )
         }
 
-        if (showMutualAidPackageDialog) {
-            val parsedExpiry = parseMutualAidPackageExpiry()
-            AlertDialog(
-                onDismissRequest = { showMutualAidPackageDialog = false },
-                title = { Text("Export MA Package") },
-                text = {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        Text(
-                            "Export a mutual-aid package from the current map using already-cached imagery and DEM data only.",
-                            fontSize = 12.sp
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        Text("Source org: ${CaltopoClient.GetMutualAidSourceLabel().ifBlank { "Not configured in ct_mutual_aid_credentials" }}")
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = maPackageDisplayName,
-                            onValueChange = { maPackageDisplayName = it },
-                            label = { Text("Display name") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = maPackageIncident,
-                            onValueChange = { maPackageIncident = it },
-                            label = { Text("Incident") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = maPackageOpPeriod,
-                            onValueChange = { maPackageOpPeriod = it },
-                            label = { Text("Op period") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = maPackageMapId,
-                            onValueChange = { maPackageMapId = it },
-                            label = { Text("Map ID") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = maPackageMapTitle,
-                            onValueChange = { maPackageMapTitle = it },
-                            label = { Text("Map title") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(
-                                checked = maPackageUseMapPaneExtents,
-                                onCheckedChange = { maPackageUseMapPaneExtents = it }
-                            )
-                            Text("Use MapPane extents")
-                        }
-                        Text(
-                            if (maPackageUseMapPaneExtents) {
-                                "Export uses the current MapPane viewport instead of the offline-prep boundary selection."
-                            } else {
-                                "Export uses the offline-prep boundary selection when one is active; otherwise it uses the current MapPane viewport."
-                            },
-                            fontSize = 11.sp
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(
-                                value = maPackageExpiryDateText,
-                                onValueChange = { maPackageExpiryDateText = it },
-                                label = { Text("Expiry date") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
-                            )
-                            OutlinedTextField(
-                                value = maPackageExpiryTimeText,
-                                onValueChange = { maPackageExpiryTimeText = it },
-                                label = { Text("Expiry time") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        if (parsedExpiry <= System.currentTimeMillis()) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "Expiry must be a future local date/time in yyyy-MM-dd and HH:mm format.",
-                                color = MaterialTheme.colorScheme.error,
-                                fontSize = 11.sp
-                            )
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(
-                        enabled = CaltopoClient.GetMutualAidSourceLabel().isNotBlank() &&
-                            maPackageIncident.isNotBlank() &&
-                            maPackageOpPeriod.isNotBlank() &&
-                            maPackageMapId.isNotBlank() &&
-                            parsedExpiry > System.currentTimeMillis() &&
-                            !preparingMutualAidShare,
-                        onClick = {
-                            showMutualAidPackageDialog = false
-                            startMutualAidShare()
-                        }
-                    ) { Text("Start Sharing") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showMutualAidPackageDialog = false }) {
-                        Text("Cancel")
-                    }
-                }
-            )
-        }
-
-        if (preparingMutualAidShare) {
-            AlertDialog(
-                onDismissRequest = {},
-                title = { Text("Preparing MA Package") },
-                text = {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Spacer(Modifier.height(8.dp))
-                        Text("Packaging cached map and DEM data for transfer…")
-                    }
-                },
-                confirmButton = {}
-            )
-        }
-
-        activeShareSession?.let { session ->
-            MutualAidPackageShareDialog(
-                session = session,
-                onDone = { MutualAidPackageTransferManager.stopShareSession() }
-            )
-        }
+        MapPaneMutualAidDialogs(
+            showPackageDialog = showMutualAidPackageDialog,
+            onShowPackageDialogChange = { showMutualAidPackageDialog = it },
+            sourceLabel = CaltopoClient.GetMutualAidSourceLabel(),
+            displayName = maPackageDisplayName,
+            onDisplayNameChange = { maPackageDisplayName = it },
+            incident = maPackageIncident,
+            onIncidentChange = { maPackageIncident = it },
+            opPeriod = maPackageOpPeriod,
+            onOpPeriodChange = { maPackageOpPeriod = it },
+            mapId = maPackageMapId,
+            onMapIdChange = { maPackageMapId = it },
+            mapTitle = maPackageMapTitle,
+            onMapTitleChange = { maPackageMapTitle = it },
+            expiryDateText = maPackageExpiryDateText,
+            onExpiryDateTextChange = { maPackageExpiryDateText = it },
+            expiryTimeText = maPackageExpiryTimeText,
+            onExpiryTimeTextChange = { maPackageExpiryTimeText = it },
+            useMapPaneExtents = maPackageUseMapPaneExtents,
+            onUseMapPaneExtentsChange = { maPackageUseMapPaneExtents = it },
+            parsedExpiryEpochMs = parseMutualAidPackageExpiry(),
+            preparingShare = preparingMutualAidShare,
+            onStartShare = { startMutualAidShare() },
+            activeShareSession = activeShareSession,
+            onShareDone = { MutualAidPackageTransferManager.stopShareSession() }
+        )
 
         if (showOfflinePrepDialog) {
             val selectedBoundary =
@@ -4247,262 +4120,6 @@ internal fun SplitMapPane(
     }
 }
 
-private fun estimateDemSamplesForBounds(
-    bounds: BoundingBox,
-    stepMeters: Double,
-    clipBoundary: GeoBoundary? = null
-): Int {
-    if (stepMeters <= 0.0) return 0
-    val north = bounds.latNorth
-    val south = bounds.latSouth
-    val west = bounds.lonWest
-    val east = bounds.lonEast
-    val loLat = minOf(north, south)
-    val hiLat = maxOf(north, south)
-    val loLon = minOf(west, east)
-    val hiLon = maxOf(west, east)
-    val centerLat = (loLat + hiLat) / 2.0
-    val latStepDeg = stepMeters / 111_320.0
-    val lonMetersAtLat = 111_320.0 * kotlin.math.cos(Math.toRadians(centerLat)).coerceAtLeast(0.1)
-    val lonStepDeg = stepMeters / lonMetersAtLat
-    var total = 0
-    var lat = loLat
-    while (lat <= hiLat) {
-        var lon = loLon
-        while (lon <= hiLon) {
-            if (clipBoundary == null || pointInPolygon(lat, lon, clipBoundary.ring)) {
-                total++
-            }
-            lon += lonStepDeg
-        }
-        lat += latStepDeg
-    }
-    return total
-}
-
-internal fun estimateDemSamplesApproximate(
-    bounds: BoundingBox,
-    stepMeters: Double,
-    clipBoundary: GeoBoundary? = null
-): Int {
-    if (stepMeters <= 0.0) return 0
-    val effectiveArea = if (clipBoundary != null) {
-        polygonAreaMeters2(clipBoundary.ring).coerceAtLeast(0.0)
-    } else {
-        boundsAreaMeters2(bounds).coerceAtLeast(0.0)
-    }
-    if (effectiveArea <= 0.0) return 0
-    val sampleArea = stepMeters * stepMeters
-    return kotlin.math.max(1, kotlin.math.ceil(effectiveArea / sampleArea).toInt())
-}
-
-private suspend fun forEachDemSamplePointForBounds(
-    bounds: BoundingBox,
-    stepMeters: Double,
-    clipBoundary: GeoBoundary? = null,
-    block: suspend (Double, Double) -> Unit
-) {
-    if (stepMeters <= 0.0) return
-    val north = bounds.latNorth
-    val south = bounds.latSouth
-    val west = bounds.lonWest
-    val east = bounds.lonEast
-    val loLat = minOf(north, south)
-    val hiLat = maxOf(north, south)
-    val loLon = minOf(west, east)
-    val hiLon = maxOf(west, east)
-    val centerLat = (loLat + hiLat) / 2.0
-    val latStepDeg = stepMeters / 111_320.0
-    val lonMetersAtLat = 111_320.0 * kotlin.math.cos(Math.toRadians(centerLat)).coerceAtLeast(0.1)
-    val lonStepDeg = stepMeters / lonMetersAtLat
-    var lat = loLat
-    while (lat <= hiLat) {
-        var lon = loLon
-        while (lon <= hiLon) {
-            if (clipBoundary == null || pointInPolygon(lat, lon, clipBoundary.ring)) {
-                block(lat, lon)
-            }
-            lon += lonStepDeg
-        }
-        lat += latStepDeg
-    }
-}
-
-/** Returns the USGS 3DEP 1° tile name (e.g. "n40w122") that covers the given coordinate. */
-private fun tileNameForLocation(lat: Double, lng: Double): String {
-    val tileNorth = kotlin.math.floor(lat).toInt() + 1
-    val tileLonBlock = kotlin.math.floor(lng).toInt()
-    val latPart = if (tileNorth >= 0) "n%02d".format(tileNorth) else "s%02d".format(-tileNorth)
-    val lonPart = if (tileLonBlock < 0) "w%03d".format(-tileLonBlock) else "e%03d".format(tileLonBlock + 1)
-    return "$latPart$lonPart"
-}
-
-/**
- * Background helper: downloads one USGS 3DEP 1° GeoTIFF tile into the archive DEM cache if it
- * is not already present (or is incomplete). After a successful download the GeoTiffDemSource
- * catalog is invalidated so subsequent DEM queries are served from the new local file.
- *
- * Must be called from an IO coroutine. Swallows non-cancellation exceptions.
- */
-private suspend fun autoDownloadDemTile(
-    tileName: String,
-    context: Context,
-    client: OkHttpClient,
-    service: DemElevationService
-) {
-    val archiveRoot = CaltopoClient.GetArchiveDir() ?: run {
-        MapCacheDebug.log("auto-dem: no archive dir, skipping tile=$tileName")
-        return
-    }
-    val cacheDir = archiveRoot.findFile("cache") ?: archiveRoot.createDirectory("cache") ?: return
-    val demDir = cacheDir.findFile("dem") ?: cacheDir.createDirectory("dem") ?: return
-    val fileName = "USGS_1_$tileName.tif"
-    val existing = demDir.findFile(fileName)
-    if (existing != null && existing.isFile && existing.length() > 5_000_000L) {
-        MapCacheDebug.log("auto-dem: already present tile=$tileName bytes=${existing.length()}")
-        service.refreshGeoTiffCatalog()
-        return
-    }
-    val url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/$tileName/USGS_1_$tileName.tif"
-    CTDebug(MAP_PANE_TAG, "auto-dem: downloading tile=$tileName")
-    try {
-        val ok = client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                CTError(MAP_PANE_TAG, "auto-dem http-fail code=${resp.code} tile=$tileName")
-                return@use false
-            }
-            val body = resp.body ?: run { CTError(MAP_PANE_TAG, "auto-dem no-body tile=$tileName"); return@use false }
-            val destFile = demDir.findFile(fileName) ?: demDir.createFile("image/tiff", fileName)
-                ?: run { CTError(MAP_PANE_TAG, "auto-dem create-failed tile=$tileName"); return@use false }
-            context.contentResolver.openOutputStream(destFile.uri, "wt")?.use { out ->
-                body.byteStream().copyTo(out)
-            } ?: run { CTError(MAP_PANE_TAG, "auto-dem stream-open-failed tile=$tileName"); return@use false }
-            true
-        }
-        if (ok) {
-            CTDebug(MAP_PANE_TAG, "auto-dem: complete tile=$tileName")
-            service.refreshGeoTiffCatalog()
-        }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        CTError(MAP_PANE_TAG, "auto-dem ex tile=$tileName: ${e.javaClass.simpleName}:${e.message}")
-    }
-}
-
-private fun demTileNamesForBounds(bounds: BoundingBox): List<String> {
-    val latMin = minOf(bounds.latNorth, bounds.latSouth)
-    val latMax = maxOf(bounds.latNorth, bounds.latSouth)
-    val lonMin = minOf(bounds.lonWest, bounds.lonEast)
-    val lonMax = maxOf(bounds.lonWest, bounds.lonEast)
-    // USGS 3DEP 1° tile naming: "n40w122" means NW corner at 40°N, 122°W → covers 39–40°N, 121–122°W.
-    val latSouthBlock = kotlin.math.floor(latMin).toInt()
-    val latNorthBlock = kotlin.math.ceil(latMax).toInt() - 1
-    val lonWestBlock = kotlin.math.floor(lonMin).toInt()
-    val lonEastBlock = kotlin.math.ceil(lonMax).toInt() - 1
-    val names = mutableListOf<String>()
-    for (latBlock in latSouthBlock..latNorthBlock) {
-        val tileNorth = latBlock + 1
-        val latPart = if (tileNorth >= 0) "n%02d".format(tileNorth) else "s%02d".format(-tileNorth)
-        for (lonBlock in lonWestBlock..lonEastBlock) {
-            val lonPart = if (lonBlock < 0) "w%03d".format(-lonBlock) else "e%03d".format(lonBlock + 1)
-            names += "$latPart$lonPart"
-        }
-    }
-    return names
-}
-
-private fun formatDurationShort(totalSeconds: Long): String {
-    val safe = totalSeconds.coerceAtLeast(0L)
-    val h = safe / 3600L
-    val m = (safe % 3600L) / 60L
-    val s = safe % 60L
-    return if (h > 0L) {
-        String.format(Locale.US, "%d:%02d:%02d", h, m, s)
-    } else {
-        String.format(Locale.US, "%02d:%02d", m, s)
-    }
-}
-
-internal fun queryAvailableCacheBytes(context: android.content.Context): Long? {
-    return try {
-        when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
-            is MapCacheRoot.FileBacked -> {
-                val stat = StatFs(root.dir.absolutePath)
-                stat.availableBytes
-            }
-            is MapCacheRoot.SafBacked -> {
-                null
-            }
-        }
-    } catch (_: Exception) {
-        null
-    }
-}
-
-internal fun mapCacheRootSignature(context: android.content.Context): String {
-    return try {
-        when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
-            is MapCacheRoot.FileBacked -> "file:${root.dir.absolutePath}"
-            is MapCacheRoot.SafBacked -> "saf:${root.dir.uri}"
-        }
-    } catch (_: Exception) {
-        "unknown"
-    }
-}
-
-private fun exportBadTileHashes(context: android.content.Context): String? {
-    return try {
-        val hashes = BadTilePolicy.blockedHashesSorted(context)
-        val header = "# RID2Caltopo bad tile hashes\n# count=${hashes.size}\n"
-        val body = if (hashes.isEmpty()) "# (none)\n" else hashes.joinToString(separator = "\n", postfix = "\n")
-        val payload = (header + body).toByteArray(Charsets.UTF_8)
-        when (val root = MapCacheRootResolver.resolveRoot(context.applicationContext)) {
-            is MapCacheRoot.FileBacked -> {
-                val out = File(root.dir, "bad_tile_hashes.txt")
-                out.writeBytes(payload)
-                out.absolutePath
-            }
-            is MapCacheRoot.SafBacked -> {
-                val existing = root.dir.findFile("bad_tile_hashes.txt")
-                val file = existing ?: root.dir.createFile("text/plain", "bad_tile_hashes.txt")
-                if (file == null) return null
-                context.applicationContext.contentResolver.openOutputStream(file.uri, "w")?.use { out ->
-                    out.write(payload)
-                    out.flush()
-                } ?: return null
-                file.uri.toString()
-            }
-        }
-    } catch (e: Exception) {
-        MapCacheDebug.log("bad-hash export failed err=${e.javaClass.simpleName}:${e.message}")
-        null
-    }
-}
-
-private fun localDeviceMarkerColor(): String {
-    val state = R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator.coordinationIndicatorState
-    if (CaltopoMap.IsInitialDeviceMarkerPublishPending() &&
-        state != PeerCoordinator.CoordinationIndicatorState.HEALTHY &&
-        state != PeerCoordinator.CoordinationIndicatorState.IDLE) {
-        return LOCAL_DEVICE_COLOR_STARTING
-    }
-    return when (state) {
-        PeerCoordinator.CoordinationIndicatorState.HEALTHY -> LOCAL_DEVICE_COLOR_HEALTHY
-        PeerCoordinator.CoordinationIndicatorState.IDLE -> LOCAL_DEVICE_COLOR_HEALTHY
-        PeerCoordinator.CoordinationIndicatorState.DEGRADED -> LOCAL_DEVICE_COLOR_DEGRADED
-        PeerCoordinator.CoordinationIndicatorState.UNCONFIGURED -> LOCAL_DEVICE_COLOR_UNCONFIGURED
-    }
-}
-
-private fun localDeviceStatusLines(): List<String> {
-    val coordinator = R2cRuntimeRegistry.getDefaultRuntime().peerCoordinator
-    return buildList {
-        add(coordinator.coordinationStatusText)
-        addAll(coordinator.coordinationDiagnosticLines)
-    }
-}
-
 private fun BoundingBox.containsLocation(location: Location): Boolean {
     val minLat = minOf(latNorth, latSouth)
     val maxLat = maxOf(latNorth, latSouth)
@@ -4612,322 +4229,4 @@ private fun predictedHeadPoint(
         lat = predictedGeoPoint.latitude,
         lng = predictedGeoPoint.longitude
     )
-}
-
-private fun buildNotamMarkerIcon(
-    context: Context,
-    fillColor: Int
-): Drawable {
-    val sizePx = 88
-    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    val radius = sizePx * 0.22f
-    val center = sizePx / 2f
-    val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = fillColor
-    }
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = AndroidColor.BLACK
-        strokeWidth = 6f
-    }
-    canvas.drawCircle(center, center, radius, fill)
-    canvas.drawCircle(center, center, radius, border)
-    return BitmapDrawable(context.resources, bitmap)
-}
-
-private fun isKnownArtifactSymbol(symbol: String): Boolean {
-    return symbolGlyphForMarkerSymbol(symbol) != null
-}
-
-private fun markerIconForArtifactSymbol(
-    resources: android.content.res.Resources,
-    symbol: String,
-    colorHex: String?,
-    cache: MutableMap<String, Drawable>,
-    scale: Float = 1.0f
-): Drawable {
-    val normalizedSymbol = symbol.ifBlank { "point" }
-    val normalizedColor = normalizeMarkerColor(colorHex, normalizedSymbol)
-    val safeScale = drawableScaleOrDefault(scale)
-    val cacheKey = "$normalizedSymbol|$normalizedColor|${"%.3f".format(Locale.US, safeScale)}"
-    val cached = cache[cacheKey]
-    if (cached != null) {
-        return cached.constantState?.newDrawable(resources)?.mutate() ?: cached
-    }
-
-    val icon = scaleDrawableBitmap(
-        resources = resources,
-        drawable = buildCaltopoLikeSymbolDrawable(resources, normalizedSymbol, normalizedColor),
-        scale = safeScale
-    )
-    cache[cacheKey] = icon
-    return icon.constantState?.newDrawable(resources)?.mutate() ?: icon
-}
-
-private fun scaleDrawableBitmap(
-    resources: android.content.res.Resources,
-    drawable: Drawable,
-    scale: Float
-): Drawable {
-    if (scale == 1.0f) return drawable
-    val width = scaledDimension(drawable.intrinsicWidth.takeIf { it > 0 } ?: 1, scale)
-    val height = scaledDimension(drawable.intrinsicHeight.takeIf { it > 0 } ?: 1, scale)
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    val previousBounds = Rect(drawable.bounds)
-    drawable.setBounds(0, 0, width, height)
-    drawable.draw(canvas)
-    drawable.setBounds(previousBounds)
-    return BitmapDrawable(resources, bitmap)
-}
-
-private fun cachedScaledRemoteMarkerDrawable(
-    resources: android.content.res.Resources,
-    source: Drawable,
-    cache: MutableMap<String, Drawable>,
-    cacheKey: String,
-    scale: Float
-): Drawable {
-    val safeScale = drawableScaleOrDefault(scale)
-    val scaledCacheKey = "$cacheKey|${"%.3f".format(Locale.US, safeScale)}"
-    val cached = cache[scaledCacheKey]
-    if (cached != null) {
-        return cached.constantState?.newDrawable(resources)?.mutate() ?: cached
-    }
-    val scaled = scaleDrawableBitmap(
-        resources = resources,
-        drawable = source.constantState?.newDrawable(resources)?.mutate() ?: source.mutate(),
-        scale = safeScale
-    )
-    cache[scaledCacheKey] = scaled
-    return scaled.constantState?.newDrawable(resources)?.mutate() ?: scaled
-}
-
-private fun symbolGlyphForMarkerSymbol(symbol: String): String? {
-    return when (symbol.lowercase()) {
-        "point" -> "\u2022"
-        "c:ring" -> "\u25cb"
-        "c:target1" -> "1"
-        "c:target2" -> "2"
-        "c:target3" -> "3"
-        "cp" -> "CP"
-        "clue" -> "?"
-        "heatsource" -> "HS"
-        "fire-hotspot" -> "HOT"
-        "medevac-site" -> "+"
-        "hut" -> "\u2302"
-        "camping" -> "CAMP"
-        "radiotower" -> "RT"
-        "waterfalls" -> "WF"
-        "fuel" -> "F"
-        "automobile" -> "CAR"
-        "4wd" -> "4W"
-        else -> null
-    }
-}
-
-private fun fallbackGlyphForSymbol(symbol: String): String {
-    val compact = symbol.replace("[^A-Za-z0-9]".toRegex(), "").uppercase()
-    return when {
-        compact.length >= 2 -> compact.substring(0, 2)
-        compact.isNotEmpty() -> compact
-        else -> "?"
-    }
-}
-
-private fun normalizeMarkerColor(colorHex: String?, symbol: String): Int {
-    val raw = colorHex?.trim().orEmpty()
-    if (raw.isEmpty() || raw.equals("null", ignoreCase = true)) {
-        return when (symbol.lowercase()) {
-            "cp", "clue", "medevac-site" -> AndroidColor.parseColor("#2D4FAE")
-            "heatsource", "fire-hotspot", "c:ring", "c:target1", "c:target2", "c:target3", "point" ->
-                AndroidColor.parseColor("#FF1B1B")
-            else -> AndroidColor.parseColor("#111111")
-        }
-    }
-    val prefixed = if (raw.startsWith("#")) raw else "#$raw"
-    return try {
-        AndroidColor.parseColor(prefixed)
-    } catch (_: IllegalArgumentException) {
-        AndroidColor.parseColor("#111111")
-    }
-}
-
-private fun buildCaltopoLikeSymbolDrawable(
-    resources: android.content.res.Resources,
-    symbol: String,
-    fillColor: Int
-): Drawable {
-    val sizePx = 56
-    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    val cx = sizePx / 2f
-    val cy = sizePx / 2f
-
-    val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = fillColor
-    }
-    val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = fillColor
-        strokeWidth = 4f
-    }
-    val whiteStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = AndroidColor.WHITE
-        strokeWidth = 4f
-    }
-    val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = AndroidColor.WHITE
-        textAlign = Paint.Align.CENTER
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
-    }
-    val black = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = AndroidColor.BLACK
-    }
-    val blackStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = AndroidColor.BLACK
-        strokeWidth = 3f
-    }
-
-    when (symbol.lowercase()) {
-        "point" -> canvas.drawCircle(cx, cy, 8f, fill)
-        "c:ring" -> canvas.drawCircle(cx, cy, 10f, stroke)
-        "c:target1" -> {
-            canvas.drawCircle(cx, cy, 11f, stroke)
-            canvas.drawCircle(cx, cy, 2.5f, fill)
-        }
-        "c:target2" -> {
-            canvas.drawCircle(cx, cy, 11f, stroke)
-            canvas.drawLine(cx - 16, cy, cx + 16, cy, stroke)
-            canvas.drawLine(cx, cy - 16, cx, cy + 16, stroke)
-        }
-        "c:target3" -> {
-            canvas.drawCircle(cx, cy, 8f, stroke)
-            canvas.drawCircle(cx, cy, 14f, stroke)
-            canvas.drawLine(cx - 16, cy, cx + 16, cy, stroke)
-            canvas.drawLine(cx, cy - 16, cx, cy + 16, stroke)
-        }
-        "cp" -> {
-            val p = Path().apply {
-                moveTo(cx - 12, cy - 12)
-                lineTo(cx + 12, cy - 12)
-                lineTo(cx + 12, cy + 12)
-                lineTo(cx - 12, cy + 12)
-                close()
-            }
-            canvas.drawPath(p, fill)
-            canvas.drawLine(cx - 10, cy + 10, cx + 10, cy - 10, whiteStroke)
-        }
-        "clue" -> {
-            canvas.drawCircle(cx, cy, 11.5f, fill)
-            text.textSize = 22f
-            val bounds = Rect()
-            text.getTextBounds("?", 0, 1, bounds)
-            canvas.drawText("?", cx, cy + bounds.height() / 2f, text)
-        }
-        "heatsource" -> {
-            canvas.drawCircle(cx, cy, 11.5f, stroke)
-            canvas.drawLine(cx - 8, cy - 8, cx + 8, cy + 8, stroke)
-            canvas.drawLine(cx + 8, cy - 8, cx - 8, cy + 8, stroke)
-        }
-        "fire-hotspot" -> {
-            canvas.drawCircle(cx, cy, 11.5f, stroke)
-            canvas.drawCircle(cx, cy, 4.5f, fill)
-        }
-        "medevac-site" -> {
-            stroke.color = AndroidColor.parseColor("#2D4FAE")
-            canvas.drawCircle(cx, cy, 11.5f, stroke)
-            fill.color = AndroidColor.parseColor("#E61E2B")
-            canvas.drawRect(cx - 2, cy - 7, cx + 2, cy + 7, fill)
-            canvas.drawRect(cx - 7, cy - 2, cx + 7, cy + 2, fill)
-        }
-        "hut" -> {
-            val roof = Path().apply {
-                moveTo(cx - 11, cy + 2)
-                lineTo(cx, cy - 10)
-                lineTo(cx + 11, cy + 2)
-                close()
-            }
-            canvas.drawPath(roof, black)
-            canvas.drawRect(cx - 9, cy + 2, cx + 9, cy + 12, black)
-            val door = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.WHITE }
-            canvas.drawRect(cx - 2, cy + 6, cx + 2, cy + 12, door)
-        }
-        "camping" -> {
-            val tent = Path().apply {
-                moveTo(cx - 12, cy + 10)
-                lineTo(cx - 1, cy - 10)
-                lineTo(cx + 12, cy + 10)
-                close()
-            }
-            canvas.drawPath(tent, blackStroke)
-            canvas.drawLine(cx - 2, cy + 10, cx + 3, cy + 2, blackStroke)
-        }
-        "radiotower" -> {
-            canvas.drawLine(cx, cy - 12, cx - 5, cy + 12, blackStroke)
-            canvas.drawLine(cx, cy - 12, cx + 5, cy + 12, blackStroke)
-            canvas.drawLine(cx - 4, cy + 2, cx + 4, cy + 2, blackStroke)
-            canvas.drawLine(cx - 6, cy + 12, cx + 6, cy + 12, blackStroke)
-            canvas.drawArc(cx - 14, cy - 12, cx - 2, cy, -70f, 140f, false, blackStroke)
-            canvas.drawArc(cx + 2, cy - 12, cx + 14, cy, 110f, 140f, false, blackStroke)
-        }
-        "waterfalls" -> {
-            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = AndroidColor.BLACK
-                style = Paint.Style.STROKE
-                strokeWidth = 2.5f
-            }
-            canvas.drawLine(cx - 8, cy - 10, cx - 8, cy + 6, p)
-            canvas.drawLine(cx - 2, cy - 10, cx - 2, cy + 4, p)
-            canvas.drawLine(cx + 4, cy - 10, cx + 4, cy + 7, p)
-            canvas.drawArc(cx - 12, cy + 2, cx + 10, cy + 16, 200f, 140f, false, p)
-        }
-        "fuel" -> {
-            canvas.drawRect(cx - 8, cy - 10, cx + 4, cy + 10, blackStroke)
-            canvas.drawLine(cx + 4, cy - 8, cx + 10, cy - 8, blackStroke)
-            canvas.drawLine(cx + 10, cy - 8, cx + 10, cy + 4, blackStroke)
-            canvas.drawLine(cx + 10, cy + 4, cx + 6, cy + 4, blackStroke)
-            canvas.drawLine(cx - 10, cy + 12, cx + 10, cy + 12, blackStroke)
-        }
-        "automobile", "4wd" -> {
-            val y = cy + 4
-            val body = Path().apply {
-                moveTo(cx - 12, y)
-                lineTo(cx - 7, y - 6)
-                lineTo(cx + 5, y - 6)
-                lineTo(cx + 12, y)
-                lineTo(cx + 12, y + 5)
-                lineTo(cx - 12, y + 5)
-                close()
-            }
-            canvas.drawPath(body, black)
-            canvas.drawCircle(cx - 7, y + 6, 3f, black)
-            canvas.drawCircle(cx + 7, y + 6, 3f, black)
-            if (symbol.lowercase() == "4wd") {
-                canvas.drawRect(cx - 2, y - 12, cx + 2, y - 6, black)
-            }
-        }
-        else -> {
-            val glyph = symbolGlyphForMarkerSymbol(symbol) ?: fallbackGlyphForSymbol(symbol)
-            canvas.drawCircle(cx, cy, sizePx * 0.38f, fill)
-            val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                color = AndroidColor.WHITE
-                strokeWidth = 3f
-            }
-            canvas.drawCircle(cx, cy, sizePx * 0.38f, border)
-            text.textSize = if (glyph.length > 2) 14f else 18f
-            val bounds = Rect()
-            text.getTextBounds(glyph, 0, glyph.length, bounds)
-            canvas.drawText(glyph, cx, cy + bounds.height() / 2f, text)
-        }
-    }
-
-    return BitmapDrawable(resources, bitmap)
 }

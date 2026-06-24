@@ -74,7 +74,6 @@ import org.ncssar.rid2caltopo.data.DriveSyncAction
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
 import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.GoogleDriveConfigSync
-import org.ncssar.rid2caltopo.data.MutualAidExportCoordinator
 import org.ncssar.rid2caltopo.data.MutualAidProfileManager
 import org.ncssar.rid2caltopo.data.MutualAidPackageManager
 import org.ncssar.rid2caltopo.data.OrgConfigManager
@@ -1617,23 +1616,6 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Export Org Config")
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = {
-                            showTestingToolsDialog = false
-                            if (!CaltopoClient.HasMutualAidTemplate()) {
-                                CaltopoClient.ShowToast("Load ct_mutual_aid_credentials before exporting an MA package.")
-                            } else if (CaltopoMap.GetMapId().isBlank()) {
-                                CaltopoClient.ShowToast("Connect to a CalTopo map before exporting an MA package.")
-                            } else {
-                                MutualAidExportCoordinator.requestExportDialog()
-                                localViewModel.showStreams()
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Export MA Package")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(

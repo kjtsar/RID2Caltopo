@@ -43,6 +43,49 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.newReader())
 }
 
+def androidCmakeVersion = "3.22.1"
+
+def androidSdkDir = {
+    def localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        def localProperties = new Properties()
+        localPropertiesFile.withInputStream { localProperties.load(it) }
+        def localSdkDir = localProperties.getProperty("sdk.dir")
+        if (localSdkDir != null && !localSdkDir.trim().isEmpty()) {
+            return file(localSdkDir)
+        }
+    }
+
+    def envSdkDir = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+    return envSdkDir != null && !envSdkDir.trim().isEmpty() ? file(envSdkDir) : null
+}
+
+def cmakeExecutable = {
+    def sdkDir = androidSdkDir()
+    if (sdkDir != null) {
+        def executableName = System.getProperty("os.name").toLowerCase(Locale.US).contains("windows") ? "cmake.exe" : "cmake"
+        def sdkCmake = new File(sdkDir, "cmake/${androidCmakeVersion}/bin/${executableName}")
+        if (sdkCmake.exists()) {
+            return sdkCmake.absolutePath
+        }
+    }
+    return "cmake"
+}
+
+def pathWithHostToolDirs = {
+    def existingPath = System.getenv("PATH") ?: ""
+    def pathEntries = []
+    ["/opt/homebrew/bin", "/usr/local/bin"].each { candidate ->
+        if (file(candidate).isDirectory()) {
+            pathEntries.add(candidate)
+        }
+    }
+    if (!existingPath.trim().isEmpty()) {
+        pathEntries.addAll(existingPath.split(java.util.regex.Pattern.quote(File.pathSeparator)))
+    }
+    return pathEntries.findAll { it != null && !it.trim().isEmpty() }.unique().join(File.pathSeparator)
+}
+
 android {
     namespace = "org.ncssar.rid2caltopo"
     compileSdk = 36
@@ -94,7 +137,7 @@ android {
     externalNativeBuild {
         cmake {
             path "src/main/cpp/CMakeLists.txt"
-            version "3.22.1"
+            version androidCmakeVersion
         }
     }
     sourceSets {
@@ -330,13 +373,14 @@ tasks.register("buildAnomalyVideoTest") {
     })
     outputs.file("${rootDir}/tools/anomaly_test/build/anomaly_video_test")
     doLast {
+        def cmake = cmakeExecutable()
         exec {
             workingDir rootDir
-            commandLine "cmake", "-S", anomalyTestDir.absolutePath, "-B", anomalyTestBuildDir.absolutePath
+            commandLine cmake, "-S", anomalyTestDir.absolutePath, "-B", anomalyTestBuildDir.absolutePath
         }
         exec {
             workingDir rootDir
-            commandLine "cmake", "--build", anomalyTestBuildDir.absolutePath, "--target", "anomaly_video_test"
+            commandLine cmake, "--build", anomalyTestBuildDir.absolutePath, "--target", "anomaly_video_test"
         }
     }
 }
@@ -349,6 +393,7 @@ tasks.register("colorRealtimeQualification") {
     doLast {
         exec {
             workingDir rootDir
+            environment "PATH", pathWithHostToolDirs()
             commandLine "python3",
                     "tools/anomaly_test/run_color_realtime_qualification.py",
                     "--binary",

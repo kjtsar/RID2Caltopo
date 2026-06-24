@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,6 +53,16 @@ data class DroneSignalLossFlightUiState(
     val signalIdleMs: Long?,
     val distanceFromTabletFt: Double?
 )
+
+internal class DroneSignalLossSpokenWarningGate(initialFlightKey: String?) {
+    private var observedFlightKey: String? = initialFlightKey
+
+    fun shouldRequestWarning(currentFlightKey: String?): Boolean {
+        if (currentFlightKey == observedFlightKey) return false
+        observedFlightKey = currentFlightKey
+        return currentFlightKey != null
+    }
+}
 
 private data class FlightMonitorState(
     val hasExceededDistanceThreshold: Boolean = false,
@@ -543,12 +554,17 @@ object DroneSignalLossAlertCenter : CtDroneSpec.DroneSpecsChangedListener {
 @Composable
 fun DroneSignalLossAlertHost() {
     val alert by DroneSignalLossAlertCenter.uiState.collectAsState()
+    val spokenWarningGate = remember {
+        DroneSignalLossSpokenWarningGate(alert?.flightKey)
+    }
 
     LaunchedEffect(Unit) {
         DroneSignalLossAlertCenter.ensureRegistered()
     }
 
     LaunchedEffect(alert?.flightKey) {
+        val currentFlightKey = alert?.flightKey
+        if (!spokenWarningGate.shouldRequestWarning(currentFlightKey)) return@LaunchedEffect
         val currentAlert = alert ?: return@LaunchedEffect
         SpokenWarningCenter.requestWarning(
             kind = SpokenWarningKind.DroneTelemetry,

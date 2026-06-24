@@ -5,6 +5,28 @@ import org.junit.Test
 
 class DroneSignalLossAlertCenterTest {
     @Test
+    fun spokenWarningGate_doesNotReplayInitialRetainedAlert() {
+        val gate = DroneSignalLossSpokenWarningGate(initialFlightKey = "flight-a")
+
+        assertEquals(false, gate.shouldRequestWarning("flight-a"))
+    }
+
+    @Test
+    fun spokenWarningGate_requestsWarningForNewAlertAfterHostStarts() {
+        val gate = DroneSignalLossSpokenWarningGate(initialFlightKey = null)
+
+        assertEquals(true, gate.shouldRequestWarning("flight-a"))
+    }
+
+    @Test
+    fun spokenWarningGate_allowsAlertAfterClearingPreviousAlert() {
+        val gate = DroneSignalLossSpokenWarningGate(initialFlightKey = "flight-a")
+
+        assertEquals(false, gate.shouldRequestWarning(null))
+        assertEquals(true, gate.shouldRequestWarning("flight-b"))
+    }
+
+    @Test
     fun effectiveIdleThreshold_keepsBootstrapFloorAfterCadenceIsLearned() {
         val thresholdMs = DroneSignalLossAlertCenter.effectiveIdleThresholdMsForTests(
             learnedIntervalMs = 2_231L,

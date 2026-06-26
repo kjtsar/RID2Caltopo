@@ -121,6 +121,19 @@ private enum class RenderSessionHealth {
     LONG_IDLE,
 }
 
+internal fun shouldRecoverRenderedNoProgress(
+    isLocalFilePlayback: Boolean,
+    renderedFrameCount: Long,
+    idlePollCount: Int,
+    recoveryPollThreshold: Int,
+    hasRecentReaderWait: Boolean,
+): Boolean {
+    if (isLocalFilePlayback) return false
+    return renderedFrameCount > 0L &&
+        idlePollCount >= recoveryPollThreshold &&
+        !hasRecentReaderWait
+}
+
 private data class UpstreamRepublishMarker(
     val observedAtMs: Long,
     val previousPublisherConnId: String?,
@@ -1220,9 +1233,10 @@ class FfmpegProbeService(
         useRenderedProgress: Boolean,
         nowMs: Long,
     ): RenderSessionHealth {
+        val isLocalFilePlayback =
+            sourcePathByDesignator[designator]?.startsWith("file://", ignoreCase = true) == true
         val localPlaybackHeld =
-            sourcePathByDesignator[designator]?.startsWith("file://", ignoreCase = true) == true &&
-                localPlaybackPausedByDesignator[designator] == true
+            isLocalFilePlayback && localPlaybackPausedByDesignator[designator] == true
         if (localPlaybackHeld) return RenderSessionHealth.HEALTHY
         if (sessionState.idlePollCount == 0) return RenderSessionHealth.HEALTHY
         if (useRenderedProgress &&
@@ -1238,8 +1252,18 @@ class FfmpegProbeService(
             // when the controller resumes sending data.
             val hasRecentReaderWait =
                 sessionState.lastReaderWaitAtMs?.let { nowMs - it <= recentReaderWaitPenaltyMs } == true
-            if (hasRecentReaderWait) return RenderSessionHealth.STALLED
-            return RenderSessionHealth.LONG_IDLE
+            return if (shouldRecoverRenderedNoProgress(
+                    isLocalFilePlayback = isLocalFilePlayback,
+                    renderedFrameCount = sessionState.renderedFrameCount,
+                    idlePollCount = sessionState.idlePollCount,
+                    recoveryPollThreshold = renderedNoProgressRecoveryPolls,
+                    hasRecentReaderWait = hasRecentReaderWait,
+                )
+            ) {
+                RenderSessionHealth.LONG_IDLE
+            } else {
+                RenderSessionHealth.STALLED
+            }
         }
         return RenderSessionHealth.STALLED
     }

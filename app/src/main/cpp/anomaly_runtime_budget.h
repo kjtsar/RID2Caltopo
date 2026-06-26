@@ -165,6 +165,7 @@ bool anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
         bool ad_thread_started,
         bool ad_sync_ready,
         bool render_thread_stop,
+        bool local_playback_paused,
         int render_queue_depth,
         int64_t buffered_span_ms,
         int64_t target_latency_ms);
@@ -396,6 +397,11 @@ anomaly_detector_runtime_budget_local_ad_overlay_action_t
 anomaly_detector_runtime_budget_local_ad_overlay_action(
         bool overlay_present,
         bool attached_to_pending_render);
+
+bool anomaly_detector_runtime_budget_should_draw_held_local_overlay(
+        bool local_file_source,
+        bool frame_overlay_present,
+        bool held_overlay_present);
 
 anomaly_detector_runtime_budget_local_ad_route_t
 anomaly_detector_runtime_budget_local_ad_route(

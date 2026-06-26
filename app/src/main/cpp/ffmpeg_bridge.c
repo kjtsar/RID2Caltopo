@@ -285,6 +285,7 @@ typedef struct ffmpeg_session_t {
     int64_t anomaly_process_frame_count;
     int64_t anomaly_annotated_frame_count;
     anomaly_detector_annotation_cadence_snapshot_state_t anomaly_annotation_cadence;
+    anomaly_detector_annotation_cadence_snapshot_state_t anomaly_overlay_publication_cadence;
     int64_t anomaly_annotation_last_source_ts_us;
     int64_t anomaly_process_total_us;
     int64_t anomaly_process_max_us;
@@ -857,6 +858,8 @@ static void ensure_anomaly_rgba_resources(ffmpeg_session_t *session,
     anomaly_state_reset(&session->anomaly_state);
     anomaly_detector_annotation_cadence_snapshot_state_init(
             &session->anomaly_annotation_cadence);
+    anomaly_detector_annotation_cadence_snapshot_state_init(
+            &session->anomaly_overlay_publication_cadence);
 }
 
 static void cleanup_anomaly_resources(ffmpeg_session_t *session) {
@@ -1259,12 +1262,20 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
             anomaly_detector_result_annotations(&result);
     const int stable_overlay_window_frames =
         anomaly_detector_sparse_overlay_window_frames(LOCAL_AD_TARGET_EVAL_INTERVAL_FRAMES);
-    anomaly_detector_annotation_view_t stable_annotations =
+    anomaly_detector_annotation_view_t stable_tracking_annotations =
             !use_stable_overlay_draw
                     ? raw_annotations
                     : anomaly_detector_result_apply_annotation_stability(
                             &result,
                             &session->anomaly_annotation_cadence,
+                            session->anomaly_process_frame_count,
+                            stable_overlay_window_frames);
+    anomaly_detector_annotation_view_t stable_annotations =
+            !use_stable_overlay_draw
+                    ? stable_tracking_annotations
+                    : anomaly_detector_annotation_publish_on_elapsed_cadence(
+                            stable_tracking_annotations,
+                            &session->anomaly_overlay_publication_cadence,
                             session->anomaly_process_frame_count,
                             stable_overlay_window_frames);
     if (source_ts_us > 0) {
@@ -1996,6 +2007,35 @@ static bool apply_overlay_to_decoded_frame(ffmpeg_session_t *session,
     return true;
 }
 
+static int copy_published_overlay_boxes(ffmpeg_session_t *session,
+                                        anomaly_box_t *out_boxes,
+                                        int out_capacity) {
+    if (session == NULL || out_boxes == NULL || out_capacity <= 0) {
+        return 0;
+    }
+    bool locked = session->anomaly_lock_ready;
+    if (locked) {
+        pthread_mutex_lock(&session->anomaly_lock);
+    }
+    anomaly_detector_annotation_view_t view =
+            anomaly_detector_annotation_cadence_snapshot_view(
+                    &session->anomaly_overlay_publication_cadence);
+    int count = view.box_count;
+    if (count < 0 || view.boxes == NULL) {
+        count = 0;
+    }
+    if (count > out_capacity) {
+        count = out_capacity;
+    }
+    for (int i = 0; i < count; i++) {
+        out_boxes[i] = view.boxes[i];
+    }
+    if (locked) {
+        pthread_mutex_unlock(&session->anomaly_lock);
+    }
+    return count;
+}
+
 static void render_frame_to_surface(ffmpeg_session_t *session,
                                     AVFrame *decoded,
                                     AVFrame *history_frame,
@@ -2015,6 +2055,15 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
                      session->designator);
         }
         return;
+    }
+
+    anomaly_box_t held_overlay_boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    int held_overlay_box_count = 0;
+    if (overlay_frame == NULL && is_local_file_source(session)) {
+        held_overlay_box_count = copy_published_overlay_boxes(
+                session,
+                held_overlay_boxes,
+                ANOMALY_MAX_BOXES_PER_FRAME);
     }
 
     bool use_render_lock = session->render_sync_ready;
@@ -2048,6 +2097,18 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
                 session->rgba_frame->linesize);
         trace_end_section();
         display_rgba = session->rgba_frame;
+    }
+    if (anomaly_detector_runtime_budget_should_draw_held_local_overlay(
+                is_local_file_source(session),
+                overlay_frame != NULL,
+                held_overlay_box_count > 0)) {
+        anomaly_debug_draw_boxes_rgba(
+                display_rgba->data[0],
+                display_rgba->linesize[0],
+                decoded->width,
+                decoded->height,
+                held_overlay_boxes,
+                held_overlay_box_count);
     }
     ANativeWindow_setBuffersGeometry(window, decoded->width, decoded->height, WINDOW_FORMAT_RGBA_8888);
 
@@ -2949,6 +3010,8 @@ static void reset_render_timing_state_locked(ffmpeg_session_t *session,
         session->anomaly_annotated_frame_count = 0;
         anomaly_detector_annotation_cadence_snapshot_state_init(
                 &session->anomaly_annotation_cadence);
+        anomaly_detector_annotation_cadence_snapshot_state_init(
+                &session->anomaly_overlay_publication_cadence);
         session->anomaly_annotation_last_source_ts_us = 0;
         session->anomaly_process_total_us = 0;
         session->anomaly_process_max_us = 0;
@@ -3004,6 +3067,8 @@ static void reset_anomaly_tracking_state(ffmpeg_session_t *session) {
     session->anomaly_annotated_frame_count = 0;
     anomaly_detector_annotation_cadence_snapshot_state_init(
             &session->anomaly_annotation_cadence);
+    anomaly_detector_annotation_cadence_snapshot_state_init(
+            &session->anomaly_overlay_publication_cadence);
     session->anomaly_annotation_last_source_ts_us = 0;
     session->anomaly_process_total_us = 0;
     session->anomaly_process_max_us = 0;
@@ -3836,11 +3901,13 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
     bool local_ad_enabled = false;
     bool local_ad_thread_started = false;
     bool local_ad_sync_ready = false;
+    bool local_playback_paused = false;
     if (local_file_source) {
         pthread_mutex_lock(&g_lock);
         local_ad_enabled = anomaly_processing_enabled_locked(session);
         local_ad_thread_started = session->ad_thread_started;
         local_ad_sync_ready = session->ad_sync_ready;
+        local_playback_paused = session->local_playback_paused;
         pthread_mutex_unlock(&g_lock);
     }
     if (anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
@@ -3849,6 +3916,7 @@ static bool dequeue_due_render_frame_locked(ffmpeg_session_t *session,
                 local_ad_thread_started,
                 local_ad_sync_ready,
                 session->render_thread_stop,
+                local_playback_paused,
                 session->render_queue_depth,
                 buffered_span_ms,
                 local_ad_render_backlog_target_ms())) {
@@ -5707,6 +5775,8 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     anomaly_state_init(&slot->anomaly_state);
     anomaly_detector_annotation_cadence_snapshot_state_init(
             &slot->anomaly_annotation_cadence);
+    anomaly_detector_annotation_cadence_snapshot_state_init(
+            &slot->anomaly_overlay_publication_cadence);
     if (pthread_mutex_init(&slot->anomaly_lock, NULL) != 0) {
         ct_error(TAG, "pthread_mutex_init failed for anomaly lock");
         memset(slot, 0, sizeof(*slot));

@@ -175,6 +175,7 @@ bool anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
         bool ad_thread_started,
         bool ad_sync_ready,
         bool render_thread_stop,
+        bool local_playback_paused,
         int render_queue_depth,
         int64_t buffered_span_ms,
         int64_t target_latency_ms) {
@@ -183,6 +184,7 @@ bool anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
         !ad_thread_started ||
         !ad_sync_ready ||
         render_thread_stop ||
+        local_playback_paused ||
         render_queue_depth <= 0 ||
         target_latency_ms <= 0) {
         return false;
@@ -1227,6 +1229,11 @@ anomaly_detector_runtime_budget_local_ad_cadence(
     if (full_scan_stride_frames < target_eval_interval_frames) {
         full_scan_stride_frames = target_eval_interval_frames;
     }
+    if (decoded_frame_ordinal == 1) {
+        cadence.full_scan_due = true;
+        cadence.frame_stride_override = 1;
+        return cadence;
+    }
     if ((decoded_frame_ordinal % target_eval_interval_frames) != 0) {
         cadence.analyze = false;
         cadence.prediction_only = true;
@@ -1253,6 +1260,13 @@ anomaly_detector_runtime_budget_local_ad_overlay_action(
         return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_ATTACHED;
     }
     return ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE;
+}
+
+bool anomaly_detector_runtime_budget_should_draw_held_local_overlay(
+        bool local_file_source,
+        bool frame_overlay_present,
+        bool held_overlay_present) {
+    return local_file_source && !frame_overlay_present && held_overlay_present;
 }
 
 anomaly_detector_runtime_budget_local_ad_route_t

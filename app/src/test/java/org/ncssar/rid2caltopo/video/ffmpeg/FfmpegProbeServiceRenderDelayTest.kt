@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.video.ffmpeg
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class FfmpegProbeServiceRenderDelayTest {
@@ -48,5 +49,18 @@ class FfmpegProbeServiceRenderDelayTest {
         assertEquals(19_800L, lagged.sourceClockOffsetMs)
         assertEquals(0L, lagged.estimatedLagMs)
         assertEquals(200_000L, lagged.lastSourceTimestampUs)
+    }
+
+    @Test
+    fun shouldRecoverRenderedNoProgress_doesNotRestartLocalFilePlayback() {
+        assertFalse(
+            shouldRecoverRenderedNoProgress(
+                isLocalFilePlayback = true,
+                renderedFrameCount = 47L,
+                idlePollCount = 78,
+                recoveryPollThreshold = 8,
+                hasRecentReaderWait = false,
+            )
+        )
     }
 }

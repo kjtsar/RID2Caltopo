@@ -72,6 +72,7 @@ void anomaly_detector_annotation_cadence_snapshot_state_init(
     }
     anomaly_detector_annotation_cadence_state_init(&state->visibility);
     state->box_count = 0;
+    state->last_desired_frame_ordinal = -1;
     state->stability_last_frame_ordinal = -1;
     for (int i = 0; i < ANOMALY_DETECTOR_MAX_STABLE_ANNOTATION_SLOTS; i++) {
         state->stable_slots[i] = (anomaly_detector_annotation_stability_slot_t){0};
@@ -122,23 +123,6 @@ static void anomaly_detector_annotation_snapshot_copy(
     for (int i = 0; i < source.box_count; i++) {
         state->boxes[i] = source.boxes[i];
     }
-}
-
-static bool anomaly_detector_annotation_snapshot_contains_color(
-        const anomaly_detector_annotation_cadence_snapshot_state_t *state) {
-    if (state == NULL) {
-        return false;
-    }
-    int count = state->box_count;
-    if (count > ANOMALY_MAX_BOXES_PER_FRAME) {
-        count = ANOMALY_MAX_BOXES_PER_FRAME;
-    }
-    for (int i = 0; i < count; i++) {
-        if (state->boxes[i].algorithm == ANOMALY_ALGO_COLOR) {
-            return true;
-        }
-    }
-    return false;
 }
 
 static bool anomaly_detector_annotation_view_has_immediate_thermal(
@@ -580,6 +564,39 @@ anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_stab
     return anomaly_detector_annotation_cadence_snapshot_view(snapshot_state);
 }
 
+anomaly_detector_annotation_view_t anomaly_detector_annotation_publish_on_elapsed_cadence(
+        anomaly_detector_annotation_view_t                    desired_annotations,
+        anomaly_detector_annotation_cadence_snapshot_state_t  *snapshot_state,
+        int64_t                                               frame_ordinal,
+        int                                                   cadence_frames) {
+    desired_annotations = anomaly_detector_annotation_normalize_view(desired_annotations);
+    if (snapshot_state == NULL || frame_ordinal < 0) {
+        return desired_annotations;
+    }
+    if (desired_annotations.box_count > 0) {
+        anomaly_detector_annotation_snapshot_copy(snapshot_state, desired_annotations);
+        snapshot_state->last_desired_frame_ordinal = frame_ordinal;
+        snapshot_state->visibility.initialized = true;
+        snapshot_state->visibility.annotations_visible = true;
+        snapshot_state->visibility.last_update_frame_ordinal = frame_ordinal;
+        return anomaly_detector_annotation_cadence_snapshot_view(snapshot_state);
+    }
+
+    if (snapshot_state->visibility.initialized &&
+        snapshot_state->visibility.annotations_visible &&
+        snapshot_state->box_count > 0 &&
+        snapshot_state->last_desired_frame_ordinal >= 0 &&
+        frame_ordinal - snapshot_state->last_desired_frame_ordinal < (int64_t)cadence_frames) {
+        return anomaly_detector_annotation_cadence_snapshot_view(snapshot_state);
+    }
+
+    snapshot_state->box_count = 0;
+    snapshot_state->visibility.initialized = true;
+    snapshot_state->visibility.annotations_visible = false;
+    snapshot_state->visibility.last_update_frame_ordinal = frame_ordinal;
+    return anomaly_detector_annotation_empty_view();
+}
+
 anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_visibility_cadence(
         const anomaly_detector_result_t                       *result,
         anomaly_detector_annotation_cadence_snapshot_state_t   *snapshot_state,
@@ -593,15 +610,6 @@ anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_visi
     }
 
     bool desired_visible = desired_annotations.box_count > 0;
-    if (!desired_visible &&
-        snapshot_state->visibility.annotations_visible &&
-        anomaly_detector_annotation_snapshot_contains_color(snapshot_state)) {
-        snapshot_state->visibility.initialized = true;
-        snapshot_state->visibility.annotations_visible = false;
-        snapshot_state->visibility.last_update_frame_ordinal = frame_ordinal;
-        snapshot_state->box_count = 0;
-        return anomaly_detector_annotation_empty_view();
-    }
     if (desired_visible &&
         snapshot_state->visibility.initialized &&
         !snapshot_state->visibility.annotations_visible &&

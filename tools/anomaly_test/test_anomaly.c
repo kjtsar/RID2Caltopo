@@ -12685,31 +12685,34 @@ static void test_detector_facade_runtime_budget_should_trim_render_queue(void) {
 
 static void test_detector_facade_runtime_budget_should_wait_for_local_ad_buffer(void) {
     EXPECT(anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                   true, true, true, true, false, 1, 0, 500),
+                   true, true, true, true, false, false, 1, 0, 500),
            "runtime budget local AD buffer: ready local sidecar waits below target span");
     EXPECT(anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                   true, true, true, true, false, 8, 499, 500),
+                   true, true, true, true, false, false, 8, 499, 500),
            "runtime budget local AD buffer: waits until target span is reached");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                    true, true, true, true, false, 8, 500, 500),
+                    true, true, true, true, false, false, 8, 500, 500),
            "runtime budget local AD buffer: releases at target span");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                    true, true, true, true, true, 8, 100, 700),
+                    true, true, true, true, false, true, 1, 0, 500),
+           "runtime budget local AD buffer: paused manual step renders without waiting for backlog");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
+                    true, true, true, true, true, false, 8, 100, 700),
            "runtime budget local AD buffer: render stop drains without waiting");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                    true, false, true, true, false, 1, 0, 700),
+                    true, false, true, true, false, false, 1, 0, 700),
            "runtime budget local AD buffer: disabled AD does not delay playback");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                    true, true, false, true, false, 1, 0, 700),
+                    true, true, false, true, false, false, 1, 0, 700),
            "runtime budget local AD buffer: missing AD thread does not delay playback");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                    false, true, true, true, false, 1, 0, 700),
+                    false, true, true, true, false, false, 1, 0, 700),
            "runtime budget local AD buffer: live sources do not use local sidecar delay");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                    true, true, true, true, false, 0, 0, 700),
+                    true, true, true, true, false, false, 0, 0, 700),
            "runtime budget local AD buffer: empty queue has nothing to delay");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_buffer(
-                    true, true, true, true, false, 1, 0, 0),
+                    true, true, true, true, false, false, 1, 0, 0),
            "runtime budget local AD buffer: invalid target does not delay playback");
 }
 
@@ -12750,10 +12753,17 @@ static void test_detector_facade_runtime_budget_local_ad_cadence(void) {
     anomaly_detector_runtime_budget_local_ad_cadence_t cadence =
             anomaly_detector_runtime_budget_local_ad_cadence(
                     true, true, 1, 30, 5);
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
+           cadence.full_scan_due &&
+           cadence.frame_stride_override == 1,
+           "runtime budget local AD cadence: first post-preroll frame forces a full scan opportunity");
+
+    cadence = anomaly_detector_runtime_budget_local_ad_cadence(
+            true, true, 2, 30, 5);
     EXPECT(!cadence.analyze && cadence.prediction_only &&
            !cadence.full_scan_due &&
            cadence.frame_stride_override == 0,
-           "runtime budget local AD cadence: skips non-eval local frames");
+           "runtime budget local AD cadence: skips non-eval local frames after startup scan");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, true, 5, 30, 5);
@@ -13610,6 +13620,17 @@ static void test_detector_facade_runtime_budget_local_ad_overlay_action(void) {
     EXPECT(anomaly_detector_runtime_budget_local_ad_overlay_action(true, false) ==
                    ANOMALY_DETECTOR_RUNTIME_BUDGET_LOCAL_AD_OVERLAY_NONE,
            "runtime budget local AD overlay: late overlay does not re-enter render queue out of order");
+}
+
+static void test_detector_facade_runtime_budget_held_local_overlay_draw(void) {
+    EXPECT(!anomaly_detector_runtime_budget_should_draw_held_local_overlay(false, false, true),
+           "runtime budget held local overlay: live streams do not draw held local overlays");
+    EXPECT(!anomaly_detector_runtime_budget_should_draw_held_local_overlay(true, true, true),
+           "runtime budget held local overlay: frame overlay takes precedence over held overlay");
+    EXPECT(!anomaly_detector_runtime_budget_should_draw_held_local_overlay(true, false, false),
+           "runtime budget held local overlay: empty held overlay is not drawn");
+    EXPECT(anomaly_detector_runtime_budget_should_draw_held_local_overlay(true, false, true),
+           "runtime budget held local overlay: local non-overlay frames draw held ROI");
 }
 
 static void test_detector_facade_runtime_budget_local_ad_route(void) {
@@ -14838,9 +14859,9 @@ static void test_detector_facade_result_apply_annotation_visibility_cadence_trac
            "detector facade visibility cadence: boundary color appearance is published");
     result.box_count = 0;
     view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 46, 15);
-    EXPECT(view.boxes == NULL &&
-           view.box_count == 0,
-           "detector facade visibility cadence: color disappearance clears stale ROI immediately");
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1,
+           "detector facade visibility cadence: color disappearance holds stale ROI inside window");
 }
 
 static void test_detector_facade_result_apply_annotation_visibility_cadence_holds_jitter(void) {
@@ -14887,6 +14908,114 @@ static void test_detector_facade_result_apply_annotation_visibility_cadence_hold
     EXPECT(fabsf(view.boxes[0].left_norm - 0.20f) < 0.0001f &&
            fabsf(view.boxes[0].top_norm - 0.40f) < 0.0001f,
            "detector facade visibility cadence: large target switch is held within window");
+}
+
+static void test_detector_facade_result_apply_annotation_visibility_cadence_holds_color_disappearance(void) {
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    memset(&result, 0, sizeof(result));
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    state.visibility.initialized = true;
+    state.visibility.annotations_visible = true;
+    state.visibility.last_update_frame_ordinal = 15;
+    state.box_count = 1;
+    state.boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.boxes[0].left_norm = 0.20f;
+    state.boxes[0].right_norm = 0.30f;
+    state.boxes[0].top_norm = 0.40f;
+    state.boxes[0].bottom_norm = 0.50f;
+    state.boxes[0].weight = 0.80f;
+
+    result.box_count = 0;
+    anomaly_detector_annotation_view_t view =
+        anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 16, 15);
+    EXPECT(view.boxes == state.boxes &&
+           view.box_count == 1 &&
+           state.visibility.annotations_visible &&
+           state.visibility.last_update_frame_ordinal == 15,
+           "detector facade visibility cadence: color disappearance is held within half-second window");
+
+    view = anomaly_detector_result_apply_annotation_visibility_cadence(&result, &state, 30, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0 &&
+           !state.visibility.annotations_visible &&
+           state.visibility.last_update_frame_ordinal == 30,
+           "detector facade visibility cadence: color disappearance clears at half-second boundary");
+}
+
+static void test_detector_facade_result_apply_annotation_stability_holds_publication_cadence(void) {
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t stability_state;
+    anomaly_detector_annotation_cadence_snapshot_state_t publication_state;
+    memset(&result, 0, sizeof(result));
+    anomaly_detector_annotation_cadence_snapshot_state_init(&stability_state);
+    anomaly_detector_annotation_cadence_snapshot_state_init(&publication_state);
+
+    result.box_count = 1;
+    result.boxes[0].algorithm = ANOMALY_ALGO_COLOR;
+    result.boxes[0].left_norm = 0.20f;
+    result.boxes[0].right_norm = 0.30f;
+    result.boxes[0].top_norm = 0.40f;
+    result.boxes[0].bottom_norm = 0.50f;
+    result.boxes[0].weight = 0.80f;
+
+    anomaly_detector_annotation_view_t view = {0};
+    for (int frame = 1; frame < 8; frame++) {
+        anomaly_detector_annotation_view_t stable_view =
+            anomaly_detector_result_apply_annotation_stability(&result, &stability_state, frame, 15);
+        view = anomaly_detector_annotation_publish_on_elapsed_cadence(
+                stable_view, &publication_state, frame, 15);
+        EXPECT(stable_view.box_count == 0 &&
+               view.box_count == 0,
+               "detector facade annotation stability: sub-threshold color hits are not published");
+    }
+    anomaly_detector_annotation_view_t stable_view =
+        anomaly_detector_result_apply_annotation_stability(&result, &stability_state, 8, 15);
+    view = anomaly_detector_annotation_publish_on_elapsed_cadence(
+            stable_view, &publication_state, 8, 15);
+    EXPECT(view.boxes == publication_state.boxes &&
+           view.box_count == 1 &&
+           publication_state.visibility.annotations_visible &&
+           publication_state.visibility.last_update_frame_ordinal == 8,
+           "detector facade annotation stability: threshold color hit publishes stable ROI");
+
+    result.boxes[0].left_norm = 0.24f;
+    result.boxes[0].right_norm = 0.34f;
+    result.boxes[0].top_norm = 0.36f;
+    result.boxes[0].bottom_norm = 0.46f;
+    result.boxes[0].weight = 1.00f;
+    stable_view = anomaly_detector_result_apply_annotation_stability(&result, &stability_state, 9, 15);
+    EXPECT(stable_view.box_count == 1 &&
+           stable_view.boxes[0].left_norm > 0.20f,
+           "detector facade annotation stability: stable tracker follows motion before display cadence");
+    view = anomaly_detector_annotation_publish_on_elapsed_cadence(
+            stable_view, &publication_state, 9, 15);
+    EXPECT(view.boxes == publication_state.boxes &&
+           view.box_count == 1 &&
+           view.boxes[0].left_norm > 0.20f &&
+           view.boxes[0].top_norm < 0.40f &&
+           publication_state.visibility.last_update_frame_ordinal == 9 &&
+           publication_state.last_desired_frame_ordinal == 9,
+           "detector facade annotation stability: published ROI follows target movement inside half-second window");
+
+    result.box_count = 0;
+    stable_view = (anomaly_detector_annotation_view_t){0};
+    view = anomaly_detector_annotation_publish_on_elapsed_cadence(
+            stable_view, &publication_state, 23, 15);
+    EXPECT(view.boxes == publication_state.boxes &&
+           view.box_count == 1 &&
+           publication_state.visibility.annotations_visible &&
+           publication_state.last_desired_frame_ordinal == 9,
+           "detector facade annotation stability: published ROI remains visible until target is absent for half-second");
+
+    stable_view = (anomaly_detector_annotation_view_t){0};
+    view = anomaly_detector_annotation_publish_on_elapsed_cadence(
+            stable_view, &publication_state, 24, 15);
+    EXPECT(view.boxes == NULL &&
+           view.box_count == 0 &&
+           !publication_state.visibility.annotations_visible &&
+           publication_state.visibility.last_update_frame_ordinal == 24,
+           "detector facade annotation stability: published ROI clears after target is absent for half-second");
 }
 
 static void test_detector_facade_result_apply_annotation_visibility_cadence_holds_reappearance(void) {
@@ -20814,6 +20943,7 @@ int main(void) {
     test_detector_facade_runtime_budget_startup_observation();
     test_detector_facade_runtime_budget_render_lag();
     test_detector_facade_runtime_budget_local_ad_overlay_action();
+    test_detector_facade_runtime_budget_held_local_overlay_draw();
     test_detector_facade_runtime_budget_local_ad_route();
     test_detector_facade_runtime_budget_advance_render_due_ms();
     test_detector_facade_runtime_budget_pts_interval_from_span_ms();
@@ -20856,6 +20986,8 @@ int main(void) {
     test_detector_facade_result_apply_annotation_cadence();
     test_detector_facade_result_apply_annotation_visibility_cadence_tracks_motion();
     test_detector_facade_result_apply_annotation_visibility_cadence_holds_jitter();
+    test_detector_facade_result_apply_annotation_visibility_cadence_holds_color_disappearance();
+    test_detector_facade_result_apply_annotation_stability_holds_publication_cadence();
     test_detector_facade_result_apply_annotation_visibility_cadence_holds_reappearance();
     test_detector_facade_annotation_snapshot_view_contract();
     test_detector_facade_process_output_combines_frame_and_annotations();

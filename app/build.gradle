@@ -362,7 +362,7 @@ tasks.register("jacocoTestReport", JacocoReport) {
 
 tasks.register("buildAnomalyVideoTest") {
     group = "verification"
-    description = "Builds the host anomaly_video_test harness used by Color AD realtime qualification."
+    description = "Builds the host anomaly harnesses used by Color AD realtime qualification."
     def anomalyTestDir = file("${rootDir}/tools/anomaly_test")
     def anomalyTestBuildDir = file("${rootDir}/tools/anomaly_test/build")
     inputs.files(fileTree("${rootDir}/tools/anomaly_test") {
@@ -372,6 +372,7 @@ tasks.register("buildAnomalyVideoTest") {
         include("*.c", "*.h")
     })
     outputs.file("${rootDir}/tools/anomaly_test/build/anomaly_video_test")
+    outputs.file("${rootDir}/tools/anomaly_test/build/target_color_perf_probe")
     doLast {
         def cmake = cmakeExecutable()
         exec {
@@ -381,6 +382,10 @@ tasks.register("buildAnomalyVideoTest") {
         exec {
             workingDir rootDir
             commandLine cmake, "--build", anomalyTestBuildDir.absolutePath, "--target", "anomaly_video_test"
+        }
+        exec {
+            workingDir rootDir
+            commandLine cmake, "--build", anomalyTestBuildDir.absolutePath, "--target", "target_color_perf_probe"
         }
     }
 }
@@ -398,6 +403,8 @@ tasks.register("colorRealtimeQualification") {
                     "tools/anomaly_test/run_color_realtime_qualification.py",
                     "--binary",
                     "tools/anomaly_test/build/anomaly_video_test",
+                    "--target-color-perf-probe",
+                    "tools/anomaly_test/build/target_color_perf_probe",
                     "--output-dir",
                     "${buildDir}/reports/color-realtime-qualification",
                     "--fail-on-regression"

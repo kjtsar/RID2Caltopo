@@ -34,6 +34,7 @@
 #include "anomaly_target_observations.h"
 #include "anomaly_target_revisit.h"
 #include "anomaly_target_tracks.h"
+#include "anomaly_target_color_detector.h"
 #include "anomaly_thermal_detector.h"
 #include "anomaly_thermal_state.h"
 
@@ -86,6 +87,15 @@ static bool rgba_pixel_is(const uint8_t *buf, int stride, int x, int y,
                           uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     const uint8_t *px = buf + y * stride + x * 4;
     return px[0] == r && px[1] == g && px[2] == b && px[3] == a;
+}
+
+static void fill_rect(uint8_t *buf, int stride, int x0, int y0, int x1, int y1,
+                      uint8_t r, uint8_t g, uint8_t b) {
+    for (int y = y0; y < y1; y++) {
+        for (int x = x0; x < x1; x++) {
+            set_pixel(buf, stride, x, y, r, g, b);
+        }
+    }
 }
 
 static anomaly_config_t default_cfg(int algorithm_mask);
@@ -11317,6 +11327,7 @@ static anomaly_config_t default_cfg(int algorithm_mask) {
     c.min_hits          = 1;     // show on first hit unless overridden
     c.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
     c.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
+    c.target_color_family_mask = 0u;
     return c;
 }
 
@@ -18072,6 +18083,18 @@ static void test_config_transition_live_update(void) {
            "config transition: live processing change classifies live update");
 }
 
+static void test_config_transition_target_color_mask_is_live_update(void) {
+    anomaly_config_t before = default_cfg(ANOMALY_ALGO_COLOR);
+    anomaly_config_t after = before;
+
+    EXPECT(before.target_color_family_mask == 0u,
+           "config target color: default mask is zero/off");
+    after.target_color_family_mask = ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_WHITE;
+    EXPECT(anomaly_config_transition_classify(&before, &after) ==
+               ANOMALY_CONFIG_TRANSITION_LIVE_UPDATE,
+           "config target color: changing selected families is a live update");
+}
+
 static void test_config_transition_reset_sensitive(void) {
     anomaly_config_t before = default_cfg(ANOMALY_ALGO_COLOR);
     anomaly_config_t after = before;
@@ -18220,6 +18243,388 @@ static void test_runtime_config_motion_evidence_scale(void) {
     cfg.motion_evidence_scale = NAN;
     EXPECT_NEAR(anomaly_runtime_effective_motion_evidence_scale(&cfg), 1.0f, 0.0001f,
                 "runtime config: nonfinite motion evidence scale defaults to 1");
+}
+
+// ── standalone target-color detector tests ────────────────────────────────
+
+static void test_target_color_detector_family_classification(void) {
+    EXPECT(anomaly_target_color_classify_rgb(230, 30, 25) == ANOMALY_TARGET_COLOR_RED,
+           "target color classify: red shirt-like RGB maps to red family");
+    EXPECT(anomaly_target_color_classify_rgb(32, 72, 220) == ANOMALY_TARGET_COLOR_BLUE,
+           "target color classify: saturated blue maps to blue family");
+    EXPECT(anomaly_target_color_classify_rgb(245, 170, 35) == ANOMALY_TARGET_COLOR_YELLOW_ORANGE,
+           "target color classify: yellow/orange maps to yellow-orange family");
+    EXPECT(anomaly_target_color_classify_rgb(35, 150, 55) == ANOMALY_TARGET_COLOR_GREEN,
+           "target color classify: green maps to green family");
+    EXPECT(anomaly_target_color_classify_rgb(18, 18, 18) == ANOMALY_TARGET_COLOR_BLACK,
+           "target color classify: dark neutral maps to black family");
+    EXPECT(anomaly_target_color_classify_rgb(238, 238, 232) == ANOMALY_TARGET_COLOR_WHITE,
+           "target color classify: bright neutral maps to white family");
+    EXPECT(anomaly_target_color_classify_rgb(205, 144, 102) == ANOMALY_TARGET_COLOR_SKIN,
+           "target color classify: skin-tone RGB maps to skin family");
+    EXPECT(anomaly_target_color_classify_rgb(112, 110, 96) == ANOMALY_TARGET_COLOR_NONE,
+           "target color classify: muted background maps to no target family");
+}
+
+static void test_target_color_detector_score_boosts_distinct_nearby_families(void) {
+    anomaly_target_color_component_score_t one =
+        anomaly_target_color_score_component(
+            ANOMALY_TARGET_COLOR_RED,
+            9,
+            9,
+            0.54f,
+            0.70f,
+            42.0f);
+    anomaly_target_color_component_score_t two =
+        anomaly_target_color_score_component(
+            ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_WHITE,
+            18,
+            18,
+            0.54f,
+            0.70f,
+            42.0f);
+    anomaly_target_color_component_score_t three =
+        anomaly_target_color_score_component(
+            ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+            27,
+            27,
+            0.54f,
+            0.70f,
+            42.0f);
+
+    EXPECT(one.accepted, "target color score: one compact selected family can be noteworthy");
+    EXPECT(two.accepted, "target color score: two compact selected families are accepted");
+    EXPECT(three.accepted, "target color score: three compact selected families are accepted");
+    EXPECT(two.score > one.score + 0.70f,
+           "target color score: two nearby families score much higher than one");
+    EXPECT(three.score > two.score + 0.50f,
+           "target color score: three nearby families score higher than two");
+    EXPECT(anomaly_target_color_count_families(ANOMALY_TARGET_COLOR_RED) == 1,
+           "target color count: one bit counts once");
+    EXPECT(anomaly_target_color_count_families(ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_RED) == 1,
+           "target color count: same-family repeats do not multiply");
+}
+
+static void test_target_color_detector_no_selection_is_quiet(void) {
+    const int W = 64;
+    const int H = 64;
+    uint8_t *rgba = make_gray_frame(W, H, 92);
+    fill_rect(rgba, W * 4, 24, 24, 34, 34, 230, 30, 25);
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t result;
+    anomaly_target_color_scratch_init(&scratch);
+    anomaly_target_color_result_init(&result);
+
+    bool ok = anomaly_target_color_detect_rgba(
+        rgba,
+        W * 4,
+        W,
+        H,
+        0u,
+        &scratch,
+        &result);
+
+    EXPECT(ok, "target color detect: no-selection call succeeds");
+    EXPECT(result.roi_count == 0, "target color detect: no selected colors publishes no ROIs");
+    EXPECT(result.sampled_pixels == 0, "target color detect: no selected colors does no pixel sampling");
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(rgba);
+}
+
+static void test_target_color_detector_detects_selected_red_blob(void) {
+    const int W = 64;
+    const int H = 64;
+    uint8_t *rgba = make_gray_frame(W, H, 96);
+    fill_rect(rgba, W * 4, 24, 24, 34, 34, 230, 30, 25);
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t result;
+    anomaly_target_color_scratch_init(&scratch);
+    anomaly_target_color_result_init(&result);
+
+    bool ok = anomaly_target_color_detect_rgba(
+        rgba,
+        W * 4,
+        W,
+        H,
+        ANOMALY_TARGET_COLOR_RED,
+        &scratch,
+        &result);
+
+    EXPECT(ok, "target color detect: selected-red call succeeds");
+    EXPECT(result.roi_count == 1, "target color detect: compact selected red blob publishes one ROI");
+    if (result.roi_count == 1) {
+        EXPECT(result.rois[0].family_mask == ANOMALY_TARGET_COLOR_RED,
+               "target color detect: red ROI reports red family");
+        EXPECT(fabsf(result.rois[0].center_x_norm - 0.453f) < 0.08f &&
+               fabsf(result.rois[0].center_y_norm - 0.453f) < 0.08f,
+               "target color detect: red ROI is centered near the red blob");
+    }
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(rgba);
+}
+
+static void test_target_color_detector_absent_selected_color_is_quiet(void) {
+    const int W = 64;
+    const int H = 64;
+    uint8_t *rgba = make_gray_frame(W, H, 88);
+    fill_rect(rgba, W * 4, 24, 24, 34, 34, 230, 30, 25);
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t result;
+    anomaly_target_color_scratch_init(&scratch);
+    anomaly_target_color_result_init(&result);
+
+    bool ok = anomaly_target_color_detect_rgba(
+        rgba,
+        W * 4,
+        W,
+        H,
+        ANOMALY_TARGET_COLOR_BLUE,
+        &scratch,
+        &result);
+
+    EXPECT(ok, "target color detect: absent selected-color call succeeds");
+    EXPECT(result.roi_count == 0, "target color detect: absent selected color publishes no ROIs");
+    EXPECT(result.candidate_component_count == 0,
+           "target color detect: absent selected color does not build components");
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(rgba);
+}
+
+static void test_target_color_detector_detects_blue_and_yellow_blobs_on_muted_backgrounds(void) {
+    const int W = 72;
+    const int H = 72;
+    uint8_t *blue = make_gray_frame(W, H, 116);
+    uint8_t *yellow = make_gray_frame(W, H, 102);
+    fill_rect(blue, W * 4, 28, 28, 40, 40, 32, 72, 220);
+    fill_rect(yellow, W * 4, 28, 28, 40, 40, 245, 170, 35);
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t blue_result;
+    anomaly_target_color_result_t yellow_result;
+    anomaly_target_color_scratch_init(&scratch);
+
+    EXPECT(anomaly_target_color_detect_rgba(
+               blue, W * 4, W, H, ANOMALY_TARGET_COLOR_BLUE, &scratch, &blue_result),
+           "target color detect: selected-blue fixture succeeds");
+    EXPECT(blue_result.roi_count == 1 &&
+           blue_result.rois[0].family_mask == ANOMALY_TARGET_COLOR_BLUE,
+           "target color detect: selected-blue fixture publishes one blue ROI");
+
+    EXPECT(anomaly_target_color_detect_rgba(
+               yellow, W * 4, W, H, ANOMALY_TARGET_COLOR_YELLOW_ORANGE, &scratch, &yellow_result),
+           "target color detect: selected-yellow fixture succeeds");
+    EXPECT(yellow_result.roi_count == 1 &&
+           yellow_result.rois[0].family_mask == ANOMALY_TARGET_COLOR_YELLOW_ORANGE,
+           "target color detect: selected-yellow fixture publishes one yellow/orange ROI");
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(blue);
+    free(yellow);
+}
+
+static void test_target_color_detector_broad_common_regions_do_not_explode_rois(void) {
+    const int W = 96;
+    const int H = 96;
+    uint8_t *rgba = make_gray_frame(W, H, 88);
+    fill_rect(rgba, W * 4, 0, 0, W, 32, 236, 236, 232);
+    fill_rect(rgba, W * 4, 0, 32, W, 64, 18, 18, 18);
+    fill_rect(rgba, W * 4, 0, 64, W, H, 205, 144, 102);
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t result;
+    anomaly_target_color_scratch_init(&scratch);
+
+    EXPECT(anomaly_target_color_detect_rgba(
+               rgba,
+               W * 4,
+               W,
+               H,
+               ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+               &scratch,
+               &result),
+           "target color detect: broad common-color fixture succeeds");
+    EXPECT(result.roi_count <= ANOMALY_TARGET_COLOR_MAX_ROIS,
+           "target color detect: broad common-color fixture is bounded");
+    EXPECT(result.roi_count == 0,
+           "target color detect: broad common-color fixture publishes no compact target ROIs");
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(rgba);
+}
+
+static void test_target_color_detector_broad_green_forest_is_bounded_without_subject(void) {
+    const int W = 128;
+    const int H = 128;
+    uint8_t *rgba = make_gray_frame(W, H, 86);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            if (((x / 8) + (y / 10)) % 2 == 0) {
+                set_pixel(rgba, W * 4, x, y, 44, 112, 42);
+            } else {
+                set_pixel(rgba, W * 4, x, y, 68, 150, 56);
+            }
+        }
+    }
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t result;
+    anomaly_target_color_scratch_init(&scratch);
+
+    EXPECT(anomaly_target_color_detect_rgba(
+               rgba,
+               W * 4,
+               W,
+               H,
+               ANOMALY_TARGET_COLOR_GREEN,
+               &scratch,
+               &result),
+           "target color detect: broad green forest fixture succeeds");
+    EXPECT(result.selected_pixel_count > result.sampled_pixels / 2,
+           "target color detect: broad green forest records substantial selected-color load");
+    EXPECT(result.candidate_component_count <= 2,
+           "target color detect: broad mottled green forest keeps component work low");
+    EXPECT(result.roi_count == 0,
+           "target color detect: broad mottled green forest without a distinct subject publishes no ROIs");
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(rgba);
+}
+
+static void test_target_color_detector_lime_subject_in_green_forest_stays_bounded(void) {
+    const int W = 128;
+    const int H = 128;
+    uint8_t *rgba = make_gray_frame(W, H, 86);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            if (((x / 8) + (y / 10)) % 2 == 0) {
+                set_pixel(rgba, W * 4, x, y, 44, 112, 42);
+            } else {
+                set_pixel(rgba, W * 4, x, y, 68, 150, 56);
+            }
+        }
+    }
+    fill_rect(rgba, W * 4, 54, 56, 74, 76, 118, 232, 36);
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t result;
+    anomaly_target_color_scratch_init(&scratch);
+
+    EXPECT(anomaly_target_color_detect_rgba(
+               rgba,
+               W * 4,
+               W,
+               H,
+               ANOMALY_TARGET_COLOR_GREEN,
+               &scratch,
+               &result),
+           "target color detect: lime subject in green forest fixture succeeds");
+    EXPECT(result.selected_pixel_count > result.sampled_pixels / 2,
+           "target color detect: lime subject fixture records substantial selected-color load");
+    EXPECT(result.candidate_component_count <= 3,
+           "target color detect: lime subject in mottled forest keeps component work bounded");
+    EXPECT(result.roi_count == 1,
+           "target color detect: lime subject fixture publishes one compact green ROI");
+    if (result.roi_count == 1) {
+        EXPECT(result.rois[0].family_mask == ANOMALY_TARGET_COLOR_GREEN,
+               "target color detect: lime subject ROI reports green family");
+        EXPECT(fabsf(result.rois[0].center_x_norm - 0.50f) < 0.08f &&
+               fabsf(result.rois[0].center_y_norm - 0.52f) < 0.08f,
+               "target color detect: lime subject ROI is centered near the compact subject");
+    }
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(rgba);
+}
+
+static void test_target_color_detector_clustered_multiple_families_score_higher(void) {
+    const int W = 80;
+    const int H = 80;
+    uint8_t *one_rgba = make_gray_frame(W, H, 90);
+    uint8_t *three_rgba = make_gray_frame(W, H, 90);
+    fill_rect(one_rgba, W * 4, 32, 32, 40, 40, 20, 20, 18);
+    fill_rect(three_rgba, W * 4, 30, 32, 38, 40, 20, 20, 18);
+    fill_rect(three_rgba, W * 4, 38, 32, 46, 40, 238, 238, 232);
+    fill_rect(three_rgba, W * 4, 34, 40, 42, 48, 205, 144, 102);
+
+    anomaly_target_color_scratch_t scratch;
+    anomaly_target_color_result_t one;
+    anomaly_target_color_result_t three;
+    anomaly_target_color_scratch_init(&scratch);
+    anomaly_target_color_result_init(&one);
+    anomaly_target_color_result_init(&three);
+
+    bool ok_one = anomaly_target_color_detect_rgba(
+        one_rgba,
+        W * 4,
+        W,
+        H,
+        ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+        &scratch,
+        &one);
+    bool ok_three = anomaly_target_color_detect_rgba(
+        three_rgba,
+        W * 4,
+        W,
+        H,
+        ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+        &scratch,
+        &three);
+
+    EXPECT(ok_one && ok_three, "target color detect: clustered family calls succeed");
+    EXPECT(one.roi_count == 1 && three.roi_count == 1,
+           "target color detect: both single and multi-family blobs publish bounded ROIs");
+    if (one.roi_count == 1 && three.roi_count == 1) {
+        EXPECT(three.rois[0].distinct_family_count == 3,
+               "target color detect: clustered ROI reports three selected families");
+        EXPECT(three.rois[0].score > one.rois[0].score + 1.0f,
+               "target color detect: clustered multi-family ROI scores much higher than one family");
+    }
+
+    anomaly_target_color_scratch_cleanup(&scratch);
+    free(one_rgba);
+    free(three_rgba);
+}
+
+static void test_process_frame_target_color_mask_publishes_standalone_roi(void) {
+    const int W = 80;
+    const int H = 80;
+    uint8_t *rgba = make_gray_frame(W, H, 94);
+    fill_rect(rgba, W * 4, 34, 34, 46, 46, 230, 30, 25);
+
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.score_threshold = 15.0f;
+    cfg.target_color_family_mask = 0u;
+    anomaly_result_t no_target;
+    int no_target_boxes = anomaly_process_frame(&st, &cfg, rgba, W * 4, W, H, 0, &no_target);
+    EXPECT(no_target_boxes == 0,
+           "target color integration: no selected target colors keeps high-threshold Color AD quiet");
+
+    anomaly_state_reset(&st);
+    cfg.target_color_family_mask = ANOMALY_TARGET_COLOR_RED;
+    anomaly_result_t target;
+    int target_boxes = anomaly_process_frame(&st, &cfg, rgba, W * 4, W, H, 33333, &target);
+    EXPECT(target_boxes > 0,
+           "target color integration: selected red target color publishes a standalone ROI");
+    if (target_boxes > 0) {
+        EXPECT(target.boxes[0].algorithm == ANOMALY_ALGO_COLOR,
+               "target color integration: standalone target-color ROI is published as color");
+        float cx = (target.boxes[0].left_norm + target.boxes[0].right_norm) * 0.5f;
+        float cy = (target.boxes[0].top_norm + target.boxes[0].bottom_norm) * 0.5f;
+        EXPECT(fabsf(cx - 0.50f) < 0.12f && fabsf(cy - 0.50f) < 0.12f,
+               "target color integration: standalone target-color ROI is centered near the selected blob");
+    }
+
+    anomaly_state_cleanup(&st);
+    free(rgba);
 }
 
 static anomaly_thermal_shadow_shape_t valid_thermal_shadow_shape(void) {
@@ -20889,6 +21294,17 @@ int main(void) {
     test_color_detector_candidate_bbox_norm_helper();
     test_color_detector_contrast_helpers();
     test_color_detector_target_telemetry();
+    test_target_color_detector_family_classification();
+    test_target_color_detector_score_boosts_distinct_nearby_families();
+    test_target_color_detector_no_selection_is_quiet();
+    test_target_color_detector_detects_selected_red_blob();
+    test_target_color_detector_absent_selected_color_is_quiet();
+    test_target_color_detector_detects_blue_and_yellow_blobs_on_muted_backgrounds();
+    test_target_color_detector_broad_common_regions_do_not_explode_rois();
+    test_target_color_detector_broad_green_forest_is_bounded_without_subject();
+    test_target_color_detector_lime_subject_in_green_forest_stays_bounded();
+    test_target_color_detector_clustered_multiple_families_score_higher();
+    test_process_frame_target_color_mask_publishes_standalone_roi();
 
     test_color_candidate_target_observation_conversion();
     test_thermal_candidate_target_observation_conversion();
@@ -21085,6 +21501,7 @@ int main(void) {
     test_config_transition_display_only();
     test_config_transition_debug_only();
     test_config_transition_live_update();
+    test_config_transition_target_color_mask_is_live_update();
     test_config_transition_reset_sensitive();
     test_config_transition_reset_wins();
     test_config_transition_null_requires_reset();

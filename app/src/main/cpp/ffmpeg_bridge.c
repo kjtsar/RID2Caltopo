@@ -5764,6 +5764,7 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->anomaly_cfg.thermal_min_delta = ANOMALY_THERMAL_MIN_DELTA;
     slot->anomaly_cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_LEGACY;
     slot->anomaly_cfg.color_target_candidate_limit = 1;
+    slot->anomaly_cfg.target_color_family_mask = 0u;
     slot->anomaly_thermal_paused = false;
     slot->anomaly_runtime_disabled = false;
     slot->anomaly_troubleshooting_debug = false;
@@ -6144,7 +6145,8 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         jfloat thermal_min_delta,
         jfloat small_target_screen_fraction,
         jint color_frontend_mode,
-        jint color_target_candidate_limit
+        jint color_target_candidate_limit,
+        jint target_color_family_mask
 ) {
     (void) env;
     (void) thiz;
@@ -6207,13 +6209,15 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
         int color_candidate_limit = (int) color_target_candidate_limit;
         session->anomaly_cfg.color_target_candidate_limit =
                 color_candidate_limit < 1 ? 1 : (color_candidate_limit > 4 ? 4 : color_candidate_limit);
+        session->anomaly_cfg.target_color_family_mask =
+                ((uint32_t) target_color_family_mask) & ANOMALY_TARGET_COLOR_ALL;
         bool log_local_config =
                 is_local_file_source(session) &&
                 session->anomaly_cfg.enabled &&
                 session->anomaly_cfg.algorithm_mask != 0;
         if (session->anomaly_troubleshooting_debug || log_local_config) {
             ct_debug(TAG,
-                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d movement=%d strideMode=%d stride=%d adaptiveMin=%d adaptiveMaxFrames=%d adaptiveMaxSec=%.1f pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d colorCandidates=%d thermalPause=%d runtimeDisabled=%d",
+                     "anomaly config applied id=%lld designator=%s local=%d enabled=%d mask=%d reg=%d movement=%d strideMode=%d stride=%d adaptiveMin=%d adaptiveMaxFrames=%d adaptiveMaxSec=%.1f pixelStep=%d threshold=%.2f minHits=%d scanZone=%.2f colorFrontend=%d colorCandidates=%d targetColors=%u thermalPause=%d runtimeDisabled=%d",
                      (long long) session->session_id,
                      session->designator,
                      is_local_file_source(session) ? 1 : 0,
@@ -6232,6 +6236,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeUpdateAnomalyConfig(
                      session->anomaly_cfg.scan_zone,
                      session->anomaly_cfg.color_frontend_mode,
                      session->anomaly_cfg.color_target_candidate_limit,
+                     session->anomaly_cfg.target_color_family_mask,
                      session->anomaly_thermal_paused ? 1 : 0,
                      session->anomaly_runtime_disabled ? 1 : 0);
         }

@@ -109,6 +109,7 @@ object FfmpegBridge {
             smallTargetScreenFraction = config.smallTargetScreenFraction,
             colorFrontendMode = config.colorFrontendMode,
             colorTargetCandidateLimit = config.colorTargetCandidateLimit,
+            targetColorFamilyMask = config.targetColorFamilyMask,
         )
     }
 
@@ -245,6 +246,7 @@ object FfmpegBridge {
         smallTargetScreenFraction: Float,
         colorFrontendMode: Int,
         colorTargetCandidateLimit: Int,
+        targetColorFamilyMask: Int,
     )
     private external fun nativeSetAnomalyThermalPaused(sessionId: Long, paused: Boolean)
     private external fun nativeGetSessionPerfStats(sessionId: Long): LongArray?

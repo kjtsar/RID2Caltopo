@@ -22,6 +22,7 @@
 #include "anomaly_scan_planner.h"
 #include "anomaly_scratch.h"
 #include "anomaly_target_matching.h"
+#include "anomaly_target_color_detector.h"
 #include "anomaly_target_observations.h"
 #include "anomaly_target_revisit.h"
 #include "anomaly_target_tracks.h"
@@ -7423,6 +7424,7 @@ void anomaly_state_init(anomaly_state_t *state) {
     memset(state, 0, sizeof(*state));
     if (state != NULL) {
         anomaly_thermal_state_init(&state->thermal);
+        anomaly_target_color_scratch_init(&state->target_color_scratch);
         state->next_target_track_id = 1;
     }
 }
@@ -7549,6 +7551,7 @@ void anomaly_state_reset(anomaly_state_t *state) {
     free(state->scratch_i32);
     state->scratch_i32 = NULL;
     state->scratch_i32_capacity = 0;
+    anomaly_target_color_scratch_cleanup(&state->target_color_scratch);
 }
 
 void anomaly_state_cleanup(anomaly_state_t *state) {
@@ -11345,7 +11348,8 @@ motion_appearance_scoring_done:
     anomaly_target_observation_t target_observations[
         4 + ANOMALY_SALIENCY_EXTRA_TRACKS +
         ANOMALY_TARGET_CANDIDATE_KEEP_MAX +
-        ANOMALY_COLOR_PROVISIONAL_KEEP_MAX];
+        ANOMALY_COLOR_PROVISIONAL_KEEP_MAX +
+        ANOMALY_TARGET_COLOR_MAX_ROIS];
     int target_observation_count = 0;
     float target_half_side = clampf(sqrtf(fmaxf(cfg->min_area_fraction, 0.0001f)) * 0.5f, 0.01f, 0.10f);
     for (int ai = 0; ai < 4 && target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0])); ai++) {
@@ -11484,6 +11488,52 @@ motion_appearance_scoring_done:
             }
             target_observations[target_observation_count++] = candidate_obs;
             scan_plan.provisional_candidate_selected_count++;
+        }
+    }
+    if (scan_plan.mode == ANOMALY_RESCAN_MODE_FULL &&
+        anomaly_detection_active &&
+        (cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
+        cfg->target_color_family_mask != 0u &&
+        target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0]))) {
+        anomaly_target_color_result_t target_color_result;
+        if (anomaly_target_color_detect_rgba(
+                rgba,
+                rgba_stride,
+                width,
+                height,
+                cfg->target_color_family_mask,
+                &state->target_color_scratch,
+                &target_color_result)) {
+            for (int ri = 0;
+                 ri < target_color_result.roi_count &&
+                 target_observation_count < (int)(sizeof(target_observations) / sizeof(target_observations[0]));
+                 ri++) {
+                const anomaly_target_color_roi_t *roi = &target_color_result.rois[ri];
+                if (anomaly_color_candidate_near_reviewed_fp_cluster(
+                        roi->center_x_norm,
+                        roi->center_y_norm)) {
+                    continue;
+                }
+                anomaly_target_observation_t obs;
+                memset(&obs, 0, sizeof(obs));
+                obs.valid = true;
+                obs.publish_confirming = true;
+                obs.algorithm = ANOMALY_ALGO_COLOR;
+                obs.center_x_norm = roi->center_x_norm;
+                obs.center_y_norm = roi->center_y_norm;
+                obs.half_w_norm = clampf(fmaxf(roi->half_w_norm, target_half_side), 0.010f, 0.120f);
+                obs.half_h_norm = clampf(fmaxf(roi->half_h_norm, target_half_side), 0.010f, 0.120f);
+                obs.support_radius_norm =
+                    clampf(fmaxf(obs.half_w_norm, obs.half_h_norm) * 1.8f, 0.020f, 0.220f);
+                obs.confidence = clampf(0.34f + 0.42f * roi->confidence, 0.35f, 0.88f);
+                if (anomaly_target_observation_near_existing(
+                        target_observations,
+                        target_observation_count,
+                        &obs)) {
+                    continue;
+                }
+                target_observations[target_observation_count++] = obs;
+            }
         }
     }
     if (scan_plan.mode == ANOMALY_RESCAN_MODE_FULL &&

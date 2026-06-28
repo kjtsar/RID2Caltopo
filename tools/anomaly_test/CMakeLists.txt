@@ -30,6 +30,7 @@ add_executable(anomaly_test
     ../../app/src/main/cpp/anomaly_result_builder.c
     ../../app/src/main/cpp/anomaly_scan_planner.c
     ../../app/src/main/cpp/anomaly_target_observations.c
+    ../../app/src/main/cpp/anomaly_target_color_detector.c
     ../../app/src/main/cpp/anomaly_target_revisit.c
     ../../app/src/main/cpp/anomaly_target_tracks.c
     ../../app/src/main/cpp/anomaly_thermal_detector.c
@@ -68,6 +69,7 @@ add_executable(anomaly_video_test
     ../../app/src/main/cpp/anomaly_result_builder.c
     ../../app/src/main/cpp/anomaly_scan_planner.c
     ../../app/src/main/cpp/anomaly_target_observations.c
+    ../../app/src/main/cpp/anomaly_target_color_detector.c
     ../../app/src/main/cpp/anomaly_target_revisit.c
     ../../app/src/main/cpp/anomaly_target_tracks.c
     ../../app/src/main/cpp/anomaly_thermal_detector.c
@@ -79,8 +81,18 @@ target_include_directories(anomaly_video_test PRIVATE
 target_compile_definitions(anomaly_video_test PRIVATE ANOMALY_DEBUG_TIMING=$<BOOL:${ANOMALY_DEBUG_TIMING}>)
 target_link_libraries(anomaly_video_test m)
 
+add_executable(target_color_perf_probe
+    target_color_perf_probe.c
+    ../../app/src/main/cpp/anomaly_target_color_detector.c
+)
+target_include_directories(target_color_perf_probe PRIVATE
+    ../../app/src/main/cpp
+)
+target_link_libraries(target_color_perf_probe m)
+
 enable_testing()
 add_test(NAME anomaly_test COMMAND anomaly_test)
+add_test(NAME target_color_perf_probe COMMAND target_color_perf_probe)
 add_test(
     NAME anomaly_video_app_defaults_local_playback_config
     COMMAND anomaly_video_test

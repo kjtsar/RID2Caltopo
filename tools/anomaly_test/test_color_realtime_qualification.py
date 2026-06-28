@@ -14,6 +14,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_color_realtime_qualification as qual
 
 
+TARGET_COLOR_PROBE_OUTPUT = """\
+no selected colors             avg_ms=0.000 min_ms=0.000 max_ms=0.001 sampled=0 selected=0 components=0 rois=0
+gray, searching green          avg_ms=0.244 min_ms=0.221 max_ms=0.446 sampled=57600 selected=0 components=0 rois=0
+uniform green frame            avg_ms=0.820 min_ms=0.787 max_ms=1.168 sampled=57600 selected=57600 components=0 rois=0
+green plus lime subject        avg_ms=0.815 min_ms=0.788 max_ms=1.207 sampled=57600 selected=57600 components=1 rois=1
+mottled green frame            avg_ms=0.828 min_ms=0.789 max_ms=1.670 sampled=57600 selected=57600 components=0 rois=0
+mottled green plus lime        avg_ms=0.833 min_ms=0.802 max_ms=1.128 sampled=57600 selected=57600 components=1 rois=1
+"""
+
+
 def write_detection_csv(path: Path, rows: list[dict[str, object]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         handle.write("# comment\n")
@@ -36,6 +46,49 @@ def write_detection_csv(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 class ColorRealtimeQualificationTest(unittest.TestCase):
+    def test_parse_target_color_perf_probe_output(self) -> None:
+        report = qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT)
+
+        self.assertEqual("target-color-perf-probe", report["suite"])
+        self.assertAlmostEqual(0.244, report["baseline_avg_ms"])
+        cases = {case["name"]: case for case in report["cases"]}
+        self.assertEqual(57600, cases["mottled green plus lime"]["selected_pixel_count"])
+        self.assertEqual(1, cases["mottled green plus lime"]["roi_count"])
+        self.assertAlmostEqual(
+            0.833 / 0.244,
+            cases["mottled green plus lime"]["avg_to_baseline_ratio"],
+        )
+
+    def test_evaluate_gate_includes_target_color_perf_regression(self) -> None:
+        report = {
+            "cases": [],
+            "target_color_perf": qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT),
+        }
+
+        result = qual.evaluate_gate(report)
+
+        self.assertTrue(result.passed)
+        self.assertEqual([], result.failures)
+
+    def test_evaluate_gate_reports_target_color_perf_regression(self) -> None:
+        target_report = qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT)
+        for case in target_report["cases"]:
+            if case["name"] == "uniform green frame":
+                case["avg_ms"] = 3.0
+                case["avg_to_baseline_ratio"] = 3.0 / target_report["baseline_avg_ms"]
+        report = {
+            "cases": [],
+            "target_color_perf": target_report,
+        }
+
+        result = qual.evaluate_gate(report)
+
+        self.assertFalse(result.passed)
+        self.assertIn(
+            "target-color-perf: uniform green frame avg 3.000 ms is 12.30x baseline, above 8.00x",
+            result.failures,
+        )
+
     def test_detection_signature_ignores_review_label_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = Path(tmp) / "detections.csv"

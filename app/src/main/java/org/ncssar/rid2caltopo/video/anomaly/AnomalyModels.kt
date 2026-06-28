@@ -130,12 +130,30 @@ data class NativeAnomalyConfig(
     val smallTargetScreenFraction: Float,
     val colorFrontendMode: Int,
     val colorTargetCandidateLimit: Int,
+    val targetColorFamilyMask: Int,
 )
 
 enum class ColorFrontendMode(val nativeValue: Int) {
     Legacy(0),
     FreshRgba(1),
     FreshYuv(2),
+}
+
+enum class TargetColorFamily(
+    val nativeMask: Int,
+    val label: String,
+) {
+    Red(nativeMask = 0x01, label = "Red"),
+    Blue(nativeMask = 0x02, label = "Blue"),
+    YellowOrange(nativeMask = 0x04, label = "Yellow/Orange"),
+    Green(nativeMask = 0x08, label = "Green"),
+    Black(nativeMask = 0x10, label = "Black"),
+    White(nativeMask = 0x20, label = "White"),
+    Skin(nativeMask = 0x40, label = "Skin");
+
+    companion object {
+        val allowedMask: Int = entries.fold(0) { mask, family -> mask or family.nativeMask }
+    }
 }
 
 data class AnomalyConfig(
@@ -164,6 +182,7 @@ data class AnomalyConfig(
     val smallTargetScreenFraction: Float = 1.0f / 200.0f,
     val colorFrontendMode: ColorFrontendMode = ColorFrontendMode.Legacy,
     val colorTargetCandidateLimit: Int = 1,
+    val targetColorFamilyMask: Int = 0,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {
@@ -368,6 +387,7 @@ data class AnomalyConfig(
             smallTargetScreenFraction = smallTargetScreenFraction.coerceIn(0.0015f, 0.03f),
             colorFrontendMode = nativeColorFrontendMode,
             colorTargetCandidateLimit = colorTargetCandidateLimit.coerceIn(1, 4),
+            targetColorFamilyMask = targetColorFamilyMask and TargetColorFamily.allowedMask,
         )
     }
 

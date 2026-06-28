@@ -161,6 +161,25 @@ class AnomalyConfigTest {
     }
 
     @Test
+    fun toNativeConfig_targetColorFamiliesDefaultOff() {
+        val native = AnomalyConfig().toNativeConfig()
+
+        assertEquals(0, native.targetColorFamilyMask)
+    }
+
+    @Test
+    fun toNativeConfig_targetColorFamiliesAreConfigurableAndClamped() {
+        val selected =
+            TargetColorFamily.Red.nativeMask or
+            TargetColorFamily.Blue.nativeMask or
+            TargetColorFamily.Skin.nativeMask
+        val withUnknownBits = selected or 0x8000
+        val native = AnomalyConfig(targetColorFamilyMask = withUnknownBits).toNativeConfig()
+
+        assertEquals(selected, native.targetColorFamilyMask)
+    }
+
+    @Test
     fun toNativeConfig_colorPixelStepOverrideRemainsManual() {
         val native = AnomalyConfig(
             appearanceSelection = AppearanceAnomalySelection.Color,

@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "anomaly_target_color_detector.h"
 #include "anomaly_thermal_state.h"
 
 // ── Algorithm selector bits ────────────────────────────────────────────────
@@ -215,6 +216,7 @@ typedef struct {
     float small_target_screen_fraction;
     int   color_frontend_mode;
     int   color_target_candidate_limit;
+    uint32_t target_color_family_mask;
     bool  thermal_debug_target_enabled;
     float thermal_debug_target_x_norm;
     float thermal_debug_target_y_norm;
@@ -423,6 +425,7 @@ typedef struct {
     size_t   scratch_prev_sample_lookup_capacity;
     int     *scratch_i32;
     size_t   scratch_i32_capacity;
+    anomaly_target_color_scratch_t target_color_scratch;
     uint64_t color_phase_counter;
     int64_t  last_full_refresh_source_ts_us;
     int64_t  last_full_refresh_frame_counter;

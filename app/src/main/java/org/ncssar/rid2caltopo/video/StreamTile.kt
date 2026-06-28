@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -85,6 +86,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AnomalyStrideMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
+import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.ui.StreamPlayerView
 import kotlin.math.roundToInt
 
@@ -1166,6 +1168,9 @@ internal fun AnomalySettingsDialogs(
         var colorTargetCandidateLimitValue by remember(streamDesignator, anomalyConfig.colorTargetCandidateLimit) {
             mutableStateOf(anomalyConfig.colorTargetCandidateLimit.coerceIn(1, 4))
         }
+        var targetColorFamilyMaskValue by remember(streamDesignator, anomalyConfig.targetColorFamilyMask) {
+            mutableStateOf(anomalyConfig.targetColorFamilyMask and TargetColorFamily.allowedMask)
+        }
         var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
             mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 33))
         }
@@ -1190,6 +1195,7 @@ internal fun AnomalySettingsDialogs(
             motionEvidenceSensitivityValue = config.motionEvidenceSensitivity.coerceIn(0f, 1f)
             minHitsValue = config.minHits.coerceIn(1, 5)
             colorTargetCandidateLimitValue = config.colorTargetCandidateLimit.coerceIn(1, 4)
+            targetColorFamilyMaskValue = config.targetColorFamilyMask and TargetColorFamily.allowedMask
             frameStrideValue = config.frameStride.coerceIn(1, 33)
             adaptiveMinStrideValue = config.adaptiveMinStrideFrames.coerceAtLeast(2)
             adaptiveMaxStrideSecondsValue = config.adaptiveMaxStrideSeconds.coerceIn(0.1f, 10.0f)
@@ -1418,6 +1424,42 @@ internal fun AnomalySettingsDialogs(
                         valueRange = 1f..4f,
                         steps = 2
                     )
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("Target Colors")
+                        TargetColorFamily.entries.chunked(2).forEach { rowFamilies ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                rowFamilies.forEach { family ->
+                                    val selected = (targetColorFamilyMaskValue and family.nativeMask) != 0
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Checkbox(
+                                            checked = selected,
+                                            onCheckedChange = { checked ->
+                                                targetColorFamilyMaskValue = if (checked) {
+                                                    targetColorFamilyMaskValue or family.nativeMask
+                                                } else {
+                                                    targetColorFamilyMaskValue and family.nativeMask.inv()
+                                                } and TargetColorFamily.allowedMask
+                                            }
+                                        )
+                                        Text(family.label)
+                                    }
+                                }
+                                if (rowFamilies.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
                     Text("Frame Stride ${frameStrideValue}x")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1538,6 +1580,7 @@ internal fun AnomalySettingsDialogs(
                         viewModel.setScanZone(streamDesignator, scanZoneValue)
                         viewModel.setMinHits(streamDesignator, minHitsValue)
                         viewModel.setColorTargetCandidateLimit(streamDesignator, colorTargetCandidateLimitValue)
+                        viewModel.setTargetColorFamilyMask(streamDesignator, targetColorFamilyMaskValue)
                         viewModel.setAnomalyFrameStride(streamDesignator, frameStrideValue)
                         viewModel.setAnomalyAdaptiveStride(
                             streamDesignator,

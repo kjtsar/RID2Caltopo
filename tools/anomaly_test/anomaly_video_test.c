@@ -88,6 +88,7 @@ typedef struct {
     float thermal_min_delta;
     float small_target_screen_fraction;
     int color_target_candidate_limit;
+    uint32_t target_color_family_mask;
 } app_anomaly_config_t;
 
 static float app_clampf(float value, float min_value, float max_value) {
@@ -166,6 +167,48 @@ static const char *color_frontend_name(int mode) {
         default:
             return "legacy";
     }
+}
+
+static bool parse_target_color_families(const char *text, uint32_t *mask_out) {
+    if (mask_out != NULL) *mask_out = 0u;
+    if (text == NULL || mask_out == NULL) return false;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", text);
+    uint32_t mask = 0u;
+    char *token = strtok(buf, ",");
+    while (token != NULL) {
+        while (*token == ' ' || *token == '\t') token++;
+        char *end = token + strlen(token);
+        while (end > token && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+            *end = '\0';
+        }
+        if (strcmp(token, "red") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_RED;
+        } else if (strcmp(token, "blue") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_BLUE;
+        } else if (strcmp(token, "yellow") == 0 ||
+                   strcmp(token, "orange") == 0 ||
+                   strcmp(token, "yellow-orange") == 0 ||
+                   strcmp(token, "yellow_orange") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_YELLOW_ORANGE;
+        } else if (strcmp(token, "green") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_GREEN;
+        } else if (strcmp(token, "black") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_BLACK;
+        } else if (strcmp(token, "white") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_WHITE;
+        } else if (strcmp(token, "skin") == 0 ||
+                   strcmp(token, "skin-tone") == 0 ||
+                   strcmp(token, "skin_tone") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_SKIN;
+        } else if (*token != '\0') {
+            return false;
+        }
+        token = strtok(NULL, ",");
+    }
+    *mask_out = mask;
+    return true;
 }
 
 static const char *app_polarity_name(app_thermal_polarity_t polarity) {
@@ -282,6 +325,8 @@ static void derive_native_cfg_from_app(const app_anomaly_config_t *app_cfg,
             : ANOMALY_COLOR_FRONTEND_LEGACY;
     native_cfg->color_target_candidate_limit =
         app_clampi(app_cfg->color_target_candidate_limit, 1, 4);
+    native_cfg->target_color_family_mask =
+        app_cfg->target_color_family_mask & ANOMALY_TARGET_COLOR_ALL;
 }
 
 // ── pixel-font frame-number overlay ───────────────────────────────────────
@@ -2058,6 +2103,10 @@ static void usage(const char *prog) {
         "  --color-target-candidates <1..4>\n"
         "                   Color provisional target candidates to track\n"
         "                   (default: 1)\n"
+        "  --target-color-families <list>\n"
+        "                   Comma-separated target-color families for the\n"
+        "                   standalone target-color detector:\n"
+        "                   red,blue,yellow/orange,green,black,white,skin\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
         "  --small-target-fraction <f>\n"
         "                   Override the maximum normalized on-screen size\n"
@@ -2149,6 +2198,7 @@ int main(int argc, char **argv) {
         .small_target_screen_fraction = ANOMALY_SMALL_TARGET_SCREEN_FRACTION_DEFAULT,
         .color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA,
         .color_target_candidate_limit = APP_DEFAULT_COLOR_TARGET_CANDIDATE_LIMIT,
+        .target_color_family_mask = 0u,
     };
     int requested_color_frontend_mode = cfg.color_frontend_mode;
     int requested_movement_estimator_mode = cfg.movement_estimator_mode;
@@ -2236,6 +2286,13 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--color-target-candidates") && i+1 < argc) {
             cfg.color_target_candidate_limit = app_clampi(atoi(argv[++i]), 1, 4);
+        }
+        else if (!strcmp(argv[i], "--target-color-families") && i+1 < argc) {
+            if (!parse_target_color_families(argv[++i], &cfg.target_color_family_mask)) {
+                fprintf(stderr, "Error: --target-color-families expects comma-separated red, blue, yellow/orange, green, black, white, skin\n");
+                return 1;
+            }
+            app_cfg.target_color_family_mask = cfg.target_color_family_mask;
         }
         else if (!strcmp(argv[i], "--min-delta") && i+1 < argc) min_delta_override    = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--small-target-fraction") && i+1 < argc) {
@@ -2406,6 +2463,7 @@ int main(int argc, char **argv) {
         if (movement_estimator_overridden) {
             cfg.movement_estimator_mode = requested_movement_estimator_mode;
         }
+        cfg.target_color_family_mask = app_cfg.target_color_family_mask & ANOMALY_TARGET_COLOR_ALL;
     }
     bool app_qualification_ready = app_parity_mode && app_display_output;
     if (app_parity_mode && !app_display_output) {

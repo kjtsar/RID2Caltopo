@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,24 @@ import review_eval
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COLOR_MANIFEST = Path("tools/anomaly_test/regression_suite_color_manifest.json")
+TARGET_COLOR_BASELINE_CASE = "gray, searching green"
+TARGET_COLOR_STRESS_CASES = (
+    "uniform green frame",
+    "green plus lime subject",
+    "mottled green frame",
+    "mottled green plus lime",
+)
+TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO = 8.0
+TARGET_COLOR_PROBE_RE = re.compile(
+    r"^(?P<name>.*?)\s+"
+    r"avg_ms=(?P<avg_ms>[0-9.]+)\s+"
+    r"min_ms=(?P<min_ms>[0-9.]+)\s+"
+    r"max_ms=(?P<max_ms>[0-9.]+)\s+"
+    r"sampled=(?P<sampled>[0-9]+)\s+"
+    r"selected=(?P<selected>[0-9]+)\s+"
+    r"components=(?P<components>[0-9]+)\s+"
+    r"rois=(?P<rois>[0-9]+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -264,6 +283,60 @@ def review_precision_recall(score: dict[str, object]) -> tuple[float, float]:
     )
 
 
+def parse_target_color_perf_probe_output(output: str) -> dict[str, object]:
+    cases: list[dict[str, object]] = []
+    baseline_avg_ms: float | None = None
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = TARGET_COLOR_PROBE_RE.match(stripped)
+        if match is None:
+            raise ValueError(f"unrecognized target-color perf probe output: {line}")
+        case = {
+            "name": match.group("name").strip(),
+            "avg_ms": float(match.group("avg_ms")),
+            "min_ms": float(match.group("min_ms")),
+            "max_ms": float(match.group("max_ms")),
+            "sampled_pixel_count": int(match.group("sampled")),
+            "selected_pixel_count": int(match.group("selected")),
+            "candidate_component_count": int(match.group("components")),
+            "roi_count": int(match.group("rois")),
+        }
+        if case["name"] == TARGET_COLOR_BASELINE_CASE:
+            baseline_avg_ms = float(case["avg_ms"])
+        cases.append(case)
+
+    if baseline_avg_ms is None or baseline_avg_ms <= 0.0:
+        raise ValueError(f"target-color perf baseline case missing or zero: {TARGET_COLOR_BASELINE_CASE}")
+
+    for case in cases:
+        case["avg_to_baseline_ratio"] = float(case["avg_ms"]) / baseline_avg_ms
+
+    return {
+        "suite": "target-color-perf-probe",
+        "baseline_case": TARGET_COLOR_BASELINE_CASE,
+        "baseline_avg_ms": baseline_avg_ms,
+        "max_avg_to_baseline_ratio": TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO,
+        "stress_cases": list(TARGET_COLOR_STRESS_CASES),
+        "cases": cases,
+    }
+
+
+def run_target_color_perf_probe(binary: Path, repo_root: Path) -> dict[str, object]:
+    completed = subprocess.run(
+        [str(binary)],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    report = parse_target_color_perf_probe_output(completed.stdout)
+    report["binary"] = str(binary.resolve())
+    report["stdout"] = completed.stdout
+    return report
+
+
 def manifest_coverage(manifest_path: Path, cases: Iterable[ClipCase]) -> dict[str, object]:
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     source_clip_ids = [
@@ -375,6 +448,33 @@ def evaluate_gate(report: dict[str, object]) -> GateResult:
             elif not bool(geometry.get("matches_expected_red2_patio_track", False)):
                 failures.append(f"{label}: Red2 patio-target geometry check failed")
 
+    target_color_perf = report.get("target_color_perf")
+    if target_color_perf is not None:
+        if not isinstance(target_color_perf, dict):
+            failures.append("target-color-perf: report is not an object")
+            return GateResult(not failures, failures)
+        perf_cases = target_color_perf.get("cases", [])
+        if not isinstance(perf_cases, list):
+            failures.append("target-color-perf: cases missing")
+        else:
+            by_name = {
+                str(case.get("name", "")): case
+                for case in perf_cases
+                if isinstance(case, dict)
+            }
+            for name in TARGET_COLOR_STRESS_CASES:
+                case = by_name.get(name)
+                if case is None:
+                    failures.append(f"target-color-perf: stress case missing: {name}")
+                    continue
+                avg_ms = float(case.get("avg_ms", 0.0))
+                ratio = float(case.get("avg_to_baseline_ratio", 0.0))
+                if ratio > TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:
+                    failures.append(
+                        f"target-color-perf: {name} avg {avg_ms:.3f} ms is "
+                        f"{ratio:.2f}x baseline, above {TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:.2f}x"
+                    )
+
     return GateResult(not failures, failures)
 
 
@@ -423,6 +523,12 @@ def main() -> int:
         help="Directory for per-case outputs and aggregate report",
     )
     parser.add_argument(
+        "--target-color-perf-probe",
+        type=Path,
+        default=Path("tools/anomaly_test/build/target_color_perf_probe"),
+        help="Path to target_color_perf_probe",
+    )
+    parser.add_argument(
         "--fail-on-regression",
         action="store_true",
         help="Exit non-zero if candidate equivalence or Red clip capability gates fail",
@@ -431,12 +537,18 @@ def main() -> int:
 
     repo_root = REPO_ROOT
     binary = args.binary if args.binary.is_absolute() else repo_root / args.binary
+    target_color_perf_probe = (
+        args.target_color_perf_probe
+        if args.target_color_perf_probe.is_absolute()
+        else repo_root / args.target_color_perf_probe
+    )
     output_dir = args.output_dir if args.output_dir.is_absolute() else repo_root / args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     report = {
         "suite": "color-realtime-qualification",
         "binary": str(binary.resolve()),
+        "target_color_perf": run_target_color_perf_probe(target_color_perf_probe.resolve(), repo_root),
         "manifest_coverage": manifest_coverage(repo_root / COLOR_MANIFEST, CASES),
         "cases": [
             run_case(binary.resolve(), repo_root, case, output_dir)
@@ -473,6 +585,20 @@ def main() -> int:
         red2_geometry = case.get("red2_geometry")
         if isinstance(red2_geometry, dict):
             print(f"  Red2 geometry match: {red2_geometry['matches_expected_red2_patio_track']}")
+    target_color_perf = report.get("target_color_perf")
+    if isinstance(target_color_perf, dict):
+        print("\nTarget-color perf stress:")
+        print(f"  baseline: {target_color_perf['baseline_case']} {float(target_color_perf['baseline_avg_ms']):.3f} ms")
+        perf_cases = target_color_perf.get("cases", [])
+        if isinstance(perf_cases, list):
+            for case in perf_cases:
+                if not isinstance(case, dict) or case.get("name") not in TARGET_COLOR_STRESS_CASES:
+                    continue
+                print(
+                    f"  {case['name']}: avg={float(case['avg_ms']):.3f} ms "
+                    f"ratio={float(case['avg_to_baseline_ratio']):.2f}x "
+                    f"rois={case['roi_count']}"
+                )
     print(f"\nGate passed: {gate.passed}")
     for failure in gate.failures:
         print(f"  - {failure}")

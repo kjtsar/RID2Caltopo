@@ -65,6 +65,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MotionRegistrationMode
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
+import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamTelemetrySnapshot
@@ -2137,6 +2138,12 @@ class StreamsViewModel(
     fun setColorTargetCandidateLimit(designator: String, limit: Int) {
         updateAnomalyConfig(designator) { current ->
             current.copy(colorTargetCandidateLimit = limit.coerceIn(1, 4))
+        }
+    }
+
+    fun setTargetColorFamilyMask(designator: String, mask: Int) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(targetColorFamilyMask = mask and TargetColorFamily.allowedMask)
         }
     }
 

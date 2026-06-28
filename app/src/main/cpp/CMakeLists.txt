@@ -34,6 +34,7 @@ add_library(
     anomaly_result_builder.c
     anomaly_scan_planner.c
     anomaly_target_observations.c
+    anomaly_target_color_detector.c
     anomaly_target_revisit.c
     anomaly_target_tracks.c
     anomaly_thermal_detector.c

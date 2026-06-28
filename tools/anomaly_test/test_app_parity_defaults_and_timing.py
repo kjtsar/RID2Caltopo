@@ -177,6 +177,7 @@ class AppParityDefaultsAndTimingTest(unittest.TestCase):
             r'dependsOn\("testDebugUnitTest", "trackerCoordinationTests", "colorRealtimeQualification"\)',
         )
         self.assertIn("run_color_realtime_qualification.py", gradle)
+        self.assertIn("--target-color-perf-probe", gradle)
         self.assertIn("--fail-on-regression", gradle)
 
     def test_color_realtime_qualification_builds_host_harness(self) -> None:
@@ -186,6 +187,7 @@ class AppParityDefaultsAndTimingTest(unittest.TestCase):
         self.assertIn("cmake", gradle)
         self.assertIn("--target", gradle)
         self.assertIn("anomaly_video_test", gradle)
+        self.assertIn("target_color_perf_probe", gradle)
         self.assertNotIn("Skipping colorRealtimeQualification", gradle)
 
     def test_red2_realtime_candidate_limit_one_matches_four_candidate_output(self) -> None:

@@ -20,15 +20,34 @@ static int target_color_min3(int a, int b, int c) {
     return m < c ? m : c;
 }
 
+static float target_color_hue_degrees(int r, int g, int b, int max_c, int chroma) {
+    if (chroma <= 0) return 0.0f;
+    float hue;
+    if (max_c == r) {
+        hue = 60.0f * ((float)(g - b) / (float)chroma);
+        if (hue < 0.0f) hue += 360.0f;
+    } else if (max_c == g) {
+        hue = 60.0f * (((float)(b - r) / (float)chroma) + 2.0f);
+    } else {
+        hue = 60.0f * (((float)(r - g) / (float)chroma) + 4.0f);
+    }
+    if (hue >= 360.0f) hue -= 360.0f;
+    return hue;
+}
+
 static int target_color_family_slot(uint32_t family) {
     switch (family & ANOMALY_TARGET_COLOR_ALL) {
         case ANOMALY_TARGET_COLOR_RED: return 0;
         case ANOMALY_TARGET_COLOR_BLUE: return 1;
-        case ANOMALY_TARGET_COLOR_YELLOW_ORANGE: return 2;
+        case ANOMALY_TARGET_COLOR_YELLOW: return 2;
         case ANOMALY_TARGET_COLOR_GREEN: return 3;
         case ANOMALY_TARGET_COLOR_BLACK: return 4;
         case ANOMALY_TARGET_COLOR_WHITE: return 5;
-        case ANOMALY_TARGET_COLOR_SKIN: return 6;
+        case ANOMALY_TARGET_COLOR_GREY: return 6;
+        case ANOMALY_TARGET_COLOR_BROWN: return 7;
+        case ANOMALY_TARGET_COLOR_PINK: return 8;
+        case ANOMALY_TARGET_COLOR_ORANGE: return 9;
+        case ANOMALY_TARGET_COLOR_PURPLE: return 10;
         default: return -1;
     }
 }
@@ -59,27 +78,43 @@ uint32_t anomaly_target_color_classify_rgb(uint8_t r8, uint8_t g8, uint8_t b8) {
     int min_c = target_color_min3(r, g, b);
     int chroma = max_c - min_c;
     float luma = (0.2126f * (float)r) + (0.7152f * (float)g) + (0.0722f * (float)b);
+    float value = (float)max_c / 255.0f;
+    float saturation = max_c > 0 ? (float)chroma / (float)max_c : 0.0f;
+    float hue = target_color_hue_degrees(r, g, b, max_c, chroma);
 
     if (max_c <= 48 && chroma <= 34) return ANOMALY_TARGET_COLOR_BLACK;
-    if (min_c >= 210 && chroma <= 48) return ANOMALY_TARGET_COLOR_WHITE;
-    if (r >= 120 && g >= 70 && b >= 45 &&
-        r > g + 28 && r > b + 48 && g >= b - 8 && g <= r - 18 &&
-        luma >= 95.0f && luma <= 205.0f) {
-        return ANOMALY_TARGET_COLOR_SKIN;
+    if (min_c >= 210 && chroma <= 42) return ANOMALY_TARGET_COLOR_WHITE;
+    if (luma >= 72.0f && luma <= 190.0f && chroma <= 12) {
+        return ANOMALY_TARGET_COLOR_GREY;
     }
-    if (r >= 150 && g >= 95 && b <= 120 && r >= g - 15 && chroma >= 70) {
-        return ANOMALY_TARGET_COLOR_YELLOW_ORANGE;
+
+    if (chroma < 45 || saturation < 0.38f || value < 0.22f) {
+        return ANOMALY_TARGET_COLOR_NONE;
     }
-    if (r >= 145 && r > g + 55 && r > b + 45 && g <= 135 && chroma >= 70) {
+
+    if (hue >= 18.0f && hue < 45.0f &&
+        saturation >= 0.45f && value >= 0.35f && value <= 0.68f) {
+        return ANOMALY_TARGET_COLOR_BROWN;
+    }
+    if (hue >= 320.0f && hue < 345.0f &&
+        value >= 0.78f && saturation >= 0.38f && saturation <= 0.72f) {
+        return ANOMALY_TARGET_COLOR_PINK;
+    }
+
+    if (hue < 8.0f || hue >= 345.0f) return ANOMALY_TARGET_COLOR_RED;
+    if (hue < 18.0f) {
+        if (value >= 0.58f && saturation >= 0.58f) return ANOMALY_TARGET_COLOR_ORANGE;
         return ANOMALY_TARGET_COLOR_RED;
     }
-    if (b >= 120 && b > r + 45 && b > g + 35 && chroma >= 65) {
-        return ANOMALY_TARGET_COLOR_BLUE;
+    if (hue < 48.0f) {
+        if (value >= 0.82f && saturation >= 0.55f) return ANOMALY_TARGET_COLOR_ORANGE;
+        return ANOMALY_TARGET_COLOR_NONE;
     }
-    if (g >= 105 && g > r + 35 && g > b + 30 && chroma >= 55) {
-        return ANOMALY_TARGET_COLOR_GREEN;
-    }
-    return ANOMALY_TARGET_COLOR_NONE;
+    if (hue < 78.0f) return ANOMALY_TARGET_COLOR_YELLOW;
+    if (hue < 170.0f) return ANOMALY_TARGET_COLOR_GREEN;
+    if (hue < 250.0f) return ANOMALY_TARGET_COLOR_BLUE;
+    if (hue < 345.0f) return ANOMALY_TARGET_COLOR_PURPLE;
+    return ANOMALY_TARGET_COLOR_RED;
 }
 
 int anomaly_target_color_count_families(uint32_t family_mask) {
@@ -141,7 +176,9 @@ static bool target_color_scratch_ensure(
     if (scratch == NULL) return false;
     if (cell_count == 0u) return true;
     if (scratch->cell_capacity < cell_count) {
-        uint8_t *family = (uint8_t *)realloc(scratch->family_mask_grid, cell_count);
+        uint16_t *family = (uint16_t *)realloc(
+            scratch->family_mask_grid,
+            cell_count * sizeof(*scratch->family_mask_grid));
         if (family == NULL) return false;
         scratch->family_mask_grid = family;
         uint8_t *visited = (uint8_t *)realloc(scratch->visited_grid, cell_count);
@@ -197,10 +234,10 @@ bool anomaly_target_color_detect_rgba(
     int grid_h = (frame_height + sample_step - 1) / sample_step;
     size_t cell_count = (size_t)grid_w * (size_t)grid_h;
     if (!target_color_scratch_ensure(scratch, cell_count)) return false;
-    memset(scratch->family_mask_grid, 0, cell_count);
+    memset(scratch->family_mask_grid, 0, cell_count * sizeof(*scratch->family_mask_grid));
     memset(scratch->visited_grid, 0, cell_count);
 
-    enum { TARGET_COLOR_FAMILY_SLOTS = 7 };
+    enum { TARGET_COLOR_FAMILY_SLOTS = 11 };
     int family_counts[TARGET_COLOR_FAMILY_SLOTS] = {0};
     double family_r_sum[TARGET_COLOR_FAMILY_SLOTS] = {0.0};
     double family_g_sum[TARGET_COLOR_FAMILY_SLOTS] = {0.0};
@@ -226,7 +263,7 @@ bool anomaly_target_color_detect_rgba(
             uint32_t family = anomaly_target_color_classify_rgb(p[0], p[1], p[2]) & selected;
             result->sampled_pixels++;
             if (family != 0u) {
-                scratch->family_mask_grid[(size_t)gy * (size_t)grid_w + (size_t)gx] = (uint8_t)family;
+                scratch->family_mask_grid[(size_t)gy * (size_t)grid_w + (size_t)gx] = (uint16_t)family;
                 result->selected_pixel_count++;
                 int slot = target_color_family_slot(family);
                 if (slot >= 0) {

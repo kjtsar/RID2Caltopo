@@ -96,6 +96,7 @@ typedef struct {
 
     bool color_algorithm_configured;
     bool color_stride_hold_eligible;
+    bool selected_target_color_acquisition_pending;
 
     const int *prev_sample_lookup;
     const anomaly_scan_planner_prev_lookup_summary_t *prev_lookup_summary;

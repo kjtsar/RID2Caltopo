@@ -187,21 +187,27 @@ static bool parse_target_color_families(const char *text, uint32_t *mask_out) {
             mask |= ANOMALY_TARGET_COLOR_RED;
         } else if (strcmp(token, "blue") == 0) {
             mask |= ANOMALY_TARGET_COLOR_BLUE;
-        } else if (strcmp(token, "yellow") == 0 ||
-                   strcmp(token, "orange") == 0 ||
-                   strcmp(token, "yellow-orange") == 0 ||
+        } else if (strcmp(token, "yellow") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_YELLOW;
+        } else if (strcmp(token, "orange") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_ORANGE;
+        } else if (strcmp(token, "yellow-orange") == 0 ||
                    strcmp(token, "yellow_orange") == 0) {
-            mask |= ANOMALY_TARGET_COLOR_YELLOW_ORANGE;
+            mask |= ANOMALY_TARGET_COLOR_YELLOW | ANOMALY_TARGET_COLOR_ORANGE;
         } else if (strcmp(token, "green") == 0) {
             mask |= ANOMALY_TARGET_COLOR_GREEN;
         } else if (strcmp(token, "black") == 0) {
             mask |= ANOMALY_TARGET_COLOR_BLACK;
         } else if (strcmp(token, "white") == 0) {
             mask |= ANOMALY_TARGET_COLOR_WHITE;
-        } else if (strcmp(token, "skin") == 0 ||
-                   strcmp(token, "skin-tone") == 0 ||
-                   strcmp(token, "skin_tone") == 0) {
-            mask |= ANOMALY_TARGET_COLOR_SKIN;
+        } else if (strcmp(token, "grey") == 0 || strcmp(token, "gray") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_GREY;
+        } else if (strcmp(token, "brown") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_BROWN;
+        } else if (strcmp(token, "pink") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_PINK;
+        } else if (strcmp(token, "purple") == 0) {
+            mask |= ANOMALY_TARGET_COLOR_PURPLE;
         } else if (*token != '\0') {
             return false;
         }
@@ -2106,7 +2112,7 @@ static void usage(const char *prog) {
         "  --target-color-families <list>\n"
         "                   Comma-separated target-color families for the\n"
         "                   standalone target-color detector:\n"
-        "                   red,blue,yellow/orange,green,black,white,skin\n"
+        "                   white,black,grey,yellow,red,blue,green,brown,pink,orange,purple\n"
         "  --min-delta <f>  Override ANOMALY_THERMAL_MIN_DELTA (default: %.1f)\n"
         "  --small-target-fraction <f>\n"
         "                   Override the maximum normalized on-screen size\n"
@@ -2289,7 +2295,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--target-color-families") && i+1 < argc) {
             if (!parse_target_color_families(argv[++i], &cfg.target_color_family_mask)) {
-                fprintf(stderr, "Error: --target-color-families expects comma-separated red, blue, yellow/orange, green, black, white, skin\n");
+                fprintf(stderr, "Error: --target-color-families expects comma-separated white, black, grey, yellow, red, blue, green, brown, pink, orange, purple\n");
                 return 1;
             }
             app_cfg.target_color_family_mask = cfg.target_color_family_mask;

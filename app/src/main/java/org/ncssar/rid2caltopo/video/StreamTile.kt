@@ -87,6 +87,8 @@ import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
 import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
+import org.ncssar.rid2caltopo.video.anomaly.targetColorFamilySummary
+import org.ncssar.rid2caltopo.video.anomaly.targetColorSelectionEnabled
 import org.ncssar.rid2caltopo.ui.StreamPlayerView
 import kotlin.math.roundToInt
 
@@ -1171,6 +1173,10 @@ internal fun AnomalySettingsDialogs(
         var targetColorFamilyMaskValue by remember(streamDesignator, anomalyConfig.targetColorFamilyMask) {
             mutableStateOf(anomalyConfig.targetColorFamilyMask and TargetColorFamily.allowedMask)
         }
+        var showTargetColorsDialog by remember(streamDesignator) { mutableStateOf(false) }
+        var pendingTargetColorFamilyMaskValue by remember(streamDesignator) {
+            mutableStateOf(targetColorFamilyMaskValue)
+        }
         var frameStrideValue by remember(streamDesignator, anomalyConfig.frameStride) {
             mutableStateOf(anomalyConfig.frameStride.coerceIn(1, 33))
         }
@@ -1202,6 +1208,10 @@ internal fun AnomalySettingsDialogs(
             pixelStepValue = config.pixelStep.coerceIn(0, 4)
             thermalMinDeltaValue = config.thermalMinDelta.coerceIn(1.0f, 64.0f)
             smallTargetFractionValue = config.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)
+        }
+        fun openTargetColorsDialog() {
+            pendingTargetColorFamilyMaskValue = targetColorFamilyMaskValue and TargetColorFamily.allowedMask
+            showTargetColorsDialog = true
         }
         AlertDialog(
             onDismissRequest = onDismissAnomalySettingsDialog,
@@ -1279,6 +1289,32 @@ internal fun AnomalySettingsDialogs(
                                     CaltopoClient.ShowToast("Appearance set to Color.")
                                 }
                             )
+                        }
+                    }
+                    val targetColorsEnabled =
+                        targetColorSelectionEnabled(anomalyConfig.appearanceSelection)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Target Colors")
+                            Text(
+                                targetColorFamilySummary(targetColorFamilyMaskValue),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (targetColorsEnabled) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.60f)
+                                }
+                            )
+                        }
+                        TextButton(
+                            enabled = targetColorsEnabled,
+                            onClick = { openTargetColorsDialog() }
+                        ) {
+                            Text("Target Colors")
                         }
                     }
                     Row(
@@ -1424,42 +1460,6 @@ internal fun AnomalySettingsDialogs(
                         valueRange = 1f..4f,
                         steps = 2
                     )
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text("Target Colors")
-                        TargetColorFamily.entries.chunked(2).forEach { rowFamilies ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                rowFamilies.forEach { family ->
-                                    val selected = (targetColorFamilyMaskValue and family.nativeMask) != 0
-                                    Row(
-                                        modifier = Modifier.weight(1f),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Checkbox(
-                                            checked = selected,
-                                            onCheckedChange = { checked ->
-                                                targetColorFamilyMaskValue = if (checked) {
-                                                    targetColorFamilyMaskValue or family.nativeMask
-                                                } else {
-                                                    targetColorFamilyMaskValue and family.nativeMask.inv()
-                                                } and TargetColorFamily.allowedMask
-                                            }
-                                        )
-                                        Text(family.label)
-                                    }
-                                }
-                                if (rowFamilies.size == 1) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
-                            }
-                        }
-                    }
                     Text("Frame Stride ${frameStrideValue}x")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1598,6 +1598,73 @@ internal fun AnomalySettingsDialogs(
                 TextButton(onClick = onDismissAnomalySettingsDialog) { Text("Close") }
             }
         )
+        if (showTargetColorsDialog) {
+            AlertDialog(
+                onDismissRequest = { showTargetColorsDialog = false },
+                title = { Text("Target Colors") },
+                text = {
+                    val targetColorsScroll = rememberScrollState()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp)
+                            .verticalScroll(targetColorsScroll),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        TargetColorFamily.entries.chunked(2).forEach { rowFamilies ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                rowFamilies.forEach { family ->
+                                    val selected = (pendingTargetColorFamilyMaskValue and family.nativeMask) != 0
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Checkbox(
+                                            checked = selected,
+                                            onCheckedChange = { checked ->
+                                                pendingTargetColorFamilyMaskValue = if (checked) {
+                                                    pendingTargetColorFamilyMaskValue or family.nativeMask
+                                                } else {
+                                                    pendingTargetColorFamilyMaskValue and family.nativeMask.inv()
+                                                } and TargetColorFamily.allowedMask
+                                            }
+                                        )
+                                        Text(family.label)
+                                    }
+                                }
+                                if (rowFamilies.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val nextMask = pendingTargetColorFamilyMaskValue and TargetColorFamily.allowedMask
+                            targetColorFamilyMaskValue = nextMask
+                            viewModel.setTargetColorFamilyMask(streamDesignator, nextMask)
+                            showTargetColorsDialog = false
+                        }
+                    ) { Text("Apply") }
+                },
+                dismissButton = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                pendingTargetColorFamilyMaskValue = 0
+                            }
+                        ) { Text("Clear") }
+                        TextButton(onClick = { showTargetColorsDialog = false }) { Text("Cancel") }
+                    }
+                }
+            )
+        }
     }
 
     if (showAdHelpDialog) {

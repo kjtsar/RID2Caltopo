@@ -7,12 +7,16 @@
 #define ANOMALY_TARGET_COLOR_NONE          0x00u
 #define ANOMALY_TARGET_COLOR_RED           0x01u
 #define ANOMALY_TARGET_COLOR_BLUE          0x02u
-#define ANOMALY_TARGET_COLOR_YELLOW_ORANGE 0x04u
+#define ANOMALY_TARGET_COLOR_YELLOW        0x04u
 #define ANOMALY_TARGET_COLOR_GREEN         0x08u
 #define ANOMALY_TARGET_COLOR_BLACK         0x10u
 #define ANOMALY_TARGET_COLOR_WHITE         0x20u
-#define ANOMALY_TARGET_COLOR_SKIN          0x40u
-#define ANOMALY_TARGET_COLOR_ALL           0x7Fu
+#define ANOMALY_TARGET_COLOR_GREY          0x40u
+#define ANOMALY_TARGET_COLOR_BROWN         0x80u
+#define ANOMALY_TARGET_COLOR_PINK          0x100u
+#define ANOMALY_TARGET_COLOR_ORANGE        0x200u
+#define ANOMALY_TARGET_COLOR_PURPLE        0x400u
+#define ANOMALY_TARGET_COLOR_ALL           0x7FFu
 
 #define ANOMALY_TARGET_COLOR_MAX_ROIS 2
 
@@ -48,7 +52,7 @@ typedef struct {
 } anomaly_target_color_result_t;
 
 typedef struct {
-    uint8_t *family_mask_grid;
+    uint16_t *family_mask_grid;
     uint8_t *visited_grid;
     int *queue;
     size_t cell_capacity;

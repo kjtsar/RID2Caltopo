@@ -145,6 +145,7 @@ private fun shouldOfferDriveRestore(context: Context): Boolean {
 
 internal fun shouldLaunchArchiveDirPicker(
     archiveUriMissing: Boolean,
+    sessionArchiveDirAvailable: Boolean,
     forceArchiveDirPrompt: Boolean,
     driveRestoreEligibilityLoaded: Boolean,
     showDriveRestoreDialog: Boolean,
@@ -152,12 +153,20 @@ internal fun shouldLaunchArchiveDirPicker(
     archiveDirPickerOpen: Boolean
 ): Boolean {
     return archiveUriMissing &&
+        !sessionArchiveDirAvailable &&
         !archiveDirPickerOpen &&
         (
             forceArchiveDirPrompt ||
                 (driveRestoreEligibilityLoaded && !showDriveRestoreDialog && !driveSyncInProgress)
             )
 }
+
+internal fun archiveDirPromptMessage(permissionMissing: Boolean): String =
+    if (permissionMissing) {
+        "Archive folder access expired. Please re-select the archive directory for drone tracks and map cache."
+    } else {
+        "Select an archive directory for drone tracks and map cache."
+    }
 
 internal suspend fun <T> readMutualAidPackagePreviewOffMain(
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -936,6 +945,8 @@ fun MainScreen(
 
     // Launcher for selecting an archive directory
     var archiveDirPickerOpen by rememberSaveable { mutableStateOf(false) }
+    var pendingArchiveDirPromptMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingArchiveDirInitialUri by rememberSaveable { mutableStateOf<String?>(null) }
     val queryArchiveDirLauncher = rememberLauncherForActivityResult(
         contract = OpenArchiveDir(),
         onResult = { uri ->
@@ -959,8 +970,12 @@ fun MainScreen(
         val archiveUriMissing = withContext(Dispatchers.IO) {
             null == CaltopoClient.GetArchiveUri()
         }
+        val sessionArchiveDirAvailable = withContext(Dispatchers.IO) {
+            CaltopoClient.HasArchiveDirForCurrentSession()
+        }
         val shouldPromptArchiveDir = shouldLaunchArchiveDirPicker(
             archiveUriMissing = archiveUriMissing,
+            sessionArchiveDirAvailable = sessionArchiveDirAvailable,
             forceArchiveDirPrompt = forceArchiveDirPrompt,
             driveRestoreEligibilityLoaded = driveRestoreEligibilityLoaded,
             showDriveRestoreDialog = showDriveRestoreDialog,
@@ -972,17 +987,46 @@ fun MainScreen(
                 CaltopoClient.GetArchiveUriSelectionHint()
             }
             val permissionMissing = CaltopoClient.WasArchiveUriPermissionMissing()
-            val prompt = if (permissionMissing) {
-                "Archive folder access expired. Please re-select the archive directory for tracks and map cache."
-            } else {
-                "Select an archive directory for drone tracks and map cache."
-            }
-            CaltopoClient.ShowToast(prompt)
-            CTDebug(tag, "LaunchedEffect() requesting archiveDir initialUri='${initialUri ?: "<none>"}'")
             forceArchiveDirPrompt = false
-            archiveDirPickerOpen = true
-            queryArchiveDirLauncher.launch(initialUri)
+            pendingArchiveDirInitialUri = initialUri?.toString()
+            pendingArchiveDirPromptMessage = archiveDirPromptMessage(permissionMissing)
+            CTDebug(tag, "LaunchedEffect() prepared archiveDir prompt initialUri='${initialUri ?: "<none>"}'")
         }
+    }
+    pendingArchiveDirPromptMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = {
+                pendingArchiveDirPromptMessage = null
+                pendingArchiveDirInitialUri = null
+            },
+            title = { Text("Archive directory") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val initialUri = pendingArchiveDirInitialUri?.let(Uri::parse)
+                        pendingArchiveDirPromptMessage = null
+                        pendingArchiveDirInitialUri = null
+                        archiveDirPickerOpen = true
+                        CTDebug(tag, "Archive directory prompt confirmed initialUri='${initialUri ?: "<none>"}'")
+                        queryArchiveDirLauncher.launch(initialUri)
+                    }
+                ) {
+                    Text("Select")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        CaltopoClient.UseTemporaryArchiveDirForSession()
+                        pendingArchiveDirPromptMessage = null
+                        pendingArchiveDirInitialUri = null
+                    }
+                ) {
+                    Text("Not now")
+                }
+            }
+        )
     }
     
     // 2. Build the unified list of display items.

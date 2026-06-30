@@ -2684,11 +2684,21 @@ static void extract_color_blob_candidates(
                         }
                         continue;
                     }
+                    bool selected_target_revisit_rescue =
+                        rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY &&
+                        cfg != NULL &&
+                        cfg->target_color_family_mask != 0u;
+                    float target_rescue_peak_floor = selected_target_revisit_rescue ? 2.05f : 2.50f;
+                    int target_rescue_area_limit =
+                        fresh_max_blob_area * (selected_target_revisit_rescue ? 20 : 8);
+                    int target_rescue_span_limit =
+                        small_target_limit_cells + (selected_target_revisit_rescue ? 48 : 3);
                     bool target_centered_rescue =
-                        peak_support >= 2.50f &&
-                        area <= fresh_max_blob_area * 8 &&
-                        component_span <= small_target_limit_cells + 3 &&
-                        (component_contains_target ||
+                        peak_support >= target_rescue_peak_floor &&
+                        area <= target_rescue_area_limit &&
+                        component_span <= target_rescue_span_limit &&
+                        (selected_target_revisit_rescue ||
+                         component_contains_target ||
                          color_component_near_predicted_color_target(
                             state,
                             roi_x0,
@@ -7926,6 +7936,9 @@ int anomaly_process_frame(
         .base_registration_health = registration_health_base,
         .color_algorithm_configured = color_algorithm_configured,
         .color_stride_hold_eligible = true,
+        .selected_target_color_acquisition_pending =
+            cfg->target_color_family_mask != 0u &&
+            anomaly_target_revisit_color_track_count(state) == 0,
         .prev_sample_lookup = prev_sample_lookup,
         .prev_lookup_summary = &prev_sample_lookup_summary,
         .adaptive = {
@@ -11222,6 +11235,13 @@ motion_appearance_scoring_done:
     if (selective_refresh_active) {
         for (int ai = 0; ai < 4; ai++) {
             if (raw_cx[ai] < 0.0f || raw_cy[ai] < 0.0f) continue;
+            bool selected_target_color_reacquire =
+                ai == 0 &&
+                cfg->target_color_family_mask != 0u &&
+                scan_plan.mode == ANOMALY_RESCAN_MODE_TARGET_ONLY;
+            if (selected_target_color_reacquire) {
+                continue;
+            }
             if (!anomaly_target_revisit_point_inside_gate(
                     state,
                     raw_cx[ai],
@@ -11490,7 +11510,8 @@ motion_appearance_scoring_done:
             scan_plan.provisional_candidate_selected_count++;
         }
     }
-    if (scan_plan.mode == ANOMALY_RESCAN_MODE_FULL &&
+    if ((scan_plan.mode == ANOMALY_RESCAN_MODE_FULL ||
+         scan_plan.mode == ANOMALY_RESCAN_MODE_TARGET_ONLY) &&
         anomaly_detection_active &&
         (cfg->algorithm_mask & ANOMALY_ALGO_COLOR) != 0 &&
         cfg->target_color_family_mask != 0u &&

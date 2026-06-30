@@ -170,13 +170,84 @@ class AnomalyConfigTest {
     @Test
     fun toNativeConfig_targetColorFamiliesAreConfigurableAndClamped() {
         val selected =
-            TargetColorFamily.Red.nativeMask or
-            TargetColorFamily.Blue.nativeMask or
-            TargetColorFamily.Skin.nativeMask
+            TargetColorFamily.White.nativeMask or
+            TargetColorFamily.Pink.nativeMask or
+            TargetColorFamily.Purple.nativeMask
         val withUnknownBits = selected or 0x8000
         val native = AnomalyConfig(targetColorFamilyMask = withUnknownBits).toNativeConfig()
 
         assertEquals(selected, native.targetColorFamilyMask)
+    }
+
+    @Test
+    fun targetColorFamilies_arePlainOperatorColorTerms() {
+        assertEquals(
+            listOf(
+                "White",
+                "Black",
+                "Grey",
+                "Yellow",
+                "Red",
+                "Blue",
+                "Green",
+                "Brown",
+                "Pink",
+                "Orange",
+                "Purple",
+            ),
+            TargetColorFamily.entries.map { it.label },
+        )
+        assertEquals(0x07FF, TargetColorFamily.allowedMask)
+    }
+
+    @Test
+    fun targetColorFamilySummary_supportsMultiColorSelection() {
+        assertEquals("None", targetColorFamilySummary(0))
+        assertEquals("Red", targetColorFamilySummary(TargetColorFamily.Red.nativeMask))
+        assertEquals(
+            "Red, Blue",
+            targetColorFamilySummary(
+                TargetColorFamily.Red.nativeMask or TargetColorFamily.Blue.nativeMask
+            )
+        )
+        assertEquals(
+            "Red, Blue +2",
+            targetColorFamilySummary(
+                TargetColorFamily.Red.nativeMask or
+                    TargetColorFamily.Blue.nativeMask or
+                    TargetColorFamily.Orange.nativeMask or
+                    TargetColorFamily.Purple.nativeMask
+            )
+        )
+    }
+
+    @Test
+    fun targetColorSelectionEnabled_allowsPreselectionInAutoMode() {
+        assertTrue(targetColorSelectionEnabled(AppearanceAnomalySelection.Auto))
+        assertTrue(targetColorSelectionEnabled(AppearanceAnomalySelection.Color))
+        assertFalse(targetColorSelectionEnabled(AppearanceAnomalySelection.Thermal))
+    }
+
+    @Test
+    fun anomalyPrefs_stripTargetColorsAtPersistenceBoundary() {
+        val selected =
+            TargetColorFamily.Red.nativeMask or
+            TargetColorFamily.White.nativeMask
+        val config = AnomalyConfig(
+            enabled = true,
+            targetColorFamilyMask = selected,
+            colorTargetCandidateLimit = 3,
+        )
+
+        val persistable = AnomalyPrefs.persistableConfig(config)
+        val sessionDefault = AnomalyPrefs.sessionDefaultConfigFromPersisted(config)
+
+        assertEquals(0, persistable.targetColorFamilyMask)
+        assertEquals(0, sessionDefault.targetColorFamilyMask)
+        assertEquals(3, persistable.colorTargetCandidateLimit)
+        assertEquals(3, sessionDefault.colorTargetCandidateLimit)
+        assertTrue(persistable.enabled)
+        assertTrue(sessionDefault.enabled)
     }
 
     @Test

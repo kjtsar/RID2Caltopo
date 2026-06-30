@@ -6,6 +6,7 @@
 #define ANOMALY_RUNTIME_PRESSURE_DEFAULT_ANALYZE_ALTERNATE_PCT 50
 #define ANOMALY_RUNTIME_PRESSURE_DEFAULT_BYPASS_ALTERNATE_PCT 66
 #define ANOMALY_RUNTIME_PRESSURE_DEFAULT_BYPASS_ALL_PCT 80
+#define ANOMALY_RUNTIME_PRESSURE_LIVE_AD_BACKLOG_MS 100
 
 anomaly_runtime_pressure_policy_t anomaly_runtime_pressure_policy_make_default(
         int queue_capacity) {
@@ -143,6 +144,18 @@ int anomaly_runtime_pressure_backlog_frame_capacity(
         frames = hard_capacity;
     }
     return frames;
+}
+
+int anomaly_runtime_pressure_live_ad_backlog_frame_capacity(
+        int64_t source_interval_ms,
+        int64_t default_source_interval_ms,
+        int hard_capacity) {
+    return anomaly_runtime_pressure_backlog_frame_capacity(
+            ANOMALY_RUNTIME_PRESSURE_LIVE_AD_BACKLOG_MS,
+            source_interval_ms,
+            default_source_interval_ms,
+            2,
+            hard_capacity);
 }
 
 int anomaly_runtime_pressure_oldest_drop_count_for_admission(

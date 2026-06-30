@@ -199,12 +199,75 @@ bool anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
         bool local_file_source,
         bool processing_enabled,
         bool render_thread_stop,
+        bool target_color_selected,
         anomaly_detector_runtime_budget_t budget) {
-    if (!local_file_source || !processing_enabled || render_thread_stop) {
+    if (!local_file_source ||
+        !processing_enabled ||
+        render_thread_stop ||
+        target_color_selected) {
         return false;
     }
     budget = anomaly_detector_runtime_budget_normalize(budget);
     return budget.render_backlog_seconds < budget.cursory_backlog_seconds;
+}
+
+bool anomaly_detector_runtime_budget_should_start_ad_worker(
+        bool render_session,
+        bool ad_sync_ready,
+        bool processing_enabled,
+        bool ad_thread_started,
+        bool ad_thread_starting) {
+    return render_session &&
+           ad_sync_ready &&
+           processing_enabled &&
+           !ad_thread_started &&
+           !ad_thread_starting;
+}
+
+int64_t anomaly_detector_runtime_budget_local_ad_annotation_ordinal(
+        bool local_file_source,
+        int64_t analyzed_frame_count,
+        int64_t local_ad_cadence_ordinal) {
+    if (local_file_source && local_ad_cadence_ordinal > 0) {
+        return local_ad_cadence_ordinal - 1;
+    }
+    return analyzed_frame_count < 0 ? 0 : analyzed_frame_count;
+}
+
+int64_t anomaly_detector_runtime_budget_local_ad_render_latency_target_ms(
+        bool local_file_source,
+        bool ad_enabled,
+        bool target_color_selected,
+        int64_t target_latency_ms,
+        int64_t target_color_cap_ms) {
+    if (!local_file_source ||
+        !ad_enabled ||
+        !target_color_selected ||
+        target_latency_ms <= 0 ||
+        target_color_cap_ms <= 0) {
+        return target_latency_ms;
+    }
+    return target_latency_ms < target_color_cap_ms
+           ? target_latency_ms
+           : target_color_cap_ms;
+}
+
+int64_t anomaly_detector_runtime_budget_local_ad_buffer_latency_target_ms(
+        bool local_file_source,
+        bool ad_enabled,
+        bool target_color_selected,
+        int64_t target_latency_ms,
+        int64_t target_color_buffer_cap_ms) {
+    if (!local_file_source ||
+        !ad_enabled ||
+        !target_color_selected ||
+        target_latency_ms <= 0 ||
+        target_color_buffer_cap_ms <= 0) {
+        return target_latency_ms;
+    }
+    return target_latency_ms < target_color_buffer_cap_ms
+           ? target_latency_ms
+           : target_color_buffer_cap_ms;
 }
 
 int anomaly_detector_runtime_budget_queue_tail_index(
@@ -1207,6 +1270,7 @@ anomaly_detector_runtime_budget_local_ad_cadence_t
 anomaly_detector_runtime_budget_local_ad_cadence(
         bool local_file_source,
         bool processing_enabled,
+        bool target_color_selected,
         int64_t decoded_frame_ordinal,
         int full_scan_stride_frames,
         int target_eval_interval_frames) {
@@ -1234,6 +1298,14 @@ anomaly_detector_runtime_budget_local_ad_cadence(
         cadence.frame_stride_override = 1;
         return cadence;
     }
+    if (target_color_selected) {
+        cadence.full_scan_due =
+                (decoded_frame_ordinal % full_scan_stride_frames) == 0;
+        cadence.frame_stride_override = cadence.full_scan_due
+                ? 1
+                : suppress_implicit_full_refresh_stride;
+        return cadence;
+    }
     if ((decoded_frame_ordinal % target_eval_interval_frames) != 0) {
         cadence.analyze = false;
         cadence.prediction_only = true;
@@ -1247,6 +1319,17 @@ anomaly_detector_runtime_budget_local_ad_cadence(
         cadence.frame_stride_override = suppress_implicit_full_refresh_stride;
     }
     return cadence;
+}
+
+bool anomaly_detector_runtime_budget_local_ad_should_skip_target_eval(
+        bool target_eval_frame,
+        bool full_scan_due,
+        int target_revisit_count,
+        bool target_color_selected) {
+    return target_eval_frame &&
+           !full_scan_due &&
+           target_revisit_count <= 0 &&
+           !target_color_selected;
 }
 
 anomaly_detector_runtime_budget_local_ad_overlay_action_t

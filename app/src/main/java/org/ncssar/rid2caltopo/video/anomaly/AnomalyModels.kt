@@ -143,18 +143,37 @@ enum class TargetColorFamily(
     val nativeMask: Int,
     val label: String,
 ) {
+    White(nativeMask = 0x20, label = "White"),
+    Black(nativeMask = 0x10, label = "Black"),
+    Grey(nativeMask = 0x40, label = "Grey"),
+    Yellow(nativeMask = 0x04, label = "Yellow"),
     Red(nativeMask = 0x01, label = "Red"),
     Blue(nativeMask = 0x02, label = "Blue"),
-    YellowOrange(nativeMask = 0x04, label = "Yellow/Orange"),
     Green(nativeMask = 0x08, label = "Green"),
-    Black(nativeMask = 0x10, label = "Black"),
-    White(nativeMask = 0x20, label = "White"),
-    Skin(nativeMask = 0x40, label = "Skin");
+    Brown(nativeMask = 0x80, label = "Brown"),
+    Pink(nativeMask = 0x100, label = "Pink"),
+    Orange(nativeMask = 0x200, label = "Orange"),
+    Purple(nativeMask = 0x400, label = "Purple");
 
     companion object {
         val allowedMask: Int = entries.fold(0) { mask, family -> mask or family.nativeMask }
     }
 }
+
+fun targetColorFamilySummary(mask: Int): String {
+    val selected = TargetColorFamily.entries.filter { family ->
+        (mask and family.nativeMask) != 0
+    }
+    return when (selected.size) {
+        0 -> "None"
+        1 -> selected.first().label
+        2 -> selected.joinToString(", ") { it.label }
+        else -> selected.take(2).joinToString(", ") { it.label } + " +${selected.size - 2}"
+    }
+}
+
+fun targetColorSelectionEnabled(selection: AppearanceAnomalySelection): Boolean =
+    selection != AppearanceAnomalySelection.Thermal
 
 data class AnomalyConfig(
     val enabled: Boolean = false,

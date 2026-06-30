@@ -410,6 +410,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     private static boolean ShutdownInProgress = false;
     private static boolean AppExitRequested = false;
     private static long DebugLogGeneration = 0L;
+    private static volatile File TemporaryArchiveRootForSession = null;
 
     private static void ResetDebugOutputStream() {
         synchronized (DebugLogLock) {
@@ -1066,7 +1067,8 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static DocumentFile GetArchiveDir() {
         Uri archiveUri = GetArchiveUri();
         Context ctxt = R2CApplication.getAppCtxt();
-        if (null == ctxt || null == archiveUri) return null;
+        if (ctxt == null) return null;
+        if (archiveUri == null) return GetTemporaryArchiveDirForSession();
         return DocumentFile.fromTreeUri(ctxt, archiveUri);
     }
 
@@ -1079,11 +1081,10 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
      */
     @Nullable
     public static DocumentFile GetTodaysTrackDir() {
-        Uri archivePath = GetArchiveUri();
         DocumentFile todaysDir = null;
         Context ctxt = R2CApplication.getAppCtxt();
-        if (null == ctxt || null == archivePath) return null;
-        DocumentFile archiveDir = DocumentFile.fromTreeUri(ctxt, archivePath);
+        if (null == ctxt) return null;
+        DocumentFile archiveDir = GetArchiveDir();
         if (null != archiveDir) try {
             SimpleDateFormat sdf = new SimpleDateFormat("ddMMMyyyy", Locale.US);
             String dirpath = "tracks-" + sdf.format(new Date());
@@ -3274,6 +3275,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
     public static void SetArchiveUri(@NonNull Uri pathUri) {
         ClientClassState ccs = GetState();
         String pathString = pathUri.toString();
+        TemporaryArchiveRootForSession = null;
         if (!ccs.archivePath.equals(pathString)) {
             ccs.archivePath = pathString;
             persistArchivePathBackup(pathString);
@@ -3282,6 +3284,38 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
             ArchiveState("archivePath changed.");
             InitArchiveDir();
         }
+    }
+
+    public static boolean UseTemporaryArchiveDirForSession() {
+        Context ctxt = R2CApplication.getAppCtxt();
+        if (ctxt == null) return false;
+        File root = new File(ctxt.getCacheDir(), "temporary-archive");
+        if (!root.exists() && !root.mkdirs()) {
+            CTWarn(TAG, "UseTemporaryArchiveDirForSession(): unable to create " + root);
+            return false;
+        }
+        if (!root.isDirectory() || !root.canWrite()) {
+            CTWarn(TAG, "UseTemporaryArchiveDirForSession(): root is not writable " + root);
+            return false;
+        }
+        TemporaryArchiveRootForSession = root;
+        ArchivePermissionMissingFlag = false;
+        CTWarn(TAG, "Using temporary archive directory for this app session: " + root);
+        InitArchiveDir();
+        return true;
+    }
+
+    public static boolean HasArchiveDirForCurrentSession() {
+        return GetArchiveDir() != null;
+    }
+
+    @Nullable
+    private static DocumentFile GetTemporaryArchiveDirForSession() {
+        File root = TemporaryArchiveRootForSession;
+        if (root == null) return null;
+        if (!root.exists() && !root.mkdirs()) return null;
+        if (!root.isDirectory() || !root.canWrite()) return null;
+        return DocumentFile.fromFile(root);
     }
 
     private static void clearArchivePath(@NonNull String reason) {

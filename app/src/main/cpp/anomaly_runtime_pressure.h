@@ -55,6 +55,11 @@ int anomaly_runtime_pressure_backlog_frame_capacity(
         int min_frames,
         int hard_capacity);
 
+int anomaly_runtime_pressure_live_ad_backlog_frame_capacity(
+        int64_t source_interval_ms,
+        int64_t default_source_interval_ms,
+        int hard_capacity);
+
 int anomaly_runtime_pressure_oldest_drop_count_for_admission(
         int queue_depth,
         int desired_depth);

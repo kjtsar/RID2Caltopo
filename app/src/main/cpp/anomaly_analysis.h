@@ -309,6 +309,15 @@ typedef struct {
     float last_movement_dy_px;
     float last_movement_residual_px;
     float last_movement_independent_score;
+    bool  last_prediction_valid;
+    bool  last_prediction_local_residual_applied;
+    bool  last_prediction_inverse_failed;
+    float last_prediction_before_x_norm;
+    float last_prediction_before_y_norm;
+    float last_prediction_registration_x_norm;
+    float last_prediction_registration_y_norm;
+    float last_prediction_after_x_norm;
+    float last_prediction_after_y_norm;
 } anomaly_target_track_t;
 
 // Per-stream mutable state owned by the decode thread (no locking needed).
@@ -1140,6 +1149,7 @@ typedef enum {
 #define ANOMALY_SCAN_REASON_MASK_EMPTY             0x2000u
 #define ANOMALY_SCAN_REASON_MASK_TOO_BROAD         0x4000u
 #define ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH  0x8000u
+#define ANOMALY_SCAN_REASON_TARGET_COLOR_ACQUIRE   0x10000u
 
 #define ANOMALY_ADAPTIVE_STRIDE_REASON_REG_INVALID         0x0001u
 #define ANOMALY_ADAPTIVE_STRIDE_REASON_REG_DEGRADED        0x0002u

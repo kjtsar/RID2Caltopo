@@ -61,7 +61,6 @@ static inline anomaly_config_transition_t anomaly_runtime_config_transition_clas
         anomaly_runtime_config_float_changed(before->motion_evidence_scale, after->motion_evidence_scale) ||
         anomaly_runtime_config_float_changed(before->thermal_min_delta, after->thermal_min_delta) ||
         before->color_target_candidate_limit != after->color_target_candidate_limit ||
-        before->target_color_family_mask != after->target_color_family_mask ||
         before->min_hits != after->min_hits) {
         anomaly_runtime_config_raise_transition(
                 &transition,
@@ -85,7 +84,8 @@ static inline anomaly_config_transition_t anomaly_runtime_config_transition_clas
         anomaly_runtime_config_float_changed(
                 before->small_target_screen_fraction,
                 after->small_target_screen_fraction) ||
-        before->color_frontend_mode != after->color_frontend_mode) {
+        before->color_frontend_mode != after->color_frontend_mode ||
+        before->target_color_family_mask != after->target_color_family_mask) {
         anomaly_runtime_config_raise_transition(
                 &transition,
                 ANOMALY_CONFIG_TRANSITION_RESET_DETECTOR_STATE);

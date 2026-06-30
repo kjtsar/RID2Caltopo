@@ -50,6 +50,8 @@ const char *anomaly_debug_scan_reason_flag_name(uint32_t flag) {
             return "mask-too-broad";
         case ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH:
             return "periodic-full-refresh";
+        case ANOMALY_SCAN_REASON_TARGET_COLOR_ACQUIRE:
+            return "target-color-acquisition";
         default:
             return "unknown";
     }
@@ -82,6 +84,7 @@ void anomaly_debug_format_scan_reason_flags(
         ANOMALY_SCAN_REASON_MASK_EMPTY,
         ANOMALY_SCAN_REASON_MASK_TOO_BROAD,
         ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH,
+        ANOMALY_SCAN_REASON_TARGET_COLOR_ACQUIRE,
     };
     size_t offset = 0;
     for (size_t i = 0; i < sizeof(known_flags) / sizeof(known_flags[0]); i++) {

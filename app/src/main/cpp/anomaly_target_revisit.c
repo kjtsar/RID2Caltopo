@@ -27,6 +27,28 @@ int anomaly_target_revisit_track_count(const anomaly_state_t *state) {
     return count;
 }
 
+int anomaly_target_revisit_color_track_count(const anomaly_state_t *state) {
+    return anomaly_target_revisit_confirmed_color_track_count(state, 1);
+}
+
+int anomaly_target_revisit_confirmed_color_track_count(
+        const anomaly_state_t *state,
+        int                    min_hits) {
+    if (state == NULL) return 0;
+    int required_hits = min_hits > 1 ? min_hits : 1;
+    int count = 0;
+    for (int i = 0; i < ANOMALY_MAX_TARGET_TRACKS; i++) {
+        const anomaly_target_track_t *track = &state->target_tracks[i];
+        if (track->algorithm == ANOMALY_ALGO_COLOR &&
+            track->publish_confirmed &&
+            track->hit_count >= required_hits &&
+            anomaly_target_revisit_track_is_eligible(track)) {
+            count++;
+        }
+    }
+    return count;
+}
+
 void anomaly_target_revisit_adaptive_track_risk(
         const anomaly_state_t *state,
         int                    min_hits,

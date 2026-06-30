@@ -390,6 +390,7 @@ static anomaly_scan_plan_t build_scan_plan(
         bool                                                full_refresh_cadence_due,
         bool                                                scene_discontinuity,
         bool                                                periodic_full_refresh_due_value,
+        bool                                                selected_target_color_acquisition_pending,
         const anomaly_scan_planner_prev_lookup_summary_t   *prev_lookup_summary,
         anomaly_registration_health_t                      *registration_health_out) {
     anomaly_scan_plan_t plan;
@@ -511,6 +512,10 @@ static anomaly_scan_plan_t build_scan_plan(
     }
     if (full_refresh_cadence_due || periodic_full_refresh_due_value) {
         plan.reason_flags |= ANOMALY_SCAN_REASON_PERIODIC_FULL_REFRESH;
+        force_full = true;
+    }
+    if (selected_target_color_acquisition_pending) {
+        plan.reason_flags |= ANOMALY_SCAN_REASON_TARGET_COLOR_ACQUIRE;
         force_full = true;
     }
 
@@ -695,6 +700,14 @@ bool anomaly_scan_planner_plan(
         input->adaptive.adaptive_enabled &&
         periodic_full_refresh_due(state, cfg, input->frame_source_ts_us);
     anomaly_registration_health_t registration_health = input->base_registration_health;
+    bool selected_target_color_acquisition_pending =
+        input->selected_target_color_acquisition_pending ||
+        (cfg->target_color_family_mask != 0u &&
+         anomaly_target_revisit_color_track_count(state) == 0);
+    bool selected_target_color_confirmation_pending =
+        cfg->target_color_family_mask != 0u &&
+        anomaly_target_revisit_color_track_count(state) > 0 &&
+        anomaly_target_revisit_confirmed_color_track_count(state, cfg->min_hits) == 0;
     anomaly_scan_plan_t scan_plan = build_scan_plan(
         state,
         input->registration,
@@ -706,6 +719,7 @@ bool anomaly_scan_planner_plan(
         full_refresh_cadence_due,
         input->scene_discontinuity,
         force_periodic_full_refresh,
+        selected_target_color_acquisition_pending,
         input->prev_sample_lookup != NULL ? input->prev_lookup_summary : NULL,
         &registration_health);
     int64_t scan_plan_elapsed_us = anomaly_timing_now_us() - scan_plan_started_us;
@@ -718,6 +732,8 @@ bool anomaly_scan_planner_plan(
         effective_frame_stride > 1 &&
         !full_refresh_cadence_due &&
         !force_periodic_full_refresh &&
+        !selected_target_color_acquisition_pending &&
+        !selected_target_color_confirmation_pending &&
         scan_plan.mode != ANOMALY_RESCAN_MODE_TARGET_ONLY;
     if (color_stride_hold_frame) {
         rescan_mode = ANOMALY_RESCAN_MODE_APPEARANCE_STRIDE_SKIP;

@@ -11,6 +11,12 @@
 
 int anomaly_target_revisit_track_count(const anomaly_state_t *state);
 
+int anomaly_target_revisit_color_track_count(const anomaly_state_t *state);
+
+int anomaly_target_revisit_confirmed_color_track_count(
+        const anomaly_state_t *state,
+        int                    min_hits);
+
 void anomaly_target_revisit_adaptive_track_risk(
         const anomaly_state_t *state,
         int                    min_hits,

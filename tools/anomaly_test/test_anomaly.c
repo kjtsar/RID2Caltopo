@@ -8512,6 +8512,24 @@ static void test_target_tracks_predict_applies_stable_local_residual_to_color(vo
                 "target tracks predict: stable local residual offsets color x prediction");
     EXPECT_NEAR(state.target_tracks[0].center_y_norm, 0.51f, 0.0001f,
                 "target tracks predict: stable local residual offsets color y prediction");
+    EXPECT(state.target_tracks[0].last_prediction_valid,
+           "target tracks predict: color local residual prediction should be recorded valid");
+    EXPECT(state.target_tracks[0].last_prediction_local_residual_applied,
+           "target tracks predict: color local residual diagnostic should record applied correction");
+    EXPECT(!state.target_tracks[0].last_prediction_inverse_failed,
+           "target tracks predict: color local residual diagnostic should record successful inverse");
+    EXPECT_NEAR(state.target_tracks[0].last_prediction_before_x_norm, 0.50f, 0.0001f,
+                "target tracks predict: color diagnostic should record pre-prediction x");
+    EXPECT_NEAR(state.target_tracks[0].last_prediction_before_y_norm, 0.50f, 0.0001f,
+                "target tracks predict: color diagnostic should record pre-prediction y");
+    EXPECT_NEAR(state.target_tracks[0].last_prediction_registration_x_norm, 0.52f, 0.0001f,
+                "target tracks predict: color diagnostic should record registration-only x");
+    EXPECT_NEAR(state.target_tracks[0].last_prediction_registration_y_norm, 0.49f, 0.0001f,
+                "target tracks predict: color diagnostic should record registration-only y");
+    EXPECT_NEAR(state.target_tracks[0].last_prediction_after_x_norm, 0.50f, 0.0001f,
+                "target tracks predict: color diagnostic should record final predicted x");
+    EXPECT_NEAR(state.target_tracks[0].last_prediction_after_y_norm, 0.51f, 0.0001f,
+                "target tracks predict: color diagnostic should record final predicted y");
 }
 
 static void test_target_tracks_predict_nonfresh_thermal_uses_registration_only(void) {
@@ -12727,6 +12745,80 @@ static void test_detector_facade_runtime_budget_should_wait_for_local_ad_buffer(
            "runtime budget local AD buffer: invalid target does not delay playback");
 }
 
+static void test_detector_facade_runtime_budget_local_ad_render_latency_target(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_ad_render_latency_target_ms(
+                   true, true, false, 700, 350) == 700,
+           "runtime budget local AD latency: ordinary local playback keeps normal target latency");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_render_latency_target_ms(
+                   true, true, true, 700, 350) == 350,
+           "runtime budget local AD latency: selected target color caps local playback latency");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_render_latency_target_ms(
+                   true, true, true, 250, 350) == 250,
+           "runtime budget local AD latency: selected target color does not raise an already fresh target");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_render_latency_target_ms(
+                   false, true, true, 700, 350) == 700,
+           "runtime budget local AD latency: live playback ignores local target-color cap");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_render_latency_target_ms(
+                   true, false, true, 700, 350) == 700,
+           "runtime budget local AD latency: disabled AD keeps normal local playback latency");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_render_latency_target_ms(
+                   true, true, true, 700, 0) == 700,
+           "runtime budget local AD latency: invalid cap keeps normal latency");
+}
+
+static void test_detector_facade_runtime_budget_local_ad_buffer_latency_target(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_ad_buffer_latency_target_ms(
+                   true, true, false, 700, 100) == 700,
+           "runtime budget local AD buffer latency: ordinary local playback keeps normal target latency");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_buffer_latency_target_ms(
+                   true, true, true, 700, 100) == 100,
+           "runtime budget local AD buffer latency: selected target color keeps render buffer shallow");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_buffer_latency_target_ms(
+                   true, true, true, 70, 100) == 70,
+           "runtime budget local AD buffer latency: selected target color does not raise an already shallow buffer");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_buffer_latency_target_ms(
+                   false, true, true, 700, 100) == 700,
+           "runtime budget local AD buffer latency: live playback ignores local target-color buffer cap");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_buffer_latency_target_ms(
+                   true, false, true, 700, 100) == 700,
+           "runtime budget local AD buffer latency: disabled AD keeps normal target latency");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_buffer_latency_target_ms(
+                   true, true, true, 700, 0) == 700,
+           "runtime budget local AD buffer latency: invalid cap keeps normal latency");
+}
+
+static void test_detector_facade_runtime_budget_ad_worker_start_gate(void) {
+    EXPECT(anomaly_detector_runtime_budget_should_start_ad_worker(
+                   true, true, true, false, false),
+           "runtime budget AD worker start: ready render session can claim worker start");
+    EXPECT(!anomaly_detector_runtime_budget_should_start_ad_worker(
+                    false, true, true, false, false),
+           "runtime budget AD worker start: non-render sessions do not start workers");
+    EXPECT(!anomaly_detector_runtime_budget_should_start_ad_worker(
+                    true, false, true, false, false),
+           "runtime budget AD worker start: missing AD sync does not start workers");
+    EXPECT(!anomaly_detector_runtime_budget_should_start_ad_worker(
+                    true, true, false, false, false),
+           "runtime budget AD worker start: disabled processing does not start workers");
+    EXPECT(!anomaly_detector_runtime_budget_should_start_ad_worker(
+                    true, true, true, true, false),
+           "runtime budget AD worker start: started worker blocks duplicate launch");
+    EXPECT(!anomaly_detector_runtime_budget_should_start_ad_worker(
+                    true, true, true, false, true),
+           "runtime budget AD worker start: starting worker blocks duplicate launch");
+}
+
+static void test_detector_facade_runtime_budget_local_ad_annotation_ordinal(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_ad_annotation_ordinal(false, 3, 25) == 3,
+           "runtime budget local AD annotation ordinal: live sources use analyzed frame count");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_annotation_ordinal(true, 3, 25) == 24,
+           "runtime budget local AD annotation ordinal: local playback uses decoded display cadence");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_annotation_ordinal(true, 3, 0) == 3,
+           "runtime budget local AD annotation ordinal: missing local cadence falls back to analyzed count");
+    EXPECT(anomaly_detector_runtime_budget_local_ad_annotation_ordinal(true, -1, 10) == 9,
+           "runtime budget local AD annotation ordinal: local cadence remains usable when analyzed count is unset");
+}
+
 static void test_detector_facade_runtime_budget_local_ad_startup_preroll(void) {
     anomaly_detector_runtime_budget_local_ad_startup_preroll_t preroll =
             anomaly_detector_runtime_budget_local_ad_startup_preroll(
@@ -12763,46 +12855,78 @@ static void test_detector_facade_runtime_budget_local_ad_startup_preroll(void) {
 static void test_detector_facade_runtime_budget_local_ad_cadence(void) {
     anomaly_detector_runtime_budget_local_ad_cadence_t cadence =
             anomaly_detector_runtime_budget_local_ad_cadence(
-                    true, true, 1, 30, 5);
+                    true, true, false, 1, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
            cadence.full_scan_due &&
            cadence.frame_stride_override == 1,
            "runtime budget local AD cadence: first post-preroll frame forces a full scan opportunity");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
-            true, true, 2, 30, 5);
+            true, true, false, 2, 30, 5);
     EXPECT(!cadence.analyze && cadence.prediction_only &&
            !cadence.full_scan_due &&
            cadence.frame_stride_override == 0,
            "runtime budget local AD cadence: skips non-eval local frames after startup scan");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
-            true, true, 5, 30, 5);
+            true, true, false, 5, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
            !cadence.full_scan_due &&
            cadence.frame_stride_override > 30,
            "runtime budget local AD cadence: target-eval frames suppress analyzed-frame full refresh");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
-            true, true, 30, 30, 5);
+            true, true, false, 30, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
            cadence.full_scan_due &&
            cadence.frame_stride_override == 1,
            "runtime budget local AD cadence: thirty decoded frames forces a full scan opportunity");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
-            false, true, 1, 30, 5);
+            true, true, true, 2, 30, 5);
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
+           !cadence.full_scan_due &&
+           cadence.frame_stride_override > 30,
+           "runtime budget local AD cadence: selected target color analyzes non-eval acquisition frames");
+
+    cadence = anomaly_detector_runtime_budget_local_ad_cadence(
+            true, true, true, 30, 30, 5);
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
+           cadence.full_scan_due &&
+           cadence.frame_stride_override == 1,
+           "runtime budget local AD cadence: selected target color still honors full-scan cadence");
+
+    cadence = anomaly_detector_runtime_budget_local_ad_cadence(
+            false, true, false, 1, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
            !cadence.full_scan_due &&
            cadence.frame_stride_override == 0,
            "runtime budget local AD cadence: live sources are not locally throttled");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
-            true, false, 1, 30, 5);
+            true, false, false, 1, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
            !cadence.full_scan_due &&
            cadence.frame_stride_override == 0,
            "runtime budget local AD cadence: disabled processing leaves handoff policy alone");
+}
+
+static void test_detector_facade_runtime_budget_local_ad_target_eval_skip(void) {
+    EXPECT(anomaly_detector_runtime_budget_local_ad_should_skip_target_eval(
+                   true, false, 0, false),
+           "runtime budget local AD target eval: no tracks and no selected color can skip target eval");
+    EXPECT(!anomaly_detector_runtime_budget_local_ad_should_skip_target_eval(
+                    true, false, 0, true),
+           "runtime budget local AD target eval: selected target color keeps acquisition frames analyzable");
+    EXPECT(!anomaly_detector_runtime_budget_local_ad_should_skip_target_eval(
+                    true, false, 1, false),
+           "runtime budget local AD target eval: existing revisit tracks keep target eval analyzable");
+    EXPECT(!anomaly_detector_runtime_budget_local_ad_should_skip_target_eval(
+                    true, true, 0, false),
+           "runtime budget local AD target eval: full scan cadence is never skipped as target eval");
+    EXPECT(!anomaly_detector_runtime_budget_local_ad_should_skip_target_eval(
+                    false, false, 0, false),
+           "runtime budget local AD target eval: non-target-eval frames are left to cadence policy");
 }
 
 static void test_detector_facade_runtime_budget_should_wait_for_local_ad_processing(void) {
@@ -12811,28 +12935,31 @@ static void test_detector_facade_runtime_budget_should_wait_for_local_ad_process
     budget.startup_elapsed_seconds = 1.0f;
     budget.render_backlog_seconds = 0.20f;
     EXPECT(anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
-                   true, true, false, budget),
+                   true, true, false, false, budget),
            "runtime budget local AD processing: waits below cursory backlog");
+    EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
+                    true, true, false, true, budget),
+           "runtime budget local AD processing: selected target colors start before render backlog grows");
 
     budget.render_backlog_seconds = 0.25f;
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
-                    true, true, false, budget),
+                    true, true, false, false, budget),
            "runtime budget local AD processing: starts at cursory backlog");
 
     budget.render_backlog_seconds = 0.50f;
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
-                    true, true, false, budget),
+                    true, true, false, false, budget),
            "runtime budget local AD processing: keeps running at thorough backlog");
 
     budget.render_backlog_seconds = 0.20f;
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
-                    false, true, false, budget),
+                    false, true, false, false, budget),
            "runtime budget local AD processing: live sources do not wait on local backlog");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
-                    true, false, false, budget),
+                    true, false, false, false, budget),
            "runtime budget local AD processing: disabled AD does not wait");
     EXPECT(!anomaly_detector_runtime_budget_should_wait_for_local_ad_processing(
-                    true, true, true, budget),
+                    true, true, true, false, budget),
            "runtime budget local AD processing: render stop drains without waiting");
 }
 
@@ -13937,6 +14064,17 @@ static void test_runtime_pressure_backlog_frame_capacity(void) {
            "runtime pressure backlog capacity: nonpositive hard capacity returns zero");
     EXPECT(anomaly_runtime_pressure_backlog_frame_capacity(150, 33, 33, 2, 24) == 5,
            "runtime pressure backlog capacity: local playback sidecar window stays short");
+}
+
+static void test_runtime_pressure_live_ad_backlog_frame_capacity(void) {
+    EXPECT(anomaly_runtime_pressure_live_ad_backlog_frame_capacity(33, 33, 24) == 4,
+           "runtime pressure live AD backlog capacity: 30fps live input stays near the fresh edge");
+    EXPECT(anomaly_runtime_pressure_live_ad_backlog_frame_capacity(40, 33, 24) == 3,
+           "runtime pressure live AD backlog capacity: slower live input adapts to source cadence");
+    EXPECT(anomaly_runtime_pressure_live_ad_backlog_frame_capacity(0, 33, 24) == 4,
+           "runtime pressure live AD backlog capacity: invalid source interval uses default");
+    EXPECT(anomaly_runtime_pressure_live_ad_backlog_frame_capacity(33, 33, 2) == 2,
+           "runtime pressure live AD backlog capacity: hard capacity is honored");
 }
 
 static void test_runtime_pressure_oldest_drop_count_for_admission(void) {
@@ -18083,7 +18221,7 @@ static void test_config_transition_live_update(void) {
            "config transition: live processing change classifies live update");
 }
 
-static void test_config_transition_target_color_mask_is_live_update(void) {
+static void test_config_transition_target_color_mask_resets_detector_state(void) {
     anomaly_config_t before = default_cfg(ANOMALY_ALGO_COLOR);
     anomaly_config_t after = before;
 
@@ -18091,8 +18229,8 @@ static void test_config_transition_target_color_mask_is_live_update(void) {
            "config target color: default mask is zero/off");
     after.target_color_family_mask = ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_WHITE;
     EXPECT(anomaly_config_transition_classify(&before, &after) ==
-               ANOMALY_CONFIG_TRANSITION_LIVE_UPDATE,
-           "config target color: changing selected families is a live update");
+               ANOMALY_CONFIG_TRANSITION_RESET_DETECTOR_STATE,
+           "config target color: changing selected families resets detector state");
 }
 
 static void test_config_transition_reset_sensitive(void) {
@@ -18252,16 +18390,38 @@ static void test_target_color_detector_family_classification(void) {
            "target color classify: red shirt-like RGB maps to red family");
     EXPECT(anomaly_target_color_classify_rgb(32, 72, 220) == ANOMALY_TARGET_COLOR_BLUE,
            "target color classify: saturated blue maps to blue family");
-    EXPECT(anomaly_target_color_classify_rgb(245, 170, 35) == ANOMALY_TARGET_COLOR_YELLOW_ORANGE,
-           "target color classify: yellow/orange maps to yellow-orange family");
+    EXPECT(anomaly_target_color_classify_rgb(245, 220, 35) == ANOMALY_TARGET_COLOR_YELLOW,
+           "target color classify: clear yellow maps to yellow family");
+    EXPECT(anomaly_target_color_classify_rgb(238, 132, 32) == ANOMALY_TARGET_COLOR_ORANGE,
+           "target color classify: clear orange maps to orange family");
+    EXPECT(anomaly_target_color_classify_rgb(175, 63, 38) == ANOMALY_TARGET_COLOR_ORANGE,
+           "target color classify: encoded orange bottle maps to orange family");
     EXPECT(anomaly_target_color_classify_rgb(35, 150, 55) == ANOMALY_TARGET_COLOR_GREEN,
            "target color classify: green maps to green family");
     EXPECT(anomaly_target_color_classify_rgb(18, 18, 18) == ANOMALY_TARGET_COLOR_BLACK,
            "target color classify: dark neutral maps to black family");
     EXPECT(anomaly_target_color_classify_rgb(238, 238, 232) == ANOMALY_TARGET_COLOR_WHITE,
            "target color classify: bright neutral maps to white family");
-    EXPECT(anomaly_target_color_classify_rgb(205, 144, 102) == ANOMALY_TARGET_COLOR_SKIN,
-           "target color classify: skin-tone RGB maps to skin family");
+    EXPECT(anomaly_target_color_classify_rgb(128, 128, 124) == ANOMALY_TARGET_COLOR_GREY,
+           "target color classify: medium neutral maps to grey family");
+    EXPECT(anomaly_target_color_classify_rgb(130, 76, 35) == ANOMALY_TARGET_COLOR_BROWN,
+           "target color classify: clear brown maps to brown family");
+    EXPECT(anomaly_target_color_classify_rgb(238, 104, 170) == ANOMALY_TARGET_COLOR_PINK,
+           "target color classify: clear pink maps to pink family");
+    EXPECT(anomaly_target_color_classify_rgb(128, 58, 178) == ANOMALY_TARGET_COLOR_PURPLE,
+           "target color classify: clear purple maps to purple family");
+    EXPECT(anomaly_target_color_classify_rgb(92, 60, 180) == ANOMALY_TARGET_COLOR_PURPLE,
+           "target color classify: blue-purple shirt maps to purple family");
+    EXPECT(anomaly_target_color_classify_rgb(168, 52, 145) == ANOMALY_TARGET_COLOR_PURPLE,
+           "target color classify: reddish-purple shirt maps to purple family");
+    EXPECT(anomaly_target_color_classify_rgb(72, 150, 72) == ANOMALY_TARGET_COLOR_GREEN,
+           "target color classify: yellow-green fabric maps to green family");
+    EXPECT(anomaly_target_color_classify_rgb(220, 76, 44) == ANOMALY_TARGET_COLOR_ORANGE,
+           "target color classify: red-orange fabric maps to orange family");
+    EXPECT(anomaly_target_color_classify_rgb(205, 144, 102) == ANOMALY_TARGET_COLOR_NONE,
+           "target color classify: skin-like RGB is treated as ambiguous");
+    EXPECT(anomaly_target_color_classify_rgb(190, 130, 85) == ANOMALY_TARGET_COLOR_NONE,
+           "target color classify: brown-orange boundary is treated as ambiguous");
     EXPECT(anomaly_target_color_classify_rgb(112, 110, 96) == ANOMALY_TARGET_COLOR_NONE,
            "target color classify: muted background maps to no target family");
 }
@@ -18285,7 +18445,7 @@ static void test_target_color_detector_score_boosts_distinct_nearby_families(voi
             42.0f);
     anomaly_target_color_component_score_t three =
         anomaly_target_color_score_component(
-            ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+            ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_BLUE,
             27,
             27,
             0.54f,
@@ -18303,6 +18463,8 @@ static void test_target_color_detector_score_boosts_distinct_nearby_families(voi
            "target color count: one bit counts once");
     EXPECT(anomaly_target_color_count_families(ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_RED) == 1,
            "target color count: same-family repeats do not multiply");
+    EXPECT(anomaly_target_color_count_families(ANOMALY_TARGET_COLOR_ALL) == 11,
+           "target color count: all supported color families are represented");
 }
 
 static void test_target_color_detector_no_selection_is_quiet(void) {
@@ -18396,17 +18558,20 @@ static void test_target_color_detector_absent_selected_color_is_quiet(void) {
     free(rgba);
 }
 
-static void test_target_color_detector_detects_blue_and_yellow_blobs_on_muted_backgrounds(void) {
+static void test_target_color_detector_detects_blue_yellow_and_orange_blobs_on_muted_backgrounds(void) {
     const int W = 72;
     const int H = 72;
     uint8_t *blue = make_gray_frame(W, H, 116);
     uint8_t *yellow = make_gray_frame(W, H, 102);
+    uint8_t *orange = make_gray_frame(W, H, 102);
     fill_rect(blue, W * 4, 28, 28, 40, 40, 32, 72, 220);
-    fill_rect(yellow, W * 4, 28, 28, 40, 40, 245, 170, 35);
+    fill_rect(yellow, W * 4, 28, 28, 40, 40, 245, 220, 35);
+    fill_rect(orange, W * 4, 28, 28, 40, 40, 238, 132, 32);
 
     anomaly_target_color_scratch_t scratch;
     anomaly_target_color_result_t blue_result;
     anomaly_target_color_result_t yellow_result;
+    anomaly_target_color_result_t orange_result;
     anomaly_target_color_scratch_init(&scratch);
 
     EXPECT(anomaly_target_color_detect_rgba(
@@ -18417,15 +18582,23 @@ static void test_target_color_detector_detects_blue_and_yellow_blobs_on_muted_ba
            "target color detect: selected-blue fixture publishes one blue ROI");
 
     EXPECT(anomaly_target_color_detect_rgba(
-               yellow, W * 4, W, H, ANOMALY_TARGET_COLOR_YELLOW_ORANGE, &scratch, &yellow_result),
+               yellow, W * 4, W, H, ANOMALY_TARGET_COLOR_YELLOW, &scratch, &yellow_result),
            "target color detect: selected-yellow fixture succeeds");
     EXPECT(yellow_result.roi_count == 1 &&
-           yellow_result.rois[0].family_mask == ANOMALY_TARGET_COLOR_YELLOW_ORANGE,
-           "target color detect: selected-yellow fixture publishes one yellow/orange ROI");
+           yellow_result.rois[0].family_mask == ANOMALY_TARGET_COLOR_YELLOW,
+           "target color detect: selected-yellow fixture publishes one yellow ROI");
+
+    EXPECT(anomaly_target_color_detect_rgba(
+               orange, W * 4, W, H, ANOMALY_TARGET_COLOR_ORANGE, &scratch, &orange_result),
+           "target color detect: selected-orange fixture succeeds");
+    EXPECT(orange_result.roi_count == 1 &&
+           orange_result.rois[0].family_mask == ANOMALY_TARGET_COLOR_ORANGE,
+           "target color detect: selected-orange fixture publishes one orange ROI");
 
     anomaly_target_color_scratch_cleanup(&scratch);
     free(blue);
     free(yellow);
+    free(orange);
 }
 
 static void test_target_color_detector_broad_common_regions_do_not_explode_rois(void) {
@@ -18434,7 +18607,7 @@ static void test_target_color_detector_broad_common_regions_do_not_explode_rois(
     uint8_t *rgba = make_gray_frame(W, H, 88);
     fill_rect(rgba, W * 4, 0, 0, W, 32, 236, 236, 232);
     fill_rect(rgba, W * 4, 0, 32, W, 64, 18, 18, 18);
-    fill_rect(rgba, W * 4, 0, 64, W, H, 205, 144, 102);
+    fill_rect(rgba, W * 4, 0, 64, W, H, 130, 76, 35);
 
     anomaly_target_color_scratch_t scratch;
     anomaly_target_color_result_t result;
@@ -18445,7 +18618,7 @@ static void test_target_color_detector_broad_common_regions_do_not_explode_rois(
                W * 4,
                W,
                H,
-               ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+               ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_BROWN,
                &scratch,
                &result),
            "target color detect: broad common-color fixture succeeds");
@@ -18550,7 +18723,7 @@ static void test_target_color_detector_clustered_multiple_families_score_higher(
     fill_rect(one_rgba, W * 4, 32, 32, 40, 40, 20, 20, 18);
     fill_rect(three_rgba, W * 4, 30, 32, 38, 40, 20, 20, 18);
     fill_rect(three_rgba, W * 4, 38, 32, 46, 40, 238, 238, 232);
-    fill_rect(three_rgba, W * 4, 34, 40, 42, 48, 205, 144, 102);
+    fill_rect(three_rgba, W * 4, 34, 40, 42, 48, 32, 72, 220);
 
     anomaly_target_color_scratch_t scratch;
     anomaly_target_color_result_t one;
@@ -18564,7 +18737,7 @@ static void test_target_color_detector_clustered_multiple_families_score_higher(
         W * 4,
         W,
         H,
-        ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+        ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_BLUE,
         &scratch,
         &one);
     bool ok_three = anomaly_target_color_detect_rgba(
@@ -18572,7 +18745,7 @@ static void test_target_color_detector_clustered_multiple_families_score_higher(
         W * 4,
         W,
         H,
-        ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_SKIN,
+        ANOMALY_TARGET_COLOR_BLACK | ANOMALY_TARGET_COLOR_WHITE | ANOMALY_TARGET_COLOR_BLUE,
         &scratch,
         &three);
 
@@ -18625,6 +18798,53 @@ static void test_process_frame_target_color_mask_publishes_standalone_roi(void) 
 
     anomaly_state_cleanup(&st);
     free(rgba);
+}
+
+static void test_process_frame_target_color_mask_refreshes_on_target_only_rescan(void) {
+    const int W = 160;
+    const int H = 120;
+    uint8_t *frame1 = make_gray_frame(W, H, 94);
+    uint8_t *frame2 = make_gray_frame(W, H, 94);
+    stamp_texture_field(frame1, W * 4, W, H, 0);
+    stamp_texture_field(frame2, W * 4, W, H, 0);
+    fill_rect(frame1, W * 4, 68, 52, 82, 66, 230, 30, 25);
+    fill_rect(frame2, W * 4, 102, 52, 116, 66, 230, 30, 25);
+
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR);
+    cfg.color_frontend_mode = ANOMALY_COLOR_FRONTEND_FRESH_RGBA;
+    cfg.score_threshold = 15.0f;
+    cfg.min_hits = 1;
+    cfg.frame_stride = 10;
+    cfg.target_color_family_mask = ANOMALY_TARGET_COLOR_RED;
+
+    anomaly_result_t r1;
+    int b1 = anomaly_process_frame(&st, &cfg, frame1, W * 4, W, H, 0, &r1);
+    EXPECT(b1 > 0,
+           "target color target-only integration: first full frame publishes selected-color ROI");
+
+    anomaly_result_t r2;
+    int b2 = anomaly_process_frame(&st, &cfg, frame2, W * 4, W, H, 33333, &r2);
+    EXPECT(r2.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "target color target-only integration: follow-up frame uses target-only cadence");
+    EXPECT(b2 > 0,
+           "target color target-only integration: target-only frame publishes selected-color ROI");
+    if (b2 > 0) {
+        bool found_moved_box = false;
+        for (int bi = 0; bi < b2 && bi < ANOMALY_MAX_BOXES_PER_FRAME; bi++) {
+            float cx = (r2.boxes[bi].left_norm + r2.boxes[bi].right_norm) * 0.5f;
+            if (fabsf(cx - (109.0f / 160.0f)) < 0.12f) {
+                found_moved_box = true;
+            }
+        }
+        EXPECT(found_moved_box,
+               "target color target-only integration: target-only ROI follows moved selected-color blob");
+    }
+
+    anomaly_state_cleanup(&st);
+    free(frame1);
+    free(frame2);
 }
 
 static anomaly_thermal_shadow_shape_t valid_thermal_shadow_shape(void) {
@@ -20292,8 +20512,17 @@ static void test_scan_planner_default_ops_contract(void) {
     state.target_tracks[0].active = true;
     state.target_tracks[0].hit_count = 2;
     state.target_tracks[0].confidence = 0.72f;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_MOTION;
     EXPECT(ops->target_revisit_track_count(&state) == 1,
            "scan planner default ops: target revisit count forwards active track count");
+    EXPECT(anomaly_target_revisit_color_track_count(&state) == 0,
+           "scan planner default ops: non-color revisit track is not a color target lock");
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[0].publish_confirmed = true;
+    EXPECT(anomaly_target_revisit_color_track_count(&state) == 1,
+           "scan planner default ops: color revisit count identifies acquired color target");
+    EXPECT(anomaly_target_revisit_confirmed_color_track_count(&state, 3) == 0,
+           "scan planner default ops: min-hit-aware color count waits for configured hits");
 
     bool has_track_risk = false;
     bool has_weak_lock = false;
@@ -20315,24 +20544,132 @@ static anomaly_registration_model_t scan_planner_identity_registration(void) {
     return model;
 }
 
+static void scan_planner_configure_prev_lookup_roi(
+        anomaly_roi_state_t *prev,
+        uint8_t             *valid_mask,
+        uint8_t             *coverage_age) {
+    prev->valid = true;
+    prev->roi_x0 = 0;
+    prev->roi_y0 = 0;
+    prev->roi_x1 = 40;
+    prev->roi_y1 = 40;
+    prev->width = 4;
+    prev->height = 4;
+    prev->sample_step = 10;
+    prev->valid_mask = valid_mask;
+    prev->coverage_age = coverage_age;
+    memset(valid_mask, 1, 16 * sizeof(*valid_mask));
+    memset(coverage_age, 0, 16 * sizeof(*coverage_age));
+}
+
 static anomaly_roi_state_t scan_planner_prev_lookup_roi(
         uint8_t *valid_mask,
         uint8_t *coverage_age) {
     anomaly_roi_state_t prev;
     memset(&prev, 0, sizeof(prev));
-    prev.valid = true;
-    prev.roi_x0 = 0;
-    prev.roi_y0 = 0;
-    prev.roi_x1 = 40;
-    prev.roi_y1 = 40;
-    prev.width = 4;
-    prev.height = 4;
-    prev.sample_step = 10;
-    prev.valid_mask = valid_mask;
-    prev.coverage_age = coverage_age;
-    memset(valid_mask, 1, 16 * sizeof(*valid_mask));
-    memset(coverage_age, 0, 16 * sizeof(*coverage_age));
+    scan_planner_configure_prev_lookup_roi(&prev, valid_mask, coverage_age);
     return prev;
+}
+
+static void test_scan_planner_selected_target_color_acquires_until_first_color_track(void) {
+    int prev_lookup[16];
+    for (int i = 0; i < 16; i++) prev_lookup[i] = i;
+
+    anomaly_state_t state;
+    anomaly_state_init(&state);
+    EXPECT(anomaly_roi_state_ensure_pixel_capacity(&state.roi_state, 16),
+           "scan planner target color acquisition: test ROI buffers allocate");
+    EXPECT(anomaly_roi_state_ensure_cell_capacity(&state.roi_state, 16),
+           "scan planner target color acquisition: test ROI cell buffers allocate");
+    scan_planner_configure_prev_lookup_roi(
+            &state.roi_state,
+            state.roi_state.valid_mask,
+            state.roi_state.coverage_age);
+    state.roi_state.cell_cols = 4;
+    state.roi_state.cell_rows = 4;
+    state.roi_state.cell_size_px = 10;
+    memset(state.roi_state.cell_summaries,
+           0,
+           16 * sizeof(*state.roi_state.cell_summaries));
+    state.frame_counter = 2;
+    state.last_full_refresh_frame_counter = 1;
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_COLOR | ANOMALY_ALGO_MOTION);
+    cfg.target_color_family_mask = ANOMALY_TARGET_COLOR_ORANGE;
+    cfg.min_hits = 2;
+    cfg.stride_mode = ANOMALY_STRIDE_MODE_FIXED;
+    cfg.frame_stride = 30;
+
+    anomaly_registration_model_t model = scan_planner_identity_registration();
+    anomaly_scan_planner_prev_lookup_summary_t summary = {
+        .carried_samples = 16,
+        .newly_exposed_samples = 0,
+        .stale_samples = 0,
+    };
+    anomaly_scan_planner_input_t input = {
+        .state = &state,
+        .cfg = &cfg,
+        .registration = &model,
+        .ops = anomaly_scan_planner_default_ops(),
+        .frame_width = 40,
+        .frame_height = 40,
+        .roi_x0 = 0,
+        .roi_y0 = 0,
+        .roi_x1 = 40,
+        .roi_y1 = 40,
+        .sample_step = 10,
+        .sampled_width = 4,
+        .sampled_height = 4,
+        .fixed_full_refresh_cadence_due = false,
+        .scene_discontinuity = false,
+        .base_registration_health = ANOMALY_REG_HEALTH_HEALTHY,
+        .color_algorithm_configured = true,
+        .color_stride_hold_eligible = true,
+        .prev_sample_lookup = prev_lookup,
+        .prev_lookup_summary = &summary,
+        .adaptive = {
+            .adaptive_enabled = false,
+            .fixed_frame_stride = 30,
+        },
+        .selective_refresh = {
+            .allow_sparse_fallback = true,
+        },
+    };
+    anomaly_scan_planner_output_t output;
+    bool ok = anomaly_scan_planner_plan(&input, &output);
+
+    EXPECT(ok, "scan planner target color acquisition: planner call succeeds");
+    EXPECT(output.rescan_mode == ANOMALY_RESCAN_MODE_FULL,
+           "scan planner target color acquisition: selected color forces full scan before first color track");
+    EXPECT((output.scan_plan.reason_flags & ANOMALY_SCAN_REASON_TARGET_COLOR_ACQUIRE) != 0u,
+           "scan planner target color acquisition: full scan records acquisition reason before first color track");
+
+    state.target_tracks[0].active = true;
+    state.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    state.target_tracks[0].hit_count = 1;
+    state.target_tracks[0].confidence = 0.72f;
+    state.target_tracks[0].publish_confirmed = true;
+    state.target_tracks[0].center_x_norm = 0.50f;
+    state.target_tracks[0].center_y_norm = 0.50f;
+    state.target_tracks[0].half_w_norm = 0.03f;
+    state.target_tracks[0].half_h_norm = 0.03f;
+    state.target_tracks[0].support_radius_norm = 0.12f;
+    anomaly_target_revisit_annotate_roi_cells(&state.roi_state, &state, cfg.min_hits);
+
+    memset(&output, 0, sizeof(output));
+    ok = anomaly_scan_planner_plan(&input, &output);
+
+    EXPECT(ok, "scan planner target color acquisition: planner call succeeds with provisional track");
+    EXPECT(output.scan_plan.target_revisit_track_count == 1,
+           "scan planner target color acquisition: provisional color track is still visible to planner");
+    EXPECT(anomaly_target_revisit_confirmed_color_track_count(&state, cfg.min_hits) == 0,
+           "scan planner target color acquisition: one-hit color track is not an acquired lock");
+    EXPECT(output.rescan_mode == ANOMALY_RESCAN_MODE_TARGET_ONLY,
+           "scan planner target color acquisition: provisional color track uses target-only confirmation");
+    EXPECT((output.scan_plan.reason_flags & ANOMALY_SCAN_REASON_TARGET_COLOR_ACQUIRE) == 0u,
+           "scan planner target color acquisition: provisional color track clears full acquisition reason");
+
+    anomaly_state_cleanup(&state);
 }
 
 static void test_scan_planner_prev_sample_lookup_invalid_input(void) {
@@ -21299,12 +21636,13 @@ int main(void) {
     test_target_color_detector_no_selection_is_quiet();
     test_target_color_detector_detects_selected_red_blob();
     test_target_color_detector_absent_selected_color_is_quiet();
-    test_target_color_detector_detects_blue_and_yellow_blobs_on_muted_backgrounds();
+    test_target_color_detector_detects_blue_yellow_and_orange_blobs_on_muted_backgrounds();
     test_target_color_detector_broad_common_regions_do_not_explode_rois();
     test_target_color_detector_broad_green_forest_is_bounded_without_subject();
     test_target_color_detector_lime_subject_in_green_forest_stays_bounded();
     test_target_color_detector_clustered_multiple_families_score_higher();
     test_process_frame_target_color_mask_publishes_standalone_roi();
+    test_process_frame_target_color_mask_refreshes_on_target_only_rescan();
 
     test_color_candidate_target_observation_conversion();
     test_thermal_candidate_target_observation_conversion();
@@ -21328,8 +21666,13 @@ int main(void) {
     test_detector_facade_runtime_budget_render_queue_hard_cap();
     test_detector_facade_runtime_budget_should_trim_render_queue();
     test_detector_facade_runtime_budget_should_wait_for_local_ad_buffer();
+    test_detector_facade_runtime_budget_local_ad_render_latency_target();
+    test_detector_facade_runtime_budget_local_ad_buffer_latency_target();
+    test_detector_facade_runtime_budget_ad_worker_start_gate();
+    test_detector_facade_runtime_budget_local_ad_annotation_ordinal();
     test_detector_facade_runtime_budget_local_ad_startup_preroll();
     test_detector_facade_runtime_budget_local_ad_cadence();
+    test_detector_facade_runtime_budget_local_ad_target_eval_skip();
     test_detector_facade_runtime_budget_should_wait_for_local_ad_processing();
     test_detector_facade_runtime_budget_queue_tail_index();
     test_detector_facade_runtime_budget_queue_offset_index();
@@ -21374,6 +21717,7 @@ int main(void) {
     test_runtime_pressure_bypass_decision();
     test_runtime_pressure_bypass_decision_for_source();
     test_runtime_pressure_backlog_frame_capacity();
+    test_runtime_pressure_live_ad_backlog_frame_capacity();
     test_runtime_pressure_oldest_drop_count_for_admission();
     test_runtime_pressure_queue_storage_capacity();
     test_runtime_pressure_mode_names();
@@ -21501,7 +21845,7 @@ int main(void) {
     test_config_transition_display_only();
     test_config_transition_debug_only();
     test_config_transition_live_update();
-    test_config_transition_target_color_mask_is_live_update();
+    test_config_transition_target_color_mask_resets_detector_state();
     test_config_transition_reset_sensitive();
     test_config_transition_reset_wins();
     test_config_transition_null_requires_reset();
@@ -21567,6 +21911,7 @@ int main(void) {
     test_large_motion_discontinuity_clears_rois();
     test_scan_planner_roi_grid_cell_span_contract();
     test_scan_planner_default_ops_contract();
+    test_scan_planner_selected_target_color_acquires_until_first_color_track();
     test_scan_planner_prev_sample_lookup_invalid_input();
     test_scan_planner_prev_sample_lookup_identity_mapping();
     test_scan_planner_prev_sample_lookup_invalid_and_stale_samples();

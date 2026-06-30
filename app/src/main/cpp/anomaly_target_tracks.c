@@ -296,23 +296,41 @@ void anomaly_target_tracks_predict_with_registration(
     for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
         anomaly_target_track_t *track = &state->target_tracks[ti];
         if (!track->active) continue;
+        const float before_x = track->center_x_norm;
+        const float before_y = track->center_y_norm;
+        track->last_prediction_valid = false;
+        track->last_prediction_local_residual_applied = false;
+        track->last_prediction_inverse_failed = false;
+        track->last_prediction_before_x_norm = before_x;
+        track->last_prediction_before_y_norm = before_y;
+        track->last_prediction_registration_x_norm = before_x;
+        track->last_prediction_registration_y_norm = before_y;
+        track->last_prediction_after_x_norm = before_x;
+        track->last_prediction_after_y_norm = before_y;
         float nx = 0.0f;
         float ny = 0.0f;
         if (!prediction->invert_point(
                     prediction->registration,
-                    track->center_x_norm,
-                    track->center_y_norm,
+                    before_x,
+                    before_y,
                     &nx,
                     &ny)) {
             track->forced_revisit = true;
+            track->last_prediction_inverse_failed = true;
             continue;
         }
+        track->last_prediction_valid = true;
+        track->last_prediction_registration_x_norm = nx;
+        track->last_prediction_registration_y_norm = ny;
         if (anomaly_target_tracks_should_apply_local_residual(track, prediction)) {
             nx -= track->last_movement_dx_px / (float)(prediction->frame_width - 1);
             ny -= track->last_movement_dy_px / (float)(prediction->frame_height - 1);
+            track->last_prediction_local_residual_applied = true;
         }
         track->center_x_norm = clamp01f(nx);
         track->center_y_norm = clamp01f(ny);
+        track->last_prediction_after_x_norm = track->center_x_norm;
+        track->last_prediction_after_y_norm = track->center_y_norm;
         track->last_registration_quality = prediction->quality;
         if (!track->fresh_observation) {
             track->forced_revisit = true;

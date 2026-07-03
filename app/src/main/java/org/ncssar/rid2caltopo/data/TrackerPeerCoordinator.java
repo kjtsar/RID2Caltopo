@@ -130,6 +130,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     private volatile long reconnectScheduledAtMs;
     private volatile long reconnectTargetAtMs;
     private volatile boolean reconnectPending;
+    private volatile boolean suppressScheduledHeartbeatRequestsForTesting;
 
     private TrackerPeerCoordinator() {
     }
@@ -188,6 +189,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         this.reconnectScheduledAtMs = 0L;
         this.reconnectTargetAtMs = 0L;
         this.reconnectPending = false;
+        this.suppressScheduledHeartbeatRequestsForTesting = false;
         this.intentionallyParked = false;
         CTInfo(TAG, String.format(Locale.US,
                 "start(): wsUrl='%s' token=%s %s",
@@ -760,6 +762,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
 
     private void onTransportOpen(boolean reconnecting) {
         reconnectPending = false;
+        suppressScheduledHeartbeatRequestsForTesting = false;
         nextReconnectDelayMs = RECONNECT_BASE_DELAY_MS;
         lastReconnectCause = reconnecting ? "reconnected" : "connected";
         resetHeartbeatStateForNewTransport();
@@ -849,6 +852,15 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private void sendHeartbeat() {
+        sendHeartbeat(false);
+    }
+
+    private void sendScheduledHeartbeat() {
+        sendHeartbeat(true);
+    }
+
+    private void sendHeartbeat(boolean fromScheduler) {
+        if (fromScheduler && suppressScheduledHeartbeatRequestsForTesting) return;
         JSONObject jo = new JSONObject();
         try {
             heartbeatSendQueued = false;
@@ -886,6 +898,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
     }
 
     private void requestHeartbeat(@NonNull String reason) {
+        if (suppressScheduledHeartbeatRequestsForTesting) return;
         if (!started || !isConnected()) return;
         if ("position".equals(reason) && isIdleEligible()) return;
         if (heartbeatSendQueued) return;
@@ -900,7 +913,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
             CTDebug(TAG, String.format(Locale.US,
                     "requestHeartbeat(): coalescing reason=%s delayMs=%d", reason, delayMs));
         }
-        heartbeatCoalesceTimer.start(this::sendHeartbeat, delayMs, 0L);
+        heartbeatCoalesceTimer.start(this::sendScheduledHeartbeat, delayMs, 0L);
     }
 
     private void sendFirstSighting(@NonNull PendingDrone pending) {
@@ -1335,6 +1348,12 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         idleParkTimer.stop();
     }
 
+    void stopBackgroundTimersAndResetHeartbeatStateForTesting() {
+        stopBackgroundTimersForTesting();
+        suppressScheduledHeartbeatRequestsForTesting = true;
+        resetHeartbeatStateForNewTransport();
+    }
+
     @NonNull
     String getLastReconnectCauseForTesting() {
         return lastReconnectCause;
@@ -1533,6 +1552,7 @@ public final class TrackerPeerCoordinator implements PeerCoordinator {
         INSTANCE.forcedReconnectCount = 0L;
         INSTANCE.lastOwnerActivityAtMs = 0L;
         INSTANCE.intentionallyParked = false;
+        INSTANCE.suppressScheduledHeartbeatRequestsForTesting = false;
         INSTANCE.lastOutboundJsonForTesting = null;
         INSTANCE.lastWaypointRemoteIdForTesting = null;
         transportFactory = OkHttpTrackerCoordinationTransport::new;

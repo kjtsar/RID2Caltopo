@@ -842,7 +842,7 @@ class TrackerPeerCoordinatorTest {
         }
 
         transport.open()
-        coordinator.stopBackgroundTimersForTesting()
+        coordinator.stopBackgroundTimersAndResetHeartbeatStateForTesting()
         coordinator.handleHelloAckForTesting()
         clock.advanceBy(10_001L)
         coordinator.checkAckLivenessForTesting()

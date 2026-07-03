@@ -1,15 +1,41 @@
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.protobuf")
     id("com.google.gms.google-services")
     id("com.google.firebase.crashlytics")
     id("jacoco")
 }
 
 def generatedReleaseNotesAssetsDir = layout.buildDirectory.dir("generated/release-notes/assets")
+def generatedAppConfigProtoDir = layout.buildDirectory.dir("generated/source/proto/main/java")
+def runProcess = { File workingDirectory, List command, Map environmentOverrides = [:], boolean ignoreExitValue = false ->
+    def stdout = new ByteArrayOutputStream()
+    def stderr = new ByteArrayOutputStream()
+    def processBuilder = new ProcessBuilder(command.collect { it.toString() })
+            .directory(workingDirectory)
+    processBuilder.environment().putAll(environmentOverrides.collectEntries { key, value ->
+        [(key.toString()): value.toString()]
+    })
+
+    def process = processBuilder.start()
+    def stdoutThread = Thread.start { stdout << process.inputStream }
+    def stderrThread = Thread.start { stderr << process.errorStream }
+    def exitValue = process.waitFor()
+    stdoutThread.join()
+    stderrThread.join()
+
+    if (!ignoreExitValue && exitValue != 0) {
+        throw new GradleException("Command failed with exit code ${exitValue}: ${command.join(' ')}\n${stderr.toString('UTF-8')}")
+    }
+
+    return [
+            exitValue: exitValue,
+            stdout   : stdout.toString("UTF-8"),
+            stderr   : stderr.toString("UTF-8")
+    ]
+}
+
 def generateReleaseNotes = tasks.register("generateReleaseNotes") {
     def outputFile = generatedReleaseNotesAssetsDir.map { it.file("release_notes.txt") }
     outputs.file(outputFile)
@@ -19,16 +45,15 @@ def generateReleaseNotes = tasks.register("generateReleaseNotes") {
         def releaseNotesFile = outputFile.get().asFile
         releaseNotesFile.parentFile.mkdirs()
 
-        def stdout = new ByteArrayOutputStream()
-        def stderr = new ByteArrayOutputStream()
-        def result = exec {
-            commandLine "git", "log", "-10", "--pretty=format:%h%x09%ad%x09%B%x1E", "--date=format:%Y-%m-%d %H:%M:%S %z"
-            standardOutput = stdout
-            errorOutput = stderr
-            ignoreExitValue = true
-        }
+        def result = runProcess(rootDir, [
+                "git",
+                "log",
+                "-10",
+                "--pretty=format:%h%x09%ad%x09%B%x1E",
+                "--date=format:%Y-%m-%d %H:%M:%S %z"
+        ], [:], true)
 
-        def notes = result.exitValue == 0 ? stdout.toString("UTF-8").trim() : ""
+        def notes = result.exitValue == 0 ? result.stdout.trim() : ""
         if (notes.isEmpty()) {
             notes = "Release notes unavailable for this build."
         }
@@ -86,6 +111,87 @@ def pathWithHostToolDirs = {
     return pathEntries.findAll { it != null && !it.trim().isEmpty() }.unique().join(File.pathSeparator)
 }
 
+def protobufProtocConfiguration = configurations.create("protobufProtocExecutable") {
+    visible = false
+    transitive = false
+    canBeConsumed = false
+    canBeResolved = true
+}
+def protobufProtocClassifier = {
+    def osName = System.getProperty("os.name").toLowerCase(Locale.US)
+    def osClassifier
+    if (osName.contains("mac") || osName.contains("darwin")) {
+        osClassifier = "osx"
+    } else if (osName.contains("windows")) {
+        osClassifier = "windows"
+    } else if (osName.contains("linux")) {
+        osClassifier = "linux"
+    } else {
+        throw new GradleException("Unsupported host OS for protoc: ${System.getProperty("os.name")}")
+    }
+
+    def archName = System.getProperty("os.arch").toLowerCase(Locale.US)
+    def archClassifier
+    if (archName in ["aarch64", "arm64"]) {
+        archClassifier = "aarch_64"
+    } else if (archName in ["x86_64", "amd64"]) {
+        archClassifier = "x86_64"
+    } else if (archName in ["x86", "i386", "i686"]) {
+        archClassifier = "x86_32"
+    } else {
+        throw new GradleException("Unsupported host architecture for protoc: ${System.getProperty("os.arch")}")
+    }
+
+    return "${osClassifier}-${archClassifier}"
+}()
+dependencies.add(protobufProtocConfiguration.name, "com.google.protobuf:protoc:3.25.3:${protobufProtocClassifier}@exe")
+
+def appConfigProtoSourceDir = file("src/main/proto")
+def appConfigProtoSources = fileTree(appConfigProtoSourceDir) {
+    include "**/*.proto"
+}
+def generateAppConfigProto = tasks.register("generateAppConfigProto") {
+    inputs.files(appConfigProtoSources)
+    outputs.dir(generatedAppConfigProtoDir)
+
+    doLast {
+        def protoFiles = appConfigProtoSources.files.sort { it.absolutePath }
+        if (protoFiles.isEmpty()) {
+            throw new GradleException("No proto files found in ${appConfigProtoSourceDir}")
+        }
+
+        def outputDir = generatedAppConfigProtoDir.get().asFile
+        delete(outputDir)
+        outputDir.mkdirs()
+
+        def protocExecutable = protobufProtocConfiguration.singleFile
+        if (!protocExecutable.canExecute()) {
+            protocExecutable.setExecutable(true)
+        }
+
+        runProcess(projectDir, [
+                protocExecutable.absolutePath,
+                "-I",
+                appConfigProtoSourceDir.absolutePath,
+                "--java_out=lite:${outputDir.absolutePath}"
+        ] + protoFiles.collect { it.absolutePath })
+    }
+}
+
+tasks.register("generateDebugProto") {
+    dependsOn(generateAppConfigProto)
+}
+
+tasks.register("generateReleaseProto") {
+    dependsOn(generateAppConfigProto)
+}
+
+tasks.matching { task ->
+    task.name.startsWith("compile") && (task.name.endsWith("Kotlin") || task.name.endsWith("JavaWithJavac"))
+}.configureEach {
+    dependsOn(generateAppConfigProto)
+}
+
 android {
     namespace = "org.ncssar.rid2caltopo"
     compileSdk = 36
@@ -137,12 +243,13 @@ android {
     externalNativeBuild {
         cmake {
             path "src/main/cpp/CMakeLists.txt"
-            version androidCmakeVersion
+            version = androidCmakeVersion
         }
     }
     sourceSets {
         main {
             jniLibs.srcDirs = ['src/main/jniLibs']
+            java.srcDirs += [generatedAppConfigProtoDir.get().asFile]
         }
     }
 
@@ -153,7 +260,7 @@ android {
             proguardFiles(getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
             signingConfig = signingConfigs.getByName("release")
             firebaseCrashlytics {
-                nativeSymbolUploadEnabled true
+                nativeSymbolUploadEnabled = true
             }
             externalNativeBuild {
                 cmake {
@@ -162,15 +269,16 @@ android {
             }
         }
         debug {
-            testCoverageEnabled true
             firebaseCrashlytics {
-                nativeSymbolUploadEnabled true
+                nativeSymbolUploadEnabled = true
             }
             externalNativeBuild {
                 cmake {
                     arguments "-DANOMALY_DEBUG_TIMING=ON"
                 }
             }
+            enableUnitTestCoverage = true
+            enableAndroidTestCoverage = true
         }
     }
 
@@ -178,11 +286,9 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = '17'
-    }
     buildFeatures {
         compose = true
+        resValues = true
 //        viewBinding = true
     }
     composeOptions {
@@ -209,6 +315,12 @@ android {
                 excludes = ['jdk.internal.*']
             }
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 
@@ -294,21 +406,6 @@ dependencies {
     implementation(libs.paho.mqtt)
 }
 
-protobuf {
-    protoc {
-        artifact = "com.google.protobuf:protoc:3.25.3"
-    }
-    generateProtoTasks {
-        all().each { task ->
-            task.builtins {
-                java {
-                    option "lite"
-                }
-            }
-        }
-    }
-}
-
 jacoco {
     toolVersion = "0.8.12"
 }
@@ -375,18 +472,9 @@ tasks.register("buildAnomalyVideoTest") {
     outputs.file("${rootDir}/tools/anomaly_test/build/target_color_perf_probe")
     doLast {
         def cmake = cmakeExecutable()
-        exec {
-            workingDir rootDir
-            commandLine cmake, "-S", anomalyTestDir.absolutePath, "-B", anomalyTestBuildDir.absolutePath
-        }
-        exec {
-            workingDir rootDir
-            commandLine cmake, "--build", anomalyTestBuildDir.absolutePath, "--target", "anomaly_video_test"
-        }
-        exec {
-            workingDir rootDir
-            commandLine cmake, "--build", anomalyTestBuildDir.absolutePath, "--target", "target_color_perf_probe"
-        }
+        runProcess(rootDir, [cmake, "-S", anomalyTestDir.absolutePath, "-B", anomalyTestBuildDir.absolutePath])
+        runProcess(rootDir, [cmake, "--build", anomalyTestBuildDir.absolutePath, "--target", "anomaly_video_test"])
+        runProcess(rootDir, [cmake, "--build", anomalyTestBuildDir.absolutePath, "--target", "target_color_perf_probe"])
     }
 }
 
@@ -396,19 +484,17 @@ tasks.register("colorRealtimeQualification") {
     dependsOn("buildAnomalyVideoTest")
     outputs.upToDateWhen { false }
     doLast {
-        exec {
-            workingDir rootDir
-            environment "PATH", pathWithHostToolDirs()
-            commandLine "python3",
-                    "tools/anomaly_test/run_color_realtime_qualification.py",
-                    "--binary",
-                    "tools/anomaly_test/build/anomaly_video_test",
-                    "--target-color-perf-probe",
-                    "tools/anomaly_test/build/target_color_perf_probe",
-                    "--output-dir",
-                    "${buildDir}/reports/color-realtime-qualification",
-                    "--fail-on-regression"
-        }
+        runProcess(rootDir, [
+                "python3",
+                "tools/anomaly_test/run_color_realtime_qualification.py",
+                "--binary",
+                "tools/anomaly_test/build/anomaly_video_test",
+                "--target-color-perf-probe",
+                "tools/anomaly_test/build/target_color_perf_probe",
+                "--output-dir",
+                "${buildDir}/reports/color-realtime-qualification",
+                "--fail-on-regression"
+        ], ["PATH": pathWithHostToolDirs()])
     }
 }
 
@@ -454,16 +540,10 @@ tasks.register("trackerCoordinationTests") {
         }
         def releaseCheck = new File(trackerDir, "release_check.sh")
         if (releaseCheck.exists() && releaseCheck.canExecute()) {
-            exec {
-                workingDir trackerDir
-                commandLine "./release_check.sh"
-            }
+            runProcess(trackerDir, ["./release_check.sh"])
             return
         }
         logger.lifecycle("trackerCoordinationTests: ${releaseCheck} not executable; falling back to Python unit tests only")
-        exec {
-            workingDir trackerDir
-            commandLine "python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"
-        }
+        runProcess(trackerDir, ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"])
     }
 }

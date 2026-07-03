@@ -120,11 +120,14 @@
     <string name="generalHelpText">Remote ID signals are very weak and Android devices have limited reception range.
         This app should be paired with an external Bluetooth/Wifi bridge such as the
         &lt;a href=&quot;https://dronescout.co/bridge&quot;&gt;Bluemark DroneScout Bridge&lt;/a&gt; - both ds100 and ds110
-        models have been verified to work with this app.&lt;br&gt;&lt;br&gt;
+        models have been verified to work with this app, though the ds110 runs hotter and the ds100 seems
+        to have better reception for simple BlueTooth signalling.&lt;br&gt;&lt;br&gt;
         Field guideline: keep the tablet or phone running RID2Caltopo within about 10 meters of its paired
         DroneScout Bridge.  If multiple DroneScout Bridges are deployed for the same incident, separate
-        the bridges by at least 200 meters when practical.  Placing several bridges close together can make
-        local Bluetooth congestion worse instead of improving coverage.&lt;br&gt;&lt;br&gt;
+        them by 200 meters or more to keep them out of line of sight of each other.  Placing several
+        bridges close together can make local Bluetooth congestion worse instead of improving coverage.&lt;br&gt;&lt;br&gt;
+        The bridge requires direct line of sight to the drone for optimal signal reception and raising the
+        bridge up higher can help.<br><br>
 	If you want to publish tracks in real-time, this app requires
 	&lt;a href=&quot;https://training.caltopo.com/all_users/team-accounts/teamapi&quot;&gt;Caltopo Teams Credentials&lt;/a&gt;
         to write into your team maps.&lt;br&gt;&lt;br&gt;
@@ -140,7 +143,7 @@
         &lt;a href=&quot;https://github.com/kjtsar/RID2Caltopo/blob/main/README.md&quot;&gt;https://github.com/kjtsar/RID2Caltopo/blob/main/README.md&lt;/a&gt;</string>
     <string name="bluetoothHelp">All devices should be able to receive Bluetooth 4 Legacy Advertising remote ID signals.&lt;br&gt;&lt;br&gt;
         To receive Bluetooth 5 Long Range remote ID signals, the device must support the &quot;Coded Phy&quot; feature and also the &quot;Extended Advertising&quot; feature.&lt;br&gt;&lt;br&gt;
-        See the claimed support for this device for these features in the options menu.&lt;br&gt;&lt;br&gt;
+        See the claimed support for this device for these features in the status menu.&lt;br&gt;&lt;br&gt;
         Please be advised that even with those features supported, the device is not necessarily able to pick up the Long Range signals or it will only do that in limited time intervals.&lt;br&gt;</string>
     <string name="beaconHelp">All devices running Android 6 (Marshmallow) or newer should be able to receive Wi-Fi Beacon remote ID signals.&lt;br&gt;&lt;br&gt;
         The reception rate can vary a lot from one device to another, depending on the HW and SW.&lt;br&gt;&lt;br&gt;

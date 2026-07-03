@@ -33,8 +33,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -48,7 +47,7 @@ import kotlin.math.roundToInt
 fun ScannerScreen(
     onDismiss: () -> Unit,
 ) {
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
     val horizontalScrollState = rememberScrollState()
     val verticalScrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
@@ -173,7 +172,11 @@ fun ScannerScreen(
                     Button(
                         modifier = Modifier.padding(end = 12.dp),
                         onClick = {
-                            clipboard.setText(AnnotatedString(statusText))
+                            coroutineScope.copyPlainTextToClipboard(
+                                clipboard,
+                                "RID2Caltopo status",
+                                statusText
+                            )
                             CaltopoClient.ShowToast("Status copied to clipboard.")
                         }
                     ) {

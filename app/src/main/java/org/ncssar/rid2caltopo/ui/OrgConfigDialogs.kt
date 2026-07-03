@@ -21,9 +21,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -131,7 +130,8 @@ fun OrgConfigExportDialog(
     sourceOrgName: String,
     onUploadRequested: (callback: (Boolean, String, String?) -> Unit) -> Unit
 ) {
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
 
     var step by remember { mutableStateOf<ExportStep>(ExportStep.EnterName) }
 
@@ -210,7 +210,11 @@ fun OrgConfigExportDialog(
                         }
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(onClick = {
-                            clipboard.setText(AnnotatedString(s.token))
+                            coroutineScope.copyPlainTextToClipboard(
+                                clipboard,
+                                "RID2Caltopo org config token",
+                                s.token
+                            )
                         }) {
                             Text("Copy Token")
                         }
@@ -261,7 +265,8 @@ fun FaaConfigExportDialog(
     onDismiss: () -> Unit,
     onUploadRequested: (callback: (Boolean, String, String?) -> Unit) -> Unit
 ) {
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
     var step by remember { mutableStateOf<FaaExportStep>(FaaExportStep.Confirm) }
 
     AlertDialog(
@@ -323,7 +328,11 @@ fun FaaConfigExportDialog(
                         }
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(onClick = {
-                            clipboard.setText(AnnotatedString(s.token))
+                            coroutineScope.copyPlainTextToClipboard(
+                                clipboard,
+                                "RID2Caltopo FAA config token",
+                                s.token
+                            )
                         }) {
                             Text("Copy Token")
                         }
@@ -383,7 +392,8 @@ fun MutualAidExportDialog(
         callback: (Boolean, String, String?) -> Unit
     ) -> Unit
 ) {
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
     val zoneId = remember { ZoneId.systemDefault() }
     val dateFormatter = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd") }
     val timeFormatter = remember { DateTimeFormatter.ofPattern("HH:mm") }
@@ -514,7 +524,15 @@ fun MutualAidExportDialog(
                             )
                         }
                         Spacer(Modifier.height(8.dp))
-                        OutlinedButton(onClick = { clipboard.setText(AnnotatedString(s.token)) }) {
+                        OutlinedButton(
+                            onClick = {
+                                coroutineScope.copyPlainTextToClipboard(
+                                    clipboard,
+                                    "RID2Caltopo mutual aid config token",
+                                    s.token
+                                )
+                            }
+                        ) {
                             Text("Copy Token")
                         }
                     }

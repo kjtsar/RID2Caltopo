@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import re
+import statistics
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,17 @@ TARGET_COLOR_STRESS_CASES = (
     "mottled green plus lime",
 )
 TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO = 8.0
+TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO = 12.0
+TARGET_COLOR_MULTI_FAMILY_CASES = {
+    "broad red green background": 0,
+    "compact red green subject": 1,
+    "broad red green blue background": 0,
+    "compact red green blue subject": 1,
+}
+FULL_SCAN_MAX_P95_MS = 150.0
+FULL_SCAN_MAX_MS = 175.0
+FULL_SCAN_CATASTROPHIC_MAX_MS = 250.0
+FULL_SCAN_MIN_P95_SAMPLES = 20
 TARGET_COLOR_PROBE_RE = re.compile(
     r"^(?P<name>.*?)\s+"
     r"avg_ms=(?P<avg_ms>[0-9.]+)\s+"
@@ -247,6 +259,38 @@ def compact_run(
         if isinstance(candidate_summary, dict)
     ]
     best_realtime_factor = max(realtime_factors) if realtime_factors else 0.0
+    timing_runs = []
+    for repeated_run in repeated_runs or [run]:
+        candidate_summary = repeated_run.get("summary")
+        if not isinstance(candidate_summary, dict):
+            continue
+        stage_timing = candidate_summary.get("stage_timing")
+        if isinstance(stage_timing, dict):
+            timing_runs.append(stage_timing)
+    tail_by_mode: dict[str, object] = {}
+    mode_names = {
+        mode_name
+        for stage_timing in timing_runs
+        for by_mode in [stage_timing.get("by_rescan_mode")]
+        if isinstance(by_mode, dict)
+        for mode_name in by_mode
+    }
+    for mode_name in sorted(mode_names):
+        mode_runs = [
+            by_mode[mode_name]
+            for stage_timing in timing_runs
+            for by_mode in [stage_timing.get("by_rescan_mode")]
+            if isinstance(by_mode, dict) and isinstance(by_mode.get(mode_name), dict)
+        ]
+        p95_values = [float(mode.get("p95_total_ms", 0.0)) for mode in mode_runs]
+        max_values = [float(mode.get("max_total_ms", 0.0)) for mode in mode_runs]
+        tail_by_mode[mode_name] = {
+            "run_count": len(mode_runs),
+            "frame_count": sum(int(mode.get("frame_count", 0)) for mode in mode_runs),
+            "p95_total_ms": statistics.median(p95_values) if p95_values else 0.0,
+            "max_total_ms": statistics.median(max_values) if max_values else 0.0,
+            "worst_max_total_ms": max(max_values, default=0.0),
+        }
     return {
         "candidate_limit": run["candidate_limit"],
         "csv_path": run["csv_path"],
@@ -256,6 +300,11 @@ def compact_run(
         "best_realtime_factor": best_realtime_factor,
         "realtime_factors": realtime_factors,
         "rescan_modes": summary.get("rescan_modes", {}),
+        "stage_timing": summary.get("stage_timing", {}),
+        "tail_timing": {
+            "compiled": bool(timing_runs) and all(bool(timing.get("compiled", False)) for timing in timing_runs),
+            "by_rescan_mode": tail_by_mode,
+        },
         "box_row_count": len(run["signature"]),
     }
 
@@ -286,6 +335,7 @@ def review_precision_recall(score: dict[str, object]) -> tuple[float, float]:
 def parse_target_color_perf_probe_output(output: str) -> dict[str, object]:
     cases: list[dict[str, object]] = []
     baseline_avg_ms: float | None = None
+    baseline_max_ms: float | None = None
     for line in output.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -305,19 +355,26 @@ def parse_target_color_perf_probe_output(output: str) -> dict[str, object]:
         }
         if case["name"] == TARGET_COLOR_BASELINE_CASE:
             baseline_avg_ms = float(case["avg_ms"])
+            baseline_max_ms = float(case["max_ms"])
         cases.append(case)
 
     if baseline_avg_ms is None or baseline_avg_ms <= 0.0:
         raise ValueError(f"target-color perf baseline case missing or zero: {TARGET_COLOR_BASELINE_CASE}")
+    if baseline_max_ms is None or baseline_max_ms <= 0.0:
+        raise ValueError(f"target-color perf baseline max missing or zero: {TARGET_COLOR_BASELINE_CASE}")
 
     for case in cases:
         case["avg_to_baseline_ratio"] = float(case["avg_ms"]) / baseline_avg_ms
+        case["max_to_baseline_ratio"] = float(case["max_ms"]) / baseline_max_ms
 
     return {
         "suite": "target-color-perf-probe",
         "baseline_case": TARGET_COLOR_BASELINE_CASE,
         "baseline_avg_ms": baseline_avg_ms,
+        "baseline_max_ms": baseline_max_ms,
         "max_avg_to_baseline_ratio": TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO,
+        "multi_family_max_to_baseline_ratio": TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO,
+        "multi_family_expected_rois": TARGET_COLOR_MULTI_FAMILY_CASES,
         "stress_cases": list(TARGET_COLOR_STRESS_CASES),
         "cases": cases,
     }
@@ -377,6 +434,7 @@ def manifest_coverage(manifest_path: Path, cases: Iterable[ClipCase]) -> dict[st
 
 def evaluate_gate(report: dict[str, object]) -> GateResult:
     failures: list[str] = []
+    performance_timing_required = bool(report.get("performance_timing_required", False))
     coverage = report.get("manifest_coverage")
     if isinstance(coverage, dict):
         missing = coverage.get("missing_reviewed_excerpt_ids", [])
@@ -418,6 +476,37 @@ def evaluate_gate(report: dict[str, object]) -> GateResult:
                 failures.append(
                     f"{label}: candidate limit 1 realtime {realtime_factor:.3f} below 1.000"
                 )
+            stage_timing = candidate_1.get("tail_timing", candidate_1.get("stage_timing"))
+            if performance_timing_required and (
+                not isinstance(stage_timing, dict) or not bool(stage_timing.get("compiled", False))
+            ):
+                failures.append(f"{label}: optimized stage timing missing")
+            elif performance_timing_required and isinstance(stage_timing, dict):
+                by_mode = stage_timing.get("by_rescan_mode")
+                full = by_mode.get("full") if isinstance(by_mode, dict) else None
+                if not isinstance(full, dict) or int(full.get("frame_count", 0)) <= 0:
+                    failures.append(f"{label}: full-scan timing missing")
+                else:
+                    p95_ms = float(full.get("p95_total_ms", 0.0))
+                    max_ms = float(full.get("max_total_ms", 0.0))
+                    worst_max_ms = float(full.get("worst_max_total_ms", max_ms))
+                    frame_count = int(full.get("frame_count", 0))
+                    if (frame_count >= FULL_SCAN_MIN_P95_SAMPLES and
+                            p95_ms > FULL_SCAN_MAX_P95_MS):
+                        failures.append(
+                            f"{label}: full-scan p95 {p95_ms:.3f} ms "
+                            f"above {FULL_SCAN_MAX_P95_MS:.3f} ms"
+                        )
+                    if max_ms > FULL_SCAN_MAX_MS:
+                        failures.append(
+                            f"{label}: full-scan max {max_ms:.3f} ms "
+                            f"above {FULL_SCAN_MAX_MS:.3f} ms"
+                        )
+                    if worst_max_ms > FULL_SCAN_CATASTROPHIC_MAX_MS:
+                        failures.append(
+                            f"{label}: full-scan worst max {worst_max_ms:.3f} ms "
+                            f"above {FULL_SCAN_CATASTROPHIC_MAX_MS:.3f} ms"
+                        )
 
         if label == "red1-reviewed":
             score = case.get("review_score")
@@ -474,6 +563,31 @@ def evaluate_gate(report: dict[str, object]) -> GateResult:
                         f"target-color-perf: {name} avg {avg_ms:.3f} ms is "
                         f"{ratio:.2f}x baseline, above {TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:.2f}x"
                     )
+            for name, expected_rois in TARGET_COLOR_MULTI_FAMILY_CASES.items():
+                case = by_name.get(name)
+                if case is None:
+                    failures.append(f"target-color-perf: multi-family case missing: {name}")
+                    continue
+                avg_ms = float(case.get("avg_ms", 0.0))
+                avg_ratio = float(case.get("avg_to_baseline_ratio", 0.0))
+                max_ms = float(case.get("max_ms", 0.0))
+                max_ratio = float(case.get("max_to_baseline_ratio", 0.0))
+                roi_count = int(case.get("roi_count", -1))
+                if avg_ratio > TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:
+                    failures.append(
+                        f"target-color-perf: {name} avg {avg_ms:.3f} ms is "
+                        f"{avg_ratio:.2f}x baseline, above {TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:.2f}x"
+                    )
+                if max_ratio > TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO:
+                    failures.append(
+                        f"target-color-perf: {name} max {max_ms:.3f} ms is "
+                        f"{max_ratio:.2f}x baseline max, above "
+                        f"{TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO:.2f}x"
+                    )
+                if roi_count != expected_rois:
+                    failures.append(
+                        f"target-color-perf: {name} produced {roi_count} ROI(s), expected {expected_rois}"
+                    )
 
     return GateResult(not failures, failures)
 
@@ -482,7 +596,8 @@ def run_case(binary: Path, repo_root: Path, case: ClipCase, output_dir: Path) ->
     one_cold = run_harness(binary, repo_root, case, output_dir, 1)
     four = run_harness(binary, repo_root, case, output_dir, 4)
     one_warm = run_harness(binary, repo_root, case, output_dir, 1, run_label="realtime-probe")
-    one_runs = [one_cold, one_warm]
+    one_tail = run_harness(binary, repo_root, case, output_dir, 1, run_label="tail-probe")
+    one_runs = [one_cold, one_warm, one_tail]
     one = select_primary_candidate_run(one_runs)
     one_signature = one["signature"]
     four_signature = four["signature"]
@@ -547,6 +662,7 @@ def main() -> int:
 
     report = {
         "suite": "color-realtime-qualification",
+        "performance_timing_required": True,
         "binary": str(binary.resolve()),
         "target_color_perf": run_target_color_perf_probe(target_color_perf_probe.resolve(), repo_root),
         "manifest_coverage": manifest_coverage(repo_root / COLOR_MANIFEST, CASES),
@@ -575,6 +691,20 @@ def main() -> int:
         assert isinstance(candidate_1, dict)
         print(f"  candidate=1 realtime: {float(candidate_1['realtime_factor']):.2f}x")
         print(f"  candidate=1 box rows: {candidate_1['box_row_count']}")
+        stage_timing = candidate_1.get("tail_timing", candidate_1.get("stage_timing"))
+        if isinstance(stage_timing, dict):
+            by_mode = stage_timing.get("by_rescan_mode")
+            if isinstance(by_mode, dict):
+                for mode_name in ("full", "target_only", "appearance_stride_skip"):
+                    mode_timing = by_mode.get(mode_name)
+                    if not isinstance(mode_timing, dict) or int(mode_timing.get("frame_count", 0)) <= 0:
+                        continue
+                    print(
+                        f"  {mode_name.replace('_', '-')} tail: "
+                        f"p95={float(mode_timing.get('p95_total_ms', 0.0)):.2f} ms "
+                        f"max={float(mode_timing.get('max_total_ms', 0.0)):.2f} ms "
+                        f"frames={int(mode_timing['frame_count'])}"
+                    )
         review_score = case.get("review_score")
         if isinstance(review_score, dict):
             precision, recall = review_precision_recall(review_score)
@@ -592,11 +722,25 @@ def main() -> int:
         perf_cases = target_color_perf.get("cases", [])
         if isinstance(perf_cases, list):
             for case in perf_cases:
-                if not isinstance(case, dict) or case.get("name") not in TARGET_COLOR_STRESS_CASES:
+                if not isinstance(case, dict) or (
+                    case.get("name") not in TARGET_COLOR_STRESS_CASES
+                    and case.get("name") not in TARGET_COLOR_MULTI_FAMILY_CASES
+                ):
+                    continue
+                if case.get("name") in TARGET_COLOR_STRESS_CASES:
+                    print(
+                        f"  {case['name']}: avg={float(case['avg_ms']):.3f} ms "
+                        f"ratio={float(case['avg_to_baseline_ratio']):.2f}x "
+                        f"rois={case['roi_count']}"
+                    )
                     continue
                 print(
                     f"  {case['name']}: avg={float(case['avg_ms']):.3f} ms "
-                    f"ratio={float(case['avg_to_baseline_ratio']):.2f}x "
+                    f"max={float(case['max_ms']):.3f} ms "
+                    f"avg_ratio={float(case['avg_to_baseline_ratio']):.2f}x "
+                    f"max_ratio={float(case['max_to_baseline_ratio']):.2f}x "
+                    f"selected={case['selected_pixel_count']} "
+                    f"components={case['candidate_component_count']} "
                     f"rois={case['roi_count']}"
                 )
     print(f"\nGate passed: {gate.passed}")

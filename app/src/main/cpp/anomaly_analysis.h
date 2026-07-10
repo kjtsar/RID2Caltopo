@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "anomaly_target_color_detector.h"
+#include "anomaly_scene_coverage_scheduler.h"
 #include "anomaly_thermal_state.h"
 
 // ── Algorithm selector bits ────────────────────────────────────────────────
@@ -246,7 +247,7 @@ typedef struct {
     float max_color_score;
 } anomaly_roi_cell_summary_t;
 
-typedef struct {
+typedef struct anomaly_roi_state_t {
     bool  valid;
     int   roi_x0;
     int   roi_y0;
@@ -356,6 +357,7 @@ typedef struct {
     size_t   scratch_color_hist_bins;
     int      color_history_recovery_frames;
     anomaly_roi_state_t roi_state;
+    anomaly_scene_coverage_state_t scene_coverage_shadow;
     anomaly_target_track_t target_tracks[ANOMALY_MAX_TARGET_TRACKS];
     int      next_target_track_id;
     bool     cached_registration_valid;
@@ -1067,7 +1069,7 @@ typedef struct {
     int   layer_class;
 } anomaly_debug_movement_tile_t;
 
-typedef struct {
+typedef struct anomaly_debug_movement_t {
     bool  valid;
     int   mode;
     int   sample_count;
@@ -1220,6 +1222,7 @@ typedef struct {
     anomaly_registration_health_t registration_health;
     anomaly_rescan_mode_t rescan_mode;
     anomaly_scan_plan_t scan_plan;
+    anomaly_scene_coverage_shadow_t scene_coverage_shadow;
     int adaptive_effective_stride;
     int adaptive_stable_frames;
     int adaptive_drop_hold_frames;

@@ -3,6 +3,13 @@ project(anomaly_test C)
 
 set(CMAKE_C_STANDARD 11)
 option(ANOMALY_DEBUG_TIMING "Enable anomaly detector stage timing instrumentation" OFF)
+option(ANOMALY_PERF_QUALIFICATION "Build an optimized, timed performance qualification harness" OFF)
+if(ANOMALY_PERF_QUALIFICATION)
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+        message(FATAL_ERROR "ANOMALY_PERF_QUALIFICATION requires -DCMAKE_BUILD_TYPE=Release")
+    endif()
+    set(ANOMALY_DEBUG_TIMING ON CACHE BOOL "Enable anomaly detector stage timing instrumentation" FORCE)
+endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 add_executable(anomaly_test
@@ -29,6 +36,7 @@ add_executable(anomaly_test
     ../../app/src/main/cpp/anomaly_registration_image.c
     ../../app/src/main/cpp/anomaly_result_builder.c
     ../../app/src/main/cpp/anomaly_scan_planner.c
+    ../../app/src/main/cpp/anomaly_scene_coverage_scheduler.c
     ../../app/src/main/cpp/anomaly_target_observations.c
     ../../app/src/main/cpp/anomaly_target_color_detector.c
     ../../app/src/main/cpp/anomaly_target_revisit.c
@@ -68,6 +76,7 @@ add_executable(anomaly_video_test
     ../../app/src/main/cpp/anomaly_registration_image.c
     ../../app/src/main/cpp/anomaly_result_builder.c
     ../../app/src/main/cpp/anomaly_scan_planner.c
+    ../../app/src/main/cpp/anomaly_scene_coverage_scheduler.c
     ../../app/src/main/cpp/anomaly_target_observations.c
     ../../app/src/main/cpp/anomaly_target_color_detector.c
     ../../app/src/main/cpp/anomaly_target_revisit.c

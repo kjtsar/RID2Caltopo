@@ -197,7 +197,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 6
-    def versionPatch = 9
+    def versionPatch = 10
 
     signingConfigs {
         register("release") {
@@ -212,7 +212,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 93
+        versionCode = 94
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -478,19 +478,46 @@ tasks.register("buildAnomalyVideoTest") {
     }
 }
 
+tasks.register("buildAnomalyVideoPerfTest") {
+    group = "verification"
+    description = "Builds optimized, timed host harnesses for Color AD performance qualification."
+    def anomalyTestDir = file("${rootDir}/tools/anomaly_test")
+    def anomalyPerfBuildDir = file("${rootDir}/tools/anomaly_test/build_perf")
+    inputs.files(fileTree("${rootDir}/tools/anomaly_test") {
+        include("*.c", "*.h", "CMakeLists.txt")
+    })
+    inputs.files(fileTree("${rootDir}/app/src/main/cpp") {
+        include("*.c", "*.h")
+    })
+    outputs.file("${rootDir}/tools/anomaly_test/build_perf/anomaly_video_test")
+    outputs.file("${rootDir}/tools/anomaly_test/build_perf/target_color_perf_probe")
+    doLast {
+        def cmake = cmakeExecutable()
+        runProcess(rootDir, [
+                cmake,
+                "-S", anomalyTestDir.absolutePath,
+                "-B", anomalyPerfBuildDir.absolutePath,
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DANOMALY_PERF_QUALIFICATION=ON"
+        ])
+        runProcess(rootDir, [cmake, "--build", anomalyPerfBuildDir.absolutePath, "--target", "anomaly_video_test"])
+        runProcess(rootDir, [cmake, "--build", anomalyPerfBuildDir.absolutePath, "--target", "target_color_perf_probe"])
+    }
+}
+
 tasks.register("colorRealtimeQualification") {
     group = "verification"
     description = "Runs app-visible Color AD realtime qualification over Red clips."
-    dependsOn("buildAnomalyVideoTest")
+    dependsOn("buildAnomalyVideoPerfTest")
     outputs.upToDateWhen { false }
     doLast {
         runProcess(rootDir, [
                 "python3",
                 "tools/anomaly_test/run_color_realtime_qualification.py",
                 "--binary",
-                "tools/anomaly_test/build/anomaly_video_test",
+                "tools/anomaly_test/build_perf/anomaly_video_test",
                 "--target-color-perf-probe",
-                "tools/anomaly_test/build/target_color_perf_probe",
+                "tools/anomaly_test/build_perf/target_color_perf_probe",
                 "--output-dir",
                 "${buildDir}/reports/color-realtime-qualification",
                 "--fail-on-regression"

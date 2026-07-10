@@ -278,6 +278,13 @@ void anomaly_result_publish_scan_plan(
     result_out->scan_plan = *scan_plan;
 }
 
+void anomaly_result_publish_scene_coverage_shadow(
+        anomaly_result_t *result_out,
+        const anomaly_scene_coverage_shadow_t *scene_coverage_shadow) {
+    if (result_out == NULL || scene_coverage_shadow == NULL) return;
+    result_out->scene_coverage_shadow = *scene_coverage_shadow;
+}
+
 void anomaly_result_publish_rescan_mode(
         anomaly_result_t      *result_out,
         anomaly_rescan_mode_t rescan_mode) {

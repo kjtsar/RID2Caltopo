@@ -228,6 +228,26 @@ python3 tools/anomaly_test/run_focused_registration_experiments.py \
 Open any generated `*_summary.json` and inspect the `stage_timing` block to
 compare where runtime is going across the four focused replays.
 
+### Scene-coverage shadow evaluation
+
+Add `--scene-coverage-shadow-jsonl <file>` to an app-parity replay to record the
+shadow scheduler mask, authoritative rescan mode, and raw detector boxes for
+each analyzed frame. Evaluate that evidence with:
+
+```sh
+python3 tools/anomaly_test/analyze_scene_coverage_shadow.py \
+  /tmp/red-shadow.jsonl \
+  --strict \
+  --output /tmp/red-shadow-report.json
+```
+
+Coverage is defined by the raw candidate center's 8x6 block. The report keeps
+same-frame misses separate from misses whose block receives a later shadow
+selection. The strict gate fails closed when JSONL evidence is malformed, has
+no authoritative full-scan frames, has no raw full-scan candidates, or leaves
+a candidate block unselected beyond its configured frame/time latency bound.
+It does not enable or alter authoritative scan scheduling.
+
 ### Registration-first benchmark driver
 
 For the current optimization pass, there is also a fixed sequential benchmark

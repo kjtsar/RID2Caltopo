@@ -503,6 +503,35 @@ static const scan_reason_counter_desc_t kAdaptiveStrideReasonCounters[] = {
     { ANOMALY_ADAPTIVE_STRIDE_REASON_STABLE_WINDOW, "stable-window" },
 };
 
+static const scan_reason_counter_desc_t kSceneCoverageReasonCounters[] = {
+    { ANOMALY_SCENE_COVERAGE_REASON_INVALID_INPUT, "invalid-input" },
+    { ANOMALY_SCENE_COVERAGE_REASON_STARTUP, "startup" },
+    { ANOMALY_SCENE_COVERAGE_REASON_SCENE_DISCONTINUITY, "scene-discontinuity" },
+    { ANOMALY_SCENE_COVERAGE_REASON_REGISTRATION_HARD, "registration-hard" },
+    { ANOMALY_SCENE_COVERAGE_REASON_LOOKUP_MISSING, "lookup-missing" },
+    { ANOMALY_SCENE_COVERAGE_REASON_GRID_MISMATCH, "grid-mismatch" },
+    { ANOMALY_SCENE_COVERAGE_REASON_WARP_LOW, "warp-low" },
+    { ANOMALY_SCENE_COVERAGE_REASON_NEW_EXPOSED_HIGH, "new-exposed-high" },
+    { ANOMALY_SCENE_COVERAGE_REASON_REGISTRATION_SOFT, "registration-soft" },
+    { ANOMALY_SCENE_COVERAGE_REASON_REGISTRATION_GAP, "registration-gap" },
+    { ANOMALY_SCENE_COVERAGE_REASON_MOVEMENT_WEAK, "movement-weak" },
+    { ANOMALY_SCENE_COVERAGE_REASON_MAX_AGE, "max-age" },
+    { ANOMALY_SCENE_COVERAGE_REASON_TIMESTAMP_FALLBACK, "timestamp-fallback" },
+    { ANOMALY_SCENE_COVERAGE_REASON_MANDATORY_OVER_BUDGET, "mandatory-over-budget" },
+    { ANOMALY_SCENE_COVERAGE_REASON_RECOVERY_HYSTERESIS, "recovery-hysteresis" },
+    { ANOMALY_SCENE_COVERAGE_REASON_TARGET_REVISIT, "target-revisit" },
+    { ANOMALY_SCENE_COVERAGE_REASON_LOCAL_UNTRUSTED, "local-untrusted" },
+};
+
+static const char *scene_coverage_mode_name(anomaly_scene_coverage_mode_t mode) {
+    switch (mode) {
+        case ANOMALY_SCENE_COVERAGE_FULL_REQUIRED: return "full_required";
+        case ANOMALY_SCENE_COVERAGE_LOCKED_INCREMENTAL: return "locked_incremental";
+        case ANOMALY_SCENE_COVERAGE_RECOVERY: return "recovery";
+        default: return "unknown";
+    }
+}
+
 static const char *timing_stage_name(anomaly_timing_stage_t stage) {
     switch (stage) {
         case ANOMALY_TIMING_STAGE_REGISTRATION_PREP: return "registration_prep";
@@ -544,10 +573,34 @@ typedef struct {
     int64_t frame_total_us;
     int64_t frame_min_us;
     int64_t frame_max_us;
+    int64_t *frame_samples_us;
+    size_t frame_samples_capacity;
     int64_t stage_total_us[ANOMALY_TIMING_STAGE_COUNT];
     int64_t stage_min_us[ANOMALY_TIMING_STAGE_COUNT];
     int64_t stage_max_us[ANOMALY_TIMING_STAGE_COUNT];
 } timing_accumulator_t;
+
+static int compare_i64(const void *left, const void *right) {
+    int64_t a = *(const int64_t *)left;
+    int64_t b = *(const int64_t *)right;
+    return (a > b) - (a < b);
+}
+
+static int64_t timing_accumulator_percentile_us(const timing_accumulator_t *acc,
+                                                double percentile) {
+    if (acc == NULL || acc->frame_count <= 0 || acc->frame_samples_us == NULL) return 0;
+    size_t count = (size_t)acc->frame_count;
+    int64_t *sorted = malloc(count * sizeof(*sorted));
+    if (sorted == NULL) return 0;
+    memcpy(sorted, acc->frame_samples_us, count * sizeof(*sorted));
+    qsort(sorted, count, sizeof(*sorted), compare_i64);
+    size_t rank = (size_t)ceil(percentile * (double)count);
+    if (rank == 0) rank = 1;
+    if (rank > count) rank = count;
+    int64_t value = sorted[rank - 1];
+    free(sorted);
+    return value;
+}
 
 static int rescan_timing_mode_index(anomaly_rescan_mode_t mode) {
     for (size_t i = 0; i < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]); i++) {
@@ -556,9 +609,27 @@ static int rescan_timing_mode_index(anomaly_rescan_mode_t mode) {
     return -1;
 }
 
+static const char *rescan_mode_json_name(anomaly_rescan_mode_t mode) {
+    for (size_t i = 0; i < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]); i++) {
+        if (kRescanTimingModes[i].mode == mode) return kRescanTimingModes[i].json_name;
+    }
+    return "unset";
+}
+
 static void timing_accumulator_add(timing_accumulator_t *acc,
                                    const anomaly_debug_timing_t *timing) {
     if (acc == NULL || timing == NULL || !timing->compiled) return;
+
+    size_t needed = (size_t)acc->frame_count + 1u;
+    if (needed > acc->frame_samples_capacity) {
+        size_t capacity = acc->frame_samples_capacity > 0 ? acc->frame_samples_capacity * 2u : 64u;
+        while (capacity < needed) capacity *= 2u;
+        int64_t *samples = realloc(acc->frame_samples_us, capacity * sizeof(*samples));
+        if (samples == NULL) return;
+        acc->frame_samples_us = samples;
+        acc->frame_samples_capacity = capacity;
+    }
+    acc->frame_samples_us[acc->frame_count] = timing->total_us;
 
     acc->frame_count++;
     acc->frame_total_us += timing->total_us;
@@ -2132,6 +2203,8 @@ static void usage(const char *prog) {
         "                   Trace dense thermal extraction for one normalized target\n"
         "                   point and include the stage-by-stage outcome in thermal\n"
         "                   debug JSONL rows\n"
+        "  --scene-coverage-shadow-jsonl <file>\n"
+        "                   Write bounded per-frame shadow scheduler telemetry\n"
         "\n"
         "Diagnostic:\n"
         "  --probe cx,cy    Sample the detector's scored point nearest the given\n"
@@ -2180,6 +2253,7 @@ int main(int argc, char **argv) {
     char thermal_debug_jsonl_path[1024] = "";
     char color_debug_jsonl_path[1024] = "";
     char color_target_csv_path[1024] = "";
+    char scene_coverage_shadow_jsonl_path[1024] = "";
     int  write_video = 1;
     int  app_display_output = 0;
 
@@ -2452,6 +2526,12 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--color-target-csv") && i+1 < argc) {
             snprintf(color_target_csv_path, sizeof(color_target_csv_path), "%s", argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--scene-coverage-shadow-jsonl") && i+1 < argc) {
+            snprintf(scene_coverage_shadow_jsonl_path,
+                     sizeof(scene_coverage_shadow_jsonl_path),
+                     "%s",
+                     argv[++i]);
         }
         else if (!strcmp(argv[i], "--debug-overlay")) {
             debug_overlay = 1;
@@ -2728,6 +2808,7 @@ int main(int argc, char **argv) {
     FILE *probe_csv = NULL;
     FILE *thermal_debug_jsonl = NULL;
     FILE *color_debug_jsonl = NULL;
+    FILE *scene_coverage_shadow_jsonl = NULL;
     color_debug_target_row_t *color_target_rows = NULL;
     int color_target_row_count = 0;
     int color_target_row_cursor = 0;
@@ -2770,6 +2851,17 @@ int main(int argc, char **argv) {
         if (!color_debug_jsonl) {
             fprintf(stderr, "Cannot write color debug JSONL: %s\n", color_debug_jsonl_path);
             if (thermal_debug_jsonl) fclose(thermal_debug_jsonl);
+            free(color_target_rows);
+            return 1;
+        }
+    }
+    if (scene_coverage_shadow_jsonl_path[0]) {
+        scene_coverage_shadow_jsonl = fopen(scene_coverage_shadow_jsonl_path, "w");
+        if (!scene_coverage_shadow_jsonl) {
+            fprintf(stderr, "Cannot write scene coverage shadow JSONL: %s\n",
+                    scene_coverage_shadow_jsonl_path);
+            if (thermal_debug_jsonl) fclose(thermal_debug_jsonl);
+            if (color_debug_jsonl) fclose(color_debug_jsonl);
             free(color_target_rows);
             return 1;
         }
@@ -2829,6 +2921,21 @@ int main(int argc, char **argv) {
     int64_t revisit_independent_motion_boost_count = 0;
     int64_t revisit_global_motion_reject_count = 0;
     int64_t suppressed_offgate_winner_count = 0;
+    int scene_coverage_frame_count = 0;
+    int scene_coverage_mode_counts[3] = {0};
+    int64_t scene_coverage_selected_blocks_sum = 0;
+    int64_t scene_coverage_mandatory_blocks_sum = 0;
+    int64_t scene_coverage_selected_samples_sum = 0;
+    double scene_coverage_selected_fraction_sum = 0.0;
+    int scene_coverage_selected_blocks_max = 0;
+    int scene_coverage_selected_samples_max = 0;
+    float scene_coverage_selected_fraction_max = 0.0f;
+    float scene_coverage_debt_max = 0.0f;
+    int64_t scene_coverage_age_us_max = 0;
+    int scene_coverage_age_frames_max = 0;
+    float scene_coverage_newly_exposed_max = 0.0f;
+    int scene_coverage_reason_counts[
+        sizeof(kSceneCoverageReasonCounters) / sizeof(kSceneCoverageReasonCounters[0])] = {0};
     double wall_start_s     = monotonic_seconds();
 
     while (fread(rgba, 1, frame_bytes, in_pipe) == frame_bytes) {
@@ -2886,6 +2993,92 @@ int main(int argc, char **argv) {
         int64_t source_ts_us = (int64_t)llround(time_s * 1000000.0);
         anomaly_detector_annotation_view_t output_annotations = {0};
         anomaly_process_frame(&state, &cfg, rgba, W * 4, W, H, source_ts_us, &result);
+        if (result.scene_coverage_shadow.valid) {
+            const anomaly_scene_coverage_shadow_t *shadow = &result.scene_coverage_shadow;
+            scene_coverage_frame_count++;
+            if (shadow->mode >= ANOMALY_SCENE_COVERAGE_FULL_REQUIRED &&
+                shadow->mode <= ANOMALY_SCENE_COVERAGE_RECOVERY) {
+                scene_coverage_mode_counts[shadow->mode]++;
+            }
+            scene_coverage_selected_blocks_sum += shadow->selected_blocks;
+            scene_coverage_mandatory_blocks_sum += shadow->mandatory_blocks;
+            scene_coverage_selected_samples_sum += shadow->estimated_selected_samples;
+            scene_coverage_selected_fraction_sum += shadow->selected_fraction;
+            if (shadow->selected_blocks > scene_coverage_selected_blocks_max) {
+                scene_coverage_selected_blocks_max = shadow->selected_blocks;
+            }
+            if (shadow->estimated_selected_samples > scene_coverage_selected_samples_max) {
+                scene_coverage_selected_samples_max = shadow->estimated_selected_samples;
+            }
+            if (shadow->selected_fraction > scene_coverage_selected_fraction_max) {
+                scene_coverage_selected_fraction_max = shadow->selected_fraction;
+            }
+            if (shadow->max_coverage_debt > scene_coverage_debt_max) {
+                scene_coverage_debt_max = shadow->max_coverage_debt;
+            }
+            if (shadow->max_age_us > scene_coverage_age_us_max) {
+                scene_coverage_age_us_max = shadow->max_age_us;
+            }
+            if (shadow->max_age_frames > scene_coverage_age_frames_max) {
+                scene_coverage_age_frames_max = shadow->max_age_frames;
+            }
+            if (shadow->newly_exposed_fraction > scene_coverage_newly_exposed_max) {
+                scene_coverage_newly_exposed_max = shadow->newly_exposed_fraction;
+            }
+            for (size_t ri = 0;
+                 ri < sizeof(kSceneCoverageReasonCounters) / sizeof(kSceneCoverageReasonCounters[0]);
+                 ri++) {
+                if ((shadow->reason_flags & kSceneCoverageReasonCounters[ri].flag) != 0u) {
+                    scene_coverage_reason_counts[ri]++;
+                }
+            }
+            if (scene_coverage_shadow_jsonl != NULL) {
+                fprintf(scene_coverage_shadow_jsonl,
+                        "{\"schema_version\":1,\"frame\":%d,\"source_ts_us\":%lld,"
+                        "\"authoritative_rescan_mode\":\"%s\",\"mode\":\"%s\","
+                        "\"selected_mask\":\"%012llx\",\"mandatory_mask\":\"%012llx\","
+                        "\"selected_blocks\":%d,\"mandatory_blocks\":%d,"
+                        "\"estimated_selected_samples\":%d,\"selected_fraction\":%.6f,"
+                        "\"max_coverage_debt\":%.6f,\"max_age_us\":%lld,"
+                        "\"max_age_frames\":%d,\"newly_exposed_fraction\":%.6f,"
+                        "\"reason_flags\":%u,\"raw_boxes\":[",
+                        frame_num,
+                        (long long)source_ts_us,
+                        rescan_mode_json_name(result.rescan_mode),
+                        scene_coverage_mode_name(shadow->mode),
+                        (unsigned long long)shadow->selected_block_mask,
+                        (unsigned long long)shadow->mandatory_block_mask,
+                        shadow->selected_blocks,
+                        shadow->mandatory_blocks,
+                        shadow->estimated_selected_samples,
+                        (double)shadow->selected_fraction,
+                        (double)shadow->max_coverage_debt,
+                        (long long)shadow->max_age_us,
+                        shadow->max_age_frames,
+                        (double)shadow->newly_exposed_fraction,
+                        shadow->reason_flags);
+                for (int bi = 0; bi < result.box_count; bi++) {
+                    const anomaly_box_t *box = &result.boxes[bi];
+                    double cx = ((double)box->left_norm + (double)box->right_norm) * 0.5;
+                    double cy = ((double)box->top_norm + (double)box->bottom_norm) * 0.5;
+                    fprintf(scene_coverage_shadow_jsonl,
+                            "%s{\"algorithm\":\"%s\",\"algorithm_mask\":%d,"
+                            "\"cx_norm\":%.6f,\"cy_norm\":%.6f,"
+                            "\"left_norm\":%.6f,\"top_norm\":%.6f,"
+                            "\"right_norm\":%.6f,\"bottom_norm\":%.6f}",
+                            bi == 0 ? "" : ",",
+                            algo_label(box->algorithm),
+                            box->algorithm,
+                            cx,
+                            cy,
+                            (double)box->left_norm,
+                            (double)box->top_norm,
+                            (double)box->right_norm,
+                            (double)box->bottom_norm);
+                }
+                fputs("]}\n", scene_coverage_shadow_jsonl);
+            }
+        }
         output_annotations = anomaly_detector_result_annotations(&result);
         if (app_display_output) {
             output_annotations =
@@ -3077,6 +3270,7 @@ int main(int argc, char **argv) {
     if (probe_csv) fclose(probe_csv);
     if (thermal_debug_jsonl) fclose(thermal_debug_jsonl);
     if (color_debug_jsonl) fclose(color_debug_jsonl);
+    if (scene_coverage_shadow_jsonl) fclose(scene_coverage_shadow_jsonl);
     anomaly_state_cleanup(&state);
     free(rgba);
     free(raw_rgba);
@@ -3170,13 +3364,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  Rescan timing    :\n");
         for (size_t mode_i = 0; mode_i < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]); mode_i++) {
             const timing_accumulator_t *acc = &rescan_timing[mode_i];
-            fprintf(stderr, "    %-12s frames=%d avg=%.2f ms min=%.2f ms max=%.2f ms\n",
+            fprintf(stderr, "    %-12s frames=%d avg=%.2f ms min=%.2f ms p95=%.2f ms max=%.2f ms\n",
                     kRescanTimingModes[mode_i].display_name,
                     acc->frame_count,
                     acc->frame_count > 0
                         ? (double)acc->frame_total_us / (double)acc->frame_count / 1000.0
                         : 0.0,
                     (double)acc->frame_min_us / 1000.0,
+                    (double)timing_accumulator_percentile_us(acc, 0.95) / 1000.0,
                     (double)acc->frame_max_us / 1000.0);
         }
     }
@@ -3189,6 +3384,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  Thermal JSONL    : %s\n", thermal_debug_jsonl_path);
     if (color_debug_jsonl_path[0])
         fprintf(stderr, "  Color JSONL      : %s\n", color_debug_jsonl_path);
+    if (scene_coverage_shadow_jsonl_path[0])
+        fprintf(stderr, "  Coverage JSONL   : %s\n", scene_coverage_shadow_jsonl_path);
     fprintf(stderr, "\n");
     if (output_summary_json[0]) {
         FILE *summary = fopen(output_summary_json, "w");
@@ -3246,6 +3443,53 @@ int main(int argc, char **argv) {
             fprintf(summary, "    \"partial\": %d,\n", rescan_partial_frames);
             fprintf(summary, "    \"target_only\": %d,\n", rescan_target_only_frames);
             fprintf(summary, "    \"appearance_stride_skip\": %d\n", rescan_stride_skip_frames);
+            fprintf(summary, "  },\n  \"scene_coverage_shadow\": {\n");
+            fprintf(summary, "    \"frame_count\": %d,\n", scene_coverage_frame_count);
+            fprintf(summary, "    \"mode_counts\": {\n");
+            fprintf(summary, "      \"full_required\": %d,\n",
+                    scene_coverage_mode_counts[ANOMALY_SCENE_COVERAGE_FULL_REQUIRED]);
+            fprintf(summary, "      \"locked_incremental\": %d,\n",
+                    scene_coverage_mode_counts[ANOMALY_SCENE_COVERAGE_LOCKED_INCREMENTAL]);
+            fprintf(summary, "      \"recovery\": %d\n",
+                    scene_coverage_mode_counts[ANOMALY_SCENE_COVERAGE_RECOVERY]);
+            fprintf(summary, "    },\n");
+            fprintf(summary, "    \"avg_selected_blocks\": %.6f,\n",
+                    scene_coverage_frame_count > 0
+                        ? (double)scene_coverage_selected_blocks_sum / scene_coverage_frame_count : 0.0);
+            fprintf(summary, "    \"max_selected_blocks\": %d,\n",
+                    scene_coverage_selected_blocks_max);
+            fprintf(summary, "    \"avg_mandatory_blocks\": %.6f,\n",
+                    scene_coverage_frame_count > 0
+                        ? (double)scene_coverage_mandatory_blocks_sum / scene_coverage_frame_count : 0.0);
+            fprintf(summary, "    \"avg_selected_samples\": %.6f,\n",
+                    scene_coverage_frame_count > 0
+                        ? (double)scene_coverage_selected_samples_sum / scene_coverage_frame_count : 0.0);
+            fprintf(summary, "    \"max_selected_samples\": %d,\n",
+                    scene_coverage_selected_samples_max);
+            fprintf(summary, "    \"avg_selected_fraction\": %.6f,\n",
+                    scene_coverage_frame_count > 0
+                        ? scene_coverage_selected_fraction_sum / scene_coverage_frame_count : 0.0);
+            fprintf(summary, "    \"max_selected_fraction\": %.6f,\n",
+                    (double)scene_coverage_selected_fraction_max);
+            fprintf(summary, "    \"max_coverage_debt\": %.6f,\n",
+                    (double)scene_coverage_debt_max);
+            fprintf(summary, "    \"max_age_us\": %lld,\n",
+                    (long long)scene_coverage_age_us_max);
+            fprintf(summary, "    \"max_age_frames\": %d,\n",
+                    scene_coverage_age_frames_max);
+            fprintf(summary, "    \"max_newly_exposed_fraction\": %.6f,\n",
+                    (double)scene_coverage_newly_exposed_max);
+            fprintf(summary, "    \"reason_counts\": {\n");
+            for (size_t ri = 0;
+                 ri < sizeof(kSceneCoverageReasonCounters) / sizeof(kSceneCoverageReasonCounters[0]);
+                 ri++) {
+                fprintf(summary, "      \"%s\": %d%s\n",
+                        kSceneCoverageReasonCounters[ri].name,
+                        scene_coverage_reason_counts[ri],
+                        (ri + 1) < sizeof(kSceneCoverageReasonCounters) /
+                                   sizeof(kSceneCoverageReasonCounters[0]) ? "," : "");
+            }
+            fprintf(summary, "    }\n");
             fprintf(summary, "  },\n  \"adaptive_stride\": {\n");
             fprintf(summary, "    \"frame_count\": %d,\n", adaptive_stride_frame_count);
             fprintf(summary, "    \"min\": %d,\n", adaptive_stride_min);
@@ -3339,6 +3583,8 @@ int main(int argc, char **argv) {
                             : 0.0);
                 fprintf(summary, "        \"min_total_ms\": %.6f,\n",
                         (double)acc->frame_min_us / 1000.0);
+                fprintf(summary, "        \"p95_total_ms\": %.6f,\n",
+                        (double)timing_accumulator_percentile_us(acc, 0.95) / 1000.0);
                 fprintf(summary, "        \"max_total_ms\": %.6f,\n",
                         (double)acc->frame_max_us / 1000.0);
                 fprintf(summary, "        \"stages\": {\n");
@@ -3402,6 +3648,9 @@ int main(int argc, char **argv) {
             fprintf(summary, "  }\n}\n");
             fclose(summary);
         }
+    }
+    for (size_t mode_i = 0; mode_i < sizeof(kRescanTimingModes) / sizeof(kRescanTimingModes[0]); mode_i++) {
+        free(rescan_timing[mode_i].frame_samples_us);
     }
     if (probe_active) {
         fprintf(stderr, "Probe interpretation:\n");

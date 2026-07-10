@@ -46,6 +46,23 @@ static void fill_green_mottle(uint8_t *buf, int w, int h) {
     }
 }
 
+static void fill_vertical_bands(
+        uint8_t *buf,
+        int w,
+        int h,
+        const uint8_t colors[][3],
+        int color_count) {
+    int stride = w * 4;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int band = (x * color_count) / w;
+            if (band >= color_count) band = color_count - 1;
+            set_pixel(buf, stride, x, y,
+                      colors[band][0], colors[band][1], colors[band][2]);
+        }
+    }
+}
+
 static double now_s(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -122,6 +139,40 @@ int main(void) {
     fill_green_mottle(rgba, w, h);
     fill_rect(rgba, w, 620, 340, 660, 380, 118, 232, 36);
     run_case("mottled green plus lime", rgba, w, h, ANOMALY_TARGET_COLOR_GREEN);
+
+    static const uint8_t red_green[][3] = {
+        {224, 32, 28},
+        {28, 190, 52},
+    };
+    fill_vertical_bands(rgba, w, h, red_green, 2);
+    run_case("broad red green background", rgba, w, h,
+             ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_GREEN);
+
+    fill(rgba, w, h, 86, 86, 86);
+    fill_rect(rgba, w, 600, 330, 632, 370, 224, 32, 28);
+    fill_rect(rgba, w, 632, 330, 664, 370, 28, 190, 52);
+    run_case("compact red green subject", rgba, w, h,
+             ANOMALY_TARGET_COLOR_RED | ANOMALY_TARGET_COLOR_GREEN);
+
+    static const uint8_t red_green_blue[][3] = {
+        {224, 32, 28},
+        {28, 190, 52},
+        {28, 72, 224},
+    };
+    fill_vertical_bands(rgba, w, h, red_green_blue, 3);
+    run_case("broad red green blue background", rgba, w, h,
+             ANOMALY_TARGET_COLOR_RED |
+             ANOMALY_TARGET_COLOR_GREEN |
+             ANOMALY_TARGET_COLOR_BLUE);
+
+    fill(rgba, w, h, 60, 60, 60);
+    fill_rect(rgba, w, 590, 330, 618, 370, 224, 32, 28);
+    fill_rect(rgba, w, 618, 330, 646, 370, 28, 190, 52);
+    fill_rect(rgba, w, 646, 330, 674, 370, 28, 72, 224);
+    run_case("compact red green blue subject", rgba, w, h,
+             ANOMALY_TARGET_COLOR_RED |
+             ANOMALY_TARGET_COLOR_GREEN |
+             ANOMALY_TARGET_COLOR_BLUE);
 
     free(rgba);
     return 0;

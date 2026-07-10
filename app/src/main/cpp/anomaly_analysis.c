@@ -20,6 +20,7 @@
 #include "anomaly_runtime_config.h"
 #include "anomaly_saliency_tracks.h"
 #include "anomaly_scan_planner.h"
+#include "anomaly_scene_coverage_scheduler.h"
 #include "anomaly_scratch.h"
 #include "anomaly_target_matching.h"
 #include "anomaly_target_color_detector.h"
@@ -7435,6 +7436,7 @@ void anomaly_state_init(anomaly_state_t *state) {
     if (state != NULL) {
         anomaly_thermal_state_init(&state->thermal);
         anomaly_target_color_scratch_init(&state->target_color_scratch);
+        anomaly_scene_coverage_state_init(&state->scene_coverage_shadow);
         state->next_target_track_id = 1;
     }
 }
@@ -7456,6 +7458,7 @@ void anomaly_state_reset(anomaly_state_t *state) {
     state->adaptive_frame_interval_ema_us = 0.0f;
     state->adaptive_reason_flags = 0u;
     state->color_history_recovery_frames = 0;
+    anomaly_scene_coverage_state_reset(&state->scene_coverage_shadow);
     memset(state->acc_cx,     0, sizeof(state->acc_cx));
     memset(state->acc_cy,     0, sizeof(state->acc_cy));
     memset(state->acc_hits,   0, sizeof(state->acc_hits));
@@ -7985,6 +7988,37 @@ int anomaly_process_frame(
     };
     anomaly_result_publish_frame_metadata(result_out, &frame_metadata);
 
+    const anomaly_scene_coverage_policy_t scene_coverage_policy = {
+        .locked_budget_blocks = 8,
+        .recovery_budget_blocks = 16,
+        .relock_healthy_frames = 3,
+        .max_age_us = ANOMALY_FULL_RESCAN_INTERVAL_US,
+        .max_age_frames = ANOMALY_FULL_RESCAN_INTERVAL_FRAMES,
+        .minimum_movement_confidence = 0.45f,
+    };
+    const anomaly_scene_coverage_input_t scene_coverage_input = {
+        .frame_counter = state->frame_counter,
+        .source_ts_us = source_ts_us,
+        // This observer runs only after either a fresh solve or a valid cache load.
+        .registration_attempted = true,
+        .scene_discontinuity = scene_discontinuity,
+        .registration_health = registration_health,
+        .prev_sample_lookup = prev_sample_lookup,
+        .prev_lookup_summary = &prev_sample_lookup_summary,
+        .previous_roi = &state->roi_state,
+        .movement = &movement_sidecar,
+        .sampled_width = sg_w,
+        .sampled_height = sg_h,
+        .policy = &scene_coverage_policy,
+    };
+    anomaly_scene_coverage_shadow_t scene_coverage_shadow;
+    if (anomaly_scene_coverage_scheduler_observe(
+            &state->scene_coverage_shadow,
+            &scene_coverage_input,
+            &scene_coverage_shadow)) {
+        anomaly_result_publish_scene_coverage_shadow(result_out, &scene_coverage_shadow);
+    }
+
     // ── Compensate accumulators for camera motion (or wipe on discontinuity)
     // T⁻¹(p) = Aᵀ * (p - t) / (a²+b²)  where Aᵀ = [[a,b],[-b,a]]
     stage_started_us = anomaly_timing_now_us();
@@ -8450,7 +8484,14 @@ int anomaly_process_frame(
     }
 
     const int R = effective_thermal_window_radius_cells(sample_step);
+    const float color_max_contrast_rescue_score =
+        ANOMALY_COLOR_RESCUE_SCORE_BASE + ANOMALY_COLOR_RESCUE_SCORE_RANGE;
+    const bool color_allows_pre_support_temporal_rescue =
+        anomaly_color_frontend_allows_pre_support_temporal_rescue(color_frontend_mode);
 
+#if ANOMALY_DEBUG_TIMING
+    int64_t sampled_scoring_started_us = anomaly_timing_now_us();
+#endif
     for (int sy = 0; sy < sg_h; sy++) {
         int y  = roi_y0 + sy * sample_step;
         if (y >= roi_y1) y = roi_y1 - 1;
@@ -8465,9 +8506,6 @@ int anomaly_process_frame(
             bool color_refresh_skip = color_selective_refresh_active && appearance_refresh_mask[idx] == 0u;
 
             if (compute_spatial_thermal_scores && !thermal_refresh_skip) {
-#if ANOMALY_DEBUG_TIMING
-                int64_t branch_started_us = anomaly_timing_now_us();
-#endif
                 // Integral-image window query.
                 int wx0 = sx - R; if (wx0 < 0) wx0 = 0;
                 int wx1 = sx + R; if (wx1 >= sg_w) wx1 = sg_w - 1;
@@ -8496,15 +8534,9 @@ int anomaly_process_frame(
                         saliency_spatial_map[idx] = saliency_spatial;
                     }
                 }
-#if ANOMALY_DEBUG_TIMING
-                anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_THERMAL_SCORING, branch_started_us);
-#endif
             }
 
             if (color_algorithm_enabled && !color_refresh_skip) {
-#if ANOMALY_DEBUG_TIMING
-                int64_t branch_started_us = anomaly_timing_now_us();
-#endif
                 anomaly_roi_state_t *roi_state = &state->roi_state;
                 if (roi_state->color_valid_mask != NULL &&
                     roi_state->color_valid_mask[idx] != 0u &&
@@ -8516,6 +8548,9 @@ int anomaly_process_frame(
                         ? color_family_rarity_lut[hist_key]
                         : color_hist_rarity_lut[hist_key];
                     roi_state->color_raw_score[idx] = rarity;
+                    int evaluated_local_support = -1;
+                    float evaluated_pre_support_score = 0.0f;
+                    bool evaluated_pre_support_score_valid = false;
                     if (saliency_color_map != NULL) {
                         bool target_debug_sample =
                             color_target_valid &&
@@ -8536,8 +8571,10 @@ int anomaly_process_frame(
                                 u_bin,
                                 v_bin,
                                 ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS);
+                            evaluated_local_support = local_support;
                             if (local_support < ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
                                 saliency_color_map[idx] = 0.0f;
+                                evaluated_pre_support_score_valid = true;
                             } else {
                                 float center_chroma = anomaly_color_sample_chroma_magnitude(roi_state, idx);
                                 float support_scale = clampf(
@@ -8550,16 +8587,18 @@ int anomaly_process_frame(
                                     rarity_score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
                                                    ANOMALY_COLOR_RARITY_SCALE;
                                 }
-                                float rescue_score = anomaly_color_score_contrast_rescue(
-                                    roi_state,
-                                    sg_w,
-                                    sg_h,
-                                    sx,
-                                    sy,
-                                    !color_refresh_skip,
-                                    local_support);
+                                float rescue_score = rarity_score >= color_max_contrast_rescue_score
+                                    ? 0.0f
+                                    : anomaly_color_score_contrast_rescue(
+                                        roi_state,
+                                        sg_w,
+                                        sg_h,
+                                        sx,
+                                        sy,
+                                        !color_refresh_skip,
+                                        local_support);
                                 float temporal_rescue_score =
-                                    anomaly_color_frontend_allows_pre_support_temporal_rescue(color_frontend_mode)
+                                    color_allows_pre_support_temporal_rescue
                                     ? anomaly_color_score_temporal_rescue(
                                         state,
                                         cfg,
@@ -8572,6 +8611,8 @@ int anomaly_process_frame(
                                     : 0.0f;
                                 float seed_score = fmaxf(rarity_score, fmaxf(rescue_score, temporal_rescue_score));
                                 saliency_color_map[idx] = clampf(seed_score * support_scale, 0.0f, 4.0f);
+                                evaluated_pre_support_score = saliency_color_map[idx];
+                                evaluated_pre_support_score_valid = true;
                                 if (saliency_color_map[idx] > color_strongest_seed_score) {
                                     int key = anomaly_color_hist_key(u_bin, v_bin);
                                     color_strongest_seed_score = saliency_color_map[idx];
@@ -8603,15 +8644,17 @@ int anomaly_process_frame(
                             ? (float)color_recent_hist_weighted[key]
                             : 0.0f;
                         color_target_hist_rarity = rarity;
-                        color_target_local_support = anomaly_color_local_uv_support_count(
-                            roi_state,
-                            sg_w,
-                            sg_h,
-                            sx,
-                            sy,
-                            u_bin,
-                            v_bin,
-                            ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS);
+                        color_target_local_support = evaluated_local_support >= 0
+                            ? evaluated_local_support
+                            : anomaly_color_local_uv_support_count(
+                                roi_state,
+                                sg_w,
+                                sg_h,
+                                sx,
+                                sy,
+                                u_bin,
+                                v_bin,
+                                ANOMALY_COLOR_LOCAL_SUPPORT_RADIUS);
                         anomaly_color_compute_target_telemetry(
                             roi_state,
                             sg_w,
@@ -8623,7 +8666,9 @@ int anomaly_process_frame(
                             !color_selective_refresh_active,
                             color_selective_refresh_active ? appearance_refresh_mask : NULL,
                             &color_target_telemetry);
-                        if (color_target_local_support >= ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
+                        if (evaluated_pre_support_score_valid) {
+                            color_target_pre_support_score = evaluated_pre_support_score;
+                        } else if (color_target_local_support >= ANOMALY_COLOR_LOCAL_SUPPORT_MIN) {
                             float center_chroma = anomaly_color_sample_chroma_magnitude(roi_state, idx);
                             float support_scale = clampf(
                                 0.60f + 0.20f * (float)(color_target_local_support - ANOMALY_COLOR_LOCAL_SUPPORT_MIN),
@@ -8635,16 +8680,18 @@ int anomaly_process_frame(
                                 rarity_score = (rarity - ANOMALY_COLOR_RARITY_MIN) *
                                                ANOMALY_COLOR_RARITY_SCALE;
                             }
-                            float rescue_score = anomaly_color_score_contrast_rescue(
-                                roi_state,
-                                sg_w,
-                                sg_h,
-                                sx,
-                                sy,
-                                !color_refresh_skip,
-                                color_target_local_support);
+                            float rescue_score = rarity_score >= color_max_contrast_rescue_score
+                                ? 0.0f
+                                : anomaly_color_score_contrast_rescue(
+                                    roi_state,
+                                    sg_w,
+                                    sg_h,
+                                    sx,
+                                    sy,
+                                    !color_refresh_skip,
+                                    color_target_local_support);
                             float temporal_rescue_score =
-                                anomaly_color_frontend_allows_pre_support_temporal_rescue(color_frontend_mode)
+                                color_allows_pre_support_temporal_rescue
                                 ? anomaly_color_score_temporal_rescue(
                                     state,
                                     cfg,
@@ -8668,10 +8715,6 @@ int anomaly_process_frame(
                     if (saliency_color_map != NULL) saliency_color_map[idx] = 0.0f;
                     if (roi_state->color_raw_score != NULL) roi_state->color_raw_score[idx] = 0.0f;
                 }
-#if ANOMALY_DEBUG_TIMING
-                anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SCORING, branch_started_us);
-                anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SEED_SCORING, branch_started_us);
-#endif
             }
             if (color_target_valid && sx == color_target_sx && sy == color_target_sy) {
                 color_target_refresh_skipped = color_refresh_skip;
@@ -8680,6 +8723,19 @@ int anomaly_process_frame(
             }
         }
     }
+#if ANOMALY_DEBUG_TIMING
+    if (sampled_scoring_started_us > 0) {
+        int64_t sampled_scoring_us = anomaly_timing_now_us() - sampled_scoring_started_us;
+        if (sampled_scoring_us > 0) {
+            // Thermal and Color work share this loop. Charge the whole pass to Color
+            // seed scoring when enabled so timing stays exclusive without hot-loop clocks.
+            anomaly_timing_stage_t sampled_stage = color_algorithm_enabled
+                ? ANOMALY_TIMING_STAGE_COLOR_SEED_SCORING
+                : ANOMALY_TIMING_STAGE_THERMAL_SCORING;
+            timing.stage_us[sampled_stage] += sampled_scoring_us;
+        }
+    }
+#endif
 
     anomaly_motion_candidate_t color_candidates[ANOMALY_MAX_COLOR_CANDIDATES];
     memset(color_candidates, 0, sizeof(color_candidates));
@@ -8788,7 +8844,7 @@ int anomaly_process_frame(
         anomaly_buffer_ensure_u8_capacity(&state->scratch_u8, &state->scratch_u8_capacity, sg_count) &&
         anomaly_buffer_ensure_int_capacity(&state->scratch_i32, &state->scratch_i32_capacity, sg_count)) {
 #if ANOMALY_DEBUG_TIMING
-        int64_t color_post_started_us = anomaly_timing_now_us();
+        int64_t color_scoring_started_us = anomaly_timing_now_us();
 #endif
         int color_seed_min_sx = sg_w;
         int color_seed_min_sy = sg_h;
@@ -8972,6 +9028,10 @@ int anomaly_process_frame(
             color_seed_max_sx >= color_seed_min_sx &&
             color_seed_max_sy >= color_seed_min_sy) {
 #if ANOMALY_DEBUG_TIMING
+            anomaly_timing_add_elapsed(
+                    &timing,
+                    ANOMALY_TIMING_STAGE_COLOR_SCORING,
+                    color_scoring_started_us);
             int64_t color_blob_started_us = anomaly_timing_now_us();
 #endif
             extract_color_blob_candidates(
@@ -9022,6 +9082,7 @@ int anomaly_process_frame(
             color_coarse_component_count = color_blob_examined_count;
 #if ANOMALY_DEBUG_TIMING
             anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_BLOB_EXTRACTION, color_blob_started_us);
+            color_scoring_started_us = anomaly_timing_now_us();
 #endif
         }
         color_adaptive_source_coarse_count = color_coarse_component_count;
@@ -9030,7 +9091,7 @@ int anomaly_process_frame(
         }
         state->fresh_color_distinctness_ratio = color_fresh_distinctness_ratio;
 #if ANOMALY_DEBUG_TIMING
-        anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SCORING, color_post_started_us);
+        anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_COLOR_SCORING, color_scoring_started_us);
 #endif
         if (color_frame_hist != NULL) {
             for (int hi = 0; hi < ANOMALY_COLOR_HIST_BINS; hi++) {

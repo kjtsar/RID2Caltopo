@@ -21,6 +21,10 @@ uniform green frame            avg_ms=0.820 min_ms=0.787 max_ms=1.168 sampled=57
 green plus lime subject        avg_ms=0.815 min_ms=0.788 max_ms=1.207 sampled=57600 selected=57600 components=1 rois=1
 mottled green frame            avg_ms=0.828 min_ms=0.789 max_ms=1.670 sampled=57600 selected=57600 components=0 rois=0
 mottled green plus lime        avg_ms=0.833 min_ms=0.802 max_ms=1.128 sampled=57600 selected=57600 components=1 rois=1
+broad red green background     avg_ms=0.910 min_ms=0.870 max_ms=1.410 sampled=57600 selected=57600 components=0 rois=0
+compact red green subject      avg_ms=0.470 min_ms=0.440 max_ms=0.780 sampled=57600 selected=160 components=1 rois=1
+broad red green blue background avg_ms=0.940 min_ms=0.900 max_ms=1.520 sampled=57600 selected=57600 components=0 rois=0
+compact red green blue subject avg_ms=0.490 min_ms=0.460 max_ms=0.810 sampled=57600 selected=210 components=1 rois=1
 """
 
 
@@ -58,6 +62,10 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
             0.833 / 0.244,
             cases["mottled green plus lime"]["avg_to_baseline_ratio"],
         )
+        self.assertAlmostEqual(
+            1.520 / 0.446,
+            cases["broad red green blue background"]["max_to_baseline_ratio"],
+        )
 
     def test_evaluate_gate_includes_target_color_perf_regression(self) -> None:
         report = {
@@ -86,6 +94,52 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn(
             "target-color-perf: uniform green frame avg 3.000 ms is 12.30x baseline, above 8.00x",
+            result.failures,
+        )
+
+    def test_evaluate_gate_reports_missing_multi_family_case(self) -> None:
+        target_report = qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT)
+        target_report["cases"] = [
+            case
+            for case in target_report["cases"]
+            if case["name"] != "compact red green subject"
+        ]
+
+        result = qual.evaluate_gate({"cases": [], "target_color_perf": target_report})
+
+        self.assertFalse(result.passed)
+        self.assertIn(
+            "target-color-perf: multi-family case missing: compact red green subject",
+            result.failures,
+        )
+
+    def test_evaluate_gate_reports_wrong_multi_family_roi_outcome(self) -> None:
+        target_report = qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT)
+        for case in target_report["cases"]:
+            if case["name"] == "broad red green blue background":
+                case["roi_count"] = 1
+
+        result = qual.evaluate_gate({"cases": [], "target_color_perf": target_report})
+
+        self.assertFalse(result.passed)
+        self.assertIn(
+            "target-color-perf: broad red green blue background produced 1 ROI(s), expected 0",
+            result.failures,
+        )
+
+    def test_evaluate_gate_reports_multi_family_max_regression(self) -> None:
+        target_report = qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT)
+        for case in target_report["cases"]:
+            if case["name"] == "compact red green blue subject":
+                case["max_ms"] = 6.0
+                case["max_to_baseline_ratio"] = 6.0 / target_report["baseline_max_ms"]
+
+        result = qual.evaluate_gate({"cases": [], "target_color_perf": target_report})
+
+        self.assertFalse(result.passed)
+        self.assertIn(
+            "target-color-perf: compact red green blue subject max 6.000 ms is "
+            "13.45x baseline max, above 12.00x",
             result.failures,
         )
 
@@ -233,6 +287,129 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
         self.assertIn("red1-reviewed: reviewed precision 0.750 below 1.000", result.failures)
         self.assertIn("red1-reviewed: reviewed recall 0.500 below 0.600", result.failures)
         self.assertIn("red2-reviewed: Red2 patio-target geometry check failed", result.failures)
+
+    def test_evaluate_gate_accepts_full_scan_tail_within_budget(self) -> None:
+        report = {
+            "performance_timing_required": True,
+            "cases": [
+                {
+                    "label": "tail-probe",
+                    "candidate_outputs_identical": True,
+                    "candidate_1_repeated_outputs_identical": True,
+                    "candidate_1": {
+                        "realtime_factor": 4.0,
+                        "best_realtime_factor": 4.0,
+                        "tail_timing": {
+                            "compiled": True,
+                            "by_rescan_mode": {
+                                "full": {
+                                    "frame_count": 10,
+                                    "p95_total_ms": qual.FULL_SCAN_MAX_P95_MS,
+                                    "max_total_ms": qual.FULL_SCAN_MAX_MS,
+                                }
+                            },
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = qual.evaluate_gate(report)
+
+        self.assertTrue(result.passed)
+        self.assertEqual([], result.failures)
+
+    def test_evaluate_gate_uses_max_only_for_small_full_scan_samples(self) -> None:
+        report = {
+            "performance_timing_required": True,
+            "cases": [
+                {
+                    "label": "short-tail-probe",
+                    "candidate_outputs_identical": True,
+                    "candidate_1_repeated_outputs_identical": True,
+                    "candidate_1": {
+                        "realtime_factor": 4.0,
+                        "best_realtime_factor": 4.0,
+                        "tail_timing": {
+                            "compiled": True,
+                            "by_rescan_mode": {
+                                "full": {
+                                    "frame_count": qual.FULL_SCAN_MIN_P95_SAMPLES - 1,
+                                    "p95_total_ms": qual.FULL_SCAN_MAX_P95_MS + 1.0,
+                                    "max_total_ms": qual.FULL_SCAN_MAX_MS,
+                                }
+                            },
+                        },
+                    },
+                }
+            ],
+        }
+
+        result = qual.evaluate_gate(report)
+
+        self.assertTrue(result.passed)
+        self.assertEqual([], result.failures)
+
+    def test_evaluate_gate_reports_missing_and_regressed_full_scan_tail(self) -> None:
+        missing_timing = {
+            "performance_timing_required": True,
+            "cases": [
+                {
+                    "label": "missing-tail",
+                    "candidate_outputs_identical": True,
+                    "candidate_1_repeated_outputs_identical": True,
+                    "candidate_1": {
+                        "realtime_factor": 4.0,
+                        "best_realtime_factor": 4.0,
+                    },
+                }
+            ]
+        }
+        regressed_tail = {
+            "performance_timing_required": True,
+            "cases": [
+                {
+                    "label": "slow-tail",
+                    "candidate_outputs_identical": True,
+                    "candidate_1_repeated_outputs_identical": True,
+                    "candidate_1": {
+                        "realtime_factor": 4.0,
+                        "best_realtime_factor": 4.0,
+                        "tail_timing": {
+                            "compiled": True,
+                            "by_rescan_mode": {
+                                "full": {
+                                    "frame_count": qual.FULL_SCAN_MIN_P95_SAMPLES,
+                                    "p95_total_ms": qual.FULL_SCAN_MAX_P95_MS + 0.001,
+                                    "max_total_ms": qual.FULL_SCAN_MAX_MS + 0.001,
+                                    "worst_max_total_ms": qual.FULL_SCAN_CATASTROPHIC_MAX_MS + 0.001,
+                                }
+                            },
+                        },
+                    },
+                }
+            ]
+        }
+
+        missing_result = qual.evaluate_gate(missing_timing)
+        regressed_result = qual.evaluate_gate(regressed_tail)
+
+        self.assertIn("missing-tail: optimized stage timing missing", missing_result.failures)
+        self.assertIn(
+            f"slow-tail: full-scan p95 {qual.FULL_SCAN_MAX_P95_MS + 0.001:.3f} ms "
+            f"above {qual.FULL_SCAN_MAX_P95_MS:.3f} ms",
+            regressed_result.failures,
+        )
+        self.assertIn(
+            f"slow-tail: full-scan max {qual.FULL_SCAN_MAX_MS + 0.001:.3f} ms "
+            f"above {qual.FULL_SCAN_MAX_MS:.3f} ms",
+            regressed_result.failures,
+        )
+        self.assertIn(
+            f"slow-tail: full-scan worst max {qual.FULL_SCAN_CATASTROPHIC_MAX_MS + 0.001:.3f} ms "
+            f"above {qual.FULL_SCAN_CATASTROPHIC_MAX_MS:.3f} ms",
+            regressed_result.failures,
+        )
 
     def test_evaluate_gate_uses_best_candidate_one_realtime_probe(self) -> None:
         report = {
@@ -394,6 +571,16 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
                 "realtime_factor": 0.82,
                 "frame_count": 153,
                 "rescan_modes": {},
+                "stage_timing": {
+                    "compiled": True,
+                    "by_rescan_mode": {
+                        "full": {
+                            "frame_count": 5,
+                            "p95_total_ms": 50.0,
+                            "max_total_ms": 55.0,
+                        }
+                    },
+                },
             },
             "signature": [("1", "0.033", "color", "0.5", "0.5", "0.04", "0.04", "1.00")],
         }
@@ -405,6 +592,16 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
                 "realtime_factor": 1.06,
                 "frame_count": 153,
                 "rescan_modes": {},
+                "stage_timing": {
+                    "compiled": True,
+                    "by_rescan_mode": {
+                        "full": {
+                            "frame_count": 5,
+                            "p95_total_ms": 42.0,
+                            "max_total_ms": 45.0,
+                        }
+                    },
+                },
             },
             "signature": list(cold["signature"]),
         }
@@ -415,6 +612,10 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
         compact = qual.compact_run(selected, repeated_runs=[cold, warm])
         self.assertEqual(1.06, compact["best_realtime_factor"])
         self.assertEqual([0.82, 1.06], compact["realtime_factors"])
+        self.assertEqual(42.0, compact["stage_timing"]["by_rescan_mode"]["full"]["p95_total_ms"])
+        self.assertEqual(46.0, compact["tail_timing"]["by_rescan_mode"]["full"]["p95_total_ms"])
+        self.assertEqual(50.0, compact["tail_timing"]["by_rescan_mode"]["full"]["max_total_ms"])
+        self.assertEqual(55.0, compact["tail_timing"]["by_rescan_mode"]["full"]["worst_max_total_ms"])
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@
 #include "anomaly_runtime_config.h"
 #include "anomaly_saliency_tracks.h"
 #include "anomaly_scan_planner.h"
+#include "anomaly_scene_coverage_scheduler.h"
 #include "anomaly_scratch.h"
 #include "anomaly_target_observations.h"
 #include "anomaly_target_revisit.h"
@@ -21304,6 +21305,381 @@ static void test_scan_zone_growth_reallocates_scratch_buffers(void) {
     anomaly_state_cleanup(&st);
 }
 
+static anomaly_scene_coverage_policy_t scene_coverage_test_policy(void) {
+    return (anomaly_scene_coverage_policy_t) {
+        .locked_budget_blocks = 6,
+        .recovery_budget_blocks = 12,
+        .relock_healthy_frames = 2,
+        .max_age_us = 1000000,
+        .max_age_frames = 30,
+        .minimum_movement_confidence = 0.45f,
+    };
+}
+
+static void scene_coverage_test_movement(anomaly_debug_movement_t *movement) {
+    memset(movement, 0, sizeof(*movement));
+    movement->valid = true;
+    movement->tile_cols = ANOMALY_SCENE_COVERAGE_COLS;
+    movement->tile_rows = ANOMALY_SCENE_COVERAGE_ROWS;
+    movement->confidence = 1.0f;
+    for (int i = 0; i < ANOMALY_SCENE_COVERAGE_BLOCK_COUNT; i++) {
+        movement->tiles[i].valid = true;
+        movement->tiles[i].confidence = 1.0f;
+        movement->tiles[i].layer_class = ANOMALY_MOVEMENT_LAYER_BACKGROUND;
+    }
+}
+
+static void scene_coverage_test_roi(
+        anomaly_roi_state_t *roi,
+        anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT]) {
+    memset(roi, 0, sizeof(*roi));
+    memset(cells, 0, sizeof(*cells) * ANOMALY_SCENE_COVERAGE_BLOCK_COUNT);
+    roi->valid = true;
+    roi->width = ANOMALY_SCENE_COVERAGE_COLS;
+    roi->height = ANOMALY_SCENE_COVERAGE_ROWS;
+    roi->cell_cols = ANOMALY_SCENE_COVERAGE_COLS;
+    roi->cell_rows = ANOMALY_SCENE_COVERAGE_ROWS;
+    roi->cell_summaries = cells;
+}
+
+static anomaly_scene_coverage_input_t scene_coverage_test_input(
+        int64_t frame,
+        int64_t source_ts_us,
+        const int *lookup,
+        const anomaly_scan_planner_prev_lookup_summary_t *summary,
+        const anomaly_roi_state_t *roi,
+        const anomaly_debug_movement_t *movement,
+        const anomaly_scene_coverage_policy_t *policy) {
+    return (anomaly_scene_coverage_input_t) {
+        .frame_counter = frame,
+        .source_ts_us = source_ts_us,
+        .registration_attempted = true,
+        .registration_health = ANOMALY_REG_HEALTH_HEALTHY,
+        .prev_sample_lookup = lookup,
+        .prev_lookup_summary = summary,
+        .previous_roi = roi,
+        .movement = movement,
+        .sampled_width = ANOMALY_SCENE_COVERAGE_COLS,
+        .sampled_height = ANOMALY_SCENE_COVERAGE_ROWS,
+        .policy = policy,
+    };
+}
+
+static void scene_coverage_prime_locked(
+        anomaly_scene_coverage_state_t *state,
+        int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT],
+        anomaly_scan_planner_prev_lookup_summary_t *summary,
+        anomaly_roi_state_t *roi,
+        anomaly_debug_movement_t *movement,
+        anomaly_scene_coverage_policy_t *policy) {
+    for (int i = 0; i < ANOMALY_SCENE_COVERAGE_BLOCK_COUNT; i++) lookup[i] = i;
+    *summary = (anomaly_scan_planner_prev_lookup_summary_t) {
+        .carried_samples = ANOMALY_SCENE_COVERAGE_BLOCK_COUNT,
+    };
+    anomaly_scene_coverage_state_init(state);
+    anomaly_scene_coverage_shadow_t shadow;
+    anomaly_scene_coverage_input_t first = scene_coverage_test_input(
+        1, 100000, NULL, NULL, roi, movement, policy);
+    anomaly_scene_coverage_scheduler_observe(state, &first, &shadow);
+    anomaly_scene_coverage_input_t second = scene_coverage_test_input(
+        2, 200000, lookup, summary, roi, movement, policy);
+    anomaly_scene_coverage_scheduler_observe(state, &second, &shadow);
+    anomaly_scene_coverage_input_t third = scene_coverage_test_input(
+        3, 300000, lookup, summary, roi, movement, policy);
+    anomaly_scene_coverage_scheduler_observe(state, &third, &shadow);
+    EXPECT(shadow.mode == ANOMALY_SCENE_COVERAGE_LOCKED_INCREMENTAL,
+           "scene coverage prime: healthy recovery relocks deterministically");
+}
+
+static void test_scene_coverage_translation_selects_entering_edge(void) {
+    anomaly_scene_coverage_state_t state;
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    scene_coverage_prime_locked(&state, lookup, &summary, &roi, &movement, &policy);
+
+    uint64_t expected_edge = 0u;
+    for (int y = 0; y < ANOMALY_SCENE_COVERAGE_ROWS; y++) {
+        expected_edge |= UINT64_C(1) << (y * ANOMALY_SCENE_COVERAGE_COLS);
+        for (int x = 0; x < ANOMALY_SCENE_COVERAGE_COLS; x++) {
+            int index = y * ANOMALY_SCENE_COVERAGE_COLS + x;
+            lookup[index] = x == 0 ? ANOMALY_SCAN_PLANNER_PREV_LOOKUP_INVALID
+                                   : index - 1;
+        }
+    }
+    summary.carried_samples = 42;
+    summary.newly_exposed_samples = 6;
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        4, 400000, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_shadow_t shadow;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &shadow);
+
+    EXPECT(shadow.mode == ANOMALY_SCENE_COVERAGE_LOCKED_INCREMENTAL,
+           "scene coverage translation: modest exposure remains locked");
+    EXPECT(shadow.mandatory_block_mask == expected_edge,
+           "scene coverage translation: only entering-edge blocks are mandatory");
+    EXPECT(shadow.selected_block_mask == expected_edge && shadow.selected_blocks == 6,
+           "scene coverage translation: entering edge consumes the locked budget");
+}
+
+static void test_scene_coverage_rotation_scale_carries_scene_age(void) {
+    anomaly_scene_coverage_state_t state;
+    anomaly_scene_coverage_state_init(&state);
+    state.valid = true;
+    state.mode = ANOMALY_SCENE_COVERAGE_LOCKED_INCREMENTAL;
+    state.sampled_width = ANOMALY_SCENE_COVERAGE_COLS;
+    state.sampled_height = ANOMALY_SCENE_COVERAGE_ROWS;
+    for (int i = 0; i < ANOMALY_SCENE_COVERAGE_BLOCK_COUNT; i++) {
+        state.blocks[i].shadow_last_selected_frame = 100 + i;
+        state.blocks[i].shadow_last_selected_source_ts_us = 1000000 + i * 1000;
+        state.blocks[i].coverage_debt = (float)i * 0.01f;
+    }
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    policy.locked_budget_blocks = 1;
+    policy.max_age_frames = 1000;
+    policy.max_age_us = 100000000;
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    const float cos_theta = 0.9659258f;
+    const float sin_theta = 0.2588190f;
+    const float scale = 0.85f;
+    const float center_x = 0.5f * (float)(ANOMALY_SCENE_COVERAGE_COLS - 1);
+    const float center_y = 0.5f * (float)(ANOMALY_SCENE_COVERAGE_ROWS - 1);
+    for (int y = 0; y < ANOMALY_SCENE_COVERAGE_ROWS; y++) {
+        for (int x = 0; x < ANOMALY_SCENE_COVERAGE_COLS; x++) {
+            float dx = (float)x - center_x;
+            float dy = (float)y - center_y;
+            int px = (int)lroundf(center_x + scale * (cos_theta * dx - sin_theta * dy));
+            int py = (int)lroundf(center_y + scale * (sin_theta * dx + cos_theta * dy));
+            if (px < 0) px = 0;
+            if (px >= ANOMALY_SCENE_COVERAGE_COLS) px = ANOMALY_SCENE_COVERAGE_COLS - 1;
+            if (py < 0) py = 0;
+            if (py >= ANOMALY_SCENE_COVERAGE_ROWS) py = ANOMALY_SCENE_COVERAGE_ROWS - 1;
+            lookup[y * ANOMALY_SCENE_COVERAGE_COLS + x] =
+                py * ANOMALY_SCENE_COVERAGE_COLS + px;
+        }
+    }
+    anomaly_scan_planner_prev_lookup_summary_t summary = {
+        .carried_samples = ANOMALY_SCENE_COVERAGE_BLOCK_COUNT,
+    };
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        160, 2000000, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_shadow_t shadow;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &shadow);
+
+    int carried_matches = 0;
+    for (int block = 0; block < ANOMALY_SCENE_COVERAGE_BLOCK_COUNT; block++) {
+        if ((shadow.selected_block_mask & (UINT64_C(1) << block)) != 0u) continue;
+        int previous = lookup[block];
+        if (state.blocks[block].shadow_last_selected_frame == 100 + previous) {
+            carried_matches++;
+        }
+    }
+    EXPECT(carried_matches >= 40,
+           "scene coverage rotation/scale: scene ages follow warped samples across blocks");
+}
+
+static void test_scene_coverage_local_uncertainty_stays_budgeted(void) {
+    anomaly_scene_coverage_state_t state;
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    scene_coverage_prime_locked(&state, lookup, &summary, &roi, &movement, &policy);
+
+    for (int i = 0; i < ANOMALY_SCENE_COVERAGE_BLOCK_COUNT; i++) {
+        movement.tiles[i].confidence = 0.10f;
+    }
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        4, 400000, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_shadow_t shadow;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &shadow);
+
+    EXPECT(shadow.mode == ANOMALY_SCENE_COVERAGE_LOCKED_INCREMENTAL &&
+           shadow.selected_blocks == policy.locked_budget_blocks,
+           "scene coverage local uncertainty: strong global lock keeps weak tiles budgeted");
+    EXPECT((shadow.reason_flags & ANOMALY_SCENE_COVERAGE_REASON_LOCAL_UNTRUSTED) != 0u &&
+           (shadow.reason_flags & ANOMALY_SCENE_COVERAGE_REASON_MANDATORY_OVER_BUDGET) == 0u,
+           "scene coverage local uncertainty: reports local trust without hard budget overflow");
+}
+
+static void test_scene_coverage_soft_recovery_and_hysteretic_relock(void) {
+    anomaly_scene_coverage_state_t state;
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    scene_coverage_prime_locked(&state, lookup, &summary, &roi, &movement, &policy);
+
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        4, 400000, lookup, &summary, &roi, &movement, &policy);
+    input.registration_health = ANOMALY_REG_HEALTH_SOFT_DEGRADED;
+    anomaly_scene_coverage_shadow_t soft, healthy_one, healthy_two;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &soft);
+    input.frame_counter = 5;
+    input.source_ts_us = 500000;
+    input.registration_health = ANOMALY_REG_HEALTH_HEALTHY;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &healthy_one);
+    input.frame_counter = 6;
+    input.source_ts_us = 600000;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &healthy_two);
+
+    EXPECT(soft.mode == ANOMALY_SCENE_COVERAGE_RECOVERY &&
+           soft.selected_blocks == policy.recovery_budget_blocks,
+           "scene coverage recovery: soft degradation expands the block budget");
+    EXPECT(healthy_one.mode == ANOMALY_SCENE_COVERAGE_RECOVERY &&
+           healthy_two.mode == ANOMALY_SCENE_COVERAGE_LOCKED_INCREMENTAL,
+           "scene coverage recovery: relock waits for consecutive healthy frames");
+}
+
+static void test_scene_coverage_hard_loss_forces_full_then_recovery(void) {
+    anomaly_scene_coverage_state_t state;
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    scene_coverage_prime_locked(&state, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        4, 400000, lookup, &summary, &roi, &movement, &policy);
+    input.registration_health = ANOMALY_REG_HEALTH_HARD_DEGRADED;
+    anomaly_scene_coverage_shadow_t hard, next;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &hard);
+    input.frame_counter = 5;
+    input.source_ts_us = 500000;
+    input.registration_health = ANOMALY_REG_HEALTH_HEALTHY;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &next);
+
+    EXPECT(hard.mode == ANOMALY_SCENE_COVERAGE_FULL_REQUIRED &&
+           hard.selected_blocks == ANOMALY_SCENE_COVERAGE_BLOCK_COUNT,
+           "scene coverage hard loss: all blocks are selected");
+    EXPECT(next.mode == ANOMALY_SCENE_COVERAGE_RECOVERY,
+           "scene coverage hard loss: the next healthy frame starts recovery");
+}
+
+static void test_scene_coverage_target_revisit_outranks_old_debt(void) {
+    anomaly_scene_coverage_state_t state;
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    policy.locked_budget_blocks = 1;
+    policy.max_age_frames = 1000;
+    policy.max_age_us = 100000000;
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    scene_coverage_prime_locked(&state, lookup, &summary, &roi, &movement, &policy);
+    state.blocks[0].coverage_debt = 100.0f;
+    cells[20].scan_flags = ANOMALY_SCAN_FLAG_TARGET_REVISIT;
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        4, 400000, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_shadow_t shadow;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &shadow);
+
+    EXPECT(shadow.selected_block_mask == (UINT64_C(1) << 20),
+           "scene coverage priority: target revisit outranks ordinary old debt");
+    EXPECT((shadow.reason_flags & ANOMALY_SCENE_COVERAGE_REASON_TARGET_REVISIT) != 0u,
+           "scene coverage priority: target revisit reason is reported");
+}
+
+static void test_scene_coverage_max_age_and_timestamp_fallback(void) {
+    anomaly_scene_coverage_state_t state;
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    scene_coverage_prime_locked(&state, lookup, &summary, &roi, &movement, &policy);
+    policy.locked_budget_blocks = 1;
+    policy.max_age_us = 100000;
+    policy.max_age_frames = 20;
+    for (int i = 0; i < ANOMALY_SCENE_COVERAGE_BLOCK_COUNT; i++) {
+        state.blocks[i].shadow_last_selected_source_ts_us = 390000;
+        state.blocks[i].shadow_last_selected_frame = 9;
+    }
+    state.blocks[7].shadow_last_selected_source_ts_us = 100000;
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        10, 400000, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_shadow_t source_due, fallback;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &source_due);
+    input.frame_counter = 35;
+    input.source_ts_us = 400000;
+    anomaly_scene_coverage_scheduler_observe(&state, &input, &fallback);
+
+    EXPECT(source_due.selected_block_mask == (UINT64_C(1) << 7) &&
+           (source_due.reason_flags & ANOMALY_SCENE_COVERAGE_REASON_MAX_AGE) != 0u,
+           "scene coverage deadline: source time selects the due block");
+    EXPECT((fallback.reason_flags & ANOMALY_SCENE_COVERAGE_REASON_TIMESTAMP_FALLBACK) != 0u &&
+           (fallback.reason_flags & ANOMALY_SCENE_COVERAGE_REASON_MAX_AGE) != 0u,
+           "scene coverage deadline: non-monotonic time uses deterministic frame age");
+}
+
+static void test_scene_coverage_determinism_and_result_isolation(void) {
+    anomaly_scene_coverage_state_t first_state;
+    anomaly_scene_coverage_policy_t policy = scene_coverage_test_policy();
+    anomaly_debug_movement_t movement;
+    anomaly_roi_state_t roi;
+    anomaly_roi_cell_summary_t cells[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    int lookup[ANOMALY_SCENE_COVERAGE_BLOCK_COUNT];
+    anomaly_scan_planner_prev_lookup_summary_t summary;
+    scene_coverage_test_movement(&movement);
+    scene_coverage_test_roi(&roi, cells);
+    scene_coverage_prime_locked(
+        &first_state, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_state_t second_state = first_state;
+    anomaly_scene_coverage_input_t input = scene_coverage_test_input(
+        4, 400000, lookup, &summary, &roi, &movement, &policy);
+    anomaly_scene_coverage_shadow_t first, second;
+    anomaly_scene_coverage_scheduler_observe(&first_state, &input, &first);
+    anomaly_scene_coverage_scheduler_observe(&second_state, &input, &second);
+    EXPECT(memcmp(&first, &second, sizeof(first)) == 0 &&
+           memcmp(&first_state, &second_state, sizeof(first_state)) == 0,
+           "scene coverage determinism: identical state and input produce identical output");
+
+    anomaly_result_t result;
+    memset(&result, 0x5a, sizeof(result));
+    anomaly_box_t saved_boxes[ANOMALY_MAX_BOXES_PER_FRAME];
+    memcpy(saved_boxes, result.boxes, sizeof(saved_boxes));
+    int saved_box_count = result.box_count;
+    anomaly_rescan_mode_t saved_rescan_mode = result.rescan_mode;
+    anomaly_scan_plan_t saved_scan_plan = result.scan_plan;
+    anomaly_debug_movement_t saved_movement = result.movement_debug;
+    anomaly_result_publish_scene_coverage_shadow(&result, &first);
+    EXPECT(result.box_count == saved_box_count &&
+           memcmp(result.boxes, saved_boxes, sizeof(saved_boxes)) == 0 &&
+           result.rescan_mode == saved_rescan_mode &&
+           memcmp(&result.scan_plan, &saved_scan_plan, sizeof(saved_scan_plan)) == 0 &&
+           memcmp(&result.movement_debug, &saved_movement, sizeof(saved_movement)) == 0,
+           "scene coverage publication: authoritative result fields remain untouched");
+    EXPECT(memcmp(&result.scene_coverage_shadow, &first, sizeof(first)) == 0,
+           "scene coverage publication: shadow telemetry is copied exactly");
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -21931,6 +22307,14 @@ int main(void) {
     test_periodic_full_refresh_replaces_indefinite_target_only_reuse();
     test_fixed_stride_full_refresh_is_not_shortened_by_time_periodic();
     test_scan_zone_growth_reallocates_scratch_buffers();
+    test_scene_coverage_translation_selects_entering_edge();
+    test_scene_coverage_rotation_scale_carries_scene_age();
+    test_scene_coverage_local_uncertainty_stays_budgeted();
+    test_scene_coverage_soft_recovery_and_hysteretic_relock();
+    test_scene_coverage_hard_loss_forces_full_then_recovery();
+    test_scene_coverage_target_revisit_outranks_old_debt();
+    test_scene_coverage_max_age_and_timestamp_fallback();
+    test_scene_coverage_determinism_and_result_isolation();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

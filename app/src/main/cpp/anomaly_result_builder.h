@@ -29,6 +29,10 @@ void anomaly_result_publish_scan_plan(
         anomaly_result_t          *result_out,
         const anomaly_scan_plan_t *scan_plan);
 
+void anomaly_result_publish_scene_coverage_shadow(
+        anomaly_result_t *result_out,
+        const anomaly_scene_coverage_shadow_t *scene_coverage_shadow);
+
 void anomaly_result_publish_rescan_mode(
         anomaly_result_t      *result_out,
         anomaly_rescan_mode_t rescan_mode);

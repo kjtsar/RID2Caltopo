@@ -9,7 +9,7 @@
 
 typedef struct anomaly_registration_model_t anomaly_scan_planner_registration_t;
 
-typedef struct {
+typedef struct anomaly_scan_planner_prev_lookup_summary_t {
     int carried_samples;
     int newly_exposed_samples;
     int stale_samples;

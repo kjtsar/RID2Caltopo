@@ -33,6 +33,7 @@ add_library(
     anomaly_registration_image.c
     anomaly_result_builder.c
     anomaly_scan_planner.c
+    anomaly_scene_coverage_scheduler.c
     anomaly_target_observations.c
     anomaly_target_color_detector.c
     anomaly_target_revisit.c

@@ -17,6 +17,7 @@ import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
 import androidx.media3.exoplayer.ExoPlayer
 import org.ncssar.rid2caltopo.video.StreamRenderRouter
+import org.ncssar.rid2caltopo.video.SerializedTaskQueue
 import org.ncssar.rid2caltopo.video.session.StreamSessionService
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
@@ -834,7 +835,7 @@ class StreamsViewModel(
     private val streamInfoByDesignator = mutableMapOf<String, StreamInfo>()
     private val dismissedStreamRevisions = mutableStateMapOf<String, Long>()
     private val lastAppliedAnomalyPolicyByDesignator = mutableMapOf<String, AnomalyPolicyUpdate>()
-    private var anomalyPolicyApplyJob: Job? = null
+    private val anomalyPolicyApplyQueue = SerializedTaskQueue(viewModelScope, Dispatchers.Default)
     private var latestProcessLoadSnapshot by mutableStateOf<ProcessLoadSnapshot?>(null)
     private var lastProcessLoadLogAtMs = 0L
     /** Coordinator that owns all DEM / AGL / ATO / heading computation. */
@@ -2927,9 +2928,10 @@ class StreamsViewModel(
         }
         lastAppliedAnomalyPolicyByDesignator.keys.retainAll(desiredDesignators)
         if (updates.isEmpty()) return
-        anomalyPolicyApplyJob?.cancel()
-        anomalyPolicyApplyJob = viewModelScope.launch(Dispatchers.Default) {
-            val probeService = ffmpegProbeService ?: return@launch
+        anomalyPolicyApplyQueue.submit {
+            // The policy is cached above, so every queued value must reach the native service.
+            // Local playback startup can resync several times in quick succession.
+            val probeService = ffmpegProbeService ?: return@submit
             updates.forEach { update ->
                 probeService.setAnomalyThermalPaused(
                     designator = update.designator,

@@ -13369,30 +13369,30 @@ static void test_detector_facade_runtime_budget_local_ad_cadence(void) {
             anomaly_detector_runtime_budget_local_ad_cadence(
                     true, true, false, 1, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
-           cadence.full_scan_due &&
-           cadence.frame_stride_override == 1,
-           "runtime budget local AD cadence: first post-preroll frame forces a full scan opportunity");
+           !cadence.full_scan_due &&
+           cadence.frame_stride_override == 0,
+           "runtime budget local AD cadence: uniqueness detector owns its discovery cadence");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, true, false, 2, 30, 5);
-    EXPECT(!cadence.analyze && cadence.prediction_only &&
+    EXPECT(cadence.analyze && !cadence.prediction_only &&
            !cadence.full_scan_due &&
            cadence.frame_stride_override == 0,
-           "runtime budget local AD cadence: skips non-eval local frames after startup scan");
+           "runtime budget local AD cadence: uniqueness frames reach adaptive detector cadence");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, true, false, 5, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
            !cadence.full_scan_due &&
-           cadence.frame_stride_override > 30,
-           "runtime budget local AD cadence: target-eval frames suppress analyzed-frame full refresh");
+           cadence.frame_stride_override == 0,
+           "runtime budget local AD cadence: uniqueness target-eval boundaries are not double-gated");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, true, false, 30, 30, 5);
     EXPECT(cadence.analyze && !cadence.prediction_only &&
-           cadence.full_scan_due &&
-           cadence.frame_stride_override == 1,
-           "runtime budget local AD cadence: thirty decoded frames forces a full scan opportunity");
+           !cadence.full_scan_due &&
+           cadence.frame_stride_override == 0,
+           "runtime budget local AD cadence: uniqueness full-scan boundaries remain detector-owned");
 
     cadence = anomaly_detector_runtime_budget_local_ad_cadence(
             true, true, true, 2, 30, 5);

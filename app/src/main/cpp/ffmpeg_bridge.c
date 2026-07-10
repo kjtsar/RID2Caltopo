@@ -4482,7 +4482,8 @@ static void *ad_thread_main(void *arg) {
                 } else if (cadence.full_scan_due) {
                     trace_set_counter("RID2C local_ad_full_scan_due",
                                       local_ad_cadence_ordinal);
-                } else if (local_ad_target_eval_has_no_revisit_work(
+                } else if (cadence.frame_stride_override > 0 &&
+                           local_ad_target_eval_has_no_revisit_work(
                                    session,
                                    local_ad_cadence_ordinal)) {
                     bypass_for_local_cadence = true;

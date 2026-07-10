@@ -1284,6 +1284,13 @@ anomaly_detector_runtime_budget_local_ad_cadence(
     if (!local_file_source || !processing_enabled) {
         return cadence;
     }
+    // The uniqueness detector already owns its adaptive scan cadence. Applying a
+    // second sparse gate here can leave short-lived targets with only one discovery
+    // observation, which can never satisfy min_hits. Explicit target-color scans
+    // retain the lightweight outer cadence below.
+    if (!target_color_selected) {
+        return cadence;
+    }
     if (decoded_frame_ordinal <= 0) {
         decoded_frame_ordinal = 1;
     }
@@ -1298,26 +1305,11 @@ anomaly_detector_runtime_budget_local_ad_cadence(
         cadence.frame_stride_override = 1;
         return cadence;
     }
-    if (target_color_selected) {
-        cadence.full_scan_due =
-                (decoded_frame_ordinal % full_scan_stride_frames) == 0;
-        cadence.frame_stride_override = cadence.full_scan_due
-                ? 1
-                : suppress_implicit_full_refresh_stride;
-        return cadence;
-    }
-    if ((decoded_frame_ordinal % target_eval_interval_frames) != 0) {
-        cadence.analyze = false;
-        cadence.prediction_only = true;
-        return cadence;
-    }
     cadence.full_scan_due =
             (decoded_frame_ordinal % full_scan_stride_frames) == 0;
-    if (cadence.full_scan_due) {
-        cadence.frame_stride_override = 1;
-    } else {
-        cadence.frame_stride_override = suppress_implicit_full_refresh_stride;
-    }
+    cadence.frame_stride_override = cadence.full_scan_due
+            ? 1
+            : suppress_implicit_full_refresh_stride;
     return cadence;
 }
 

@@ -528,7 +528,162 @@ typedef struct {
     float ring_fraction;
     float support_mass;
     float uniqueness;
+    anomaly_color_blob_signature_t blob_signature;
+    anomaly_color_blob_signature_t ring_signature;
 } anomaly_dense_color_component_t;
+
+static void copy_color_shadow_signature(
+        anomaly_color_shadow_signature_t      *dst,
+        const anomaly_color_blob_signature_t  *src) {
+    if (dst == NULL) return;
+    memset(dst, 0, sizeof(*dst));
+    dst->predominant_u_bin = -1;
+    dst->predominant_v_bin = -1;
+    if (src == NULL) return;
+    memcpy(dst->histogram, src->histogram, sizeof(dst->histogram));
+    dst->sample_count = src->sample_count;
+    dst->predominant_u_bin = src->predominant_u_bin;
+    dst->predominant_v_bin = src->predominant_v_bin;
+    dst->predominant_family_count = src->predominant_family_count;
+    dst->predominant_family_share = src->predominant_family_share;
+    dst->normalized_entropy = src->normalized_entropy;
+    dst->purity = src->purity;
+}
+
+static void copy_color_blob_signature(
+        anomaly_color_blob_signature_t       *dst,
+        const anomaly_color_shadow_signature_t *src) {
+    if (dst == NULL) return;
+    memset(dst, 0, sizeof(*dst));
+    dst->predominant_u_bin = -1;
+    dst->predominant_v_bin = -1;
+    if (src == NULL) return;
+    memcpy(dst->histogram, src->histogram, sizeof(dst->histogram));
+    dst->sample_count = src->sample_count;
+    dst->predominant_u_bin = src->predominant_u_bin;
+    dst->predominant_v_bin = src->predominant_v_bin;
+    dst->predominant_family_count = src->predominant_family_count;
+    dst->predominant_family_share = src->predominant_family_share;
+    dst->normalized_entropy = src->normalized_entropy;
+    dst->purity = src->purity;
+}
+
+static uint32_t build_color_shadow_scene_histogram(
+        const anomaly_roi_state_t *roi_state,
+        int                        sg_w,
+        int                        sg_h,
+        uint32_t                  *hist_out) {
+    if (hist_out == NULL) return 0u;
+    memset(hist_out, 0, ANOMALY_COLOR_HIST_BINS * sizeof(*hist_out));
+    if (roi_state == NULL || sg_w <= 0 || sg_h <= 0 ||
+        roi_state->color_valid_mask == NULL || roi_state->color_u_bin == NULL ||
+        roi_state->color_v_bin == NULL) {
+        return 0u;
+    }
+    uint32_t sample_count = 0u;
+    size_t slots = (size_t)sg_w * (size_t)sg_h;
+    for (size_t idx = 0; idx < slots; idx++) {
+        if (roi_state->color_valid_mask[idx] == 0u) continue;
+        int u_bin = (int)roi_state->color_u_bin[idx];
+        int v_bin = (int)roi_state->color_v_bin[idx];
+        if (u_bin < 0 || u_bin >= ANOMALY_COLOR_U_BINS ||
+            v_bin < 0 || v_bin >= ANOMALY_COLOR_V_BINS) {
+            continue;
+        }
+        int key = anomaly_color_hist_key(u_bin, v_bin);
+        if (hist_out[key] < UINT32_MAX) hist_out[key]++;
+        if (sample_count < UINT32_MAX) sample_count++;
+    }
+    return sample_count;
+}
+
+static void compute_color_candidate_shadow_evidence(
+        const anomaly_roi_state_t       *roi_state,
+        int                              sg_w,
+        int                              sg_h,
+        const uint32_t                  *scene_hist,
+        uint32_t                         scene_sample_count,
+        anomaly_color_blob_candidate_t  *candidate) {
+    if (candidate == NULL || !candidate->shadow_color.valid || scene_hist == NULL ||
+        roi_state == NULL || roi_state->color_valid_mask == NULL ||
+        roi_state->color_u_bin == NULL || roi_state->color_v_bin == NULL) {
+        return;
+    }
+
+    anomaly_color_blob_signature_t sampled_contribution;
+    memset(&sampled_contribution, 0, sizeof(sampled_contribution));
+    sampled_contribution.predominant_u_bin = -1;
+    sampled_contribution.predominant_v_bin = -1;
+    int min_x = clamp_i32(candidate->min_x, 0, sg_w - 1);
+    int min_y = clamp_i32(candidate->min_y, 0, sg_h - 1);
+    int max_x = clamp_i32(candidate->max_x, 0, sg_w - 1);
+    int max_y = clamp_i32(candidate->max_y, 0, sg_h - 1);
+    for (int sy = min_y; sy <= max_y; sy++) {
+        for (int sx = min_x; sx <= max_x; sx++) {
+            size_t idx = (size_t)sy * (size_t)sg_w + (size_t)sx;
+            if (roi_state->color_valid_mask[idx] == 0u) continue;
+            int u_bin = (int)roi_state->color_u_bin[idx];
+            int v_bin = (int)roi_state->color_v_bin[idx];
+            if (u_bin < 0 || u_bin >= ANOMALY_COLOR_U_BINS ||
+                v_bin < 0 || v_bin >= ANOMALY_COLOR_V_BINS) {
+                continue;
+            }
+            int key = anomaly_color_hist_key(u_bin, v_bin);
+            if (sampled_contribution.histogram[key] < UINT32_MAX) {
+                sampled_contribution.histogram[key]++;
+            }
+            if (sampled_contribution.sample_count < UINT32_MAX) {
+                sampled_contribution.sample_count++;
+            }
+        }
+    }
+
+    anomaly_color_blob_signature_t dense_blob;
+    anomaly_color_blob_signature_t dense_ring;
+    copy_color_blob_signature(&dense_blob, &candidate->shadow_color.blob_signature);
+    copy_color_blob_signature(&dense_ring, &candidate->shadow_color.ring_signature);
+    int predominant_u = dense_blob.predominant_u_bin;
+    int predominant_v = dense_blob.predominant_v_bin;
+    float excluded_rarity = anomaly_color_candidate_excluded_family_rarity(
+        scene_hist,
+        NULL,
+        &sampled_contribution,
+        NULL,
+        predominant_u,
+        predominant_v);
+    uint32_t excluded_samples = scene_sample_count > sampled_contribution.sample_count
+        ? scene_sample_count - sampled_contribution.sample_count
+        : 0u;
+    float excluded_family_count = excluded_rarity > 0.0f
+        ? (1.0f / excluded_rarity) - 1.0f
+        : (float)excluded_samples;
+    float normalized_rarity = excluded_samples > 0u
+        ? 1.0f - excluded_family_count / (float)excluded_samples
+        : 0.0f;
+    normalized_rarity = clampf(normalized_rarity, 0.0f, 1.0f);
+    float ring_divergence = anomaly_color_signature_divergence(&dense_blob, &dense_ring);
+    float chroma_reliability = anomaly_color_signature_chroma_reliability(&dense_blob);
+
+    candidate->shadow_color.sampled_grid_contribution_count =
+        sampled_contribution.sample_count;
+    candidate->shadow_color.sampled_grid_contribution_domain =
+        ANOMALY_COLOR_EVIDENCE_DOMAIN_SAMPLED_GRID_BBOX;
+    candidate->shadow_color.excluded_background_rarity =
+        clampf(excluded_rarity, 0.0f, 1.0f);
+    candidate->shadow_color.normalized_rarity_factor = normalized_rarity;
+    candidate->shadow_color.local_ring_divergence =
+        clampf(ring_divergence, 0.0f, 1.0f);
+    candidate->shadow_color.chroma_reliability =
+        clampf(chroma_reliability, 0.0f, 1.0f);
+    candidate->shadow_color.temporal_valid = false;
+    candidate->shadow_color.temporal_consistency = 1.0f;
+    // Shadow-only composite. Temporal evidence is neutral until Packet D.
+    candidate->shadow_color.composite_uniqueness = clampf(
+        normalized_rarity * dense_blob.purity * ring_divergence *
+            chroma_reliability * candidate->shadow_color.temporal_consistency,
+        0.0f,
+        1.0f);
+}
 
 static void insert_color_blob_candidate(
         anomaly_color_blob_candidate_t *top,
@@ -869,9 +1024,19 @@ static bool verify_dense_color_component(
                 ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE];
     uint8_t visited[ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE *
                     ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE];
+    uint8_t member_mask[ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE *
+                        ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE];
+    uint8_t ring_mask[ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE *
+                      ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE];
+    uint8_t dense_u_bins[ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE *
+                         ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE];
+    uint8_t dense_v_bins[ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE *
+                         ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE];
     int queue[ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE *
               ANOMALY_COLOR_DENSE_VERIFY_MAX_WINDOW_SIDE];
     memset(visited, 0, sizeof(visited));
+    memset(member_mask, 0, sizeof(member_mask));
+    memset(ring_mask, 0, sizeof(ring_mask));
 
     for (int wy = 0; wy < win_h; wy++) {
         for (int wx = 0; wx < win_w; wx++) {
@@ -886,6 +1051,16 @@ static bool verify_dense_color_component(
                 &luma_buf[local_idx],
                 &u_buf[local_idx],
                 &v_buf[local_idx]);
+            dense_u_bins[local_idx] = (uint8_t)anomaly_color_quantize_uv_bin(
+                u_buf[local_idx],
+                ANOMALY_COLOR_DETECTOR_U_MIN,
+                ANOMALY_COLOR_DETECTOR_U_MAX,
+                ANOMALY_COLOR_U_BINS);
+            dense_v_bins[local_idx] = (uint8_t)anomaly_color_quantize_uv_bin(
+                v_buf[local_idx],
+                ANOMALY_COLOR_DETECTOR_V_MIN,
+                ANOMALY_COLOR_DETECTOR_V_MAX,
+                ANOMALY_COLOR_V_BINS);
         }
     }
 
@@ -933,6 +1108,7 @@ static bool verify_dense_color_component(
             continue;
         }
         area_px++;
+        member_mask[cur] = 1u;
         sum_x += (double)px;
         sum_y += (double)py;
         sum_u += (double)cur_u;
@@ -1021,6 +1197,37 @@ static bool verify_dense_color_component(
         if (reject_span_out != NULL) *reject_span_out = span_px / (float)step;
         if (reject_ring_fraction_out != NULL) *reject_ring_fraction_out = ring_fraction;
         if (reject_support_mass_out != NULL) *reject_support_mass_out = support_mass;
+        return false;
+    }
+
+    for (int member_idx = 0; member_idx < win_w * win_h; member_idx++) {
+        if (member_mask[member_idx] == 0u) continue;
+        int member_x = member_idx % win_w;
+        int member_y = member_idx / win_w;
+        for (int dy = -1; dy <= 1; dy++) {
+            int ring_y = member_y + dy;
+            if (ring_y < 0 || ring_y >= win_h) continue;
+            for (int dx = -1; dx <= 1; dx++) {
+                int ring_x = member_x + dx;
+                if (ring_x < 0 || ring_x >= win_w || (dx == 0 && dy == 0)) continue;
+                int ring_idx = ring_y * win_w + ring_x;
+                if (member_mask[ring_idx] == 0u) ring_mask[ring_idx] = 1u;
+            }
+        }
+    }
+    size_t dense_slots = (size_t)win_w * (size_t)win_h;
+    if (!anomaly_color_build_blob_signature(
+            dense_u_bins,
+            dense_v_bins,
+            member_mask,
+            dense_slots,
+            &dense_out->blob_signature) ||
+        !anomaly_color_build_blob_signature(
+            dense_u_bins,
+            dense_v_bins,
+            ring_mask,
+            dense_slots,
+            &dense_out->ring_signature)) {
         return false;
     }
 
@@ -1454,6 +1661,17 @@ static bool build_color_blob_candidate(
     candidate_out->min_y = dense_min_sy;
     candidate_out->max_x = dense_max_sx;
     candidate_out->max_y = dense_max_sy;
+    candidate_out->shadow_color.valid = dense_component.blob_signature.sample_count > 0u;
+    candidate_out->shadow_color.blob_domain = ANOMALY_COLOR_EVIDENCE_DOMAIN_DENSE_PIXEL_EXACT;
+    candidate_out->shadow_color.ring_domain = ANOMALY_COLOR_EVIDENCE_DOMAIN_DENSE_PIXEL_EXACT;
+    copy_color_shadow_signature(
+        &candidate_out->shadow_color.blob_signature,
+        &dense_component.blob_signature);
+    copy_color_shadow_signature(
+        &candidate_out->shadow_color.ring_signature,
+        &dense_component.ring_signature);
+    candidate_out->shadow_color.temporal_valid = false;
+    candidate_out->shadow_color.temporal_consistency = 1.0f;
     return true;
 }
 
@@ -8279,6 +8497,8 @@ int anomaly_process_frame(
     double g_std_l  = sqrt(fmax((sum_l2/(double)sample_count) - g_mean_l*g_mean_l, 1.0));
     uint8_t *color_frame_hist = NULL;
     uint8_t color_recent_hist_weighted[ANOMALY_COLOR_HIST_BINS];
+    uint32_t color_shadow_scene_hist[ANOMALY_COLOR_HIST_BINS] = {0u};
+    uint32_t color_shadow_scene_sample_count = 0u;
     float color_family_rarity_lut[ANOMALY_COLOR_HIST_BINS];
     float color_hist_rarity_lut[ANOMALY_COLOR_HIST_BINS];
     for (int i = 0; i < ANOMALY_COLOR_HIST_BINS; i++) {
@@ -8329,6 +8549,11 @@ int anomaly_process_frame(
         } else {
             color_frame_hist = NULL;
         }
+        color_shadow_scene_sample_count = build_color_shadow_scene_histogram(
+            roi_state,
+            sg_w,
+            sg_h,
+            color_shadow_scene_hist);
     }
     anomaly_timing_add_elapsed(&timing, ANOMALY_TIMING_STAGE_SAMPLED_GRID_PREP, stage_started_us);
 
@@ -8774,6 +8999,22 @@ int anomaly_process_frame(
     float color_candidate_small_target_area_ratio[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_scene_commonness_score[ANOMALY_MAX_COLOR_CANDIDATES];
     float color_candidate_uniqueness_rank[ANOMALY_MAX_COLOR_CANDIDATES];
+    anomaly_color_shadow_evidence_t color_candidate_shadow[ANOMALY_MAX_COLOR_CANDIDATES];
+    memset(color_candidate_shadow, 0, sizeof(color_candidate_shadow));
+    anomaly_color_blob_signature_t
+        color_candidate_temporal_signatures[ANOMALY_MAX_COLOR_CANDIDATES];
+    memset(color_candidate_temporal_signatures,
+           0,
+           sizeof(color_candidate_temporal_signatures));
+    anomaly_color_shadow_candidate_t
+        color_shadow_candidates[ANOMALY_MAX_COLOR_CANDIDATES];
+    memset(color_shadow_candidates, 0, sizeof(color_shadow_candidates));
+    anomaly_color_shadow_match_t color_shadow_matches[ANOMALY_MAX_COLOR_CANDIDATES];
+    for (int ci = 0; ci < ANOMALY_MAX_COLOR_CANDIDATES; ci++) {
+        color_shadow_matches[ci].track_index = -1;
+        color_shadow_matches[ci].track_id = -1;
+        color_shadow_matches[ci].temporal_consistency = 1.0f;
+    }
     bool color_candidate_promotion_eligible[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_candidate_promotion_track[ANOMALY_MAX_COLOR_CANDIDATES];
     int color_hist_nonzero_bins = 0;
@@ -9108,6 +9349,52 @@ int anomaly_process_frame(
 #if ANOMALY_DEBUG_TIMING
         int64_t color_candidate_started_us = anomaly_timing_now_us();
 #endif
+        for (int ci = 0; ci < color_candidate_count; ci++) {
+            compute_color_candidate_shadow_evidence(
+                &state->roi_state,
+                sg_w,
+                sg_h,
+                color_shadow_scene_hist,
+                color_shadow_scene_sample_count,
+                &color_blob_candidates[ci]);
+            color_candidate_shadow[ci] = color_blob_candidates[ci].shadow_color;
+            copy_color_blob_signature(
+                &color_candidate_temporal_signatures[ci],
+                &color_blob_candidates[ci].shadow_color.blob_signature);
+            color_shadow_candidates[ci].valid =
+                color_blob_candidates[ci].shadow_color.valid &&
+                color_candidate_temporal_signatures[ci].sample_count > 0u;
+            color_shadow_candidates[ci].center_x_norm =
+                (float)color_blob_candidates[ci].candidate.pixel_x /
+                (float)(width > 1 ? width - 1 : 1);
+            color_shadow_candidates[ci].center_y_norm =
+                (float)color_blob_candidates[ci].candidate.pixel_y /
+                (float)(height > 1 ? height - 1 : 1);
+            color_shadow_candidates[ci].signature =
+                &color_candidate_temporal_signatures[ci];
+        }
+        anomaly_target_tracks_evaluate_color_shadow_candidates(
+            state,
+            registration_health,
+            color_shadow_candidates,
+            color_candidate_count,
+            color_shadow_matches);
+        for (int ci = 0; ci < color_candidate_count; ci++) {
+            anomaly_color_shadow_evidence_t *shadow =
+                &color_blob_candidates[ci].shadow_color;
+            shadow->temporal_valid = color_shadow_matches[ci].temporal_valid;
+            shadow->temporal_consistency =
+                color_shadow_matches[ci].temporal_valid
+                    ? color_shadow_matches[ci].temporal_consistency
+                    : 1.0f;
+            shadow->composite_uniqueness = clampf(
+                shadow->normalized_rarity_factor * shadow->blob_signature.purity *
+                    shadow->local_ring_divergence * shadow->chroma_reliability *
+                    shadow->temporal_consistency,
+                0.0f,
+                1.0f);
+            color_candidate_shadow[ci] = *shadow;
+        }
         for (int ci = 0; ci < color_candidate_count; ci++) {
             float temporal_candidate_boost = anomaly_color_score_candidate_temporal_boost(
                 state,
@@ -11832,12 +12119,29 @@ motion_appearance_scoring_done:
     if (result_out != NULL) {
         anomaly_result_publish_scan_plan(result_out, &scan_plan);
     }
+    for (int ci = 0; ci < color_candidate_count; ci++) {
+        for (int oi = 0; oi < target_observation_count; oi++) {
+            const anomaly_target_observation_t *obs = &target_observations[oi];
+            if (!obs->valid || obs->algorithm != ANOMALY_ALGO_COLOR) continue;
+            if (fabsf(obs->center_x_norm - color_shadow_candidates[ci].center_x_norm) <= 1.0e-6f &&
+                fabsf(obs->center_y_norm - color_shadow_candidates[ci].center_y_norm) <= 1.0e-6f) {
+                color_shadow_candidates[ci].fresh_color_observation = true;
+                break;
+            }
+        }
+    }
     bool clear_roi_tracks = anomaly_target_tracks_update_from_observations(
             state,
             target_observations,
             target_observation_count,
             registration_health,
             anomaly_registration_health_confidence(registration_health));
+    anomaly_target_tracks_commit_color_shadow_candidates(
+        state,
+        registration_health,
+        color_shadow_candidates,
+        color_shadow_matches,
+        color_candidate_count);
     if (clear_roi_tracks) {
         anomaly_roi_tracks_clear_all(state);
     }
@@ -13030,6 +13334,42 @@ motion_appearance_scoring_done:
             .frame_h = fh,
         };
         anomaly_result_publish_color_debug_candidates(result_out, &color_debug_candidate_publication);
+        for (int i = 0; i < color_debug_candidate_count; i++) {
+            anomaly_debug_color_candidate_t *debug_candidate =
+                &result_out->color_debug.candidates[i];
+            const anomaly_color_shadow_evidence_t *shadow =
+                &color_candidate_shadow[i];
+            debug_candidate->color_uniqueness_rank = color_candidate_uniqueness_rank[i];
+            debug_candidate->shadow_color_valid = shadow->valid;
+            debug_candidate->shadow_blob_domain = (int)shadow->blob_domain;
+            debug_candidate->shadow_ring_domain = (int)shadow->ring_domain;
+            debug_candidate->shadow_sampled_grid_contribution_domain =
+                (int)shadow->sampled_grid_contribution_domain;
+            debug_candidate->shadow_blob_sample_count = shadow->blob_signature.sample_count;
+            debug_candidate->shadow_ring_sample_count = shadow->ring_signature.sample_count;
+            debug_candidate->shadow_sampled_grid_contribution_count =
+                shadow->sampled_grid_contribution_count;
+            debug_candidate->shadow_predominant_u_bin =
+                shadow->blob_signature.predominant_u_bin;
+            debug_candidate->shadow_predominant_v_bin =
+                shadow->blob_signature.predominant_v_bin;
+            debug_candidate->shadow_predominant_family_share =
+                shadow->blob_signature.predominant_family_share;
+            debug_candidate->shadow_normalized_entropy =
+                shadow->blob_signature.normalized_entropy;
+            debug_candidate->shadow_purity = shadow->blob_signature.purity;
+            debug_candidate->shadow_excluded_background_rarity =
+                shadow->excluded_background_rarity;
+            debug_candidate->shadow_normalized_rarity_factor =
+                shadow->normalized_rarity_factor;
+            debug_candidate->shadow_local_ring_divergence = shadow->local_ring_divergence;
+            debug_candidate->shadow_chroma_reliability = shadow->chroma_reliability;
+            debug_candidate->shadow_temporal_valid = shadow->temporal_valid;
+            debug_candidate->shadow_temporal_consistency = shadow->temporal_consistency;
+            debug_candidate->shadow_matched_track_id = color_shadow_matches[i].track_id;
+            debug_candidate->shadow_matched_track_index = color_shadow_matches[i].track_index;
+            debug_candidate->shadow_composite_uniqueness = shadow->composite_uniqueness;
+        }
         anomaly_result_saliency_debug_publication_t saliency_debug = {
             .bg_ready = bg_valid,
             .raw_score = best_persist,

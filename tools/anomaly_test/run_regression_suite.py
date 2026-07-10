@@ -11,6 +11,30 @@ from pathlib import Path
 
 from review_eval import POSITIVE_KINDS, load_review
 
+SHADOW_SCORE_EPSILON = 1e-4
+SHADOW_COMPONENT_FIELDS = (
+    "shadow_normalized_rarity_factor",
+    "shadow_local_ring_divergence",
+    "shadow_chroma_reliability",
+    "shadow_temporal_consistency",
+    "shadow_purity",
+    "shadow_normalized_entropy",
+)
+SHADOW_REQUIRED_FIELDS = (
+    "shadow_composite_uniqueness",
+    "shadow_blob_domain",
+    "shadow_ring_domain",
+    "shadow_sampled_grid_contribution_domain",
+    "shadow_blob_sample_count",
+    "shadow_ring_sample_count",
+    "shadow_sampled_grid_contribution_count",
+    "shadow_predominant_u_bin",
+    "shadow_predominant_v_bin",
+    "shadow_predominant_family_share",
+    "shadow_excluded_background_rarity",
+    *SHADOW_COMPONENT_FIELDS,
+)
+
 
 def load_manifest(path: Path) -> dict:
     return json.loads(path.read_text())
@@ -57,6 +81,8 @@ def detector_args_use_color(detector_args: list[str]) -> bool:
                 return (int(detector_args[idx + 1]) & 0x01) != 0
             except ValueError:
                 return False
+        if arg == "--app-appearance" and idx + 1 < len(detector_args):
+            return detector_args[idx + 1] in {"auto", "color"}
     return False
 
 
@@ -88,6 +114,159 @@ def format_ratio(value: float | None) -> str:
 
 def format_seconds(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.3f}s"
+
+
+def apply_review_kind_overrides(review_path: Path, out_path: Path, overrides: list[dict]) -> Path:
+    if not overrides:
+        return review_path
+    document = json.loads(review_path.read_text())
+    applied = 0
+    for frame in document.get("frames", []):
+        time_s = float(frame.get("source_timestamp_us", 0)) / 1_000_000.0
+        for annotation in frame.get("annotations", []):
+            for override in overrides:
+                if (
+                    abs(time_s - float(override["time_s"])) <= 0.000_001
+                    and annotation.get("review_kind") == override.get("from")
+                ):
+                    annotation["review_kind"] = override["to"]
+                    applied += 1
+                    break
+    if applied != len(overrides):
+        raise RuntimeError(
+            f"review override mismatch for {review_path}: applied {applied}/{len(overrides)}"
+        )
+    out_path.write_text(json.dumps(document, indent=2) + "\n")
+    return out_path
+
+
+def shadow_invalid_reason(candidate: dict) -> str | None:
+    if not candidate.get("valid", True):
+        return "production_candidate_invalid"
+    missing = [field for field in SHADOW_REQUIRED_FIELDS if field not in candidate]
+    if missing:
+        return "missing_fields:" + ",".join(missing)
+    if not candidate.get("shadow_color_valid", False):
+        return "shadow_color_invalid"
+    numeric_fields = ("shadow_composite_uniqueness", *SHADOW_COMPONENT_FIELDS)
+    if any(not math.isfinite(float(candidate[field])) for field in numeric_fields):
+        return "non_finite_shadow_value"
+    return None
+
+
+def shadow_order_candidates(candidates: list[dict], epsilon: float = SHADOW_SCORE_EPSILON) -> list[dict]:
+    """Order valid candidates by score bands, preserving production order inside each band."""
+    valid = [candidate for candidate in candidates if shadow_invalid_reason(candidate) is None]
+    sorted_by_score = sorted(
+        enumerate(valid),
+        key=lambda item: (-float(item[1]["shadow_composite_uniqueness"]), item[0]),
+    )
+    ordered: list[dict] = []
+    cursor = 0
+    while cursor < len(sorted_by_score):
+        band_score = float(sorted_by_score[cursor][1]["shadow_composite_uniqueness"])
+        band: list[tuple[int, dict]] = []
+        while cursor < len(sorted_by_score):
+            item = sorted_by_score[cursor]
+            if band_score - float(item[1]["shadow_composite_uniqueness"]) > epsilon:
+                break
+            band.append(item)
+            cursor += 1
+        ordered.extend(candidate for _, candidate in sorted(band, key=lambda item: item[0]))
+    return ordered
+
+
+def summarize_shadow_review_rows(
+    telemetry_frames: list[dict],
+    detail_rows: list[dict],
+    time_tolerance_s: float,
+) -> dict:
+    rows: list[dict] = []
+    for review in detail_rows:
+        frame = min(
+            telemetry_frames,
+            key=lambda item: abs(float(item.get("time_s", -1.0)) - float(review["time_s"])),
+            default=None,
+        )
+        row = {
+            "time_s": review["time_s"],
+            "x_norm": review["x_norm"],
+            "y_norm": review["y_norm"],
+            "review_kind": review["review_kind"],
+            "review_class": "positive" if review["review_kind"] in POSITIVE_KINDS else "negative",
+            "production_rank": None,
+            "shadow_rank": None,
+            "rank_delta": None,
+            "winner_swap": None,
+            "component_attribution": None,
+            "invalid_shadow_reason": None,
+        }
+        if frame is None or abs(float(frame.get("time_s", -1.0)) - float(review["time_s"])) > time_tolerance_s:
+            row["invalid_shadow_reason"] = "no_telemetry_frame"
+            rows.append(row)
+            continue
+        candidates = list(frame.get("candidates", []))
+        if not candidates:
+            row["invalid_shadow_reason"] = "no_candidates"
+            rows.append(row)
+            continue
+        reviewed_candidate = min(candidates, key=lambda item: candidate_distance(review, item))
+        reviewed_distance = candidate_distance(review, reviewed_candidate)
+        bbox_fields = (
+            "bbox_left_norm",
+            "bbox_top_norm",
+            "bbox_right_norm",
+            "bbox_bottom_norm",
+        )
+        reviewed_inside = (
+            all(field in reviewed_candidate for field in bbox_fields)
+            and point_in_bbox(review, reviewed_candidate)
+        )
+        if not reviewed_inside and reviewed_distance > 0.035:
+            row["invalid_shadow_reason"] = "no_nearby_candidate"
+            row["nearest_candidate_distance"] = reviewed_distance
+            rows.append(row)
+            continue
+        production_rank = candidates.index(reviewed_candidate) + 1
+        ordered = shadow_order_candidates(candidates)
+        invalid_reason = shadow_invalid_reason(reviewed_candidate)
+        row["candidate_index"] = reviewed_candidate.get("index", production_rank - 1)
+        row["production_rank"] = production_rank
+        row["invalid_shadow_reason"] = invalid_reason
+        if invalid_reason is None:
+            shadow_rank = ordered.index(reviewed_candidate) + 1
+            row["shadow_rank"] = shadow_rank
+            row["rank_delta"] = production_rank - shadow_rank
+        production_winner_index = int(frame.get("winning_candidate_index", -1))
+        production_winner = next(
+            (candidate for candidate in candidates if int(candidate.get("index", -1)) == production_winner_index),
+            candidates[0],
+        )
+        if all(shadow_invalid_reason(candidate) is None for candidate in candidates):
+            shadow_winner = ordered[0]
+            row["production_winner_index"] = production_winner.get("index")
+            row["shadow_winner_index"] = shadow_winner.get("index")
+            row["winner_swap"] = shadow_winner is not production_winner
+        else:
+            row["winner_evidence_reason"] = "incomplete_candidate_shadow_evidence"
+        if invalid_reason is None and shadow_invalid_reason(production_winner) is None:
+            deltas = {
+                field.removeprefix("shadow_"): (
+                    float(reviewed_candidate[field]) - float(production_winner[field])
+                )
+                for field in SHADOW_COMPONENT_FIELDS
+            }
+            dominant = max(deltas, key=lambda field: abs(deltas[field])) if deltas else None
+            row["component_attribution"] = {"deltas_vs_production_winner": deltas, "dominant": dominant}
+        row["shadow_temporal_valid"] = reviewed_candidate.get("shadow_temporal_valid")
+        rows.append(row)
+    return {
+        "tie_policy": {
+            "type": "score_band_preserve_production_order",
+            "epsilon": SHADOW_SCORE_EPSILON,
+        },
+        "reviewed_rows": rows,
+    }
 
 
 def load_thermal_debug_jsonl(path: Path) -> list[dict]:
@@ -497,6 +676,29 @@ def summarize_color_telemetry(
             lines.append(f"  ... {len(cluster['rows']) - 8} more misses in cluster")
         lines.append("")
 
+    shadow_ordering = summarize_shadow_review_rows(
+        telemetry_frames=telemetry_frames,
+        detail_rows=detail_rows,
+        time_tolerance_s=time_tolerance_s,
+    )
+    shadow_rows = shadow_ordering["reviewed_rows"]
+    lines += [
+        "## Shadow Uniqueness Ordering",
+        "",
+        f"- Tie policy: preserve production order within {SHADOW_SCORE_EPSILON:g} composite-score bands",
+        f"- Reviewed positive/negative rows: {len(shadow_rows)}",
+        f"- Rows with valid candidate shadow evidence: {sum(row['shadow_rank'] is not None for row in shadow_rows)}",
+        f"- Conclusive winner comparisons: {sum(row['winner_swap'] is not None for row in shadow_rows)}",
+        "",
+    ]
+    for row in shadow_rows:
+        lines.append(
+            f"- t={float(row['time_s']):.3f}s {row['review_class']} "
+            f"production_rank={row['production_rank']} shadow_rank={row['shadow_rank']} "
+            f"delta={row['rank_delta']} winner_swap={row['winner_swap']} "
+            f"invalid={row['invalid_shadow_reason'] or 'none'}"
+        )
+
     return {
         "review_path": str(review_path),
         "telemetry_path": str(telemetry_path),
@@ -508,6 +710,7 @@ def summarize_color_telemetry(
         "component_reject_counts": component_reject_counts,
         "clusters": clusters,
         "misses": results,
+        "shadow_ordering": shadow_ordering,
         "markdown": "\n".join(lines).rstrip() + "\n",
     }
 
@@ -797,9 +1000,18 @@ def main() -> int:
             thermal_telemetry_path = excerpt_dir / "thermal_debug.jsonl"
             color_debug_jsonl_path = excerpt_dir / "color_debug.jsonl"
             color_target_csv_path = excerpt_dir / "color_target.csv"
-            review_path = resolve_path(repo_root, excerpt.get("review_path"))
-            if review_path is None:
+            source_review_path = resolve_path(repo_root, excerpt.get("review_path"))
+            if source_review_path is None:
                 raise RuntimeError(f"reviewed excerpt missing review path: {excerpt['id']}")
+            review_overrides = list(excerpt.get("review_kind_overrides", []))
+            review_path = apply_review_kind_overrides(
+                source_review_path,
+                excerpt_dir / "effective_review.json",
+                review_overrides,
+            )
+            excerpt_result["source_review_path"] = str(source_review_path)
+            if review_overrides:
+                excerpt_result["review_kind_overrides"] = review_overrides
             color_debug_enabled = detector_args_use_color(profile_args)
             color_target_written = False
             if color_debug_enabled:

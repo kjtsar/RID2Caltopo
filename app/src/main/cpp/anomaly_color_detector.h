@@ -40,6 +40,7 @@
 #define ANOMALY_COLOR_PROVISIONAL_FP_CLUSTER_RADIUS 0.060f
 #define ANOMALY_COLOR_SUPPORT_COMPACT_PEAK_SEED_FLOOR 0.58f
 #define ANOMALY_COLOR_SUPPORT_COMPACT_PEAK_MAX_CELLS 9
+#define ANOMALY_COLOR_DIVERGENCE_FULL_CONFIDENCE_SAMPLES 8u
 
 typedef struct {
     int   sx;
@@ -54,6 +55,18 @@ typedef struct {
     float compact_prominence;
     float core_share;
 } anomaly_color_support_score_t;
+
+// Fixed-size, allocation-free summary of one blob's quantized UV samples.
+typedef struct {
+    uint32_t histogram[ANOMALY_COLOR_HIST_BINS];
+    uint32_t sample_count;
+    int      predominant_u_bin;
+    int      predominant_v_bin;
+    uint32_t predominant_family_count;
+    float    predominant_family_share;
+    float    normalized_entropy;
+    float    purity;
+} anomaly_color_blob_signature_t;
 
 static inline float anomaly_color_clampf(float value, float min_value, float max_value) {
     if (value < min_value) return min_value;
@@ -1131,6 +1144,51 @@ typedef struct {
 } anomaly_color_target_telemetry_t;
 
 bool anomaly_color_hist_ensure_capacity(uint8_t **buffer, size_t *capacity_bins);
+
+// Builds a signature from UV-bin samples; a NULL include mask includes every slot.
+bool anomaly_color_build_blob_signature(
+        const uint8_t                  *u_bins,
+        const uint8_t                  *v_bins,
+        const uint8_t                  *include_mask,
+        size_t                          sample_slots,
+        anomaly_color_blob_signature_t *signature_out);
+
+// Returns 1/(candidate-excluded current+recent 3x3 family count+1).
+float anomaly_color_candidate_excluded_family_rarity(
+        const uint32_t                       *current_hist,
+        const uint32_t                       *recent_hist,
+        const anomaly_color_blob_signature_t *current_candidate,
+        const anomaly_color_blob_signature_t *recent_candidate,
+        int                                   center_u_bin,
+        int                                   center_v_bin);
+
+// Builds a sampled-grid UV signature from the ring outside an inclusive bbox.
+// The frame-valid mask is required; optional include/exclude masks further gate samples.
+bool anomaly_color_build_local_ring_signature(
+        const anomaly_roi_state_t       *roi_state,
+        int                              sg_w,
+        int                              sg_h,
+        int                              bbox_min_x,
+        int                              bbox_min_y,
+        int                              bbox_max_x,
+        int                              bbox_max_y,
+        int                              ring_width_cells,
+        const uint8_t                   *include_mask,
+        const uint8_t                   *exclude_mask,
+        anomaly_color_blob_signature_t  *signature_out);
+
+// Symmetric UV-family divergence. Sparse evidence is confidence-scaled toward zero.
+float anomaly_color_signature_divergence(
+        const anomaly_color_blob_signature_t *blob_signature,
+        const anomaly_color_blob_signature_t *ring_signature);
+
+float anomaly_color_signature_similarity(
+        const anomaly_color_blob_signature_t *first_signature,
+        const anomaly_color_blob_signature_t *second_signature);
+
+// Reliability of quantized chroma: neutral centroids and dispersed colors are downweighted.
+float anomaly_color_signature_chroma_reliability(
+        const anomaly_color_blob_signature_t *signature);
 
 int anomaly_color_build_frame_histogram(
         const anomaly_roi_state_t *roi_state,

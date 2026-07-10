@@ -3,6 +3,8 @@
 
 #include <stdbool.h>
 
+#include "anomaly_color_shadow_evidence.h"
+
 #define ANOMALY_APPEARANCE_MOTION_CANDIDATE_MAX 4
 #define ANOMALY_APPEARANCE_MOTION_CANDIDATE_NMS_RADIUS 2
 
@@ -85,6 +87,7 @@ typedef struct {
     int min_y;
     int max_x;
     int max_y;
+    anomaly_color_shadow_evidence_t shadow_color;
 } anomaly_color_blob_candidate_t;
 
 typedef struct {

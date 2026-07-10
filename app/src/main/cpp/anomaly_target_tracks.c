@@ -6,6 +6,7 @@
 #include "anomaly_target_revisit.h"
 
 #include <math.h>
+#include <limits.h>
 #include <string.h>
 
 #define ANOMALY_TARGET_MAX_CARRIED_MISSES ANOMALY_ACC_HOLD_FRAMES
@@ -17,6 +18,19 @@
 #define ANOMALY_TARGET_CONFIDENCE_MISS_DECAY 0.22f
 #define ANOMALY_TARGET_CONFIDENCE_POSITIONAL_MISS_DECAY 0.04f
 #define ANOMALY_TARGET_CONFIRMED_COLOR_LOCK_GATE 0.040f
+#define ANOMALY_COLOR_SHADOW_MATCH_GATE 0.040f
+#define ANOMALY_COLOR_SHADOW_HISTORY_MASS 65535u
+
+static void anomaly_target_tracks_invalidate_color_shadow_signature(
+        anomaly_target_track_t *track) {
+    if (track == NULL) return;
+    track->shadow_color_signature_valid = false;
+    track->shadow_color_signature_age = 0;
+    track->shadow_color_signature_sample_count = 0u;
+    memset(track->shadow_color_signature_histogram,
+           0,
+           sizeof(track->shadow_color_signature_histogram));
+}
 
 void anomaly_target_tracks_clear_track(anomaly_target_track_t *track) {
     if (track == NULL) return;
@@ -280,6 +294,27 @@ void anomaly_target_tracks_predict_with_registration(
         anomaly_state_t                                      *state,
         const anomaly_target_tracks_registration_prediction_t *prediction) {
     if (state == NULL || prediction == NULL) return;
+    if (prediction->health != ANOMALY_REG_HEALTH_HEALTHY) {
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            anomaly_target_tracks_invalidate_color_shadow_signature(
+                &state->target_tracks[ti]);
+        }
+    } else {
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            anomaly_target_track_t *track = &state->target_tracks[ti];
+            if (!track->active || track->algorithm != ANOMALY_ALGO_COLOR ||
+                !track->shadow_color_signature_valid) {
+                continue;
+            }
+            if (track->shadow_color_signature_age < INT_MAX) {
+                track->shadow_color_signature_age++;
+            }
+            if (track->shadow_color_signature_age >
+                ANOMALY_COLOR_SHADOW_MAX_AGE_FRAMES) {
+                anomaly_target_tracks_invalidate_color_shadow_signature(track);
+            }
+        }
+    }
     if (prediction->scene_discontinuity ||
         prediction->health == ANOMALY_REG_HEALTH_INVALID ||
         prediction->health == ANOMALY_REG_HEALTH_HARD_DEGRADED) {
@@ -334,6 +369,193 @@ void anomaly_target_tracks_predict_with_registration(
         track->last_registration_quality = prediction->quality;
         if (!track->fresh_observation) {
             track->forced_revisit = true;
+        }
+    }
+}
+
+static void anomaly_target_tracks_reset_color_shadow_match(
+        anomaly_color_shadow_match_t *match) {
+    if (match == NULL) return;
+    match->track_index = -1;
+    match->track_id = -1;
+    match->temporal_valid = false;
+    match->temporal_consistency = 1.0f;
+}
+
+static bool anomaly_target_tracks_color_shadow_signature_is_fresh(
+        const anomaly_target_track_t *track) {
+    return track != NULL && track->shadow_color_signature_valid &&
+           track->shadow_color_signature_age >= 0 &&
+           track->shadow_color_signature_age <= ANOMALY_COLOR_SHADOW_MAX_AGE_FRAMES &&
+           track->shadow_color_signature_sample_count > 0u;
+}
+
+void anomaly_target_tracks_evaluate_color_shadow_candidates(
+        const anomaly_state_t                   *state,
+        anomaly_registration_health_t            registration_health,
+        const anomaly_color_shadow_candidate_t  *candidates,
+        int                                      candidate_count,
+        anomaly_color_shadow_match_t            *matches_out) {
+    if (matches_out == NULL || candidate_count <= 0) return;
+    for (int ci = 0; ci < candidate_count; ci++) {
+        anomaly_target_tracks_reset_color_shadow_match(&matches_out[ci]);
+    }
+    if (state == NULL || candidates == NULL ||
+        registration_health != ANOMALY_REG_HEALTH_HEALTHY) {
+        return;
+    }
+
+    bool matched_tracks[ANOMALY_MAX_TARGET_TRACKS];
+    memset(matched_tracks, 0, sizeof(matched_tracks));
+    for (int ci = 0; ci < candidate_count; ci++) {
+        const anomaly_color_shadow_candidate_t *candidate = &candidates[ci];
+        if (!candidate->valid || candidate->signature == NULL ||
+            candidate->signature->sample_count == 0u) {
+            continue;
+        }
+        int best_idx = -1;
+        float best_dist = 0.0f;
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            const anomaly_target_track_t *track = &state->target_tracks[ti];
+            if (matched_tracks[ti] || !track->active ||
+                track->algorithm != ANOMALY_ALGO_COLOR) {
+                continue;
+            }
+            float dx = candidate->center_x_norm - track->center_x_norm;
+            float dy = candidate->center_y_norm - track->center_y_norm;
+            float dist = sqrtf(dx * dx + dy * dy);
+            float gate = ANOMALY_COLOR_SHADOW_MATCH_GATE +
+                         0.25f * track->support_radius_norm;
+            if (dist > gate) continue;
+            if (best_idx < 0 || dist < best_dist) {
+                best_idx = ti;
+                best_dist = dist;
+            }
+        }
+        if (best_idx < 0) continue;
+
+        const anomaly_target_track_t *track = &state->target_tracks[best_idx];
+        anomaly_color_shadow_match_t *match = &matches_out[ci];
+        matched_tracks[best_idx] = true;
+        match->track_index = best_idx;
+        match->track_id = track->id;
+        if (anomaly_target_tracks_color_shadow_signature_is_fresh(track)) {
+            anomaly_color_blob_signature_t prior_signature;
+            memset(&prior_signature, 0, sizeof(prior_signature));
+            memcpy(prior_signature.histogram,
+                   track->shadow_color_signature_histogram,
+                   sizeof(prior_signature.histogram));
+            prior_signature.sample_count = track->shadow_color_signature_sample_count;
+            match->temporal_valid = true;
+            match->temporal_consistency = anomaly_color_signature_similarity(
+                candidate->signature,
+                &prior_signature);
+        }
+    }
+}
+
+static void anomaly_target_tracks_store_color_shadow_signature(
+        anomaly_target_track_t                 *track,
+        const anomaly_color_blob_signature_t  *signature) {
+    if (track == NULL || signature == NULL || signature->sample_count == 0u) return;
+    uint32_t normalized[ANOMALY_COLOR_HIST_BINS];
+    uint32_t normalized_sum = 0u;
+    for (int key = 0; key < ANOMALY_COLOR_HIST_BINS; key++) {
+        uint64_t scaled = (uint64_t)signature->histogram[key] *
+                          (uint64_t)ANOMALY_COLOR_SHADOW_HISTORY_MASS;
+        uint32_t value = (uint32_t)((scaled + signature->sample_count / 2u) /
+                                    signature->sample_count);
+        normalized[key] = value;
+        normalized_sum += value;
+    }
+
+    uint32_t stored_sum = 0u;
+    for (int key = 0; key < ANOMALY_COLOR_HIST_BINS; key++) {
+        uint32_t value = normalized[key];
+        if (track->shadow_color_signature_valid) {
+            value = (uint32_t)(((uint64_t)track->shadow_color_signature_histogram[key] * 3u +
+                                normalized[key] + 2u) / 4u);
+        }
+        track->shadow_color_signature_histogram[key] = value;
+        stored_sum += value;
+    }
+    track->shadow_color_signature_valid = stored_sum > 0u && normalized_sum > 0u;
+    track->shadow_color_signature_age = 0;
+    track->shadow_color_signature_sample_count = stored_sum;
+}
+
+void anomaly_target_tracks_commit_color_shadow_candidates(
+        anomaly_state_t                         *state,
+        anomaly_registration_health_t            registration_health,
+        const anomaly_color_shadow_candidate_t  *candidates,
+        const anomaly_color_shadow_match_t      *matches,
+        int                                      candidate_count) {
+    if (state == NULL) return;
+
+    bool claimed_tracks[ANOMALY_MAX_TARGET_TRACKS];
+    memset(claimed_tracks, 0, sizeof(claimed_tracks));
+    if (registration_health == ANOMALY_REG_HEALTH_HEALTHY &&
+        candidates != NULL && matches != NULL) {
+        for (int ci = 0; ci < candidate_count; ci++) {
+            const anomaly_color_shadow_candidate_t *candidate = &candidates[ci];
+            const anomaly_color_shadow_match_t *match = &matches[ci];
+            if (!candidate->valid || !candidate->fresh_color_observation ||
+                candidate->signature == NULL || candidate->signature->sample_count == 0u ||
+                match->track_index < 0 || match->track_index >= ANOMALY_MAX_TARGET_TRACKS) {
+                continue;
+            }
+            anomaly_target_track_t *track = &state->target_tracks[match->track_index];
+            if (!track->active || !track->fresh_observation ||
+                track->algorithm != ANOMALY_ALGO_COLOR || track->id != match->track_id ||
+                claimed_tracks[match->track_index]) {
+                continue;
+            }
+            anomaly_target_tracks_store_color_shadow_signature(track, candidate->signature);
+            claimed_tracks[match->track_index] = true;
+        }
+
+        // Newly allocated production tracks had no pre-update shadow match.
+        // Rematch only fresh exact observations, using the same strict shadow gate.
+        for (int ci = 0; ci < candidate_count; ci++) {
+            const anomaly_color_shadow_candidate_t *candidate = &candidates[ci];
+            if (!candidate->valid || !candidate->fresh_color_observation ||
+                candidate->signature == NULL || candidate->signature->sample_count == 0u) {
+                continue;
+            }
+            int pre_idx = matches[ci].track_index;
+            if (pre_idx >= 0 && pre_idx < ANOMALY_MAX_TARGET_TRACKS &&
+                claimed_tracks[pre_idx]) {
+                continue;
+            }
+            int best_idx = -1;
+            float best_dist = 0.0f;
+            for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+                anomaly_target_track_t *track = &state->target_tracks[ti];
+                if (claimed_tracks[ti] || !track->active || !track->fresh_observation ||
+                    track->algorithm != ANOMALY_ALGO_COLOR) {
+                    continue;
+                }
+                float dx = candidate->center_x_norm - track->center_x_norm;
+                float dy = candidate->center_y_norm - track->center_y_norm;
+                float dist = sqrtf(dx * dx + dy * dy);
+                float gate = ANOMALY_COLOR_SHADOW_MATCH_GATE +
+                             0.25f * track->support_radius_norm;
+                if (dist > gate) continue;
+                if (best_idx < 0 || dist < best_dist) {
+                    best_idx = ti;
+                    best_dist = dist;
+                }
+            }
+            if (best_idx < 0) continue;
+            anomaly_target_tracks_store_color_shadow_signature(
+                &state->target_tracks[best_idx],
+                candidate->signature);
+            claimed_tracks[best_idx] = true;
+        }
+    } else if (registration_health != ANOMALY_REG_HEALTH_HEALTHY) {
+        for (int ti = 0; ti < ANOMALY_MAX_TARGET_TRACKS; ti++) {
+            anomaly_target_tracks_invalidate_color_shadow_signature(
+                &state->target_tracks[ti]);
         }
     }
 }

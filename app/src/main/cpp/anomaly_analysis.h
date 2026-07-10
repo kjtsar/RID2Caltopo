@@ -319,6 +319,10 @@ typedef struct {
     float last_prediction_registration_y_norm;
     float last_prediction_after_x_norm;
     float last_prediction_after_y_norm;
+    bool  shadow_color_signature_valid;
+    int   shadow_color_signature_age;
+    uint32_t shadow_color_signature_histogram[ANOMALY_COLOR_HIST_BINS];
+    uint32_t shadow_color_signature_sample_count;
 } anomaly_target_track_t;
 
 // Per-stream mutable state owned by the decode thread (no locking needed).
@@ -556,6 +560,28 @@ typedef struct {
     float small_target_area_ratio;
     float scene_commonness;
     float retention_rank;
+    float color_uniqueness_rank;
+    bool  shadow_color_valid;
+    int   shadow_blob_domain;
+    int   shadow_ring_domain;
+    int   shadow_sampled_grid_contribution_domain;
+    uint32_t shadow_blob_sample_count;
+    uint32_t shadow_ring_sample_count;
+    uint32_t shadow_sampled_grid_contribution_count;
+    int   shadow_predominant_u_bin;
+    int   shadow_predominant_v_bin;
+    float shadow_predominant_family_share;
+    float shadow_normalized_entropy;
+    float shadow_purity;
+    float shadow_excluded_background_rarity;
+    float shadow_normalized_rarity_factor;
+    float shadow_local_ring_divergence;
+    float shadow_chroma_reliability;
+    bool  shadow_temporal_valid;
+    float shadow_temporal_consistency;
+    int   shadow_matched_track_id;
+    int   shadow_matched_track_index;
+    float shadow_composite_uniqueness;
     bool  above_threshold;
 } anomaly_debug_color_candidate_t;
 

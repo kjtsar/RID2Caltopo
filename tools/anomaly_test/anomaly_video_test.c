@@ -1308,6 +1308,14 @@ static void dump_thermal_debug(FILE *out, int frame_num, double time_s,
     }
 }
 
+static const char *color_shadow_domain_name(int domain) {
+    switch (domain) {
+        case 1: return "dense_pixel_exact";
+        case 2: return "sampled_grid_bbox";
+        default: return "invalid";
+    }
+}
+
 static void dump_color_debug(FILE *out, int frame_num, double time_s,
                              const anomaly_result_t *result) {
     if (out == NULL || result == NULL) return;
@@ -1337,7 +1345,7 @@ static void dump_color_debug(FILE *out, int frame_num, double time_s,
     for (int i = 0; i < dbg->candidate_count && i < ANOMALY_DEBUG_TOP_COLOR_CANDIDATES; i++) {
         const anomaly_debug_color_candidate_t *c = &dbg->candidates[i];
         fprintf(out,
-                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f ring=%.2f support=%.2f contrast=%.2f rank=%.2f%s\n",
+                "    #%d px=(%d,%d) xy=(%.4f,%.4f) base=%.3f final=%.3f area=%.1f span=%.1f fill=%.2f center=%.2f quality=%.2f isolation=%.2f ring=%.2f support=%.2f contrast=%.2f rank=%.2f uniqueness=%.3f%s\n",
                 i + 1,
                 c->pixel_x,
                 c->pixel_y,
@@ -1355,7 +1363,34 @@ static void dump_color_debug(FILE *out, int frame_num, double time_s,
                 (double)c->support_mass,
                 (double)c->contrast_weight,
                 (double)c->retention_rank,
+                (double)c->color_uniqueness_rank,
                 (i == dbg->winning_candidate_index) ? "  <winner>" : "");
+        fprintf(out,
+                "       shadow valid=%d domains=(blob=%s ring=%s grid=%s) counts=(blob=%u ring=%u grid=%u) "
+                "predominant=(%d,%d share=%.3f) entropy=%.3f purity=%.3f excluded_rarity=%.3f "
+                "normalized_rarity=%.3f ring_divergence=%.3f chroma=%.3f temporal=(%d %.3f) "
+                "track=(id=%d index=%d) composite=%.3f\n",
+                c->shadow_color_valid ? 1 : 0,
+                color_shadow_domain_name(c->shadow_blob_domain),
+                color_shadow_domain_name(c->shadow_ring_domain),
+                color_shadow_domain_name(c->shadow_sampled_grid_contribution_domain),
+                c->shadow_blob_sample_count,
+                c->shadow_ring_sample_count,
+                c->shadow_sampled_grid_contribution_count,
+                c->shadow_predominant_u_bin,
+                c->shadow_predominant_v_bin,
+                (double)c->shadow_predominant_family_share,
+                (double)c->shadow_normalized_entropy,
+                (double)c->shadow_purity,
+                (double)c->shadow_excluded_background_rarity,
+                (double)c->shadow_normalized_rarity_factor,
+                (double)c->shadow_local_ring_divergence,
+                (double)c->shadow_chroma_reliability,
+                c->shadow_temporal_valid ? 1 : 0,
+                (double)c->shadow_temporal_consistency,
+                c->shadow_matched_track_id,
+                c->shadow_matched_track_index,
+                (double)c->shadow_composite_uniqueness);
     }
     if (dbg->target.enabled) {
         fprintf(out,
@@ -1921,7 +1956,20 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
                 "\"local_ring_neighbor_count\":%d,"
                 "\"current_nearest_hist_distance\":%.6f,\"recent_nearest_hist_distance\":%.6f,"
                 "\"small_target_span_ratio\":%.6f,\"small_target_area_ratio\":%.6f,"
-                "\"scene_commonness\":%.6f,\"retention_rank\":%.6f,\"above_threshold\":%s}",
+                "\"scene_commonness\":%.6f,\"retention_rank\":%.6f,"
+                "\"color_uniqueness_rank\":%.6f,\"shadow_color_valid\":%s,"
+                "\"shadow_blob_domain\":\"%s\",\"shadow_ring_domain\":\"%s\","
+                "\"shadow_sampled_grid_contribution_domain\":\"%s\","
+                "\"shadow_blob_sample_count\":%u,\"shadow_ring_sample_count\":%u,"
+                "\"shadow_sampled_grid_contribution_count\":%u,"
+                "\"shadow_predominant_u_bin\":%d,\"shadow_predominant_v_bin\":%d,"
+                "\"shadow_predominant_family_share\":%.6f,\"shadow_normalized_entropy\":%.6f,"
+                "\"shadow_purity\":%.6f,\"shadow_excluded_background_rarity\":%.6f,"
+                "\"shadow_normalized_rarity_factor\":%.6f,\"shadow_local_ring_divergence\":%.6f,"
+                "\"shadow_chroma_reliability\":%.6f,\"shadow_temporal_valid\":%s,"
+                "\"shadow_temporal_consistency\":%.6f,\"shadow_matched_track_id\":%d,"
+                "\"shadow_matched_track_index\":%d,\"shadow_composite_uniqueness\":%.6f,"
+                "\"above_threshold\":%s}",
                 (i == 0) ? "" : ",",
                 i,
                 c->valid ? "true" : "false",
@@ -1961,6 +2009,28 @@ static void write_color_debug_jsonl(FILE *out, int frame_num, double time_s,
                 (double)c->small_target_area_ratio,
                 (double)c->scene_commonness,
                 (double)c->retention_rank,
+                (double)c->color_uniqueness_rank,
+                c->shadow_color_valid ? "true" : "false",
+                color_shadow_domain_name(c->shadow_blob_domain),
+                color_shadow_domain_name(c->shadow_ring_domain),
+                color_shadow_domain_name(c->shadow_sampled_grid_contribution_domain),
+                c->shadow_blob_sample_count,
+                c->shadow_ring_sample_count,
+                c->shadow_sampled_grid_contribution_count,
+                c->shadow_predominant_u_bin,
+                c->shadow_predominant_v_bin,
+                (double)c->shadow_predominant_family_share,
+                (double)c->shadow_normalized_entropy,
+                (double)c->shadow_purity,
+                (double)c->shadow_excluded_background_rarity,
+                (double)c->shadow_normalized_rarity_factor,
+                (double)c->shadow_local_ring_divergence,
+                (double)c->shadow_chroma_reliability,
+                c->shadow_temporal_valid ? "true" : "false",
+                (double)c->shadow_temporal_consistency,
+                c->shadow_matched_track_id,
+                c->shadow_matched_track_index,
+                (double)c->shadow_composite_uniqueness,
                 c->above_threshold ? "true" : "false");
     }
     fprintf(out,

@@ -7412,6 +7412,208 @@ static void test_target_tracks_clear_all_resets_tracks_and_next_id(void) {
     }
 }
 
+static anomaly_color_blob_signature_t target_tracks_test_color_signature(
+        int u_bin,
+        int v_bin,
+        uint32_t sample_count) {
+    anomaly_color_blob_signature_t signature;
+    memset(&signature, 0, sizeof(signature));
+    signature.predominant_u_bin = u_bin;
+    signature.predominant_v_bin = v_bin;
+    signature.sample_count = sample_count;
+    signature.predominant_family_count = sample_count;
+    signature.predominant_family_share = sample_count > 0u ? 1.0f : 0.0f;
+    signature.purity = sample_count > 0u ? 1.0f : 0.0f;
+    if (u_bin >= 0 && u_bin < ANOMALY_COLOR_U_BINS &&
+        v_bin >= 0 && v_bin < ANOMALY_COLOR_V_BINS) {
+        signature.histogram[anomaly_color_hist_key(u_bin, v_bin)] = sample_count;
+    }
+    return signature;
+}
+
+static void test_color_shadow_new_track_seeds_after_production_update(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.next_target_track_id = 1;
+    anomaly_color_blob_signature_t signature =
+        target_tracks_test_color_signature(5, 6, 24u);
+    anomaly_color_shadow_candidate_t candidate = {
+        .valid = true,
+        .fresh_color_observation = true,
+        .center_x_norm = 0.42f,
+        .center_y_norm = 0.37f,
+        .signature = &signature,
+    };
+    anomaly_color_shadow_match_t match;
+    anomaly_target_tracks_evaluate_color_shadow_candidates(
+        &state,
+        ANOMALY_REG_HEALTH_HEALTHY,
+        &candidate,
+        1,
+        &match);
+    EXPECT(match.track_index == -1 && !match.temporal_valid &&
+               fabsf(match.temporal_consistency - 1.0f) < 0.0001f,
+           "color shadow lifecycle: a candidate before first production allocation is neutral");
+
+    anomaly_target_observation_t observation = {
+        .valid = true,
+        .publish_confirming = true,
+        .algorithm = ANOMALY_ALGO_COLOR,
+        .center_x_norm = candidate.center_x_norm,
+        .center_y_norm = candidate.center_y_norm,
+        .half_w_norm = 0.02f,
+        .half_h_norm = 0.02f,
+        .support_radius_norm = 0.04f,
+        .confidence = 0.60f,
+    };
+    anomaly_target_tracks_update_from_observations(
+        &state,
+        &observation,
+        1,
+        ANOMALY_REG_HEALTH_HEALTHY,
+        1.0f);
+    anomaly_target_tracks_commit_color_shadow_candidates(
+        &state,
+        ANOMALY_REG_HEALTH_HEALTHY,
+        &candidate,
+        &match,
+        1);
+
+    EXPECT(state.target_tracks[0].active && state.target_tracks[0].fresh_observation &&
+               state.target_tracks[0].algorithm == ANOMALY_ALGO_COLOR,
+           "color shadow lifecycle: production update owns the new color track");
+    EXPECT(state.target_tracks[0].shadow_color_signature_valid &&
+               state.target_tracks[0].shadow_color_signature_age == 0 &&
+               state.target_tracks[0].shadow_color_signature_sample_count > 0u,
+           "color shadow lifecycle: post-update strict rematch seeds the new track signature");
+}
+
+static void test_color_shadow_one_to_one_and_neutral_invalid_match(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    anomaly_target_track_t *track = &state.target_tracks[0];
+    track->active = true;
+    track->id = 17;
+    track->algorithm = ANOMALY_ALGO_COLOR;
+    track->center_x_norm = 0.50f;
+    track->center_y_norm = 0.50f;
+    track->support_radius_norm = 0.04f;
+    track->shadow_color_signature_valid = true;
+    track->shadow_color_signature_histogram[anomaly_color_hist_key(5, 5)] = 32u;
+    track->shadow_color_signature_sample_count = 32u;
+    anomaly_color_blob_signature_t signatures[2] = {
+        target_tracks_test_color_signature(5, 5, 32u),
+        target_tracks_test_color_signature(5, 5, 32u),
+    };
+    anomaly_color_shadow_candidate_t candidates[2] = {
+        {.valid = true, .center_x_norm = 0.50f, .center_y_norm = 0.50f,
+         .signature = &signatures[0]},
+        {.valid = true, .center_x_norm = 0.505f, .center_y_norm = 0.50f,
+         .signature = &signatures[1]},
+    };
+    anomaly_color_shadow_match_t matches[2];
+    anomaly_target_tracks_evaluate_color_shadow_candidates(
+        &state,
+        ANOMALY_REG_HEALTH_HEALTHY,
+        candidates,
+        2,
+        matches);
+    EXPECT(matches[0].track_index == 0 && matches[0].track_id == 17 &&
+               matches[0].temporal_valid,
+           "color shadow association: first candidate claims the prior color track");
+    EXPECT(matches[1].track_index == -1 && !matches[1].temporal_valid &&
+               fabsf(matches[1].temporal_consistency - 1.0f) < 0.0001f,
+           "color shadow association: one track cannot support two candidates");
+
+    track->shadow_color_signature_valid = false;
+    anomaly_target_tracks_evaluate_color_shadow_candidates(
+        &state,
+        ANOMALY_REG_HEALTH_HEALTHY,
+        candidates,
+        1,
+        matches);
+    EXPECT(matches[0].track_index == 0 && !matches[0].temporal_valid &&
+               fabsf(matches[0].temporal_consistency - 1.0f) < 0.0001f,
+           "color shadow association: positional match without history remains neutral");
+}
+
+static void test_color_shadow_healthy_age_expiry_and_degradation_reset(void) {
+    anomaly_state_t state;
+    memset(&state, 0, sizeof(state));
+    anomaly_target_track_t *track = &state.target_tracks[0];
+    track->active = true;
+    track->id = 23;
+    track->algorithm = ANOMALY_ALGO_COLOR;
+    track->center_x_norm = 0.40f;
+    track->center_y_norm = 0.60f;
+    track->shadow_color_signature_valid = true;
+    track->shadow_color_signature_histogram[anomaly_color_hist_key(6, 6)] = 32u;
+    track->shadow_color_signature_sample_count = 32u;
+    anomaly_target_tracks_registration_prediction_t healthy = {
+        .health = ANOMALY_REG_HEALTH_HEALTHY,
+    };
+    for (int frame = 0; frame < ANOMALY_COLOR_SHADOW_MAX_AGE_FRAMES; frame++) {
+        anomaly_target_tracks_predict_with_registration(&state, &healthy);
+    }
+    EXPECT(track->shadow_color_signature_valid &&
+               track->shadow_color_signature_age == ANOMALY_COLOR_SHADOW_MAX_AGE_FRAMES,
+           "color shadow lifecycle: healthy stride frames retain history through max age");
+
+    anomaly_color_blob_signature_t signature =
+        target_tracks_test_color_signature(6, 6, 32u);
+    anomaly_color_shadow_candidate_t candidate = {
+        .valid = true,
+        .center_x_norm = track->center_x_norm,
+        .center_y_norm = track->center_y_norm,
+        .signature = &signature,
+    };
+    anomaly_color_shadow_match_t match;
+    anomaly_target_tracks_evaluate_color_shadow_candidates(
+        &state,
+        ANOMALY_REG_HEALTH_HEALTHY,
+        &candidate,
+        1,
+        &match);
+    EXPECT(match.temporal_valid,
+           "color shadow lifecycle: signature remains usable at documented max age");
+
+    anomaly_target_tracks_predict_with_registration(&state, &healthy);
+    EXPECT(!track->shadow_color_signature_valid &&
+               track->shadow_color_signature_sample_count == 0u,
+           "color shadow lifecycle: healthy history expires beyond max age");
+
+    track->shadow_color_signature_valid = true;
+    track->shadow_color_signature_histogram[anomaly_color_hist_key(6, 6)] = 32u;
+    track->shadow_color_signature_sample_count = 32u;
+    anomaly_target_tracks_registration_prediction_t degraded = {
+        .health = ANOMALY_REG_HEALTH_SOFT_DEGRADED,
+    };
+    anomaly_target_tracks_predict_with_registration(&state, &degraded);
+    EXPECT(!track->shadow_color_signature_valid &&
+               track->shadow_color_signature_sample_count == 0u,
+           "color shadow lifecycle: non-healthy registration invalidates immediately");
+}
+
+static void test_color_shadow_adjacent_similarity_exceeds_distant(void) {
+    anomaly_color_blob_signature_t base =
+        target_tracks_test_color_signature(5, 5, 32u);
+    anomaly_color_blob_signature_t adjacent =
+        target_tracks_test_color_signature(6, 5, 32u);
+    anomaly_color_blob_signature_t distant =
+        target_tracks_test_color_signature(11, 11, 32u);
+    float adjacent_similarity = anomaly_color_signature_similarity(&base, &adjacent);
+    float distant_similarity = anomaly_color_signature_similarity(&base, &distant);
+    EXPECT(adjacent_similarity > distant_similarity,
+           "color shadow similarity: adjacent-bin movement is more consistent than replacement");
+    EXPECT_NEAR(anomaly_color_signature_similarity(&adjacent, &base),
+                adjacent_similarity,
+                0.0001f,
+                "color shadow similarity: comparison is symmetric");
+    EXPECT(adjacent_similarity >= 0.0f && adjacent_similarity <= 1.0f &&
+               distant_similarity >= 0.0f && distant_similarity <= 1.0f,
+           "color shadow similarity: outputs remain bounded");
+}
+
 static void test_roi_tracks_clear_all_resets_all_lifecycle_state(void) {
     anomaly_state_t state;
     memset(&state, 0, sizeof(state));
@@ -9141,6 +9343,315 @@ static void test_color_detector_histogram_and_rarity_helpers(void) {
            "color hist capacity: NULL capacity pointer is rejected");
     EXPECT(anomaly_color_build_frame_histogram(NULL, 2, 2, hist) == 0,
            "color frame histogram: NULL roi returns no valid samples");
+}
+
+static void test_color_detector_blob_signature_helpers(void) {
+    anomaly_color_blob_signature_t empty;
+    EXPECT(anomaly_color_build_blob_signature(NULL, NULL, NULL, 0u, &empty),
+           "color blob signature: zero slots produce a valid empty signature");
+    EXPECT(empty.sample_count == 0u &&
+           empty.predominant_u_bin == -1 && empty.predominant_v_bin == -1 &&
+           empty.predominant_family_count == 0u,
+           "color blob signature: empty identity and counts are neutral");
+    EXPECT_NEAR(empty.predominant_family_share, 0.0f, 0.0001f,
+                "color blob signature: empty family share is neutral");
+    EXPECT_NEAR(empty.normalized_entropy, 0.0f, 0.0001f,
+                "color blob signature: empty entropy is neutral");
+    EXPECT_NEAR(empty.purity, 0.0f, 0.0001f,
+                "color blob signature: empty purity is neutral");
+    EXPECT(!anomaly_color_build_blob_signature(NULL, NULL, NULL, 1u, &empty),
+           "color blob signature: non-empty NULL sample arrays are rejected");
+    EXPECT(empty.sample_count == 0u && empty.predominant_u_bin == -1,
+           "color blob signature: rejected input still resets output deterministically");
+    EXPECT(!anomaly_color_build_blob_signature(NULL, NULL, NULL, 0u, NULL),
+           "color blob signature: NULL output is rejected");
+
+    enum { coherent_samples = 300 };
+    uint8_t coherent_u[coherent_samples];
+    uint8_t coherent_v[coherent_samples];
+    memset(coherent_u, 5, sizeof(coherent_u));
+    memset(coherent_v, 6, sizeof(coherent_v));
+    anomaly_color_blob_signature_t coherent;
+    EXPECT(anomaly_color_build_blob_signature(
+               coherent_u, coherent_v, NULL, coherent_samples, &coherent),
+           "color blob signature: coherent samples build successfully");
+    EXPECT(coherent.sample_count == coherent_samples &&
+           coherent.histogram[anomaly_color_hist_key(5, 6)] == coherent_samples,
+           "color blob signature: fixed histogram counters retain counts above 255");
+    EXPECT(coherent.predominant_u_bin == 5 && coherent.predominant_v_bin == 6 &&
+           coherent.predominant_family_count == coherent_samples,
+           "color blob signature: coherent bin is the predominant family identity");
+    EXPECT_NEAR(coherent.predominant_family_share, 1.0f, 0.0001f,
+                "color blob signature: coherent family owns every sample");
+    EXPECT_NEAR(coherent.normalized_entropy, 0.0f, 0.0001f,
+                "color blob signature: one-bin blob has zero normalized entropy");
+    EXPECT_NEAR(coherent.purity, 1.0f, 0.0001f,
+                "color blob signature: one-bin blob is maximally pure");
+
+    const uint8_t adjacent_u[8] = {5u, 5u, 5u, 5u, 6u, 6u, 6u, 6u};
+    const uint8_t adjacent_v[8] = {6u, 6u, 6u, 6u, 6u, 6u, 6u, 6u};
+    anomaly_color_blob_signature_t adjacent;
+    EXPECT(anomaly_color_build_blob_signature(
+               adjacent_u, adjacent_v, NULL, 8u, &adjacent),
+           "color blob signature: adjacent-bin samples build successfully");
+    EXPECT(adjacent.predominant_family_count == 8u &&
+           adjacent.predominant_family_share == 1.0f,
+           "color blob signature: adjacent bins remain one 3x3 color family");
+    EXPECT(adjacent.normalized_entropy > coherent.normalized_entropy &&
+           adjacent.normalized_entropy <= 1.0f,
+           "color blob signature: adjacent split has bounded nonzero entropy");
+
+    const uint8_t mixed_u[8] = {2u, 2u, 2u, 2u, 9u, 9u, 9u, 9u};
+    const uint8_t mixed_v[8] = {2u, 2u, 2u, 2u, 9u, 9u, 9u, 9u};
+    anomaly_color_blob_signature_t mixed;
+    EXPECT(anomaly_color_build_blob_signature(mixed_u, mixed_v, NULL, 8u, &mixed),
+           "color blob signature: mixed samples build successfully");
+    EXPECT(mixed.predominant_family_count == 4u &&
+           mixed.predominant_family_share == 0.5f,
+           "color blob signature: separated colors do not merge into one family");
+    EXPECT(adjacent.purity > mixed.purity && mixed.purity >= 0.0f,
+           "color blob signature: coherent adjacent colors are purer than mixed colors");
+
+    const uint8_t filtered_u[4] = {3u, 12u, 4u, 8u};
+    const uint8_t filtered_v[4] = {3u, 3u, 4u, 8u};
+    const uint8_t include_mask[4] = {1u, 1u, 0u, 0u};
+    anomaly_color_blob_signature_t filtered;
+    EXPECT(anomaly_color_build_blob_signature(
+               filtered_u, filtered_v, include_mask, 4u, &filtered),
+           "color blob signature: masks and invalid bins are accepted safely");
+    EXPECT(filtered.sample_count == 1u &&
+           filtered.histogram[anomaly_color_hist_key(3, 3)] == 1u,
+           "color blob signature: excluded and out-of-range samples are skipped");
+
+    uint32_t current_hist[ANOMALY_COLOR_HIST_BINS] = {0u};
+    uint32_t recent_hist[ANOMALY_COLOR_HIST_BINS] = {0u};
+    anomaly_color_blob_signature_t current_candidate;
+    anomaly_color_blob_signature_t recent_candidate;
+    memset(&current_candidate, 0, sizeof(current_candidate));
+    memset(&recent_candidate, 0, sizeof(recent_candidate));
+    int center_key = anomaly_color_hist_key(5, 5);
+    int neighbor_key = anomaly_color_hist_key(6, 5);
+    current_hist[center_key] = 15u;
+    current_hist[neighbor_key] = 4u;
+    recent_hist[center_key] = 8u;
+    current_candidate.histogram[center_key] = 5u;
+    recent_candidate.histogram[center_key] = 3u;
+    EXPECT_NEAR(anomaly_color_candidate_excluded_family_rarity(
+                    current_hist, recent_hist, &current_candidate, &recent_candidate, 5, 5),
+                1.0f / 20.0f,
+                0.0001f,
+                "color candidate rarity: subtracts current and recent candidate families");
+
+    current_hist[center_key] = 2u;
+    current_hist[neighbor_key] = 0u;
+    recent_hist[center_key] = 1u;
+    current_candidate.histogram[center_key] = 50u;
+    recent_candidate.histogram[center_key] = UINT32_MAX;
+    EXPECT_NEAR(anomaly_color_candidate_excluded_family_rarity(
+                    current_hist, recent_hist, &current_candidate, &recent_candidate, 5, 5),
+                1.0f,
+                0.0001f,
+                "color candidate rarity: oversized subtraction saturates at zero without underflow");
+    EXPECT_NEAR(anomaly_color_candidate_excluded_family_rarity(
+                    NULL, NULL, NULL, NULL, 5, 5),
+                1.0f,
+                0.0001f,
+                "color candidate rarity: empty scene is maximally rare");
+    EXPECT_NEAR(anomaly_color_candidate_excluded_family_rarity(
+                    current_hist, recent_hist, NULL, NULL, -1, 5),
+                0.0f,
+                0.0001f,
+                "color candidate rarity: invalid family identity is neutral");
+
+    anomaly_color_blob_signature_t small_candidate;
+    anomaly_color_blob_signature_t large_candidate;
+    memset(&small_candidate, 0, sizeof(small_candidate));
+    memset(&large_candidate, 0, sizeof(large_candidate));
+    small_candidate.histogram[center_key] = 10u;
+    large_candidate.histogram[center_key] = 300u;
+    memset(current_hist, 0, sizeof(current_hist));
+    memset(recent_hist, 0, sizeof(recent_hist));
+    current_hist[center_key] = 17u;
+    float small_rarity = anomaly_color_candidate_excluded_family_rarity(
+        current_hist, recent_hist, &small_candidate, NULL, 5, 5);
+    current_hist[center_key] = 307u;
+    float large_rarity = anomaly_color_candidate_excluded_family_rarity(
+        current_hist, recent_hist, &large_candidate, NULL, 5, 5);
+    EXPECT_NEAR(small_rarity, 1.0f / 8.0f, 0.0001f,
+                "color candidate rarity: small blob leaves only true background support");
+    EXPECT_NEAR(large_rarity, small_rarity, 0.0001f,
+                "color candidate rarity: a larger blob does not worsen its own excluded rarity");
+}
+
+static void test_color_detector_local_background_helpers(void) {
+    enum { grid_width = 5, grid_height = 5, grid_slots = grid_width * grid_height };
+    uint8_t u_bins[grid_slots];
+    uint8_t v_bins[grid_slots];
+    uint8_t valid_mask[grid_slots];
+    uint8_t include_mask[grid_slots];
+    uint8_t exclude_mask[grid_slots];
+    memset(u_bins, 2, sizeof(u_bins));
+    memset(v_bins, 3, sizeof(v_bins));
+    memset(valid_mask, 1, sizeof(valid_mask));
+    memset(include_mask, 1, sizeof(include_mask));
+    memset(exclude_mask, 0, sizeof(exclude_mask));
+    for (int sy = 1; sy <= 3; sy++) {
+        for (int sx = 1; sx <= 3; sx++) {
+            size_t idx = (size_t)sy * grid_width + (size_t)sx;
+            u_bins[idx] = 11u;
+            v_bins[idx] = 11u;
+        }
+    }
+    anomaly_roi_state_t roi_state;
+    memset(&roi_state, 0, sizeof(roi_state));
+    roi_state.color_u_bin = u_bins;
+    roi_state.color_v_bin = v_bins;
+    roi_state.color_valid_mask = valid_mask;
+
+    anomaly_color_blob_signature_t ring;
+    EXPECT(anomaly_color_build_local_ring_signature(
+               &roi_state, grid_width, grid_height,
+               1, 1, 3, 3, 1, NULL, NULL, &ring),
+           "color local ring: centered bbox builds successfully");
+    EXPECT(ring.sample_count == 16u &&
+           ring.histogram[anomaly_color_hist_key(2, 3)] == 16u,
+           "color local ring: fixed one-cell ring contains the expected border cells");
+    EXPECT(ring.histogram[anomaly_color_hist_key(11, 11)] == 0u,
+           "color local ring: candidate bbox footprint is always excluded");
+    EXPECT(ring.predominant_family_share >= 0.0f &&
+           ring.predominant_family_share <= 1.0f &&
+           ring.normalized_entropy >= 0.0f && ring.normalized_entropy <= 1.0f &&
+           ring.purity >= 0.0f && ring.purity <= 1.0f,
+           "color local ring: all normalized signature outputs remain bounded");
+
+    valid_mask[0] = 0u;
+    include_mask[1] = 0u;
+    exclude_mask[2] = 1u;
+    EXPECT(anomaly_color_build_local_ring_signature(
+               &roi_state, grid_width, grid_height,
+               1, 1, 3, 3, 1, include_mask, exclude_mask, &ring),
+           "color local ring: validity and optional masks build successfully");
+    EXPECT(ring.sample_count == 13u,
+           "color local ring: valid, include, and exclude semantics gate ring samples");
+
+    memset(valid_mask, 1, sizeof(valid_mask));
+    EXPECT(anomaly_color_build_local_ring_signature(
+               &roi_state, grid_width, grid_height,
+               -2, -2, 1, 1, 1, NULL, NULL, &ring),
+           "color local ring: a bbox crossing the frame origin clips safely");
+    EXPECT(ring.sample_count == 5u,
+           "color local ring: edge-clipped bbox retains only in-frame ring cells");
+
+    memset(valid_mask, 0, sizeof(valid_mask));
+    EXPECT(anomaly_color_build_local_ring_signature(
+               &roi_state, grid_width, grid_height,
+               1, 1, 3, 3, 1, NULL, NULL, &ring),
+           "color local ring: an empty valid ring remains a successful observation");
+    EXPECT(ring.sample_count == 0u && ring.predominant_u_bin == -1,
+           "color local ring: empty evidence returns a neutral signature");
+    EXPECT(!anomaly_color_build_local_ring_signature(
+               &roi_state, grid_width, grid_height,
+               1, 1, 3, 3, 0, NULL, NULL, &ring),
+           "color local ring: a non-positive ring width is rejected");
+    EXPECT(ring.sample_count == 0u && ring.predominant_u_bin == -1,
+           "color local ring: rejected geometry resets output deterministically");
+
+    enum { distribution_samples = 16 };
+    uint8_t base_u[distribution_samples];
+    uint8_t base_v[distribution_samples];
+    uint8_t adjacent_u[distribution_samples];
+    uint8_t adjacent_v[distribution_samples];
+    uint8_t distant_u[distribution_samples];
+    uint8_t distant_v[distribution_samples];
+    memset(base_u, 5, sizeof(base_u));
+    memset(base_v, 5, sizeof(base_v));
+    memset(adjacent_u, 6, sizeof(adjacent_u));
+    memset(adjacent_v, 5, sizeof(adjacent_v));
+    memset(distant_u, 11, sizeof(distant_u));
+    memset(distant_v, 11, sizeof(distant_v));
+    anomaly_color_blob_signature_t base;
+    anomaly_color_blob_signature_t identical;
+    anomaly_color_blob_signature_t adjacent;
+    anomaly_color_blob_signature_t distant;
+    EXPECT(anomaly_color_build_blob_signature(
+               base_u, base_v, NULL, distribution_samples, &base) &&
+           anomaly_color_build_blob_signature(
+               base_u, base_v, NULL, distribution_samples, &identical) &&
+           anomaly_color_build_blob_signature(
+               adjacent_u, adjacent_v, NULL, distribution_samples, &adjacent) &&
+           anomaly_color_build_blob_signature(
+               distant_u, distant_v, NULL, distribution_samples, &distant),
+           "color divergence: test distributions build successfully");
+    float identical_divergence = anomaly_color_signature_divergence(&base, &identical);
+    float adjacent_divergence = anomaly_color_signature_divergence(&base, &adjacent);
+    float distant_divergence = anomaly_color_signature_divergence(&base, &distant);
+    EXPECT_NEAR(identical_divergence, 0.0f, 0.0001f,
+                "color divergence: identical distributions have zero divergence");
+    EXPECT(adjacent_divergence > 0.0f && adjacent_divergence < distant_divergence,
+           "color divergence: adjacent UV families are closer than distant colors");
+    EXPECT_NEAR(distant_divergence, 1.0f, 0.0001f,
+                "color divergence: well-separated distributions reach maximum divergence");
+    EXPECT_NEAR(anomaly_color_signature_divergence(&distant, &base),
+                distant_divergence,
+                0.0001f,
+                "color divergence: distribution ordering does not change the result");
+    EXPECT(adjacent_divergence >= 0.0f && adjacent_divergence <= 1.0f &&
+           distant_divergence >= 0.0f && distant_divergence <= 1.0f,
+           "color divergence: populated outputs remain bounded");
+
+    anomaly_color_blob_signature_t empty;
+    anomaly_color_blob_signature_t sparse_base;
+    anomaly_color_blob_signature_t sparse_distant;
+    EXPECT(anomaly_color_build_blob_signature(NULL, NULL, NULL, 0u, &empty) &&
+           anomaly_color_build_blob_signature(base_u, base_v, NULL, 1u, &sparse_base) &&
+           anomaly_color_build_blob_signature(
+               distant_u, distant_v, NULL, 1u, &sparse_distant),
+           "color divergence: empty and sparse signatures build successfully");
+    EXPECT_NEAR(anomaly_color_signature_divergence(&base, &empty), 0.0f, 0.0001f,
+                "color divergence: empty ring evidence is neutral");
+    float sparse_divergence = anomaly_color_signature_divergence(
+        &sparse_base, &sparse_distant);
+    EXPECT(sparse_divergence >= 0.0f && sparse_divergence <= 0.1251f,
+           "color divergence: one-sample evidence cannot produce a strong score");
+
+    uint8_t neutral_u[distribution_samples];
+    uint8_t neutral_v[distribution_samples];
+    uint8_t saturated_u[distribution_samples];
+    uint8_t saturated_v[distribution_samples];
+    uint8_t dispersed_u[distribution_samples];
+    uint8_t dispersed_v[distribution_samples];
+    memset(neutral_u, 5, sizeof(neutral_u));
+    memset(neutral_v, 5, sizeof(neutral_v));
+    memset(saturated_u, 11, sizeof(saturated_u));
+    memset(saturated_v, 11, sizeof(saturated_v));
+    for (int i = 0; i < distribution_samples; i++) {
+        dispersed_u[i] = 11u;
+        dispersed_v[i] = i < distribution_samples / 2 ? 0u : 11u;
+    }
+    anomaly_color_blob_signature_t neutral;
+    anomaly_color_blob_signature_t saturated;
+    anomaly_color_blob_signature_t dispersed;
+    EXPECT(anomaly_color_build_blob_signature(
+               neutral_u, neutral_v, NULL, distribution_samples, &neutral) &&
+           anomaly_color_build_blob_signature(
+               saturated_u, saturated_v, NULL, distribution_samples, &saturated) &&
+           anomaly_color_build_blob_signature(
+               dispersed_u, dispersed_v, NULL, distribution_samples, &dispersed),
+           "color chroma reliability: test signatures build successfully");
+    float neutral_reliability = anomaly_color_signature_chroma_reliability(&neutral);
+    float saturated_reliability = anomaly_color_signature_chroma_reliability(&saturated);
+    float dispersed_reliability = anomaly_color_signature_chroma_reliability(&dispersed);
+    EXPECT(neutral_reliability >= 0.0f && neutral_reliability < 0.05f,
+           "color chroma reliability: near-neutral UV is strongly downweighted");
+    EXPECT(saturated_reliability > 0.95f && saturated_reliability <= 1.0f,
+           "color chroma reliability: coherent saturated UV is reliable and bounded");
+    EXPECT(dispersed_reliability >= 0.0f &&
+           dispersed_reliability < saturated_reliability,
+           "color chroma reliability: dispersed chroma is less reliable than coherent chroma");
+    EXPECT_NEAR(anomaly_color_signature_chroma_reliability(&empty), 0.0f, 0.0001f,
+                "color chroma reliability: empty evidence is neutral");
+    EXPECT_NEAR(anomaly_color_signature_chroma_reliability(NULL), 0.0f, 0.0001f,
+                "color chroma reliability: NULL evidence is neutral");
 }
 
 static void test_color_detector_candidate_scalar_helpers(void) {
@@ -19758,6 +20269,51 @@ static void test_color_fresh_compact_unique_blob_survives(void) {
                "color fresh blob-first: winning compact blob stays near source patch");
         EXPECT(winner->hist_rarity_score > 0.0f,
                "color fresh blob-first: winning compact blob exposes rarity at its peak pixel");
+        EXPECT(winner->color_uniqueness_rank >= 0.0f &&
+               winner->color_uniqueness_rank <= 1.0f,
+               "color shadow integration: authoritative uniqueness rank is exported independently");
+        EXPECT(winner->shadow_color_valid &&
+               winner->shadow_blob_domain == ANOMALY_COLOR_EVIDENCE_DOMAIN_DENSE_PIXEL_EXACT &&
+               winner->shadow_ring_domain == ANOMALY_COLOR_EVIDENCE_DOMAIN_DENSE_PIXEL_EXACT &&
+               winner->shadow_sampled_grid_contribution_domain ==
+                   ANOMALY_COLOR_EVIDENCE_DOMAIN_SAMPLED_GRID_BBOX,
+               "color shadow integration: dense and sampled-grid evidence domains are explicit");
+        EXPECT(winner->shadow_blob_sample_count > 0u &&
+               winner->shadow_ring_sample_count > 0u &&
+               winner->shadow_sampled_grid_contribution_count > 0u,
+               "color shadow integration: dense and sampled-grid evidence counts remain separate");
+        EXPECT(winner->shadow_predominant_u_bin >= 0 &&
+               winner->shadow_predominant_u_bin < ANOMALY_COLOR_U_BINS &&
+               winner->shadow_predominant_v_bin >= 0 &&
+               winner->shadow_predominant_v_bin < ANOMALY_COLOR_V_BINS,
+               "color shadow integration: predominant UV family is valid");
+        EXPECT(winner->shadow_predominant_family_share >= 0.0f &&
+               winner->shadow_predominant_family_share <= 1.0f &&
+               winner->shadow_normalized_entropy >= 0.0f &&
+               winner->shadow_normalized_entropy <= 1.0f &&
+               winner->shadow_purity >= 0.0f && winner->shadow_purity <= 1.0f &&
+               winner->shadow_excluded_background_rarity >= 0.0f &&
+               winner->shadow_excluded_background_rarity <= 1.0f &&
+               winner->shadow_normalized_rarity_factor >= 0.0f &&
+               winner->shadow_normalized_rarity_factor <= 1.0f &&
+               winner->shadow_local_ring_divergence >= 0.0f &&
+               winner->shadow_local_ring_divergence <= 1.0f &&
+               winner->shadow_chroma_reliability >= 0.0f &&
+               winner->shadow_chroma_reliability <= 1.0f &&
+               winner->shadow_composite_uniqueness >= 0.0f &&
+               winner->shadow_composite_uniqueness <= 1.0f,
+               "color shadow integration: every component and composite stays bounded");
+        EXPECT(!winner->shadow_temporal_valid &&
+               fabsf(winner->shadow_temporal_consistency - 1.0f) < 0.0001f,
+               "color shadow integration: Packet C temporal evidence is invalid and neutral");
+        float expected_shadow_composite =
+            winner->shadow_normalized_rarity_factor * winner->shadow_purity *
+            winner->shadow_local_ring_divergence * winner->shadow_chroma_reliability *
+            winner->shadow_temporal_consistency;
+        EXPECT_NEAR(winner->shadow_composite_uniqueness,
+                    expected_shadow_composite,
+                    0.0001f,
+                    "color shadow integration: composite is the documented factored product");
     }
 
     free(frame);
@@ -21908,6 +22464,10 @@ int main(void) {
     test_target_revisit_annotate_roi_cells_min_hits_scales_provisional();
     test_target_tracks_clear_single_track_zeroes_fields();
     test_target_tracks_clear_all_resets_tracks_and_next_id();
+    test_color_shadow_new_track_seeds_after_production_update();
+    test_color_shadow_one_to_one_and_neutral_invalid_match();
+    test_color_shadow_healthy_age_expiry_and_degradation_reset();
+    test_color_shadow_adjacent_similarity_exceeds_distant();
     test_roi_tracks_clear_all_resets_all_lifecycle_state();
     test_roi_tracks_clear_saliency_only_preserves_unrelated_state();
     test_roi_tracks_age_one_frame_lifecycle_and_preserves_unrelated_state();
@@ -21973,6 +22533,8 @@ int main(void) {
     test_thermal_detector_temporal_stats_helper();
     test_thermal_state_lifecycle_helpers();
     test_color_detector_histogram_and_rarity_helpers();
+    test_color_detector_blob_signature_helpers();
+    test_color_detector_local_background_helpers();
     test_color_detector_candidate_scalar_helpers();
     test_color_detector_rgba_sampling_helpers();
     test_color_detector_sampling_phase_helpers();

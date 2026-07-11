@@ -69,6 +69,12 @@ static double now_s(void) {
     return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
 }
 
+static int compare_double(const void *left, const void *right) {
+    double a = *(const double *)left;
+    double b = *(const double *)right;
+    return (a > b) - (a < b);
+}
+
 static void run_case(const char *name, uint8_t *rgba, int w, int h, uint32_t mask) {
     anomaly_target_color_scratch_t scratch;
     anomaly_target_color_result_t result;
@@ -87,6 +93,7 @@ static void run_case(const char *name, uint8_t *rgba, int w, int h, uint32_t mas
     double min_ms = 1e9;
     double max_ms = 0.0;
     double sum_ms = 0.0;
+    double samples_ms[iters];
     for (int i = 0; i < iters; i++) {
         double t0 = now_s();
         if (!anomaly_target_color_detect_rgba(rgba, w * 4, w, h, mask, &scratch, &result)) {
@@ -97,13 +104,19 @@ static void run_case(const char *name, uint8_t *rgba, int w, int h, uint32_t mas
         if (ms < min_ms) min_ms = ms;
         if (ms > max_ms) max_ms = ms;
         sum_ms += ms;
+        samples_ms[i] = ms;
     }
 
-    printf("%-30s avg_ms=%.3f min_ms=%.3f max_ms=%.3f sampled=%d selected=%d components=%d rois=%d\n",
+    qsort(samples_ms, (size_t)iters, sizeof(samples_ms[0]), compare_double);
+    const int p95_index = ((95 * iters + 99) / 100) - 1;
+    const double p95_ms = samples_ms[p95_index];
+
+    printf("%-30s avg_ms=%.3f min_ms=%.3f max_ms=%.3f p95_ms=%.3f sampled=%d selected=%d components=%d rois=%d\n",
            name,
            sum_ms / (double)iters,
            min_ms,
            max_ms,
+           p95_ms,
            result.sampled_pixels,
            result.selected_pixel_count,
            result.candidate_component_count,

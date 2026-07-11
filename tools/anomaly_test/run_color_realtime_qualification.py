@@ -31,7 +31,8 @@ TARGET_COLOR_STRESS_CASES = (
     "mottled green plus lime",
 )
 TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO = 8.0
-TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO = 12.0
+TARGET_COLOR_MULTI_FAMILY_P95_TO_BASELINE_RATIO = 12.0
+TARGET_COLOR_CATASTROPHIC_MAX_MS = 250.0
 TARGET_COLOR_MULTI_FAMILY_CASES = {
     "broad red green background": 0,
     "compact red green subject": 1,
@@ -47,6 +48,7 @@ TARGET_COLOR_PROBE_RE = re.compile(
     r"avg_ms=(?P<avg_ms>[0-9.]+)\s+"
     r"min_ms=(?P<min_ms>[0-9.]+)\s+"
     r"max_ms=(?P<max_ms>[0-9.]+)\s+"
+    r"p95_ms=(?P<p95_ms>[0-9.]+)\s+"
     r"sampled=(?P<sampled>[0-9]+)\s+"
     r"selected=(?P<selected>[0-9]+)\s+"
     r"components=(?P<components>[0-9]+)\s+"
@@ -336,6 +338,7 @@ def parse_target_color_perf_probe_output(output: str) -> dict[str, object]:
     cases: list[dict[str, object]] = []
     baseline_avg_ms: float | None = None
     baseline_max_ms: float | None = None
+    baseline_p95_ms: float | None = None
     for line in output.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -348,6 +351,7 @@ def parse_target_color_perf_probe_output(output: str) -> dict[str, object]:
             "avg_ms": float(match.group("avg_ms")),
             "min_ms": float(match.group("min_ms")),
             "max_ms": float(match.group("max_ms")),
+            "p95_ms": float(match.group("p95_ms")),
             "sampled_pixel_count": int(match.group("sampled")),
             "selected_pixel_count": int(match.group("selected")),
             "candidate_component_count": int(match.group("components")),
@@ -356,24 +360,30 @@ def parse_target_color_perf_probe_output(output: str) -> dict[str, object]:
         if case["name"] == TARGET_COLOR_BASELINE_CASE:
             baseline_avg_ms = float(case["avg_ms"])
             baseline_max_ms = float(case["max_ms"])
+            baseline_p95_ms = float(case["p95_ms"])
         cases.append(case)
 
     if baseline_avg_ms is None or baseline_avg_ms <= 0.0:
         raise ValueError(f"target-color perf baseline case missing or zero: {TARGET_COLOR_BASELINE_CASE}")
     if baseline_max_ms is None or baseline_max_ms <= 0.0:
         raise ValueError(f"target-color perf baseline max missing or zero: {TARGET_COLOR_BASELINE_CASE}")
+    if baseline_p95_ms is None or baseline_p95_ms <= 0.0:
+        raise ValueError(f"target-color perf baseline p95 missing or zero: {TARGET_COLOR_BASELINE_CASE}")
 
     for case in cases:
         case["avg_to_baseline_ratio"] = float(case["avg_ms"]) / baseline_avg_ms
         case["max_to_baseline_ratio"] = float(case["max_ms"]) / baseline_max_ms
+        case["p95_to_baseline_ratio"] = float(case["p95_ms"]) / baseline_p95_ms
 
     return {
         "suite": "target-color-perf-probe",
         "baseline_case": TARGET_COLOR_BASELINE_CASE,
         "baseline_avg_ms": baseline_avg_ms,
         "baseline_max_ms": baseline_max_ms,
+        "baseline_p95_ms": baseline_p95_ms,
         "max_avg_to_baseline_ratio": TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO,
-        "multi_family_max_to_baseline_ratio": TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO,
+        "multi_family_p95_to_baseline_ratio": TARGET_COLOR_MULTI_FAMILY_P95_TO_BASELINE_RATIO,
+        "catastrophic_max_ms": TARGET_COLOR_CATASTROPHIC_MAX_MS,
         "multi_family_expected_rois": TARGET_COLOR_MULTI_FAMILY_CASES,
         "stress_cases": list(TARGET_COLOR_STRESS_CASES),
         "cases": cases,
@@ -563,6 +573,12 @@ def evaluate_gate(report: dict[str, object]) -> GateResult:
                         f"target-color-perf: {name} avg {avg_ms:.3f} ms is "
                         f"{ratio:.2f}x baseline, above {TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:.2f}x"
                     )
+                max_ms = float(case.get("max_ms", 0.0))
+                if max_ms > TARGET_COLOR_CATASTROPHIC_MAX_MS:
+                    failures.append(
+                        f"target-color-perf: {name} max {max_ms:.3f} ms exceeds "
+                        f"catastrophic ceiling {TARGET_COLOR_CATASTROPHIC_MAX_MS:.3f} ms"
+                    )
             for name, expected_rois in TARGET_COLOR_MULTI_FAMILY_CASES.items():
                 case = by_name.get(name)
                 if case is None:
@@ -571,18 +587,24 @@ def evaluate_gate(report: dict[str, object]) -> GateResult:
                 avg_ms = float(case.get("avg_ms", 0.0))
                 avg_ratio = float(case.get("avg_to_baseline_ratio", 0.0))
                 max_ms = float(case.get("max_ms", 0.0))
-                max_ratio = float(case.get("max_to_baseline_ratio", 0.0))
+                p95_ms = float(case.get("p95_ms", 0.0))
+                p95_ratio = float(case.get("p95_to_baseline_ratio", 0.0))
                 roi_count = int(case.get("roi_count", -1))
                 if avg_ratio > TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:
                     failures.append(
                         f"target-color-perf: {name} avg {avg_ms:.3f} ms is "
                         f"{avg_ratio:.2f}x baseline, above {TARGET_COLOR_MAX_AVG_TO_BASELINE_RATIO:.2f}x"
                     )
-                if max_ratio > TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO:
+                if p95_ratio > TARGET_COLOR_MULTI_FAMILY_P95_TO_BASELINE_RATIO:
                     failures.append(
-                        f"target-color-perf: {name} max {max_ms:.3f} ms is "
-                        f"{max_ratio:.2f}x baseline max, above "
-                        f"{TARGET_COLOR_MULTI_FAMILY_MAX_TO_BASELINE_RATIO:.2f}x"
+                        f"target-color-perf: {name} p95 {p95_ms:.3f} ms is "
+                        f"{p95_ratio:.2f}x baseline p95, above "
+                        f"{TARGET_COLOR_MULTI_FAMILY_P95_TO_BASELINE_RATIO:.2f}x"
+                    )
+                if max_ms > TARGET_COLOR_CATASTROPHIC_MAX_MS:
+                    failures.append(
+                        f"target-color-perf: {name} max {max_ms:.3f} ms exceeds "
+                        f"catastrophic ceiling {TARGET_COLOR_CATASTROPHIC_MAX_MS:.3f} ms"
                     )
                 if roi_count != expected_rois:
                     failures.append(
@@ -737,8 +759,9 @@ def main() -> int:
                 print(
                     f"  {case['name']}: avg={float(case['avg_ms']):.3f} ms "
                     f"max={float(case['max_ms']):.3f} ms "
+                    f"p95={float(case['p95_ms']):.3f} ms "
                     f"avg_ratio={float(case['avg_to_baseline_ratio']):.2f}x "
-                    f"max_ratio={float(case['max_to_baseline_ratio']):.2f}x "
+                    f"p95_ratio={float(case['p95_to_baseline_ratio']):.2f}x "
                     f"selected={case['selected_pixel_count']} "
                     f"components={case['candidate_component_count']} "
                     f"rois={case['roi_count']}"

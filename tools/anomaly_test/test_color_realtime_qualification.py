@@ -15,16 +15,16 @@ import run_color_realtime_qualification as qual
 
 
 TARGET_COLOR_PROBE_OUTPUT = """\
-no selected colors             avg_ms=0.000 min_ms=0.000 max_ms=0.001 sampled=0 selected=0 components=0 rois=0
-gray, searching green          avg_ms=0.244 min_ms=0.221 max_ms=0.446 sampled=57600 selected=0 components=0 rois=0
-uniform green frame            avg_ms=0.820 min_ms=0.787 max_ms=1.168 sampled=57600 selected=57600 components=0 rois=0
-green plus lime subject        avg_ms=0.815 min_ms=0.788 max_ms=1.207 sampled=57600 selected=57600 components=1 rois=1
-mottled green frame            avg_ms=0.828 min_ms=0.789 max_ms=1.670 sampled=57600 selected=57600 components=0 rois=0
-mottled green plus lime        avg_ms=0.833 min_ms=0.802 max_ms=1.128 sampled=57600 selected=57600 components=1 rois=1
-broad red green background     avg_ms=0.910 min_ms=0.870 max_ms=1.410 sampled=57600 selected=57600 components=0 rois=0
-compact red green subject      avg_ms=0.470 min_ms=0.440 max_ms=0.780 sampled=57600 selected=160 components=1 rois=1
-broad red green blue background avg_ms=0.940 min_ms=0.900 max_ms=1.520 sampled=57600 selected=57600 components=0 rois=0
-compact red green blue subject avg_ms=0.490 min_ms=0.460 max_ms=0.810 sampled=57600 selected=210 components=1 rois=1
+no selected colors             avg_ms=0.000 min_ms=0.000 max_ms=0.001 p95_ms=0.001 sampled=0 selected=0 components=0 rois=0
+gray, searching green          avg_ms=0.244 min_ms=0.221 max_ms=0.446 p95_ms=0.300 sampled=57600 selected=0 components=0 rois=0
+uniform green frame            avg_ms=0.820 min_ms=0.787 max_ms=1.168 p95_ms=0.900 sampled=57600 selected=57600 components=0 rois=0
+green plus lime subject        avg_ms=0.815 min_ms=0.788 max_ms=1.207 p95_ms=0.910 sampled=57600 selected=57600 components=1 rois=1
+mottled green frame            avg_ms=0.828 min_ms=0.789 max_ms=1.670 p95_ms=0.920 sampled=57600 selected=57600 components=0 rois=0
+mottled green plus lime        avg_ms=0.833 min_ms=0.802 max_ms=1.128 p95_ms=0.930 sampled=57600 selected=57600 components=1 rois=1
+broad red green background     avg_ms=0.910 min_ms=0.870 max_ms=1.410 p95_ms=1.020 sampled=57600 selected=57600 components=0 rois=0
+compact red green subject      avg_ms=0.470 min_ms=0.440 max_ms=0.780 p95_ms=0.550 sampled=57600 selected=160 components=1 rois=1
+broad red green blue background avg_ms=0.940 min_ms=0.900 max_ms=1.520 p95_ms=1.060 sampled=57600 selected=57600 components=0 rois=0
+compact red green blue subject avg_ms=0.490 min_ms=0.460 max_ms=0.810 p95_ms=0.570 sampled=57600 selected=210 components=1 rois=1
 """
 
 
@@ -63,8 +63,8 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
             cases["mottled green plus lime"]["avg_to_baseline_ratio"],
         )
         self.assertAlmostEqual(
-            1.520 / 0.446,
-            cases["broad red green blue background"]["max_to_baseline_ratio"],
+            1.060 / 0.300,
+            cases["broad red green blue background"]["p95_to_baseline_ratio"],
         )
 
     def test_evaluate_gate_includes_target_color_perf_regression(self) -> None:
@@ -127,19 +127,34 @@ class ColorRealtimeQualificationTest(unittest.TestCase):
             result.failures,
         )
 
-    def test_evaluate_gate_reports_multi_family_max_regression(self) -> None:
+    def test_evaluate_gate_reports_multi_family_p95_regression(self) -> None:
         target_report = qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT)
         for case in target_report["cases"]:
             if case["name"] == "compact red green blue subject":
-                case["max_ms"] = 6.0
-                case["max_to_baseline_ratio"] = 6.0 / target_report["baseline_max_ms"]
+                case["p95_ms"] = 4.0
+                case["p95_to_baseline_ratio"] = 4.0 / target_report["baseline_p95_ms"]
 
         result = qual.evaluate_gate({"cases": [], "target_color_perf": target_report})
 
         self.assertFalse(result.passed)
         self.assertIn(
-            "target-color-perf: compact red green blue subject max 6.000 ms is "
-            "13.45x baseline max, above 12.00x",
+            "target-color-perf: compact red green blue subject p95 4.000 ms is "
+            "13.33x baseline p95, above 12.00x",
+            result.failures,
+        )
+
+    def test_evaluate_gate_reports_catastrophic_max(self) -> None:
+        target_report = qual.parse_target_color_perf_probe_output(TARGET_COLOR_PROBE_OUTPUT)
+        for case in target_report["cases"]:
+            if case["name"] == "mottled green frame":
+                case["max_ms"] = 251.0
+
+        result = qual.evaluate_gate({"cases": [], "target_color_perf": target_report})
+
+        self.assertFalse(result.passed)
+        self.assertIn(
+            "target-color-perf: mottled green frame max 251.000 ms exceeds "
+            "catastrophic ceiling 250.000 ms",
             result.failures,
         )
 

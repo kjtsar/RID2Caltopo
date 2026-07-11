@@ -1427,6 +1427,23 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
         session->anomaly_process_max_us = elapsed_us;
     }
     if (annotated) {
+        if (session->anomaly_annotated_frame_count == 0) {
+            const anomaly_box_t *first_box = &stable_annotations.boxes[0];
+            ct_debug(
+                    "FfmpegProbeService",
+                    "First anomaly ROI designator=%s sessionId=%lld mediaTs=%.3fs analyzedFrame=%lld "
+                    "algorithm=%d box=[%.3f,%.3f,%.3f,%.3f] weight=%.2f",
+                    session->designator,
+                    (long long) session->session_id,
+                    source_ts_us > 0 ? ((double) source_ts_us / 1000000.0) : 0.0,
+                    (long long) session->anomaly_process_frame_count + 1,
+                    first_box->algorithm,
+                    first_box->left_norm,
+                    first_box->top_norm,
+                    first_box->right_norm,
+                    first_box->bottom_norm,
+                    first_box->weight);
+        }
         session->anomaly_annotated_frame_count += 1;
     }
     session->anomaly_last_registration_health = result.registration_health;
@@ -5604,8 +5621,12 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                                             render_queue_depth_after_enqueue,
                                             decoded_at_ms,
                                             session->local_ad_startup_preroll_started_at_ms,
-                                            LOCAL_AD_STARTUP_PREROLL_RENDER_DEPTH,
-                                            LOCAL_AD_STARTUP_PREROLL_MAX_WAIT_MS);
+                                            target_color_selected
+                                                    ? LOCAL_AD_STARTUP_PREROLL_RENDER_DEPTH
+                                                    : 0,
+                                            target_color_selected
+                                                    ? LOCAL_AD_STARTUP_PREROLL_MAX_WAIT_MS
+                                                    : 0);
                             if (preroll.complete && !session->local_ad_startup_preroll_complete) {
                                 session->local_ad_startup_preroll_complete = true;
                                 trace_set_counter("RID2C local_ad_preroll_complete", 1);

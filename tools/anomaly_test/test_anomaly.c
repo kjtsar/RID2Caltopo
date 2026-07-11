@@ -13362,6 +13362,11 @@ static void test_detector_facade_runtime_budget_local_ad_startup_preroll(void) {
             true, true, true, true, true, false, 0, 1100, 1000, 12, 800);
     EXPECT(!preroll.wait && preroll.complete,
            "runtime budget local AD startup preroll: completed preroll remains open");
+
+    preroll = anomaly_detector_runtime_budget_local_ad_startup_preroll(
+            true, false, true, true, true, false, 0, 1000, 1000, 0, 0);
+    EXPECT(!preroll.wait && preroll.complete,
+           "runtime budget local AD startup preroll: zero limits start uniqueness review immediately");
 }
 
 static void test_detector_facade_runtime_budget_local_ad_cadence(void) {

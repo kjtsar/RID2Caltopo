@@ -21,12 +21,11 @@ Primary source files:
 - [`anomaly_analysis.c`](../app/src/main/cpp/anomaly_analysis.c)
 - [`anomaly_video_test.c`](../tools/anomaly_test/anomaly_video_test.c)
 
-Related historical documents:
+Related maintained documents:
 
+- [Anomaly Detector: An Introduction for SAR Users](Anomaly_Detector_Introduction_for_SAR.md)
 - [IR Anomaly Detector](IR_Anomaly_Detector.md)
-- [Visible-Light Color Anomaly Detector Architecture](Visible_Color_Anomaly_Detector_Architecture.md)
-- [IR Anomaly Redesign Project Plan](IR_Anomaly_Redesign_Project_Plan.md)
-- [IR Anomaly Runtime Tracing](IR_Anomaly_Runtime_Tracing.md)
+- [Color Anomaly Detector](Color_Anomaly_Detector.md)
 
 ## Summary
 
@@ -606,9 +605,9 @@ Perfetto trace labels are available around:
 - `RID2C ad_queue_depth`
 - `RID2C render_queue_depth`
 
-For on-device runtime work, use
-[IR Anomaly Runtime Tracing](IR_Anomaly_Runtime_Tracing.md)
-as the profiling guide.
+For on-device runtime work, use the tracked
+[`capture_perfetto_trace.sh`](../tools/android_profiling/capture_perfetto_trace.sh)
+helper to collect Perfetto and supporting device diagnostics.
 
 The host harness summary JSON also records selective-refresh diagnostics:
 

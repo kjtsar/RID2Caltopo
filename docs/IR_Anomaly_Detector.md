@@ -3,7 +3,7 @@
 Current implementation note: for the consolidated current-state detector
 reference, including app defaults, FFmpeg threading, scan planning, visible
 color, motion, saliency, and runtime caveats, start with
-[Current_Anomaly_Detector.md](/Users/kjt/Projects/RID2Caltopo/docs/Current_Anomaly_Detector.md).
+[Current Anomaly Detector](Current_Anomaly_Detector.md).
 
 ## Operator Summary
 
@@ -124,7 +124,7 @@ This document describes the IR-focused anomaly detector shared by:
 - the host-side harness through `tools/anomaly_test/anomaly_video_test.c`
 
 The important architectural point is that detector logic lives in
-[anomaly_analysis.c](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/anomaly_analysis.c)
+[`anomaly_analysis.c`](../app/src/main/cpp/anomaly_analysis.c)
 and is intended to behave the same in both environments.
 
 ### Pipeline Overview
@@ -385,12 +385,12 @@ drops, the first places to investigate are:
 ### Source Files
 
 - Shared detector:
-  [anomaly_analysis.c](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/anomaly_analysis.c)
+  [`anomaly_analysis.c`](../app/src/main/cpp/anomaly_analysis.c)
 - Native bridge:
-  [ffmpeg_bridge.c](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/ffmpeg_bridge.c)
+  [`ffmpeg_bridge.c`](../app/src/main/cpp/ffmpeg_bridge.c)
 - App config model:
-  [AnomalyModels.kt](/Users/kjt/Projects/RID2Caltopo/app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyModels.kt)
+  [`AnomalyModels.kt`](../app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyModels.kt)
 - App settings persistence:
-  [AnomalyPrefs.kt](/Users/kjt/Projects/RID2Caltopo/app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyPrefs.kt)
+  [`AnomalyPrefs.kt`](../app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyPrefs.kt)
 - Harness usage:
-  [tools/anomaly_test/README.md](/Users/kjt/Projects/RID2Caltopo/tools/anomaly_test/README.md)
+  [`tools/anomaly_test/README.md`](../tools/anomaly_test/README.md)

@@ -8,25 +8,25 @@ shipping runtime path from older design goals and historical tuning notes.
 
 Primary source files:
 
-- [AnomalyModels.kt](/Users/kjt/Projects/RID2Caltopo/app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyModels.kt)
-- [AnomalyPrefs.kt](/Users/kjt/Projects/RID2Caltopo/app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyPrefs.kt)
-- [StreamTile.kt](/Users/kjt/Projects/RID2Caltopo/app/src/main/java/org/ncssar/rid2caltopo/video/StreamTile.kt)
-- [StreamsViewModel.kt](/Users/kjt/Projects/RID2Caltopo/app/src/main/java/org/ncssar/rid2caltopo/video/StreamsViewModel.kt)
-- [FfmpegBridge.kt](/Users/kjt/Projects/RID2Caltopo/app/src/main/java/org/ncssar/rid2caltopo/video/ffmpeg/FfmpegBridge.kt)
-- [ffmpeg_bridge.c](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/ffmpeg_bridge.c)
-- [anomaly_runtime_budget.h](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/anomaly_runtime_budget.h)
-- [anomaly_runtime_handoff.h](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/anomaly_runtime_handoff.h)
-- [anomaly_runtime_pressure.h](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/anomaly_runtime_pressure.h)
-- [anomaly_analysis.h](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/anomaly_analysis.h)
-- [anomaly_analysis.c](/Users/kjt/Projects/RID2Caltopo/app/src/main/cpp/anomaly_analysis.c)
-- [anomaly_video_test.c](/Users/kjt/Projects/RID2Caltopo/tools/anomaly_test/anomaly_video_test.c)
+- [`AnomalyModels.kt`](../app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyModels.kt)
+- [`AnomalyPrefs.kt`](../app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyPrefs.kt)
+- [`StreamTile.kt`](../app/src/main/java/org/ncssar/rid2caltopo/video/StreamTile.kt)
+- [`StreamsViewModel.kt`](../app/src/main/java/org/ncssar/rid2caltopo/video/StreamsViewModel.kt)
+- [`FfmpegBridge.kt`](../app/src/main/java/org/ncssar/rid2caltopo/video/ffmpeg/FfmpegBridge.kt)
+- [`ffmpeg_bridge.c`](../app/src/main/cpp/ffmpeg_bridge.c)
+- [`anomaly_runtime_budget.h`](../app/src/main/cpp/anomaly_runtime_budget.h)
+- [`anomaly_runtime_handoff.h`](../app/src/main/cpp/anomaly_runtime_handoff.h)
+- [`anomaly_runtime_pressure.h`](../app/src/main/cpp/anomaly_runtime_pressure.h)
+- [`anomaly_analysis.h`](../app/src/main/cpp/anomaly_analysis.h)
+- [`anomaly_analysis.c`](../app/src/main/cpp/anomaly_analysis.c)
+- [`anomaly_video_test.c`](../tools/anomaly_test/anomaly_video_test.c)
 
 Related historical documents:
 
-- [IR_Anomaly_Detector.md](/Users/kjt/Projects/RID2Caltopo/docs/IR_Anomaly_Detector.md)
-- [Visible_Color_Anomaly_Detector_Architecture.md](/Users/kjt/Projects/RID2Caltopo/docs/Visible_Color_Anomaly_Detector_Architecture.md)
-- [IR_Anomaly_Redesign_Project_Plan.md](/Users/kjt/Projects/RID2Caltopo/docs/IR_Anomaly_Redesign_Project_Plan.md)
-- [IR_Anomaly_Runtime_Tracing.md](/Users/kjt/Projects/RID2Caltopo/docs/IR_Anomaly_Runtime_Tracing.md)
+- [IR Anomaly Detector](IR_Anomaly_Detector.md)
+- [Visible-Light Color Anomaly Detector Architecture](Visible_Color_Anomaly_Detector_Architecture.md)
+- [IR Anomaly Redesign Project Plan](IR_Anomaly_Redesign_Project_Plan.md)
+- [IR Anomaly Runtime Tracing](IR_Anomaly_Runtime_Tracing.md)
 
 ## Summary
 
@@ -607,7 +607,7 @@ Perfetto trace labels are available around:
 - `RID2C render_queue_depth`
 
 For on-device runtime work, use
-[IR_Anomaly_Runtime_Tracing.md](/Users/kjt/Projects/RID2Caltopo/docs/IR_Anomaly_Runtime_Tracing.md)
+[IR Anomaly Runtime Tracing](IR_Anomaly_Runtime_Tracing.md)
 as the profiling guide.
 
 The host harness summary JSON also records selective-refresh diagnostics:

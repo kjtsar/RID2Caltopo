@@ -4,11 +4,11 @@ This android application monitors Bluetooth and WiFi networks for [ASTM F3411](h
 compatible Remote ID location updates and records the updates as a sequence of track waypoints 
 that are compatible with [Caltopo](https://www.caltopo.com)'s geo-json file format.   
 
-Additionally, if a you have configured caltopo teams credentials properly and your mapid points 
+Additionally, if you have configured caltopo teams credentials properly and your mapid points 
 to an existing map that the credentials have write/update permissions for, the app can plot near
 real-time* LiveTrack updates into the map.
 
-All drones in service of a SAR organization should be required to emit Remote ID signalling, 
+All drones in service of a SAR organization should be required to emit Remote ID signaling, 
 enabling this drone and manufacturer-agnostic app to close the previously open loop between 
 search assignments and actual drone coverage.  Together with Caltopo's "Aircraft" layer, the
 ~real-time updates from this app allow an air-boss or supplemental Visual Observers to keep 
@@ -226,8 +226,17 @@ and point to the root folder. Then Build -> Make Project.
 
 ## Detector documentation
 
-For the IR anomaly detector operator summary and technical design notes, see
-[docs/IR_Anomaly_Detector.md](/Users/kjt/Projects/RID2Caltopo/docs/IR_Anomaly_Detector.md).
+RID2Caltopo includes an Anomaly Detector that can help searchers identify
+regions of interest in infrared and visible-light drone video. For a
+non-technical introduction to its infrared, color, target-color, motion, and
+saliency capabilities, see [Anomaly Detector: An Introduction for SAR Users](docs/Anomaly_Detector_Introduction_for_SAR.md).
+
+For technical infrared detector design notes, see
+[IR Anomaly Detector](docs/IR_Anomaly_Detector.md).
+
+For the current visible-light detector architecture, including Color Outlier,
+Target Colors, realtime scheduling, and qualification, see
+[Color Anomaly Detector](docs/Color_Anomaly_Detector.md).
 
 ## MediaMtx
 The latest version of this app bundles a version of the MediaMtx 1.16.2 server that has been tailored

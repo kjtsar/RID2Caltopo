@@ -66,6 +66,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MotionRegistrationMode
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
+import org.ncssar.rid2caltopo.video.anomaly.PersonRelevanceMode
 import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
@@ -685,6 +686,18 @@ internal fun streamTelemetrySummaryDesignatorLabel(
 ): String = droneSpec.mappedId
     ?.takeIf { it.isNotBlank() }
     ?: streamDesignator
+
+internal data class AnomalyPolicyUpdate(
+    val designator: String,
+    val thermalPaused: Boolean,
+    val personRelevanceMode: PersonRelevanceMode,
+    val config: org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig,
+)
+
+internal fun anomalyPolicyChanged(
+    previous: AnomalyPolicyUpdate?,
+    next: AnomalyPolicyUpdate,
+): Boolean = previous != next
 
 class StreamsViewModel(
     application: Application
@@ -2024,6 +2037,12 @@ class StreamsViewModel(
         }
     }
 
+    fun setPersonRelevanceMode(designator: String, mode: PersonRelevanceMode) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(personRelevanceMode = mode)
+        }
+    }
+
     fun toggleSaliencyEnabled(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(saliencyEnabled = !current.saliencyEnabled)
@@ -2854,12 +2873,6 @@ class StreamsViewModel(
         }
     }
 
-    private data class AnomalyPolicyUpdate(
-        val designator: String,
-        val thermalPaused: Boolean,
-        val config: org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig,
-    )
-
     private fun estimateAnomalyHeadroom(
         processCpuFraction: Double,
         mainThreadCpuFraction: Double,
@@ -2916,12 +2929,13 @@ class StreamsViewModel(
             val update = AnomalyPolicyUpdate(
                 designator = designator,
                 thermalPaused = enableForDesignator && thermalPause,
+                personRelevanceMode = config.personRelevanceMode,
                 config = config.toNativeConfig(
                     enabledOverride = enableForDesignator,
                     detectedAppearanceMode = _detectedAppearanceModeByDesignator[designator]
                 )
             )
-            if (lastAppliedAnomalyPolicyByDesignator[designator] != update) {
+            if (anomalyPolicyChanged(lastAppliedAnomalyPolicyByDesignator[designator], update)) {
                 updates += update
                 lastAppliedAnomalyPolicyByDesignator[designator] = update
             }
@@ -2937,7 +2951,11 @@ class StreamsViewModel(
                     designator = update.designator,
                     paused = update.thermalPaused
                 )
-                probeService.setAnomalyConfig(update.designator, update.config)
+                probeService.setAnomalyPolicy(
+                    designator = update.designator,
+                    config = update.config,
+                    personRelevanceMode = update.personRelevanceMode,
+                )
             }
         }
     }

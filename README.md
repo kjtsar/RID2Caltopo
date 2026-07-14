@@ -238,10 +238,12 @@ For the current visible-light detector architecture, including Color Outlier,
 Target Colors, realtime scheduling, and qualification, see
 [Color Anomaly Detector](docs/Color_Anomaly_Detector.md).
 
-## MediaMtx
-The latest version of this app bundles a version of the MediaMtx 1.16.2 server that has been tailored
+## MediaMTX
+The latest version of this app bundles a version of the MediaMTX 1.16.2 server that has been tailored
 to pamper to the sensitivities of the various DJI and Autel drone controllers and to support low latency
 playback.  Please contact me <kjtsar@kjt.us> to get a copy of the changes or the mediamtx executable.
+MediaMTX remains licensed under its MIT license; see
+[Third-Party Software Notices](THIRD_PARTY_NOTICES.md).
 
 
 ## Supported interfaces and protocols
@@ -253,3 +255,15 @@ support one or more of the other capabilities.
 This app doesn't collect or disseminate any information except in the service of connecting to 
 and updating a caltopo map.  For more specifics, please see the corresponding 
 [Privacy Policy](PrivacyPolicy.md) document.
+
+## License
+
+RID2Caltopo's original source code and documentation are licensed under the
+[Apache License 2.0](LICENSE). Third-party components retain their respective
+licenses; see [Third-Party Software Notices](THIRD_PARTY_NOTICES.md) and
+[NOTICE](NOTICE).
+
+RID2Caltopo is an operational aid rather than a certified aviation, navigation,
+or life-safety system. Review the [operational disclaimer](DISCLAIMER.md) before
+using it in the field. Contributions are welcome under the terms described in
+[CONTRIBUTING.md](CONTRIBUTING.md).

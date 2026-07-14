@@ -8,6 +8,7 @@ plugins {
 }
 
 def generatedReleaseNotesAssetsDir = layout.buildDirectory.dir("generated/release-notes/assets")
+def generatedLegalAssetsDir = layout.buildDirectory.dir("generated/legal/assets/legal")
 def generatedAppConfigProtoDir = layout.buildDirectory.dir("generated/source/proto/main/java")
 def runProcess = { File workingDirectory, List command, Map environmentOverrides = [:], boolean ignoreExitValue = false ->
     def stdout = new ByteArrayOutputStream()
@@ -59,6 +60,15 @@ def generateReleaseNotes = tasks.register("generateReleaseNotes") {
         }
         releaseNotesFile.text = notes + System.lineSeparator()
     }
+}
+
+def generateLegalNoticeAssets = tasks.register("generateLegalNoticeAssets", Sync) {
+    from(rootProject.file("LICENSE"))
+    from(rootProject.file("NOTICE"))
+    from(rootProject.file("DISCLAIMER.md"))
+    from(rootProject.file("THIRD_PARTY_NOTICES.md"))
+    from(rootProject.file("third_party/licenses"))
+    into(generatedLegalAssetsDir)
 }
 
 // Read the keystore properties
@@ -197,7 +207,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 6
-    def versionPatch = 10
+    def versionPatch = 11
 
     signingConfigs {
         register("release") {
@@ -212,7 +222,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 94
+        versionCode = 95
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -302,9 +312,16 @@ android {
             useLegacyPackaging = false
         }
     }
+    androidResources {
+        noCompress += "tflite"
+    }
     sourceSets {
         main {
-            assets.srcDirs += ['src/main/assets', generatedReleaseNotesAssetsDir.get().asFile]
+            assets.srcDirs += [
+                    'src/main/assets',
+                    generatedReleaseNotesAssetsDir.get().asFile,
+                    generatedLegalAssetsDir.get().asFile
+            ]
         }
     }
     testOptions {
@@ -327,13 +344,13 @@ kotlin {
 tasks.matching { task ->
     task.name.startsWith("merge") && task.name.endsWith("Assets")
 }.configureEach {
-    dependsOn(generateReleaseNotes)
+    dependsOn(generateReleaseNotes, generateLegalNoticeAssets)
 }
 
 tasks.matching { task ->
     task.name.startsWith("lint") || task.name.contains("Lint")
 }.configureEach {
-    dependsOn(generateReleaseNotes)
+    dependsOn(generateReleaseNotes, generateLegalNoticeAssets)
 }
 
 dependencies {
@@ -396,6 +413,7 @@ dependencies {
     implementation("androidx.datastore:datastore:1.1.1")
     implementation("com.google.protobuf:protobuf-javalite:3.25.3")
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("com.google.ai.edge.litert:litert:2.1.5")
     implementation("org.osmdroid:osmdroid-android:6.1.20")
     implementation("mil.nga:tiff:3.0.0")
     // QR code generation for org-config join tokens (core only — no camera/Activity dependency)
@@ -525,12 +543,32 @@ tasks.register("colorRealtimeQualification") {
     }
 }
 
+tasks.register("personRelevanceQualification") {
+    group = "verification"
+    description = "Runs deterministic OFF/SHADOW Person Relevance qualification."
+    outputs.upToDateWhen { false }
+    doLast {
+        runProcess(rootDir, [
+                "python3",
+                "tools/anomaly_test/run_person_relevance_qualification.py",
+                "tools/anomaly_test/fixtures/person_relevance/manifest.json",
+                "--output",
+                "${buildDir}/reports/person-relevance-qualification/report.json"
+        ], ["PATH": pathWithHostToolDirs()])
+    }
+}
+
 tasks.register("releaseVerification") {
     group = "verification"
     description = "Runs all verification required before producing release artifacts."
     // connectedDebugAndroidTest requires a reachable adb device/emulator. Keep it
     // out of the default release gate until device-level tests are intentional.
-    dependsOn("testDebugUnitTest", "trackerCoordinationTests", "colorRealtimeQualification")
+    dependsOn(
+            "testDebugUnitTest",
+            "trackerCoordinationTests",
+            "colorRealtimeQualification",
+            "personRelevanceQualification"
+    )
     // dependsOn("connectedDebugAndroidTest")
 }
 

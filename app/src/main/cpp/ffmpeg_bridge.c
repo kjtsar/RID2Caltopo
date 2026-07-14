@@ -27,6 +27,7 @@
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mem.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/dict.h>
 #if HAVE_SWSCALE
@@ -39,6 +40,7 @@
 #include "anomaly_analysis.h"
 #include "anomaly_debug_helpers.h"
 #include "anomaly_detector.h"
+#include "anomaly_person_relevance_scheduler.h"
 #include "anomaly_runtime_handoff.h"
 #include "anomaly_runtime_pressure.h"
 #include "anomaly_target_revisit.h"
@@ -210,6 +212,12 @@ typedef struct ffmpeg_session_t {
     ANativeWindow *window;
     anomaly_config_t anomaly_cfg;    // protected by g_lock
     anomaly_state_t  anomaly_state;  // decode-owned, synchronized via anomaly_lock for resets
+    // Person relevance is a bounded sidecar. It is initialized OFF until a
+    // model backend and analyzer candidate-identity hook are configured.
+    anomaly_person_relevance_scheduler_t person_relevance_scheduler;
+    pthread_mutex_t person_relevance_config_lock;
+    bool person_relevance_config_lock_ready;
+    atomic_int person_relevance_mode;
     pthread_mutex_t anomaly_lock;
     bool anomaly_lock_ready;
     bool anomaly_thermal_paused;
@@ -414,12 +422,24 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static jlong g_next_session_id = 1;
 static ffmpeg_session_t g_sessions[MAX_SESSIONS];
 static jclass g_bridge_class = NULL;
+static jclass g_person_relevance_coordinator_class = NULL;
+static jmethodID g_person_relevance_infer_mid = NULL;
 static jclass g_caltopo_client_class = NULL;
 static jmethodID g_dispatch_probe_event_mid = NULL;
 static jmethodID g_ctdebug_mid = NULL;
 static jmethodID g_ctwarn_mid = NULL;
 static jmethodID g_cterror_mid = NULL;
 static jmethodID g_register_debug_tag_mid = NULL;
+static atomic_uint_fast64_t g_person_relevance_evidence_id = 1u;
+
+#if HAVE_FFMPEG && HAVE_SWSCALE
+static bool person_relevance_native_backend(
+        void *context,
+        void *retained_frame,
+        const anomaly_person_relevance_model_identity_t *model,
+        const anomaly_person_relevance_candidate_batch_t *candidates,
+        anomaly_person_relevance_decision_batch_t *decisions_out);
+#endif
 
 static inline void trace_begin_section(const char *name) {
     if (name == NULL || name[0] == '\0') return;
@@ -1313,7 +1333,12 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
                                       uint8_t *rgba,
                                       int rgba_stride,
                                       int64_t source_ts_us,
-                                      int64_t annotation_frame_ordinal) {
+                                      int64_t annotation_frame_ordinal,
+                                      void *person_source_frame,
+                                      uint64_t person_generation,
+                                      uint64_t person_frame_sequence,
+                                      anomaly_person_scheduler_pressure_t person_pressure,
+                                      bool allow_person_offer) {
     anomaly_result_t result;
     memset(&result, 0, sizeof(result));
     anomaly_config_t cfg;
@@ -1347,6 +1372,37 @@ static bool analyze_rgba_frame_locked(ffmpeg_session_t *session,
                                               width, height,
                                               source_ts_us, &result);
     trace_end_section();
+    if (allow_person_offer &&
+        atomic_load_explicit(
+                &session->person_relevance_mode, memory_order_relaxed) !=
+                ANOMALY_PERSON_RELEVANCE_OFF &&
+        session->person_relevance_config_lock_ready &&
+        pthread_mutex_trylock(&session->person_relevance_config_lock) == 0) {
+        anomaly_person_scheduler_snapshot_t person_snapshot;
+        size_t person_candidate_count = anomaly_person_scheduler_snapshot_from_boxes(
+                person_generation,
+                person_frame_sequence,
+                source_ts_us,
+                &session->anomaly_state,
+                &cfg,
+                result.boxes,
+                (size_t)(raw_box_count > 0 ? raw_box_count : 0),
+                &person_snapshot);
+        if (person_candidate_count > 0u) {
+            (void)anomaly_person_scheduler_consume_latest_boxes(
+                    &session->person_relevance_scheduler,
+                    &person_snapshot,
+                    1000000,
+                    result.boxes,
+                    (size_t)raw_box_count);
+            (void)anomaly_person_scheduler_offer(
+                    &session->person_relevance_scheduler,
+                    person_pressure,
+                    person_source_frame,
+                    &person_snapshot);
+        }
+        pthread_mutex_unlock(&session->person_relevance_config_lock);
+    }
     anomaly_detector_annotation_view_t raw_annotations =
             anomaly_detector_result_annotations(&result);
     const int stable_overlay_window_frames =
@@ -1798,7 +1854,12 @@ static bool analyze_rgba_frame(ffmpeg_session_t *session,
             rgba,
             rgba_stride,
             source_ts_us,
-            -1);
+            -1,
+            NULL,
+            0u,
+            0u,
+            ANOMALY_PERSON_PRESSURE_ELEVATED,
+            false);
     if (session->anomaly_lock_ready) {
         pthread_mutex_unlock(&session->anomaly_lock);
     }
@@ -2005,7 +2066,11 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
                                     int64_t source_ts_us,
                                     bool *out_analyzed,
                                     int frame_stride_override,
-                                    int64_t annotation_frame_ordinal) {
+                                    int64_t annotation_frame_ordinal,
+                                    uint64_t generation,
+                                    uint64_t frame_sequence,
+                                    anomaly_person_scheduler_pressure_t person_pressure,
+                                    bool allow_person_offer) {
     if (out_analyzed != NULL) *out_analyzed = false;
     if (session == NULL || session_stopping(session) || !frame_looks_scalable(decoded)) return NULL;
     if (!anomaly_processing_enabled(session)) return NULL;
@@ -2064,7 +2129,12 @@ static AVFrame *build_overlay_frame(ffmpeg_session_t *session,
             session->anomaly_rgba_frame->data[0],
             session->anomaly_rgba_frame->linesize[0],
             source_ts_us,
-            annotation_frame_ordinal);
+            annotation_frame_ordinal,
+            decoded,
+            generation,
+            frame_sequence,
+            person_pressure,
+            allow_person_offer);
     if (out_analyzed != NULL) *out_analyzed = true;
     AVFrame *overlay = frame_annotated ? clone_rgba_frame(session->anomaly_rgba_frame) : NULL;
     if (locked) {
@@ -2335,6 +2405,203 @@ static void render_frame_to_surface(ffmpeg_session_t *session,
     if (use_render_lock) {
         pthread_mutex_unlock(&session->render_lock);
     }
+}
+
+static void *retain_person_relevance_frame(void *frame) {
+    return frame != NULL ? av_frame_clone((const AVFrame *)frame) : NULL;
+}
+
+static void release_person_relevance_frame(void *frame) {
+    AVFrame *owned = frame;
+    av_frame_free(&owned);
+}
+
+static const anomaly_person_relevance_model_identity_t PERSON_RELEVANCE_MODEL = {
+    .model_name = "EfficientDet Lite0 Detection",
+    .model_version = "971d935f3679eabbcce7b4d3733f351d403ff2b9",
+    .model_sha256 = "33a3b622c7cac0762f96089353cd61495f3e993968d133af7871bfc2d5396704",
+    .input_tensor = "serving_default_images:0",
+    .quantization = "uint8 scale=0.0078125 zeroPoint=127",
+    .runtime_name = "LiteRT",
+    .runtime_version = "2.1.5",
+    .accelerator = "CPU/XNNPACK 1-thread",
+};
+
+static bool person_relevance_crop_rgb320(
+        const AVFrame *source,
+        const anomaly_person_relevance_candidate_t *candidate,
+        uint8_t **rgb_out) {
+    if (source == NULL || candidate == NULL || rgb_out == NULL ||
+        source->width <= 0 || source->height <= 0 ||
+        !isfinite(candidate->left_norm) || !isfinite(candidate->top_norm) ||
+        !isfinite(candidate->right_norm) || !isfinite(candidate->bottom_norm) ||
+        candidate->right_norm <= candidate->left_norm ||
+        candidate->bottom_norm <= candidate->top_norm) {
+        return false;
+    }
+    *rgb_out = NULL;
+    AVFrame *crop = av_frame_clone(source);
+    if (crop == NULL) return false;
+
+    float center_x = 0.5f * (candidate->left_norm + candidate->right_norm);
+    float center_y = 0.5f * (candidate->top_norm + candidate->bottom_norm);
+    int candidate_w = (int)ceilf(
+            (candidate->right_norm - candidate->left_norm) * (float)source->width);
+    int candidate_h = (int)ceilf(
+            (candidate->bottom_norm - candidate->top_norm) * (float)source->height);
+    int side = candidate_w > candidate_h ? candidate_w : candidate_h;
+    side *= 2;
+    if (side < 64) side = 64;
+    if (side > source->width) side = source->width;
+    if (side > source->height) side = source->height;
+    if (side <= 0) {
+        av_frame_free(&crop);
+        return false;
+    }
+    int left = (int)lroundf(center_x * (float)source->width - 0.5f * (float)side);
+    int top = (int)lroundf(center_y * (float)source->height - 0.5f * (float)side);
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (left + side > source->width) left = source->width - side;
+    if (top + side > source->height) top = source->height - side;
+    crop->crop_left = (size_t)left;
+    crop->crop_top = (size_t)top;
+    crop->crop_right = (size_t)(source->width - left - side);
+    crop->crop_bottom = (size_t)(source->height - top - side);
+    if (av_frame_apply_cropping(crop, AV_FRAME_CROP_UNALIGNED) < 0 ||
+        crop->width <= 0 || crop->height <= 0) {
+        av_frame_free(&crop);
+        return false;
+    }
+
+    struct SwsContext *sws = sws_getContext(
+            crop->width,
+            crop->height,
+            (enum AVPixelFormat)crop->format,
+            320,
+            320,
+            AV_PIX_FMT_RGB24,
+            SWS_BILINEAR,
+            NULL,
+            NULL,
+            NULL);
+    uint8_t *rgb = av_malloc(320u * 320u * 3u);
+    if (sws == NULL || rgb == NULL) {
+        sws_freeContext(sws);
+        av_free(rgb);
+        av_frame_free(&crop);
+        return false;
+    }
+    uint8_t *dest_data[4] = {rgb, NULL, NULL, NULL};
+    int dest_linesize[4] = {320 * 3, 0, 0, 0};
+    int rows = sws_scale(
+            sws,
+            (const uint8_t *const *)crop->data,
+            crop->linesize,
+            0,
+            crop->height,
+            dest_data,
+            dest_linesize);
+    sws_freeContext(sws);
+    av_frame_free(&crop);
+    if (rows != 320) {
+        av_free(rgb);
+        return false;
+    }
+    *rgb_out = rgb;
+    return true;
+}
+
+static bool person_relevance_native_backend(
+        void *context,
+        void *retained_frame,
+        const anomaly_person_relevance_model_identity_t *model,
+        const anomaly_person_relevance_candidate_batch_t *candidates,
+        anomaly_person_relevance_decision_batch_t *decisions_out) {
+    (void)context;
+    (void)model;
+    if (retained_frame == NULL || candidates == NULL || decisions_out == NULL) return false;
+    memset(decisions_out, 0, sizeof(*decisions_out));
+    bool did_attach = false;
+    JNIEnv *env = get_env(&did_attach);
+    if (env == NULL || g_person_relevance_coordinator_class == NULL ||
+        g_person_relevance_infer_mid == NULL) {
+        release_env(did_attach);
+        return false;
+    }
+
+    decisions_out->count = candidates->count;
+    for (size_t i = 0; i < candidates->count; i++) {
+        const anomaly_person_relevance_candidate_t *candidate =
+                &candidates->candidates[i];
+        anomaly_person_relevance_decision_t *decision =
+                &decisions_out->decisions[i];
+        decision->candidate_id = candidate->candidate_id;
+        decision->observation_index = candidate->observation_index;
+        decision->provenance_mask = candidate->provenance_mask;
+        decision->kind = ANOMALY_PERSON_RELEVANCE_DECISION_INVALID;
+
+        uint8_t *rgb = NULL;
+        if (!person_relevance_crop_rgb320(
+                    (const AVFrame *)retained_frame, candidate, &rgb)) {
+            continue;
+        }
+        jobject buffer = (*env)->NewDirectByteBuffer(env, rgb, 320 * 320 * 3);
+        jfloatArray result = buffer == NULL ? NULL : (jfloatArray)(*env)->CallStaticObjectMethod(
+                env,
+                g_person_relevance_coordinator_class,
+                g_person_relevance_infer_mid,
+                buffer);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            result = NULL;
+        }
+        if (result != NULL && (*env)->GetArrayLength(env, result) >= 2) {
+            jfloat values[2] = {-1.0f, 0.0f};
+            (*env)->GetFloatArrayRegion(env, result, 0, 2, values);
+            if (values[0] == 1.0f && isfinite(values[1]) &&
+                values[1] >= 0.0f && values[1] <= 1.0f) {
+                decision->person_confidence = values[1];
+                decision->evidence_id = atomic_fetch_add_explicit(
+                        &g_person_relevance_evidence_id, 1u, memory_order_relaxed);
+                decision->kind = values[1] >= 0.50f
+                        ? ANOMALY_PERSON_RELEVANCE_DECISION_POSITIVE
+                        : ANOMALY_PERSON_RELEVANCE_DECISION_LOW_CONFIDENCE;
+            } else if (values[0] == 0.0f) {
+                decision->kind = ANOMALY_PERSON_RELEVANCE_DECISION_LOW_CONFIDENCE;
+            }
+        }
+        if (result != NULL) (*env)->DeleteLocalRef(env, result);
+        if (buffer != NULL) (*env)->DeleteLocalRef(env, buffer);
+        av_free(rgb);
+    }
+    release_env(did_attach);
+    return true;
+}
+
+static bool configure_person_relevance_scheduler(
+        ffmpeg_session_t *session,
+        anomaly_person_relevance_mode_t mode) {
+    if (session == NULL) return false;
+    anomaly_person_scheduler_destroy(&session->person_relevance_scheduler);
+    anomaly_person_relevance_config_t config = {
+        .mode = mode,
+        .minimum_person_confidence = 0.50f,
+        .maximum_confidence_bonus = 0.20f,
+    };
+    bool configured = anomaly_person_scheduler_init(
+            &session->person_relevance_scheduler,
+            &config,
+            mode == ANOMALY_PERSON_RELEVANCE_OFF ? NULL : &PERSON_RELEVANCE_MODEL,
+            mode == ANOMALY_PERSON_RELEVANCE_OFF ? NULL : person_relevance_native_backend,
+            session,
+            retain_person_relevance_frame,
+            release_person_relevance_frame);
+    atomic_store_explicit(
+            &session->person_relevance_mode,
+            configured ? mode : ANOMALY_PERSON_RELEVANCE_OFF,
+            memory_order_relaxed);
+    return configured;
 }
 #endif
 
@@ -4544,7 +4811,13 @@ static void *ad_thread_main(void *arg) {
                                                        packet.source_ts_us,
                                                        &analyzed,
                                                        frame_stride_override,
-                                                       annotation_frame_ordinal);
+                                                       annotation_frame_ordinal,
+                                                       (uint64_t)packet.generation_id,
+                                                       (uint64_t)packet.frame_id,
+                                                       pressure_mode == AD_PRESSURE_MODE_NORMAL
+                                                               ? ANOMALY_PERSON_PRESSURE_NORMAL
+                                                               : ANOMALY_PERSON_PRESSURE_ELEVATED,
+                                                       true);
             packet.analyzed = analyzed;
         }
         if (session_stopping(session)) {
@@ -5830,7 +6103,11 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                             pts_us,
                             &analyzed,
                             0,
-                            -1);
+                            -1,
+                            0u,
+                            0u,
+                            ANOMALY_PERSON_PRESSURE_ELEVATED,
+                            false);
                     if (is_local_file_source(session)) {
                         pace_local_file_playback(session, pts_us);
                     }
@@ -5932,6 +6209,13 @@ static void run_decode_loop(ffmpeg_session_t *session) {
                         : "unavailable");
     }
     if (session->is_render) {
+        if (session->person_relevance_config_lock_ready) {
+            pthread_mutex_lock(&session->person_relevance_config_lock);
+        }
+        anomaly_person_scheduler_destroy(&session->person_relevance_scheduler);
+        if (session->person_relevance_config_lock_ready) {
+            pthread_mutex_unlock(&session->person_relevance_config_lock);
+        }
         cleanup_anomaly_resources(session);
     }
 #endif
@@ -6027,12 +6311,50 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
     slot->ad_pressure_frame_counter = 0;
     slot->ad_pressure_mode = AD_PRESSURE_MODE_NORMAL;
     anomaly_state_init(&slot->anomaly_state);
+    atomic_init(&slot->person_relevance_mode, ANOMALY_PERSON_RELEVANCE_OFF);
+    if (pthread_mutex_init(&slot->person_relevance_config_lock, NULL) != 0) {
+        ct_error(TAG, "person relevance config mutex initialization failed");
+        memset(slot, 0, sizeof(*slot));
+        pthread_mutex_unlock(&g_lock);
+        (*env)->ReleaseStringUTFChars(env, designator, d);
+        (*env)->ReleaseStringUTFChars(env, url, u);
+        return 0;
+    }
+    slot->person_relevance_config_lock_ready = true;
+#if HAVE_FFMPEG && HAVE_SWSCALE
+    if (!configure_person_relevance_scheduler(
+            slot, ANOMALY_PERSON_RELEVANCE_OFF)) {
+#else
+    const anomaly_person_relevance_config_t person_relevance_off = {
+        .mode = ANOMALY_PERSON_RELEVANCE_OFF,
+        .minimum_person_confidence = 0.50f,
+        .maximum_confidence_bonus = 0.20f,
+    };
+    if (!anomaly_person_scheduler_init(
+            &slot->person_relevance_scheduler,
+            &person_relevance_off,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL)) {
+#endif
+        ct_error(TAG, "person relevance scheduler OFF initialization failed");
+        pthread_mutex_destroy(&slot->person_relevance_config_lock);
+        memset(slot, 0, sizeof(*slot));
+        pthread_mutex_unlock(&g_lock);
+        (*env)->ReleaseStringUTFChars(env, designator, d);
+        (*env)->ReleaseStringUTFChars(env, url, u);
+        return 0;
+    }
     anomaly_detector_annotation_cadence_snapshot_state_init(
             &slot->anomaly_annotation_cadence);
     anomaly_detector_annotation_cadence_snapshot_state_init(
             &slot->anomaly_overlay_publication_cadence);
     if (pthread_mutex_init(&slot->anomaly_lock, NULL) != 0) {
         ct_error(TAG, "pthread_mutex_init failed for anomaly lock");
+        anomaly_person_scheduler_destroy(&slot->person_relevance_scheduler);
+        pthread_mutex_destroy(&slot->person_relevance_config_lock);
         memset(slot, 0, sizeof(*slot));
         pthread_mutex_unlock(&g_lock);
         (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -6056,6 +6378,8 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
         if (pthread_mutex_init(&slot->render_lock, NULL) != 0) {
             ct_error(TAG, "pthread_mutex_init failed for render_lock");
             pthread_mutex_destroy(&slot->anomaly_lock);
+            anomaly_person_scheduler_destroy(&slot->person_relevance_scheduler);
+            pthread_mutex_destroy(&slot->person_relevance_config_lock);
             memset(slot, 0, sizeof(*slot));
             pthread_mutex_unlock(&g_lock);
             (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -6066,6 +6390,8 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
             ct_error(TAG, "pthread_cond_init failed for render_cond");
             pthread_mutex_destroy(&slot->render_lock);
             pthread_mutex_destroy(&slot->anomaly_lock);
+            anomaly_person_scheduler_destroy(&slot->person_relevance_scheduler);
+            pthread_mutex_destroy(&slot->person_relevance_config_lock);
             memset(slot, 0, sizeof(*slot));
             pthread_mutex_unlock(&g_lock);
             (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -6077,6 +6403,8 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
             pthread_cond_destroy(&slot->render_cond);
             pthread_mutex_destroy(&slot->render_lock);
             pthread_mutex_destroy(&slot->anomaly_lock);
+            anomaly_person_scheduler_destroy(&slot->person_relevance_scheduler);
+            pthread_mutex_destroy(&slot->person_relevance_config_lock);
             memset(slot, 0, sizeof(*slot));
             pthread_mutex_unlock(&g_lock);
             (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -6089,6 +6417,8 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
             pthread_cond_destroy(&slot->render_cond);
             pthread_mutex_destroy(&slot->render_lock);
             pthread_mutex_destroy(&slot->anomaly_lock);
+            anomaly_person_scheduler_destroy(&slot->person_relevance_scheduler);
+            pthread_mutex_destroy(&slot->person_relevance_config_lock);
             memset(slot, 0, sizeof(*slot));
             pthread_mutex_unlock(&g_lock);
             (*env)->ReleaseStringUTFChars(env, designator, d);
@@ -6147,6 +6477,11 @@ static jlong start_session(JNIEnv *env, jstring designator, jstring url, bool is
             slot->ad_sync_ready = false;
         }
 #endif
+        anomaly_person_scheduler_destroy(&slot->person_relevance_scheduler);
+        if (slot->person_relevance_config_lock_ready) {
+            pthread_mutex_destroy(&slot->person_relevance_config_lock);
+            slot->person_relevance_config_lock_ready = false;
+        }
         if (slot->anomaly_lock_ready) {
             pthread_mutex_destroy(&slot->anomaly_lock);
             slot->anomaly_lock_ready = false;
@@ -6198,6 +6533,29 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeInitBridge(
             g_bridge_class,
             "dispatchNativeProbeEvent",
         "(Ljava/lang/String;Ljava/lang/String;JLjava/lang/String;DLjava/lang/String;JJDDDDDD)V");
+
+    jclass person_local_cls = (*env)->FindClass(
+            env,
+            "org/ncssar/rid2caltopo/video/PersonRelevanceCoordinator");
+    if (person_local_cls != NULL) {
+        if (g_person_relevance_coordinator_class != NULL) {
+            (*env)->DeleteGlobalRef(env, g_person_relevance_coordinator_class);
+        }
+        g_person_relevance_coordinator_class =
+                (*env)->NewGlobalRef(env, person_local_cls);
+        (*env)->DeleteLocalRef(env, person_local_cls);
+        if (g_person_relevance_coordinator_class != NULL) {
+            g_person_relevance_infer_mid = (*env)->GetStaticMethodID(
+                    env,
+                    g_person_relevance_coordinator_class,
+                    "inferRgb320",
+                    "(Ljava/nio/ByteBuffer;)[F");
+        }
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        g_person_relevance_infer_mid = NULL;
+    }
 
     jclass caltopo_local_cls = (*env)->FindClass(env, "org/ncssar/rid2caltopo/data/CaltopoClient");
     if (caltopo_local_cls == NULL) {
@@ -6562,6 +6920,37 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetAnomalyThermalPau
     pthread_mutex_unlock(&g_lock);
 }
 
+JNIEXPORT jboolean JNICALL
+Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeSetPersonRelevanceMode(
+        JNIEnv *env,
+        jobject thiz,
+        jlong session_id,
+        jint mode
+) {
+    (void)env;
+    (void)thiz;
+    if (mode < ANOMALY_PERSON_RELEVANCE_OFF ||
+        mode > ANOMALY_PERSON_RELEVANCE_POSITIVE_ONLY) {
+        return JNI_FALSE;
+    }
+    bool configured = false;
+    pthread_mutex_lock(&g_lock);
+    ffmpeg_session_t *session = find_session_locked(session_id);
+    if (session != NULL && session->active && session->running && session->is_render &&
+        session->person_relevance_config_lock_ready) {
+#if HAVE_FFMPEG && HAVE_SWSCALE
+        pthread_mutex_lock(&session->person_relevance_config_lock);
+        configured = configure_person_relevance_scheduler(
+                session, (anomaly_person_relevance_mode_t)mode);
+        pthread_mutex_unlock(&session->person_relevance_config_lock);
+#else
+        configured = mode == ANOMALY_PERSON_RELEVANCE_OFF;
+#endif
+    }
+    pthread_mutex_unlock(&g_lock);
+    return configured ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jlongArray JNICALL
 Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
         JNIEnv *env,
@@ -6569,7 +6958,7 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
         jlong session_id
 ) {
     (void) thiz;
-    jlong values[34];
+    jlong values[46];
     memset(values, 0, sizeof(values));
 
     pthread_mutex_lock(&g_lock);
@@ -6614,11 +7003,27 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionPerfStats(
     values[31] = (jlong) session->ad_worker_processed_frame_count;
     values[32] = (jlong) session->ad_worker_annotated_frame_count;
     values[33] = (jlong) session->ad_worker_overlay_enqueued_count;
+    anomaly_person_scheduler_metrics_t person_metrics;
+    anomaly_person_scheduler_metrics(
+            &session->person_relevance_scheduler, &person_metrics);
+    values[34] = (jlong)atomic_load_explicit(
+            &session->person_relevance_mode, memory_order_relaxed);
+    values[35] = (jlong)person_metrics.offered;
+    values[36] = (jlong)person_metrics.admitted;
+    values[37] = (jlong)person_metrics.contention_drops;
+    values[38] = (jlong)person_metrics.pressure_drops;
+    values[39] = (jlong)person_metrics.replacements;
+    values[40] = (jlong)person_metrics.completed;
+    values[41] = (jlong)person_metrics.stale_discarded;
+    values[42] = (jlong)person_metrics.backend_failures;
+    values[43] = (jlong)person_metrics.positive_decisions;
+    values[44] = (jlong)person_metrics.bonuses_applied;
+    values[45] = (jlong)person_metrics.inference_wall_time_us;
     pthread_mutex_unlock(&g_lock);
 
-    jlongArray array = (*env)->NewLongArray(env, 34);
+    jlongArray array = (*env)->NewLongArray(env, 46);
     if (array == NULL) return NULL;
-    (*env)->SetLongArrayRegion(env, array, 0, 34, values);
+    (*env)->SetLongArrayRegion(env, array, 0, 46, values);
     return array;
 }
 
@@ -6643,6 +7048,29 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeGetSessionDebugSumma
         } else if (detector[0] != '\0') {
             snprintf(summary, sizeof(summary), "%s", detector);
         }
+        anomaly_person_scheduler_metrics_t metrics;
+        anomaly_person_scheduler_metrics(
+                &session->person_relevance_scheduler, &metrics);
+        size_t used = strlen(summary);
+        snprintf(summary + used,
+                 sizeof(summary) - used,
+                 "%sperson{mode=%d offered=%llu admitted=%llu pressureDrop=%llu "
+                 "contentionDrop=%llu replaced=%llu completed=%llu stale=%llu "
+                 "failure=%llu positive=%llu applied=%llu inferUs=%llu}",
+                 used > 0 ? " | " : "",
+                 atomic_load_explicit(
+                         &session->person_relevance_mode, memory_order_relaxed),
+                 (unsigned long long)metrics.offered,
+                 (unsigned long long)metrics.admitted,
+                 (unsigned long long)metrics.pressure_drops,
+                 (unsigned long long)metrics.contention_drops,
+                 (unsigned long long)metrics.replacements,
+                 (unsigned long long)metrics.completed,
+                 (unsigned long long)metrics.stale_discarded,
+                 (unsigned long long)metrics.backend_failures,
+                 (unsigned long long)metrics.positive_decisions,
+                 (unsigned long long)metrics.bonuses_applied,
+                 (unsigned long long)metrics.inference_wall_time_us);
     }
     pthread_mutex_unlock(&g_lock);
     if (summary[0] == '\0') return NULL;
@@ -6900,6 +7328,11 @@ Java_org_ncssar_rid2caltopo_video_ffmpeg_FfmpegBridge_nativeStop(
     if (session->anomaly_lock_ready) {
         pthread_mutex_destroy(&session->anomaly_lock);
         session->anomaly_lock_ready = false;
+    }
+    anomaly_person_scheduler_destroy(&session->person_relevance_scheduler);
+    if (session->person_relevance_config_lock_ready) {
+        pthread_mutex_destroy(&session->person_relevance_config_lock);
+        session->person_relevance_config_lock_ready = false;
     }
     memset(session, 0, sizeof(*session));
     pthread_mutex_unlock(&g_lock);

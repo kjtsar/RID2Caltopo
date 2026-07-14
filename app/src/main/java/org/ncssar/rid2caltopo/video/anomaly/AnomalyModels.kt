@@ -106,6 +106,24 @@ enum class AnomalyStrideMode(
     Adaptive(nativeValue = 1, label = "Adaptive");
 }
 
+enum class PersonRelevanceMode(
+    val nativeValue: Int,
+    val label: String,
+) {
+    Off(nativeValue = 0, label = "Off"),
+    Evaluate(nativeValue = 1, label = "Evaluate"),
+    Assist(nativeValue = 2, label = "Assist");
+
+    companion object {
+        fun fromPersistedValue(value: String?): PersonRelevanceMode =
+            entries.firstOrNull { it.name == value } ?: Off
+    }
+}
+
+const val PERSON_RELEVANCE_SUPPORTING_TEXT =
+    "Evaluate records person evidence without changing ROI scores. " +
+        "Assist can only add relevance and never reject a target."
+
 data class NativeAnomalyConfig(
     val enabled: Boolean,
     val showHotOverlay: Boolean,
@@ -202,6 +220,7 @@ data class AnomalyConfig(
     val colorFrontendMode: ColorFrontendMode = ColorFrontendMode.Legacy,
     val colorTargetCandidateLimit: Int = 1,
     val targetColorFamilyMask: Int = 0,
+    val personRelevanceMode: PersonRelevanceMode = PersonRelevanceMode.Off,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {

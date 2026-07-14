@@ -15,6 +15,7 @@ import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheStartupMaintenance
+import org.ncssar.rid2caltopo.video.PersonRelevanceCoordinator
 
 class R2CApplication : Application() {
     val TAG = "R2CApplication"
@@ -22,6 +23,7 @@ class R2CApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this;
+        PersonRelevanceCoordinator.initialize(this)
 
         // Force IPv4 preference for older stack compatibility
         System.setProperty("java.net.preferIPv4Stack", "true");

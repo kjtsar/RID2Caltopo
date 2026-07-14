@@ -33,6 +33,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -86,6 +89,8 @@ import org.ncssar.rid2caltopo.video.anomaly.AnomalyStrideMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
+import org.ncssar.rid2caltopo.video.anomaly.PersonRelevanceMode
+import org.ncssar.rid2caltopo.video.anomaly.PERSON_RELEVANCE_SUPPORTING_TEXT
 import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.anomaly.targetColorFamilySummary
 import org.ncssar.rid2caltopo.video.anomaly.targetColorSelectionEnabled
@@ -1378,6 +1383,43 @@ internal fun AnomalySettingsDialogs(
                         TextButton(onClick = { viewModel.toggleAnomalyTroubleshootingDebug(streamDesignator) }) {
                             Text(if (anomalyConfig.troubleshootingDebug) "On" else "Off")
                         }
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Person Relevance")
+                        }
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            PersonRelevanceMode.entries.forEachIndexed { index, mode ->
+                                SegmentedButton(
+                                    selected = anomalyConfig.personRelevanceMode == mode,
+                                    onClick = {
+                                        viewModel.setPersonRelevanceMode(streamDesignator, mode)
+                                    },
+                                    shape = SegmentedButtonDefaults.itemShape(
+                                        index = index,
+                                        count = PersonRelevanceMode.entries.size,
+                                    ),
+                                ) {
+                                    Text(mode.label)
+                                }
+                            }
+                        }
+                        Text(
+                            "Assist is experimental.",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Text(
+                            PERSON_RELEVANCE_SUPPORTING_TEXT,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),

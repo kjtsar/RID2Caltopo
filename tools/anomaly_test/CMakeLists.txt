@@ -99,9 +99,30 @@ target_include_directories(target_color_perf_probe PRIVATE
 )
 target_link_libraries(target_color_perf_probe m)
 
+add_executable(person_relevance_test
+    test_person_relevance.c
+    ../../app/src/main/cpp/anomaly_person_relevance.c
+)
+target_include_directories(person_relevance_test PRIVATE
+    ../../app/src/main/cpp
+)
+target_link_libraries(person_relevance_test m)
+
+add_executable(person_relevance_scheduler_test
+    test_person_relevance_scheduler.c
+    ../../app/src/main/cpp/anomaly_person_relevance.c
+    ../../app/src/main/cpp/anomaly_person_relevance_scheduler.c
+)
+target_include_directories(person_relevance_scheduler_test PRIVATE
+    ../../app/src/main/cpp
+)
+target_link_libraries(person_relevance_scheduler_test m pthread)
+
 enable_testing()
 add_test(NAME anomaly_test COMMAND anomaly_test)
 add_test(NAME target_color_perf_probe COMMAND target_color_perf_probe)
+add_test(NAME person_relevance_test COMMAND person_relevance_test)
+add_test(NAME person_relevance_scheduler_test COMMAND person_relevance_scheduler_test)
 add_test(
     NAME anomaly_video_app_defaults_local_playback_config
     COMMAND anomaly_video_test

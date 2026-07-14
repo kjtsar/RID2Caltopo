@@ -15102,6 +15102,33 @@ static void test_detector_facade_annotation_stability_latches_for_window_after_m
            "detector facade annotation stability: qualified ROI turns off after backlog window");
 }
 
+static void test_detector_facade_annotation_stability_caps_color_disappearance_hold(void) {
+    anomaly_detector_result_t result;
+    anomaly_detector_annotation_cadence_snapshot_state_t state;
+    memset(&result, 0, sizeof(result));
+    anomaly_detector_annotation_cadence_snapshot_state_init(&state);
+    result.box_count = 1;
+    result.boxes[0] =
+        make_test_annotation(0.32f, 0.28f, 0.38f, 0.34f, 0.80f, ANOMALY_ALGO_COLOR);
+
+    anomaly_detector_annotation_view_t view = {0};
+    for (int frame = 0; frame < 8; frame++) {
+        view = anomaly_detector_result_apply_annotation_stability(&result, &state, frame, 15);
+    }
+    EXPECT(view.box_count == 1,
+           "detector facade annotation stability: majority color observation qualifies ROI");
+
+    result.box_count = 0;
+    for (int frame = 8; frame <= 14; frame++) {
+        view = anomaly_detector_result_apply_annotation_stability(&result, &state, frame, 15);
+        EXPECT(view.box_count == 1,
+               "detector facade annotation stability: missing color ROI keeps short anti-flicker hold");
+    }
+    view = anomaly_detector_result_apply_annotation_stability(&result, &state, 15, 15);
+    EXPECT(view.boxes == NULL && view.box_count == 0,
+           "detector facade annotation stability: missing color ROI clears after short hold");
+}
+
 static void test_detector_facade_annotation_stability_keeps_lit_rois_before_newcomers(void) {
     anomaly_detector_result_t result;
     anomaly_detector_annotation_cadence_snapshot_state_t state;
@@ -15667,21 +15694,12 @@ static void test_detector_facade_result_apply_annotation_stability_holds_publica
     result.box_count = 0;
     stable_view = (anomaly_detector_annotation_view_t){0};
     view = anomaly_detector_annotation_publish_on_elapsed_cadence(
-            stable_view, &publication_state, 23, 15);
-    EXPECT(view.boxes == publication_state.boxes &&
-           view.box_count == 1 &&
-           publication_state.visibility.annotations_visible &&
-           publication_state.last_desired_frame_ordinal == 9,
-           "detector facade annotation stability: published ROI remains visible until target is absent for half-second");
-
-    stable_view = (anomaly_detector_annotation_view_t){0};
-    view = anomaly_detector_annotation_publish_on_elapsed_cadence(
-            stable_view, &publication_state, 24, 15);
+            stable_view, &publication_state, 16, 15);
     EXPECT(view.boxes == NULL &&
            view.box_count == 0 &&
            !publication_state.visibility.annotations_visible &&
-           publication_state.visibility.last_update_frame_ordinal == 24,
-           "detector facade annotation stability: published ROI clears after target is absent for half-second");
+           publication_state.visibility.last_update_frame_ordinal == 16,
+           "detector facade annotation stability: publication does not duplicate color disappearance hold");
 }
 
 static void test_detector_facade_result_apply_annotation_visibility_cadence_holds_reappearance(void) {
@@ -20735,6 +20753,60 @@ static void test_motion_moving_patch_affine_registration(void) {
     anomaly_state_cleanup(&st);
 }
 
+static void test_affine_registration_predicts_target_in_frame_motion_direction(void) {
+    const int W = 320, H = 240;
+    const int DX = 4, DY = 4;
+    anomaly_state_t st;
+    anomaly_state_init(&st);
+
+    anomaly_config_t cfg = default_cfg(ANOMALY_ALGO_MOTION);
+    cfg.registration_mode = ANOMALY_REGISTRATION_AFFINE;
+    cfg.score_threshold = 100.0f;
+    cfg.min_hits = 2;
+
+    uint8_t *previous = make_gray_frame(W, H, 80);
+    uint8_t *current = make_gray_frame(W, H, 80);
+    for (int y = 24; y < H - 24; y += 16) {
+        for (int x = 24; x < W - 24; x += 16) {
+            uint8_t value = ((x / 16 + y / 16) & 1) ? 220 : 35;
+            for (int oy = -2; oy <= 2; oy++) {
+                for (int ox = -2; ox <= 2; ox++) {
+                    set_pixel(previous, W * 4, x + ox, y + oy, value, value, value);
+                    set_pixel(current, W * 4, x + DX + ox, y + DY + oy, value, value, value);
+                }
+            }
+        }
+    }
+
+    anomaly_result_t result;
+    anomaly_process_frame(&st, &cfg, previous, W * 4, W, H, 0, &result);
+    st.next_target_track_id = 2;
+    st.target_tracks[0].active = true;
+    st.target_tracks[0].id = 1;
+    st.target_tracks[0].algorithm = ANOMALY_ALGO_COLOR;
+    st.target_tracks[0].publish_confirmed = true;
+    st.target_tracks[0].confidence = 1.0f;
+    st.target_tracks[0].hit_count = 3;
+    st.target_tracks[0].hold_count = ANOMALY_ACC_HOLD_FRAMES;
+    st.target_tracks[0].center_x_norm = 0.50f;
+    st.target_tracks[0].center_y_norm = 0.50f;
+
+    anomaly_process_frame(&st, &cfg, current, W * 4, W, H, 0, &result);
+
+    EXPECT(result.gmv_debug.valid,
+           "affine registration direction: translated texture produces a valid fit");
+    EXPECT(result.gmv_debug.fit_tx < 0.0f && result.gmv_debug.fit_ty < 0.0f,
+           "affine registration direction: published transform maps current back to previous");
+    EXPECT(st.target_tracks[0].active &&
+           st.target_tracks[0].center_x_norm > 0.50f &&
+           st.target_tracks[0].center_y_norm > 0.50f,
+           "affine registration direction: prior target follows current-frame translation");
+
+    free(previous);
+    free(current);
+    anomaly_state_cleanup(&st);
+}
+
 static void test_accumulator_hold_after_miss(void) {
     // Detection fires on frame 1, disappears on frame 2.
     // Accumulator hold should keep the box visible for ANOMALY_ACC_HOLD_FRAMES more frames.
@@ -22680,6 +22752,7 @@ int main(void) {
     test_detector_facade_annotation_stability_caps_and_ranks_rois();
     test_detector_facade_annotation_stability_ages_out_missing_slots();
     test_detector_facade_annotation_stability_latches_for_window_after_majority();
+    test_detector_facade_annotation_stability_caps_color_disappearance_hold();
     test_detector_facade_annotation_stability_keeps_lit_rois_before_newcomers();
     test_detector_facade_annotation_stability_smooths_lit_roi_motion();
     test_detector_facade_process_args_frame_ready_contract();
@@ -22845,6 +22918,7 @@ int main(void) {
     test_motion_static_scene();
     test_motion_moving_patch();
     test_motion_moving_patch_affine_registration();
+    test_affine_registration_predicts_target_in_frame_motion_direction();
     test_accumulator_hold_after_miss();
     test_frame_stride_gates_full_refresh_only();
     test_color_stride_hold_blocks_new_non_cadence_roi();

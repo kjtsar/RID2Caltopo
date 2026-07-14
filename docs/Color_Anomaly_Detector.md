@@ -53,7 +53,7 @@ object classification or a confirmed person detection.
 | Setting | Default |
 | --- | --- |
 | Detection | Off |
-| Appearance | Auto, with infrared fallback until another mode is resolved |
+| Appearance | Color |
 | Motion | On |
 | Saliency | Off |
 | Sensitivity | `0.59` |
@@ -328,9 +328,9 @@ and final app-visible annotations.
 
 The main controls that affect Color behavior are:
 
-- **Appearance:** Auto, Infrared, or Color
-- **Target Colors:** Multi-select color-family picker, available in Auto and
-  Color but disabled for explicit Infrared
+- **Appearance:** Infrared or Color
+- **Target Colors:** Multi-select color-family picker, available in Color and
+  disabled for Infrared
 - **Sensitivity:** Maps logarithmically to the native score threshold
 - **Motion Evidence:** Controls motion contribution and support strength
 - **Scan Zone:** Centered fraction of the frame eligible for normal anomaly
@@ -341,8 +341,8 @@ The main controls that affect Color behavior are:
 - **Color Candidates:** Number of provisional Color targets retained for
   revisit, default one
 - **Stride, Adaptive Min, and Adaptive Max:** Discovery cadence controls
-- **Detail:** Pixel sampling step; app Color defaults resolve Auto to dense
-  sampling
+- **Detail:** Pixel sampling step; the automatic detail value resolves to dense
+  sampling for Color
 - **Registration and Movement Estimator:** Camera-motion compensation controls
 
 `Reset to Realtime Defaults` preserves the selected appearance and thermal

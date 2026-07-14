@@ -1,0 +1,70 @@
+# Gapless Target Color Buckets Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Keep the textual target-color picker unchanged while mapping RGB pixels into the 11 named color buckets through a gapless internal color-space classifier with a clarity gate for weak evidence.
+
+**Architecture:** Preserve `anomaly_target_color_classify_rgb(...)` as the public native seam. Replace the current hand-coded RGB threshold boxes with a low-cost HSV-style conversion: neutral pixels classify by value/chroma, saturated pixels classify by hue sector, and low-clarity pixels return `ANOMALY_TARGET_COLOR_NONE` so ambiguous colors do not become detector evidence.
+
+**Tech Stack:** C native anomaly detector, existing anomaly test harness, Android Gradle unit-test/release gates.
+
+---
+
+### Task 1: Add Classifier Contract Tests
+
+**Files:**
+- Modify: `tools/anomaly_test/test_anomaly.c`
+
+- [ ] **Step 1: Add tests for gapless hue ownership and ambiguity gating**
+
+Extend `test_target_color_detector_family_classification()` with samples showing that blue-purple, clear purple, reddish-purple, yellow-green, and red-orange colors map to named buckets, while low-saturation muted colors remain quiet.
+
+- [ ] **Step 2: Run native test to verify red**
+
+Run: `cmake --build tools/anomaly_test/build_timing --target anomaly_test && tools/anomaly_test/build_timing/anomaly_test`
+
+Expected: FAIL on the new classification expectations that the current RGB threshold boxes do not satisfy.
+
+### Task 2: Implement Gapless Internal Mapping
+
+**Files:**
+- Modify: `app/src/main/cpp/anomaly_target_color_detector.c`
+
+- [ ] **Step 1: Add a small RGB-to-HSV helper**
+
+Keep it file-local, using only `float` arithmetic already available in this file.
+
+- [ ] **Step 2: Classify neutral pixels by value/chroma**
+
+Very dark pixels map to Black, very bright low-chroma pixels map to White, and medium low-chroma pixels map to Grey.
+
+- [ ] **Step 3: Classify chromatic pixels by hue sector**
+
+Map hue ranges to Red, Orange, Yellow, Green, Blue, Purple, with Brown and Pink handled as lightness/chroma variants of orange/red-purple regions.
+
+- [ ] **Step 4: Preserve the clarity gate**
+
+Return `ANOMALY_TARGET_COLOR_NONE` for low-chroma or low-light colors that are not clear enough to use as detector evidence.
+
+- [ ] **Step 5: Run native test to verify green**
+
+Run: `cmake --build tools/anomaly_test/build_timing --target anomaly_test && tools/anomaly_test/build_timing/anomaly_test`
+
+Expected: PASS.
+
+### Task 3: Verify App-Facing Behavior
+
+**Files:**
+- No additional source files unless tests reveal a UI or bridge mismatch.
+
+- [ ] **Step 1: Run focused Android config tests**
+
+Run: `./gradlew :app:testDebugUnitTest --tests org.ncssar.rid2caltopo.video.anomaly.AnomalyConfigTest`
+
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 2: Run color realtime qualification or release gate**
+
+Run: `./gradlew :app:releaseCheck`
+
+Expected: BUILD SUCCESSFUL, or a clearly unrelated transient failure documented with a focused rerun.

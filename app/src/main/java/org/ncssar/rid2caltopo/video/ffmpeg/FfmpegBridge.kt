@@ -6,6 +6,11 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.RegisterDebugTags
 import org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig
 
 object FfmpegBridge {
+    enum class PersonRelevanceMode(val nativeValue: Int) {
+        OFF(0),
+        SHADOW(1),
+        POSITIVE_ONLY(2),
+    }
     const val TAG = "FfmpegBridge"
     const val NATIVE_TAG = "ffmpeg_bridge"
     private val probeListeners = linkedSetOf<(String, Long, String, FfmpegTelemetry) -> Unit>()
@@ -116,6 +121,11 @@ object FfmpegBridge {
     fun setAnomalyThermalPaused(sessionId: Long, paused: Boolean) {
         if (!nativeLoaded || sessionId <= 0L) return
         nativeSetAnomalyThermalPaused(sessionId, paused)
+    }
+
+    fun setPersonRelevanceMode(sessionId: Long, mode: PersonRelevanceMode): Boolean {
+        if (!nativeLoaded || sessionId <= 0L) return false
+        return nativeSetPersonRelevanceMode(sessionId, mode.nativeValue)
     }
 
     fun sessionPerfStats(sessionId: Long): LongArray? {
@@ -249,6 +259,7 @@ object FfmpegBridge {
         targetColorFamilyMask: Int,
     )
     private external fun nativeSetAnomalyThermalPaused(sessionId: Long, paused: Boolean)
+    private external fun nativeSetPersonRelevanceMode(sessionId: Long, mode: Int): Boolean
     private external fun nativeGetSessionPerfStats(sessionId: Long): LongArray?
     private external fun nativeGetSessionDebugSummary(sessionId: Long): String?
     private external fun nativeSetLocalPlaybackPaused(sessionId: Long, paused: Boolean)

@@ -65,7 +65,9 @@ static void fill_vertical_bands(
 
 static double now_s(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    // This probe isolates detector cost; the video qualification separately
+    // measures end-to-end wall-clock realtime performance.
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
     return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
 }
 

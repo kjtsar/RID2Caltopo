@@ -2172,48 +2172,8 @@ static bool fresh_color_blob_is_too_common_for_dense_verify(
     return rarity < ANOMALY_FRESH_COLOR_WINNER_MIN_RARITY;
 }
 
-typedef struct {
-    float m00;
-    float m01;
-    float m02;
-    float m10;
-    float m11;
-    float m12;
-    bool valid;
-} anomaly_color_inverse_affine_t;
-
 static inline bool color_registration_model_valid(const anomaly_registration_model_t *model) {
     return model != NULL && model->similarity.valid;
-}
-
-static inline anomaly_color_inverse_affine_t color_registration_inverse_affine(
-        const anomaly_registration_model_t *model) {
-    anomaly_color_inverse_affine_t inv;
-    memset(&inv, 0, sizeof(inv));
-    if (model == NULL) return inv;
-    float det = model->affine[0] * model->affine[4] - model->affine[1] * model->affine[3];
-    if (fabsf(det) < 1e-6f) return inv;
-    float inv_det = 1.0f / det;
-    inv.m00 =  model->affine[4] * inv_det;
-    inv.m01 = -model->affine[1] * inv_det;
-    inv.m02 = (model->affine[1] * model->affine[5] - model->affine[4] * model->affine[2]) * inv_det;
-    inv.m10 = -model->affine[3] * inv_det;
-    inv.m11 =  model->affine[0] * inv_det;
-    inv.m12 = (model->affine[3] * model->affine[2] - model->affine[0] * model->affine[5]) * inv_det;
-    inv.valid = true;
-    return inv;
-}
-
-static inline bool color_registration_invert_point_fast(
-        const anomaly_color_inverse_affine_t *inv,
-        float                                 x,
-        float                                 y,
-        float                                *out_x,
-        float                                *out_y) {
-    if (inv == NULL || !inv->valid || out_x == NULL || out_y == NULL) return false;
-    *out_x = inv->m00 * x + inv->m01 * y + inv->m02;
-    *out_y = inv->m10 * x + inv->m11 * y + inv->m12;
-    return true;
 }
 
 static bool prepare_color_sampling_state(
@@ -2313,8 +2273,7 @@ static bool prepare_color_sampling_state(
 
     float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
     float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
-    anomaly_color_inverse_affine_t inv = color_registration_inverse_affine(registration);
-    if (!inv.valid) {
+    if (!anomaly_registration_model_valid(registration)) {
         if (fallback_reason_flags_out != NULL) {
             *fallback_reason_flags_out |= ANOMALY_SCAN_REASON_MASK_BUILD_FAILED;
         }
@@ -2387,30 +2346,29 @@ static bool prepare_color_sampling_state(
             float px = 0.0f;
             float py = 0.0f;
             bool carried = false;
-            if (color_registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
-                int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
-                int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
-                if (prev_px >= prev_roi_x0 && prev_px < prev_roi_x1 &&
-                    prev_py >= prev_roi_y0 && prev_py < prev_roi_y1) {
-                    int prev_sx = (prev_px - prev_roi_x0) / prev_sample_step;
-                    int prev_sy = (prev_py - prev_roi_y0) / prev_sample_step;
-                    if (prev_sx >= 0 && prev_sy >= 0 &&
-                        prev_sx < prev_width && prev_sy < prev_height) {
-                        size_t prev_idx = (size_t)prev_sy * (size_t)prev_width + (size_t)prev_sx;
-                        if (prev_color_valid_mask[prev_idx] != 0u) {
-                            roi_state->color_luma[idx] = prev_color_luma[prev_idx];
-                            roi_state->color_u[idx] = prev_color_u[prev_idx];
-                            roi_state->color_v[idx] = prev_color_v[prev_idx];
-                            roi_state->color_raw_score[idx] = prev_color_raw_score[prev_idx];
-                            roi_state->color_contrast_weight[idx] = prev_color_contrast_weight[prev_idx];
-                            roi_state->color_u_bin[idx] = prev_color_u_bin[prev_idx];
-                            roi_state->color_v_bin[idx] = prev_color_v_bin[prev_idx];
-                            roi_state->color_valid_mask[idx] = 1u;
-                            roi_state->color_phase_x[idx] = prev_color_phase_x[prev_idx];
-                            roi_state->color_phase_y[idx] = prev_color_phase_y[prev_idx];
-                            carried = true;
-                            carried_count++;
-                        }
+            anomaly_registration_apply_point(registration, nx, ny, &px, &py);
+            int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
+            int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
+            if (prev_px >= prev_roi_x0 && prev_px < prev_roi_x1 &&
+                prev_py >= prev_roi_y0 && prev_py < prev_roi_y1) {
+                int prev_sx = (prev_px - prev_roi_x0) / prev_sample_step;
+                int prev_sy = (prev_py - prev_roi_y0) / prev_sample_step;
+                if (prev_sx >= 0 && prev_sy >= 0 &&
+                    prev_sx < prev_width && prev_sy < prev_height) {
+                    size_t prev_idx = (size_t)prev_sy * (size_t)prev_width + (size_t)prev_sx;
+                    if (prev_color_valid_mask[prev_idx] != 0u) {
+                        roi_state->color_luma[idx] = prev_color_luma[prev_idx];
+                        roi_state->color_u[idx] = prev_color_u[prev_idx];
+                        roi_state->color_v[idx] = prev_color_v[prev_idx];
+                        roi_state->color_raw_score[idx] = prev_color_raw_score[prev_idx];
+                        roi_state->color_contrast_weight[idx] = prev_color_contrast_weight[prev_idx];
+                        roi_state->color_u_bin[idx] = prev_color_u_bin[prev_idx];
+                        roi_state->color_v_bin[idx] = prev_color_v_bin[prev_idx];
+                        roi_state->color_valid_mask[idx] = 1u;
+                        roi_state->color_phase_x[idx] = prev_color_phase_x[prev_idx];
+                        roi_state->color_phase_y[idx] = prev_color_phase_y[prev_idx];
+                        carried = true;
+                        carried_count++;
                     }
                 }
             }
@@ -7054,6 +7012,25 @@ static anomaly_registration_model_t estimate_affine_registration_model(
     } else if (det <= 0.0f) {
         model.invalid_reason = ANOMALY_REG_INVALID_REASON_AFFINE_NEGATIVE_DET;
         model.scene_discontinuity = true;
+    }
+
+    // Feature tracking fits previous -> current. Publish the inverse so both
+    // registration backends obey the shared current -> previous contract.
+    anomaly_inverse_affine_t current_to_previous =
+        anomaly_registration_inverse_affine(&model);
+    if (!current_to_previous.valid) {
+        model.similarity.valid = false;
+        model.invalid_reason = ANOMALY_REG_INVALID_REASON_AFFINE_FIT_FAILED;
+        model.scene_discontinuity = true;
+    } else {
+        float mean_residual = model.similarity.mean_residual;
+        model.affine[0] = current_to_previous.m00;
+        model.affine[1] = current_to_previous.m01;
+        model.affine[2] = current_to_previous.m02;
+        model.affine[3] = current_to_previous.m10;
+        model.affine[4] = current_to_previous.m11;
+        model.affine[5] = current_to_previous.m12;
+        summarize_affine_as_similarity(model.affine, mean_residual, &model.similarity);
     }
     return model;
 }

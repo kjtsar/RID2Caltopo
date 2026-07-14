@@ -114,16 +114,14 @@ class AnomalyConfigTest {
     }
 
     @Test
-    fun toNativeConfig_autoColorDetectionUsesFreshRgbaFrontend() {
+    fun toNativeConfig_colorSelectionUsesFreshRgbaFrontend() {
         val config = AnomalyConfig(
-            appearanceSelection = AppearanceAnomalySelection.Auto,
+            appearanceSelection = AppearanceAnomalySelection.Color,
             algorithms = emptySet(),
             colorFrontendMode = ColorFrontendMode.Legacy,
         )
 
-        val native = config.toNativeConfig(
-            detectedAppearanceMode = AppearanceAnomalyMode.Color
-        )
+        val native = config.toNativeConfig()
 
         assertEquals(AnomalyAlgorithm.ColorOutlier.nativeMask, native.algorithmMask)
         assertEquals(ColorFrontendMode.FreshRgba.nativeValue, native.colorFrontendMode)
@@ -222,10 +220,25 @@ class AnomalyConfigTest {
     }
 
     @Test
-    fun targetColorSelectionEnabled_allowsPreselectionInAutoMode() {
-        assertTrue(targetColorSelectionEnabled(AppearanceAnomalySelection.Auto))
+    fun targetColorSelectionEnabled_onlyAllowsColorMode() {
         assertTrue(targetColorSelectionEnabled(AppearanceAnomalySelection.Color))
         assertFalse(targetColorSelectionEnabled(AppearanceAnomalySelection.Thermal))
+    }
+
+    @Test
+    fun appearanceSelectionFromPersisted_migratesAutoAndUnknownValuesToColor() {
+        assertEquals(
+            AppearanceAnomalySelection.Color,
+            AnomalyPrefs.appearanceSelectionFromPersisted("Auto")
+        )
+        assertEquals(
+            AppearanceAnomalySelection.Color,
+            AnomalyPrefs.appearanceSelectionFromPersisted("unexpected")
+        )
+        assertEquals(
+            AppearanceAnomalySelection.Thermal,
+            AnomalyPrefs.appearanceSelectionFromPersisted("Thermal")
+        )
     }
 
     @Test
@@ -286,10 +299,10 @@ class AnomalyConfigTest {
     }
 
     @Test
-    fun resetToRealtimeDefaults_usesColorBaseCaseForAutoDetectedColor() {
+    fun resetToRealtimeDefaults_usesExplicitColorBaseCase() {
         val tuned = AnomalyConfig(
             enabled = true,
-            appearanceSelection = AppearanceAnomalySelection.Auto,
+            appearanceSelection = AppearanceAnomalySelection.Color,
             algorithms = setOf(AnomalyAlgorithm.Motion, AnomalyAlgorithm.PersistentDarkPatch),
             saliencyEnabled = true,
             showHotOverlay = true,
@@ -303,12 +316,10 @@ class AnomalyConfigTest {
             colorTargetCandidateLimit = 4,
         )
 
-        val reset = tuned.resetToRealtimeDefaults(
-            resolvedAppearanceMode = AppearanceAnomalyMode.Color
-        )
+        val reset = tuned.resetToRealtimeDefaults()
 
         assertTrue(reset.enabled)
-        assertEquals(AppearanceAnomalySelection.Auto, reset.appearanceSelection)
+        assertEquals(AppearanceAnomalySelection.Color, reset.appearanceSelection)
         assertEquals(setOf(AnomalyAlgorithm.Motion), reset.algorithms)
         assertFalse(reset.saliencyEnabled)
         assertFalse(reset.showHotOverlay)
@@ -424,9 +435,9 @@ class AnomalyConfigTest {
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
         assertEquals(3.04f, native.scoreThreshold, 0.01f)
-        assertEquals(1, native.frameStride)
+        assertEquals(30, native.frameStride)
         assertEquals(
-            AnomalyAlgorithm.ThermalHotspot.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
+            AnomalyAlgorithm.ColorOutlier.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
             native.algorithmMask
         )
     }
@@ -435,7 +446,7 @@ class AnomalyConfigTest {
     fun forLocalPlaybackReview_preservesPersistedCapturedPlaybackSettings() {
         val reviewConfig = AnomalyConfig(
             enabled = false,
-            appearanceSelection = AppearanceAnomalySelection.Auto,
+            appearanceSelection = AppearanceAnomalySelection.Color,
             algorithms = setOf(AnomalyAlgorithm.Motion),
             strideMode = AnomalyStrideMode.Fixed,
             frameStride = 2,
@@ -452,7 +463,7 @@ class AnomalyConfigTest {
 
         val native = reviewConfig.toNativeConfig(sourceFps = 30.0f)
         assertEquals(
-            AnomalyAlgorithm.ThermalHotspot.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
+            AnomalyAlgorithm.ColorOutlier.nativeMask or AnomalyAlgorithm.Motion.nativeMask,
             native.algorithmMask
         )
     }
@@ -503,10 +514,10 @@ class AnomalyConfigTest {
     }
 
     @Test
-    fun realtimeDefaults_matchDocumentedIrDefaults() {
+    fun realtimeDefaults_matchDocumentedColorDefaults() {
         val config = AnomalyConfig()
 
-        assertEquals(AppearanceAnomalySelection.Auto, config.appearanceSelection)
+        assertEquals(AppearanceAnomalySelection.Color, config.appearanceSelection)
         assertEquals(setOf(AnomalyAlgorithm.Motion), config.algorithms)
         assertEquals(ThermalPolarity.BlackHot, config.thermalPolarity)
         assertEquals(MotionRegistrationMode.Affine, config.registrationMode)

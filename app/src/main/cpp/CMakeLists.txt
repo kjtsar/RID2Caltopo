@@ -13,6 +13,8 @@ add_library(
     ffmpeg_bridge.c
     anomaly_detector.c
     anomaly_detector_annotation.c
+    anomaly_person_relevance.c
+    anomaly_person_relevance_scheduler.c
     anomaly_runtime_budget.c
     anomaly_runtime_handoff.c
     anomaly_runtime_pressure.c

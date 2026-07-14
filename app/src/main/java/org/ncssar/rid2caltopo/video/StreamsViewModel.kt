@@ -1,6 +1,5 @@
 import android.app.Application
 import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Debug
 import android.os.Build
@@ -43,7 +42,6 @@ import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.tan
 import org.ncssar.rid2caltopo.data.CaltopoClient
@@ -66,6 +64,7 @@ import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MotionRegistrationMode
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
+import org.ncssar.rid2caltopo.video.anomaly.PersonRelevanceMode
 import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.ffmpeg.FfmpegProbeService
 import org.ncssar.rid2caltopo.video.ffmpeg.StreamRuntimeSnapshot
@@ -686,25 +685,23 @@ internal fun streamTelemetrySummaryDesignatorLabel(
     ?.takeIf { it.isNotBlank() }
     ?: streamDesignator
 
+internal data class AnomalyPolicyUpdate(
+    val designator: String,
+    val thermalPaused: Boolean,
+    val personRelevanceMode: PersonRelevanceMode,
+    val config: org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig,
+)
+
+internal fun anomalyPolicyChanged(
+    previous: AnomalyPolicyUpdate?,
+    next: AnomalyPolicyUpdate,
+): Boolean = previous != next
+
 class StreamsViewModel(
     application: Application
 ) : AndroidViewModel(application),
     CtDroneSpec.DroneSpecsChangedListener,
     CaltopoMap.MapStatusListener {
-
-    private data class CapturedVideoAppearanceGuess(
-        val mode: AppearanceAnomalyMode,
-        val width: Int?,
-        val height: Int?,
-        val grayscaleFraction: Float?,
-        val reason: String,
-    )
-
-    private data class AppearanceObservationState(
-        val current: AppearanceAnomalyMode,
-        val pending: AppearanceAnomalyMode? = null,
-        val streak: Int = 0,
-    )
 
     private val tag = "StreamsViewModel"
     private val processLoadSampleIntervalMs = 1_000L
@@ -824,8 +821,6 @@ class StreamsViewModel(
     private var configuredStreamBindings by mutableStateOf<Map<String, String>>(emptyMap())
     private var configuredStreamDesignatorsByRemoteId by mutableStateOf<Map<String, String>>(emptyMap())
     private val _anomalyConfigByDesignator = mutableStateMapOf<String, AnomalyConfig>()
-    private val _detectedAppearanceModeByDesignator = mutableStateMapOf<String, AppearanceAnomalyMode>()
-    private val appearanceObservationStateByDesignator = mutableMapOf<String, AppearanceObservationState>()
     private var defaultAnomalyConfig by mutableStateOf(AnomalyConfig())
     private var lastCapturedVideoSelectionUri: Uri? by mutableStateOf(null)
     private val capturedVideoOpenGeneration = AtomicLong(0L)
@@ -1287,18 +1282,6 @@ class StreamsViewModel(
             val resolvedInfo = try {
                 val cachedUri = stageCapturedVideoForPlayback(designator, uri, displayName)
                 val annotationSidecarPath = annotationSidecarPathForPlaybackUri(cachedUri)
-                val appearanceGuess = guessCapturedVideoAppearance(cachedUri)
-                CTDebug(
-                    tag,
-                    "Captured video appearance guess for $designator: mode=${appearanceGuess.mode.label} " +
-                        "size=${appearanceGuess.width ?: -1}x${appearanceGuess.height ?: -1} " +
-                        "gray=${appearanceGuess.grayscaleFraction?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"} " +
-                        "reason=${appearanceGuess.reason}"
-                )
-                withContext(Dispatchers.Main) {
-                    _detectedAppearanceModeByDesignator[designator] = appearanceGuess.mode
-                    applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-                }
                 pendingInfo.copy(
                     sourcePath = cachedUri.toString(),
                     playbackUri = cachedUri,
@@ -1346,8 +1329,6 @@ class StreamsViewModel(
         localPlaybackPausedState.remove(designator)
         dirtyLocalPlaybackReviews.remove(designator)
         localPlaybackReviewByDesignator.remove(designator)
-        _detectedAppearanceModeByDesignator.remove(designator)
-        appearanceObservationStateByDesignator.remove(designator)
         _localPlaybackEntries.value = _localPlaybackEntries.value.toMutableMap().apply {
             remove(designator)
         }
@@ -1947,37 +1928,7 @@ class StreamsViewModel(
     }
 
     fun resolvedAppearanceModeFor(designator: String): AppearanceAnomalyMode {
-        val config = anomalyConfigFor(designator)
-        return config.resolvedAppearanceMode(_detectedAppearanceModeByDesignator[designator])
-    }
-
-    fun observeRenderedAppearance(designator: String, bitmap: Bitmap) {
-        val guess = classifyAppearanceFromBitmap(bitmap.width, bitmap.height, bitmap)
-        val previous = appearanceObservationStateByDesignator[designator]
-        val nextState = when {
-            previous == null -> AppearanceObservationState(current = guess.mode)
-            previous.current == guess.mode -> AppearanceObservationState(current = guess.mode)
-            previous.pending == guess.mode -> {
-                val streak = previous.streak + 1
-                if (streak >= 3) {
-                    AppearanceObservationState(current = guess.mode)
-                } else {
-                    previous.copy(streak = streak)
-                }
-            }
-            else -> previous.copy(pending = guess.mode, streak = 1)
-        }
-        appearanceObservationStateByDesignator[designator] = nextState
-        val resolved = nextState.current
-        if (_detectedAppearanceModeByDesignator[designator] != resolved) {
-            _detectedAppearanceModeByDesignator[designator] = resolved
-            CTDebug(
-                tag,
-                "Observed stream appearance for $designator -> ${resolved.label} " +
-                    "size=${guess.width ?: -1}x${guess.height ?: -1} gray=${guess.grayscaleFraction?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"} reason=${guess.reason}"
-            )
-            applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
-        }
+        return anomalyConfigFor(designator).resolvedAppearanceMode()
     }
 
     fun toggleAnomalyEnabled(designator: String) {
@@ -1989,7 +1940,6 @@ class StreamsViewModel(
     fun resetAnomalyRealtimeDefaults(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.resetToRealtimeDefaults(
-                resolvedAppearanceMode = resolvedAppearanceModeFor(designator)
             )
         }
     }
@@ -2021,6 +1971,12 @@ class StreamsViewModel(
     fun toggleAnomalyTroubleshootingDebug(designator: String) {
         updateAnomalyConfig(designator) { current ->
             current.copy(troubleshootingDebug = !current.troubleshootingDebug)
+        }
+    }
+
+    fun setPersonRelevanceMode(designator: String, mode: PersonRelevanceMode) {
+        updateAnomalyConfig(designator) { current ->
+            current.copy(personRelevanceMode = mode)
         }
     }
 
@@ -2344,8 +2300,6 @@ class StreamsViewModel(
 
         val removed = lastLiveRevisions.keys - liveDesignators
         removed.forEach { designator ->
-            _detectedAppearanceModeByDesignator.remove(designator)
-            appearanceObservationStateByDesignator.remove(designator)
             CTDebug(tag, "Stream $designator no longer live -> stop render")
             renderRouteByDesignator.remove(designator)
             _playbackIndicatorStateByDesignator.remove(designator)
@@ -2854,12 +2808,6 @@ class StreamsViewModel(
         }
     }
 
-    private data class AnomalyPolicyUpdate(
-        val designator: String,
-        val thermalPaused: Boolean,
-        val config: org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig,
-    )
-
     private fun estimateAnomalyHeadroom(
         processCpuFraction: Double,
         mainThreadCpuFraction: Double,
@@ -2916,12 +2864,12 @@ class StreamsViewModel(
             val update = AnomalyPolicyUpdate(
                 designator = designator,
                 thermalPaused = enableForDesignator && thermalPause,
+                personRelevanceMode = config.personRelevanceMode,
                 config = config.toNativeConfig(
-                    enabledOverride = enableForDesignator,
-                    detectedAppearanceMode = _detectedAppearanceModeByDesignator[designator]
+                    enabledOverride = enableForDesignator
                 )
             )
-            if (lastAppliedAnomalyPolicyByDesignator[designator] != update) {
+            if (anomalyPolicyChanged(lastAppliedAnomalyPolicyByDesignator[designator], update)) {
                 updates += update
                 lastAppliedAnomalyPolicyByDesignator[designator] = update
             }
@@ -2937,7 +2885,11 @@ class StreamsViewModel(
                     designator = update.designator,
                     paused = update.thermalPaused
                 )
-                probeService.setAnomalyConfig(update.designator, update.config)
+                probeService.setAnomalyPolicy(
+                    designator = update.designator,
+                    config = update.config,
+                    personRelevanceMode = update.personRelevanceMode,
+                )
             }
         }
     }
@@ -3026,101 +2978,6 @@ class StreamsViewModel(
         val seconds = (totalMs % 60_000L) / 1000L
         val millis = totalMs % 1000L
         return String.format(Locale.US, "%02d:%02d.%03d", minutes, seconds, millis)
-    }
-
-    private fun guessCapturedVideoAppearance(sourceUri: Uri): CapturedVideoAppearanceGuess {
-        val retriever = MediaMetadataRetriever()
-        return try {
-            val context = getApplication<Application>().applicationContext
-            retriever.setDataSource(context, sourceUri)
-            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
-            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
-            val frame = runCatching {
-                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    ?: retriever.frameAtTime
-            }.getOrNull()
-            val guess = classifyAppearanceFromBitmap(width, height, frame)
-            frame?.recycle()
-            guess
-        } catch (t: Throwable) {
-            CTDebug(tag, "Captured video appearance guess failed for $sourceUri: ${t.message}")
-            CapturedVideoAppearanceGuess(
-                mode = AppearanceAnomalyMode.Thermal,
-                width = null,
-                height = null,
-                grayscaleFraction = null,
-                reason = "fallback",
-            )
-        } finally {
-            runCatching { retriever.release() }
-        }
-    }
-
-    private fun classifyAppearanceFromBitmap(
-        widthHint: Int?,
-        heightHint: Int?,
-        bitmap: Bitmap?,
-    ): CapturedVideoAppearanceGuess {
-        val width = widthHint ?: bitmap?.width
-        val height = heightHint ?: bitmap?.height
-        val grayscaleFraction = bitmap?.let { estimateGrayscaleFraction(it) }
-        val smallThermalSize = width != null && height != null &&
-            ((width <= 640 && height <= 512) || (width <= 704 && height <= 576))
-        val likelyGrayscale = grayscaleFraction != null && grayscaleFraction >= 0.94f
-        val clearlyColor = grayscaleFraction != null && grayscaleFraction <= 0.82f
-        val mode = if (smallThermalSize && likelyGrayscale) {
-            AppearanceAnomalyMode.Thermal
-        } else if (likelyGrayscale && width != null && height != null && max(width, height) <= 960) {
-            AppearanceAnomalyMode.Thermal
-        } else if (bitmap == null || grayscaleFraction == null) {
-            AppearanceAnomalyMode.Thermal
-        } else if (!clearlyColor) {
-            AppearanceAnomalyMode.Thermal
-        } else {
-            AppearanceAnomalyMode.Color
-        }
-        val reason = buildString {
-            append(if (smallThermalSize) "small-frame" else "full-frame")
-            append("/")
-            append(
-                when {
-                    likelyGrayscale -> "grayscale"
-                    clearlyColor -> "colorful"
-                    else -> "ambiguous"
-                }
-            )
-        }
-        return CapturedVideoAppearanceGuess(
-            mode = mode,
-            width = width,
-            height = height,
-            grayscaleFraction = grayscaleFraction,
-            reason = reason,
-        )
-    }
-
-    private fun estimateGrayscaleFraction(bitmap: Bitmap): Float {
-        val width = bitmap.width
-        val height = bitmap.height
-        if (width <= 0 || height <= 0) return 0f
-        val stepX = max(1, width / 24)
-        val stepY = max(1, height / 24)
-        var grayCount = 0
-        var totalCount = 0
-        for (y in 0 until height step stepY) {
-            for (x in 0 until width step stepX) {
-                val pixel = bitmap.getPixel(x, y)
-                val r = (pixel shr 16) and 0xFF
-                val g = (pixel shr 8) and 0xFF
-                val b = pixel and 0xFF
-                val chromaSpread = max(abs(r - g), max(abs(r - b), abs(g - b)))
-                if (chromaSpread <= 8) {
-                    grayCount++
-                }
-                totalCount++
-            }
-        }
-        return if (totalCount > 0) grayCount.toFloat() / totalCount.toFloat() else 0f
     }
 
     init {

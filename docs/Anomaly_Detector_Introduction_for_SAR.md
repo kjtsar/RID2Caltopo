@@ -6,8 +6,10 @@ The RID2Caltopo Anomaly Detector helps a searcher notice small or unusual
 regions in drone video. When it finds something worth a closer look, it places
 a box around that **region of interest (ROI)** on the video.
 
-The detector is a search aid, not a person-recognition system. A box means
-**"inspect this area"**, not **"a person has been found."** The operator remains
+The detector is a search aid, not confirmation that a person has been found. A
+box means **"inspect this area"**, not **"a person has been found."** Optional
+Person Relevance can strengthen an existing region of interest, but it does
+not originate a target or replace operator review. The operator remains
 responsible for reviewing the image, changing the camera angle or zoom when
 possible, and deciding whether the observation should be investigated or
 shared with the search team.
@@ -23,6 +25,7 @@ The detector can use several kinds of visual evidence:
 | Target Colors | One or more color families selected by the operator | A subject known to be wearing or carrying a particular color |
 | Motion | Local movement that remains after accounting for drone and camera motion | A moving subject, signaling searcher, or disturbed vegetation |
 | Saliency | A location supported by a combination of appearance, motion, and persistence | Subtle targets that may not be convincing from one clue alone |
+| Person Relevance | Whether an existing Color or Infrared ROI has person-like visual evidence | Prioritizing an already-detected region for closer review |
 
 These capabilities can support one another. For example, a weak thermal
 contrast may become more interesting when it remains in one location and also
@@ -84,9 +87,24 @@ especially useful evidence, such as a red shirt near blue pants.
 
 Select only colors that are reasonably reliable. Very common scene colors,
 such as green in a forest or white in snow, may produce more distractions. The
-feature is available with **Auto** or **Color** appearance and is not used in
-explicit **Infrared** mode. With no target colors selected, the normal
+feature is available with **Color** appearance and is not used in
+**Infrared** mode. With no target colors selected, the normal
 uniqueness-based Color Outlier capability remains available.
+
+## Person Relevance
+
+Person Relevance examines only regions already found by the Color or Infrared
+detector. It cannot find a person when the selected appearance detector did not
+first produce a candidate.
+
+- **Off** performs no person analysis.
+- **Evaluate** records person evidence without changing ROI relevance.
+- **Assist** may add a bounded positive relevance boost. It never rejects a
+  target or confirms that the target is a person.
+
+Person analysis may be skipped when the device is busy so video playback and
+the primary detector retain priority. Assist remains experimental until it has
+completed reviewed aerial and device qualification.
 
 ## Motion Detection and Camera Stabilization
 
@@ -139,21 +157,21 @@ reacquired, tracked, or boxed by more than one capability.
 
 ### Thermal Search
 
-- Select **Auto** or **Infrared**.
+- Select **Infrared**.
 - Confirm that WH or BH matches the displayed thermal palette.
 - Leave Motion on when the video is stable enough to support it.
 - Start with **Reset to Realtime Defaults**.
 
 ### General Daylight Search
 
-- Select **Auto** or **Color**.
+- Select **Color**.
 - Leave Target Colors clear when there is no dependable color description.
 - Use Color Outlier to look for colors that differ from the surrounding scene.
 - Leave Motion on to provide an additional clue.
 
 ### Known Clothing or Equipment Color
 
-- Select **Auto** or **Color**.
+- Select **Color**.
 - Select only the known Target Colors.
 - Use two colors when both are dependable and likely to appear close together.
 - Clear obsolete color selections when moving to a different subject or
@@ -170,9 +188,8 @@ reacquired, tracked, or boxed by more than one capability.
 
 **Detection** turns anomaly processing on or off.
 
-**Appearance** selects Auto, Infrared, or Color. Auto is a practical starting
-point; choose an explicit mode when the camera type is known and Auto does not
-match it.
+**Appearance** selects Infrared or Color. Select the mode that matches the
+camera feed; the app does not guess from image color or brightness.
 
 **Target Colors** narrows a visible-light search to selected color families.
 
@@ -220,7 +237,7 @@ Before searching:
 
 - Confirm the correct video stream and camera type.
 - Reset to realtime defaults unless using a tested profile.
-- Confirm Auto, Infrared, or Color is appropriate.
+- Confirm that Color or Infrared matches the camera feed.
 - Verify WH/BH for thermal video.
 - Select Target Colors only when the description is reliable.
 - Confirm the scan zone covers the intended search area.

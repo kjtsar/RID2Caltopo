@@ -69,6 +69,31 @@ data class LocalPlaybackPointAnnotation(
     val note: String = "",
     val createdAtMs: Long,
     val anomalyDebugSummary: String? = null,
+    val box: LocalPlaybackNormalizedBox? = null,
+    val personRelevance: LocalPlaybackPersonRelevanceEvidence? = null,
+)
+
+data class LocalPlaybackNormalizedBox(
+    val xMin: Float,
+    val yMin: Float,
+    val xMax: Float,
+    val yMax: Float,
+)
+
+data class LocalPlaybackPersonRelevanceEvidence(
+    val modelName: String? = null,
+    val modelVersion: String? = null,
+    val modelSha256: String? = null,
+    val runtime: String? = null,
+    val backend: String? = null,
+    val rawPersonScore: Float? = null,
+    val decisionThreshold: Float? = null,
+    val decisionStatus: String? = null,
+    val sourceDetectors: List<String>? = null,
+    val candidateRelevance: Float? = null,
+    val baseRelevance: Float? = null,
+    val fusedRelevance: Float? = null,
+    val inferenceTimeUs: Long? = null,
 )
 
 data class LocalPlaybackFrameReview(
@@ -77,7 +102,7 @@ data class LocalPlaybackFrameReview(
 )
 
 data class LocalPlaybackReviewFile(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     val sourceDisplayName: String,
     val originalSourceUri: String? = null,
     val playbackUri: String? = null,
@@ -97,8 +122,7 @@ fun LocalPlaybackReviewFile.toJson(): JSONObject {
     frames.sortedBy { it.sourceTimestampUs }.forEach { frame ->
         val annotationArray = JSONArray()
         frame.annotations.forEach { annotation ->
-            annotationArray.put(
-                JSONObject()
+            val annotationJson = JSONObject()
                     .put("x_norm", annotation.xNorm.toDouble())
                     .put("y_norm", annotation.yNorm.toDouble())
                     .put("verdict", annotation.verdict.wireName)
@@ -108,7 +132,11 @@ fun LocalPlaybackReviewFile.toJson(): JSONObject {
                     .put("note", annotation.note)
                     .put("created_at_ms", annotation.createdAtMs)
                     .put("anomaly_debug_summary", annotation.anomalyDebugSummary ?: JSONObject.NULL)
-            )
+            annotation.box?.let { box -> annotationJson.put("box", box.toJson()) }
+            annotation.personRelevance?.let { evidence ->
+                annotationJson.put("person_relevance", evidence.toJson())
+            }
+            annotationArray.put(annotationJson)
         }
         frameArray.put(
             JSONObject()
@@ -147,6 +175,10 @@ fun localPlaybackReviewFromJson(json: JSONObject): LocalPlaybackReviewFile {
                 note = annotationJson.optString("note", ""),
                 createdAtMs = annotationJson.optLong("created_at_ms", 0L),
                 anomalyDebugSummary = annotationJson.optString("anomaly_debug_summary").ifBlank { null },
+                box = normalizedBoxFromJson(annotationJson.optJSONObject("box")),
+                personRelevance = personRelevanceEvidenceFromJson(
+                    annotationJson.optJSONObject("person_relevance")
+                ),
             )
         }
         frames += LocalPlaybackFrameReview(
@@ -163,6 +195,109 @@ fun localPlaybackReviewFromJson(json: JSONObject): LocalPlaybackReviewFile {
         updatedAtMs = json.optLong("updated_at_ms", 0L),
         frames = frames,
     )
+}
+
+private fun LocalPlaybackNormalizedBox.toJson(): JSONObject =
+    JSONObject()
+        .put("x_min", xMin.toDouble())
+        .put("y_min", yMin.toDouble())
+        .put("x_max", xMax.toDouble())
+        .put("y_max", yMax.toDouble())
+
+private fun normalizedBoxFromJson(json: JSONObject?): LocalPlaybackNormalizedBox? {
+    json ?: return null
+    val xMin = json.normalizedFloat("x_min") ?: return null
+    val yMin = json.normalizedFloat("y_min") ?: return null
+    val xMax = json.normalizedFloat("x_max") ?: return null
+    val yMax = json.normalizedFloat("y_max") ?: return null
+    if (xMin >= xMax || yMin >= yMax) return null
+    return LocalPlaybackNormalizedBox(xMin = xMin, yMin = yMin, xMax = xMax, yMax = yMax)
+}
+
+private fun LocalPlaybackPersonRelevanceEvidence.toJson(): JSONObject =
+    JSONObject().apply {
+        putOptional("model_name", modelName)
+        putOptional("model_version", modelVersion)
+        putOptional("model_sha256", modelSha256)
+        putOptional("runtime", runtime)
+        putOptional("backend", backend)
+        putOptional("raw_person_score", rawPersonScore)
+        putOptional("decision_threshold", decisionThreshold)
+        putOptional("decision_status", decisionStatus)
+        sourceDetectors?.let { detectors -> put("source_detectors", JSONArray(detectors)) }
+        putOptional("candidate_relevance", candidateRelevance)
+        putOptional("base_relevance", baseRelevance)
+        putOptional("fused_relevance", fusedRelevance)
+        putOptional("inference_time_us", inferenceTimeUs)
+    }
+
+private fun personRelevanceEvidenceFromJson(json: JSONObject?): LocalPlaybackPersonRelevanceEvidence? {
+    json ?: return null
+    val evidence = LocalPlaybackPersonRelevanceEvidence(
+        modelName = json.optionalString("model_name"),
+        modelVersion = json.optionalString("model_version"),
+        modelSha256 = json.optionalString("model_sha256"),
+        runtime = json.optionalString("runtime"),
+        backend = json.optionalString("backend"),
+        rawPersonScore = json.normalizedFloat("raw_person_score"),
+        decisionThreshold = json.normalizedFloat("decision_threshold"),
+        decisionStatus = json.optionalString("decision_status"),
+        sourceDetectors = json.optionalStringList("source_detectors"),
+        candidateRelevance = json.normalizedFloat("candidate_relevance"),
+        baseRelevance = json.normalizedFloat("base_relevance"),
+        fusedRelevance = json.normalizedFloat("fused_relevance"),
+        inferenceTimeUs = json.nonNegativeLong("inference_time_us"),
+    )
+    return evidence.takeIf { it.hasValidField() }
+}
+
+private fun LocalPlaybackPersonRelevanceEvidence.hasValidField(): Boolean =
+    modelName != null ||
+        modelVersion != null ||
+        modelSha256 != null ||
+        runtime != null ||
+        backend != null ||
+        rawPersonScore != null ||
+        decisionThreshold != null ||
+        decisionStatus != null ||
+        sourceDetectors?.isNotEmpty() == true ||
+        candidateRelevance != null ||
+        baseRelevance != null ||
+        fusedRelevance != null ||
+        inferenceTimeUs != null
+
+private fun JSONObject.putOptional(key: String, value: Any?) {
+    if (value != null) put(key, value)
+}
+
+private fun JSONObject.optionalString(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return optString(key).trim().ifBlank { null }
+}
+
+private fun JSONObject.normalizedFloat(key: String): Float? {
+    if (!has(key) || isNull(key)) return null
+    val value = (opt(key) as? Number)?.toDouble() ?: return null
+    if (!value.isFinite()) return null
+    return value.coerceIn(0.0, 1.0).toFloat()
+}
+
+private fun JSONObject.nonNegativeLong(key: String): Long? {
+    if (!has(key) || isNull(key)) return null
+    val value = opt(key) as? Number ?: return null
+    val asDouble = value.toDouble()
+    if (!asDouble.isFinite() || asDouble < 0.0 || asDouble > Long.MAX_VALUE.toDouble()) return null
+    return value.toLong()
+}
+
+private fun JSONObject.optionalStringList(key: String): List<String>? {
+    if (!has(key) || isNull(key)) return null
+    val array = optJSONArray(key) ?: return null
+    return buildList {
+        for (index in 0 until array.length()) {
+            array.optString(index).trim().takeIf { it.isNotEmpty() }?.let(::add)
+        }
+    }
 }
 
 fun buildLocalPlaybackFrameAnnotationSummary(annotations: List<LocalPlaybackPointAnnotation>): String? {

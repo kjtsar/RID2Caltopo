@@ -1,19 +1,17 @@
-##RID2Caltopo Disclaimer and Licensing##
+# RID2Caltopo Disclaimer and Licensing
 
-ALL SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT 
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS 
-FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE 
-COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, 
-INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL 
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE 
-GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
-WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING 
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF 
-THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+RID2Caltopo's original source code and documentation are licensed under the
+[Apache License 2.0](LICENSE).
 
-##LICENSES##
-The OpenDroneId scanning and parsing code serving as the foundation
-for this tool are Copyright by Intel and Skydio under the
-[Apache 2.0](http://www.apache.org/licenses/LICENSE-2.0)
+The application is provided on an "AS IS" basis, without warranties or
+conditions of any kind. See the [operational disclaimer](DISCLAIMER.md) before
+using RID2Caltopo in search-and-rescue or aviation operations. The complete
+warranty disclaimer and limitation of liability are contained in the license.
+
+RID2Caltopo includes or interoperates with third-party software that remains
+under its own license. This includes portions of the OpenDroneID
+receiver-android project, which are Apache-2.0 licensed, and may include
+MediaMTX, FFmpeg, and Gradle-resolved Android and Java libraries. See
+[Third-Party Software Notices](THIRD_PARTY_NOTICES.md) for details.
+
+Copyright and attribution information is also provided in [NOTICE](NOTICE).

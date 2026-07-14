@@ -28,12 +28,21 @@ object AnomalyPrefs {
     private const val KEY_THERMAL_MIN_DELTA = "thermal_min_delta"
     private const val KEY_SMALL_TARGET_SCREEN_FRACTION = "small_target_screen_fraction"
     private const val KEY_COLOR_TARGET_CANDIDATE_LIMIT = "color_target_candidate_limit"
+    private const val KEY_PERSON_RELEVANCE_MODE = "person_relevance_mode"
 
     internal fun persistableConfig(config: AnomalyConfig): AnomalyConfig =
         config.copy(targetColorFamilyMask = 0)
 
     internal fun sessionDefaultConfigFromPersisted(config: AnomalyConfig): AnomalyConfig =
         config.copy(targetColorFamilyMask = 0)
+
+    internal fun persistedPersonRelevanceMode(mode: PersonRelevanceMode): String = mode.name
+
+    internal fun personRelevanceModeFromPersisted(value: String?): PersonRelevanceMode =
+        PersonRelevanceMode.fromPersistedValue(value)
+
+    internal fun appearanceSelectionFromPersisted(value: String?): AppearanceAnomalySelection =
+        AppearanceAnomalySelection.fromPersistedValue(value)
 
     private fun migrateLegacyRealtimeDefaultsIfNeeded(config: AnomalyConfig): AnomalyConfig {
         val legacyAlgorithms = setOf(AnomalyAlgorithm.ThermalHotspot)
@@ -87,9 +96,9 @@ object AnomalyPrefs {
             ?.mapNotNull { name -> runCatching { AnomalyAlgorithm.valueOf(name) }.getOrNull() }
             ?.toSet()
             ?: defaults.algorithms
-        val appearanceSelection = prefs.getString(KEY_APPEARANCE_SELECTION, defaults.appearanceSelection.name)
-            ?.let { name -> runCatching { AppearanceAnomalySelection.valueOf(name) }.getOrNull() }
-            ?: defaults.appearanceSelection
+        val persistedAppearanceSelection =
+            prefs.getString(KEY_APPEARANCE_SELECTION, defaults.appearanceSelection.name)
+        val appearanceSelection = appearanceSelectionFromPersisted(persistedAppearanceSelection)
         val polarity = prefs.getString(KEY_THERMAL_POLARITY, defaults.thermalPolarity.name)
             ?.let { name -> runCatching { ThermalPolarity.valueOf(name) }.getOrNull() }
             ?: defaults.thermalPolarity
@@ -140,9 +149,12 @@ object AnomalyPrefs {
                 .getInt(KEY_COLOR_TARGET_CANDIDATE_LIMIT, defaults.colorTargetCandidateLimit)
                 .coerceIn(1, 4),
             targetColorFamilyMask = defaults.targetColorFamilyMask,
+            personRelevanceMode = personRelevanceModeFromPersisted(
+                prefs.getString(KEY_PERSON_RELEVANCE_MODE, defaults.personRelevanceMode.name)
+            ),
         )
         val migrated = migrateLegacyRealtimeDefaultsIfNeeded(loaded)
-        if (migrated != loaded) {
+        if (migrated != loaded || persistedAppearanceSelection != appearanceSelection.name) {
             save(context, migrated)
         }
         return sessionDefaultConfigFromPersisted(migrated)
@@ -186,6 +198,7 @@ object AnomalyPrefs {
                 normalized.smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)
             )
             .putInt(KEY_COLOR_TARGET_CANDIDATE_LIMIT, normalized.colorTargetCandidateLimit.coerceIn(1, 4))
+            .putString(KEY_PERSON_RELEVANCE_MODE, persistedPersonRelevanceMode(normalized.personRelevanceMode))
             .apply()
     }
 }

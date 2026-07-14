@@ -100,9 +100,6 @@ bool anomaly_scan_planner_build_prev_sample_lookup(
 
     float fw = (float)(frame_width > 1 ? frame_width - 1 : 1);
     float fh = (float)(frame_height > 1 ? frame_height - 1 : 1);
-    anomaly_inverse_affine_t inv = anomaly_registration_inverse_affine(registration);
-    if (!inv.valid) return false;
-
     int carried_samples = 0;
     int newly_exposed_samples = 0;
     int stale_samples = 0;
@@ -119,10 +116,7 @@ bool anomaly_scan_planner_build_prev_sample_lookup(
             float ny = clamp01f((float)y / fh);
             float px = 0.0f;
             float py = 0.0f;
-            if (!anomaly_registration_invert_point_fast(&inv, nx, ny, &px, &py)) {
-                newly_exposed_samples++;
-                continue;
-            }
+            anomaly_registration_apply_point(registration, nx, ny, &px, &py);
             int prev_px = clamp_i32((int)lroundf(px * fw), 0, frame_width - 1);
             int prev_py = clamp_i32((int)lroundf(py * fh), 0, frame_height - 1);
             if (prev_px < prev->roi_x0 || prev_px >= prev->roi_x1 ||

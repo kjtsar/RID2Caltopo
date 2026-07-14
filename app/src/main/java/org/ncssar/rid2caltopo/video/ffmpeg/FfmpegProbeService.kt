@@ -11,6 +11,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.RegisterDebugTags
 import org.ncssar.rid2caltopo.video.UpstreamBoundaryMarker
 import org.ncssar.rid2caltopo.video.UpstreamTimingRegistry
 import org.ncssar.rid2caltopo.video.anomaly.NativeAnomalyConfig
+import org.ncssar.rid2caltopo.video.anomaly.PersonRelevanceMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -208,6 +209,7 @@ class FfmpegProbeService(
     private val renderDelayBaseMsByDesignator = mutableMapOf<String, Long>()
     private val renderDelayMeasuredAtMsByDesignator = mutableMapOf<String, Long>()
     private val anomalyConfigByDesignator = mutableMapOf<String, NativeAnomalyConfig>()
+    private val personRelevanceModeByDesignator = mutableMapOf<String, PersonRelevanceMode>()
     private val cachedAnomalyDebugSummaryBySessionId = mutableMapOf<Long, String?>()
     private val lastAnomalyDebugFetchAtMsBySessionId = mutableMapOf<Long, Long>()
     private val localPlaybackPausedByDesignator = mutableMapOf<String, Boolean>()
@@ -645,6 +647,7 @@ class FfmpegProbeService(
             renderDelayBaseMsByDesignator.clear()
             renderDelayMeasuredAtMsByDesignator.clear()
             anomalyConfigByDesignator.clear()
+            personRelevanceModeByDesignator.clear()
             pendingRepublishByDesignator.clear()
             _renderDelayMsByDesignator.value = emptyMap()
             snapshot
@@ -723,11 +726,33 @@ class FfmpegProbeService(
             }
         }
         if (existingRenderSessionId != null) {
-            val attached = FfmpegBridge.attachSurface(existingRenderSessionId, surface)
-            if (!attached) {
-                CTWarn(tag, "Unable to bind render surface for $designator sessionId=$existingRenderSessionId")
+            sessionControlExecutor.execute {
+                val isCurrentSurface = synchronized(stateLock) {
+                    activeRenderSurfaceByDesignator[designator] === surface &&
+                        renderSessions[designator] == existingRenderSessionId &&
+                        !retiringSessionIds.contains(existingRenderSessionId)
+                }
+                if (!isCurrentSurface || !surface.isValid) {
+                    CTDebug(
+                        tag,
+                        "Skipping stale render surface attach for $designator " +
+                            "sessionId=$existingRenderSessionId surface=${System.identityHashCode(surface)}"
+                    )
+                    return@execute
+                }
+                CTDebug(
+                    tag,
+                    "Binding render surface for $designator sessionId=$existingRenderSessionId " +
+                        "surface=${System.identityHashCode(surface)}"
+                )
+                if (!FfmpegBridge.attachSurface(existingRenderSessionId, surface)) {
+                    CTWarn(
+                        tag,
+                        "Unable to bind render surface for $designator sessionId=$existingRenderSessionId"
+                    )
+                }
             }
-            return attached
+            return true
         }
         sessionControlExecutor.execute {
             ensureRenderSession(designator)
@@ -1059,8 +1084,23 @@ class FfmpegProbeService(
     }
 
     fun setAnomalyConfig(designator: String, config: NativeAnomalyConfig) {
+        setAnomalyPolicy(
+            designator = designator,
+            config = config,
+            personRelevanceMode = synchronized(stateLock) {
+                personRelevanceModeByDesignator[designator] ?: PersonRelevanceMode.Off
+            },
+        )
+    }
+
+    fun setAnomalyPolicy(
+        designator: String,
+        config: NativeAnomalyConfig,
+        personRelevanceMode: PersonRelevanceMode,
+    ) {
         synchronized(stateLock) {
             anomalyConfigByDesignator[designator] = config
+            personRelevanceModeByDesignator[designator] = personRelevanceMode
             if (!config.enabled) {
                 anomalyPauseReasonByDesignator.remove(designator)
             }
@@ -1691,7 +1731,11 @@ class FfmpegProbeService(
         val snapshot = synchronized(stateLock) {
             val config = anomalyConfigByDesignator[designator] ?: return
             val sessionIds = listOfNotNull(renderSessions[designator]).distinct()
-            Pair(sessionIds, config)
+            Triple(
+                sessionIds,
+                config,
+                personRelevanceModeByDesignator[designator] ?: PersonRelevanceMode.Off,
+            )
         }
         snapshot.first.forEach { sessionId ->
             if (snapshot.second.troubleshootingDebug) {
@@ -1706,17 +1750,24 @@ class FfmpegProbeService(
                         "pixelStep=${snapshot.second.pixelStep} threshold=${"%.2f".format(snapshot.second.scoreThreshold)} " +
                         "minHits=${snapshot.second.minHits} scanZone=${"%.2f".format(snapshot.second.scanZone)} " +
                         "colorFrontend=${snapshot.second.colorFrontendMode} " +
-                        "targetColors=${snapshot.second.targetColorFamilyMask}"
+                        "targetColors=${snapshot.second.targetColorFamilyMask} " +
+                        "personRelevance=${snapshot.third}"
                 )
             }
             FfmpegBridge.updateAnomalyConfig(sessionId, snapshot.second)
+            FfmpegBridge.setPersonRelevanceMode(sessionId, snapshot.third.toFfmpegBridgeMode())
         }
     }
 
     private fun applyAnomalyConfigToSession(designator: String, sessionId: Long) {
-        val config = synchronized(stateLock) {
-            anomalyConfigByDesignator[designator]
-        } ?: return
+        val policy = synchronized(stateLock) {
+            val config = anomalyConfigByDesignator[designator] ?: return
+            Pair(
+                config,
+                personRelevanceModeByDesignator[designator] ?: PersonRelevanceMode.Off,
+            )
+        }
+        val config = policy.first
         if (config.troubleshootingDebug) {
             CTDebug(
                 tag,
@@ -1729,10 +1780,12 @@ class FfmpegProbeService(
                     "pixelStep=${config.pixelStep} threshold=${"%.2f".format(config.scoreThreshold)} " +
                     "minHits=${config.minHits} scanZone=${"%.2f".format(config.scanZone)} " +
                     "colorFrontend=${config.colorFrontendMode} " +
-                    "targetColors=${config.targetColorFamilyMask}"
+                    "targetColors=${config.targetColorFamilyMask} " +
+                    "personRelevance=${policy.second}"
             )
         }
         FfmpegBridge.updateAnomalyConfig(sessionId, config)
+        FfmpegBridge.setPersonRelevanceMode(sessionId, policy.second.toFfmpegBridgeMode())
     }
 
     private fun applyLocalPlaybackControlsToSession(designator: String, sessionId: Long) {
@@ -1742,6 +1795,13 @@ class FfmpegProbeService(
         FfmpegBridge.setLocalPlaybackPaused(sessionId, paused)
     }
 }
+
+internal fun PersonRelevanceMode.toFfmpegBridgeMode(): FfmpegBridge.PersonRelevanceMode =
+    when (this) {
+        PersonRelevanceMode.Off -> FfmpegBridge.PersonRelevanceMode.OFF
+        PersonRelevanceMode.Evaluate -> FfmpegBridge.PersonRelevanceMode.SHADOW
+        PersonRelevanceMode.Assist -> FfmpegBridge.PersonRelevanceMode.POSITIVE_ONLY
+    }
 
 internal fun quantizeRenderDelayMs(renderLatencyMs: Long): Long {
     if (renderLatencyMs <= 0L) return 0L

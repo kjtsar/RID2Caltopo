@@ -50,16 +50,19 @@ enum class AppearanceAnomalyMode(
 enum class AppearanceAnomalySelection(
     val label: String,
 ) {
-    Auto(label = "Auto"),
     Thermal(label = "Infrared"),
     Color(label = "Color");
 
-    fun resolved(fallback: AppearanceAnomalyMode = AppearanceAnomalyMode.Thermal): AppearanceAnomalyMode =
+    fun resolved(): AppearanceAnomalyMode =
         when (this) {
-            Auto -> fallback
             Thermal -> AppearanceAnomalyMode.Thermal
             Color -> AppearanceAnomalyMode.Color
         }
+
+    companion object {
+        fun fromPersistedValue(value: String?): AppearanceAnomalySelection =
+            entries.firstOrNull { it.name == value } ?: Color
+    }
 }
 
 enum class ThermalPolarity(
@@ -105,6 +108,24 @@ enum class AnomalyStrideMode(
     Fixed(nativeValue = 0, label = "Fixed"),
     Adaptive(nativeValue = 1, label = "Adaptive");
 }
+
+enum class PersonRelevanceMode(
+    val nativeValue: Int,
+    val label: String,
+) {
+    Off(nativeValue = 0, label = "Off"),
+    Evaluate(nativeValue = 1, label = "Evaluate"),
+    Assist(nativeValue = 2, label = "Assist");
+
+    companion object {
+        fun fromPersistedValue(value: String?): PersonRelevanceMode =
+            entries.firstOrNull { it.name == value } ?: Off
+    }
+}
+
+const val PERSON_RELEVANCE_SUPPORTING_TEXT =
+    "Evaluate records person evidence without changing ROI scores. " +
+        "Assist can only add relevance and never reject a target."
 
 data class NativeAnomalyConfig(
     val enabled: Boolean,
@@ -183,7 +204,7 @@ data class AnomalyConfig(
     val troubleshootingDebug: Boolean = false,
     val algorithms: Set<AnomalyAlgorithm> = DEFAULT_NON_APPEARANCE_ALGORITHMS,
     val saliencyEnabled: Boolean = false,
-    val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Auto,
+    val appearanceSelection: AppearanceAnomalySelection = AppearanceAnomalySelection.Color,
     val strideMode: AnomalyStrideMode = AnomalyStrideMode.Fixed,
     val frameStride: Int = 1,
     val adaptiveMinStrideFrames: Int = 2,
@@ -202,6 +223,7 @@ data class AnomalyConfig(
     val colorFrontendMode: ColorFrontendMode = ColorFrontendMode.Legacy,
     val colorTargetCandidateLimit: Int = 1,
     val targetColorFamilyMask: Int = 0,
+    val personRelevanceMode: PersonRelevanceMode = PersonRelevanceMode.Off,
 ) {
     val nonAppearanceAlgorithms: Set<AnomalyAlgorithm>
         get() = algorithms.filterNot {
@@ -244,15 +266,11 @@ data class AnomalyConfig(
         return (diagonal * smallTargetScreenFraction.coerceIn(0.0015f, 0.03f)).coerceAtLeast(2.0f)
     }
 
-    fun resolvedAppearanceMode(
-        detectedMode: AppearanceAnomalyMode? = null,
-    ): AppearanceAnomalyMode = appearanceSelection.resolved(detectedMode ?: AppearanceAnomalyMode.Thermal)
+    fun resolvedAppearanceMode(): AppearanceAnomalyMode = appearanceSelection.resolved()
 
-    fun resolvedAlgorithms(
-        detectedMode: AppearanceAnomalyMode? = null,
-    ): Set<AnomalyAlgorithm> {
+    fun resolvedAlgorithms(): Set<AnomalyAlgorithm> {
         val resolved = nonAppearanceAlgorithms.toMutableSet()
-        resolved += resolvedAppearanceMode(detectedMode).algorithm
+        resolved += resolvedAppearanceMode().algorithm
         if (saliencyEnabled) {
             resolved += AnomalyAlgorithm.PersistentDarkPatch
         }
@@ -275,17 +293,13 @@ data class AnomalyConfig(
         return copy(enabled = true)
     }
 
-    fun resetToRealtimeDefaults(
-        resolvedAppearanceMode: AppearanceAnomalyMode? = null,
-    ): AnomalyConfig {
+    fun resetToRealtimeDefaults(): AnomalyConfig {
         val reset = AnomalyConfig().copy(
             enabled = enabled,
             appearanceSelection = appearanceSelection,
             thermalPolarity = thermalPolarity,
         )
-        val resetAppearance = appearanceSelection.resolved(
-            resolvedAppearanceMode ?: AppearanceAnomalyMode.Thermal
-        )
+        val resetAppearance = appearanceSelection.resolved()
         return if (resetAppearance == AppearanceAnomalyMode.Color) {
             reset.withColorRealtimeStrideDefaultsIfUnmodified()
         } else {
@@ -327,11 +341,10 @@ data class AnomalyConfig(
 
     fun toNativeConfig(
         enabledOverride: Boolean? = null,
-        detectedAppearanceMode: AppearanceAnomalyMode? = null,
         sourceFps: Float? = null,
     ): NativeAnomalyConfig {
-        val resolvedAppearanceMode = resolvedAppearanceMode(detectedAppearanceMode)
-        val mask = resolvedAlgorithms(resolvedAppearanceMode).fold(0) { acc, algo -> acc or algo.nativeMask }
+        val resolvedAppearanceMode = resolvedAppearanceMode()
+        val mask = resolvedAlgorithms().fold(0) { acc, algo -> acc or algo.nativeMask }
         val sensitivityClamped = sensitivity.coerceIn(0f, 1f)
         val motionSensitivityClamped = motionEvidenceSensitivity.coerceIn(0f, 1f)
         // Logarithmic curve: 0% → ~15σ (essentially silent), 60% → ~2.8σ (default), 100% → 1.0σ.

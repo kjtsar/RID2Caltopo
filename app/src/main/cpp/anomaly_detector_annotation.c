@@ -233,6 +233,36 @@ static int anomaly_detector_annotation_stability_required_hits(int window_frames
     return required;
 }
 
+static int anomaly_detector_annotation_disappearance_hold_frames(
+        int algorithm,
+        int window_frames) {
+    if (algorithm != ANOMALY_ALGO_COLOR) {
+        return window_frames;
+    }
+    // Color targets can move noticeably while occluded, so cap the stale-box
+    // interval while retaining enough history to suppress single-frame flicker.
+    int hold_frames = (window_frames + 1) / 2;
+    if (hold_frames < 3) hold_frames = 3;
+    if (hold_frames > window_frames) hold_frames = window_frames;
+    return hold_frames;
+}
+
+static int anomaly_detector_annotation_snapshot_disappearance_hold_frames(
+        const anomaly_detector_annotation_cadence_snapshot_state_t *state,
+        int                                                         window_frames) {
+    if (state == NULL || state->box_count <= 0) {
+        return window_frames;
+    }
+    for (int i = 0; i < state->box_count; i++) {
+        if (state->boxes[i].algorithm != ANOMALY_ALGO_COLOR) {
+            return window_frames;
+        }
+    }
+    // Stability already owns Color's disappearance hold. Do not apply the
+    // publication cadence a second time when its stabilized input goes empty.
+    return 1;
+}
+
 static int anomaly_detector_annotation_popcount_u64(uint64_t v) {
     int count = 0;
     while (v != 0) {
@@ -508,8 +538,12 @@ anomaly_detector_annotation_view_t anomaly_detector_result_apply_annotation_stab
             anomaly_detector_annotation_stability_slot_meets_threshold(slot, required_hits)) {
             anomaly_detector_annotation_stability_slot_t *mutable_slot =
                 &snapshot_state->stable_slots[i];
+            const int hold_frames =
+                anomaly_detector_annotation_disappearance_hold_frames(
+                        mutable_slot->algorithm,
+                        normalized_window_frames);
             const int64_t publish_until =
-                frame_ordinal + (int64_t)normalized_window_frames - 1;
+                frame_ordinal + (int64_t)hold_frames - 1;
             if (mutable_slot->published_until_frame_ordinal < publish_until) {
                 mutable_slot->published_until_frame_ordinal = publish_until;
             }
@@ -582,11 +616,16 @@ anomaly_detector_annotation_view_t anomaly_detector_annotation_publish_on_elapse
         return anomaly_detector_annotation_cadence_snapshot_view(snapshot_state);
     }
 
+    const int disappearance_hold_frames =
+        anomaly_detector_annotation_snapshot_disappearance_hold_frames(
+                snapshot_state,
+                cadence_frames);
     if (snapshot_state->visibility.initialized &&
         snapshot_state->visibility.annotations_visible &&
         snapshot_state->box_count > 0 &&
         snapshot_state->last_desired_frame_ordinal >= 0 &&
-        frame_ordinal - snapshot_state->last_desired_frame_ordinal < (int64_t)cadence_frames) {
+        frame_ordinal - snapshot_state->last_desired_frame_ordinal <
+            (int64_t)disappearance_hold_frames) {
         return anomaly_detector_annotation_cadence_snapshot_view(snapshot_state);
     }
 

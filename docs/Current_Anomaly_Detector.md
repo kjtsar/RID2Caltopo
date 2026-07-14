@@ -52,28 +52,30 @@ The default app configuration is conservative and starts disabled. When enabled
 without prior user changes, the current `AnomalyConfig()` resolves to:
 
 - `enabled = false`
-- appearance selection `Auto`, which falls back to thermal unless the caller
-  supplies another detected appearance
+- appearance selection `Color`; operators explicitly select `Infrared` for
+  thermal footage
 - algorithm set containing `Motion`; the resolved appearance cue adds
-  `ThermalHotspot` for infrared footage
+  `ColorOutlier` for the default color footage
 - saliency disabled
-- `frameStride = 1`
-- `pixelStep = 0` (`Auto`)
-- sensitivity `0.42`, which maps to about a `4.8` native score threshold
+- the stored baseline has `frameStride = 1`; default Color conversion applies
+  adaptive `30..60` frame discovery cadence with a two-second cap
+- `pixelStep = 0` in stored settings, converted to dense `pixelStep = 1` for
+  Color analysis
+- sensitivity `0.59`, which maps to about a `3.04` native score threshold
 - motion evidence sensitivity `0.60`
 - min area fraction `0.0015`
 - thermal polarity `Black Hot`
 - registration mode `Affine`
-- movement estimator mode `Legacy`
+- movement estimator mode `Layered Active`
 - scan zone `0.50`
 - min hits `2`
 - thermal min delta `10.0`
 - small target screen fraction `1/200`
 - color frontend mode `Legacy`
 
-`AnomalyPrefs` migrates legacy realtime-like saved defaults to this current
-posture so reset/default profiles do not remain stranded on the older
-thermal-only, stride-10 configuration.
+`AnomalyPrefs` migrates removed or unknown appearance selections to `Color`
+and migrates legacy realtime-like saved defaults to this current posture so
+profiles do not remain stranded on the older thermal-only configuration.
 
 The current native tree also contains a gated selective-refresh improvement:
 full scans can retain a bounded percentage of thermal candidates as provisional
@@ -107,7 +109,7 @@ The important Kotlin-to-native conversion happens in `toNativeConfig()`:
 The UI exposes the main controls through `StreamTile.kt`:
 
 - detection on/off
-- appearance: auto, infrared, color
+- appearance: infrared or color
 - thermal polarity: white hot, black hot
 - motion and saliency toggles
 - sensitivity and motion evidence sliders

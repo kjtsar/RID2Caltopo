@@ -2941,7 +2941,9 @@ int main(int argc, char **argv) {
     anomaly_state_t state;
     anomaly_state_init(&state);
     anomaly_detector_annotation_cadence_snapshot_state_t display_cadence;
+    anomaly_detector_annotation_cadence_snapshot_state_t display_publication_cadence;
     anomaly_detector_annotation_cadence_snapshot_state_init(&display_cadence);
+    anomaly_detector_annotation_cadence_snapshot_state_init(&display_publication_cadence);
     int display_cadence_frames = anomaly_detector_default_window_frames((float)fps);
     int64_t display_analyzed_frame_count = 0;
 
@@ -3155,6 +3157,12 @@ int main(int argc, char **argv) {
                 anomaly_detector_result_apply_annotation_stability(
                         &result,
                         &display_cadence,
+                        display_analyzed_frame_count,
+                        display_cadence_frames);
+            output_annotations =
+                anomaly_detector_annotation_publish_on_elapsed_cadence(
+                        output_annotations,
+                        &display_publication_cadence,
                         display_analyzed_frame_count,
                         display_cadence_frames);
         }

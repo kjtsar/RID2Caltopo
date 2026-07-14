@@ -136,6 +136,8 @@
         the developer appreciates the work of the &lt;a href=&quot;https://github.com/opendroneid&quot;&gt;opendronid&lt;/a&gt;
         consortium and makes use of their remote ID parser code in this app which is covered by the
         SPDX-License-Identifier: Apache-2.0.&lt;br&gt;&lt;br&gt;
+        Video relay and playback may use MediaMTX under the MIT License and FFmpeg under the
+        applicable LGPL or GPL terms.&lt;br&gt;&lt;br&gt;
         For Disclaimer and Licensing, please refer to &lt;a href=&quot;https://github.com/kjtsar/RID2Caltopo/blob/main/DisclaimerLicense.md&quot;&gt;
         https://github.com/kjtsar/RID2Caltopo/blob/main/DisclaimerLicense.md&lt;/a&gt;
         &lt;br&gt;&lt;br&gt;

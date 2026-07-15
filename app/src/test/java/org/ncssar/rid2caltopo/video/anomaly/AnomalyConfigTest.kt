@@ -220,47 +220,49 @@ class AnomalyConfigTest {
     }
 
     @Test
-    fun targetColorSelectionEnabled_onlyAllowsColorMode() {
-        assertTrue(targetColorSelectionEnabled(AppearanceAnomalySelection.Color))
-        assertFalse(targetColorSelectionEnabled(AppearanceAnomalySelection.Thermal))
+    fun sessionStartConfig_isOffWithColorRealtimeDefaults() {
+        val config = AnomalyPrefs.sessionStartConfig()
+
+        assertEquals(AnomalyDetectorMode.Off, config.detectorMode())
+        assertEquals(AppearanceAnomalySelection.Color, config.appearanceSelection)
+        assertEquals(AnomalyStrideMode.Adaptive, config.strideMode)
+        assertEquals(30, config.frameStride)
+        assertEquals(0, config.targetColorFamilyMask)
+        assertFalse(config.saliencyEnabled)
+        assertEquals(PersonRelevanceMode.Off, config.personRelevanceMode)
     }
 
     @Test
-    fun appearanceSelectionFromPersisted_migratesAutoAndUnknownValuesToColor() {
-        assertEquals(
-            AppearanceAnomalySelection.Color,
-            AnomalyPrefs.appearanceSelectionFromPersisted("Auto")
-        )
-        assertEquals(
-            AppearanceAnomalySelection.Color,
-            AnomalyPrefs.appearanceSelectionFromPersisted("unexpected")
-        )
-        assertEquals(
-            AppearanceAnomalySelection.Thermal,
-            AnomalyPrefs.appearanceSelectionFromPersisted("Thermal")
-        )
+    fun detectorMode_transitionsKeepModesMutuallyExclusive() {
+        val color = AnomalyConfig().withDetectorMode(AnomalyDetectorMode.ColorUniqueness)
+        assertEquals(AnomalyDetectorMode.ColorUniqueness, color.detectorMode())
+
+        val targeted = color
+            .copy(targetColorFamilyMask = TargetColorFamily.Orange.nativeMask)
+            .withDetectorMode(AnomalyDetectorMode.TargetColors)
+        assertEquals(AnomalyDetectorMode.TargetColors, targeted.detectorMode())
+
+        val infrared = targeted.withDetectorMode(AnomalyDetectorMode.Infrared)
+        assertEquals(AnomalyDetectorMode.Infrared, infrared.detectorMode())
+        assertEquals(0, infrared.targetColorFamilyMask)
+
+        val off = infrared.withDetectorMode(AnomalyDetectorMode.Off)
+        assertEquals(AnomalyDetectorMode.Off, off.detectorMode())
     }
 
     @Test
-    fun anomalyPrefs_stripTargetColorsAtPersistenceBoundary() {
-        val selected =
-            TargetColorFamily.Red.nativeMask or
-            TargetColorFamily.White.nativeMask
-        val config = AnomalyConfig(
+    fun realtimeReset_preservesSelectedTargetColorMode() {
+        val reset = AnomalyConfig(
             enabled = true,
-            targetColorFamilyMask = selected,
-            colorTargetCandidateLimit = 3,
-        )
+            targetColorFamilyMask = TargetColorFamily.Orange.nativeMask,
+            sensitivity = 1.0f,
+            saliencyEnabled = true,
+        ).resetToRealtimeDefaults()
 
-        val persistable = AnomalyPrefs.persistableConfig(config)
-        val sessionDefault = AnomalyPrefs.sessionDefaultConfigFromPersisted(config)
-
-        assertEquals(0, persistable.targetColorFamilyMask)
-        assertEquals(0, sessionDefault.targetColorFamilyMask)
-        assertEquals(3, persistable.colorTargetCandidateLimit)
-        assertEquals(3, sessionDefault.colorTargetCandidateLimit)
-        assertTrue(persistable.enabled)
-        assertTrue(sessionDefault.enabled)
+        assertEquals(AnomalyDetectorMode.TargetColors, reset.detectorMode())
+        assertEquals(TargetColorFamily.Orange.nativeMask, reset.targetColorFamilyMask)
+        assertEquals(0.59f, reset.sensitivity)
+        assertFalse(reset.saliencyEnabled)
     }
 
     @Test

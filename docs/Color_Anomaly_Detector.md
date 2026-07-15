@@ -52,8 +52,7 @@ object classification or a confirmed person detection.
 
 | Setting | Default |
 | --- | --- |
-| Detection | Off |
-| Appearance | Color |
+| AD Mode | Off; Color realtime defaults are prepared |
 | Motion | On |
 | Saliency | Off |
 | Sensitivity | `0.59` |
@@ -328,9 +327,9 @@ and final app-visible annotations.
 
 The main controls that affect Color behavior are:
 
-- **Appearance:** Infrared or Color
-- **Target Colors:** Multi-select color-family picker, available in Color and
-  disabled for Infrared
+- **AD Mode:** Off, Color Uniqueness, Target Colors, or Infrared
+- **Target Colors:** Multi-select color-family picker shown only in Target
+  Colors mode
 - **Sensitivity:** Maps logarithmically to the native score threshold
 - **Motion Evidence:** Controls motion contribution and support strength
 - **Scan Zone:** Centered fraction of the frame eligible for normal anomaly
@@ -345,9 +344,12 @@ The main controls that affect Color behavior are:
   sampling for Color
 - **Registration and Movement Estimator:** Camera-motion compensation controls
 
-`Reset to Realtime Defaults` preserves the selected appearance and thermal
-polarity while restoring tested general settings. When the resolved appearance
-is Color, it also applies the Color-specific adaptive scheduling posture.
+`Reset to Realtime Defaults` preserves the selected mode and target colors
+while restoring tested general settings. Color modes also receive the
+Color-specific adaptive scheduling posture.
+
+AD configuration is session-only. App startup always returns to AD Off with
+fresh realtime defaults rather than restoring the previous flight's settings.
 
 Debug controls such as Show Candidate Blobs and Troubleshooting Debug are for
 diagnosis. Their output should not be interpreted as confirmed detections.

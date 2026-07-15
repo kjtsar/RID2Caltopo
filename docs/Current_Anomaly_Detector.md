@@ -57,9 +57,9 @@ without prior user changes, the current `AnomalyConfig()` resolves to:
 - algorithm set containing `Motion`; the resolved appearance cue adds
   `ColorOutlier` for the default color footage
 - saliency disabled
-- the stored baseline has `frameStride = 1`; default Color conversion applies
+- the session baseline has `frameStride = 1`; default Color conversion applies
   adaptive `30..60` frame discovery cadence with a two-second cap
-- `pixelStep = 0` in stored settings, converted to dense `pixelStep = 1` for
+- `pixelStep = 0` in session defaults, converted to dense `pixelStep = 1` for
   Color analysis
 - sensitivity `0.59`, which maps to about a `3.04` native score threshold
 - motion evidence sensitivity `0.60`
@@ -73,9 +73,9 @@ without prior user changes, the current `AnomalyConfig()` resolves to:
 - small target screen fraction `1/200`
 - color frontend mode `Legacy`
 
-`AnomalyPrefs` migrates removed or unknown appearance selections to `Color`
-and migrates legacy realtime-like saved defaults to this current posture so
-profiles do not remain stranded on the older thermal-only configuration.
+`AnomalyPrefs` clears settings written by older releases and supplies fresh
+session defaults. AD configuration is never saved; each app start begins Off
+with the current Color realtime defaults ready for explicit mode selection.
 
 The current native tree also contains a gated selective-refresh improvement:
 full scans can retain a bounded percentage of thermal candidates as provisional
@@ -87,9 +87,9 @@ gates.
 
 ## App Configuration Path
 
-`AnomalyConfig` is the Kotlin source of truth for operator-facing state. The
-app persists it through `AnomalyPrefs`, keeps a default copy in
-`StreamsViewModel`, and writes per-stream overrides into
+`AnomalyConfig` is the Kotlin source of truth for operator-facing state.
+`AnomalyPrefs` clears legacy saved values and returns fresh startup defaults;
+`StreamsViewModel` then keeps a session default plus per-stream overrides in
 `_anomalyConfigByDesignator`.
 
 The important Kotlin-to-native conversion happens in `toNativeConfig()`:
@@ -692,9 +692,10 @@ Two focused CTest gates now pin this:
   operator's configured stride.
 - "Raw candidate above threshold" and "visible box drawn" are different states.
   Always check publication gates, accumulator hits, holdoff, and `box_count`.
-- UI persistence spans `AnomalyConfig`, `AnomalyPrefs`, `StreamsViewModel`, and
+- Session configuration spans `AnomalyConfig`, `StreamsViewModel`, and
   `toNativeConfig()`. A new user-facing AD setting is incomplete unless it is
-  wired through all of those layers and the native config if needed.
+  wired through those layers and the native config if needed; it must not be
+  added to persistent app storage.
 
 ## Practical Debugging Order
 

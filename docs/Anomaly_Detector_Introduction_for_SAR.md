@@ -186,12 +186,13 @@ reacquired, tracked, or boxed by more than one capability.
 
 ## Controls Most Operators Need
 
-**Detection** turns anomaly processing on or off.
+**AD Mode** is the first control in Anomaly Detector Settings. It selects Off,
+Color Uniqueness, Target Colors, or Infrared. The stream legend shows the
+current mode and opens the same settings panel when tapped.
 
-**Appearance** selects Infrared or Color. Select the mode that matches the
-camera feed; the app does not guess from image color or brightness.
-
-**Target Colors** narrows a visible-light search to selected color families.
+Only settings that apply to the selected mode are shown. Target Colors opens a
+color-family picker; Infrared exposes thermal controls; and Off hides detector
+tuning controls.
 
 **Sensitivity** controls how strong the evidence must be before a box is
 shown. Increasing sensitivity can find weaker candidates but also increases
@@ -208,6 +209,10 @@ stability but can delay brief detections.
 
 **Reset to Realtime Defaults** restores a tested starting point when tuning has
 made the detector slow, noisy, or difficult to interpret.
+
+AD mode and tuning changes last only for the current app session. Every app
+start resets AD to Off with the tested realtime defaults ready for the next
+selected mode.
 
 The detail, stride, adaptive timing, registration, movement estimator, thermal
 minimum delta, and debug-overlay controls are intended for advanced tuning and

@@ -14,6 +14,8 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.os.Process;
 
 import android.content.Intent;
@@ -39,9 +41,14 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import kotlin.Unit;
 
@@ -59,6 +66,22 @@ public class MediaMTXService extends Service {
     private static volatile int expectedRestartExitPid = 0;
     private boolean foregroundStarted = false;
     private boolean foregroundStartBlocked = false;
+    private final Object nativeControlLock = new Object();
+    private final ExecutorService nativeControlExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "mediamtx-native-control");
+        thread.setDaemon(false);
+        return thread;
+    });
+    private NativeControlAction activeNativeControlAction;
+    private NativeControlAction pendingNativeControlAction;
+    private boolean nativeControlWorkerScheduled = false;
+    private boolean serviceDestroying = false;
+
+    private enum NativeControlAction {
+        START,
+        RESTART
+    }
+
     public static boolean IsRunning() { return serviceRunning; }
 
     public static int findNativeServerPid() {
@@ -180,10 +203,10 @@ public class MediaMTXService extends Service {
             return START_NOT_STICKY;
         }
         if (ACTION_RESTART_SERVICE.equals(action)) {
-            CTDebug(TAG, "MediaMTXService restarting native server.");
+            CTDebug(TAG, "MediaMTXService queueing native server restart.");
             ensureListenersRegistered();
             processPid = Process.myPid();
-            restartNativeServer();
+            enqueueNativeControl(NativeControlAction.RESTART);
             return START_NOT_STICKY;
         }
 
@@ -198,27 +221,103 @@ public class MediaMTXService extends Service {
         processPid = Process.myPid();
         CTDebug(TAG, "MediaMTX service started in pid " + processPid);
 
-        startNativeServer();
+        enqueueNativeControl(NativeControlAction.START);
 
         return START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
+        synchronized (nativeControlLock) {
+            serviceDestroying = true;
+            pendingNativeControlAction = null;
+        }
         serviceRunning = false;
-        foregroundStarted = false;
         foregroundStartBlocked = false;
         processPid = 0;
         stopForegroundSafely();
-        new Thread(MediaMTXNative::stop, "mediamtx-native-stop").start();
-        // Run syncAll on a background thread to avoid ForegroundServiceDidNotStopInTimeException.
-        // Android 14+ enforces a ~20 s shutdown timeout on the main thread; copying large video
-        // files to the SAF archive can easily exceed that.  Any fragments not synced here will
-        // be picked up by the syncAll() call at the next startNativeServer() invocation.
         final Context appContext = getApplicationContext();
-        new Thread(() -> MediaMTXRecordingSync.syncAll(appContext, null),
-                "mediamtx-sync-shutdown").start();
+        nativeControlExecutor.execute(() -> {
+            MediaMTXNative.stop();
+            // Android 14+ enforces a short foreground-service shutdown timeout. Keep the
+            // potentially slow recording copy off the main thread and serialized after stop.
+            MediaMTXRecordingSync.syncAll(appContext, null);
+        });
+        nativeControlExecutor.shutdown();
         super.onDestroy();
+    }
+
+    private void enqueueNativeControl(NativeControlAction requestedAction) {
+        synchronized (nativeControlLock) {
+            if (serviceDestroying || nativeControlExecutor.isShutdown()) {
+                CTInfo(TAG, "Ignoring " + requestedAction + " request while service is stopping.");
+                return;
+            }
+
+            if (requestedAction == NativeControlAction.RESTART) {
+                if (activeNativeControlAction == NativeControlAction.RESTART
+                        || pendingNativeControlAction == NativeControlAction.RESTART) {
+                    CTDebug(TAG, "Coalescing duplicate MediaMTX restart request.");
+                    return;
+                }
+                // A restart includes startup, so it supersedes a start that has not begun.
+                pendingNativeControlAction = NativeControlAction.RESTART;
+            } else {
+                if (activeNativeControlAction != null || pendingNativeControlAction != null) {
+                    CTDebug(TAG, "Coalescing duplicate MediaMTX start request.");
+                    return;
+                }
+                pendingNativeControlAction = NativeControlAction.START;
+            }
+
+            if (!nativeControlWorkerScheduled) {
+                nativeControlWorkerScheduled = true;
+                nativeControlExecutor.execute(this::drainNativeControlRequests);
+            }
+        }
+    }
+
+    private void drainNativeControlRequests() {
+        while (true) {
+            final NativeControlAction action;
+            synchronized (nativeControlLock) {
+                if (serviceDestroying || pendingNativeControlAction == null) {
+                    activeNativeControlAction = null;
+                    nativeControlWorkerScheduled = false;
+                    return;
+                }
+                action = pendingNativeControlAction;
+                pendingNativeControlAction = null;
+                activeNativeControlAction = action;
+            }
+
+            try {
+                CTDebug(TAG, "Running MediaMTX " + action + " on " + Thread.currentThread().getName());
+                if (action == NativeControlAction.RESTART) {
+                    restartNativeServer();
+                } else if (MediaMTXNative.currentPid() > 0) {
+                    CTDebug(TAG, "MediaMTX native server is already running; coalescing start request.");
+                } else {
+                    startNativeServer();
+                }
+            } catch (RuntimeException e) {
+                CTError(TAG, "MediaMTX " + action + " worker failed", e);
+                processPid = 0;
+                serviceRunning = false;
+                MediaMTXStatus.onServerExited(action.name().toLowerCase(Locale.US) + " exception");
+                stopSelf();
+            } finally {
+                synchronized (nativeControlLock) {
+                    activeNativeControlAction = null;
+                }
+            }
+        }
+    }
+
+    private boolean isServiceDestroying() {
+        synchronized (nativeControlLock) {
+            return serviceDestroying;
+        }
     }
 
     private void ensureListenersRegistered() {
@@ -244,6 +343,8 @@ public class MediaMTXService extends Service {
 
     private void restartNativeServer() {
         MediaMTXRecordingSync.syncAll(getApplicationContext(), null);
+        if (isServiceDestroying()) return;
+
         int restartingPid = MediaMTXNative.currentPid();
         if (restartingPid > 0) {
             expectedRestartExitPid = restartingPid;
@@ -251,11 +352,13 @@ public class MediaMTXService extends Service {
         MediaMTXNative.stop();
         if (!waitForNativeServerStop(restartingPid)) {
             expectedRestartExitPid = 0;
+            if (isServiceDestroying()) return;
             CTError(TAG, "Timed out waiting for MediaMTX to stop before restart; keeping existing server state.");
             MediaMTXStatus.INSTANCE.onServerStarted("existing");
             serviceRunning = true;
             return;
         }
+        if (isServiceDestroying()) return;
         startNativeServer();
     }
 
@@ -281,10 +384,17 @@ public class MediaMTXService extends Service {
     private void startNativeServer() {
         try {
             MediaMTXRecordingSync.syncAll(getApplicationContext(), null);
+            if (isServiceDestroying()) return;
+
             File bin = extractAsset("mediamtx");
             File cfg = buildConfigAsset("mediamtx.yml");
+            if (isServiceDestroying()) return;
+
             CTDebug(TAG, "Starting MediaMTX Server...");
 
+            // Shutdown cleanup is queued on this same executor, so it cannot call stop until
+            // this start returns. Avoid holding nativeControlLock across the JNI call: onDestroy
+            // must always be able to mark the service as stopping without blocking the main thread.
             int rc = MediaMTXNative.start(bin.getAbsolutePath(), cfg.getAbsolutePath());
             if (rc != 0) {
                 CTError(TAG, "MediaMTX failed to start");
@@ -292,6 +402,10 @@ public class MediaMTXService extends Service {
                 serviceRunning = false;
                 MediaMTXStatus.onServerExited("failed to start");
                 stopSelf();
+            }
+        } catch (InterruptedIOException e) {
+            if (!isServiceDestroying()) {
+                CTError(TAG, "MediaMTX asset extraction interrupted", e);
             }
         } catch (Exception e) {
             CTError(TAG, "MediaMTX_Start() raised", e);
@@ -397,26 +511,79 @@ public class MediaMTXService extends Service {
 
         File etcDir = new File(getFilesDir(), "etc");
         checkFile(etcDir);
-        etcDir.mkdirs();
+        if (!etcDir.exists() && !etcDir.mkdirs()) {
+            throw new IOException("Unable to create " + etcDir);
+        }
         File outFile = new File(etcDir, assetName);
+        File versionFile = new File(etcDir, assetName + ".app-update");
+        String appUpdateToken = getAppUpdateToken();
+
+        if (outFile.isFile()
+                && outFile.length() > 0
+                && outFile.canExecute()
+                && versionFile.isFile()
+                && appUpdateToken.equals(readSmallTextFile(versionFile))) {
+            CTDebug(TAG, "extractAsset(): using cached " + outFile);
+            return outFile;
+        }
 
         long bytesWritten = 0;
+        File tempFile = new File(etcDir, assetName + ".tmp");
         CTDebug(TAG, "extractAsset(): building " + outFile);
         try (InputStream in = getAssets().open(assetName);
-             OutputStream out = new FileOutputStream(outFile)) {
-            byte[] buffer = new byte[4096];
+             OutputStream out = new FileOutputStream(tempFile)) {
+            byte[] buffer = new byte[64 * 1024];
             int read;
             while ((read = in.read(buffer)) != -1) {
+                if (Thread.currentThread().isInterrupted() || isServiceDestroying()) {
+                    throw new InterruptedIOException("MediaMTX asset extraction interrupted");
+                }
                 bytesWritten += read;
                 out.write(buffer, 0, read);
             }
-            outFile.setExecutable(true, false);
-            outFile.setReadable(true, false);
-            outFile.setWritable(true, true);
+        } catch (IOException e) {
+            if (tempFile.exists() && !tempFile.delete()) {
+                CTDebug(TAG, "Unable to remove incomplete MediaMTX asset " + tempFile);
+            }
+            throw e;
+        }
+
+        Files.move(
+                tempFile.toPath(),
+                outFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING
+        );
+        outFile.setExecutable(true, false);
+        outFile.setReadable(true, false);
+        outFile.setWritable(true, true);
+        try (OutputStream out = new FileOutputStream(versionFile)) {
+            out.write(appUpdateToken.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            CTError(TAG, "Unable to record MediaMTX asset cache version; next start will re-extract", e);
         }
         CTDebug(TAG, String.format(Locale.US, "Wrote %.3f KB into %s", bytesWritten / 1024F, outFile));
         checkFile(outFile);
         return outFile;
+    }
+
+    private String getAppUpdateToken() {
+        try {
+            PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return packageInfo.lastUpdateTime + ":" + packageInfo.getLongVersionCode();
+        } catch (PackageManager.NameNotFoundException e) {
+            File sourceApk = new File(getApplicationInfo().sourceDir);
+            return Long.toString(sourceApk.lastModified());
+        }
+    }
+
+    private String readSmallTextFile(File file) {
+        try {
+            byte[] bytes = Files.readAllBytes(file.toPath());
+            if (bytes.length > 128) return "";
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     private File buildConfigAsset(String assetName) throws IOException {

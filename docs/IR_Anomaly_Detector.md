@@ -25,7 +25,7 @@ At a high level, the detector:
 For IR work, the default app posture is now:
 
 - `Thermal Palette`: `Black Hot`
-- `Appearance`: `Thermal`
+- `AD Mode`: `Infrared`
 - `Registration`: `Affine`
 - `Frame Stride`: `1`
 - `Scan Zone`: `80%`
@@ -41,10 +41,9 @@ The redesign posture behind those defaults is:
 
 ### What the Main Controls Mean
 
-- `Detection`: Master enable for anomaly processing.
-- `Appearance`: Chooses the primary appearance detector.
-  `Thermal` is the current IR-focused mode. `Color` exists but has not been the
-  main tuning target so far.
+- `AD Mode`: Selects Off, Color Uniqueness, Target Colors, or Infrared.
+  Select Infrared for this detector; the panel then shows the applicable
+  thermal controls.
 - `Motion`: Enables the motion detector as a separate cue.
 - `Saliency`: Enables unified saliency. This combines appearance evidence with
   motion-supported temporal evidence. For parity with harness runs, this can now
@@ -85,34 +84,14 @@ The redesign posture behind those defaults is:
 
 ### Reset Behavior
 
-`Reset AD Controls to Realtime Defaults` is intended to restore the operating
-defaults without changing the user's anomaly-detection context. It now preserves:
+`Reset AD Controls to Realtime Defaults` restores tested operating values while
+preserving Infrared mode and the selected thermal palette.
 
-- `Appearance` (`Thermal` vs `Color`)
-- `Thermal Palette` (`Black Hot` vs `White Hot`)
+### Session Behavior
 
-Other detector controls return to the app's realtime defaults.
-
-### Persistence
-
-All app detector settings are persisted. That includes:
-
-- detection enabled
-- appearance selection
-- motion enabled
-- saliency enabled
-- show-hot overlay
-- candidate blobs
-- frame stride
-- detail / pixel step
-- sensitivity
-- motion evidence sensitivity
-- min area fraction
-- thermal palette
-- registration mode
-- scan zone
-- min hits
-- thermal min delta
+AD settings are not persisted. They remain active only until the app process
+ends. Every app start returns AD to Off with fresh realtime defaults, preventing
+settings from an earlier flight or camera from carrying into the next mission.
 
 ## Technical Appendix
 

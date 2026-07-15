@@ -1278,7 +1278,7 @@ private fun EmptyStreamsView(
                 AnomalySettingsMenuContent(
                     viewModel = viewModel,
                     streamDesignator = settingsDesignator,
-                    anomalyEnabled = anomalyConfig.enabled,
+                    anomalyMode = anomalyConfig.detectorMode(),
                     isLocalPlayback = false,
                     pauseLocalPlaybackOnOpen = false,
                     onShowSettings = { showAnomalySettingsDialog = true },

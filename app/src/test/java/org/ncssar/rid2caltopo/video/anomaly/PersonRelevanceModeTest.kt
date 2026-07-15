@@ -11,17 +11,6 @@ class PersonRelevanceModeTest {
     }
 
     @Test
-    fun persistedModes_roundTripAndUnknownValuesFallBackToOff() {
-        PersonRelevanceMode.entries.forEach { mode ->
-            val persisted = AnomalyPrefs.persistedPersonRelevanceMode(mode)
-            assertEquals(mode, AnomalyPrefs.personRelevanceModeFromPersisted(persisted))
-        }
-
-        assertEquals(PersonRelevanceMode.Off, AnomalyPrefs.personRelevanceModeFromPersisted(null))
-        assertEquals(PersonRelevanceMode.Off, AnomalyPrefs.personRelevanceModeFromPersisted("FUTURE_MODE"))
-    }
-
-    @Test
     fun realtimeReset_disablesPersonRelevance() {
         val reset = AnomalyConfig(
             enabled = true,

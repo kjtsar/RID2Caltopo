@@ -59,6 +59,7 @@ import org.ncssar.rid2caltopo.ui.ComplianceAlertCenter
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyPrefs
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyDetectorMode
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyStrideMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
 import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
@@ -1931,9 +1932,9 @@ class StreamsViewModel(
         return anomalyConfigFor(designator).resolvedAppearanceMode()
     }
 
-    fun toggleAnomalyEnabled(designator: String) {
+    fun setAnomalyDetectorMode(designator: String, mode: AnomalyDetectorMode) {
         updateAnomalyConfig(designator) { current ->
-            current.copy(enabled = !current.enabled)
+            current.withDetectorMode(mode)
         }
     }
 
@@ -2427,10 +2428,6 @@ class StreamsViewModel(
         val updated = reducer(current)
         _anomalyConfigByDesignator[designator] = updated
         defaultAnomalyConfig = updated
-        val appContext = getApplication<Application>().applicationContext
-        viewModelScope.launch(Dispatchers.IO) {
-            AnomalyPrefs.save(appContext, updated)
-        }
         applyFocusedAnomalyPolicy(lastLiveRevisions.keys)
     }
 
@@ -2981,7 +2978,7 @@ class StreamsViewModel(
     }
 
     init {
-        defaultAnomalyConfig = AnomalyPrefs.load(application.applicationContext)
+        defaultAnomalyConfig = AnomalyPrefs.loadSessionDefaults(application.applicationContext)
         refreshConfiguredStreamBindings()
         CaltopoMap.AddMapStatusListener(this)
         CaltopoClient.AddDroneSpecsChangedListener(this)

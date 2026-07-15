@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -31,6 +32,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SegmentedButton
@@ -85,15 +87,13 @@ import kotlinx.coroutines.withContext
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyAlgorithm
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyConfig
+import org.ncssar.rid2caltopo.video.anomaly.AnomalyDetectorMode
 import org.ncssar.rid2caltopo.video.anomaly.AnomalyStrideMode
-import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalyMode
-import org.ncssar.rid2caltopo.video.anomaly.AppearanceAnomalySelection
 import org.ncssar.rid2caltopo.video.anomaly.MovementEstimatorMode
 import org.ncssar.rid2caltopo.video.anomaly.PersonRelevanceMode
 import org.ncssar.rid2caltopo.video.anomaly.PERSON_RELEVANCE_SUPPORTING_TEXT
 import org.ncssar.rid2caltopo.video.anomaly.TargetColorFamily
 import org.ncssar.rid2caltopo.video.anomaly.targetColorFamilySummary
-import org.ncssar.rid2caltopo.video.anomaly.targetColorSelectionEnabled
 import org.ncssar.rid2caltopo.ui.StreamPlayerView
 import kotlin.math.roundToInt
 
@@ -128,8 +128,6 @@ fun StreamTile(
     var pendingPairingWarning by remember { mutableStateOf<StreamTelemetryPairingWarning?>(null) }
     var anomalyMenuExpanded by remember { mutableStateOf(false) }
     var showAnomalySettingsDialog by remember { mutableStateOf(false) }
-    var showSensitivityDialog by remember { mutableStateOf(false) }
-    var showScanZoneDialog by remember { mutableStateOf(false) }
     var showAdHelpDialog by remember { mutableStateOf(false) }
     val focusedPath by viewModel.focusedPath.collectAsStateWithLifecycle()
 
@@ -147,7 +145,7 @@ fun StreamTile(
     val pauseLocalPlaybackOnOpen = if (isLocalPlayback) viewModel.pauseLocalPlaybackOnOpenEnabled() else false
     val designatorState = viewModel.designatorStateFor(streamDesignator)
     val anomalyConfig = viewModel.anomalyConfigFor(streamDesignator)
-    val resolvedAppearanceMode = viewModel.resolvedAppearanceModeFor(streamDesignator)
+    val anomalyMode = anomalyConfig.detectorMode()
     val anomalyPauseReason = viewModel.anomalyPauseReasonFor(streamDesignator)
     val currentIsFocused by rememberUpdatedState(isFocused)
     val currentDesignatorState by rememberUpdatedState(designatorState)
@@ -180,7 +178,7 @@ fun StreamTile(
     }
     val showLocalPlaybackLegendControls = isLocalPlayback
     val showAnomalyReviewLegendControls = isLocalPlayback && anomalyConfig.enabled
-    val showAnomalyLegendControls = anomalyConfig.enabled
+    val showAnomalyLegendControls = true
     val showLegendControls = showLocalPlaybackLegendControls || showAnomalyLegendControls
     val showLocalPlaybackShell = isLocalPlayback && streamState != StreamState.ERROR
     val showOverlayControls = showTileControls &&
@@ -209,19 +207,6 @@ fun StreamTile(
             scale = nextScale,
         )
     }
-    val togglePlaybackAnomalyEnabled = {
-        viewModel.toggleAnomalyEnabled(streamDesignator)
-        val nextEnabled = !anomalyConfig.enabled
-        CaltopoClient.ShowToast(
-            if (nextEnabled) {
-                "Anomaly detection enabled for $streamDesignator."
-            } else {
-                "Anomaly detection disabled for $streamDesignator."
-            }
-        )
-        pendingAnnotationPoint = null
-    }
-
     LaunchedEffect(anomalyConfig.enabled) {
         if (!anomalyConfig.enabled) {
             pendingAnnotationPoint = null
@@ -459,7 +444,7 @@ fun StreamTile(
                                 )
                             },
                             onLongPress = {
-                                togglePlaybackAnomalyEnabled()
+                                showAnomalySettingsDialog = true
                             },
                             onDoubleTap = {
                                 zoomScale = 1f
@@ -571,7 +556,7 @@ fun StreamTile(
                                 },
                                 onLongPress = {
                                     if (isLocalPlayback) {
-                                        togglePlaybackAnomalyEnabled()
+                                        showAnomalySettingsDialog = true
                                         return@detectTapGestures
                                     }
                                     CTDebug(tag, "StreamTile(${streamDesignator}) onLongPress designatorState=${designatorState::class.simpleName}")
@@ -624,7 +609,7 @@ fun StreamTile(
                     AnomalySettingsMenuContent(
                         viewModel = viewModel,
                         streamDesignator = streamDesignator,
-                        anomalyEnabled = anomalyConfig.enabled,
+                        anomalyMode = anomalyMode,
                         isLocalPlayback = isLocalPlayback,
                         pauseLocalPlaybackOnOpen = pauseLocalPlaybackOnOpen,
                         onShowSettings = { showAnomalySettingsDialog = true },
@@ -696,53 +681,18 @@ fun StreamTile(
                         }
                     }
                     if (showAnomalyLegendControls) {
-                        Text(
-                            text = "Sens ${anomalyConfig.sensitivityLabel}",
-                            color = Color.White,
+                        OutlinedLegendText(
+                            text = "AD: ${anomalyMode.label}",
+                            fillColor = when (anomalyMode) {
+                                AnomalyDetectorMode.Off -> Color.DarkGray
+                                AnomalyDetectorMode.ColorUniqueness -> Color(0xFF1565C0)
+                                AnomalyDetectorMode.TargetColors -> Color(0xFF2E7D32)
+                                AnomalyDetectorMode.Infrared -> Color(0xFFC62828)
+                            },
                             fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.sensitivity) {
-                                detectTapGestures(onTap = { showSensitivityDialog = true })
-                            }
-                        )
-                        Text(
-                            text = "Zone ${anomalyConfig.scanZoneLabel}",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.scanZone) {
-                                detectTapGestures(onTap = { showScanZoneDialog = true })
-                            }
-                        )
-                        Text(
-                            text = "Hits ${anomalyConfig.minHits}",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.minHits) {
-                                detectTapGestures(onTap = { viewModel.cycleMinHits(streamDesignator) })
-                            }
-                        )
-                        Text(
-                            text = "Stride ${anomalyConfig.frameStride}x",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.frameStride) {
-                                detectTapGestures(onTap = { viewModel.cycleAnomalyFrameStride(streamDesignator) })
-                            }
-                        )
-                        Text(
-                            text = "Detail ${anomalyConfig.pixelStepLabel}",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.pixelStep) {
-                                detectTapGestures(onTap = { viewModel.cycleAnomalyPixelStep(streamDesignator) })
-                            }
-                        )
-                        Text(
-                            text = "Small ${anomalyConfig.smallTargetScaleLabel}",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.smallTargetScreenFraction) {
+                            modifier = Modifier.pointerInput(streamDesignator, anomalyMode) {
                                 detectTapGestures(onTap = { showAnomalySettingsDialog = true })
-                            }
+                            },
                         )
                         if (anomalyConfig.enabled && anomalyPauseReason != null) {
                             Text(
@@ -751,203 +701,8 @@ fun StreamTile(
                                 fontSize = 11.sp,
                             )
                         }
-                        Text(
-                            text = if (anomalyConfig.showHotOverlay) "ShowHot On" else "ShowHot Off",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.showHotOverlay) {
-                                detectTapGestures(onTap = { viewModel.toggleShowHotOverlay(streamDesignator) })
-                            }
-                        )
-                        Text(
-                            text = if (anomalyConfig.showCandidateBlobs) "Blobs On" else "Blobs Off",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.showCandidateBlobs) {
-                                detectTapGestures(onTap = { viewModel.toggleShowCandidateBlobs(streamDesignator) })
-                            }
-                        )
-                        if (anomalyConfig.motionEnabled) {
-                            Text(
-                                text = "Motion ${anomalyConfig.motionEvidenceSensitivityLabel}",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.motionEvidenceSensitivity) {
-                                    detectTapGestures(onTap = { viewModel.cycleMotionEvidenceSensitivity(streamDesignator) })
-                                }
-                            )
-                        }
-                        when (resolvedAppearanceMode) {
-                            AppearanceAnomalyMode.Thermal -> {
-                                val thermalShortLabel = when (anomalyConfig.thermalPolarity) {
-                                    org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.WhiteHot -> "WH"
-                                    org.ncssar.rid2caltopo.video.anomaly.ThermalPolarity.BlackHot -> "BH"
-                                }
-                                OutlinedLegendText(
-                                    text = "Infrared",
-                                    fillColor = Color.Red,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.pointerInput(streamDesignator) {
-                                        detectTapGestures(
-                                            onTap = {
-                                                viewModel.setAppearanceAnomalySelection(
-                                                    streamDesignator,
-                                                    AppearanceAnomalySelection.Color
-                                                )
-                                            }
-                                        )
-                                    }
-                                )
-                                Text(
-                                    text = thermalShortLabel,
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.thermalPolarity) {
-                                        detectTapGestures(
-                                            onTap = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }
-                                        )
-                                    }
-                                )
-                            }
-                            AppearanceAnomalyMode.Color -> {
-                                OutlinedLegendText(
-                                    text = "Color Outlier",
-                                    fillColor = Color.Blue,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.pointerInput(streamDesignator) {
-                                        detectTapGestures(
-                                            onTap = {
-                                                viewModel.setAppearanceAnomalySelection(
-                                                    streamDesignator,
-                                                    AppearanceAnomalySelection.Thermal
-                                                )
-                                            }
-                                        )
-                                    }
-                                )
-                            }
-                        }
-                        if (anomalyConfig.motionEnabled) {
-                            OutlinedLegendText(
-                                text = "Motion",
-                                fillColor = Color.Green,
-                                fontSize = 11.sp,
-                                modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.algorithms) {
-                                    detectTapGestures(
-                                        onTap = {
-                                            viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
-                                        }
-                                    )
-                                }
-                            )
-                        } else {
-                            Text(
-                                text = "Motion Off",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                modifier = Modifier.pointerInput(streamDesignator, anomalyConfig.algorithms) {
-                                    detectTapGestures(
-                                        onTap = {
-                                            viewModel.toggleAnomalyAlgorithm(streamDesignator, AnomalyAlgorithm.Motion)
-                                        }
-                                    )
-                                }
-                            )
-                        }
                     }
                 }
-            }
-            if (showSensitivityDialog) {
-                var sliderValue by remember(streamDesignator, anomalyConfig.sensitivity) {
-                    mutableStateOf(anomalyConfig.sensitivity.coerceIn(0f, 1f))
-                }
-                AlertDialog(
-                    onDismissRequest = { showSensitivityDialog = false },
-                    title = { Text("Detection Sensitivity") },
-                    text = {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = "Lower sensitivity requires a stronger outlier in a smaller region before drawing a box."
-                            )
-                            Text(text = "Current: ${(sliderValue * 100f).toInt()}%")
-                            Slider(
-                                value = sliderValue,
-                                onValueChange = { sliderValue = it },
-                                valueRange = 0f..1f
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Strict")
-                                Text("Aggressive")
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                viewModel.setAnomalySensitivity(streamDesignator, sliderValue)
-                                showSensitivityDialog = false
-                            }
-                        ) {
-                            Text("Apply")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showSensitivityDialog = false }) {
-                            Text("Cancel")
-                        }
-                    }
-                )
-            }
-            if (showScanZoneDialog) {
-                var sliderValue by remember(streamDesignator, anomalyConfig.scanZone) {
-                    mutableStateOf(anomalyConfig.scanZone.coerceIn(0.5f, 1f))
-                }
-                AlertDialog(
-                    onDismissRequest = { showScanZoneDialog = false },
-                    title = { Text("Scan Zone") },
-                    text = {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = "Sets the centered portion of the frame scanned for anomalies. Reduce to exclude wide-angle lens distortion at the frame edges."
-                            )
-                            Text(text = "Current: ${(sliderValue * 100f).toInt()}%")
-                            Slider(
-                                value = sliderValue,
-                                onValueChange = { sliderValue = it },
-                                valueRange = 0.5f..1f
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("50% (center only)")
-                                Text("100% (full frame)")
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                viewModel.setScanZone(streamDesignator, sliderValue)
-                                showScanZoneDialog = false
-                            }
-                        ) {
-                            Text("Apply")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showScanZoneDialog = false }) {
-                            Text("Cancel")
-                        }
-                    }
-                )
             }
             AnomalySettingsDialogs(
                 viewModel = viewModel,
@@ -1081,7 +836,7 @@ fun StreamTile(
 internal fun AnomalySettingsMenuContent(
     viewModel: StreamsViewModel,
     streamDesignator: String,
-    anomalyEnabled: Boolean,
+    anomalyMode: AnomalyDetectorMode,
     isLocalPlayback: Boolean,
     pauseLocalPlaybackOnOpen: Boolean,
     onShowSettings: () -> Unit,
@@ -1091,22 +846,7 @@ internal fun AnomalySettingsMenuContent(
     onDismissMenu: () -> Unit,
 ) {
     DropdownMenuItem(
-        text = {
-            Text(
-                if (anomalyEnabled) {
-                    "Anomaly Detection: On (tap to turn Off)"
-                } else {
-                    "Anomaly Detection: Off (tap to turn On)"
-                }
-            )
-        },
-        onClick = {
-            onDismissMenu()
-            viewModel.toggleAnomalyEnabled(streamDesignator)
-        }
-    )
-    DropdownMenuItem(
-        text = { Text("Anomaly Detector Settings") },
+        text = { Text("AD Mode: ${anomalyMode.label}") },
         onClick = {
             onDismissMenu()
             onShowSettings()
@@ -1179,6 +919,7 @@ internal fun AnomalySettingsDialogs(
             mutableStateOf(anomalyConfig.targetColorFamilyMask and TargetColorFamily.allowedMask)
         }
         var showTargetColorsDialog by remember(streamDesignator) { mutableStateOf(false) }
+        var modeMenuExpanded by remember(streamDesignator) { mutableStateOf(false) }
         var pendingTargetColorFamilyMaskValue by remember(streamDesignator) {
             mutableStateOf(targetColorFamilyMaskValue)
         }
@@ -1230,83 +971,72 @@ internal fun AnomalySettingsDialogs(
                         .verticalScroll(settingsScroll),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    val appearanceStatus = "Appearance: ${anomalyConfig.appearanceSelection.label}"
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Detection")
-                        TextButton(onClick = { viewModel.toggleAnomalyEnabled(streamDesignator) }) {
-                            Text(if (anomalyConfig.enabled) "On" else "Off")
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Reset to Realtime Defaults")
-                        TextButton(onClick = {
-                            val defaults = anomalyConfig.resetToRealtimeDefaults()
-                            syncDialogValues(defaults)
-                            viewModel.resetAnomalyRealtimeDefaults(streamDesignator)
-                            CaltopoClient.ShowToast("Anomaly detector reset to realtime defaults.")
-                        }) {
-                            Text("Reset")
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(appearanceStatus)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AppearanceSelectionButton(
-                                label = "Infrared",
-                                selected = anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Thermal,
-                                onClick = {
-                                    viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Thermal)
-                                    CaltopoClient.ShowToast("Appearance set to Infrared.")
-                                }
-                            )
-                            AppearanceSelectionButton(
-                                label = "Color",
-                                selected = anomalyConfig.appearanceSelection == AppearanceAnomalySelection.Color,
-                                onClick = {
-                                    viewModel.setAppearanceAnomalySelection(streamDesignator, AppearanceAnomalySelection.Color)
-                                    CaltopoClient.ShowToast("Appearance set to Color.")
-                                }
-                            )
-                        }
-                    }
-                    val targetColorsEnabled =
-                        targetColorSelectionEnabled(anomalyConfig.appearanceSelection)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Target Colors")
-                            Text(
-                                targetColorFamilySummary(targetColorFamilyMaskValue),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (targetColorsEnabled) {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.60f)
-                                }
-                            )
-                        }
-                        TextButton(
-                            enabled = targetColorsEnabled,
-                            onClick = { openTargetColorsDialog() }
+                    val selectedMode = anomalyConfig.detectorMode()
+                    Text("AD Mode", style = MaterialTheme.typography.titleSmall)
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { modeMenuExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text("Target Colors")
+                            Text(selectedMode.label, modifier = Modifier.weight(1f))
+                            Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
+                        }
+                        DropdownMenu(
+                            expanded = modeMenuExpanded,
+                            onDismissRequest = { modeMenuExpanded = false },
+                        ) {
+                            AnomalyDetectorMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.label) },
+                                    onClick = {
+                                        modeMenuExpanded = false
+                                        if (mode == AnomalyDetectorMode.TargetColors) {
+                                            openTargetColorsDialog()
+                                        } else {
+                                            viewModel.setAnomalyDetectorMode(streamDesignator, mode)
+                                        }
+                                    },
+                                )
+                            }
                         }
                     }
+                    if (selectedMode != AnomalyDetectorMode.Off) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Realtime Defaults")
+                            TextButton(onClick = {
+                                val defaults = anomalyConfig.resetToRealtimeDefaults()
+                                syncDialogValues(defaults)
+                                viewModel.resetAnomalyRealtimeDefaults(streamDesignator)
+                                CaltopoClient.ShowToast("Anomaly detector reset to realtime defaults.")
+                            }) {
+                                Text("Reset")
+                            }
+                        }
+                    }
+                    if (selectedMode == AnomalyDetectorMode.TargetColors) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Target Colors")
+                                Text(
+                                    targetColorFamilySummary(targetColorFamilyMaskValue),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(onClick = { openTargetColorsDialog() }) {
+                                Text("Change")
+                            }
+                        }
+                    }
+                    if (selectedMode != AnomalyDetectorMode.Off) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1339,14 +1069,16 @@ internal fun AnomalySettingsDialogs(
                             Text(if (anomalyConfig.showGuideBoxes) "On" else "Off")
                         }
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Show Hottest Region")
-                        TextButton(onClick = { viewModel.toggleShowHotOverlay(streamDesignator) }) {
-                            Text(if (anomalyConfig.showHotOverlay) "On" else "Off")
+                    if (selectedMode == AnomalyDetectorMode.Infrared) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Show Hottest Region")
+                            TextButton(onClick = { viewModel.toggleShowHotOverlay(streamDesignator) }) {
+                                Text(if (anomalyConfig.showHotOverlay) "On" else "Off")
+                            }
                         }
                     }
                     Row(
@@ -1457,14 +1189,16 @@ internal fun AnomalySettingsDialogs(
                             )
                         }
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Infrared Palette")
-                        TextButton(onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }) {
-                            Text(anomalyConfig.thermalPolarity.label)
+                    if (selectedMode == AnomalyDetectorMode.Infrared) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Infrared Palette")
+                            TextButton(onClick = { viewModel.cycleAnomalyThermalPolarity(streamDesignator) }) {
+                                Text(anomalyConfig.thermalPolarity.label)
+                            }
                         }
                     }
                     Text("Sensitivity ${((sensitivityValue * 100f).toInt())}%")
@@ -1480,13 +1214,17 @@ internal fun AnomalySettingsDialogs(
                         valueRange = 1f..5f,
                         steps = 3
                     )
-                    Text("Color Candidates $colorTargetCandidateLimitValue")
-                    Slider(
-                        value = colorTargetCandidateLimitValue.toFloat(),
-                        onValueChange = { colorTargetCandidateLimitValue = it.toInt().coerceIn(1, 4) },
-                        valueRange = 1f..4f,
-                        steps = 2
-                    )
+                    if (selectedMode == AnomalyDetectorMode.ColorUniqueness ||
+                        selectedMode == AnomalyDetectorMode.TargetColors
+                    ) {
+                        Text("Color Candidates $colorTargetCandidateLimitValue")
+                        Slider(
+                            value = colorTargetCandidateLimitValue.toFloat(),
+                            onValueChange = { colorTargetCandidateLimitValue = it.toInt().coerceIn(1, 4) },
+                            valueRange = 1f..4f,
+                            steps = 2
+                        )
+                    }
                     Text("Frame Stride ${frameStrideValue}x")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1535,8 +1273,14 @@ internal fun AnomalySettingsDialogs(
                         valueRange = 0f..4f,
                         steps = 3
                     )
-                    Text("Thermal Min Delta ${"%.1f".format(thermalMinDeltaValue)}")
-                    Slider(value = thermalMinDeltaValue, onValueChange = { thermalMinDeltaValue = it }, valueRange = 1f..64f)
+                    if (selectedMode == AnomalyDetectorMode.Infrared) {
+                        Text("Thermal Min Delta ${"%.1f".format(thermalMinDeltaValue)}")
+                        Slider(
+                            value = thermalMinDeltaValue,
+                            onValueChange = { thermalMinDeltaValue = it },
+                            valueRange = 1f..64f,
+                        )
+                    }
                     val smallTargetDenominator =
                         (1.0f / smallTargetFractionValue.coerceIn(0.0015f, 0.03f)).roundToInt()
                     Text("Small Target Scale 1/$smallTargetDenominator screen diagonal")
@@ -1596,6 +1340,7 @@ internal fun AnomalySettingsDialogs(
                                 Text("Clear")
                             }
                         }
+                    }
                     }
                 }
             },
@@ -1672,9 +1417,18 @@ internal fun AnomalySettingsDialogs(
                 },
                 confirmButton = {
                     TextButton(
+                        enabled = pendingTargetColorFamilyMaskValue != 0,
                         onClick = {
                             val nextMask = pendingTargetColorFamilyMaskValue and TargetColorFamily.allowedMask
                             targetColorFamilyMaskValue = nextMask
+                            viewModel.setAnomalyDetectorMode(
+                                streamDesignator,
+                                if (nextMask == 0) {
+                                    AnomalyDetectorMode.ColorUniqueness
+                                } else {
+                                    AnomalyDetectorMode.TargetColors
+                                },
+                            )
                             viewModel.setTargetColorFamilyMask(streamDesignator, nextMask)
                             showTargetColorsDialog = false
                         }
@@ -1682,11 +1436,19 @@ internal fun AnomalySettingsDialogs(
                 },
                 dismissButton = {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(
-                            onClick = {
-                                pendingTargetColorFamilyMaskValue = 0
-                            }
-                        ) { Text("Clear") }
+                        if (anomalyConfig.detectorMode() == AnomalyDetectorMode.TargetColors) {
+                            TextButton(
+                                onClick = {
+                                    targetColorFamilyMaskValue = 0
+                                    viewModel.setTargetColorFamilyMask(streamDesignator, 0)
+                                    viewModel.setAnomalyDetectorMode(
+                                        streamDesignator,
+                                        AnomalyDetectorMode.ColorUniqueness,
+                                    )
+                                    showTargetColorsDialog = false
+                                }
+                            ) { Text("Clear") }
+                        }
                         TextButton(onClick = { showTargetColorsDialog = false }) { Text("Cancel") }
                     }
                 }
@@ -1707,23 +1469,23 @@ internal fun AnomalySettingsDialogs(
                         .verticalScroll(helpScroll),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("Legend controls")
-                    Text("Sens: Detection sensitivity. Lower values are stricter and require a stronger outlier before drawing a box.")
-                    Text("Zone: Centered portion of the frame scanned for anomalies. Lower values ignore more of the outer frame.")
-                    Text("Hits: Consecutive analyzed-frame hits required in roughly the same motion-stabilized region before a detection is promoted.")
-                    Text("Stride: Analyze every Nth frame. Higher stride reduces CPU load but may miss brief motion.")
+                    Text("AD mode")
+                    Text("The stream legend shows the current mode. Tap it to select Off, Color Uniqueness, Target Colors, or Infrared.")
+                    Text("The settings below the mode selector apply only to the selected detector. Settings last for this app session; startup returns AD to Off with realtime defaults.")
+                    Text("Sensitivity: Lower values are stricter and require a stronger outlier before drawing a box.")
+                    Text("Scan Zone: Centered portion of the frame scanned for anomalies. Lower values ignore more of the outer frame.")
+                    Text("Min Hits: Consecutive analyzed-frame hits required in roughly the same motion-stabilized region before a detection is promoted.")
+                    Text("Frame Stride: Analyze every Nth frame. Higher stride reduces CPU load but may miss brief motion.")
                     Text("Detail: Pixel sampling step for appearance analysis. Auto chooses a default from frame size; smaller steps inspect more detail at higher cost.")
-                    Text("Appearance: Infrared is the recommended default for SAR thermal video. Color Outlier is mainly for visible-light footage or special cases.")
                     Text("ShowHot: Draws a red ring around the hottest region in the frame as a thermal debug aid.")
                     Text("Guide Boxes: Shows cyan outlines for the centered scan zone and the maximum small-target size.")
                     Text("Saliency: Enables the unified saliency detector. Turn it off to match harness runs that omit the saliency algorithm.")
                     Text("Motion: Motion evidence sensitivity. Higher values strengthen the motion detector and also increase the influence of motion support in combined anomaly scoring.")
                     Text("Registration: Chooses the motion-registration backend used to stabilize detections. Affine usually tracks camera motion more accurately; GMV is simpler and may be cheaper.")
                     Text("Movement Estimator: Legacy keeps current behavior. Shadow computes layered parallax telemetry without changing detections. Active applies layered parallax suppression to motion scoring and is still experimental.")
-                    Text("Infrared (WH/BH): Thermal polarity. WH means brighter pixels are hotter; BH means darker pixels are hotter.")
+                    Text("Infrared Palette: White Hot means brighter pixels are hotter; Black Hot means darker pixels are hotter.")
                     Text("Thermal Min Delta: Minimum infrared contrast before thermal/saliency evidence is considered. Raise it to ignore weaker temperature differences.")
                     Text("Small: Maximum on-screen small-target box size. The cyan rectangle shows the largest blob the anomaly detector should treat as a 'small target' for the squinter. As the camera zooms in, targets larger than this are down-ranked and can disappear.")
-                    Text("Motion badge: Indicates whether the motion detector is currently part of the active anomaly stack.")
                     if (isLocalPlayback) {
                         Text("Playback review controls")
                         Text("Back: Step backward through the recent paused-frame history.")

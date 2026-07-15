@@ -59,10 +59,13 @@ enum class AppearanceAnomalySelection(
             Color -> AppearanceAnomalyMode.Color
         }
 
-    companion object {
-        fun fromPersistedValue(value: String?): AppearanceAnomalySelection =
-            entries.firstOrNull { it.name == value } ?: Color
-    }
+}
+
+enum class AnomalyDetectorMode(val label: String) {
+    Off("Off"),
+    ColorUniqueness("Color Uniqueness"),
+    TargetColors("Target Colors"),
+    Infrared("Infrared"),
 }
 
 enum class ThermalPolarity(
@@ -117,10 +120,6 @@ enum class PersonRelevanceMode(
     Evaluate(nativeValue = 1, label = "Evaluate"),
     Assist(nativeValue = 2, label = "Assist");
 
-    companion object {
-        fun fromPersistedValue(value: String?): PersonRelevanceMode =
-            entries.firstOrNull { it.name == value } ?: Off
-    }
 }
 
 const val PERSON_RELEVANCE_SUPPORTING_TEXT =
@@ -192,9 +191,6 @@ fun targetColorFamilySummary(mask: Int): String {
         else -> selected.take(2).joinToString(", ") { it.label } + " +${selected.size - 2}"
     }
 }
-
-fun targetColorSelectionEnabled(selection: AppearanceAnomalySelection): Boolean =
-    selection != AppearanceAnomalySelection.Thermal
 
 data class AnomalyConfig(
     val enabled: Boolean = false,
@@ -268,6 +264,31 @@ data class AnomalyConfig(
 
     fun resolvedAppearanceMode(): AppearanceAnomalyMode = appearanceSelection.resolved()
 
+    fun detectorMode(): AnomalyDetectorMode = when {
+        !enabled -> AnomalyDetectorMode.Off
+        resolvedAppearanceMode() == AppearanceAnomalyMode.Thermal -> AnomalyDetectorMode.Infrared
+        targetColorFamilyMask != 0 -> AnomalyDetectorMode.TargetColors
+        else -> AnomalyDetectorMode.ColorUniqueness
+    }
+
+    fun withDetectorMode(mode: AnomalyDetectorMode): AnomalyConfig = when (mode) {
+        AnomalyDetectorMode.Off -> copy(enabled = false)
+        AnomalyDetectorMode.ColorUniqueness -> copy(
+            enabled = true,
+            appearanceSelection = AppearanceAnomalySelection.Color,
+            targetColorFamilyMask = 0,
+        ).withColorRealtimeStrideDefaultsIfUnmodified()
+        AnomalyDetectorMode.TargetColors -> copy(
+            enabled = true,
+            appearanceSelection = AppearanceAnomalySelection.Color,
+        ).withColorRealtimeStrideDefaultsIfUnmodified()
+        AnomalyDetectorMode.Infrared -> copy(
+            enabled = true,
+            appearanceSelection = AppearanceAnomalySelection.Thermal,
+            targetColorFamilyMask = 0,
+        )
+    }
+
     fun resolvedAlgorithms(): Set<AnomalyAlgorithm> {
         val resolved = nonAppearanceAlgorithms.toMutableSet()
         resolved += resolvedAppearanceMode().algorithm
@@ -298,6 +319,7 @@ data class AnomalyConfig(
             enabled = enabled,
             appearanceSelection = appearanceSelection,
             thermalPolarity = thermalPolarity,
+            targetColorFamilyMask = targetColorFamilyMask,
         )
         val resetAppearance = appearanceSelection.resolved()
         return if (resetAppearance == AppearanceAnomalyMode.Color) {

@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.max
-import java.util.concurrent.Executors
 
 data class StreamTelemetrySnapshot(
     val sourceTag: String? = null,
@@ -219,7 +218,9 @@ class FfmpegProbeService(
     val renderDelayMsByDesignatorFlow: StateFlow<Map<String, Long>> =
         _renderDelayMsByDesignator.asStateFlow()
     private val noFramePoll = DelayedExec()
-    private val sessionControlExecutor = Executors.newSingleThreadExecutor()
+    // Native teardown can wait on an FFmpeg reader. Keep it off the control lane so a
+    // reconnect can bind a surface and start a replacement session immediately.
+    private val sessionExecutionLanes = FfmpegSessionExecutionLanes()
     private val stateLock = Any()
     private var lastPerfSampleAtMs = 0L
     private var lastPerfProcessCpuMs = 0L
@@ -556,7 +557,7 @@ class FfmpegProbeService(
             }
         }
         CTDebug(tag, "Republish for $designator -> no active render session; ensuring FFmpeg render is started")
-        sessionControlExecutor.execute {
+        sessionExecutionLanes.executeControl {
             if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
                 ensureRenderSession(designator)
             }
@@ -610,7 +611,7 @@ class FfmpegProbeService(
             activeSessionId
         } ?: return
         CTDebug(tag, "Suspending FFmpeg render for $designator sessionId=$sessionId")
-        sessionControlExecutor.execute {
+        sessionExecutionLanes.executeControl {
             FfmpegBridge.detachSurface(sessionId)
         }
     }
@@ -667,12 +668,13 @@ class FfmpegProbeService(
         val active = collectActiveSessionsForShutdown()
         noFramePoll.stop()
         FfmpegBridge.removeProbeListener(probeListener)
-        sessionControlExecutor.execute {
+        sessionExecutionLanes.shutdownControl()
+        sessionExecutionLanes.executeStop {
             active.forEach { sessionId ->
                 FfmpegBridge.stop(sessionId)
                 CTDebug(tag, "Stopped FFmpeg sessionId=$sessionId during close()")
             }
-            sessionControlExecutor.shutdown()
+            sessionExecutionLanes.shutdownStops()
         }
     }
 
@@ -726,7 +728,7 @@ class FfmpegProbeService(
             }
         }
         if (existingRenderSessionId != null) {
-            sessionControlExecutor.execute {
+            sessionExecutionLanes.executeControl {
                 val isCurrentSurface = synchronized(stateLock) {
                     activeRenderSurfaceByDesignator[designator] === surface &&
                         renderSessions[designator] == existingRenderSessionId &&
@@ -738,7 +740,7 @@ class FfmpegProbeService(
                         "Skipping stale render surface attach for $designator " +
                             "sessionId=$existingRenderSessionId surface=${System.identityHashCode(surface)}"
                     )
-                    return@execute
+                    return@executeControl
                 }
                 CTDebug(
                     tag,
@@ -754,7 +756,7 @@ class FfmpegProbeService(
             }
             return true
         }
-        sessionControlExecutor.execute {
+        sessionExecutionLanes.executeControl {
             ensureRenderSession(designator)
         }
         return true
@@ -839,7 +841,7 @@ class FfmpegProbeService(
                     "oldSurface=${action.requestedSurface?.let { System.identityHashCode(it) }} " +
                     "newSurface=${System.identityHashCode(action.fallbackSurface)}"
             )
-            sessionControlExecutor.execute {
+            sessionExecutionLanes.executeControl {
                 FfmpegBridge.detachSurface(action.sessionId)
                 if (!FfmpegBridge.attachSurface(action.sessionId, action.fallbackSurface)) {
                     CTWarn(
@@ -857,7 +859,7 @@ class FfmpegProbeService(
             "Unbinding render surface for $designator sessionId=${action.sessionId} " +
                 "surface=${action.requestedSurface?.let { System.identityHashCode(it) }}"
         )
-        sessionControlExecutor.execute {
+        sessionExecutionLanes.executeControl {
             FfmpegBridge.detachSurface(action.sessionId)
         }
     }
@@ -1566,7 +1568,7 @@ class FfmpegProbeService(
                 sessionId,
                 "Stopped stalled FFmpeg render for $designator sessionId=$sessionId idlePolls=$idlePolls"
             )
-            sessionControlExecutor.execute {
+            sessionExecutionLanes.executeControl {
                 val upstreamBoundary = latestUpstreamBoundary(designator)
                 val upstreamTransientClose =
                     upstreamBoundary?.boundary == "stream_error" &&
@@ -1578,7 +1580,7 @@ class FfmpegProbeService(
                             "while upstream is transiently closed " +
                             "boundary=${upstreamBoundary?.boundary} outcome=${upstreamBoundary?.outcome}"
                     )
-                    return@execute
+                    return@executeControl
                 }
                 if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
                     ensureRenderSession(designator)
@@ -1595,7 +1597,7 @@ class FfmpegProbeService(
                 sessionId,
                 "Stopped startup-stalled FFmpeg render for $designator sessionId=$sessionId phaseAgeMs=$phaseAgeMs"
             )
-            sessionControlExecutor.execute {
+            sessionExecutionLanes.executeControl {
                 val upstreamBoundary = latestUpstreamBoundary(designator)
                 val upstreamTransientClose =
                     upstreamBoundary?.boundary == "stream_error" &&
@@ -1607,7 +1609,7 @@ class FfmpegProbeService(
                             "while upstream is transiently closed " +
                             "boundary=${upstreamBoundary?.boundary} outcome=${upstreamBoundary?.outcome}"
                     )
-                    return@execute
+                    return@executeControl
                 }
                 if (isRenderEnabled(designator) && hasBoundRenderSurface(designator)) {
                     ensureRenderSession(designator)
@@ -1677,7 +1679,7 @@ class FfmpegProbeService(
             }
         }
         if (closing) return
-        sessionControlExecutor.execute {
+        sessionExecutionLanes.executeStop {
             try {
                 FfmpegBridge.stop(sessionId)
                 CTDebug(tag, completionLog)

@@ -105,6 +105,9 @@ import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+private const val EXTRA_OPEN_STREAMS_QUALIFICATION =
+    "org.ncssar.rid2caltopo.extra.OPEN_STREAMS_QUALIFICATION"
+
 internal fun buildLogArchiveEntryName(rawName: String?): String {
     val baseName = rawName?.trim().orEmpty().ifBlank { "log_unknown" }
     return if (baseName.lowercase(Locale.US).endsWith(".txt")) {
@@ -410,9 +413,20 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
         }
     }
 
+    private fun handleStreamsQualificationIntent(intent: Intent?) {
+        if (!BuildConfig.DEBUG ||
+            intent?.getBooleanExtra(EXTRA_OPEN_STREAMS_QUALIFICATION, false) != true
+        ) {
+            return
+        }
+        CTDebug(TAG, "Opening Streams screen for connected-stream qualification")
+        localViewModel.showStreams()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleR2cIntent(intent)
+        handleStreamsQualificationIntent(intent)
     }
 
     override fun onResume() {
@@ -443,6 +457,7 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                 ScanningService.ScannerUptime
             ))[R2CViewModel::class.java]
         streamsViewModel = ViewModelProvider(this)[StreamsViewModel::class.java]
+        handleStreamsQualificationIntent(intent)
         CaltopoClient.AddDroneSpecsChangedListener(localViewModel)
         CaltopoClient.AddDroneConfirmationCandidateListener(localViewModel)
         CaltopoClient.CheckIdle()

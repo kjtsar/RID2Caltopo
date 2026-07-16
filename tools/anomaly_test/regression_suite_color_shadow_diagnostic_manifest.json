@@ -1,0 +1,75 @@
+{
+  "schema_version": 2,
+  "suite_name": "Color Uniqueness Shadow Diagnostics",
+  "notes": [
+    "Shadow diagnostics only; this manifest is not wired to Gradle or release gates.",
+    "Floristan is a hard diagnostic fixture, not a scoring-tuning target.",
+    "The 2.235567s false_positive sidecar annotation is an intended positive and is corrected only in generated effective review context."
+  ],
+  "profiles": [
+    {
+      "id": "visible-color-app-shadow-diagnostic",
+      "label": "Visible color app-parity shadow diagnostic",
+      "description": "Single app-parity profile for uniqueness shadow evidence without a dense-gold replay.",
+      "detector_args": [
+        "--app-defaults",
+        "--app-appearance",
+        "color",
+        "--app-display-output"
+      ]
+    },
+    {
+      "id": "visible-color-all-frame-shadow-diagnostic",
+      "label": "Visible color all-frame shadow diagnostic",
+      "description": "Established coarse Color baseline settings for rank evidence at every reviewed frame.",
+      "detector_args": [
+        "-a",
+        "5",
+        "-t",
+        "2.8",
+        "-m",
+        "2",
+        "-s",
+        "0.8",
+        "--registration",
+        "affine",
+        "--stride",
+        "1"
+      ]
+    }
+  ],
+  "source_clips": [
+    {
+      "id": "floristan",
+      "label": "floristan.mov",
+      "source_path": "app/src/test/resources/vidcap/floristan.mov",
+      "preserve_full_source": true,
+      "notes": "Shadow-diagnostic fixture only."
+    }
+  ],
+  "excerpts": [
+    {
+      "id": "floristan-reviewed-person-track",
+      "label": "Floristan reviewed person track",
+      "source_clip_id": "floristan",
+      "start_s": 1.9,
+      "end_s": 3.6,
+      "review_status": "reviewed",
+      "review_path": "app/src/test/resources/vidcap/floristan.review.json",
+      "review_kind_overrides": [
+        {
+          "time_s": 2.235567,
+          "from": "false_positive",
+          "to": "missed_target",
+          "reason": "Known mislabeled intended positive; source sidecar remains unchanged."
+        }
+      ],
+      "tags": [
+        "shadow_diagnostic",
+        "visible_color",
+        "hard_fixture"
+      ],
+      "notes": "Diagnostic coverage only; do not add this fixture to Gradle or release qualification."
+    }
+  ]
+}

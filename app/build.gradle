@@ -207,7 +207,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 6
-    def versionPatch = 11
+    def versionPatch = 12
 
     signingConfigs {
         register("release") {
@@ -222,7 +222,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 95
+        versionCode = 96
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -554,6 +554,18 @@ tasks.register("personRelevanceQualification") {
                 "tools/anomaly_test/fixtures/person_relevance/manifest.json",
                 "--output",
                 "${buildDir}/reports/person-relevance-qualification/report.json"
+        ], ["PATH": pathWithHostToolDirs()])
+    }
+}
+
+tasks.register("connectedStreamLifecycleQualification") {
+    group = "verification"
+    description = "Exercises RTMP publish/reconnect rendering on a connected Android device."
+    outputs.upToDateWhen { false }
+    doLast {
+        runProcess(rootDir, [
+                "python3",
+                "tools/stream_test/run_connected_stream_lifecycle_qualification.py"
         ], ["PATH": pathWithHostToolDirs()])
     }
 }

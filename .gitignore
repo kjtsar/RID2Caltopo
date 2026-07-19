@@ -23,3 +23,9 @@ app/src/test/resources/vidcap/
 
 # Native test build output
 tools/anomaly_test/build/
+
+# Apple/Xcode per-user and generated build state
+DerivedData/
+*.xcuserstate
+xcuserdata/
+apple/Build/

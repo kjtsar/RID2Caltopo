@@ -1,0 +1,235 @@
+# Apple port bring-up plan
+
+## Runtime shape
+
+Keep the Apple UI and platform radios thin around portable contracts:
+
+```text
+CoreBluetooth / Wi-Fi provider / external receiver
+                      |
+                      v
+                RidObservation
+                      |
+                      v
+           tracking and CalTopo policy
+
+controller RTMP -> embedded MediaMTX -> Low-Latency HLS -> AVFoundation frames
+                                                               |
+                                                               v
+                                                      portable anomaly core
+```
+
+The MediaMTX server must run in-process on iOS. The Android launcher currently
+uses `fork()` and `exec()` from `mediamtx_jni.c`; that process model is not an
+iOS option. The Apple bridge will instead expose a small C ABI from a Go archive
+and start MediaMTX's server core on a dedicated Go goroutine. Swift owns only
+the lifecycle calls and structured event callback.
+
+## First validation ladder
+
+1. Build `R2CCore` and run its unit tests on macOS.
+2. Build and launch `RID2CaltopoApple` in iPhone and iPad Simulators.
+3. Build the verified MediaMTX tree as an arm64 iOS archive and prove
+   start/stop plus RTMP-to-RTSP loopback on a physical iPad.
+4. Feed decoded `CVPixelBuffer` frames through the portable C anomaly core.
+5. Add CoreBluetooth Remote ID ingestion and compare decoded observations with
+   the Android implementation using the same transmitters.
+6. Qualify Wi-Fi transports separately because Apple exposes different radio
+   capabilities and entitlements than Android.
+
+Apple added the public Wi-Fi Aware framework in iOS/iPadOS 26, and the 2021
+11-inch iPad Pro (3rd generation) is on Apple's supported-device list. The API
+uses declared services and paired, authenticated peers. ASTM Broadcast Remote
+ID over Wi-Fi NAN is passive broadcast reception. An audit of the public iOS
+26.5 SDK confirms that its entire discovery surface is `WAPairedDevice`,
+declared `WAPublishableService`/`WASubscribableService` values, and paired
+publisher/subscriber Network endpoints. It exposes no raw NAN management frame,
+unsolicited service advertisement payload, or passive monitor API. Therefore a
+native App Store implementation cannot currently receive ASTM NAN broadcasts
+through the public Wi-Fi Aware framework. Keep `WiFiAwareRIDCapability` as a
+host capability indicator and use the proven external receiver feed for Wi-Fi
+Remote ID unless Apple adds a passive broadcast API.
+
+## Current checkpoint
+
+- Xcode 26.6 and the iOS 26.5 Simulator runtime are installed.
+- `R2CCore` decodes ASTM Bluetooth service data, including Basic ID, Location,
+  System, and message packs. Synthetic parity tests cover the Android wire
+  formulas and serial-number preference.
+- `R2CAppleRadios.BluetoothRIDScanner` performs a foreground CoreBluetooth scan
+  filtered to service UUID `FFFA`, validates application code `0D`, and emits
+  normalized observations through `AsyncStream`.
+- `R2CAppleRadios.ExternalRIDUDPReceiver` accepts normalized JSON plus compact
+  raw ASTM messages on UDP port 7654. It accepts individual 25-byte messages,
+  concatenated messages, Message Packs, and FFFA service-data envelopes, and
+  assembles Basic ID, Location, and System state per sender. Simulator runtime
+  proofs have driven both combined and split binary messages into the live map.
+- The universal SwiftUI Status screen starts Bluetooth and external UDP ingest
+  automatically, presents Android-style active-aircraft rows and details, and
+  uses a real `CLLocationManager` fix for the MapKit user annotation plus
+  device-relative range/bearing. Closest-pair horizontal/vertical/3D separation
+  is visible and feeds the operator proximity-alert workflow.
+- Aircraft details now offer Android-shaped session confirmation fields for
+  organization, pilot callsign, and drone description. The shared mapped-ID
+  builder matches Android's callsign filtering and model abbreviation rules.
+  Confirmations improve aircraft labels and diagnostics, propagate through
+  tracker peer coordination, and are required before this device may alert.
+- Android configuration interoperability now covers all three QR token families:
+  organization (`R2C1`), FAA (`R2CFAA1`), and mutual aid (`R2CMA1`). The shared
+  core decodes Android's shuffled alphabet and XOR envelope and parses its
+  encrypted credential bundles. The app supports camera scan, pasted token, and
+  custom-URL handoff; secrets go to Keychain and imported RID mappings persist.
+  Organization bundles also apply embedded FAA configuration and mutual-aid
+  template credentials. Cross-language vectors and bundle tests are green.
+  Camera capture and a real public Drive bundle remain physical-device gates.
+- The main SwiftUI hierarchy now begins with Android-like incident context and
+  exposes the familiar Live View, log forwarding, Status, Import Config,
+  Settings, and About controls. Exact native widgets adapt to iPhone and iPad,
+  while control names, order, and operator workflow stay aligned where practical.
+- The Status menu now opens the Android-shaped copyable build/scanner/configuration
+  report instead of being a placeholder. It adds current Apple receiver,
+  tracker, MediaMTX, video, and persisted QR mapping state while excluding all
+  credential secrets. The same universal build has been visually qualified on
+  iPhone and iPad Simulators.
+- The app declares `bluetooth-central` for limited background discovery. Apple
+  coalesces duplicate advertisements and slows background scans, so continuity
+  remains a physical-device qualification gate rather than an assumed parity.
+- The verified MediaMTX fork builds as a module-enabled XCFramework with arm64
+  device and arm64 Simulator slices.
+- The Swift actor bridge starts MediaMTX in-process, receives complete log lines
+  through an opaque-context C callback, and converts lifecycle lines to
+  `MediaServerEvent` values.
+- Simulator qualification has proven MediaMTX v1.16.2 listening on RTMP port
+  1935, RTSP port 8554, and HLS port 8888 from inside the app.
+- AVFoundation reconnects when the HLS playlist initially returns 404, then
+  pulls 32BGRA `CVPixelBuffer` frames from the live stream.
+- `Native/AnomalyCore` builds the same portable C sources used by Android and
+  the standalone regression harness as arm64 device and Simulator slices.
+- End-to-end Simulator qualification published `docs/PowerHouse.mp4` over
+  RTMP, decoded 640 x 512 frames, analyzed every delivered frame, and returned
+  a live thermal anomaly annotation. The visible operator view rendered the
+  same stream with an aligned red annotation at 1,138 analyzed frames and zero
+  dropped analysis frames. Overlay geometry now follows the decoded raster's
+  aspect ratio. The native regression harness remained green at 4594 passed,
+  0 failed.
+- Apple Live View now exposes persisted Off, Color Uniqueness, and Infrared
+  detector modes instead of hard-coding thermal analysis. Mode changes rebuild
+  detector state on its serial worker while decoded video continues. A live
+  640 x 512 H.264/LL-HLS Simulator run processed more than 2,400 Color
+  Uniqueness frames with zero analysis drops; a separate Off-mode run kept the
+  stream playing with zero analyzed frames and zero drops. Visible-light Color
+  box quality and device thermal cost remain physical/fixture qualification gates.
+- `RidTrackStore` now applies the Android waypoint fundamentals: canonical
+  alphanumeric Remote IDs, duplicate suppression with three-second stationary
+  keepalives, the 293.3 ft/s coordinate-jump ceiling, per-transport counts, and
+  30-second active-track aging.
+- The CoreBluetooth observation stream feeds that store directly. A MapKit
+  operator view renders active aircraft, heading-oriented icons, colored track
+  polylines, operator locations when present, and accepted/filtered counters.
+- Synthetic two-aircraft route qualification passed on both the iPad Pro
+  11-inch and iPhone 17 Simulators using the same live tracking path.
+- Inactive or explicitly archived tracks are written to the app's Documents
+  container using Android `WaypointTrack`'s GeoJSON envelope, coordinate order,
+  timestamp units, and `r2c_prop` identity/incident fields. Simulator runtime
+  qualification produced two readable `FeatureCollection` files, each with
+  the expected three route points.
+- The shared CalTopo client reproduces Android's base64-secret HMAC-SHA256
+  signing contract, signed `LiveTrack` creation payload, and public drone
+  position-report query including elevation, ground speed, and track heading.
+  Credentials are configured in-app, the secret is stored in Keychain, and
+  publishing remains off until explicitly enabled. Request-shape tests are
+  green. Inactive aircraft also drive a signed `LiveTrack/{id}` stop after the
+  local archive succeeds; a real CalTopo test-map transaction remains a
+  credentialed device gate.
+- `ExternalRIDUDPReceiver` provides the hardware-independent Wi-Fi fallback on
+  UDP port 7654. It validates normalized JSON datagrams, merges them with the
+  Bluetooth observation stream, and feeds the identical map/archive/publishing
+  pipeline. A live iPhone Simulator datagram produced one active `WIFIRID01`
+  aircraft on the MapKit view; malformed JSON and invalid-coordinate contracts
+  are covered by shared tests.
+- Android now has an opt-in **Apple Wi-Fi Remote ID Relay** that forwards only
+  accepted Wi-Fi Beacon/NAN observations to the Apple receiver. Exact payload,
+  validation, and real loopback UDP transport tests are green. A physical
+  Android-to-iPhone/iPad RF run remains part of the device qualification gate.
+- Live iPhone and iPad Simulator runs consumed Android-shaped Wi-Fi NAN and
+  Beacon datagrams through the automatically started receiver. Both produced
+  the expected aircraft row, accepted track point, transport/RSSI details,
+  operator coordinates, relay destination, and zero rejected datagrams. Apple
+  diagnostics now record Android-shaped `rid_rx` evidence for accepted points
+  and explicit reasons for invalid or implausible observations.
+- `apple/smoke-external-rid.sh` makes that receiver-to-track-to-diagnostic-log
+  proof repeatable against any booted iPhone or iPad Simulator build.
+- Tracker peer coordination now matches Android's `/ws/r2c` protocol and
+  `X-SAR-Token` authentication. The Apple adapter maintains hello/heartbeat
+  health, reconnects with bounded backoff, replays active sightings and pending
+  confirmations, rejects stale leases, and exposes live peer/link state.
+- CalTopo publication is gated by both the current local ownership lease and a
+  local Save confirmation. Accepted points wait through Android's two-second
+  handoff delay and publish in order; non-owner sightings relay to the owner.
+  A two-zone iPhone/iPad Simulator run against the real local tracker proved
+  authenticated links, peer discovery, ownership transfer after confirmation,
+  negative alert eligibility on the non-owner, and bidirectional sighting relay.
+  Physical-device testing with real aircraft and a credentialed CalTopo map
+  remains required.
+- The shared proximity engine now applies Android's imported spacing threshold,
+  team-drone and local-ownership eligibility rule, approach/crossing gate,
+  high-severity classification, suspension/resume state, and three-second clear
+  delay. SwiftUI presents a warning card with Map/Suspend controls and visible
+  Resume action, plus speech and haptic feedback. A tracker-backed Simulator run
+  crossed the 40 ft threshold at 28 ft and emitted the alert only after local
+  Save made the owned drone eligible.
+- Predictive Head now mirrors Android's two-sample projection, including its
+  one-foot movement gate and two-second cap for horizontal and vertical motion.
+  The Android QR setting is imported, persisted, and exposed in Apple Settings.
+  A tracker-backed Simulator run proved the reported pair remained 56 ft apart
+  while the projected separation reached 28 ft and triggered the 40 ft warning;
+  stopping the synthetic motion removed the forecast and cleared the alert.
+- The paid Apple team is configured and Xcode automatic distribution signing
+  has produced a locally verified, device-free TestFlight IPA. The release gate
+  now checks the public cross-platform privacy policy and App Store metadata
+  limits. A repeatable Release-build capture script produced visually reviewed
+  6.9-inch iPhone and 13-inch iPad Nearby Aircraft, Live Map, and Status images
+  at Apple's required pixel dimensions. App Store Connect version 1.0 exists as
+  Apple ID `6792518823`; no build has been uploaded. Upload remains intentionally
+  explicit and release remains gated by `RELEASE_ACCEPTANCE.md`.
+
+## M1 iPad hardware gate
+
+1. Connect the 2021 11-inch iPad Pro, trust the Mac, and enable Developer Mode
+   when iPadOS requests it.
+2. Select an Apple Development team and a unique bundle identifier in Xcode.
+3. Run `RID2CaltopoApple` on the iPad and approve Bluetooth, Local Network, and
+   Location permissions.
+4. Scan one organization QR generated by Android. Verify organization, incident,
+   operational period, tracker settings, CalTopo credentials, and team RID
+   mappings, then separately exercise FAA and mutual-aid QR payloads if used.
+5. Start the Bluetooth scan beside a known-good ASTM Remote ID transmitter.
+   Confirm the UI reports `Scanning`, then capture Basic ID and Location updates
+   from the same aircraft using the Android device as a side-by-side reference.
+6. Start MediaMTX and verify the controller can reach the iPad's Wi-Fi address
+   on port 1935. Confirm local HLS playback and decoded/analyzed frame counters.
+7. Compare anomaly boxes against Android on the same saved and live streams,
+   then record sustained CPU, memory, battery, and thermal behavior.
+8. Join the same tracker map from Android and Apple devices. Confirm peer count,
+   Save-driven ownership handoff, non-owner relay, reconnect recovery, and that
+   only the locally confirmed owner publishes to the CalTopo test map.
+9. Fly a controlled two-aircraft spacing exercise. Verify speech/haptic warning,
+   Map, Suspend, Resume, three-second clearing, and that a non-owner Apple device
+   never produces the alert.
+
+## Simulator versus device
+
+The Simulator is the fast gate for SwiftUI, shared policy, persistence, and
+synthetic stream tests. The 2021 M1 iPad Pro is the primary device gate for
+Bluetooth advertisements, controller networking, sustained VideoToolbox
+decode, thermal behavior, and anomaly-detector performance.
+
+## Source ownership
+
+- `Sources/R2CCore`: portable Swift models and policy.
+- `App`: SwiftUI application shell.
+- `Sources/R2CAppleRadios`: CoreBluetooth and Apple networking adapters.
+- `Native/AnomalyCore`: Apple facade and repeatable XCFramework build over the
+  existing portable C sources.
+- `Native/MediaMTX`: mobile bridge and repeatable XCFramework build; the
+  authoritative Go source remains the verified MediaMTX tree.

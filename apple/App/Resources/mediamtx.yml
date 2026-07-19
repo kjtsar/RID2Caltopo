@@ -1,0 +1,38 @@
+# Minimal Apple bring-up configuration for controller RTMP ingest and local RTSP.
+logLevel: info
+logDestinations: [stdout]
+logStructured: no
+
+api: false
+metrics: false
+pprof: false
+
+readTimeout: 90s
+writeTimeout: 90s
+
+rtmp: yes
+rtmpAddress: :1935
+rtsp: yes
+rtspAddress: :8554
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: no
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+webrtc: no
+srt: no
+
+pathDefaults:
+  source: publisher
+  overridePublisher: yes
+  publisherInactivityCloseAfter: 30s
+
+paths:
+  all_others:
+    source: publisher
+    overridePublisher: yes
+    publisherCloseAfter: 20s
+    publisherInactivityCloseAfter: 30s
+    rtmpPublishVideoOnly: true

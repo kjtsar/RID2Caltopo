@@ -1,0 +1,243 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* RID2CaltopoAppleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000011 /* RID2CaltopoAppleApp.swift */; };
+		100000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000012 /* ContentView.swift */; };
+		100000000000000000000003 /* R2CCore in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000031 /* R2CCore */; };
+		100000000000000000000004 /* R2CAppleRadios in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000032 /* R2CAppleRadios */; };
+		100000000000000000000005 /* MediaMTXMobile.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 100000000000000000000013 /* MediaMTXMobile.xcframework */; };
+		100000000000000000000006 /* MediaMTXMobileController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000014 /* MediaMTXMobileController.swift */; };
+		100000000000000000000007 /* mediamtx.yml in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000015 /* mediamtx.yml */; };
+		100000000000000000000008 /* AppleVideoFrameSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000016 /* AppleVideoFrameSource.swift */; };
+		100000000000000000000009 /* R2CAnomalyApple.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 100000000000000000000017 /* R2CAnomalyApple.xcframework */; };
+		10000000000000000000000A /* RIDTrackViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000018 /* RIDTrackViewModel.swift */; };
+		10000000000000000000000B /* RIDTrackMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000019 /* RIDTrackMapView.swift */; };
+		10000000000000000000000C /* AppleTrackArchiveStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001A /* AppleTrackArchiveStore.swift */; };
+		10000000000000000000000D /* AppleCaltopoSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001B /* AppleCaltopoSettings.swift */; };
+		10000000000000000000000E /* AppleCaltopoPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001C /* AppleCaltopoPublisher.swift */; };
+		10000000000000000000000F /* CaltopoSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001D /* CaltopoSettingsView.swift */; };
+		100000000000000000000100 /* AnomalyLiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001E /* AnomalyLiveView.swift */; };
+		100000000000000000000101 /* AppleNetworkAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001F /* AppleNetworkAddress.swift */; };
+		100000000000000000000102 /* AppleDiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000200 /* AppleDiagnosticLog.swift */; };
+		100000000000000000000103 /* DiagnosticLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000201 /* DiagnosticLogView.swift */; };
+		100000000000000000000104 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000202 /* Assets.xcassets */; };
+		100000000000000000000105 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000203 /* PrivacyInfo.xcprivacy */; };
+		100000000000000000000106 /* AboutPrivacyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000204 /* AboutPrivacyView.swift */; };
+		100000000000000000000107 /* AppleLocationProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000205 /* AppleLocationProvider.swift */; };
+		100000000000000000000108 /* RIDAircraftDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000206 /* RIDAircraftDetailView.swift */; };
+		100000000000000000000109 /* AppleOrgConfigImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000207 /* AppleOrgConfigImporter.swift */; };
+		10000000000000000000010A /* AppleTrackerCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000208 /* AppleTrackerCoordinator.swift */; };
+		10000000000000000000010B /* AppleProximityAlertCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000209 /* AppleProximityAlertCenter.swift */; };
+		10000000000000000000010C /* AppleStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000020A /* AppleStatusView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		100000000000000000000010 /* RID2CaltopoApple.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RID2CaltopoApple.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000011 /* RID2CaltopoAppleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RID2CaltopoAppleApp.swift; sourceTree = "<group>"; };
+		100000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		100000000000000000000013 /* MediaMTXMobile.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Build/MediaMTX/MediaMTXMobile.xcframework; sourceTree = "<group>"; };
+		100000000000000000000014 /* MediaMTXMobileController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaMTXMobileController.swift; sourceTree = "<group>"; };
+		100000000000000000000015 /* mediamtx.yml */ = {isa = PBXFileReference; lastKnownFileType = text.yaml; path = Resources/mediamtx.yml; sourceTree = "<group>"; };
+		100000000000000000000016 /* AppleVideoFrameSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleVideoFrameSource.swift; sourceTree = "<group>"; };
+		100000000000000000000017 /* R2CAnomalyApple.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Build/AnomalyCore/R2CAnomalyApple.xcframework; sourceTree = "<group>"; };
+		100000000000000000000018 /* RIDTrackViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RIDTrackViewModel.swift; sourceTree = "<group>"; };
+		100000000000000000000019 /* RIDTrackMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RIDTrackMapView.swift; sourceTree = "<group>"; };
+		10000000000000000000001A /* AppleTrackArchiveStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleTrackArchiveStore.swift; sourceTree = "<group>"; };
+		10000000000000000000001B /* AppleCaltopoSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleCaltopoSettings.swift; sourceTree = "<group>"; };
+		10000000000000000000001C /* AppleCaltopoPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleCaltopoPublisher.swift; sourceTree = "<group>"; };
+		10000000000000000000001D /* CaltopoSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaltopoSettingsView.swift; sourceTree = "<group>"; };
+		10000000000000000000001E /* AnomalyLiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnomalyLiveView.swift; sourceTree = "<group>"; };
+		10000000000000000000001F /* AppleNetworkAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleNetworkAddress.swift; sourceTree = "<group>"; };
+		100000000000000000000200 /* AppleDiagnosticLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleDiagnosticLog.swift; sourceTree = "<group>"; };
+		100000000000000000000201 /* DiagnosticLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogView.swift; sourceTree = "<group>"; };
+		100000000000000000000202 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		100000000000000000000203 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		100000000000000000000204 /* AboutPrivacyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutPrivacyView.swift; sourceTree = "<group>"; };
+		100000000000000000000205 /* AppleLocationProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleLocationProvider.swift; sourceTree = "<group>"; };
+		100000000000000000000206 /* RIDAircraftDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RIDAircraftDetailView.swift; sourceTree = "<group>"; };
+		100000000000000000000207 /* AppleOrgConfigImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleOrgConfigImporter.swift; sourceTree = "<group>"; };
+		100000000000000000000208 /* AppleTrackerCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleTrackerCoordinator.swift; sourceTree = "<group>"; };
+		100000000000000000000209 /* AppleProximityAlertCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleProximityAlertCenter.swift; sourceTree = "<group>"; };
+		10000000000000000000020A /* AppleStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleStatusView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		100000000000000000000020 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (100000000000000000000003 /* R2CCore in Frameworks */, 100000000000000000000004 /* R2CAppleRadios in Frameworks */, 100000000000000000000005 /* MediaMTXMobile.xcframework in Frameworks */, 100000000000000000000009 /* R2CAnomalyApple.xcframework in Frameworks */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		100000000000000000000040 = {
+			isa = PBXGroup;
+			children = (100000000000000000000041 /* App */, 100000000000000000000013 /* MediaMTXMobile.xcframework */, 100000000000000000000017 /* R2CAnomalyApple.xcframework */, 100000000000000000000042 /* Products */,);
+			sourceTree = "<group>";
+		};
+		100000000000000000000041 /* App */ = {
+			isa = PBXGroup;
+			children = (100000000000000000000011 /* RID2CaltopoAppleApp.swift */, 100000000000000000000012 /* ContentView.swift */, 100000000000000000000014 /* MediaMTXMobileController.swift */, 10000000000000000000001F /* AppleNetworkAddress.swift */, 100000000000000000000200 /* AppleDiagnosticLog.swift */, 100000000000000000000201 /* DiagnosticLogView.swift */, 100000000000000000000204 /* AboutPrivacyView.swift */, 100000000000000000000205 /* AppleLocationProvider.swift */, 100000000000000000000206 /* RIDAircraftDetailView.swift */, 100000000000000000000207 /* AppleOrgConfigImporter.swift */, 100000000000000000000208 /* AppleTrackerCoordinator.swift */, 100000000000000000000209 /* AppleProximityAlertCenter.swift */, 10000000000000000000020A /* AppleStatusView.swift */, 100000000000000000000016 /* AppleVideoFrameSource.swift */, 10000000000000000000001E /* AnomalyLiveView.swift */, 100000000000000000000018 /* RIDTrackViewModel.swift */, 100000000000000000000019 /* RIDTrackMapView.swift */, 10000000000000000000001A /* AppleTrackArchiveStore.swift */, 10000000000000000000001B /* AppleCaltopoSettings.swift */, 10000000000000000000001C /* AppleCaltopoPublisher.swift */, 10000000000000000000001D /* CaltopoSettingsView.swift */, 100000000000000000000202 /* Assets.xcassets */, 100000000000000000000203 /* PrivacyInfo.xcprivacy */, 100000000000000000000015 /* mediamtx.yml */,);
+			path = App;
+			sourceTree = "<group>";
+		};
+		100000000000000000000042 /* Products */ = {
+			isa = PBXGroup;
+			children = (100000000000000000000010 /* RID2CaltopoApple.app */,);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		100000000000000000000050 /* RID2CaltopoApple */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000070 /* Build configuration list for PBXNativeTarget "RID2CaltopoApple" */;
+			buildPhases = (100000000000000000000060 /* Sources */, 100000000000000000000020 /* Frameworks */, 100000000000000000000061 /* Resources */,);
+			buildRules = ();
+			dependencies = ();
+			name = RID2CaltopoApple;
+			packageProductDependencies = (100000000000000000000031 /* R2CCore */, 100000000000000000000032 /* R2CAppleRadios */,);
+			productName = RID2CaltopoApple;
+			productReference = 100000000000000000000010 /* RID2CaltopoApple.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		100000000000000000000080 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {100000000000000000000050 = {CreatedOnToolsVersion = 26.6;};};
+			};
+			buildConfigurationList = 100000000000000000000071 /* Build configuration list for PBXProject "RID2CaltopoApple" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base,);
+			mainGroup = 100000000000000000000040;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (100000000000000000000030 /* XCLocalSwiftPackageReference "." */,);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 100000000000000000000042 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (100000000000000000000050 /* RID2CaltopoApple */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		100000000000000000000061 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000007 /* mediamtx.yml in Resources */, 100000000000000000000104 /* Assets.xcassets in Resources */, 100000000000000000000105 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0;};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		100000000000000000000060 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (100000000000000000000002 /* ContentView.swift in Sources */, 100000000000000000000001 /* RID2CaltopoAppleApp.swift in Sources */, 100000000000000000000006 /* MediaMTXMobileController.swift in Sources */, 100000000000000000000101 /* AppleNetworkAddress.swift in Sources */, 100000000000000000000102 /* AppleDiagnosticLog.swift in Sources */, 100000000000000000000103 /* DiagnosticLogView.swift in Sources */, 100000000000000000000106 /* AboutPrivacyView.swift in Sources */, 100000000000000000000107 /* AppleLocationProvider.swift in Sources */, 100000000000000000000108 /* RIDAircraftDetailView.swift in Sources */, 100000000000000000000109 /* AppleOrgConfigImporter.swift in Sources */, 10000000000000000000010A /* AppleTrackerCoordinator.swift in Sources */, 10000000000000000000010B /* AppleProximityAlertCenter.swift in Sources */, 10000000000000000000010C /* AppleStatusView.swift in Sources */, 100000000000000000000008 /* AppleVideoFrameSource.swift in Sources */, 100000000000000000000100 /* AnomalyLiveView.swift in Sources */, 10000000000000000000000A /* RIDTrackViewModel.swift in Sources */, 10000000000000000000000B /* RIDTrackMapView.swift in Sources */, 10000000000000000000000C /* AppleTrackArchiveStore.swift in Sources */, 10000000000000000000000D /* AppleCaltopoSettings.swift in Sources */, 10000000000000000000000E /* AppleCaltopoPublisher.swift in Sources */, 10000000000000000000000F /* CaltopoSettingsView.swift in Sources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		100000000000000000000090 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; COPY_PHASE_STRIP = NO; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_OPTIMIZATION_LEVEL = 0; ONLY_ACTIVE_ARCH = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; SWIFT_OPTIMIZATION_LEVEL = "-Onone";};
+			name = Debug;
+		};
+		100000000000000000000091 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; COPY_PHASE_STRIP = NO; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O";};
+			name = Release;
+		};
+		100000000000000000000092 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 94UV79S6LR;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = RID2Caltopo;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "RID2Caltopo scans nearby ASTM Remote ID Bluetooth broadcasts to locate aircraft.";
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "RID2Caltopo receives drone telemetry and video streams over the local network.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RID2Caltopo uses location to map Remote ID aircraft observations.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = "$(inherited) -lresolv";
+				PRODUCT_BUNDLE_IDENTIFIER = org.ncssar.RID2CaltopoApple;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = App/RID2CaltopoApple-Bridging-Header.h;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		100000000000000000000093 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 94UV79S6LR;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = RID2Caltopo;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "RID2Caltopo scans nearby ASTM Remote ID Bluetooth broadcasts to locate aircraft.";
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "RID2Caltopo receives drone telemetry and video streams over the local network.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RID2Caltopo uses location to map Remote ID aircraft observations.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = "$(inherited) -lresolv";
+				PRODUCT_BUNDLE_IDENTIFIER = org.ncssar.RID2CaltopoApple;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = App/RID2CaltopoApple-Bridging-Header.h;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		100000000000000000000070 /* Build configuration list for PBXNativeTarget "RID2CaltopoApple" */ = {isa = XCConfigurationList; buildConfigurations = (100000000000000000000092 /* Debug */, 100000000000000000000093 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		100000000000000000000071 /* Build configuration list for PBXProject "RID2CaltopoApple" */ = {isa = XCConfigurationList; buildConfigurations = (100000000000000000000090 /* Debug */, 100000000000000000000091 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		100000000000000000000030 /* XCLocalSwiftPackageReference "." */ = {isa = XCLocalSwiftPackageReference; relativePath = .;};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		100000000000000000000031 /* R2CCore */ = {isa = XCSwiftPackageProductDependency; package = 100000000000000000000030 /* XCLocalSwiftPackageReference "." */; productName = R2CCore;};
+		100000000000000000000032 /* R2CAppleRadios */ = {isa = XCSwiftPackageProductDependency; package = 100000000000000000000030 /* XCLocalSwiftPackageReference "." */; productName = R2CAppleRadios;};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 100000000000000000000080 /* Project object */;
+}

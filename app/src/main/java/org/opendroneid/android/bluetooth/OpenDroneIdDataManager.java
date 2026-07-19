@@ -19,6 +19,7 @@ import org.opendroneid.android.data.SelfIdData;
 import org.opendroneid.android.data.SystemData;
 import org.opendroneid.android.data.OperatorIdData;
 import org.ncssar.rid2caltopo.data.CaltopoClient;
+import org.ncssar.rid2caltopo.data.AppleRidRelay;
 
 import java.util.Arrays;
 import java.util.Locale;
@@ -409,6 +410,30 @@ public class OpenDroneIdDataManager {
         // Pass -1000.0 (RID invalid sentinel) so MapPane skips the fallback calibration.
         // Position (lat/lng) is still recorded; ATO display uses spec.getLastRidHeightM() directly.
         double trackAltitudeM = absAltFromRidFallback ? -1000.0 : altitudeInMeters;
+        if (transportType == CtDroneSpec.TransportTypeEnum.WIFI ||
+                transportType == CtDroneSpec.TransportTypeEnum.WNAN) {
+            SystemData system = ac.getSystem();
+            double operatorLat = Double.NaN;
+            double operatorLng = Double.NaN;
+            if (system != null &&
+                    !(system.getOperatorLatitude() == 0.0 && system.getOperatorLongitude() == 0.0)) {
+                operatorLat = system.getOperatorLatitude();
+                operatorLng = system.getOperatorLongitude();
+            }
+            AppleRidRelay.forwardAcceptedWifiObservation(
+                    idStr,
+                    transportType == CtDroneSpec.TransportTypeEnum.WNAN ? "wifiNan" : "wifiBeacon",
+                    timestampInMilliseconds > 0L ? timestampInMilliseconds : nowWallMsec,
+                    lat,
+                    lng,
+                    isRidAltitudeValid(altitudeInMeters) ? altitudeInMeters : Double.NaN,
+                    aircraftTrackDeg != null ? aircraftTrackDeg : Double.NaN,
+                    aircraftGsKnots != null ? speedGroundMps : Double.NaN,
+                    operatorLat,
+                    operatorLng,
+                    ac.getConnection().rssi
+            );
+        }
         client.newWaypoint(lat, lng, trackAltitudeM, timestampInMilliseconds, transportType, airborne);
     }
 

@@ -1,0 +1,1 @@
+Initial iPhone and iPad field-test release with Bluetooth Remote ID, external Wi-Fi Remote ID relay support, MapKit tracking, Android QR configuration import, tracker coordination, CalTopo publishing, local MediaMTX video ingest, anomaly detection, and diagnostic log sharing.

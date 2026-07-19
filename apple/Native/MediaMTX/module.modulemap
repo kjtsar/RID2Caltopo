@@ -1,0 +1,4 @@
+module MediaMTXMobile {
+    header "libmediamtx_mobile.h"
+    export *
+}

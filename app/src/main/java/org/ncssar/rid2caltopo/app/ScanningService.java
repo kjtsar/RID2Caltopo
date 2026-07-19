@@ -32,6 +32,7 @@ import androidx.core.content.ContextCompat;
 
 import org.ncssar.rid2caltopo.R;
 import org.ncssar.rid2caltopo.data.CaltopoClient;
+import org.ncssar.rid2caltopo.data.AppleRidRelay;
 import org.ncssar.rid2caltopo.data.SimpleTimer;
 import org.opendroneid.android.bluetooth.BluetoothScanner;
 import org.opendroneid.android.bluetooth.OpenDroneIdDataManager;
@@ -75,6 +76,7 @@ public class ScanningService extends Service {
         }
         scanning = true;
         if (null == AppContext) AppContext = R2CApplication.getAppCtxt();
+        AppleRidRelay.refreshConfiguration(AppContext);
         CTDebug(TAG, String.format(Locale.US, "startScanning(): ScanningService 0x%x", this.hashCode()));
         wiFiScanner = new WiFiScanner(AppContext, DataManager);
         wiFiScanner.startScan();

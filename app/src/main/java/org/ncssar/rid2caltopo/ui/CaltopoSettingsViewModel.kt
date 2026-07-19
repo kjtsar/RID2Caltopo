@@ -12,6 +12,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.ncssar.rid2caltopo.app.MediaMTXService
 import org.ncssar.rid2caltopo.app.R2CApplication
 import org.ncssar.rid2caltopo.data.CaltopoClient
+import org.ncssar.rid2caltopo.data.AppleRidRelay
+import org.ncssar.rid2caltopo.data.AppleRidRelayConfig
+import org.ncssar.rid2caltopo.data.AppleRidRelayPrefs
 import org.ncssar.rid2caltopo.data.ExternalDisplayAlertRouting
 import org.ncssar.rid2caltopo.data.ExternalDisplayConfig
 import org.ncssar.rid2caltopo.data.ExternalDisplayContentMode
@@ -50,6 +53,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     val predictiveHeadEnabled = _predictiveHeadEnabled.asStateFlow()
     private val _proximityAlertSpacingFeet = MutableStateFlow(CaltopoClient.GetProximityAlertSpacingFeet().toString())
     val proximityAlertSpacingFeet = _proximityAlertSpacingFeet.asStateFlow()
+    private val initialAppleRidRelayConfig = R2CApplication.getAppCtxt()?.let(AppleRidRelayPrefs::load)
+        ?: AppleRidRelayConfig()
+    private val _appleRidRelayEnabled = MutableStateFlow(initialAppleRidRelayConfig.enabled)
+    val appleRidRelayEnabled = _appleRidRelayEnabled.asStateFlow()
+    private val _appleRidRelayHost = MutableStateFlow(initialAppleRidRelayConfig.host)
+    val appleRidRelayHost = _appleRidRelayHost.asStateFlow()
 
     private val _maxIdleTimeInMinutes = MutableStateFlow(CaltopoClient.GetMaxIdleTimeInMinutes().toString())
     val maxIdleTimeInMinutes = _maxIdleTimeInMinutes.asStateFlow()
@@ -169,6 +178,12 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     fun onProximityAlertSpacingFeetChanged(feet: String) {
         _proximityAlertSpacingFeet.value = feet
     }
+    fun onAppleRidRelayEnabledChanged(enabled: Boolean) {
+        _appleRidRelayEnabled.value = enabled
+    }
+    fun onAppleRidRelayHostChanged(host: String) {
+        _appleRidRelayHost.value = host
+    }
     fun onCaltopoDomainAndPortChanged(url: String) {
         _caltopoDomainAndPort.value = url
     }
@@ -231,6 +246,16 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         CaltopoClient.SetCaptureVideoStreamsFlag(_captureIncomingVideo.value)
         CaltopoClient.SetPredictiveHeadEnabled(_predictiveHeadEnabled.value)
         _proximityAlertSpacingFeet.value.toLongOrNull()?.let { CaltopoClient.SetProximityAlertSpacingFeet(it) }
+        R2CApplication.getAppCtxt()?.let { context ->
+            AppleRidRelayPrefs.save(
+                context,
+                AppleRidRelayConfig(
+                    enabled = _appleRidRelayEnabled.value,
+                    host = _appleRidRelayHost.value,
+                ),
+            )
+            AppleRidRelay.refreshConfiguration(context)
+        }
         CaltopoClient.SetCaltopoDomainAndPort(_caltopoDomainAndPort.value)
         CaltopoClient.SetNotamEnabled(_notamEnabled.value)
         _notamRadiusNm.value.toIntOrNull()?.let { CaltopoClient.SetNotamRadiusNm(it) }

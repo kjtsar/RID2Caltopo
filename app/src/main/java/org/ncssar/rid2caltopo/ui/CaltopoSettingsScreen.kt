@@ -36,6 +36,8 @@ fun CaltopoSettingsScreen(
     val standaloneR2cCoordinationEnabled by settingsViewModel.standaloneR2cCoordinationEnabled.collectAsState()
     val predictiveHeadEnabled by settingsViewModel.predictiveHeadEnabled.collectAsState()
     val proximityAlertSpacingFeet by settingsViewModel.proximityAlertSpacingFeet.collectAsState()
+    val appleRidRelayEnabled by settingsViewModel.appleRidRelayEnabled.collectAsState()
+    val appleRidRelayHost by settingsViewModel.appleRidRelayHost.collectAsState()
     val caltopoUrl by settingsViewModel.caltopoUrl.collectAsState()
     val notamEnabled by settingsViewModel.notamEnabled.collectAsState()
     val notamRadiusNm by settingsViewModel.notamRadiusNm.collectAsState()
@@ -147,6 +149,30 @@ fun CaltopoSettingsScreen(
                     },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     label = { Text("Proximity Alert Spacing (ft)") }
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Apple Wi-Fi Remote ID Relay", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Forwards accepted Wi-Fi Beacon/NAN positions to RID2Caltopo on an iPhone or iPad. Bluetooth is not duplicated.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LabeledSwitch(
+                    label = "Forward Wi-Fi Remote ID",
+                    checked = appleRidRelayEnabled,
+                    onCheckedChange = settingsViewModel::onAppleRidRelayEnabledChanged
+                )
+                OutlinedTextField(
+                    value = appleRidRelayHost,
+                    onValueChange = settingsViewModel::onAppleRidRelayHostChanged,
+                    enabled = appleRidRelayEnabled,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Apple device IP or broadcast address") },
+                    supportingText = { Text("UDP port 7654; default 255.255.255.255 broadcasts on the local Wi-Fi network.") }
                 )
 
 

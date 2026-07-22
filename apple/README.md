@@ -44,6 +44,14 @@ arm64 Simulator link, and verifies a fresh unsigned arm64 iPhone/iPad archive. U
 `--skip-native-rebuild` only for an intentional fast rerun after the native
 artifacts have already been rebuilt from the unchanged source trees.
 
+The gate also validates the shared protected-land source catalog. Network
+verification is attempted at most once every seven days and its state is kept
+under the ignored root `.release-state/` directory, so repeated release checks do not
+contact upstream GIS services. Debug builds never run this check. Pass
+`--force-land-catalog-refresh` only when an immediate recheck is intentional;
+temporary upstream failure retains the checked-in last-known-good catalog and
+prints a release warning.
+
 Radio, background behavior, controller networking, and performance must be
 qualified on a physical device even when equivalent Simulator tests pass.
 
@@ -73,15 +81,83 @@ frames, analyzed frames, backpressure drops, and current anomaly boxes.
 The detector control matches Android's high-level appearance choices: **Off**
 keeps video connected without spending analysis CPU, **Color** runs the shared
 fresh-RGBA Color Uniqueness detector, and **Infrared** runs the shared thermal
-detector. The persisted choice can be changed from either the main Anomaly
-Detector section or Live View and is included in the copyable Status report.
+detector. Apple 1.2 also exposes **Target Colors** and persisted advanced
+controls for motion/saliency, sensitivity, scan zone, cadence, registration,
+thermal polarity/delta, color candidates, guide boxes, and detector diagnostic
+overlays. The choice can be changed from the main Anomaly Detector section,
+Live View, or Advanced Anomaly Settings and is included in the copyable Status
+report.
 On physical hardware, the Anomaly Detector section displays the device's
 copyable `rtmp://<wifi-address>:1935/demo` controller target.
 
 For a deterministic Remote ID map smoke test, launch with `--demo-rid` and
 `--show-map`. Two synthetic aircraft exercise the same `RidTrackStore` actor
 used by live Bluetooth observations, including track polylines and current
-aircraft annotations on both iPhone and iPad.
+aircraft annotations on both iPhone and iPad. The operational map is backed by
+`MKMapView` and supports OpenStreetMap or ArcGIS imagery, optional USGS contour
+tiles, disk-backed visible-tile caching with an offline-only mode, signed
+CalTopo marker/line/polygon snapshots with searchable nested folder and
+individual-item visibility, including orphan grouping and parent-linked media
+behavior. Visibility choices persist per map. Map/video supports map-only,
+video-only, split, and primary/inset layouts, and CalTopo snapshots are cached
+per map for offline reuse. Apple 1.2 queries nearby NOTAM/TFR data using the
+imported FAA configuration and renders status, age, details, and colored
+point/line/polygon restrictions. It also queries the same one-mile FAA UAS
+Facility Map operating area as Android and reports airport, class, published
+ceiling, LAANC availability, and authorization status.
+The map menu also provides Android-shaped region preparation for the current
+viewport or a selected CalTopo line/polygon, including the Overview, Ops, and
+Full Detail presets, optional contours and USGS 1-degree DEM downloads,
+estimates, progress/cancellation, cache size/age maintenance, and bad-tile
+quarantine/export. Downloaded GeoTIFFs are sampled directly for terrain/AGL,
+with the point-sample cache and USGS service retained as fallbacks.
+Confirmed pilots also have Android-compatible local display preferences for
+active and archive track colors and the optional viewport-edge bearing line;
+tap a confirmed aircraft to edit or reset those settings.
+MediaMTX publisher events admit up to four simultaneous controller streams.
+Live Streams provides a focused, status-labeled grid, while the focused stream
+feeds map/video presentation and clue capture. Settings can use OS mirroring or
+an app-managed attached display with streams, map, split, or observer content
+and configurable alert routing.
+
+Backup & Transfer creates a passphrase-encrypted local configuration file and
+restores it through the document picker. It can also maintain an encrypted
+latest backup in the app's iCloud Drive container; automatic updates are
+debounced, and the passphrase is retained only in that device's Keychain.
+Files import/export remains available for iCloud-only, local, removable, or
+installed third-party document providers. The map menu's Export MA Package
+workflow produces Android-compatible ZIP packages from cached viewport tiles
+and DEM data; importing one installs its expiring incident profile and offline
+map content after validating archive paths and package format.
+Captured Video Review opens one movie at a time with replacement-safe local
+staging, Back/Run/Pause/Step/scrub controls, optional pause-on-open, local
+detector guide boxes, verdict summaries, and clearable paused-frame annotations.
+Reviews preserve Android schema-v2 anomaly box/debug fields under Application
+Support and can be exported through the share sheet.
+Aircraft labels use Android's collision-aware name/status layout and expose a
+combined telemetry and pilot-display sheet when tapped. Predictive Head and
+Follow Focused Drone are available from the map menu. ATO, terrain-adjusted
+AGL, and range from the first accepted takeoff fix use the same calibration
+rules as Android. USGS terrain samples are cached for a year, stale fallback
+values carry `?`, the detail sheet supports Android's manual 50-foot ATO/AGL
+calibration, and aircraft turn yellow/red at 180/200 feet AGL.
+
+The video pane's camera button captures the latest decoded frame and opens the
+clue sheet. One-stream operation defaults to the focused aircraft (or the first
+active aircraft), while the sheet allows a different active aircraft to be
+selected. It shows the snapshot, drone and projected clue locations, heading,
+AGL/ATO, and an Android-compatible -90° to 0° gimbal control. Operators can add
+the clue only to the local R2C map or save locally and submit to CalTopo.
+
+Clues are always persisted before any network request. Full JPEGs, thumbnails,
+metadata, and upload state live in `Documents/RID2Caltopo/Clues`; local camera
+markers remain visible after restart and support preview, sharing, deletion,
+and manual retry. CalTopo photo submission uses stable marker/media IDs and
+Android's signed Marker, backend-media, media-data, and MapMediaObject request
+sequence. Failed uploads retry with bounded exponential delay and resume after
+restart or credential reconfiguration. `--demo-rid --show-map
+--demo-clue-sheet` and `--demo-local-clue` provide deterministic Simulator UI
+qualification without a live camera stream.
 
 Track completion writes Android-compatible GeoJSON into
 `Documents/RID2Caltopo/Tracks/YYYY-MM-DD`. File Sharing and opening documents
@@ -111,6 +187,8 @@ to port 7654. Start the listener in the Remote ID screen or use
   "latitude": 39.7392,
   "longitude": -104.9903,
   "altitude_m": 1620.5,
+  "height_m": 35.2,
+  "height_reference": "takeoff",
   "heading_deg": 92,
   "speed_mps": 11.5,
   "operator_latitude": 39.74,
@@ -121,8 +199,9 @@ to port 7654. Start the listener in the Remote ID screen or use
 
 Only `aircraft_id`, `latitude`, and `longitude` are required. Accepted `source`
 values are the `RidObservation.Source` raw values; omitted or unknown values are
-recorded as `externalReceiver`. Invalid JSON and out-of-range coordinates are
-counted and discarded before they reach the track store.
+recorded as `externalReceiver`. Optional `height_reference` values are
+`takeoff` and `ground`. Invalid JSON and out-of-range coordinates are counted
+and discarded before they reach the track store.
 
 With an installed Simulator build running and listening, the complete external
 receiver-to-track-to-log seam can be checked repeatably with:

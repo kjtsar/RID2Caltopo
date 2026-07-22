@@ -63,6 +63,7 @@ import org.ncssar.rid2caltopo.app.R2CActivity;
 import org.ncssar.rid2caltopo.app.R2CApplication;
 import org.ncssar.rid2caltopo.app.ScanningService;
 import org.ncssar.rid2caltopo.notam.NotamCenter;
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter;
 import org.ncssar.rid2caltopo.ui.ProximityAlertCenter;
 import com.google.firebase.analytics.FirebaseAnalytics;
 
@@ -226,6 +227,11 @@ class ClientClassState {
     public String notamClientSecret;
     public String notamScope;
     public long notamLastUpdatedEpochMs;
+    public boolean landRestrictionsEnabled;
+    public boolean landRestrictionsShowOnMap;
+    public boolean landRestrictionsAutoRefresh;
+    public int landRestrictionsRadiusNm;
+    public long landRestrictionsLastUpdatedEpochMs;
     public String faaRemoteToken;
     public String faaConfigLabel;
     public String faaPayloadEnc;
@@ -276,6 +282,11 @@ class ClientClassState {
         notamClientSecret = "";
         notamScope = "";
         notamLastUpdatedEpochMs = 0L;
+        landRestrictionsEnabled = true;
+        landRestrictionsShowOnMap = true;
+        landRestrictionsAutoRefresh = true;
+        landRestrictionsRadiusNm = 5;
+        landRestrictionsLastUpdatedEpochMs = 0L;
         faaRemoteToken = "";
         faaConfigLabel = "";
         faaPayloadEnc = "";
@@ -322,6 +333,7 @@ class ClientClassState {
                         predictiveHeadEnabled:%s, proximityAlertSpacingFeet:%d
                         notamEnabled:%s, notamRadiusNm:%d, notamAutoRefresh:%s, notamRefreshIntervalSeconds:%d, notamWarnInsideOneNm:%s
                         notamApiBaseUrl:'%s', notamTokenUrl:'%s', notamClientId:'%s', notamClientSecret:'%s', notamScope:'%s', notamLastUpdatedEpochMs:%d
+                        landRestrictionsEnabled:%s, landRestrictionsShowOnMap:%s, landRestrictionsAutoRefresh:%s, landRestrictionsRadiusNm:%d, landRestrictionsLastUpdatedEpochMs:%d
                         faaConfigLabel:'%s', faaTokenPresent:%s, faaPayloadCached:%s, faaStale:%s, faaLastValidatedEpochMs:%d, faaLastFailureReason:'%s'
                         activeCaltopoProfileId:'%s', caltopoProfiles:%d, maTemplateConfigured:%s
                         archivePath: '%s', caltopoTrackFolder: '%s', caltopoDomainAndPort:%s,
@@ -333,6 +345,8 @@ class ClientClassState {
                 notamEnabled, notamRadiusNm, notamAutoRefresh, notamRefreshIntervalSeconds, notamWarnInsideOneNm,
                 notamApiBaseUrl, notamTokenUrl, notamClientId.isEmpty() ? "" : "######",
                 notamClientSecret.isEmpty() ? "" : "###########", notamScope, notamLastUpdatedEpochMs,
+                landRestrictionsEnabled, landRestrictionsShowOnMap, landRestrictionsAutoRefresh,
+                landRestrictionsRadiusNm, landRestrictionsLastUpdatedEpochMs,
                 faaConfigLabel, !faaRemoteToken.isEmpty(), !faaPayloadEnc.isEmpty(), faaConfigStale,
                 faaLastValidatedEpochMs, faaLastFailureReason,
                 activeCaltopoProfileId, caltopoProfiles != null ? caltopoProfiles.size() : 0,
@@ -3158,6 +3172,71 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         }
     }
 
+    public static boolean GetLandRestrictionsEnabled() {
+        return GetState().landRestrictionsEnabled;
+    }
+
+    public static void SetLandRestrictionsEnabled(boolean enabled) {
+        ClientClassState ccs = GetState();
+        if (ccs.landRestrictionsEnabled != enabled) {
+            ccs.landRestrictionsEnabled = enabled;
+            NotifySettingsChanged();
+            ArchiveState("land restrictions enabled changed");
+        }
+    }
+
+    public static boolean GetLandRestrictionsShowOnMap() {
+        return GetState().landRestrictionsShowOnMap;
+    }
+
+    public static void SetLandRestrictionsShowOnMap(boolean enabled) {
+        ClientClassState ccs = GetState();
+        if (ccs.landRestrictionsShowOnMap != enabled) {
+            ccs.landRestrictionsShowOnMap = enabled;
+            NotifySettingsChanged();
+            ArchiveState("land restrictions map visibility changed");
+        }
+    }
+
+    public static boolean GetLandRestrictionsAutoRefresh() {
+        return GetState().landRestrictionsAutoRefresh;
+    }
+
+    public static void SetLandRestrictionsAutoRefresh(boolean enabled) {
+        ClientClassState ccs = GetState();
+        if (ccs.landRestrictionsAutoRefresh != enabled) {
+            ccs.landRestrictionsAutoRefresh = enabled;
+            NotifySettingsChanged();
+            ArchiveState("land restrictions auto refresh changed");
+        }
+    }
+
+    public static int GetLandRestrictionsRadiusNm() {
+        return GetState().landRestrictionsRadiusNm;
+    }
+
+    public static void SetLandRestrictionsRadiusNm(int radiusNm) {
+        int normalized = Math.max(1, Math.min(50, radiusNm));
+        ClientClassState ccs = GetState();
+        if (ccs.landRestrictionsRadiusNm != normalized) {
+            ccs.landRestrictionsRadiusNm = normalized;
+            NotifySettingsChanged();
+            ArchiveState("land restrictions radius changed");
+        }
+    }
+
+    public static long GetLandRestrictionsLastUpdatedEpochMs() {
+        return GetState().landRestrictionsLastUpdatedEpochMs;
+    }
+
+    public static void SetLandRestrictionsLastUpdatedEpochMs(long value) {
+        ClientClassState ccs = GetState();
+        if (ccs.landRestrictionsLastUpdatedEpochMs != value) {
+            ccs.landRestrictionsLastUpdatedEpochMs = value;
+            ArchiveState("land restrictions timestamp changed");
+        }
+    }
+
     @NonNull
     public static String GetFaaRemoteToken() {
         String value = GetState().faaRemoteToken;
@@ -3485,6 +3564,7 @@ public class CaltopoClient implements CtDroneSpec.CtDroneSpecListener {
         long shutdownDebugLogGeneration = CaptureDebugLogGeneration();
         try {
             NotamCenter.INSTANCE.shutdown();
+            LandRestrictionCenter.INSTANCE.shutdown();
             if (Ccstate != null) {
                 ArchiveState("shutdown");
             }

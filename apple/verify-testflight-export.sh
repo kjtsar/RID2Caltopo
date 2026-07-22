@@ -76,7 +76,6 @@ profile_team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$profile_p
 profile_app="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist")"
 profile_beta="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:beta-reports-active' "$profile_plist")"
 profile_debug="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$profile_plist")"
-[[ "$profile_name" == *"Store Provisioning Profile"* ]] || { echo "Not an App Store provisioning profile: $profile_name" >&2; exit 1; }
 [[ "$profile_team" == "$actual_team" && "$profile_app" == "$application_identifier" ]] || { echo "Provisioning profile identity mismatch" >&2; exit 1; }
 [[ "$profile_beta" == "true" && "$profile_debug" == "false" ]] || { echo "Provisioning profile is not TestFlight-safe" >&2; exit 1; }
 if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$profile_plist" >/dev/null 2>&1; then

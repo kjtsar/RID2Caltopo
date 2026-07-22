@@ -6,6 +6,7 @@ struct RIDAircraftSummaryRow: View {
     let track: RidAircraftTrack
     let operatorLocation: CLLocation?
     let identity: RidAircraftIdentity?
+    var confirmedForCurrentFlight = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -31,6 +32,12 @@ struct RIDAircraftSummaryRow: View {
                 if let relativePosition {
                     Text(formatRange(relativePosition.distanceMeters))
                 }
+                Spacer(minLength: 4)
+                Label(
+                    confirmedForCurrentFlight ? "Saved" : "Tap to Save",
+                    systemImage: confirmedForCurrentFlight ? "checkmark.circle.fill" : "exclamationmark.circle"
+                )
+                .foregroundStyle(confirmedForCurrentFlight ? .green : .orange)
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -79,6 +86,24 @@ struct RIDAircraftDetailView: View {
 
     var body: some View {
         List {
+            Section("Current Flight") {
+                Button {
+                    showConfirmation = true
+                } label: {
+                    Label(
+                        identityStore.isCurrentFlightConfirmed(track.aircraftID)
+                            ? "Update Saved Drone"
+                            : "Save Drone for This Flight",
+                        systemImage: identityStore.isCurrentFlightConfirmed(track.aircraftID)
+                            ? "checkmark.circle.fill"
+                            : "square.and.arrow.down"
+                    )
+                    .font(.headline)
+                }
+                Text("Saving enables the archive-colored flight tail and, when configured, local ownership, alerts, and CalTopo publishing—matching Android's Save contract.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Section("Identity and signal") {
                 LabeledContent("Remote ID", value: track.aircraftID)
                 if let identity = identityStore.identity(for: track.aircraftID) {
@@ -142,15 +167,6 @@ struct RIDAircraftDetailView: View {
                 }
             }
 
-
-            Section("Operator confirmation") {
-                Button(identityStore.identity(for: track.aircraftID) == nil ? "Confirm Drone" : "Update Confirmation") {
-                    showConfirmation = true
-                }
-                Text("Save confirms this drone locally. With tracker coordination configured, RID2Caltopo broadcasts the decision and waits for a local owner lease before publishing or arming local alerts.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
         }
         .navigationTitle(track.aircraftID)
         .navigationBarTitleDisplayMode(.inline)
@@ -202,6 +218,9 @@ final class AppleDroneConfirmationStore: ObservableObject {
     @Published private var sessionIdentities: [String: RidAircraftIdentity] = [:]
     @Published private var peerIdentities: [String: RidAircraftIdentity] = [:]
     @Published private var importedIdentities: [String: RidAircraftIdentity] = [:]
+    private var activeRemoteIDs: Set<String> = []
+    private var promptedRemoteIDs: Set<String> = []
+    private var ignoredRemoteIDs: Set<String> = []
     private let defaults = UserDefaults.standard
 
     init() {
@@ -211,7 +230,11 @@ final class AppleDroneConfirmationStore: ObservableObject {
             let identity = RidAircraftIdentity(
                 remoteID: remoteID,
                 organization: entry["organization"] ?? "",
-                pilotCallsign: entry["owner"] ?? "",
+                pilotCallsign: Self.importedPilotCallsign(
+                    mappedID: entry["mappedID"] ?? "",
+                    model: entry["model"] ?? "",
+                    remoteID: remoteID
+                ),
                 droneDescription: entry["model"] ?? "",
                 mappedIDOverride: entry["mappedID"]
             )
@@ -221,6 +244,40 @@ final class AppleDroneConfirmationStore: ObservableObject {
 
     func identity(for remoteID: String) -> RidAircraftIdentity? {
         peerIdentities[remoteID] ?? sessionIdentities[remoteID] ?? importedIdentities[remoteID]
+    }
+
+    func isCurrentFlightConfirmed(_ remoteID: String) -> Bool {
+        sessionIdentities[remoteID] != nil || peerIdentities[remoteID] != nil
+    }
+
+    /// Matches Android's current-flight confirmation lifecycle: prompt once for
+    /// every newly active flight, including known aircraft, and forget that
+    /// flight's session state after the aircraft becomes inactive.
+    func reconcileActiveFlights(_ orderedRemoteIDs: [String]) -> String? {
+        let currentRemoteIDs = Set(orderedRemoteIDs.filter { !$0.isEmpty })
+        let endedRemoteIDs = activeRemoteIDs.subtracting(currentRemoteIDs)
+        for remoteID in endedRemoteIDs {
+            sessionIdentities.removeValue(forKey: remoteID)
+            promptedRemoteIDs.remove(remoteID)
+            ignoredRemoteIDs.remove(remoteID)
+        }
+        activeRemoteIDs = currentRemoteIDs
+
+        guard let candidate = orderedRemoteIDs.first(where: { remoteID in
+            !remoteID.isEmpty
+                && !promptedRemoteIDs.contains(remoteID)
+                && !ignoredRemoteIDs.contains(remoteID)
+                && !isCurrentFlightConfirmed(remoteID)
+        }) else { return nil }
+        promptedRemoteIDs.insert(candidate)
+        AppleLog.info("DroneConfirmation", "Queueing confirmation for active flight remoteId=\(candidate)")
+        return candidate
+    }
+
+    func ignoreForCurrentFlight(_ remoteID: String) {
+        guard !remoteID.isEmpty else { return }
+        ignoredRemoteIDs.insert(remoteID)
+        AppleLog.info("DroneConfirmation", "Ignored active flight remoteId=\(remoteID) sessionOnly=true")
     }
 
     var importedMappingCount: Int { importedIdentities.count }
@@ -245,7 +302,11 @@ final class AppleDroneConfirmationStore: ObservableObject {
                 RidAircraftIdentity(
                     remoteID: mapping.remoteID,
                     organization: mapping.organization,
-                    pilotCallsign: mapping.owner,
+                    pilotCallsign: Self.importedPilotCallsign(
+                        mappedID: mapping.mappedID,
+                        model: mapping.model,
+                        remoteID: mapping.remoteID
+                    ),
                     droneDescription: mapping.model,
                     mappedIDOverride: mapping.mappedID
                 )
@@ -276,12 +337,17 @@ final class AppleDroneConfirmationStore: ObservableObject {
     func clearPeerConfirmation(remoteID: String) {
         peerIdentities.removeValue(forKey: remoteID)
     }
+
+    private static func importedPilotCallsign(mappedID: String, model: String, remoteID: String) -> String {
+        RidAircraftIdentity.guessPilotCallsign(mappedID: mappedID, model: model, remoteID: remoteID)
+    }
 }
 
-private struct DroneConfirmationView: View {
+struct DroneConfirmationView: View {
     let remoteID: String
     @ObservedObject var identityStore: AppleDroneConfirmationStore
     let onConfirm: (RidAircraftIdentity) -> Void
+    let onIgnore: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var organization: String
     @State private var pilotCallsign: String
@@ -291,11 +357,13 @@ private struct DroneConfirmationView: View {
         remoteID: String,
         existing: RidAircraftIdentity?,
         identityStore: AppleDroneConfirmationStore,
-        onConfirm: @escaping (RidAircraftIdentity) -> Void
+        onConfirm: @escaping (RidAircraftIdentity) -> Void,
+        onIgnore: (() -> Void)? = nil
     ) {
         self.remoteID = remoteID
         self.identityStore = identityStore
         self.onConfirm = onConfirm
+        self.onIgnore = onIgnore
         _organization = State(initialValue: existing?.organization ?? "")
         _pilotCallsign = State(initialValue: existing?.pilotCallsign ?? "")
         _droneDescription = State(initialValue: existing?.droneDescription ?? "")
@@ -320,7 +388,14 @@ private struct DroneConfirmationView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    if let onIgnore {
+                        Button("Ignore") {
+                            onIgnore()
+                            dismiss()
+                        }
+                    } else {
+                        Button("Cancel") { dismiss() }
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {

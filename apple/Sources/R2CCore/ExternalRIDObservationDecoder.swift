@@ -37,6 +37,8 @@ public enum ExternalRIDObservationDecoder {
             latitude: packet.latitude,
             longitude: packet.longitude,
             altitudeMeters: packet.altitudeMeters,
+            heightMeters: packet.heightMeters,
+            heightReference: packet.heightReference.flatMap(RidObservation.HeightReference.init(rawValue:)),
             headingDegrees: packet.headingDegrees,
             speedMetersPerSecond: packet.speedMetersPerSecond,
             operatorLatitude: packet.operatorLatitude,
@@ -52,6 +54,8 @@ public enum ExternalRIDObservationDecoder {
         let latitude: Double
         let longitude: Double
         let altitudeMeters: Double?
+        let heightMeters: Double?
+        let heightReference: String?
         let headingDegrees: Double?
         let speedMetersPerSecond: Double?
         let operatorLatitude: Double?
@@ -65,6 +69,8 @@ public enum ExternalRIDObservationDecoder {
             case latitude
             case longitude
             case altitudeMeters = "altitude_m"
+            case heightMeters = "height_m"
+            case heightReference = "height_reference"
             case headingDegrees = "heading_deg"
             case speedMetersPerSecond = "speed_mps"
             case operatorLatitude = "operator_latitude"

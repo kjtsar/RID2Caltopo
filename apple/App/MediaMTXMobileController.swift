@@ -90,6 +90,8 @@ private func mediaMTXSwiftLogCallback(
 final class MediaMTXViewModel: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var status = "Stopped"
+    @Published private(set) var activePublisherPaths: Set<String> = []
+    var eventHandler: ((MediaServerEvent) -> Void)?
 
     private let controller = MediaMTXMobileController()
     private var eventTask: Task<Void, Never>?
@@ -101,14 +103,18 @@ final class MediaMTXViewModel: ObservableObject {
         eventTask = Task { [controller] in
             for await event in controller.events {
                 guard !Task.isCancelled else { return }
+                eventHandler?(event)
                 switch event {
                 case let .serverStarted(version):
                     status = "Running \(version)"
                 case let .streamStarted(path, _):
+                    activePublisherPaths.insert(path)
                     status = "Streaming \(path)"
                 case let .streamStopped(path, _):
+                    activePublisherPaths.remove(path)
                     status = "Stopped stream \(path)"
                 case let .streamError(path, _, detail):
+                    if let path { activePublisherPaths.remove(path) }
                     status = "Error \(path ?? "stream"): \(detail)"
                 default:
                     break
@@ -142,6 +148,10 @@ final class MediaMTXViewModel: ObservableObject {
             await controller.stop()
             eventTask?.cancel()
             eventTask = nil
+            for path in activePublisherPaths {
+                eventHandler?(.streamStopped(path: path, publisherConnectionID: nil))
+            }
+            activePublisherPaths.removeAll()
             isRunning = false
             status = "Stopped"
         }

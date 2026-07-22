@@ -17,10 +17,9 @@ rtspAddress: :8554
 hls: yes
 hlsAddress: :8888
 hlsAlwaysRemux: no
-hlsVariant: lowLatency
+hlsVariant: fmp4
 hlsSegmentCount: 7
 hlsSegmentDuration: 1s
-hlsPartDuration: 200ms
 webrtc: no
 srt: no
 

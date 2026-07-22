@@ -36,6 +36,34 @@ public struct RidAircraftIdentity: Sendable, Equatable {
         return callsign + Self.modelAbbreviation(droneDescription)
     }
 
+    /// Mirrors Android CtDroneSpec.GuessPilotCallsign so imported rid_map
+    /// owner names are not mistaken for operational pilot callsigns.
+    public static func guessPilotCallsign(mappedID: String, model: String, remoteID: String) -> String {
+        let mappedID = mappedID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !mappedID.isEmpty, mappedID != remoteID else { return "" }
+
+        let modelAbbreviation = modelAbbreviation(model)
+        if !modelAbbreviation.isEmpty,
+           mappedID.lowercased().hasSuffix(modelAbbreviation.lowercased()) {
+            return String(mappedID.dropLast(modelAbbreviation.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if !modelAbbreviation.isEmpty,
+           let suffixRange = mappedID.range(of: #"-\d+$"#, options: .regularExpression) {
+            let prefix = String(mappedID[..<suffixRange.lowerBound])
+            if prefix.lowercased().hasSuffix(modelAbbreviation.lowercased()) {
+                let callsign = String(prefix.dropLast(modelAbbreviation.count))
+                return (callsign + String(mappedID[suffixRange])).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        if modelAbbreviation.isEmpty,
+           let match = mappedID.range(of: #"^[0-9]?[A-Za-z]+[0-9]+"#, options: .regularExpression) {
+            return String(mappedID[match])
+        }
+        return mappedID
+    }
+
     public static func modelAbbreviation(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }

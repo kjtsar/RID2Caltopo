@@ -5,6 +5,11 @@ import Foundation
 /// Android scanners and Apple observation sources should normalize transport-specific
 /// packets into this type before applying track or CalTopo publishing policy.
 public struct RidObservation: Sendable, Equatable {
+    public enum HeightReference: String, Sendable, Codable, CaseIterable {
+        case takeoff
+        case ground
+    }
+
     public enum Source: String, Sendable, Codable, CaseIterable {
         case bluetoothLegacy
         case bluetoothExtended
@@ -19,6 +24,8 @@ public struct RidObservation: Sendable, Equatable {
     public let latitude: Double
     public let longitude: Double
     public let altitudeMeters: Double?
+    public let heightMeters: Double?
+    public let heightReference: HeightReference?
     public let headingDegrees: Double?
     public let speedMetersPerSecond: Double?
     public let operatorLatitude: Double?
@@ -32,6 +39,8 @@ public struct RidObservation: Sendable, Equatable {
         latitude: Double,
         longitude: Double,
         altitudeMeters: Double? = nil,
+        heightMeters: Double? = nil,
+        heightReference: HeightReference? = nil,
         headingDegrees: Double? = nil,
         speedMetersPerSecond: Double? = nil,
         operatorLatitude: Double? = nil,
@@ -44,6 +53,8 @@ public struct RidObservation: Sendable, Equatable {
         self.latitude = latitude
         self.longitude = longitude
         self.altitudeMeters = altitudeMeters
+        self.heightMeters = heightMeters
+        self.heightReference = heightReference
         self.headingDegrees = headingDegrees
         self.speedMetersPerSecond = speedMetersPerSecond
         self.operatorLatitude = operatorLatitude

@@ -1,6 +1,6 @@
 # RID2Caltopo Privacy Policy
 
-Last updated: July 19, 2026
+Last updated: July 21, 2026
 
 RID2Caltopo is an incident-support application for Android, iPhone, and iPad.
 It does not contain advertising or analytics SDKs, does not track people across
@@ -38,11 +38,26 @@ Apple MapKit or the configured Android map provider may contact its map service
 to load map content. A configuration import may contact its specified public
 file host to retrieve the operator-selected configuration bundle.
 
+When protected-land checks are enabled, the app sends a small geographic search
+area around the operator's current location to public National Park Service,
+U.S. Fish and Wildlife Service, U.S. Forest Service, and Colorado Parks and
+Wildlife boundary services. The returned nearby boundaries are cached locally
+for offline field reference. RID2Caltopo does not send an identity or aircraft
+track with these boundary requests.
+
 ## Files and diagnostic sharing
 
 Track archives and diagnostic logs remain in the application's local storage
 unless the operator explicitly exports or shares them. On iPhone and iPad,
 these files are also available through the Files app when file sharing is used.
+
+On iPhone and iPad, the operator may enable configuration backup to the app's
+iCloud Drive container. That backup can contain operational configuration,
+Remote ID mappings, and credentials, and is encrypted with the operator's
+passphrase before it leaves the device. The passphrase used for automatic
+backup is stored only in that device's Apple Keychain and is not included in
+the iCloud file. The operator can disable automatic backup at any time; the
+existing cloud file remains until the operator removes it from iCloud Drive.
 
 The operator can select log days, create a diagnostic bundle, and choose a
 recipient through the platform share sheet. A shared bundle may contain Remote
@@ -55,8 +70,10 @@ destination.
 ## Retention and deletion
 
 Locally stored archives and logs can be deleted through the application's file
-storage or by deleting the app and its data. Deleting the app removes its local
-app-install zone identifier. A diagnostic recipient controls retention after a
+storage or by deleting the app and its data. The encrypted configuration backup
+can be removed from iCloud Drive. Deleting the app removes its local app-install
+zone identifier and local backup passphrase, but does not itself delete an
+existing iCloud Drive backup. A diagnostic recipient controls retention after a
 bundle is shared. CalTopo and the configured tracker operator control retention
 of data deliberately sent to those services.
 

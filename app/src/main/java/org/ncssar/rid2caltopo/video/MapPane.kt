@@ -159,6 +159,8 @@ import org.ncssar.rid2caltopo.data.normalizePilotCallsign
 import org.ncssar.rid2caltopo.data.sanitizeTrackColor
 import org.ncssar.rid2caltopo.notam.NearbyNotam
 import org.ncssar.rid2caltopo.notam.NotamCenter
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionMapOverlayAdapter
 import org.ncssar.rid2caltopo.notam.NotamMapOverlayAdapter
 import org.ncssar.rid2caltopo.video.mapcache.CaltopoIconCacheService
 import org.ncssar.rid2caltopo.video.mapcache.BadTilePolicy
@@ -671,6 +673,7 @@ internal fun SplitMapPane(
     var lastInsetFollowDesignator by remember { mutableStateOf<String?>(null) }
     var lastInsetFollowPoint by remember { mutableStateOf<GeoPoint?>(null) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
+    val landRestrictionUiState by LandRestrictionCenter.uiState.collectAsStateWithLifecycle()
     val proximityMapFocusTarget by viewModel.proximityMapFocusTarget.collectAsStateWithLifecycle()
     val staleTrackCutoffMs = System.currentTimeMillis() - (CaltopoClient.GetNewTrackDelayInSeconds() * 1000L)
     var selectedNotam by remember { mutableStateOf<NearbyNotam?>(null) }
@@ -2506,6 +2509,33 @@ internal fun SplitMapPane(
                 }
 
                 val notamOverlayState = NotamMapOverlayAdapter.build(notamUiState, CaltopoMap.GetMyLocation())
+                val landRestrictionOverlays = LandRestrictionMapOverlayAdapter.build(
+                    landRestrictionUiState,
+                    CaltopoClient.GetLandRestrictionsShowOnMap()
+                )
+                landRestrictionOverlays.forEach { polygonSpec ->
+                    val polygonFill = Polygon(mapView).apply {
+                        points = polygonSpec.points
+                        title = ""
+                        applyPolygonStyle(
+                            polygon = this,
+                            strokeColor = AndroidColor.TRANSPARENT,
+                            fillColor = polygonSpec.fillColor,
+                            strokeWidth = 0f
+                        )
+                        setOnClickListener { _, _, _ -> false }
+                    }
+                    mapView.overlays.add(polygonFill)
+                    managedOverlays.add(polygonFill)
+
+                    val polygonBoundary = Polyline(mapView).apply {
+                        setPoints(closedPolylinePoints(polygonSpec.points))
+                        title = polygonSpec.title
+                        applyPolylineStyle(this, polygonSpec.strokeColor, polygonSpec.strokeWidth * lineScale)
+                    }
+                    mapView.overlays.add(polygonBoundary)
+                    managedOverlays.add(polygonBoundary)
+                }
                 notamOverlayState.polygons.forEach { polygonSpec ->
                     val polygonFill = Polygon(mapView).apply {
                         points = polygonSpec.points

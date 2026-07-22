@@ -105,6 +105,104 @@ public actor CaltopoLiveClient {
         )
     }
 
+    public func fetchMapArtifacts(now: Date = Date()) async throws -> CaltopoArtifactSnapshot {
+        let request = try makeMapSnapshotRequest(now: now)
+        let data = try await perform(request)
+        return try CaltopoArtifactDecoder.decode(data: data)
+    }
+
+    public func publishPhotoClue(_ clue: CaltopoPhotoClue, now: Date = Date()) async throws -> String {
+        let requests = try makePhotoClueRequests(clue, now: now)
+        for request in requests { _ = try await perform(request) }
+        return clue.markerID.uuidString.lowercased()
+    }
+
+    func makePhotoClueRequests(_ clue: CaltopoPhotoClue, now: Date) throws -> [URLRequest] {
+        guard !clue.teamID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              clue.latitude.isFinite, clue.longitude.isFinite,
+              !clue.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !clue.jpegData.isEmpty
+        else { throw CaltopoLiveClientError.invalidConfiguration }
+        let markerID = clue.markerID.uuidString.lowercased()
+        let mediaID = clue.mediaID.uuidString.lowercased()
+        let markerPath = "/api/v1/map/\(configuration.mapID)/Marker/\(markerID)"
+        let markerPayload: [String: Any] = [
+            "type": "Feature",
+            "geometry": [
+                "type": "Point",
+                "coordinates": [clue.longitude, clue.latitude],
+            ],
+            "properties": [
+                "class": "Marker",
+                "updated": Int64(now.timeIntervalSince1970 * 1_000),
+                "created": clue.createdMilliseconds,
+                "title": clue.title,
+                "description": clue.description,
+                "marker-color": "#FF0000",
+                "marker-symbol": "Drone",
+                "marker-size": "1",
+                "marker-visibility": "visible",
+            ],
+        ]
+        let mediaPath = "/api/v1/media/\(mediaID)"
+        let mediaPayload: [String: Any] = ["properties": ["creator": clue.teamID]]
+        let dataPath = mediaPath + "/data"
+        let dataPayload: [String: Any] = [
+            "creator": clue.teamID,
+            "data": clue.jpegData.base64EncodedString(),
+        ]
+        let linkPath = "/api/v1/map/\(configuration.mapID)/MapMediaObject"
+        let linkPayload: [String: Any] = [
+            "type": "Feature",
+            "geometry": [
+                "type": "Point",
+                "coordinates": [clue.longitude, clue.latitude],
+            ],
+            "properties": [
+                "title": clue.title,
+                "description": clue.description,
+                "parentId": "Marker:\(markerID)",
+                "backendMediaId": mediaID,
+                "heading": NSNull(),
+                "class": "MapMediaObject",
+                "marker-symbol": "aperture",
+                "marker-color": "#FF00FF",
+                "marker-size": 1,
+                "created": Int64(now.timeIntervalSince1970 * 1_000),
+            ],
+        ]
+        return try [
+            makeSignedPostRequest(path: markerPath, object: markerPayload, now: now),
+            makeSignedPostRequest(path: mediaPath, object: mediaPayload, now: now),
+            makeSignedPostRequest(path: dataPath, object: dataPayload, now: now),
+            makeSignedPostRequest(path: linkPath, object: linkPayload, now: now),
+        ]
+    }
+
+    func makeMapSnapshotRequest(now: Date) throws -> URLRequest {
+        let path = "/api/v1/map/\(configuration.mapID)/since/0"
+        let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
+        let signature = try CaltopoRequestSigner.signature(
+            method: "GET",
+            path: path,
+            expiresMilliseconds: expires,
+            payload: "",
+            credentialSecretBase64: configuration.credentialSecretBase64
+        )
+        guard var components = URLComponents(url: httpsURL(path: path)!, resolvingAgainstBaseURL: false)
+        else { throw CaltopoLiveClientError.invalidURL }
+        components.queryItems = [
+            URLQueryItem(name: "id", value: configuration.credentialID),
+            URLQueryItem(name: "expires", value: String(expires)),
+            URLQueryItem(name: "signature", value: signature),
+        ]
+        guard let url = components.url else { throw CaltopoLiveClientError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("RID2Caltopo/Apple", forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
     func makeStartLiveTrackRequest(
         remoteID: String,
         label: String,
@@ -130,6 +228,31 @@ public actor CaltopoLiveClient {
             withJSONObject: ["type": "Feature", "properties": properties],
             options: [.sortedKeys]
         )
+        let payload = String(decoding: payloadData, as: UTF8.self)
+        let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
+        let signature = try CaltopoRequestSigner.signature(
+            method: "POST",
+            path: path,
+            expiresMilliseconds: expires,
+            payload: payload,
+            credentialSecretBase64: configuration.credentialSecretBase64
+        )
+        guard let url = httpsURL(path: path) else { throw CaltopoLiveClientError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("RID2Caltopo/Apple", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Self.formBody([
+            "id": configuration.credentialID,
+            "expires": String(expires),
+            "signature": signature,
+            "json": payload,
+        ])
+        return request
+    }
+
+    private func makeSignedPostRequest(path: String, object: [String: Any], now: Date) throws -> URLRequest {
+        let payloadData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         let payload = String(decoding: payloadData, as: UTF8.self)
         let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
         let signature = try CaltopoRequestSigner.signature(

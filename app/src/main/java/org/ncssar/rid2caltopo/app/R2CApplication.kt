@@ -14,6 +14,7 @@ import org.ncssar.rid2caltopo.data.CaltopoClient.CTError
 import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
 import org.ncssar.rid2caltopo.video.mapcache.MapCacheStartupMaintenance
 import org.ncssar.rid2caltopo.video.PersonRelevanceCoordinator
 
@@ -34,6 +35,7 @@ class R2CApplication : Application() {
         FaaConfigManager.refreshIfNeededOnStartup(this)
         AirspaceCenter.initialize(this)
         NotamCenter.initialize(this)
+        LandRestrictionCenter.initialize(this)
         R2CMqttManager.InitializeNetworkAddressMonitor(this)
         MapCacheStartupMaintenance.ensureStarted(this)
         MainThreadStallMonitor.start()

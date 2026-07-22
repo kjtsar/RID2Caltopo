@@ -44,6 +44,10 @@ fun CaltopoSettingsScreen(
     val notamRefreshIntervalSeconds by settingsViewModel.notamRefreshIntervalSeconds.collectAsState()
     val notamAutoRefresh by settingsViewModel.notamAutoRefresh.collectAsState()
     val notamStatus by settingsViewModel.notamStatus.collectAsState()
+    val landRestrictionsEnabled by settingsViewModel.landRestrictionsEnabled.collectAsState()
+    val landRestrictionsShowOnMap by settingsViewModel.landRestrictionsShowOnMap.collectAsState()
+    val landRestrictionsAutoRefresh by settingsViewModel.landRestrictionsAutoRefresh.collectAsState()
+    val landRestrictionsRadiusNm by settingsViewModel.landRestrictionsRadiusNm.collectAsState()
     val externalDisplayMode by settingsViewModel.externalDisplayMode.collectAsState()
     val externalDisplayAutoOpen by settingsViewModel.externalDisplayAutoOpen.collectAsState()
     val externalDisplayReturnToPhoneOnly by settingsViewModel.externalDisplayReturnToPhoneOnly.collectAsState()
@@ -225,6 +229,52 @@ fun CaltopoSettingsScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(if (notamAutoRefresh) "Yes" else "No")
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text("Land / Agency Restrictions", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Checks NPS units, National Wildlife Refuges, USFS wilderness, and Colorado parks and wildlife properties. Results distinguish land-use rules from FAA airspace restrictions and include agency follow-up links.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Enable protected-land checks:")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = landRestrictionsEnabled,
+                        onCheckedChange = settingsViewModel::onLandRestrictionsEnabledChanged
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Show protected lands on map:")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = landRestrictionsShowOnMap,
+                        enabled = landRestrictionsEnabled,
+                        onCheckedChange = settingsViewModel::onLandRestrictionsShowOnMapChanged
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Refresh automatically:")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = landRestrictionsAutoRefresh,
+                        enabled = landRestrictionsEnabled,
+                        onCheckedChange = settingsViewModel::onLandRestrictionsAutoRefreshChanged
+                    )
+                }
+                OutlinedTextField(
+                    value = landRestrictionsRadiusNm,
+                    onValueChange = { settingsViewModel.onLandRestrictionsRadiusNmChanged(it.filter(Char::isDigit)) },
+                    enabled = landRestrictionsEnabled,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    label = { Text("Boundary query radius (1–50 NM)") }
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()

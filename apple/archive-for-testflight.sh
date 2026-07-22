@@ -8,13 +8,16 @@ scheme="RID2CaltopoApple"
 team="${R2C_DEVELOPMENT_TEAM:-}"
 bundle_id="${R2C_APP_BUNDLE_ID:-org.ncssar.RID2CaltopoApple}"
 build_number="${R2C_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
-marketing_version="${R2C_MARKETING_VERSION:-1.0}"
+marketing_version="${R2C_MARKETING_VERSION:-1.2}"
 archive_path=""
 export_path=""
 upload=false
 internal_only=false
 preflight=false
 skip_release_check=false
+force_land_catalog_refresh=false
+api_key_id="${R2C_APPSTORE_API_KEY_ID:-}"
+api_issuer="${R2C_APPSTORE_API_ISSUER:-}"
 
 usage() {
     cat <<'USAGE'
@@ -29,8 +32,12 @@ Options:
   --export-path PATH       Locally exported IPA directory
   --internal-only          Restrict an uploaded build to internal TestFlight
   --upload                 Upload after archive verification
+  --api-key-id ID          App Store Connect API key ID (or R2C_APPSTORE_API_KEY_ID)
+  --api-issuer UUID        App Store Connect issuer ID (or R2C_APPSTORE_API_ISSUER)
   --preflight              Print configuration/signing readiness without building
   --skip-release-check     Reuse a release gate that just passed on unchanged sources
+  --force-land-catalog-refresh
+                            Ignore the weekly protected-land catalog check cache
   --help                   Show this help
 
 The script first creates and verifies an unsigned archive, then asks Xcode to
@@ -49,8 +56,11 @@ while [[ $# -gt 0 ]]; do
         --export-path) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; export_path="$2"; shift 2 ;;
         --internal-only) internal_only=true; shift ;;
         --upload) upload=true; shift ;;
+        --api-key-id) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; api_key_id="$2"; shift 2 ;;
+        --api-issuer) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; api_issuer="$2"; shift 2 ;;
         --preflight) preflight=true; shift ;;
         --skip-release-check) skip_release_check=true; shift ;;
+        --force-land-catalog-refresh) force_land_catalog_refresh=true; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -108,11 +118,14 @@ fi
 
 if ! $skip_release_check; then
     [[ ! -e "$archive_path" ]] || { echo "Archive already exists: $archive_path" >&2; exit 1; }
-    "$script_dir/release-check.sh" \
+    release_check_args=(
         --archive-path "$archive_path" \
         --bundle-id "$bundle_id" \
         --build-number "$build_number" \
         --marketing-version "$marketing_version"
+    )
+    $force_land_catalog_refresh && release_check_args+=(--force-land-catalog-refresh)
+    "$script_dir/release-check.sh" "${release_check_args[@]}"
 else
     echo "Reusing the caller-confirmed Apple release gate for unchanged sources only."
     "$script_dir/verify-unsigned-archive.sh" "$archive_path" "$bundle_id" "$build_number" "$marketing_version"
@@ -123,9 +136,15 @@ fi
 options_dir="$(mktemp -d -t r2c-testflight-options)"
 trap 'rm -rf "$options_dir"' EXIT
 options_plist="$options_dir/ExportOptions.plist"
-cp "$script_dir/TestFlightExportOptions.plist" "$options_plist"
-/usr/libexec/PlistBuddy -c "Add :teamID string $team" "$options_plist"
-/usr/libexec/PlistBuddy -c 'Set :destination export' "$options_plist"
+manual_options="$script_dir/TestFlightManualExportOptions.plist"
+if [[ -f "$manual_options" ]]; then
+    cp "$manual_options" "$options_plist"
+    /usr/libexec/PlistBuddy -c "Set :teamID $team" "$options_plist"
+else
+    cp "$script_dir/TestFlightExportOptions.plist" "$options_plist"
+    /usr/libexec/PlistBuddy -c "Add :teamID string $team" "$options_plist"
+    /usr/libexec/PlistBuddy -c 'Set :destination export' "$options_plist"
+fi
 
 xcodebuild -quiet \
     -exportArchive \
@@ -145,20 +164,35 @@ if ! $upload; then
     exit 0
 fi
 
-upload_options="$options_dir/UploadOptions.plist"
-cp "$script_dir/TestFlightExportOptions.plist" "$upload_options"
-/usr/libexec/PlistBuddy -c "Add :teamID string $team" "$upload_options"
-if $internal_only; then
-    /usr/libexec/PlistBuddy -c 'Set :testFlightInternalTestingOnly true' "$upload_options"
+if [[ -z "$api_key_id" ]]; then
+    local_keys=("$HOME"/.appstoreconnect/private_keys/AuthKey_*.p8(N))
+    if [[ ${#local_keys[@]} -eq 1 ]]; then
+        api_key_id="${${local_keys[1]:t}#AuthKey_}"
+        api_key_id="${api_key_id%.p8}"
+    fi
+fi
+if [[ -z "$api_issuer" && "$team" == "94UV79S6LR" ]]; then
+    api_issuer="c827c1d7-0eee-4d7e-bcae-c27accb00e12"
 fi
 
-upload_result="${export_path}-upload"
-[[ ! -e "$upload_result" ]] || { echo "Upload result path already exists: $upload_result" >&2; exit 1; }
-xcodebuild -quiet \
-    -exportArchive \
-    -archivePath "$archive_path" \
-    -exportPath "$upload_result" \
-    -exportOptionsPlist "$upload_options" \
-    -allowProvisioningUpdates
+if [[ -n "$api_key_id" && -n "$api_issuer" && -f "$HOME/.appstoreconnect/private_keys/AuthKey_${api_key_id}.p8" ]]; then
+    $internal_only && { echo "API-key upload does not support --internal-only; use Xcode upload instead." >&2; exit 2; }
+    xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$api_key_id" --apiIssuer "$api_issuer"
+else
+    upload_options="$options_dir/UploadOptions.plist"
+    cp "$script_dir/TestFlightExportOptions.plist" "$upload_options"
+    /usr/libexec/PlistBuddy -c "Add :teamID string $team" "$upload_options"
+    if $internal_only; then
+        /usr/libexec/PlistBuddy -c 'Set :testFlightInternalTestingOnly true' "$upload_options"
+    fi
+    upload_result="${export_path}-upload"
+    [[ ! -e "$upload_result" ]] || { echo "Upload result path already exists: $upload_result" >&2; exit 1; }
+    xcodebuild -quiet \
+        -exportArchive \
+        -archivePath "$archive_path" \
+        -exportPath "$upload_result" \
+        -exportOptionsPlist "$upload_options" \
+        -allowProvisioningUpdates
+fi
 
 echo "Upload completed for build $build_number. Check App Store Connect processing status."

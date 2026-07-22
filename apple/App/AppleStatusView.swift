@@ -19,6 +19,7 @@ struct AppleStatusSnapshot {
     let operationalPeriod: String
     let trackerStatus: String
     let trackerDetail: String
+    let trackerArchiveStatus: String
     let peerCount: Int
     let caltopoStatus: String
     let activeAircraft: Int
@@ -71,6 +72,7 @@ struct AppleStatusSnapshot {
             "Operational period: \(display(operationalPeriod))",
             "Tracker: \(trackerStatus)",
             "Tracker detail: \(trackerDetail)",
+            "Tracker archive: \(trackerArchiveStatus)",
             "Peer zones: \(peerCount)",
             "CalTopo: \(caltopoStatus)",
             "",
@@ -135,6 +137,7 @@ struct AppleStatusView: View {
                 Text(snapshot.trackerDetail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                LabeledContent("Tracker archive", value: snapshot.trackerArchiveStatus)
                 LabeledContent("Peer zones", value: "\(snapshot.peerCount)")
                 LabeledContent("CalTopo", value: snapshot.caltopoStatus)
             }

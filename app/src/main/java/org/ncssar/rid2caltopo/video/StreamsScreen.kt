@@ -95,6 +95,9 @@ import org.ncssar.rid2caltopo.data.R2CMqttManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionPanel
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionStatusChip
 import org.ncssar.rid2caltopo.ui.CaltopoActionInterface
 import org.ncssar.rid2caltopo.ui.CaltopoConnectionState
 import org.ncssar.rid2caltopo.ui.ClueSubmissionSheet
@@ -310,6 +313,7 @@ fun StreamsScreen(
     val mapName = viewModel.mapName
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val airspaceUiState by AirspaceCenter.uiState.collectAsStateWithLifecycle()
+    val landRestrictionUiState by LandRestrictionCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by viewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     var splitFraction by remember { mutableFloatStateOf(0.5f) }
@@ -323,6 +327,7 @@ fun StreamsScreen(
         null -> persistedLayoutMode
     }
     var showNotamPanel by remember { mutableStateOf(false) }
+    var showLandRestrictionPanel by remember { mutableStateOf(false) }
     var showPerformancePanel by remember { mutableStateOf(false) }
     var showCompliancePanel by remember { mutableStateOf(false) }
     var showSignalLossPanel by remember { mutableStateOf(false) }
@@ -357,6 +362,11 @@ fun StreamsScreen(
                                 airspaceState = airspaceUiState,
                                 onClick = { showNotamPanel = true },
                                 outerPadding = PaddingValues(0.dp)
+                            )
+                            LandRestrictionStatusChip(
+                                state = landRestrictionUiState,
+                                onClick = { showLandRestrictionPanel = true },
+                                outerPadding = PaddingValues(start = 8.dp)
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
@@ -571,6 +581,13 @@ fun StreamsScreen(
             state = notamUiState,
             airspaceState = airspaceUiState,
             onDismiss = { showNotamPanel = false }
+        )
+    }
+    if (showLandRestrictionPanel) {
+        LandRestrictionPanel(
+            state = landRestrictionUiState,
+            onRefresh = LandRestrictionCenter::requestImmediateRefresh,
+            onDismiss = { showLandRestrictionPanel = false }
         )
     }
     if (showPerformancePanel) {

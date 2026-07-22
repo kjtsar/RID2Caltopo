@@ -5,7 +5,7 @@ enum AppleCaltopoPublisherEvent: Sendable, Equatable {
     case disabled
     case ready
     case trackStarted(String)
-    case pointPublished(String)
+    case pointPublished(String, rttMilliseconds: Int64)
     case trackStopped(String)
     case failed(String)
 }
@@ -74,8 +74,10 @@ actor AppleCaltopoPublisher {
                 liveTrackIDs[remoteID] = liveTrackID
                 continuation.yield(.trackStarted(remoteID))
             }
+            let requestStarted = Date()
             try await client.publishPoint(remoteID: remoteID, observation: observation)
-            continuation.yield(.pointPublished(remoteID))
+            let rttMilliseconds = max(0, Int64(Date().timeIntervalSince(requestStarted) * 1_000))
+            continuation.yield(.pointPublished(remoteID, rttMilliseconds: rttMilliseconds))
         } catch {
             startTasks.removeValue(forKey: remoteID)
             continuation.yield(.failed("\(remoteID): \(error.localizedDescription)"))

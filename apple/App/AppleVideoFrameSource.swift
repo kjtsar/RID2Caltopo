@@ -1,11 +1,32 @@
 import AVFoundation
 import Combine
 import CoreVideo
+import CoreImage
 import Dispatch
 import QuartzCore
+import R2CCore
 
 private struct PixelBufferTransfer: @unchecked Sendable {
     let value: CVPixelBuffer
+}
+
+struct AppleVideoSnapshot: Sendable, Equatable {
+    let jpegData: Data
+    let capturedAt: Date
+    let width: Int
+    let height: Int
+}
+
+enum AppleVideoSnapshotError: LocalizedError {
+    case noDecodedFrame
+    case conversionFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .noDecodedFrame: "No decoded video frame is available yet."
+        case .conversionFailed: "The decoded frame could not be converted to a snapshot."
+        }
+    }
 }
 
 struct AppleAnomalyBox: Sendable, Equatable, Identifiable {
@@ -26,6 +47,7 @@ struct AppleAnomalyResult: Sendable {
 enum AppleAnomalyMode: String, CaseIterable, Identifiable, Sendable {
     case off
     case colorUniqueness
+    case targetColors
     case infrared
 
     var id: String { rawValue }
@@ -34,6 +56,7 @@ enum AppleAnomalyMode: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .off: "Off"
         case .colorUniqueness: "Color Uniqueness"
+        case .targetColors: "Target Colors"
         case .infrared: "Infrared"
         }
     }
@@ -42,14 +65,15 @@ enum AppleAnomalyMode: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .off: "Off"
         case .colorUniqueness: "Color"
+        case .targetColors: "Target"
         case .infrared: "Infrared"
         }
     }
 
-    fileprivate var algorithmMask: Int32 {
+    var algorithmMask: Int32 {
         switch self {
         case .off: 0
-        case .colorUniqueness: R2C_ANOMALY_ALGORITHM_COLOR
+        case .colorUniqueness, .targetColors: R2C_ANOMALY_ALGORITHM_COLOR
         case .infrared: R2C_ANOMALY_ALGORITHM_THERMAL
         }
     }
@@ -58,16 +82,19 @@ enum AppleAnomalyMode: String, CaseIterable, Identifiable, Sendable {
 /// Owns the non-Sendable C runtime and processes at most one frame at a time.
 /// When analysis cannot keep up, the live path drops analysis work instead of
 /// building latency while video rendering continues.
-private final class AppleAnomalyProcessor: @unchecked Sendable {
+final class AppleAnomalyProcessor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "org.ncssar.rid2caltopo.anomaly", qos: .userInitiated)
     private let stateLock = NSLock()
     private var busy = false
-    private var algorithmMask: Int32
+    private var mode: AppleAnomalyMode
+    private var configuration: AppleAnomalyConfiguration
     private var runtime: OpaquePointer?
 
-    init(algorithmMask: Int32) {
-        self.algorithmMask = algorithmMask
-        runtime = R2CAnomalyCreate(algorithmMask, 30)
+    init(mode: AppleAnomalyMode, configuration: AppleAnomalyConfiguration) {
+        self.mode = mode
+        self.configuration = configuration
+        runtime = R2CAnomalyCreate(configuration.algorithmMask(for: mode), 30)
+        applyConfiguration()
     }
 
     deinit {
@@ -101,19 +128,28 @@ private final class AppleAnomalyProcessor: @unchecked Sendable {
         return true
     }
 
-    func configure(algorithmMask: Int32) {
+    func configure(mode: AppleAnomalyMode, configuration: AppleAnomalyConfiguration) {
         queue.async { [self] in
+            self.mode = mode
+            self.configuration = configuration
             R2CAnomalyDestroy(runtime)
-            self.algorithmMask = algorithmMask
-            runtime = R2CAnomalyCreate(algorithmMask, 30)
+            runtime = R2CAnomalyCreate(configuration.algorithmMask(for: mode), 30)
+            applyConfiguration()
         }
     }
 
     func reset() {
         queue.async { [self] in
             R2CAnomalyDestroy(runtime)
-            runtime = R2CAnomalyCreate(algorithmMask, 30)
+            runtime = R2CAnomalyCreate(configuration.algorithmMask(for: mode), 30)
+            applyConfiguration()
         }
+    }
+
+    private func applyConfiguration() {
+        guard let runtime else { return }
+        var native = configuration.nativeConfiguration(for: mode)
+        R2CAnomalyApplyConfiguration(runtime, &native)
     }
 
     private func process(
@@ -166,6 +202,7 @@ final class AppleVideoFrameSource: ObservableObject {
         case idle
         case connecting
         case streaming
+        case waitingForPublisher(String)
         case failed(String)
     }
 
@@ -178,12 +215,26 @@ final class AppleVideoFrameSource: ObservableObject {
     @Published private(set) var anomalyCount = 0
     @Published private(set) var anomalyBoxes: [AppleAnomalyBox] = []
     @Published private(set) var anomalyMode: AppleAnomalyMode
+    @Published private(set) var anomalyConfiguration: AppleAnomalyConfiguration
     @Published private(set) var player: AVPlayer?
+    @Published private(set) var decodedFrameAgeSeconds: Double?
+    @Published private(set) var recoveryCount = 0
+    @Published private(set) var lastRecoveryReason = "None"
+    @Published private(set) var nextRetryDelaySeconds: Double?
+    @Published private(set) var mediaPublisherStatus = "Unknown"
 
     private var videoOutput: AVPlayerItemVideoOutput?
     private var displayLink: CADisplayLink?
     private var itemStatusObservation: NSKeyValueObservation?
+    private var notificationObservers: [NSObjectProtocol] = []
     private var retryTask: Task<Void, Never>?
+    private var watchdogTask: Task<Void, Never>?
+    private var currentURL: URL?
+    private var currentPath: String?
+    private var playerGeneration = 0
+    private var recoveryPolicy = LiveVideoRecoveryPolicy()
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var latestFrameCapturedAt: Date?
     private let defaults: UserDefaults
     private let anomalyProcessor: AppleAnomalyProcessor
 
@@ -191,8 +242,10 @@ final class AppleVideoFrameSource: ObservableObject {
         self.defaults = defaults
         let stored = defaults.string(forKey: "video.anomalyMode")
         let mode = stored.flatMap(AppleAnomalyMode.init(rawValue:)) ?? .infrared
+        let configuration = AppleAnomalyConfiguration.load(from: defaults)
         anomalyMode = mode
-        anomalyProcessor = AppleAnomalyProcessor(algorithmMask: mode.algorithmMask)
+        anomalyConfiguration = configuration
+        anomalyProcessor = AppleAnomalyProcessor(mode: mode, configuration: configuration)
     }
 
     func setAnomalyMode(_ mode: AppleAnomalyMode) {
@@ -203,13 +256,39 @@ final class AppleVideoFrameSource: ObservableObject {
         droppedAnalysisFrameCount = 0
         anomalyCount = 0
         anomalyBoxes = []
-        anomalyProcessor.configure(algorithmMask: mode.algorithmMask)
+        anomalyProcessor.configure(mode: mode, configuration: anomalyConfiguration)
         AppleLog.info("Anomaly", "Detector mode changed to \(mode.label)")
+    }
+
+    func applyAnomalyConfiguration(_ configuration: AppleAnomalyConfiguration) {
+        let normalized = configuration.normalized
+        anomalyConfiguration = normalized
+        normalized.save(to: defaults)
+        analyzedFrameCount = 0
+        droppedAnalysisFrameCount = 0
+        anomalyCount = 0
+        anomalyBoxes = []
+        anomalyProcessor.configure(mode: anomalyMode, configuration: normalized)
+        AppleLog.info("Anomaly", "Advanced detector configuration applied")
     }
 
     func start(url: URL) {
         stop()
+        currentURL = url
+        currentPath = Self.streamPath(from: url)
+        recoveryPolicy.reset(at: Self.now)
+        startWatchdog()
+        installPlayer(url: url)
+        AppleLog.info("Video", "Decoder session requested url=\(url.absoluteString) path=\(currentPath ?? "unknown")")
+    }
+
+    private func installPlayer(url: URL) {
+        tearDownPlayer()
+        playerGeneration &+= 1
+        let generation = playerGeneration
+        recoveryPolicy.beginRecoveryAttempt(at: Self.now)
         state = .connecting
+        nextRetryDelaySeconds = nil
 
         let attributes: [String: any Sendable] = [
             kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
@@ -226,15 +305,15 @@ final class AppleVideoFrameSource: ObservableObject {
 
         itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, generation == self.playerGeneration else { return }
                 switch item.status {
                 case .readyToPlay:
+                    AppleLog.info("Video", "AVPlayer ready path=\(self.currentPath ?? "unknown")")
                     player.playImmediately(atRate: 1)
                 case .failed:
-                    self.scheduleReconnect(
-                        url: url,
-                        reason: item.error?.localizedDescription ?? "AVPlayer failed"
-                    )
+                    self.handleRecoveryDecision(self.recoveryPolicy.playerFailed(
+                        detail: item.error?.localizedDescription ?? "unknown failure"
+                    ))
                 case .unknown:
                     break
                 @unknown default:
@@ -247,17 +326,43 @@ final class AppleVideoFrameSource: ObservableObject {
         displayLink.preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: 30, preferred: 30)
         displayLink.add(to: .main, forMode: .common)
         self.displayLink = displayLink
+
+        let stalled = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.playbackStalledNotification,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, generation == self.playerGeneration else { return }
+                AppleLog.warning("Video", "AVPlayer reported playback stalled path=\(self.currentPath ?? "unknown"); awaiting decoded-frame watchdog")
+            }
+        }
+        let failedToEnd = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+            object: item,
+            queue: .main
+        ) { [weak self] notification in
+            let failureDetail = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "failed before live edge"
+            Task { @MainActor [weak self] in
+                guard let self, generation == self.playerGeneration else { return }
+                self.handleRecoveryDecision(self.recoveryPolicy.playerFailed(
+                    detail: failureDetail
+                ))
+            }
+        }
+        notificationObservers = [stalled, failedToEnd]
     }
 
     func stop() {
         retryTask?.cancel()
         retryTask = nil
-        displayLink?.invalidate()
-        displayLink = nil
-        itemStatusObservation = nil
-        player?.pause()
-        player = nil
-        videoOutput = nil
+        watchdogTask?.cancel()
+        watchdogTask = nil
+        playerGeneration &+= 1
+        tearDownPlayer()
+        currentURL = nil
+        currentPath = nil
         frameCount = 0
         dimensions = "--"
         videoAspectRatio = 16.0 / 9.0
@@ -265,18 +370,105 @@ final class AppleVideoFrameSource: ObservableObject {
         droppedAnalysisFrameCount = 0
         anomalyCount = 0
         anomalyBoxes = []
+        decodedFrameAgeSeconds = nil
+        recoveryCount = 0
+        lastRecoveryReason = "None"
+        nextRetryDelaySeconds = nil
+        mediaPublisherStatus = "Unknown"
+        latestPixelBuffer = nil
+        latestFrameCapturedAt = nil
         anomalyProcessor.reset()
         state = .idle
     }
 
-    private func scheduleReconnect(url: URL, reason: String) {
-        state = .failed(reason)
-        retryTask?.cancel()
-        retryTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled, let self else { return }
-            self.start(url: url)
+    func handleMediaServerEvent(_ event: MediaServerEvent) {
+        guard currentURL != nil else { return }
+        let eventPath: String?
+        let publisherAvailable: Bool?
+        switch event {
+        case let .streamStarted(path, _), let .hlsStreamStarted(path):
+            eventPath = path
+            publisherAvailable = true
+        case let .streamStopped(path, _):
+            eventPath = path
+            publisherAvailable = false
+        case let .streamError(path, _, _):
+            eventPath = path
+            publisherAvailable = false
+        default:
+            return
         }
+        guard eventPath == currentPath, let publisherAvailable else { return }
+        mediaPublisherStatus = publisherAvailable ? "Publishing" : "Unavailable"
+        AppleLog.info("Video", "MediaMTX publisher path=\(eventPath ?? "unknown") status=\(mediaPublisherStatus)")
+        if !publisherAvailable {
+            retryTask?.cancel()
+            retryTask = nil
+            nextRetryDelaySeconds = nil
+        }
+        handleRecoveryDecision(recoveryPolicy.setPublisherAvailable(publisherAvailable))
+    }
+
+    private func startWatchdog() {
+        watchdogTask?.cancel()
+        watchdogTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+                let now = Self.now
+                decodedFrameAgeSeconds = recoveryPolicy.decodedFrameAge(at: now)
+                handleRecoveryDecision(recoveryPolicy.evaluate(at: now))
+            }
+        }
+    }
+
+    private func handleRecoveryDecision(_ decision: LiveVideoRecoveryPolicy.Decision?) {
+        guard let decision else { return }
+        switch decision {
+        case let .waitForPublisher(trigger):
+            retryTask?.cancel()
+            retryTask = nil
+            nextRetryDelaySeconds = nil
+            lastRecoveryReason = trigger.diagnosticDescription
+            state = .waitingForPublisher(trigger.diagnosticDescription)
+            logPlayerFailureContext(prefix: "Waiting for MediaMTX publisher", trigger: trigger)
+        case let .reconnect(delay, trigger):
+            recoveryCount += 1
+            lastRecoveryReason = trigger.diagnosticDescription
+            nextRetryDelaySeconds = delay
+            state = .failed("\(trigger.diagnosticDescription); retry in \(Self.secondsLabel(delay))")
+            logPlayerFailureContext(prefix: "Scheduling decoder recovery in \(Self.secondsLabel(delay))", trigger: trigger)
+            scheduleReconnect(after: delay)
+        }
+    }
+
+    private func scheduleReconnect(after delay: TimeInterval) {
+        retryTask?.cancel()
+        let generation = playerGeneration
+        retryTask = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard !Task.isCancelled,
+                  let self,
+                  generation == self.playerGeneration,
+                  let url = self.currentURL
+            else { return }
+            self.installPlayer(url: url)
+        }
+    }
+
+    private func tearDownPlayer() {
+        displayLink?.invalidate()
+        displayLink = nil
+        itemStatusObservation = nil
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        notificationObservers.removeAll()
+        player?.pause()
+        player = nil
+        videoOutput = nil
     }
 
     @objc private func pullFrame(_ displayLink: CADisplayLink) {
@@ -288,14 +480,70 @@ final class AppleVideoFrameSource: ObservableObject {
         else { return }
 
         frameCount += 1
+        recoveryPolicy.recordDecodedFrame(at: Self.now)
+        decodedFrameAgeSeconds = 0
+        nextRetryDelaySeconds = nil
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         dimensions = "\(width) x \(height)"
         if height > 0 {
             videoAspectRatio = Double(width) / Double(height)
         }
+        latestPixelBuffer = pixelBuffer
+        latestFrameCapturedAt = Date()
         submitForAnomalyAnalysis(pixelBuffer: pixelBuffer, itemTime: itemTime)
         state = .streaming
+    }
+
+    func captureSnapshot() async throws -> AppleVideoSnapshot {
+        guard let latestPixelBuffer, let capturedAt = latestFrameCapturedAt else {
+            throw AppleVideoSnapshotError.noDecodedFrame
+        }
+        let transfer = PixelBufferTransfer(value: latestPixelBuffer)
+        let width = CVPixelBufferGetWidth(latestPixelBuffer)
+        let height = CVPixelBufferGetHeight(latestPixelBuffer)
+        let data = try await Task.detached(priority: .userInitiated) {
+            let context = CIContext(options: [.cacheIntermediates: false])
+            let image = CIImage(cvPixelBuffer: transfer.value)
+            guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+                  let jpeg = context.jpegRepresentation(
+                    of: image,
+                    colorSpace: colorSpace,
+                    options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.85]
+                  )
+            else { throw AppleVideoSnapshotError.conversionFailed }
+            return jpeg
+        }.value
+        AppleLog.info("Video", "Snapshot captured size=\(width)x\(height) bytes=\(data.count)")
+        return AppleVideoSnapshot(jpegData: data, capturedAt: capturedAt, width: width, height: height)
+    }
+
+    private func logPlayerFailureContext(prefix: String, trigger: LiveVideoRecoveryPolicy.Trigger) {
+        let item = player?.currentItem
+        let errorEvent = item?.errorLog()?.events.last
+        let accessEvent = item?.accessLog()?.events.last
+        let errorDetail = errorEvent.map {
+            "errorDomain=\($0.errorDomain) errorCode=\($0.errorStatusCode) comment=\($0.errorComment ?? "none") uri=\($0.uri ?? "none")"
+        } ?? "errorLog=none"
+        let accessDetail = accessEvent.map {
+            "observedBitrate=\(Int($0.observedBitrate)) indicatedBitrate=\(Int($0.indicatedBitrate)) stalls=\($0.numberOfStalls) server=\($0.serverAddress ?? "unknown")"
+        } ?? "accessLog=none"
+        AppleLog.warning(
+            "Video",
+            "\(prefix) reason=\(trigger.diagnosticDescription) frames=\(frameCount) frameAge=\(decodedFrameAgeSeconds.map { String(format: "%.1fs", $0) } ?? "none") media=\(mediaPublisherStatus) \(errorDetail) \(accessDetail)"
+        )
+    }
+
+    private static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    private static func secondsLabel(_ seconds: TimeInterval) -> String {
+        String(format: "%.0fs", seconds)
+    }
+
+    private static func streamPath(from url: URL) -> String? {
+        let components = url.pathComponents.filter { $0 != "/" }
+        guard let first = components.first else { return nil }
+        return first
     }
 
     private func submitForAnomalyAnalysis(pixelBuffer: CVPixelBuffer, itemTime: CMTime) {

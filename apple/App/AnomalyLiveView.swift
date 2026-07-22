@@ -11,8 +11,10 @@ struct AnomalyLiveView: View {
                 Color.black
                 if let player = model.player {
                     VideoPlayer(player: player)
-                    AnomalyBoxOverlay(boxes: model.anomalyBoxes)
-                        .allowsHitTesting(false)
+                    if model.anomalyConfiguration.showGuideBoxes {
+                        AnomalyBoxOverlay(boxes: model.anomalyBoxes)
+                            .allowsHitTesting(false)
+                    }
                 } else {
                     ContentUnavailableView(
                         "Video disconnected",
@@ -35,6 +37,18 @@ struct AnomalyLiveView: View {
             }
             .font(.subheadline.monospacedDigit())
             .padding()
+
+            if model.recoveryCount > 0 || model.mediaPublisherStatus != "Unknown" {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("MediaMTX: \(model.mediaPublisherStatus) • recoveries: \(model.recoveryCount)")
+                    Text("Last frame: \(frameAge) • last recovery: \(model.lastRecoveryReason)")
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
 
             Picker("Detector", selection: Binding(
                 get: { model.anomalyMode },
@@ -65,6 +79,13 @@ struct AnomalyLiveView: View {
         }
         .navigationTitle("Live Anomaly View")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink { AppleAnomalySettingsView(model: model) } label: {
+                    Label("Anomaly Settings", systemImage: "slider.horizontal.3")
+                }
+            }
+        }
     }
 
     private var videoStatus: String {
@@ -72,8 +93,13 @@ struct AnomalyLiveView: View {
         case .idle: "Idle"
         case .connecting: "Connecting"
         case .streaming: "Streaming"
+        case .waitingForPublisher: "Waiting for publisher"
         case .failed: "Reconnecting"
         }
+    }
+
+    private var frameAge: String {
+        model.decodedFrameAgeSeconds.map { String(format: "%.1fs", $0) } ?? "none decoded"
     }
 
     private var detectorDescription: String {
@@ -82,6 +108,8 @@ struct AnomalyLiveView: View {
             "Video remains connected while anomaly analysis is disabled."
         case .colorUniqueness:
             "Color Uniqueness uses the shared Android fresh-RGBA detector; boxes are yellow."
+        case .targetColors:
+            "Target Colors limits the shared color detector to the selected color families."
         case .infrared:
             "Infrared uses the shared Android thermal detector; boxes are red."
         }

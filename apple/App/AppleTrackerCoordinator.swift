@@ -114,6 +114,15 @@ final class AppleTrackerCoordinator: ObservableObject {
         )
     }
 
+    func updateCaltopoRTT(milliseconds: Int64?) {
+        guard let milliseconds, milliseconds >= 0 else { return }
+        position = TrackerCoordinationPosition(
+            latitude: position.latitude,
+            longitude: position.longitude,
+            caltopoRTTMilliseconds: milliseconds
+        )
+    }
+
     func observe(track: RidAircraftTrack, identity: RidAircraftIdentity?) {
         guard coordinationRequired else { return }
         let resolved = identity.map(Self.trackerIdentity) ?? TrackerCoordinationIdentity(

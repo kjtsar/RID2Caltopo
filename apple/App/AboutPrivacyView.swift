@@ -1,5 +1,32 @@
 import SwiftUI
 
+struct AppleReleaseNotesView: View {
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Version \(appVersion)").font(.title2.bold())
+                Text(releaseNotes)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .textSelection(.enabled)
+        }
+        .navigationTitle("Release Notes")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var releaseNotes: String {
+        guard let url = Bundle.main.url(forResource: "whats_new", withExtension: "txt"),
+              let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return "Release notes are unavailable in this build." }
+        return text
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
+}
+
 struct AboutPrivacyView: View {
     var body: some View {
         List {
@@ -11,8 +38,9 @@ struct AboutPrivacyView: View {
 
             Section("Privacy") {
                 Text("RID2Caltopo contains no advertising or analytics SDKs, does not track people across apps or websites, and does not sell personal data.")
-                Text("Remote ID observations, track archives, and diagnostic logs remain on this device unless you enable CalTopo publishing, join configured tracker peer coordination, or explicitly share a file.")
+                Text("Remote ID observations, track archives, and diagnostic logs remain on this device unless you enable CalTopo publishing, load a configuration that enables eligible team-track upload or tracker peer coordination, or explicitly share a file.")
                 Text("The CalTopo credential secret is stored in Apple Keychain and is never written to diagnostic logs or shared log bundles.")
+                Text("If you enable iCloud configuration backup, operational settings and credentials are encrypted with your passphrase before they are saved to the app's iCloud Drive container. The automatic-backup passphrase remains in this device's Keychain.")
             }
 
             Section("Permissions and network use") {
@@ -21,11 +49,13 @@ struct AboutPrivacyView: View {
                 Label("Local Network receives controller video and optional external Remote ID observations.", systemImage: "network")
                 Text("When enabled by the operator, CalTopo receives aircraft positions and telemetry for the selected map. Configured tracker peer coordination receives the app-install zone identifier, device zone name, operator position, confirmed drone identity, and aircraft sightings needed to coordinate ownership. Apple MapKit may contact Apple's map service to load map content.")
                     .foregroundStyle(.secondary)
+                Text("When protected-land checks are enabled, public NPS, USFWS, USFS, and Colorado Parks and Wildlife services receive a small geographic search area around the operator location. Returned boundaries are cached locally; these requests do not include aircraft tracks or an operator identity.")
+                    .foregroundStyle(.secondary)
             }
 
             Section("Logs and deletion") {
                 Text("You choose which log days to package and where to send the bundle. A bundle may contain Remote IDs, aircraft positions, the app-install coordination identifier, app events, device and OS details, local network addresses, and operational status.")
-                Text("Nothing is transmitted by log sharing until you choose a destination in the iOS share sheet. Local logs and track archives can be removed through the Files app; deleting RID2Caltopo removes its locally stored data and app-install zone identifier. CalTopo and the configured tracker control retention of data sent to them.")
+                Text("Nothing is transmitted by log sharing until you choose a destination in the iOS share sheet. Local logs and track archives can be removed through the Files app. An iCloud backup remains until you remove it from iCloud Drive; deleting RID2Caltopo removes local data and the local backup passphrase. CalTopo and the configured tracker control retention of data sent to them.")
             }
 
             Section("Contact") {

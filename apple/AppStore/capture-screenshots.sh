@@ -74,9 +74,9 @@ capture_device() {
     local names=("01-nearby-aircraft" "02-live-map" "03-status")
     local waits=(6 6 10)
     local launches=(
-        "--demo-rid --no-location --manual-radios"
-        "--demo-rid --show-map --no-location --manual-radios"
-        "--demo-rid --show-status --no-location --manual-radios"
+        "--demo-rid --suppress-auto-confirmation --no-location --manual-radios"
+        "--demo-rid --suppress-auto-confirmation --show-map --no-location --manual-radios"
+        "--demo-rid --suppress-auto-confirmation --show-status --no-location --manual-radios"
     )
     local index
     for index in {1..3}; do

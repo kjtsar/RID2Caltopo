@@ -1,1 +1,25 @@
-Initial iPhone and iPad field-test release with Bluetooth Remote ID, external Wi-Fi Remote ID relay support, MapKit tracking, Android QR configuration import, tracker coordination, CalTopo publishing, local MediaMTX video ingest, anomaly detection, and diagnostic log sharing.
+Latest changes:
+- Matched Android's Main Screen and Live View: Incident/Op Period, status and aircraft tables, one map/video/split destination, and the RTMP target inside Live View.
+- Added signed CalTopo team-map discovery with Android hierarchy/search, named incident selection, and reliable nested-response artifact rendering.
+- Live Map now initially follows the iPad's current GPS position and stops following after the operator pans or selects drone-follow mode.
+- MediaMTX now starts automatically, and the dashboard and Live Streams screen prominently show and copy the controller RTMP target using Android's `<droneDesignator>` contract.
+- Every active flight opens Android's Save/Ignore confirmation once; known mappings prefill the derived pilot callsign, and Save enables archive colors, ownership, alerts, and publishing.
+- Added Android-shaped offline map preparation for the visible map or a selected CalTopo line/polygon, with Overview, Ops, and Full Detail presets, base and contour tiles, USGS 1° DEM downloads, estimates, progress, cancellation, and a 250,000-tile safety limit.
+- Added map-cache size and age controls, maintenance, invalid-image rejection, bad-tile hash quarantine, clear/export tools, and offline tile reload after preparation.
+- Added locally owned, confirmed-drone telemetry-loss and 180/200-foot AGL compliance alerts with visible Map/Mute controls, speech, haptics, cooldowns, and diagnostics.
+- Expanded CalTopo marker rendering for command posts, clues, targets, heat sources, medevac sites, shelters, radio towers, waterfalls, fuel, vehicles, people, drones, and media.
+- Added FAA-configured nearby NOTAM/TFR retrieval, restriction status and age diagnostics, detailed notices, refresh controls, and severity-colored map overlays.
+- Added Android-equivalent FAA UAS Facility Map lookup for the one-mile operating area, with airport, airspace class, published ceiling, LAANC, and authorization status.
+- Added cached protected-land checks for nationwide NPS/refuge/wilderness and Colorado state lands, with agency links and a shared, weekly verified source catalog.
+- Added up to four live streams with controller-profile parsing, automatic focus on the first real publisher, stable fMP4 HLS playback, diagnostics, a streams grid, and external-display layouts.
+- Added passphrase-encrypted local configuration backup/restore and Android-compatible mutual-aid package export/import with cached map tiles, DEM data, expiration checks, and safe archive handling.
+- Added automatic Android-compatible flight archives, visible Files/export location, mapped identity and incident metadata, tracker retry, and launch-time replay.
+- Added persisted advanced anomaly controls for target colors, motion and saliency, sensitivity, scan/cadence, registration, thermal polarity/delta, color candidates, and guide/diagnostic overlays.
+- Added encrypted iCloud Drive configuration backup/restore with optional automatic debounced updates and a device-Keychain passphrase; provider-neutral Files backup/restore remains available.
+- Downloaded USGS GeoTIFFs now provide direct offline terrain/AGL sampling before the cached or online elevation fallback.
+
+Remaining Android differences:
+- Apple uses iCloud Drive and Files rather than Android's automatic Google Drive sync; Drive remains selectable through Files when installed.
+- iOS does not expose the handset Wi-Fi RSSI used by Android's controller-strength warning, so Apple provides telemetry-loss and video-health diagnostics but cannot display an equivalent controller percentage.
+- Passive Wi-Fi NAN/Beacon Remote ID requires the Android UDP relay or another external receiver because Apple does not expose passive ASTM NAN reception to App Store apps.
+- iOS may suspend foreground UDP, video, and anomaly processing when the app is locked or backgrounded; Bluetooth restoration is best effort under Apple's background policy.

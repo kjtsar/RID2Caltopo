@@ -13,6 +13,14 @@ public struct OrgConfigRIDMapping: Sendable, Equatable {
     public let organization: String
     public let model: String
     public let owner: String
+
+    public init(remoteID: String, mappedID: String, organization: String, model: String, owner: String) {
+        self.remoteID = remoteID
+        self.mappedID = mappedID
+        self.organization = organization
+        self.model = model
+        self.owner = owner
+    }
 }
 
 public struct OrgConfigCredentials: Sendable, Equatable {
@@ -69,6 +77,15 @@ public struct FaaSharedConfig: Sendable, Equatable {
     public let clientID: String
     public let clientSecret: String
     public let scope: String
+
+    public init(sourceLabel: String, apiBaseURL: String, tokenURL: String, clientID: String, clientSecret: String, scope: String) {
+        self.sourceLabel = sourceLabel
+        self.apiBaseURL = apiBaseURL
+        self.tokenURL = tokenURL
+        self.clientID = clientID
+        self.clientSecret = clientSecret
+        self.scope = scope
+    }
 }
 
 public struct MutualAidTemplateCredentials: Sendable, Equatable {
@@ -78,6 +95,15 @@ public struct MutualAidTemplateCredentials: Sendable, Equatable {
     public let domainAndPort: String
     public let sourceLabel: String
     public let targetFolderHint: String
+
+    public init(teamID: String, credentialID: String, credentialSecret: String, domainAndPort: String, sourceLabel: String, targetFolderHint: String) {
+        self.teamID = teamID
+        self.credentialID = credentialID
+        self.credentialSecret = credentialSecret
+        self.domainAndPort = domainAndPort
+        self.sourceLabel = sourceLabel
+        self.targetFolderHint = targetFolderHint
+    }
 }
 
 public struct MutualAidSharedProfile: Sendable, Equatable {
@@ -174,6 +200,39 @@ public enum AndroidConfigTokenCodec {
               let plaintext = try? decrypt(encoded),
               let plaintextData = plaintext.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: plaintextData) as? [String: Any]
+        else { throw OrgConfigInteropError.invalidBundle }
+        let profileID = string(object["profile_id"])
+        guard !profileID.isEmpty else { throw OrgConfigInteropError.invalidBundle }
+        return MutualAidSharedProfile(
+            profileID: profileID,
+            displayName: string(object["display_name"]),
+            teamID: string(object["team_id"]),
+            credentialID: string(object["credential_id"]),
+            credentialSecret: string(object["credential_secret"]),
+            domainAndPort: string(object["domain_and_port"]),
+            trackFolder: string(object["track_folder"]),
+            incident: string(object["incident"]),
+            operationalPeriod: string(object["op_period"]),
+            trackerAPIKey: string(object["tracker_api_key"]),
+            trackerURLPrefix: string(object["tracker_url_prefix"]),
+            autoConnect: (object["auto_connect"] as? NSNumber)?.boolValue ?? true,
+            expiresAtEpochMilliseconds: (object["expires_at_epoch_ms"] as? NSNumber)?.int64Value ?? 0,
+            sourceLabel: string(object["source_label"]),
+            targetMapID: string(object["target_map_id"]),
+            targetMapTitle: string(object["target_map_title"]),
+            targetFolderHint: string(object["target_folder_hint"])
+        )
+    }
+
+    public static func encryptMutualAidProfile(_ object: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return Data(xor(Array(data))).base64EncodedString()
+    }
+
+    public static func decryptMutualAidProfile(_ encoded: String) throws -> MutualAidSharedProfile {
+        let plaintext = try decrypt(encoded)
+        guard let data = plaintext.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { throw OrgConfigInteropError.invalidBundle }
         let profileID = string(object["profile_id"])
         guard !profileID.isEmpty else { throw OrgConfigInteropError.invalidBundle }

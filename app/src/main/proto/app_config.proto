@@ -100,6 +100,14 @@ message AppConfig {
     string last_failure_reason = 6;
   }
 
+  message LandRestrictionConfig {
+    bool enabled = 1;
+    bool show_on_map = 2;
+    bool auto_refresh = 3;
+    int32 radius_nm = 4;
+    int64 last_updated_epoch_ms = 5;
+  }
+
   int64 min_distance_feet = 20;
   int64 new_track_delay_seconds = 21;
   int64 max_idle_time_minutes = 22;
@@ -130,6 +138,7 @@ message AppConfig {
   ArchiveLocation archive_location = 60;
   NotamConfig notam = 61;
   FaaRemoteConfig faa_remote_config = 62;
+  LandRestrictionConfig land_restrictions = 63;
 
   repeated RidMapping rid_mappings = 70;
   repeated LoadedConfigFileRecord loaded_config_files = 80;

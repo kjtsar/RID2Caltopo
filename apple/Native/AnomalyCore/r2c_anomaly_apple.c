@@ -25,6 +25,43 @@ void R2CAnomalyDestroy(R2CAnomalyRuntime *runtime) {
     free(runtime);
 }
 
+int32_t R2CAnomalyApplyConfiguration(
+        R2CAnomalyRuntime *runtime,
+        const R2CAnomalyConfiguration *configuration) {
+    if (runtime == NULL || configuration == NULL) return -1;
+    anomaly_detector_config_t config =
+            anomaly_detector_config_make_realtime_default(configuration->algorithm_mask, 30.0f);
+    config.enabled = configuration->enabled != 0;
+    config.show_hot_overlay = configuration->show_hot_overlay != 0;
+    config.show_candidate_blobs = configuration->show_candidate_blobs != 0;
+    config.algorithm_mask = configuration->algorithm_mask;
+    config.registration_mode = configuration->registration_mode;
+    config.movement_estimator_mode = configuration->movement_estimator_mode;
+    config.stride_mode = configuration->stride_mode;
+    config.frame_stride = configuration->frame_stride > 0 ? configuration->frame_stride : 1;
+    config.adaptive_min_stride_frames = configuration->adaptive_min_stride_frames > 0
+            ? configuration->adaptive_min_stride_frames : 2;
+    config.adaptive_max_stride_seconds = configuration->adaptive_max_stride_seconds;
+    config.adaptive_max_stride_frames = (int)(30.0f * configuration->adaptive_max_stride_seconds);
+    if (config.adaptive_max_stride_frames < config.adaptive_min_stride_frames) {
+        config.adaptive_max_stride_frames = config.adaptive_min_stride_frames;
+    }
+    config.pixel_step = configuration->pixel_step;
+    config.score_threshold = configuration->score_threshold;
+    config.motion_evidence_scale = configuration->motion_evidence_scale;
+    config.min_area_fraction = configuration->min_area_fraction;
+    config.thermal_polarity = configuration->thermal_polarity;
+    config.scan_zone = configuration->scan_zone;
+    config.min_hits = configuration->min_hits;
+    config.thermal_min_delta = configuration->thermal_min_delta;
+    config.small_target_screen_fraction = configuration->small_target_screen_fraction;
+    config.color_frontend_mode = configuration->color_frontend_mode;
+    config.color_target_candidate_limit = configuration->color_target_candidate_limit;
+    config.target_color_family_mask = configuration->target_color_family_mask;
+    return (int32_t)anomaly_detector_runtime_apply_config(
+            &runtime->detector, &config, config.frame_stride);
+}
+
 int32_t R2CAnomalyProcessBGRA(
         R2CAnomalyRuntime *runtime,
         const uint8_t *bgra,

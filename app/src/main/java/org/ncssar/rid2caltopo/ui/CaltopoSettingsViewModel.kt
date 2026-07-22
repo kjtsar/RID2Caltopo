@@ -22,6 +22,7 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayMode
 import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.notam.NotamAuthManager
 import org.ncssar.rid2caltopo.notam.NotamCenter
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
 class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListener {
 
     // --- Live Data for UI --- //
@@ -87,6 +88,15 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
     private val _notamStatus = MutableStateFlow(buildNotamStatus())
     val notamStatus = _notamStatus.asStateFlow()
 
+    private val _landRestrictionsEnabled = MutableStateFlow(CaltopoClient.GetLandRestrictionsEnabled())
+    val landRestrictionsEnabled = _landRestrictionsEnabled.asStateFlow()
+    private val _landRestrictionsShowOnMap = MutableStateFlow(CaltopoClient.GetLandRestrictionsShowOnMap())
+    val landRestrictionsShowOnMap = _landRestrictionsShowOnMap.asStateFlow()
+    private val _landRestrictionsAutoRefresh = MutableStateFlow(CaltopoClient.GetLandRestrictionsAutoRefresh())
+    val landRestrictionsAutoRefresh = _landRestrictionsAutoRefresh.asStateFlow()
+    private val _landRestrictionsRadiusNm = MutableStateFlow(CaltopoClient.GetLandRestrictionsRadiusNm().toString())
+    val landRestrictionsRadiusNm = _landRestrictionsRadiusNm.asStateFlow()
+
     private val initialExternalConfig = R2CApplication.getAppCtxt()?.let { ExternalDisplayPrefs.load(it) }
         ?: ExternalDisplayConfig()
     private val _externalDisplayMode = MutableStateFlow(initialExternalConfig.mode)
@@ -127,6 +137,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamRefreshIntervalSeconds.value = CaltopoClient.GetNotamRefreshIntervalSeconds().toString()
         _notamAutoRefresh.value = CaltopoClient.GetNotamAutoRefresh()
         _notamStatus.value = buildNotamStatus()
+        _landRestrictionsEnabled.value = CaltopoClient.GetLandRestrictionsEnabled()
+        _landRestrictionsShowOnMap.value = CaltopoClient.GetLandRestrictionsShowOnMap()
+        _landRestrictionsAutoRefresh.value = CaltopoClient.GetLandRestrictionsAutoRefresh()
+        _landRestrictionsRadiusNm.value = CaltopoClient.GetLandRestrictionsRadiusNm().toString()
         val externalConfig = R2CApplication.getAppCtxt()?.let { ExternalDisplayPrefs.load(it) }
             ?: ExternalDisplayConfig()
         _externalDisplayMode.value = externalConfig.mode
@@ -204,6 +218,22 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamAutoRefresh.value = enabled
     }
 
+    fun onLandRestrictionsEnabledChanged(enabled: Boolean) {
+        _landRestrictionsEnabled.value = enabled
+    }
+
+    fun onLandRestrictionsShowOnMapChanged(enabled: Boolean) {
+        _landRestrictionsShowOnMap.value = enabled
+    }
+
+    fun onLandRestrictionsAutoRefreshChanged(enabled: Boolean) {
+        _landRestrictionsAutoRefresh.value = enabled
+    }
+
+    fun onLandRestrictionsRadiusNmChanged(radiusNm: String) {
+        _landRestrictionsRadiusNm.value = radiusNm
+    }
+
     fun onExternalDisplayModeChanged(mode: ExternalDisplayMode) {
         _externalDisplayMode.value = mode
     }
@@ -261,6 +291,10 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         _notamRadiusNm.value.toIntOrNull()?.let { CaltopoClient.SetNotamRadiusNm(it) }
         _notamRefreshIntervalSeconds.value.toIntOrNull()?.let { CaltopoClient.SetNotamRefreshIntervalSeconds(it) }
         CaltopoClient.SetNotamAutoRefresh(_notamAutoRefresh.value)
+        CaltopoClient.SetLandRestrictionsEnabled(_landRestrictionsEnabled.value)
+        CaltopoClient.SetLandRestrictionsShowOnMap(_landRestrictionsShowOnMap.value)
+        CaltopoClient.SetLandRestrictionsAutoRefresh(_landRestrictionsAutoRefresh.value)
+        _landRestrictionsRadiusNm.value.toIntOrNull()?.let(CaltopoClient::SetLandRestrictionsRadiusNm)
         R2CApplication.getAppCtxt()?.let { context ->
             ExternalDisplayPrefs.save(
                 context,
@@ -276,6 +310,7 @@ class CaltopoSettingsViewModel : ViewModel(), CaltopoClient.ClientSettingsListen
         }
         _notamStatus.value = buildNotamStatus()
         NotamCenter.requestImmediateRefresh()
+        LandRestrictionCenter.settingsChanged()
         if (restartMediaMtx) {
             R2CApplication.getAppCtxt()?.let { MediaMTXService.requestRestart(it) }
         }

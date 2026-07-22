@@ -196,6 +196,8 @@ private extension RidObservation {
             latitude: latitude,
             longitude: longitude,
             altitudeMeters: altitudeMeters,
+            heightMeters: heightMeters,
+            heightReference: heightReference,
             headingDegrees: headingDegrees,
             speedMetersPerSecond: speedMetersPerSecond,
             operatorLatitude: operatorLatitude,

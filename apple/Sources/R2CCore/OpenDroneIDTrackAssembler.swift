@@ -56,6 +56,10 @@ public actor OpenDroneIDTrackAssembler {
             latitude: location.latitude,
             longitude: location.longitude,
             altitudeMeters: location.preferredAltitudeMeters,
+            heightMeters: location.heightMeters > -999 ? location.heightMeters : nil,
+            heightReference: location.heightMeters > -999
+                ? (location.heightType == 0 ? .takeoff : .ground)
+                : nil,
             headingDegrees: location.directionDegrees,
             speedMetersPerSecond: location.horizontalSpeedMetersPerSecond,
             operatorLatitude: state.system?.operatorLatitude,

@@ -8,6 +8,7 @@ archive_path=""
 bundle_id="org.ncssar.RID2CaltopoApple"
 build_number="1"
 marketing_version="1.0"
+force_land_catalog_refresh=false
 
 usage() {
     cat <<'USAGE'
@@ -19,6 +20,8 @@ Options:
   --bundle-id ID         Override CFBundleIdentifier for the archive
   --build-number NUMBER  Override CFBundleVersion for the archive
   --marketing-version V Override CFBundleShortVersionString (default: 1.0)
+  --force-land-catalog-refresh
+                         Ignore the weekly protected-land catalog check cache
   --help                  Show this help
 
 The default gate rebuilds both native XCFrameworks from current sources, runs
@@ -34,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --bundle-id) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; bundle_id="$2"; shift 2 ;;
         --build-number) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; build_number="$2"; shift 2 ;;
         --marketing-version) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; marketing_version="$2"; shift 2 ;;
+        --force-land-catalog-refresh) force_land_catalog_refresh=true; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -59,10 +63,16 @@ else
     [[ ! -e "$archive_path" ]] || { echo "Archive already exists: $archive_path" >&2; exit 1; }
 fi
 
-echo "[1/9] App Store metadata and privacy policy"
-"$script_dir/AppStore/verify-metadata.sh"
+echo "[1/10] App Store metadata and privacy policy"
+"$script_dir/AppStore/verify-metadata.sh" --marketing-version "$marketing_version"
 
-echo "[2/9] Native Apple dependencies"
+echo "[2/10] Protected-land source catalog"
+python3 -m unittest discover -s "$repo_root/tools/protected_land_catalog" -p 'test_*.py'
+land_catalog_args=()
+$force_land_catalog_refresh && land_catalog_args+=(--force)
+python3 "$repo_root/tools/protected_land_catalog/refresh_catalog.py" "${land_catalog_args[@]}"
+
+echo "[3/10] Native Apple dependencies"
 if $rebuild_native; then
     "$script_dir/Native/MediaMTX/build-xcframework.sh"
     "$script_dir/Native/AnomalyCore/build-xcframework.sh"
@@ -84,27 +94,27 @@ for symbol in R2CMediaMTXSetLogCallback R2CMediaMTXStart R2CMediaMTXStop; do
     nm -gU "$media_root/device/libmediamtx_mobile.a" | grep "_$symbol$" >/dev/null
     nm -gU "$media_root/simulator/libmediamtx_mobile.a" | grep "_$symbol$" >/dev/null
 done
-for symbol in R2CAnomalyCreate R2CAnomalyDestroy R2CAnomalyProcessBGRA R2CAnomalyFrameResultCopyBox; do
+for symbol in R2CAnomalyCreate R2CAnomalyDestroy R2CAnomalyApplyConfiguration R2CAnomalyProcessBGRA R2CAnomalyFrameResultCopyBox; do
     nm -gU "$anomaly_root/device/libR2CAnomalyApple.a" | grep "_$symbol$" >/dev/null
     nm -gU "$anomaly_root/simulator/libR2CAnomalyApple.a" | grep "_$symbol$" >/dev/null
 done
 
-echo "[3/9] Portable anomaly regression suite"
+echo "[4/10] Portable anomaly regression suite"
 cmake -S "$repo_root/tools/anomaly_test" -B "$work_dir/anomaly-test" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$work_dir/anomaly-test" --target anomaly_test -j 1
 "$work_dir/anomaly-test/anomaly_test" | tee "$work_dir/anomaly-test.txt"
 grep -Eq 'Results: [0-9]+ passed, 0 failed' "$work_dir/anomaly-test.txt"
 
-echo "[4/9] Color and person-relevance qualifications"
+echo "[5/10] Color and person-relevance qualifications"
 (
     cd "$repo_root"
     ./gradlew :app:colorRealtimeQualification :app:personRelevanceQualification
 )
 
-echo "[5/9] Shared Swift tests"
+echo "[6/10] Shared Swift tests"
 swift test --package-path "$script_dir"
 
-echo "[6/9] Clean universal Simulator link"
+echo "[7/10] Clean universal Simulator link"
 xcodebuild -quiet \
     -project "$script_dir/RID2CaltopoApple.xcodeproj" \
     -scheme RID2CaltopoApple \
@@ -120,7 +130,7 @@ xcodebuild -quiet \
     -jobs 1 \
     build
 
-echo "[7/9] Clean arm64 device archive"
+echo "[8/10] Clean arm64 device archive"
 xcodebuild -quiet \
     -project "$script_dir/RID2CaltopoApple.xcodeproj" \
     -scheme RID2CaltopoApple \
@@ -135,10 +145,10 @@ xcodebuild -quiet \
     -jobs 1 \
     archive
 
-echo "[8/9] Archive metadata and binary verification"
+echo "[9/10] Archive metadata and binary verification"
 "$script_dir/verify-unsigned-archive.sh" "$archive_path" "$bundle_id" "$build_number" "$marketing_version"
 
-echo "[9/9] Release gate complete"
+echo "[10/10] Release gate complete"
 echo "Apple release check passed."
 if [[ "$archive_path" != "$work_dir/"* ]]; then
     echo "Verified archive: $archive_path"

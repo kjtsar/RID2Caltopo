@@ -3,6 +3,28 @@ set -euo pipefail
 
 script_dir="${0:A:h}"
 locale_dir="$script_dir/metadata/en-US"
+marketing_version=""
+
+usage() {
+    cat <<'USAGE'
+usage: apple/AppStore/verify-metadata.sh [--marketing-version VERSION]
+
+When a marketing version is supplied, metadata/en-US/whats_new.txt must match
+release-notes/VERSION.txt exactly.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --marketing-version)
+            [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+            marketing_version="$2"
+            shift 2
+            ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
 
 check_limit() {
     local file="$1"
@@ -23,6 +45,34 @@ check_limit "$locale_dir/keywords.txt" 100 "keywords"
 check_limit "$locale_dir/description.txt" 4000 "description"
 check_limit "$locale_dir/whats_new.txt" 4000 "what's new"
 [[ -s "$locale_dir/review_notes.txt" ]] || { echo "Missing review notes" >&2; exit 1; }
+
+whats_new="$locale_dir/whats_new.txt"
+rg -q '^Latest changes:$' "$whats_new" || {
+    echo "What's new must contain a 'Latest changes:' section." >&2
+    exit 1
+}
+rg -q '^Remaining Android differences:$' "$whats_new" || {
+    echo "What's new must contain a 'Remaining Android differences:' section." >&2
+    exit 1
+}
+
+if [[ -n "$marketing_version" ]]; then
+    print -r -- "$marketing_version" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}$' || {
+        echo "Invalid marketing version: $marketing_version" >&2
+        exit 2
+    }
+    version_notes="$script_dir/release-notes/$marketing_version.txt"
+    [[ -s "$version_notes" ]] || {
+        echo "Missing release notes for version $marketing_version: $version_notes" >&2
+        exit 1
+    }
+    cmp -s "$version_notes" "$whats_new" || {
+        echo "What's new does not match release-notes/$marketing_version.txt" >&2
+        echo "Copy the reviewed version notes to metadata/en-US/whats_new.txt before release." >&2
+        exit 1
+    }
+    echo "  release notes: version $marketing_version"
+fi
 
 privacy="$script_dir/../../PrivacyPolicy.md"
 [[ -s "$privacy" ]] || { echo "Missing public privacy policy source: $privacy" >&2; exit 1; }

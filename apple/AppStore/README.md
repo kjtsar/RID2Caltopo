@@ -17,8 +17,17 @@ behavior can be checked together.
 The updated root `PrivacyPolicy.md` was committed and pushed to the public
 repository on July 19, 2026. The public URL is saved in App Store Connect.
 
-`verify-metadata.sh` checks local field presence and Apple's text limits. It
-also checks that the privacy manifest matches the conservative linked-data
+Every release has an authoritative `release-notes/<version>.txt`. The file must
+describe both the latest changes and the remaining Android differences. Copy
+the reviewed text unchanged to `metadata/en-US/whats_new.txt` and run:
+
+```sh
+apple/AppStore/verify-metadata.sh --marketing-version <version>
+```
+
+`verify-metadata.sh` checks that the versioned notes exist and match the App
+Store text, as well as checking local field presence and Apple's text limits.
+It also checks that the privacy manifest matches the conservative linked-data
 worksheet in `APP_STORE_CONNECT_CHECKLIST.md`. It does not contact or modify
 App Store Connect.
 

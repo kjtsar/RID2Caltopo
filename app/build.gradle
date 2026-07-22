@@ -207,7 +207,7 @@ android {
     compileSdk = 36
     def versionMajor = 1
     def versionMinor = 6
-    def versionPatch = 12
+    def versionPatch = 13
 
     signingConfigs {
         register("release") {
@@ -222,7 +222,7 @@ android {
         applicationId "org.ncssar.rid2caltopo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 96
+        versionCode = 97
         def appVersionName = "${versionMajor}.${versionMinor}.${versionPatch}(${versionCode})"
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -599,10 +599,33 @@ tasks.matching {
     finalizedBy("uploadReleaseCrashlyticsArtifacts")
 }
 
+tasks.register("protectedLandCatalogCheck") {
+    group = "verification"
+    description = "Tests and rate-limited verifies the shared protected-land source catalog."
+    outputs.upToDateWhen { false }
+    doLast {
+        runProcess(rootDir, [
+                "python3",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tools/protected_land_catalog",
+                "-p",
+                "test_*.py"
+        ])
+        def command = ["python3", "tools/protected_land_catalog/refresh_catalog.py"]
+        if (project.findProperty("forceProtectedLandCatalogRefresh")?.toString()?.toBoolean()) {
+            command.add("--force")
+        }
+        runProcess(rootDir, command)
+    }
+}
+
 tasks.register("releaseCheck") {
     group = "verification"
     description = "Runs release verification and assembles the release build."
-    dependsOn("releaseVerification", "assembleRelease")
+    dependsOn("protectedLandCatalogCheck", "releaseVerification", "assembleRelease")
 }
 
 tasks.register("trackerCoordinationTests") {

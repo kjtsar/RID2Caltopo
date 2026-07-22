@@ -81,6 +81,9 @@ import org.ncssar.rid2caltopo.data.WaypointTrack
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.notam.NotamPanel
 import org.ncssar.rid2caltopo.notam.NotamStatusChip
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionPanel
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionStatusChip
 import org.ncssar.rid2caltopo.video.ComplianceAlertBell
 import org.ncssar.rid2caltopo.video.ComplianceAlertDialog
 import java.time.Instant
@@ -299,6 +302,7 @@ fun MainScreen(
     var showMutualAidImportPreviewDialog by remember { mutableStateOf(false) }
     var importingMutualAidConfig by remember { mutableStateOf(false) }
     var showNotamPanel by remember { mutableStateOf(false) }
+    var showLandRestrictionPanel by remember { mutableStateOf(false) }
     var showProximityDebugDialog by remember { mutableStateOf(false) }
     var showLogArchiveDialog by remember { mutableStateOf(false) }
     var showArchiveCleanupDialog by remember { mutableStateOf(false) }
@@ -327,6 +331,7 @@ fun MainScreen(
     var locationOverrideLabel by remember { mutableStateOf(formatLocationOverride(CaltopoMap.GetMyLocationOverride())) }
     val notamUiState by NotamCenter.uiState.collectAsStateWithLifecycle()
     val airspaceUiState by AirspaceCenter.uiState.collectAsStateWithLifecycle()
+    val landRestrictionUiState by LandRestrictionCenter.uiState.collectAsStateWithLifecycle()
     val overLimitDrones by streamsViewModel.overLimitDrones.collectAsStateWithLifecycle()
     val signalLossFlights by DroneSignalLossAlertCenter.flights.collectAsStateWithLifecycle()
     val proximityDebugPairs by ProximityAlertCenter.debugPairs.collectAsState()
@@ -724,6 +729,13 @@ fun MainScreen(
             state = notamUiState,
             airspaceState = airspaceUiState,
             onDismiss = { showNotamPanel = false }
+        )
+    }
+    if (showLandRestrictionPanel) {
+        LandRestrictionPanel(
+            state = landRestrictionUiState,
+            onRefresh = LandRestrictionCenter::requestImmediateRefresh,
+            onDismiss = { showLandRestrictionPanel = false }
         )
     }
     ComplianceAlertDialog(
@@ -1190,11 +1202,17 @@ fun MainScreen(
         ) {
             LazyColumn(modifier = Modifier.padding(paddingValues)) {
                 item(key = "notam_chip") {
-                    NotamStatusChip(
-                        state = notamUiState,
-                        airspaceState = airspaceUiState,
-                        onClick = { showNotamPanel = true }
-                    )
+                    Row {
+                        NotamStatusChip(
+                            state = notamUiState,
+                            airspaceState = airspaceUiState,
+                            onClick = { showNotamPanel = true }
+                        )
+                        LandRestrictionStatusChip(
+                            state = landRestrictionUiState,
+                            onClick = { showLandRestrictionPanel = true }
+                        )
+                    }
                 }
                 itemsIndexed(
                     items = screenItems,

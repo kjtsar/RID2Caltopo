@@ -35,6 +35,7 @@ bundle, GeoJSON file, or measurement in Evidence.
 | Wi-Fi RID relay | Android Beacon/NAN observations relayed over UDP appear with matching IDs, positions, and transport labels; malformed datagrams are rejected and counted. |  |  |
 | GPS and map | Operator position, range/bearing, heading, trail, closest-pair separation, portrait/landscape layout, and supported text sizes are usable. |  |  |
 | Track archive | Completing a track creates Android-compatible GeoJSON that opens through Files and contains expected coordinates and timestamps. |  |  |
+| Tracker archive upload | An eligible mapped team track uploads to the configured tracker; a forced transient failure remains pending and uploads after relaunch. Foreign, unknown, and local-only tracks remain local. |  |  |
 | Tracker coordination | Two devices report peer presence; ownership, Save, non-owner relay/silence, handoff, disconnect, and reconnect behave as documented. |  |  |
 | CalTopo publication | Owner publishes ordered points to the disposable map; non-owner does not duplicate; completion stops the track. |  |  |
 | Proximity alert | Controlled spacing verifies speech, haptic, Map, Suspend, Resume, predictive head on/off, delayed clear, and non-owner silence. |  |  |

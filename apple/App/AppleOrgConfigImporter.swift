@@ -42,6 +42,34 @@ final class AppleOrgConfigSettings: ObservableObject {
 
     var trackerAPIKey: String { Self.loadTrackerAPIKey() ?? "" }
 
+    var faaConfiguration: FaaSharedConfig? {
+        let clientID = Self.loadSecret(account: Self.faaClientIDAccount) ?? ""
+        let clientSecret = Self.loadSecret(account: Self.faaClientSecretAccount) ?? ""
+        guard !clientID.isEmpty, !clientSecret.isEmpty else { return nil }
+        return FaaSharedConfig(
+            sourceLabel: defaults.string(forKey: "faa.sourceLabel") ?? "FAA NOTAM credentials",
+            apiBaseURL: defaults.string(forKey: "faa.apiBaseURL") ?? "",
+            tokenURL: defaults.string(forKey: "faa.tokenURL") ?? "",
+            clientID: clientID,
+            clientSecret: clientSecret,
+            scope: defaults.string(forKey: "faa.scope") ?? ""
+        )
+    }
+
+    var mutualAidTemplate: MutualAidTemplateCredentials? {
+        let credentialID = Self.loadSecret(account: Self.mutualAidCredentialIDAccount) ?? ""
+        let credentialSecret = Self.loadSecret(account: Self.mutualAidCredentialSecretAccount) ?? ""
+        guard !credentialID.isEmpty, !credentialSecret.isEmpty else { return nil }
+        return MutualAidTemplateCredentials(
+            teamID: defaults.string(forKey: "mutualAid.template.teamID") ?? "",
+            credentialID: credentialID,
+            credentialSecret: credentialSecret,
+            domainAndPort: defaults.string(forKey: "mutualAid.template.domainAndPort") ?? "caltopo.com",
+            sourceLabel: defaults.string(forKey: "mutualAid.template.sourceLabel") ?? organizationName,
+            targetFolderHint: defaults.string(forKey: "mutualAid.template.targetFolderHint") ?? "MAI"
+        )
+    }
+
     func apply(bundle: OrgConfigBundle, normalizedToken: String) throws {
         let credentials = bundle.credentials
         organizationName = credentials?.organizationName.isEmpty == false
@@ -100,6 +128,104 @@ final class AppleOrgConfigSettings: ObservableObject {
         defaults.set(enabled, forKey: "org.predictiveHead")
     }
 
+    func setIncidentMapTitle(_ title: String) {
+        let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        incident = value
+        defaults.set(value, forKey: "org.incident")
+    }
+
+    func setIncident(_ value: String) {
+        incident = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        defaults.set(incident, forKey: "org.incident")
+    }
+
+    func setOperationalPeriod(_ value: String) {
+        operationalPeriod = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        defaults.set(operationalPeriod, forKey: "org.operationalPeriod")
+    }
+
+    func transferSnapshot() -> [String: Any] {
+        var value: [String: Any] = [
+            "organization_name": organizationName,
+            "incident": incident,
+            "operational_period": operationalPeriod,
+            "track_folder": trackFolder,
+            "team_id": teamID,
+            "tracker_url_prefix": trackerURLPrefix,
+            "tracker_api_key": trackerAPIKey,
+            "use_peers": usePeers,
+            "predictive_head": predictiveHeadEnabled,
+            "proximity_feet": proximityAlertSpacingFeet,
+            "source_description": sourceDescription,
+        ]
+        if let faaConfiguration {
+            value["faa"] = [
+                "source_label": faaConfiguration.sourceLabel,
+                "api_base_url": faaConfiguration.apiBaseURL,
+                "token_url": faaConfiguration.tokenURL,
+                "client_id": faaConfiguration.clientID,
+                "client_secret": faaConfiguration.clientSecret,
+                "scope": faaConfiguration.scope,
+            ]
+        }
+        if let mutualAidTemplate {
+            value["mutual_aid_template"] = [
+                "team_id": mutualAidTemplate.teamID,
+                "credential_id": mutualAidTemplate.credentialID,
+                "credential_secret": mutualAidTemplate.credentialSecret,
+                "domain_and_port": mutualAidTemplate.domainAndPort,
+                "source_label": mutualAidTemplate.sourceLabel,
+                "target_folder_hint": mutualAidTemplate.targetFolderHint,
+            ]
+        }
+        return value
+    }
+
+    func applyTransferSnapshot(_ object: [String: Any]) throws {
+        organizationName = object["organization_name"] as? String ?? ""
+        incident = object["incident"] as? String ?? ""
+        operationalPeriod = object["operational_period"] as? String ?? ""
+        trackFolder = object["track_folder"] as? String ?? ""
+        teamID = object["team_id"] as? String ?? ""
+        trackerURLPrefix = object["tracker_url_prefix"] as? String ?? ""
+        usePeers = (object["use_peers"] as? NSNumber)?.boolValue ?? true
+        predictiveHeadEnabled = (object["predictive_head"] as? NSNumber)?.boolValue ?? true
+        proximityAlertSpacingFeet = (object["proximity_feet"] as? NSNumber)?.intValue ?? 40
+        sourceDescription = object["source_description"] as? String ?? "Local backup"
+        defaults.set(organizationName, forKey: "org.name")
+        defaults.set(incident, forKey: "org.incident")
+        defaults.set(operationalPeriod, forKey: "org.operationalPeriod")
+        defaults.set(trackFolder, forKey: "org.trackFolder")
+        defaults.set(teamID, forKey: "org.teamID")
+        defaults.set(trackerURLPrefix, forKey: "org.trackerURLPrefix")
+        defaults.set(usePeers, forKey: "org.usePeers")
+        defaults.set(predictiveHeadEnabled, forKey: "org.predictiveHead")
+        defaults.set(proximityAlertSpacingFeet, forKey: "org.proximityFeet")
+        defaults.set(sourceDescription, forKey: "org.sourceDescription")
+        try Self.storeSecret(object["tracker_api_key"] as? String ?? "", account: Self.trackerAccount)
+        if let faa = object["faa"] as? [String: Any] {
+            try applyEmbedded(faa: FaaSharedConfig(
+                sourceLabel: faa["source_label"] as? String ?? "",
+                apiBaseURL: faa["api_base_url"] as? String ?? "",
+                tokenURL: faa["token_url"] as? String ?? "",
+                clientID: faa["client_id"] as? String ?? "",
+                clientSecret: faa["client_secret"] as? String ?? "",
+                scope: faa["scope"] as? String ?? ""
+            ))
+        }
+        if let template = object["mutual_aid_template"] as? [String: Any] {
+            try apply(mutualAidTemplate: MutualAidTemplateCredentials(
+                teamID: template["team_id"] as? String ?? "",
+                credentialID: template["credential_id"] as? String ?? "",
+                credentialSecret: template["credential_secret"] as? String ?? "",
+                domainAndPort: template["domain_and_port"] as? String ?? "caltopo.com",
+                sourceLabel: template["source_label"] as? String ?? "",
+                targetFolderHint: template["target_folder_hint"] as? String ?? "MAI"
+            ))
+        }
+    }
+
     func apply(faa config: FaaSharedConfig, normalizedToken: String) throws {
         try apply(faa: config, sourceToken: normalizedToken)
     }
@@ -128,10 +254,14 @@ final class AppleOrgConfigSettings: ObservableObject {
     }
 
     private static func loadTrackerAPIKey() -> String? {
+        loadSecret(account: trackerAccount)
+    }
+
+    private static func loadSecret(account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: trackerAccount,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -184,6 +314,7 @@ final class AppleOrgConfigImporter: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    var caltopoConfigurationHandler: ((AppleCaltopoConfiguration) -> Void)?
 
     var statusText: String {
         switch state {
@@ -225,6 +356,7 @@ final class AppleOrgConfigImporter: ObservableObject {
                 let bundle = try OrgConfigTokenCodec.parseBundle(data)
                 try orgSettings.apply(bundle: bundle, normalizedToken: normalized)
                 try caltopoSettings.applyImported(credentials: bundle.credentials)
+                caltopoConfigurationHandler?(caltopoSettings.configuration)
                 identityStore.applyImportedMappings(bundle.mappings)
                 if let faaConfig = bundle.faaConfig {
                     try orgSettings.applyEmbedded(faa: faaConfig)
@@ -252,6 +384,7 @@ final class AppleOrgConfigImporter: ObservableObject {
                 let profile = try AndroidConfigTokenCodec.parseMutualAidBundle(data)
                 try orgSettings.apply(mutualAid: profile, normalizedToken: normalized)
                 try caltopoSettings.applyImported(mutualAid: profile)
+                caltopoConfigurationHandler?(caltopoSettings.configuration)
                 state = .applied("Mutual-aid access installed for \(profile.displayName).")
                 AppleLog.info("OrgConfig", "Applied Android MA QR profile='\(profile.profileID)' map='\(profile.targetMapID)'")
             }

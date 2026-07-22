@@ -69,8 +69,10 @@ Remote ID unless Apple adds a passive broadcast API.
   uses a real `CLLocationManager` fix for the MapKit user annotation plus
   device-relative range/bearing. Closest-pair horizontal/vertical/3D separation
   is visible and feeds the operator proximity-alert workflow.
-- Aircraft details now offer Android-shaped session confirmation fields for
-  organization, pilot callsign, and drone description. The shared mapped-ID
+- Every newly active flight now automatically opens Android's Save/Ignore
+  confirmation once, including known aircraft, and clears that session state
+  when the flight ends. Aircraft details retain the same confirmation fields
+  for organization, pilot callsign, and drone description. The shared mapped-ID
   builder matches Android's callsign filtering and model abbreviation rules.
   Confirmations improve aircraft labels and diagnostics, propagate through
   tracker peer coordination, and are required before this device may alert.
@@ -82,10 +84,16 @@ Remote ID unless Apple adds a passive broadcast API.
   Organization bundles also apply embedded FAA configuration and mutual-aid
   template credentials. Cross-language vectors and bundle tests are green.
   Camera capture and a real public Drive bundle remain physical-device gates.
-- The main SwiftUI hierarchy now begins with Android-like incident context and
-  exposes the familiar Live View, log forwarding, Status, Import Config,
-  Settings, and About controls. Exact native widgets adapt to iPhone and iPad,
-  while control names, order, and operator workflow stay aligned where practical.
+- The regular-width iPad hierarchy now uses the Android operator-dashboard
+  shape: side-by-side incident/operational-period context, CalTopo/coordinator/
+  team-drone status, prominent map/config actions, restriction status, and the
+  active-aircraft list. Compact iPhone presentation retains native grouped
+  navigation while preserving the same controls and workflow.
+- Organization QR credentials now open a signed Android-equivalent CalTopo team
+  map browser with account/folder/bookmark hierarchy, recent activity, search,
+  folder navigation, and one-tap map selection; manual Map ID remains a fallback.
+- Live Map enters MapKit operator-follow mode when an accurate iPad location is
+  available, then yields permanently to an operator pan or focused-drone follow.
 - The Status menu now opens the Android-shaped copyable build/scanner/configuration
   report instead of being a placeholder. It adds current Apple receiver,
   tracker, MediaMTX, video, and persisted QR mapping state while excluding all
@@ -126,6 +134,43 @@ Remote ID unless Apple adds a passive broadcast API.
 - The CoreBluetooth observation stream feeds that store directly. A MapKit
   operator view renders active aircraft, heading-oriented icons, colored track
   polylines, operator locations when present, and accepted/filtered counters.
+- The operational map now uses an `MKMapView` host with Android-equivalent OSM
+  and ArcGIS imagery contracts, optional USGS contours, disk-backed tile reuse,
+  offline-only display, signed CalTopo artifact snapshots, searchable nested
+  folder/item visibility with per-map persistence, orphan grouping,
+  hidden-parent media handling, and per-map offline artifact snapshots. Map,
+  video, split, and both primary/inset layouts persist locally. Apple 1.2 adds
+  FAA-configured nearby NOTAM/TFR queries, status/age diagnostics, operator
+  controls, details, severity-colored map geometry, and Android-equivalent
+  one-mile FAA UAS Facility Map status with airport/class/ceiling/LAANC details.
+- Apple 1.2 adds Android-shaped offline preparation for the visible viewport or
+  selected CalTopo line/polygon, the Android Overview/Ops/Full Detail zoom
+  presets, optional contours and USGS 1-degree GeoTIFF acquisition, estimates,
+  progress/cancellation, cache size/age maintenance, and bad-tile quarantine,
+  clearing, and export. Terrain sampling reads downloaded GeoTIFF pixels
+  directly, then falls back to the existing point cache and USGS service.
+- Confirmed aircraft now use Android-equivalent mapped designators and
+  per-pilot persisted active/archive colors and bearing preference. The map
+  draws the full-flight archive path thin, the recent active path thick, and
+  the optional heading bearing from the aircraft to the viewport edge.
+- Aircraft overlays now use Android's two-line telemetry label format,
+  collision-avoidance candidate order, displaced-label leaders, focused-drone
+  selection/follow behavior, and bounded predictive-head projection. The
+  Apple altitude coordinator preserves ASTM takeoff/ground-relative height,
+  applies Android's six-sample takeoff-reference convergence, samples and
+  caches USGS terrain, marks stale terrain with `?`, computes ATO/AGL/range,
+  supports manual 50-foot calibration, and applies Android's 180/200-foot
+  yellow/red aircraft tint thresholds.
+- The map/video layouts now expose decoded-frame clue capture without relying
+  on the visible `AVPlayer` view. The submission sheet includes image preview,
+  aircraft selection, drone/clue telemetry, gimbal projection, title, and
+  description. Every accepted clue is written locally first under
+  `Documents/RID2Caltopo/Clues`, including a thumbnail and durable upload
+  state; local clues render as camera markers and can be opened, shared,
+  retried, or deleted. CalTopo submission follows Android's signed four-step
+  Marker/media/data/MapMediaObject contract with stable IDs and persistent
+  exponential retry. A credentialed live-map photo upload remains a physical
+  device/test-map qualification gate.
 - Synthetic two-aircraft route qualification passed on both the iPad Pro
   11-inch and iPhone 17 Simulators using the same live tracking path.
 - Inactive or explicitly archived tracks are written to the app's Documents
@@ -178,6 +223,39 @@ Remote ID unless Apple adds a passive broadcast API.
   Resume action, plus speech and haptic feedback. A tracker-backed Simulator run
   crossed the 40 ft threshold at 28 ft and emitted the alert only after local
   Save made the owned drone eligible.
+- Apple 1.2 also applies Android's learned-cadence telemetry-loss gate to locally
+  owned confirmed flights and its 180/200-foot AGL caution/over-limit policy.
+  Both provide visible Map/Mute controls, speech, haptics, cooldowns, and logs.
+  Android's controller-strength alert cannot be reproduced because public iOS
+  APIs do not expose the current Wi-Fi RSSI percentage.
+- Apple 1.2 implements operational NOTAM/TFR retrieval through the imported FAA
+  NMS OAuth configuration, retained-result error handling, refresh/age
+  diagnostics, operator visibility controls, restriction details, and
+  point/line/polygon map overlays. It also matches Android's one-mile FAA UAS
+  Facility Map query and operator status/details. Credentialed NOTAM and live
+  facility-map physical-location qualification remains required.
+- MediaMTX publisher events now feed a four-stream admission registry matching
+  Android's capacity, controller-profile path, publisher-identity, and stale
+  connecting/error rules. Operators can focus a stream or use a live grid.
+  App-managed external-display scenes offer streams, map, split, and observer
+  layouts with phone/external/both alert routing; attached iOS display scenes
+  may be system-designated noninteractive.
+- Apple 1.2 adds passphrase-encrypted local configuration backup/restore and
+  Android-compatible mutual-aid ZIP export/import. Packages contain the
+  encrypted incident profile plus cached tiles and DEM data for the chosen
+  viewport/preset, enforce expiration and archive-path safety, and import into
+  the same Apple caches used by the operational map. Encrypted iCloud Drive
+  backup/restore and optional automatic debounced updates cover Apple's native
+  archive path; Files continues to provide local/iCloud/installed-provider
+  transfer. Provider-specific Google Drive account sync is intentionally not
+  required for Apple field use.
+- Apple 1.2 adds one-at-a-time captured-video review with replacement-safe
+  staging, Back/Run/Pause/Step/scrub, pause-on-open, local detector overlays,
+  verdict summaries, clearing, paused-frame annotations, and durable/exportable
+  Android schema-v2 sidecars including anomaly box/debug fields.
+- Apple 1.2 exposes the portable detector's advanced operational controls,
+  including target-color families, motion/saliency, sensitivity, scan/cadence,
+  registration, thermal, color candidate, and diagnostic display settings.
 - Predictive Head now mirrors Android's two-sample projection, including its
   one-foot movement gate and two-second cap for horizontal and vertical motion.
   The Android QR setting is imported, persisted, and exposed in Apple Settings.

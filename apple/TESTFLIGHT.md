@@ -26,10 +26,15 @@ install RID2Caltopo like any other beta application.
 
 ## Reproducible build and upload
 
+Create `AppStore/release-notes/<version>.txt` for every release. It must contain
+both `Latest changes:` and `Remaining Android differences:` sections. After
+review, copy that exact text to `AppStore/metadata/en-US/whats_new.txt`; the
+release gate rejects missing, stale, or mismatched version notes.
+
 Review the checked-in App Store wording and verify Apple's text limits first:
 
 ```sh
-apple/AppStore/verify-metadata.sh
+apple/AppStore/verify-metadata.sh --marketing-version 1.1
 ```
 
 After the one-time account setup, first run a read-only preflight. Replace the
@@ -59,6 +64,12 @@ its team, bundle ID, build number, arm64 binary, iPhone/iPad device families,
 QR URL schemes, privacy declarations, signature, or release entitlements do
 not match expectations. It does not store Apple credentials.
 
+Release preparation also verifies the shared protected-land source catalog,
+but performs the network check no more than once every seven days. Repeated
+packaging runs reuse that result. Use `--force-land-catalog-refresh` on either
+release command when a known agency endpoint change requires an immediate
+recheck.
+
 Only after the App Store Connect record and TestFlight metadata are ready, add
 the explicit upload flag:
 
@@ -70,9 +81,11 @@ apple/archive-for-testflight.sh \
 ```
 
 Use `--internal-only` with `--upload` for a build that must never be released to
-external testers or the App Store. Upload uses Xcode's configured Apple Account
-and the checked-in `TestFlightExportOptions.plist`; no API key is placed in the
-repository or command output.
+external testers or the App Store. Normal uploads use the local App Store
+Connect key in `~/.appstoreconnect/private_keys` plus its non-secret issuer ID,
+so an expired Xcode account token does not block routine releases. The private
+key is never copied into the repository or command output. Internal-only upload
+continues to use Xcode's configured Apple Account.
 
 The equivalent manual Organizer workflow remains available:
 

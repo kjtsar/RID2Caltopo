@@ -2,6 +2,251 @@ import Foundation
 import Testing
 @testable import R2CCore
 
+@Test func caltopoTeamMapHierarchyMatchesAndroidFolderRelationsAndRecents() throws {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let recent = Int64(now.timeIntervalSince1970 * 1_000) - 1_000
+    let payload = """
+    {"accounts":[{"id":"acct","properties":{"title":"NCSSAR"}}],
+     "rels":[{"properties":{"class":"UserAccountMapRel","mapId":"map2","folderId":"folder"}}],
+     "features":[
+       {"id":"folder","properties":{"class":"UserFolder","accountId":"acct","label":"Incidents"}},
+       {"id":"map1","properties":{"class":"CollaborativeMap","folderId":"folder","title":"Older","updated":100}},
+       {"id":"map2","properties":{"class":"CollaborativeMap","title":"Current Incident","updated":\(recent)}}]}
+    """
+    let roots = try CaltopoTeamMapDecoder.decode(data: Data(payload.utf8), now: now)
+    #expect(roots.first?.title == "Recent Activity")
+    let account = try #require(roots.first(where: { $0.id == "acct" }))
+    let folder = try #require(account.children?.first(where: { $0.id == "folder" }))
+    #expect(folder.children?.map(\.id) == ["map2", "map1"])
+    #expect(folder.children?.first?.map?.title == "Current Incident")
+}
+
+@Test func caltopoTeamMapRequestUsesAndroidAccountEndpointAndSignedGet() async throws {
+    let secret = Data("team-secret".utf8).base64EncodedString()
+    let configuration = CaltopoTeamMapConfiguration(
+        domainAndPort: "caltopo.com", teamID: "team-42", credentialID: "credential-7",
+        credentialSecretBase64: secret
+    )
+    let client = try CaltopoTeamMapClient(configuration: configuration)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let request = try await client.makeRequest(now: now)
+    #expect(request.httpMethod == "GET")
+    #expect(request.url?.path == "/api/v1/acct/team-42/since/0")
+    let requestURL = try #require(request.url)
+    let components = try #require(URLComponents(url: requestURL, resolvingAgainstBaseURL: false))
+    let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+    #expect(query["id"] == "credential-7")
+    #expect(query["expires"] == "1700000010000")
+    #expect(!(query["signature"] ?? "").isEmpty)
+}
+
+@Test func geoTiffElevationSourceSamplesDownloadedUSGSTileDirectly() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("r2c-dem-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let tile = directory.appendingPathComponent("USGS_1_n40w105.tif")
+    try makeFloatGeoTiff().write(to: tile)
+
+    let bounds = try #require(GeoTiffElevationSource.tileBounds(fileName: tile.lastPathComponent))
+    #expect(bounds.south == 39 && bounds.north == 40)
+    #expect(bounds.west == -105 && bounds.east == -104)
+    let source = GeoTiffElevationSource(directory: directory)
+    #expect(abs((source.sampleElevationMeters(latitude: 39.5, longitude: -104.5) ?? 0) - 250) < 0.001)
+    #expect(source.sampleElevationMeters(latitude: 38, longitude: -104.5) == nil)
+}
+
+@Test func operationalFacilityMapMatchesAndroidQueryParserAndPolicy() throws {
+    let url = try #require(OperationalFacilityMap.queryURL(latitude: 39.7392, longitude: -104.9903))
+    let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+    #expect(query["geometry"] == "-104.990300,39.739200")
+    #expect(query["distance"] == "1.000000")
+    #expect(query["units"] == "esriSRUnit_StatuteMile")
+    #expect(OperationalFacilityMap.operatingRadiusNM == 0.868976)
+
+    let payload = #"{"features":[{"attributes":{"OBJECTID":42,"CEILING":200,"UNIT":"FEET","APT1_FAAID":"DEN","APT1_ICAO":"KDEN","APT1_NAME":"Denver International Airport (DEN)","APT1_LAANC":1,"AIRSPACE_1":"B","AIRSPACE_2":"C"}}]}"#
+    let records = try OperationalFacilityMap.parse(Data(payload.utf8))
+    #expect(records.count == 1)
+    #expect(records[0].airspaceClasses == ["B", "C"])
+    #expect(records[0].laancAvailable)
+    let state = OperationalFacilityMap.state(records: records, loading: false, errorMessage: nil)
+    #expect(state.severity == .caution)
+    #expect(state.chipLabel.contains("LAANC required"))
+    #expect(state.chipLabel.contains("up to 200 ft"))
+}
+
+@Test func operationalFacilityMapPreservesAndroidClearAndFailureStates() throws {
+    let clear = OperationalFacilityMap.state(records: [], loading: false, errorMessage: nil)
+    #expect(clear.severity == .normal)
+    #expect(clear.chipLabel == "Airspace clear")
+    let unavailable = OperationalFacilityMap.state(records: [], loading: false, errorMessage: "offline")
+    #expect(unavailable.severity == .neutral)
+    #expect(unavailable.chipLabel == "Airspace unavailable")
+    #expect(unavailable.detail == "offline")
+}
+
+@Test func operationalNotamParsesGeoJsonAndPrioritizesIntersectingTfr() throws {
+    let payload = #"{"data":{"geojson":[{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-105.01,39.72],[-104.97,39.72],[-104.97,39.76],[-105.01,39.76],[-105.01,39.72]]]},"properties":{"coreNOTAMData":{"notam":{"id":"tfr-1","icaoLocation":"KDEN","series":"FDC","number":"1","year":"26","text":"TEMPORARY FLIGHT RESTRICTION SFC-400 FT AGL","effectiveStart":"now","effectiveEnd":"later"},"notamTranslation":[{"domestic_message":"TFR SFC-400 FT AGL"}]}}}]}}"#
+    let notices = try OperationalNotamParser.parseResponse(
+        Data(payload.utf8),
+        pilot: OperationalNotamCoordinate(latitude: 39.7392, longitude: -104.9903),
+        operatingRadiusNM: 2
+    )
+    #expect(notices.count == 1)
+    #expect(notices[0].intersectsPilotArea)
+    #expect(notices[0].severity == .danger)
+    #expect(notices[0].title == "Temporary flight restriction")
+    #expect(notices[0].altitudeBand?.ceilingLabel == "400 FT")
+    #expect(OperationalNotamPolicy.chipLabel(notices: notices, configured: true, loading: false, hasError: false).contains("RESTRICTED"))
+}
+
+@Test func operationalLandRestrictionParsesAgencyLinksAndBoundaryPolicy() throws {
+    let source = OperationalLandSource(
+        id: "test-park",
+        queryEndpoint: URL(string: "https://example.gov/query")!,
+        agency: .nationalParkService,
+        rule: .launchLandOperateRestricted,
+        nameFields: ["UNIT_NAME"],
+        identifierFields: ["UNIT_CODE"]
+    )
+    let geoJSON = Data(#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"UNIT_NAME":"Test National Park","UNIT_CODE":"TEST"},"geometry":{"type":"Polygon","coordinates":[[[-105.01,39.72],[-104.97,39.72],[-104.97,39.76],[-105.01,39.76],[-105.01,39.72]]]}}]}"#.utf8)
+    let areas = try OperationalLandRestriction.parse(
+        geoJSON,
+        source: source,
+        center: .init(latitude: 39.7392, longitude: -104.9903),
+        operatingRadiusNM: 1
+    )
+
+    #expect(areas.count == 1)
+    #expect(areas[0].name == "Test National Park")
+    #expect(areas[0].containsOperator)
+    #expect(areas[0].agency.rulesURL.host == "www.nps.gov")
+    #expect(OperationalLandRestriction.severity(areas, hasError: false) == .danger)
+    #expect(OperationalLandRestriction.chipLabel(areas, loading: false, hasError: false) == "Land rules: RESTRICTED")
+}
+
+@Test func operationalLandRestrictionKeepsStateParkAdvisoryDistinctFromNoFlyRule() throws {
+    let area = OperationalLandArea(
+        id: "cpw:1",
+        name: "Example State Park",
+        agency: .coloradoParksAndWildlife,
+        rule: .propertySpecificRules,
+        polygons: [],
+        intersectsOperatingArea: true,
+        containsOperator: true,
+        distanceNM: 0,
+        detailsURL: URL(string: "https://cpw.state.co.us/example")
+    )
+
+    #expect(OperationalLandRestriction.severity([area], hasError: false) == .caution)
+    #expect(OperationalLandRestriction.chipLabel([area], loading: false, hasError: false) == "Land rules: 1 nearby")
+    #expect(area.detailsURL?.host == "cpw.state.co.us")
+}
+
+@Test func operationalLandRestrictionMeasuresNearestBoundaryEdgeInsteadOfOnlyVertices() throws {
+    let source = OperationalLandSource(
+        id: "test-wilderness",
+        queryEndpoint: URL(string: "https://example.gov/query")!,
+        agency: .forestService,
+        rule: .launchLandOperateRestricted,
+        nameFields: ["name"],
+        identifierFields: ["id"]
+    )
+    let geoJSON = Data(#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"Long Boundary","id":"1"},"geometry":{"type":"Polygon","coordinates":[[[-105.2,39.75],[-104.8,39.75],[-104.8,39.80],[-105.2,39.80],[-105.2,39.75]]]}}]}"#.utf8)
+    let areas = try OperationalLandRestriction.parse(
+        geoJSON,
+        source: source,
+        center: .init(latitude: 39.74, longitude: -105),
+        operatingRadiusNM: 1
+    )
+
+    #expect(areas.count == 1)
+    #expect(!areas[0].containsOperator)
+    #expect(areas[0].distanceNM < 0.7)
+    #expect(areas[0].intersectsOperatingArea)
+}
+
+@Test func operationalZipRoundTripsAndroidCompatibleStoredEntriesAndRejectsTraversal() throws {
+    let encoded = try OperationalZipArchive.encode([
+        .init(path: "manifest.json", data: Data("{\"format\":\"rid2caltopo_mutual_aid_package\"}".utf8)),
+        .init(path: "tiles/OSM-Standard/12/123/456.bin", data: Data([1, 2, 3, 4])),
+    ])
+    let decoded = try OperationalZipArchive.decode(encoded)
+    #expect(decoded.map(\.path) == ["manifest.json", "tiles/OSM-Standard/12/123/456.bin"])
+    #expect(decoded[1].data == Data([1, 2, 3, 4]))
+    #expect(throws: OperationalZipError.self) {
+        try OperationalZipArchive.encode([.init(path: "../escape", data: Data())])
+    }
+}
+
+@Test func operationalZipReadsDeflatedJavaCompatibleEntries() throws {
+    let fixture = "UEsDBAoAAAAAAFJK81wacLVdDAAAAAwAAAAIABwAbmFtZS50eHRVVAkAA8vqXGovEl1qdXgLAAEE9QEAAAQUAAAAUklEMkNhbHRvcG8KUEsDBBQAAgAIADxN9Fx5ZW/0XwQAAIIIAAAHABwAMS4yLnR4dFVUCQADxEFeas1BXmp1eAsAAQT1AQAABBQAAACVVc2O2zYQvucp5taLFW8CFCjak9P9QYDsbhBvkPOYGknsUiRDUva6T9Vn6JP1G0peu0EvPezCpsSZ+X7m8ycukguZgX0v+dc3DW3aVlra+DYF2zZ54Iivoeuc9UIjR4pJIicuNnjqQqIyCO1ttjs3P8cRUxYnpuDm7+yeQgyk19cxuGMf/IoOtgz0uJe0t3JY0WPMK2Lf0u3kHF1LYeu0T5aCBzvOUp+a4EuY0NE6wfnX7d2W3v39F13f3FMbDt4FbnEOQHZUXCvUCD3K4JNhb8S5Ovbci+n9z1erq6urRutR5k7KEXOOtrx95QGAGsMGELP9c56Ce6mTpOBQd2Tri3itviLr9+zAGtrjpSR/gIPab8ft3GXgPND3Cfz5AkYwlxNOa3mJIRUqodbULifG660kCo24K5Iu+T/P6YJh544EFqRd6XydTaO0DWTUKpBjlJKOjQs51wbvfrlavwf4LoRCm7tPuDNGZxUIsZNU8qzSSdp7juv7qVxiz1HEDCuAisUaJRnzqxALhtZy70PWZzrpzUvE6YUnRk7PAJQEp8n6vtoJY4x6OeKilnSTClk49dUMg3ChDBcYPQZC2bOBOFXuPIgDRfiUuLUBfB7qtwPckDoQhM/dJG5FexmsqS6KEqKDEJWoZXCUtXwm93azaSqj/ZTw1UOx3ZEeHp829+un2y8AUJLFHKgLs+FzVZ1y4TLlV89csIFu1eNaLOBA+ybpcHm4oFcvZsGS2HJEfxfSbEgKOHN8zOcJpwisoA/L4eweZi1JeFwUXCpC0wb70KmhIuMcLspgXXcjskGT9atj/z1sF8yU4aW56rLb8x69duqTbZe9irGBgoDckryAeM+uaW2OGJnwF6aykKIuo4TvmOKMJXLOcUhY+ka8ScdYTv6mkwhz+OzYPE9xrZSDmlryFFvqZbxUI2kqEwZgq5XNsyoxb9vajnXpZo50x2d2l3SpocKFV/q6XVriJfN8kgaBQZzMoIQjP1tXYbz5IpoJaudlGpDZdQKXmzlhPyQsM3wPW1EH4p3qq521ai9eEqBubMqYV5QxeBj20KrwDSrBB7+RwX9BiLC6qIqu9aopETAwjWSIY5GnSb5PFgTF4ZitUTFkb81MWIgyQ8OxclxRIp+c7aw5Z0zEiiBiURJ+paMURB02s5UTxp+yuqjofjR720pA1znbud1rpkBuH0ZGRCHUVXCwiG2/C6FH6eukAIwLU/uDrG/p5tUE1brz4/+hdkHWZrAGrYB5j7VjfXNJTIVnH7dncGoO/N7or5qKimnpm21uLX3Zbj+S7gFh+S9gn7dLd8H3cNOBk6+blcPCHRZPacn/lcSVrwbB5nD1YvFoNxX93dKpTvvDnlRNZA20v+iNGEMi+gLAiugzdkgZnSd/2DysPwjjbYI5AzL84/XJFbkiPTn16/Vn/bFBI/0VR+MBpU9LjCdGUDXRTgyDiR99sVAXl+ab7dO99q73YnVWqXzQdl7YGBFh/wBQSwECHgMKAAAAAABSSvNcGnC1XQwAAAAMAAAACAAYAAAAAAABAAAApIEAAAAAbmFtZS50eHRVVAUAA8vqXGp1eAsAAQT1AQAABBQAAABQSwECHgMUAAIACAA8TfRceWVv9F8EAACCCAAABwAYAAAAAAABAAAApIFOAAAAMS4yLnR4dFVUBQADxEFeanV4CwABBPUBAAAEFAAAAFBLBQYAAAAAAgACAJsAAADuBAAAAAA="
+    let entries = try OperationalZipArchive.decode(Data(base64Encoded: fixture)!)
+    #expect(entries.first(where: { $0.path == "name.txt" })?.data == Data("RID2Caltopo\n".utf8))
+    #expect(entries.first(where: { $0.path == "1.2.txt" })?.data.count ?? 0 > 1_000)
+}
+
+@Test func offlineMapPlannerMatchesWebMercatorAndAndroidDemNaming() throws {
+    let bounds = OperationalMapBounds(north: 39.75, south: 39.73, west: -105.01, east: -104.98)
+    let count = OperationalOfflineMapPlanner.tileCount(bounds: bounds, minimumZoom: 12, maximumZoom: 12)
+    let tiles = try #require(OperationalOfflineMapPlanner.tiles(
+        bounds: bounds,
+        minimumZoom: 12,
+        maximumZoom: 12
+    ))
+    #expect(count == tiles.count)
+    #expect(!tiles.isEmpty)
+    #expect(Set(tiles).count == tiles.count)
+    #expect(OperationalOfflineMapPlanner.demTileNames(bounds: bounds) == ["n40w106", "n40w105"])
+}
+
+@Test func offlineMapPlannerRejectsUnboundedDownloadPlans() {
+    let world = OperationalMapBounds(north: 80, south: -80, west: -180, east: 180)
+    #expect(OperationalOfflineMapPlanner.tiles(
+        bounds: world,
+        minimumZoom: 8,
+        maximumZoom: 19,
+        maximumCount: 1_000
+    ) == nil)
+}
+
+@Test func signalLossRequiresAFlightThatLeftAndStayedAway() {
+    let base = OperationalSignalLossInput(
+        signalIdleSeconds: 12,
+        learnedIntervalSeconds: nil,
+        learnedSamples: 0,
+        distanceFromDeviceFeet: 500,
+        distanceFromTakeoffFeet: 600,
+        bridgeCheckDistanceFeet: 300,
+        maximumTrackDelaySeconds: 30,
+        hasPreviouslyExceededBridgeDistance: false
+    )
+    let lost = OperationalSignalLossPolicy.evaluate(base)
+    #expect(lost.alert)
+    #expect(lost.hasExceededBridgeDistance)
+    #expect(lost.idleThresholdSeconds == 10)
+
+    let returned = OperationalSignalLossPolicy.evaluate(.init(
+        signalIdleSeconds: 12,
+        learnedIntervalSeconds: nil,
+        learnedSamples: 0,
+        distanceFromDeviceFeet: 50,
+        distanceFromTakeoffFeet: 40,
+        bridgeCheckDistanceFeet: 300,
+        maximumTrackDelaySeconds: 30,
+        hasPreviouslyExceededBridgeDistance: true
+    ))
+    #expect(!returned.alert)
+}
+
+@Test func altitudeAlertUsesAndroidThresholds() {
+    #expect(OperationalAltitudeAlertPolicy.severity(aglFeet: nil) == .normal)
+    #expect(OperationalAltitudeAlertPolicy.severity(aglFeet: 179.9) == .normal)
+    #expect(OperationalAltitudeAlertPolicy.severity(aglFeet: 180) == .caution)
+    #expect(OperationalAltitudeAlertPolicy.severity(aglFeet: 200) == .overLimit)
+}
+
 @Test func observationPreservesTransportAndIdentity() {
     let observation = RidObservation(
         source: .bluetoothLegacy,
@@ -239,6 +484,416 @@ private func proximityDrone(
     #expect(endpoint.loopbackHlsURL?.absoluteString == "http://127.0.0.1:8888/drone-one/index.m3u8")
 }
 
+@Test func liveStreamSelectionReplacesPlaceholderWhenFirstPublisherArrives() {
+    let publisher = "1sar7DjMn4pr"
+    let focus = LiveStreamSelectionPolicy.focusAfterPublisherStarted(
+        currentFocus: "demo",
+        publisherPath: publisher,
+        activePublisherPaths: [publisher]
+    )
+    #expect(focus == publisher)
+    #expect(LiveStreamSelectionPolicy.playbackPath(
+        focusedID: focus,
+        activePublisherPaths: [publisher]
+    ) == publisher)
+}
+
+@Test func liveStreamSelectionRejectsReaderCreatedPlaceholderHlsMuxer() {
+    #expect(!LiveStreamSelectionPolicy.shouldAcceptHLSMuxer(
+        path: "demo",
+        activePublisherPaths: []
+    ))
+    #expect(LiveStreamSelectionPolicy.playbackPath(
+        focusedID: "demo",
+        activePublisherPaths: []
+    ) == nil)
+}
+
+@Test func operationalMapTileSourcesMatchAndroidContracts() throws {
+    #expect(OperationalMapBaseLayer.openStreetMap.tileURL(zoom: 12, x: 657, y: 1582)?.absoluteString
+        == "https://tile.openstreetmap.org/12/657/1582.png")
+    #expect(OperationalMapBaseLayer.imagery.tileURL(zoom: 12, x: 657, y: 1582)?.absoluteString
+        == "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/12/1582/657.jpg")
+}
+
+@Test func pilotDisplayPreferenceMatchesAndroidNormalizationAndColorDefaults() {
+    #expect(PilotDisplayPreference.normalizePilotCallsign("  apple1 ") == "APPLE1")
+    #expect(PilotDisplayPreference.normalizePilotCallsign("  ") == nil)
+    #expect(PilotDisplayPreference.sanitizeTrackColor("e53935", fallback: defaultActiveTrackColor) == "#E53935")
+    #expect(PilotDisplayPreference.sanitizeTrackColor("invalid", fallback: defaultActiveTrackColor) == "#1E88E5")
+    #expect(PilotDisplayPreference() == PilotDisplayPreference(
+        activeTrackColor: "#1E88E5",
+        archiveTrackColor: "#FF00FF",
+        bearingEnabled: false
+    ))
+}
+
+@Test func operationalMapBearingLineReachesViewportEdgeAtCardinalHeadings() throws {
+    let start = MapScreenPoint(x: 50, y: 40)
+    let north = try #require(OperationalMapGeometry.bearingLineToViewportEdge(
+        start: start, headingDegrees: 0, viewportWidth: 100, viewportHeight: 80
+    ))
+    let east = try #require(OperationalMapGeometry.bearingLineToViewportEdge(
+        start: start, headingDegrees: 90, viewportWidth: 100, viewportHeight: 80
+    ))
+    let south = try #require(OperationalMapGeometry.bearingLineToViewportEdge(
+        start: start, headingDegrees: 180, viewportWidth: 100, viewportHeight: 80
+    ))
+    let west = try #require(OperationalMapGeometry.bearingLineToViewportEdge(
+        start: start, headingDegrees: 270, viewportWidth: 100, viewportHeight: 80
+    ))
+    #expect(abs(north.x - 50) < 0.0001 && north.y == 0)
+    #expect(east.x == 100 && abs(east.y - 40) < 0.0001)
+    #expect(abs(south.x - 50) < 0.0001 && south.y == 80)
+    #expect(west.x == 0 && abs(west.y - 40) < 0.0001)
+    #expect(OperationalMapGeometry.bearingLineToViewportEdge(
+        start: start, headingDegrees: nil, viewportWidth: 100, viewportHeight: 80
+    ) == nil)
+}
+
+@Test func operationalAircraftStatusLabelMatchesAndroidTokens() {
+    #expect(OperationalAircraftDisplay.statusLabel(
+        atoFeet: 125.2,
+        aglFeet: 90.4,
+        aglStale: false,
+        rangeFeet: 420,
+        headingDegrees: 273.2
+    ) == "ATO:125' AGL:90' RNG:420' HDG:273°")
+    #expect(OperationalAircraftDisplay.statusLabel(
+        atoFeet: nil,
+        aglFeet: 75,
+        aglStale: true,
+        rangeFeet: nil,
+        headingDegrees: nil
+    ) == "ATO:--' AGL:75?' RNG:--' HDG:--°")
+    #expect(OperationalAircraftDisplay.statusLabel(
+        atoFeet: 1_500,
+        aglFeet: -1_500,
+        aglStale: false,
+        rangeFeet: 1_250,
+        headingDegrees: 365
+    ) == "ATO:--' AGL:--' RNG:1250' HDG:5°")
+}
+
+@Test func operationalAltitudeUsesAtoAndTerrainDeltaLikeAndroid() throws {
+    var coordinator = OperationalAltitudeCoordinator()
+    coordinator.ingest(RidObservation(
+        source: .bluetoothExtended, aircraftId: "TEST",
+        receivedAt: Date(timeIntervalSince1970: 100),
+        latitude: 39, longitude: -105,
+        altitudeMeters: 500, heightMeters: 0, heightReference: .takeoff
+    ))
+    coordinator.applyTakeoffTerrain(OperationalTerrainSample(elevationMeters: 450))
+    coordinator.ingest(RidObservation(
+        source: .bluetoothExtended, aircraftId: "TEST",
+        receivedAt: Date(timeIntervalSince1970: 101),
+        latitude: 39.0001, longitude: -105,
+        altitudeMeters: 510, heightMeters: 10, heightReference: .takeoff
+    ))
+    coordinator.applyCurrentTerrain(
+        OperationalTerrainSample(elevationMeters: 445),
+        coordinate: try #require(coordinator.currentCoordinate)
+    )
+
+    #expect(abs((coordinator.display.atoFeet ?? 0) - 32.8084) < 0.001)
+    #expect(abs((coordinator.display.aglFeet ?? 0) - 49.2126) < 0.001)
+    #expect((coordinator.display.rangeFeet ?? 0) > 30)
+    #expect(coordinator.display.aglUsesTerrain)
+    #expect(!coordinator.display.aglStale)
+}
+
+@Test func operationalAltitudeMarksCachedTerrainStale() throws {
+    var coordinator = OperationalAltitudeCoordinator()
+    coordinator.ingest(RidObservation(
+        source: .bluetoothLegacy, aircraftId: "TEST", receivedAt: Date(),
+        latitude: 39, longitude: -105,
+        altitudeMeters: 500, heightMeters: 20, heightReference: .takeoff
+    ))
+    coordinator.applyTakeoffTerrain(OperationalTerrainSample(elevationMeters: 450))
+    coordinator.applyCurrentTerrain(
+        OperationalTerrainSample(elevationMeters: 450, stale: true),
+        coordinate: try #require(coordinator.currentCoordinate)
+    )
+    #expect(coordinator.display.aglStale)
+    #expect(coordinator.display.aglFeet != nil)
+}
+
+@Test func operationalAltitudeSealsStableSixSampleReference() {
+    var coordinator = OperationalAltitudeCoordinator()
+    for index in 0 ..< 6 {
+        coordinator.ingest(RidObservation(
+            source: .bluetoothExtended, aircraftId: "TEST",
+            receivedAt: Date(timeIntervalSince1970: Double(index)),
+            latitude: 39 + Double(index) * 0.00001, longitude: -105,
+            altitudeMeters: 510, heightMeters: 10, heightReference: .takeoff
+        ))
+    }
+    #expect(coordinator.seedSource == .automaticSealed)
+}
+
+@Test func operationalAltitudeManualCalibrationTargetsFiftyFeet() {
+    var coordinator = OperationalAltitudeCoordinator()
+    coordinator.ingest(RidObservation(
+        source: .externalReceiver, aircraftId: "TEST", receivedAt: Date(),
+        latitude: 39, longitude: -105, altitudeMeters: 510
+    ))
+    coordinator.manualCalibrateAtFiftyFeet()
+    #expect(coordinator.seedSource == .manual)
+    #expect(abs((coordinator.display.atoFeet ?? 0) - 50) < 0.001)
+}
+
+@Test func operationalClueProjectionMatchesAndroidFlatGroundFallback() {
+    let nadir = OperationalClueGeometry.project(
+        droneLatitude: 39,
+        droneLongitude: -105,
+        droneAltitudeMeters: 500,
+        headingDegrees: 90,
+        aglMeters: 100,
+        gimbalAngleDegrees: -90
+    )
+    #expect(nadir.latitude == 39)
+    #expect(nadir.longitude == -105)
+    #expect(nadir.altitudeMeters == 400)
+
+    let forward = OperationalClueGeometry.project(
+        droneLatitude: 39,
+        droneLongitude: -105,
+        droneAltitudeMeters: 500,
+        headingDegrees: 90,
+        aglMeters: 100,
+        gimbalAngleDegrees: -45
+    )
+    let relative = RidGeometry.relativePosition(
+        fromLatitude: 39, longitude: -105,
+        toLatitude: forward.latitude, longitude: forward.longitude
+    )
+    #expect(abs((relative?.distanceMeters ?? 0) - 100) < 0.1)
+    #expect(abs((relative?.bearingDegrees ?? 0) - 90) < 0.1)
+    #expect(forward.altitudeMeters == 400)
+}
+
+@Test func operationalClueRecordRoundTripsDurableUploadState() throws {
+    let record = OperationalClueRecord(
+        id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+        capturedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        aircraftID: "RID01", designator: "ALPHA1",
+        droneLatitude: 39, droneLongitude: -105, droneAltitudeMeters: 500,
+        clueLatitude: 39.001, clueLongitude: -104.999, clueAltitudeMeters: 400,
+        headingDegrees: 45, aglMeters: 100, atoMeters: 105,
+        gimbalAngleDegrees: -45, title: "Clue 1", clueDescription: "Description",
+        imageFilename: "a.jpg", thumbnailFilename: "a-thumb.jpg",
+        uploadState: .failed, uploadAttempts: 3, lastUploadError: "offline",
+        caltopoMediaID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+    )
+    let decoded = try JSONDecoder().decode(
+        OperationalClueRecord.self,
+        from: JSONEncoder().encode(record)
+    )
+    #expect(decoded == record)
+}
+
+@Test func operationalAircraftLabelLayoutSeparatesOverlappingLabels() throws {
+    let inputs = [
+        MapAircraftLabelInput(
+            id: "a", anchor: MapScreenPoint(x: 100, y: 100),
+            nameWidth: 80, nameHeight: 24, statusWidth: 190, statusHeight: 22
+        ),
+        MapAircraftLabelInput(
+            id: "b", anchor: MapScreenPoint(x: 106, y: 104),
+            nameWidth: 80, nameHeight: 24, statusWidth: 190, statusHeight: 22
+        ),
+    ]
+    let layouts = OperationalAircraftDisplay.layoutLabels(inputs, viewportWidth: 360, viewportHeight: 300)
+    let first = try #require(layouts.first { $0.id == "a" })
+    let second = try #require(layouts.first { $0.id == "b" })
+    #expect(!first.bounds.intersects(second.bounds))
+    #expect(second.leaderEnd != nil)
+}
+
+@Test func operationalAircraftPredictionMatchesAndroidAgeAndLookaheadBounds() throws {
+    let previous = MapCoordinate(latitude: 39, longitude: -105)
+    let current = MapCoordinate(latitude: 39, longitude: -104.9999)
+    let predicted = try #require(OperationalAircraftDisplay.predictedCoordinate(
+        previous: previous,
+        previousTime: Date(timeIntervalSince1970: 100),
+        current: current,
+        currentTime: Date(timeIntervalSince1970: 101),
+        now: Date(timeIntervalSince1970: 102)
+    ))
+    #expect(predicted.longitude > current.longitude)
+    #expect(OperationalAircraftDisplay.predictedCoordinate(
+        previous: previous,
+        previousTime: Date(timeIntervalSince1970: 100),
+        current: current,
+        currentTime: Date(timeIntervalSince1970: 101),
+        now: Date(timeIntervalSince1970: 101.2)
+    ) == nil)
+}
+
+@Test func caltopoArtifactDecoderBuildsVisibleOperationalOverlays() throws {
+    let data = Data(#"""
+    {"state":{"features":[
+      {"id":"ops","properties":{"class":"Folder","title":"Operations","visible":true}},
+      {"id":"hidden","properties":{"class":"Folder","title":"Hidden","visible":false}},
+      {"id":"marker","geometry":{"type":"Point","coordinates":[-104.99,39.74]},"properties":{"class":"Marker","title":"Clue","folderId":"ops","marker-symbol":"aperture","marker-color":"#FF00FF"}},
+      {"id":"line","geometry":{"type":"LineString","coordinates":[[-105,39.7],[-104.9,39.8]]},"properties":{"class":"Shape","title":"Search line","folderId":"ops","stroke":"#00FF00","stroke-width":4}},
+      {"id":"polygon","geometry":{"type":"Polygon","coordinates":[[[-105,39.7],[-104.9,39.7],[-104.9,39.8],[-105,39.7]]]},"properties":{"class":"Assignment","title":"Division A","stroke":"#FF0000","fill":"#3300FF00"}},
+      {"id":"hidden-marker","geometry":{"type":"Point","coordinates":[-104,39]},"properties":{"class":"Marker","title":"Hidden clue","folderId":"hidden"}},
+      {"id":"hidden-media","geometry":{"type":"Point","coordinates":[-104,39]},"properties":{"class":"MapMediaObject","title":"Hidden clue photo","parentId":"Marker:hidden-marker","marker-symbol":"aperture"}},
+      {"id":"live","geometry":{"type":"LineString","coordinates":[[-105,39],[-104,40]]},"properties":{"class":"LiveTrack","title":"Duplicate aircraft","folderId":"ops"}}
+    ]}}
+    """#.utf8)
+
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+    #expect(snapshot.totalFeatureCount == 8)
+    let serverHidden = Set(snapshot.folders.filter { !$0.initiallyVisible }.map(\.id))
+    let visible = snapshot.hiding(folderIDs: serverHidden)
+    #expect(visible.points.map(\.title) == ["Clue"])
+    #expect(snapshot.lines.map(\.title) == ["Search line"])
+    #expect(snapshot.polygons.map(\.title) == ["Division A"])
+    #expect(snapshot.ignoredTrackCount == 1)
+    #expect(snapshot.folders.contains { $0.title == "Operations" })
+    #expect(snapshot.folders.contains { $0.title == "Assignments" })
+    #expect(try JSONDecoder().decode(CaltopoArtifactSnapshot.self, from: JSONEncoder().encode(snapshot)) == snapshot)
+}
+
+@Test func caltopoArtifactDecoderAcceptsResultWrappedMapState() throws {
+    let data = Data(#"{"result":{"state":{"features":[{"id":"marker","geometry":{"type":"Point","coordinates":[-104.99,39.74]},"properties":{"class":"Marker","title":"Wrapped clue"}}]}}}"#.utf8)
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+    #expect(snapshot.totalFeatureCount == 1)
+    #expect(snapshot.points.map(\.title) == ["Wrapped clue"])
+}
+
+@Test func caltopoArtifactDecoderFindsDeepResponseEnvelopeAndShowsRootArtifacts() throws {
+    let data = Data(#"{"response":{"data":{"result":{"state":{"features":[{"id":"line","geometry":{"type":"LineString","coordinates":[[-105,39.7],[-104.9,39.8]]},"properties":{"class":"Shape","title":"Root line"}}]}}}}}"#.utf8)
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+    #expect(snapshot.lines.map(\.title) == ["Root line"])
+    #expect(snapshot.folders.first { $0.id == "__caltopo_lines_polygons__" }?.initiallyVisible == true)
+}
+
+@Test func caltopoArtifactVisibilityHonorsFolderHierarchyItemsAndOrphans() throws {
+    let data = Data(#"""
+    {"state":{"features":[
+      {"id":"parent","properties":{"class":"Folder","title":"Operations","visible":true}},
+      {"id":"child","properties":{"class":"Folder","title":"Division A","folderId":"parent","visible":true}},
+      {"id":"child-marker","geometry":{"type":"Point","coordinates":[-105,39.7]},"properties":{"class":"Marker","title":"Child clue","folderId":"child"}},
+      {"id":"orphan-line","geometry":{"type":"LineString","coordinates":[[-105,39.7],[-104.9,39.8]]},"properties":{"class":"Shape","title":"Orphan line","folderId":"missing-folder"}},
+      {"id":"marker","geometry":{"type":"Point","coordinates":[-104.8,39.8]},"properties":{"class":"Marker","title":"Clue","folderId":"parent"}},
+      {"id":"media","geometry":{"type":"Point","coordinates":[-104.8,39.8]},"properties":{"class":"MapMediaObject","title":"Clue photo","parentId":"Marker:marker"}}
+    ]}}
+    """#.utf8)
+
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+    #expect(snapshot.folders.first { $0.id == "child" }?.parentID == "parent")
+    #expect(snapshot.folders.contains { $0.id == "missing-folder" && $0.title.hasPrefix("Unlisted Folder ") })
+    #expect(snapshot.items.contains { $0.id == "child-marker" && $0.folderID == "child" })
+
+    let parentHidden = snapshot.hiding(folderIDs: ["parent"])
+    #expect(parentHidden.points.isEmpty)
+    #expect(parentHidden.lines.map(\.title) == ["Orphan line"])
+
+    let markerHidden = snapshot.hiding(folderIDs: [], itemIDs: ["marker"])
+    #expect(markerHidden.points.map(\.title) == ["Child clue"])
+}
+
+@Test func caltopoItemVisibilityHidesEveryMultiGeometryComponent() throws {
+    let data = Data(#"""
+    {"state":{"features":[
+      {"id":"ops","properties":{"class":"Folder","title":"Operations"}},
+      {"id":"multi-line","geometry":{"type":"MultiLineString","coordinates":[[[-105,39],[-104,40]],[[-104,39],[-103,40]]]},"properties":{"class":"Shape","title":"Segments","folderId":"ops"}},
+      {"id":"multi-area","geometry":{"type":"MultiPolygon","coordinates":[[[[-105,39],[-104,39],[-104,40],[-105,39]]],[[[-103,39],[-102,39],[-102,40],[-103,39]]]]},"properties":{"class":"Shape","title":"Areas","folderId":"ops"}}
+    ]}}
+    """#.utf8)
+
+    let snapshot = try CaltopoArtifactDecoder.decode(data: data)
+    #expect(snapshot.lines.count == 2)
+    #expect(snapshot.polygons.count == 2)
+    let hidden = snapshot.hiding(folderIDs: [], itemIDs: ["multi-line", "multi-area"])
+    #expect(hidden.lines.isEmpty)
+    #expect(hidden.polygons.isEmpty)
+}
+
+@Test func caltopoMapSnapshotRequestUsesSignedSinceZeroEndpoint() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        domainAndPort: "caltopo.com",
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let request = try await client.makeMapSnapshotRequest(now: Date(timeIntervalSince1970: 1_700_000_000))
+    #expect(request.httpMethod == "GET")
+    let components = try #require(request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) })
+    #expect(components.path == "/api/v1/map/map123/since/0")
+    let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+    #expect(values["id"] == "credential")
+    #expect(values["expires"] == "1700000010000")
+    #expect(values["signature"]?.isEmpty == false)
+}
+
+@Test func liveVideoRecoveryDetectsConnectionAndDecodedFrameStalls() {
+    var policy = LiveVideoRecoveryPolicy(configuration: .init(
+        connectionTimeout: 10,
+        frameStallTimeout: 4,
+        retryDelays: [1, 2]
+    ))
+    policy.reset(at: 100)
+
+    #expect(policy.evaluate(at: 109.9) == nil)
+    #expect(policy.evaluate(at: 110) == .reconnect(after: 1, trigger: .connectionTimedOut))
+    #expect(policy.evaluate(at: 120) == nil)
+
+    policy.beginRecoveryAttempt(at: 120)
+    policy.recordDecodedFrame(at: 121)
+    #expect(policy.evaluate(at: 124.9) == nil)
+    #expect(policy.evaluate(at: 125) == .reconnect(after: 1, trigger: .decodedFramesStalled))
+}
+
+@Test func liveVideoRecoveryWaitsForMediaMtxPublisherThenRetriesImmediately() {
+    var policy = LiveVideoRecoveryPolicy(configuration: .init(
+        connectionTimeout: 3,
+        frameStallTimeout: 2,
+        retryDelays: [1, 2]
+    ))
+    policy.reset(at: 0)
+    #expect(policy.setPublisherAvailable(false) == nil)
+    #expect(policy.evaluate(at: 3) == .waitForPublisher(trigger: .connectionTimedOut))
+    #expect(policy.setPublisherAvailable(true) == .reconnect(after: 0, trigger: .publisherReturned))
+}
+
+@Test func liveVideoRecoveryCancelsScheduledChurnWhenPublisherDisappears() {
+    var policy = LiveVideoRecoveryPolicy(configuration: .init(
+        connectionTimeout: 3,
+        frameStallTimeout: 2,
+        retryDelays: [1, 2]
+    ))
+    policy.reset(at: 0)
+    #expect(policy.playerFailed(detail: "playlist 404") == .reconnect(
+        after: 1,
+        trigger: .playerFailed("playlist 404")
+    ))
+    #expect(policy.setPublisherAvailable(false) == .waitForPublisher(
+        trigger: .playerFailed("playlist 404")
+    ))
+    #expect(policy.setPublisherAvailable(true) == .reconnect(after: 0, trigger: .publisherReturned))
+}
+
+@Test func liveVideoRecoveryBacksOffFailuresAndResetsAfterAFrame() {
+    var policy = LiveVideoRecoveryPolicy(configuration: .init(
+        connectionTimeout: 3,
+        frameStallTimeout: 2,
+        retryDelays: [1, 2, 4]
+    ))
+    policy.reset(at: 0)
+
+    #expect(policy.playerFailed(detail: "404") == .reconnect(after: 1, trigger: .playerFailed("404")))
+    policy.beginRecoveryAttempt(at: 1)
+    #expect(policy.playerFailed(detail: "404") == .reconnect(after: 2, trigger: .playerFailed("404")))
+    policy.beginRecoveryAttempt(at: 3)
+    policy.recordDecodedFrame(at: 4)
+    #expect(policy.consecutiveRecoveryCount == 0)
+    #expect(policy.playerFailed(detail: "reset") == .reconnect(after: 1, trigger: .playerFailed("reset")))
+}
+
 @Test func bluetoothServiceDataDecodesBasicID() throws {
     let advertisement = try OpenDroneIDParser.parseBluetoothServiceData(
         bluetoothServiceData(message: basicIDMessage("RID2CALTOPO12345"), counter: 7)
@@ -296,6 +951,8 @@ private func proximityDrone(
     #expect(observation?.aircraftId == "RID2CALTOPO12345")
     #expect(observation?.source == .bluetoothExtended)
     #expect(observation?.altitudeMeters == 100)
+    #expect(observation?.heightMeters == 50)
+    #expect(observation?.heightReference == .takeoff)
     #expect(observation?.signalStrengthDbm == -48)
 }
 
@@ -504,6 +1161,61 @@ private func proximityDrone(
     #expect(r2c["map_id"] as? String == "map-123")
 }
 
+@Test func trackerArchiveUploadMatchesAndroidEligibilityAndRequestContract() throws {
+    let configuration = TrackerArchiveUploadConfiguration(
+        urlPrefix: "https://tracker.example.test/r2c/",
+        apiKey: "secret-token",
+        organization: " ncssar "
+    )
+    let eligible = Data("""
+    {"features":[{"properties":{"r2c_prop":{"org":"NCSSAR","rid":"RID-1","local_archive_only":false}}}]}
+    """.utf8)
+    #expect(TrackerArchiveUploadContract.eligibility(
+        geoJSON: eligible,
+        configuration: configuration,
+        knownRemoteIDs: ["RID-1"]
+    ) == .eligible)
+
+    let request = try TrackerArchiveUploadContract.makeRequest(
+        geoJSON: eligible,
+        configuration: configuration
+    )
+    #expect(request.url?.absoluteString == "https://tracker.example.test/r2c/upload")
+    #expect(request.httpMethod == "PUT")
+    #expect(request.value(forHTTPHeaderField: "X-SAR-Token") == "secret-token")
+    #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json; charset=utf-8")
+    #expect(request.httpBody == eligible)
+}
+
+@Test func trackerArchiveUploadRejectsLocalForeignAndUnknownTracks() throws {
+    let configuration = TrackerArchiveUploadConfiguration(
+        urlPrefix: "https://tracker.example.test",
+        apiKey: "token",
+        organization: "NCSSAR"
+    )
+    func archive(org: String, rid: String, localOnly: Bool = false) -> Data {
+        Data("""
+        {"features":[{"properties":{"r2c_prop":{"org":"\(org)","rid":"\(rid)","local_archive_only":\(localOnly)}}}]}
+        """.utf8)
+    }
+    #expect(TrackerArchiveUploadContract.eligibility(
+        geoJSON: archive(org: "NCSSAR", rid: "RID-1", localOnly: true),
+        configuration: configuration, knownRemoteIDs: ["RID-1"]
+    ) == .localArchiveOnly)
+    #expect(TrackerArchiveUploadContract.eligibility(
+        geoJSON: archive(org: "OTHER", rid: "RID-1"),
+        configuration: configuration, knownRemoteIDs: ["RID-1"]
+    ) == .organizationMismatch)
+    #expect(TrackerArchiveUploadContract.eligibility(
+        geoJSON: archive(org: "NCSSAR", rid: "UNKNOWN"),
+        configuration: configuration, knownRemoteIDs: ["RID-1"]
+    ) == .unknownTeamAircraft)
+    #expect(TrackerArchiveUploadContract.isTransient(statusCode: 429))
+    #expect(TrackerArchiveUploadContract.isTransient(statusCode: 503))
+    #expect(!TrackerArchiveUploadContract.shouldMarkReported(statusCode: 503))
+    #expect(TrackerArchiveUploadContract.shouldMarkReported(statusCode: 401))
+}
+
 @Test func caltopoSignerMatchesAndroidHmacContract() throws {
     let signature = try CaltopoRequestSigner.signature(
         method: "POST",
@@ -576,6 +1288,63 @@ private func proximityDrone(
     #expect(values["signature"] == expectedSignature)
 }
 
+@Test func caltopoPhotoClueMatchesAndroidFourRequestContract() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        domainAndPort: "caltopo.com",
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let clue = CaltopoPhotoClue(
+        markerID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+        mediaID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+        latitude: 39.1,
+        longitude: -105.2,
+        title: "Clue One",
+        description: "Visible subject",
+        createdMilliseconds: 1_700_000_000_000,
+        jpegData: Data([0xff, 0xd8, 0xff, 0xd9]),
+        teamID: "team-1"
+    )
+    let requests = try await client.makePhotoClueRequests(
+        clue,
+        now: Date(timeIntervalSince1970: 1_700_000_001)
+    )
+    #expect(requests.count == 4)
+    #expect(requests.compactMap(\.url?.path) == [
+        "/api/v1/map/map123/Marker/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "/api/v1/media/11111111-2222-3333-4444-555555555555",
+        "/api/v1/media/11111111-2222-3333-4444-555555555555/data",
+        "/api/v1/map/map123/MapMediaObject",
+    ])
+    for request in requests {
+        #expect(request.httpMethod == "POST")
+        let fields = decodeFormBody(try #require(request.httpBody))
+        #expect(fields["id"] == "credential")
+        #expect(fields["signature"]?.isEmpty == false)
+        #expect(fields["json"]?.isEmpty == false)
+    }
+    let markerFields = decodeFormBody(try #require(requests[0].httpBody))
+    let markerJSON = try #require(markerFields["json"]?.data(using: .utf8))
+    let marker = try #require(JSONSerialization.jsonObject(with: markerJSON) as? [String: Any])
+    let markerProperties = try #require(marker["properties"] as? [String: Any])
+    #expect(markerProperties["class"] as? String == "Marker")
+    #expect(markerProperties["marker-symbol"] as? String == "Drone")
+
+    let dataFields = decodeFormBody(try #require(requests[2].httpBody))
+    let dataJSON = try #require(dataFields["json"]?.data(using: .utf8))
+    let mediaData = try #require(JSONSerialization.jsonObject(with: dataJSON) as? [String: Any])
+    #expect(mediaData["creator"] as? String == "team-1")
+    #expect(mediaData["data"] as? String == clue.jpegData.base64EncodedString())
+
+    let linkFields = decodeFormBody(try #require(requests[3].httpBody))
+    let linkJSON = try #require(linkFields["json"]?.data(using: .utf8))
+    let link = try #require(JSONSerialization.jsonObject(with: linkJSON) as? [String: Any])
+    let linkProperties = try #require(link["properties"] as? [String: Any])
+    #expect(linkProperties["parentId"] as? String == "Marker:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    #expect(linkProperties["backendMediaId"] as? String == "11111111-2222-3333-4444-555555555555")
+}
+
 @Test func mediaServerEventDecoderPreservesPublisherIdentity() throws {
     let event = try MediaServerEventDecoder.decode(
         json: #"{"type":"stream_started","path":"scout1","publisherConnId":"10.0.0.1:12000"}"#
@@ -640,6 +1409,24 @@ private func bluetoothServiceData(message: [UInt8], counter: UInt8) -> Data {
     #expect(identity.mappedID == "Eagle1DjMtrc4td")
     #expect(RidAircraftIdentity.modelAbbreviation("Autel Evo 2 Dual 640T") == "lEv2Dl640t")
     #expect(RidAircraftIdentity.modelAbbreviation("Potensic Atom LT") == "PtnscAtm2lt")
+}
+
+@Test func aircraftIdentityGuessesAndroidCompatiblePilotCallsign() {
+    #expect(RidAircraftIdentity.guessPilotCallsign(
+        mappedID: "1sar7DjMn4Pr",
+        model: "DJI Mini 4 Pro",
+        remoteID: "1581F6Z9C24BH0036EJL"
+    ) == "1sar7")
+    #expect(RidAircraftIdentity.guessPilotCallsign(
+        mappedID: "1sar1001DjMn4Pr-01",
+        model: "DJI Mini 4 Pro",
+        remoteID: "1581F6Z9C2527003BZFX"
+    ) == "1sar1001-01")
+    #expect(RidAircraftIdentity.guessPilotCallsign(
+        mappedID: "1668BR40EA00Z5VX",
+        model: "",
+        remoteID: "1668BR40EA00Z5VX"
+    ).isEmpty)
 }
 
 @Test func aircraftIdentityFallsBackToRemoteIDWithoutCallsign() {
@@ -930,6 +1717,18 @@ private func jsonObject(_ data: Data) throws -> [String: Any] {
     try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
 }
 
+private func decodeFormBody(_ data: Data) -> [String: String] {
+    Dictionary(uniqueKeysWithValues: String(decoding: data, as: UTF8.self)
+        .split(separator: "&")
+        .compactMap { field -> (String, String)? in
+            let parts = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return nil }
+            let key = String(parts[0]).removingPercentEncoding ?? String(parts[0])
+            let value = String(parts[1]).removingPercentEncoding ?? String(parts[1])
+            return (key, value)
+        })
+}
+
 private func sharedConfigToken(
     prefix: String,
     displayKey: String,
@@ -955,6 +1754,39 @@ private func androidCompatibleEncryptPayload(_ plaintext: String) throws -> Stri
         value ^ key[index % key.count]
     }
     return Data(encrypted).base64EncodedString()
+}
+
+private func makeFloatGeoTiff() -> Data {
+    let entryCount = 14
+    let scaleOffset = 8 + 2 + entryCount * 12 + 4
+    let tieOffset = scaleOffset + 3 * 8
+    let pixelOffset = tieOffset + 6 * 8
+    var bytes = [UInt8](repeating: 0, count: pixelOffset + 4 * 4)
+    func put16(_ value: UInt16, _ offset: Int) {
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+    }
+    func put32(_ value: UInt32, _ offset: Int) {
+        for index in 0 ..< 4 { bytes[offset + index] = UInt8(truncatingIfNeeded: value >> UInt32(index * 8)) }
+    }
+    func put64(_ value: UInt64, _ offset: Int) {
+        for index in 0 ..< 8 { bytes[offset + index] = UInt8(truncatingIfNeeded: value >> UInt64(index * 8)) }
+    }
+    func putDouble(_ value: Double, _ offset: Int) { put64(value.bitPattern, offset) }
+    func entry(_ index: Int, _ tag: UInt16, _ type: UInt16, _ count: UInt32, _ value: UInt32) {
+        let offset = 10 + index * 12
+        put16(tag, offset); put16(type, offset + 2); put32(count, offset + 4); put32(value, offset + 8)
+    }
+    bytes[0] = 0x49; bytes[1] = 0x49; put16(42, 2); put32(8, 4); put16(UInt16(entryCount), 8)
+    entry(0, 256, 4, 1, 2); entry(1, 257, 4, 1, 2); entry(2, 258, 3, 1, 32)
+    entry(3, 259, 3, 1, 1); entry(4, 262, 3, 1, 1); entry(5, 273, 4, 1, UInt32(pixelOffset))
+    entry(6, 277, 3, 1, 1); entry(7, 278, 4, 1, 2); entry(8, 279, 4, 1, 16)
+    entry(9, 284, 3, 1, 1); entry(10, 317, 3, 1, 1); entry(11, 339, 3, 1, 3)
+    entry(12, 33550, 12, 3, UInt32(scaleOffset)); entry(13, 33922, 12, 6, UInt32(tieOffset))
+    [1.0, 1.0, 0.0].enumerated().forEach { putDouble($0.element, scaleOffset + $0.offset * 8) }
+    [0.0, 0.0, 0.0, -105.0, 40.0, 0.0].enumerated().forEach { putDouble($0.element, tieOffset + $0.offset * 8) }
+    [Float(100), 200, 300, 400].enumerated().forEach { put32($0.element.bitPattern, pixelOffset + $0.offset * 4) }
+    return Data(bytes)
 }
 
 private func trackObservation(

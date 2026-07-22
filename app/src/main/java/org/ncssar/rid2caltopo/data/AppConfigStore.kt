@@ -23,7 +23,7 @@ private val Context.appConfigDataStore: DataStore<AppConfig> by dataStore(
 )
 
 object AppConfigStore {
-    const val SCHEMA_VERSION = 13
+    const val SCHEMA_VERSION = 14
     private const val MAX_LOADED_CONFIG_FILES = 6
     private const val TAG = "AppConfigStore"
     private const val DEFAULT_HOME_PROFILE_ID = "home-default"
@@ -349,6 +349,11 @@ object AppConfigStore {
         state.notamClientSecret = config.notam.clientSecret
         state.notamScope = config.notam.scope
         state.notamLastUpdatedEpochMs = config.notam.lastUpdatedEpochMs
+        state.landRestrictionsEnabled = if (config.schemaVersion >= 14) config.landRestrictions.enabled else true
+        state.landRestrictionsShowOnMap = if (config.schemaVersion >= 14) config.landRestrictions.showOnMap else true
+        state.landRestrictionsAutoRefresh = if (config.schemaVersion >= 14) config.landRestrictions.autoRefresh else true
+        state.landRestrictionsRadiusNm = config.landRestrictions.radiusNm.takeIf { it in 1..50 } ?: 5
+        state.landRestrictionsLastUpdatedEpochMs = config.landRestrictions.lastUpdatedEpochMs
         state.faaRemoteToken = config.faaRemoteConfig.token
         state.faaConfigLabel = config.faaRemoteConfig.label
         state.faaPayloadEnc = config.faaRemoteConfig.payloadEnc
@@ -448,6 +453,15 @@ object AppConfigStore {
                     .setLastValidatedEpochMs(state.faaLastValidatedEpochMs)
                     .setStale(state.faaConfigStale)
                     .setLastFailureReason(state.faaLastFailureReason ?: "")
+                    .build()
+            )
+            .setLandRestrictions(
+                AppConfig.LandRestrictionConfig.newBuilder()
+                    .setEnabled(state.landRestrictionsEnabled)
+                    .setShowOnMap(state.landRestrictionsShowOnMap)
+                    .setAutoRefresh(state.landRestrictionsAutoRefresh)
+                    .setRadiusNm(state.landRestrictionsRadiusNm.coerceIn(1, 50))
+                    .setLastUpdatedEpochMs(state.landRestrictionsLastUpdatedEpochMs)
                     .build()
             )
             .setCaltopoCredentials(

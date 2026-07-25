@@ -76,7 +76,6 @@ public enum OpenDroneIDParserError: Error, Equatable, Sendable {
     case truncatedMessage(expected: Int, actual: Int)
     case unknownMessageType(UInt8)
     case invalidMessagePack(size: Int, count: Int, availableBytes: Int)
-    case invalidRawDatagramLength(Int)
 }
 
 public enum OpenDroneIDParser {
@@ -106,37 +105,6 @@ public enum OpenDroneIDParser {
             messages = [message]
         }
         return OpenDroneIDAdvertisement(messageCounter: counter, messages: messages)
-    }
-
-    /// Parses the compact payload an external Wi-Fi radio can forward over UDP.
-    /// The payload may be either the complete Bluetooth FFFA service-data value,
-    /// one raw 25-byte ASTM message, a concatenation of raw messages, or a raw
-    /// ASTM Message Pack. Full 802.11 management-frame headers are intentionally
-    /// outside this transport contract because radio adapters expose them in
-    /// device-specific forms.
-    public static func parseExternalDatagram(_ data: Data) throws -> OpenDroneIDAdvertisement {
-        if data.first == applicationCode, data.count >= messageSize + 2 {
-            return try parseBluetoothServiceData(data)
-        }
-        guard data.count >= messageSize else {
-            throw OpenDroneIDParserError.invalidRawDatagramLength(data.count)
-        }
-
-        if data.first.map({ $0 >> 4 }) == OpenDroneIDMessage.Kind.messagePack.rawValue {
-            let pack = try parseMessage(data)
-            guard case let .messagePack(messages) = pack.payload else {
-                preconditionFailure("Message-pack header produced a different payload")
-            }
-            return OpenDroneIDAdvertisement(messageCounter: 0, messages: messages)
-        }
-
-        guard data.count.isMultiple(of: messageSize) else {
-            throw OpenDroneIDParserError.invalidRawDatagramLength(data.count)
-        }
-        let messages = try stride(from: 0, to: data.count, by: messageSize).map { offset in
-            try parseMessage(data.subdata(in: offset ..< offset + messageSize))
-        }
-        return OpenDroneIDAdvertisement(messageCounter: 0, messages: messages)
     }
 
     public static func parseMessage(_ data: Data) throws -> OpenDroneIDMessage {
@@ -195,7 +163,9 @@ public enum OpenDroneIDParser {
             pressureAltitudeMeters: altitude(uint16LE(data, 13)),
             geodeticAltitudeMeters: altitude(uint16LE(data, 15)),
             heightMeters: altitude(uint16LE(data, 17)),
-            directionDegrees: Double(rawDirection) + (eastWest == 0 ? 0 : 180),
+            directionDegrees: RidHeading.normalized(
+                Double(rawDirection) + (eastWest == 0 ? 0 : 180)
+            ) ?? 0,
             horizontalSpeedMetersPerSecond: speedMultiplier == 0
                 ? Double(rawHorizontalSpeed) * 0.25
                 : Double(rawHorizontalSpeed) * 0.75 + 63.75,

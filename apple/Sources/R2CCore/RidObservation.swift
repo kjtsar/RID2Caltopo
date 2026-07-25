@@ -15,7 +15,7 @@ public struct RidObservation: Sendable, Equatable {
         case bluetoothExtended
         case wifiBeacon
         case wifiNan
-        case externalReceiver
+        case trackerRelay
     }
 
     public let source: Source
@@ -55,7 +55,7 @@ public struct RidObservation: Sendable, Equatable {
         self.altitudeMeters = altitudeMeters
         self.heightMeters = heightMeters
         self.heightReference = heightReference
-        self.headingDegrees = headingDegrees
+        self.headingDegrees = RidHeading.normalized(headingDegrees)
         self.speedMetersPerSecond = speedMetersPerSecond
         self.operatorLatitude = operatorLatitude
         self.operatorLongitude = operatorLongitude

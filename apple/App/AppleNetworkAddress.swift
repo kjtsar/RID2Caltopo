@@ -1,10 +1,25 @@
 import Darwin
 import Foundation
+import NetworkExtension
+import R2CCore
+import UIKit
 
 enum AppleNetworkAddress {
     static func preferredIPv4Address() -> String? {
+        let candidates = ipv4Candidates()
+        return candidates.first(where: { $0.name == "en0" })?.address
+            ?? candidates.first(where: { $0.name.hasPrefix("en") })?.address
+    }
+
+    static func ipv4DiagnosticSummary() -> String {
+        let candidates = ipv4Candidates()
+        guard !candidates.isEmpty else { return "none" }
+        return candidates.map { "\($0.name)=\($0.address)" }.joined(separator: ",")
+    }
+
+    private static func ipv4Candidates() -> [(name: String, address: String)] {
         var interfaces: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&interfaces) == 0, let first = interfaces else { return nil }
+        guard getifaddrs(&interfaces) == 0, let first = interfaces else { return [] }
         defer { freeifaddrs(interfaces) }
 
         var candidates: [(name: String, address: String)] = []
@@ -37,7 +52,38 @@ enum AppleNetworkAddress {
                 address: address
             ))
         }
-        return candidates.first(where: { $0.name == "en0" })?.address
-            ?? candidates.first?.address
+        return candidates
+    }
+
+    static func currentWiFiSSID() async -> String? {
+        await withCheckedContinuation { continuation in
+            NEHotspotNetwork.fetchCurrent { network in
+                let ssid = network?.ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+                continuation.resume(returning: ssid?.isEmpty == false ? ssid : nil)
+            }
+        }
+    }
+}
+
+enum AppleDeviceIdentity {
+    static let storedNameKey = "device.stableDisplayName"
+
+    static var displayName: String {
+        let defaults = UserDefaults.standard
+        let stored = defaults.string(forKey: storedNameKey)
+        let userAssignedName = MainActor.assumeIsolated { UIDevice.current.name }
+        let resolved = OperationalDeviceName.preferredDisplayName(
+            stored: stored,
+            userAssigned: userAssignedName,
+            hostname: ProcessInfo.processInfo.hostName
+        )
+        if stored?.trimmingCharacters(in: .whitespacesAndNewlines) != resolved {
+            defaults.set(resolved, forKey: storedNameKey)
+        }
+        return resolved
+    }
+
+    static func displayName(fromHostname hostname: String) -> String {
+        OperationalDeviceName.displayName(fromHostname: hostname) ?? "iPad"
     }
 }

@@ -5,7 +5,7 @@
 Keep the Apple UI and platform radios thin around portable contracts:
 
 ```text
-CoreBluetooth / Wi-Fi provider / external receiver
+CoreBluetooth (direct RID and DS110 bridge)
                       |
                       v
                 RidObservation
@@ -34,21 +34,12 @@ the lifecycle calls and structured event callback.
 4. Feed decoded `CVPixelBuffer` frames through the portable C anomaly core.
 5. Add CoreBluetooth Remote ID ingestion and compare decoded observations with
    the Android implementation using the same transmitters.
-6. Qualify Wi-Fi transports separately because Apple exposes different radio
-   capabilities and entitlements than Android.
+6. Qualify Wi-Fi Remote ID aircraft through the DS110 Bluetooth relay.
 
-Apple added the public Wi-Fi Aware framework in iOS/iPadOS 26, and the 2021
-11-inch iPad Pro (3rd generation) is on Apple's supported-device list. The API
-uses declared services and paired, authenticated peers. ASTM Broadcast Remote
-ID over Wi-Fi NAN is passive broadcast reception. An audit of the public iOS
-26.5 SDK confirms that its entire discovery surface is `WAPairedDevice`,
-declared `WAPublishableService`/`WASubscribableService` values, and paired
-publisher/subscriber Network endpoints. It exposes no raw NAN management frame,
-unsolicited service advertisement payload, or passive monitor API. Therefore a
-native App Store implementation cannot currently receive ASTM NAN broadcasts
-through the public Wi-Fi Aware framework. Keep `WiFiAwareRIDCapability` as a
-host capability indicator and use the proven external receiver feed for Wi-Fi
-Remote ID unless Apple adds a passive broadcast API.
+The field architecture intentionally uses a DS110 wireless relay for Wi-Fi
+Beacon/NAN Remote ID aircraft. Apple consumes the relayed report through the
+same CoreBluetooth parser as direct Bluetooth Remote ID. The former UDP
+compatibility listener and Android forwarding path have been removed.
 
 ## Current checkpoint
 
@@ -59,12 +50,7 @@ Remote ID unless Apple adds a passive broadcast API.
 - `R2CAppleRadios.BluetoothRIDScanner` performs a foreground CoreBluetooth scan
   filtered to service UUID `FFFA`, validates application code `0D`, and emits
   normalized observations through `AsyncStream`.
-- `R2CAppleRadios.ExternalRIDUDPReceiver` accepts normalized JSON plus compact
-  raw ASTM messages on UDP port 7654. It accepts individual 25-byte messages,
-  concatenated messages, Message Packs, and FFFA service-data envelopes, and
-  assembles Basic ID, Location, and System state per sender. Simulator runtime
-  proofs have driven both combined and split binary messages into the live map.
-- The universal SwiftUI Status screen starts Bluetooth and external UDP ingest
+- The universal SwiftUI Status screen starts Bluetooth ingest
   automatically, presents Android-style active-aircraft rows and details, and
   uses a real `CLLocationManager` fix for the MapKit user annotation plus
   device-relative range/bearing. Closest-pair horizontal/vertical/3D separation
@@ -186,24 +172,9 @@ Remote ID unless Apple adds a passive broadcast API.
   green. Inactive aircraft also drive a signed `LiveTrack/{id}` stop after the
   local archive succeeds; a real CalTopo test-map transaction remains a
   credentialed device gate.
-- `ExternalRIDUDPReceiver` provides the hardware-independent Wi-Fi fallback on
-  UDP port 7654. It validates normalized JSON datagrams, merges them with the
-  Bluetooth observation stream, and feeds the identical map/archive/publishing
-  pipeline. A live iPhone Simulator datagram produced one active `WIFIRID01`
-  aircraft on the MapKit view; malformed JSON and invalid-coordinate contracts
-  are covered by shared tests.
-- Android now has an opt-in **Apple Wi-Fi Remote ID Relay** that forwards only
-  accepted Wi-Fi Beacon/NAN observations to the Apple receiver. Exact payload,
-  validation, and real loopback UDP transport tests are green. A physical
-  Android-to-iPhone/iPad RF run remains part of the device qualification gate.
-- Live iPhone and iPad Simulator runs consumed Android-shaped Wi-Fi NAN and
-  Beacon datagrams through the automatically started receiver. Both produced
-  the expected aircraft row, accepted track point, transport/RSSI details,
-  operator coordinates, relay destination, and zero rejected datagrams. Apple
-  diagnostics now record Android-shaped `rid_rx` evidence for accepted points
-  and explicit reasons for invalid or implausible observations.
-- `apple/smoke-external-rid.sh` makes that receiver-to-track-to-diagnostic-log
-  proof repeatable against any booted iPhone or iPad Simulator build.
+- Wi-Fi Beacon/NAN field qualification now uses the DS110 wireless relay into
+  Apple's Bluetooth intake. The UDP compatibility listener and Android sender
+  are deliberately absent.
 - Tracker peer coordination now matches Android's `/ws/r2c` protocol and
   `X-SAR-Token` authentication. The Apple adapter maintains hello/heartbeat
   health, reconnects with bounded backoff, replays active sightings and pending

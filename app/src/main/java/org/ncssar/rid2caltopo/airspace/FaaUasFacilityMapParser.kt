@@ -7,13 +7,14 @@ object FaaUasFacilityMapParser {
         val features = JSONObject(body).optJSONArray("features") ?: return emptyList()
         return buildList {
             for (i in 0 until features.length()) {
-                val attributes = features.optJSONObject(i)?.optJSONObject("attributes") ?: continue
-                add(attributes.toFacilityMapRecord())
+                val feature = features.optJSONObject(i) ?: continue
+                val attributes = feature.optJSONObject("attributes") ?: continue
+                add(attributes.toFacilityMapRecord(feature.optJSONObject("geometry")))
             }
         }
     }
 
-    private fun JSONObject.toFacilityMapRecord(): FaaUasFacilityMapRecord {
+    private fun JSONObject.toFacilityMapRecord(geometry: JSONObject?): FaaUasFacilityMapRecord {
         return FaaUasFacilityMapRecord(
             objectId = optLong("OBJECTID", -1L),
             ceilingFeet = if (has("CEILING") && !isNull("CEILING")) optInt("CEILING") else null,
@@ -24,7 +25,31 @@ object FaaUasFacilityMapParser {
             laancAvailable = optInt("APT1_LAANC", 0) == 1,
             airspaceClasses = (1..5).mapNotNull { index ->
                 optString("AIRSPACE_$index").trim().ifBlank { null }
-            }
+            },
+            rings = geometry.parseRings()
         )
+    }
+
+    private fun JSONObject?.parseRings(): List<List<AirspaceCoordinate>> {
+        val source = this?.optJSONArray("rings") ?: return emptyList()
+        return buildList {
+            for (ringIndex in 0 until source.length()) {
+                val ring = source.optJSONArray(ringIndex) ?: continue
+                val coordinates = buildList {
+                    for (coordinateIndex in 0 until ring.length()) {
+                        val pair = ring.optJSONArray(coordinateIndex) ?: continue
+                        if (pair.length() < 2) continue
+                        val longitude = pair.optDouble(0, Double.NaN)
+                        val latitude = pair.optDouble(1, Double.NaN)
+                        if (latitude.isFinite() && longitude.isFinite() &&
+                            latitude in -90.0..90.0 && longitude in -180.0..180.0
+                        ) {
+                            add(AirspaceCoordinate(latitude, longitude))
+                        }
+                    }
+                }
+                if (coordinates.size >= 3) add(coordinates)
+            }
+        }
     }
 }

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "2026.07.21",
+  "reviewedAt": "2026-07-21T00:00:00Z",
+  "refreshPolicy": {
+    "automaticMaximumFrequencyDays": 7,
+    "failureMode": "retain-last-known-good-and-warn"
+  },
+  "sources": [
+    {
+      "id": "nps",
+      "scope": "nationwide",
+      "jurisdiction": "US",
+      "agency": "National Park Service",
+      "boundaryQueryUrl": "https://services.arcgis.com/xOi1kZaI0eWDREZv/ArcGIS/rest/services/NPS_Regional_and_Park_Boundary/FeatureServer/1/query",
+      "rulesUrl": "https://www.nps.gov/articles/uncrewed-aircraft-in-the-national-parks.htm",
+      "authority": "agency",
+      "runtimeStatus": "active"
+    },
+    {
+      "id": "fws-refuge",
+      "scope": "nationwide",
+      "jurisdiction": "US",
+      "agency": "U.S. Fish and Wildlife Service",
+      "boundaryQueryUrl": "https://services.arcgis.com/QVENGdaPbd4LUkLV/arcgis/rest/services/National_Wildlife_Refuge_System_Boundaries/FeatureServer/0/query",
+      "rulesUrl": "https://www.fws.gov/law/uncrewed-aircraft-systems",
+      "authority": "agency",
+      "runtimeStatus": "active"
+    },
+    {
+      "id": "usfs-wilderness",
+      "scope": "nationwide",
+      "jurisdiction": "US",
+      "agency": "U.S. Forest Service",
+      "boundaryQueryUrl": "https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_Wilderness_01/MapServer/0/query",
+      "rulesUrl": "https://www.fs.usda.gov/Internet/FSE_DOCUMENTS/stelprd3847000.pdf",
+      "authority": "agency",
+      "runtimeStatus": "active"
+    },
+    {
+      "id": "cpw-properties",
+      "scope": "state",
+      "jurisdiction": "CO",
+      "agency": "Colorado Parks and Wildlife",
+      "boundaryQueryUrl": "https://services5.arcgis.com/ttNGmDvKQA7oeDQ3/ArcGIS/rest/services/CPWAdminData/FeatureServer/5/query",
+      "rulesUrl": "https://cpw.state.co.us/rules-and-regulations",
+      "authority": "agency",
+      "runtimeStatus": "active"
+    },
+    {
+      "id": "pad-us-state-local",
+      "scope": "nationwide-state-local-discovery",
+      "jurisdiction": "US",
+      "agency": "U.S. Geological Survey GAP Analysis Project",
+      "boundaryQueryUrl": "https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/PADUS_Public_Access/FeatureServer/0/query",
+      "rulesUrl": "https://www.usgs.gov/programs/gap-analysis-project/science/pad-us-web-services",
+      "authority": "authoritative-aggregate",
+      "runtimeStatus": "cataloged",
+      "limitations": [
+        "Public access is not a drone authorization classification",
+        "Agency data can be newer than PAD-US",
+        "Local protected-land coverage is incomplete in some jurisdictions"
+      ]
+    }
+  ]
+}

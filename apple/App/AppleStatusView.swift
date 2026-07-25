@@ -7,11 +7,6 @@ struct AppleStatusSnapshot {
     let bluetoothStatus: String
     let bluetoothObservations: Int
     let bluetoothRejected: Int
-    let externalReceiverStatus: String
-    let externalRelayDestination: String
-    let externalObservations: Int
-    let externalRejected: Int
-    let wifiAwareStatus: String
     let locationStatus: String
     let configSource: String
     let organization: String
@@ -58,11 +53,7 @@ struct AppleStatusSnapshot {
             "Bluetooth Remote ID: \(bluetoothStatus)",
             "Bluetooth observations: \(bluetoothObservations)",
             "Rejected Bluetooth packets: \(bluetoothRejected)",
-            "External Wi-Fi receiver: \(externalReceiverStatus)",
-            "Android relay destination: \(externalRelayDestination):7654",
-            "External observations: \(externalObservations)",
-            "Rejected UDP datagrams: \(externalRejected)",
-            "Wi-Fi Aware host: \(wifiAwareStatus)",
+            "Wi-Fi Remote ID bridge: DS110 to Bluetooth",
             "Location: \(locationStatus)",
             "",
             "Loaded Configuration",
@@ -70,8 +61,8 @@ struct AppleStatusSnapshot {
             "Organization: \(display(organization))",
             "Incident: \(display(incident))",
             "Operational period: \(display(operationalPeriod))",
-            "Tracker: \(trackerStatus)",
-            "Tracker detail: \(trackerDetail)",
+            "Tracker coordination: \(trackerStatus)",
+            "Tracker coordination detail: \(trackerDetail)",
             "Tracker archive: \(trackerArchiveStatus)",
             "Peer zones: \(peerCount)",
             "CalTopo: \(caltopoStatus)",
@@ -117,12 +108,7 @@ struct AppleStatusView: View {
                 LabeledContent("Bluetooth Remote ID", value: snapshot.bluetoothStatus)
                 LabeledContent("Bluetooth observations", value: "\(snapshot.bluetoothObservations)")
                 LabeledContent("Rejected Bluetooth packets", value: "\(snapshot.bluetoothRejected)")
-                LabeledContent("External Wi-Fi receiver", value: snapshot.externalReceiverStatus)
-                LabeledContent("Android relay destination", value: "\(snapshot.externalRelayDestination):7654")
-                    .textSelection(.enabled)
-                LabeledContent("External observations", value: "\(snapshot.externalObservations)")
-                LabeledContent("Rejected UDP datagrams", value: "\(snapshot.externalRejected)")
-                LabeledContent("Wi-Fi Aware host", value: snapshot.wifiAwareStatus)
+                LabeledContent("Wi-Fi Remote ID bridge", value: "DS110 to Bluetooth")
                 LabeledContent("Location", value: snapshot.locationStatus)
             }
 
@@ -133,7 +119,7 @@ struct AppleStatusView: View {
                 if !snapshot.operationalPeriod.isEmpty {
                     LabeledContent("Operational period", value: snapshot.operationalPeriod)
                 }
-                LabeledContent("Tracker", value: snapshot.trackerStatus)
+                LabeledContent("Tracker coordination", value: snapshot.trackerStatus)
                 Text(snapshot.trackerDetail)
                     .font(.caption)
                     .foregroundStyle(.secondary)

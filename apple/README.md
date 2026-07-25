@@ -7,10 +7,10 @@ iPad Simulator.
 The initial architecture keeps platform radio and UI code thin around portable
 contracts and native cores:
 
-1. CoreBluetooth or an external receiver produces `RidObservation` values.
+1. CoreBluetooth produces `RidObservation` values, including Wi-Fi Remote ID reports bridged by the DS110.
 2. Shared tracking policy consumes observations and publishes accepted updates.
-3. The verified MediaMTX Go core receives controller RTMP and exposes Low-Latency HLS locally.
-4. AVFoundation produces BGRA `CVPixelBuffer` frames for the portable C anomaly core.
+3. The verified MediaMTX Go core receives controller RTMP and exposes RTSP and HLS locally.
+4. FFmpeg demuxes RTSP and VideoToolbox produces newest-frame `CVPixelBuffer` output; AVPlayer HLS remains a fallback.
 5. SwiftUI and Metal present operator state, video, and anomaly annotations.
 
 `RidObservationProvider` is the radio boundary and `MediaServerController` is
@@ -22,6 +22,7 @@ Build both native dependencies before opening the app project on a fresh checkou
 ```sh
 apple/Native/MediaMTX/build-xcframework.sh
 apple/Native/AnomalyCore/build-xcframework.sh
+apple/Native/FFmpeg/build-xcframework.sh
 ```
 
 The Swift package can be built and tested without the application target:
@@ -37,7 +38,7 @@ The primary pre-release gate is:
 apple/release-check.sh
 ```
 
-It rebuilds the current MediaMTX and anomaly XCFramework device/Simulator
+It rebuilds the current MediaMTX, anomaly, and LGPL FFmpeg XCFramework device/Simulator
 slices, checks their exported C ABI, runs the portable anomaly regression and
 realtime qualification suites, runs all shared Swift tests, performs a clean
 arm64 Simulator link, and verifies a fresh unsigned arm64 iPhone/iPad archive. Use
@@ -98,7 +99,9 @@ aircraft annotations on both iPhone and iPad. The operational map is backed by
 tiles, disk-backed visible-tile caching with an offline-only mode, signed
 CalTopo marker/line/polygon snapshots with searchable nested folder and
 individual-item visibility, including orphan grouping and parent-linked media
-behavior. Visibility choices persist per map. Map/video supports map-only,
+behavior. Visibility choices persist per map. Android's map-local gear exposes
+Layer, Predictive Head, Download Map, Map Folders, and Map Management in the
+same order. Map/video supports map-only,
 video-only, split, and primary/inset layouts, and CalTopo snapshots are cached
 per map for offline reuse. Apple 1.2 queries nearby NOTAM/TFR data using the
 imported FAA configuration and renders status, age, details, and colored
@@ -109,14 +112,21 @@ The map menu also provides Android-shaped region preparation for the current
 viewport or a selected CalTopo line/polygon, including the Overview, Ops, and
 Full Detail presets, optional contours and USGS 1-degree DEM downloads,
 estimates, progress/cancellation, cache size/age maintenance, and bad-tile
-quarantine/export. Downloaded GeoTIFFs are sampled directly for terrain/AGL,
+quarantine/export. Long-pressing a cached bad tile opens Android's remove and
+same-hash quarantine confirmation. Downloaded GeoTIFFs are sampled directly for terrain/AGL,
 with the point-sample cache and USGS service retained as fallbacks.
 Confirmed pilots also have Android-compatible local display preferences for
 active and archive track colors and the optional viewport-edge bearing line;
 tap a confirmed aircraft to edit or reset those settings.
 MediaMTX publisher events admit up to four simultaneous controller streams.
 Live Streams provides a focused, status-labeled grid, while the focused stream
-feeds map/video presentation and clue capture. Settings can use OS mirroring or
+feeds map/video presentation and clue capture. Stream tiles support tap focus,
+long-press telemetry pairing, bounded 1x-4x pinch/pan, and double-tap clue
+capture; snapshots preserve the current zoomed framing. Tile settings expose
+close/restart actions and decoder/anomaly performance diagnostics. Stream
+designators use Android's red/yellow/green telemetry-pairing state, and a
+mismatched manual selection requires explicit confirmation. Settings can
+use OS mirroring or
 an app-managed attached display with streams, map, split, or observer content
 and configurable alert routing.
 
@@ -174,60 +184,9 @@ issues the same signed `LiveTrack/{id}` DELETE used by Android, treating 400/404
 as an already-completed stop. Real-server qualification still requires an
 operator-supplied test map and credential.
 
-When a platform cannot expose passive ASTM Wi-Fi broadcasts, an external radio
-or companion computer can send one normalized JSON observation per UDP datagram
-to port 7654. Start the listener in the Remote ID screen or use
-`--start-external-rid`. The datagram schema is:
-
-```json
-{
-  "aircraft_id": "RID-SERIAL-01",
-  "source": "wifiNan",
-  "timestamp_ms": 1700000000123,
-  "latitude": 39.7392,
-  "longitude": -104.9903,
-  "altitude_m": 1620.5,
-  "height_m": 35.2,
-  "height_reference": "takeoff",
-  "heading_deg": 92,
-  "speed_mps": 11.5,
-  "operator_latitude": 39.74,
-  "operator_longitude": -104.99,
-  "rssi_dbm": -61
-}
-```
-
-Only `aircraft_id`, `latitude`, and `longitude` are required. Accepted `source`
-values are the `RidObservation.Source` raw values; omitted or unknown values are
-recorded as `externalReceiver`. Optional `height_reference` values are
-`takeoff` and `ground`. Invalid JSON and out-of-range coordinates are counted
-and discarded before they reach the track store.
-
-With an installed Simulator build running and listening, the complete external
-receiver-to-track-to-log seam can be checked repeatably with:
-
-```sh
-apple/smoke-external-rid.sh booted
-```
-
-The script sends a unique Android-shaped Wi-Fi NAN observation and succeeds
-only after the app's current daily log contains its accepted `rid_rx` record.
-
-The Android app can provide that Wi-Fi radio path directly. In Android
-**Settings**, enable **Apple Wi-Fi Remote ID Relay** and enter the IPv4 address
-shown as **Android relay destination** on the Apple Remote ID or Status screen.
-Android then forwards accepted Wi-Fi Beacon and Wi-Fi NAN observations to UDP
-7654 using the normalized schema above. Bluetooth observations and credentials
-are not forwarded. The relay is off by default; `255.255.255.255` can be used
-for same-network broadcast when the access point permits it, though the Apple
-device's explicit IPv4 address is more reliable.
-
-The same UDP port also accepts compact binary ASTM OpenDroneID payloads from an
-external Wi-Fi radio: a raw 25-byte message, concatenated 25-byte messages, a
-raw Message Pack, or the complete Bluetooth FFFA service-data value (application
-code, message counter, and message). Basic ID and Location messages may arrive
-in separate datagrams; state is assembled per UDP sender. The external adapter
-should remove device-specific 802.11 frame headers before forwarding.
+Apple receives Remote ID through CoreBluetooth. A DS110 configured for wireless
+relay bridges aircraft Wi-Fi Beacon/NAN reports into that Bluetooth intake; the
+former Android-to-Apple UDP compatibility relay is intentionally not included.
 
 The Apple app keeps daily diagnostic logs under
 `Documents/RID2Caltopo/Logs`. **More > Send app log to Ken…** provides the same
@@ -242,7 +201,7 @@ The primary screen follows Android's operator hierarchy as closely as practical
 in SwiftUI: an incident/configuration summary first, followed by scanner and
 Nearby Aircraft status, with Live View, log forwarding, Status, Import Config,
 Settings, and About & Privacy in the More menu. Like Android, **Status** opens a
-copyable report with build, scanner, external receiver, location, loaded QR
+copyable report with build, scanner, DS110 bridge posture, location, loaded QR
 configuration, tracker, CalTopo, MediaMTX, video, and persisted-drone-mapping
 state; tokens and credential secrets are deliberately omitted. The primary
 screen includes an Android-inspired Nearby Aircraft list. Each row
@@ -289,9 +248,9 @@ device-free TestFlight packaging; a physical iPhone or iPad is still required
 for development-install and field qualification.
 
 Like Android's scanning service, the Apple app starts its Bluetooth Remote ID
-scan and external UDP listener automatically at UI startup; operators retain
-visible Stop controls. The app declares only the `bluetooth-central` background
+scan automatically at UI startup; operators retain visible Stop controls. The
+app declares only the `bluetooth-central` background
 mode. iOS may wake it for Bluetooth central events, but background scanning is
 slower and coalesces duplicate discoveries, so continuous Remote ID position
-updates are not assumed until proven on hardware. UDP, MediaMTX, decoded video,
-and anomaly processing remain foreground-only workflows.
+updates are not assumed until proven on hardware. MediaMTX, decoded video, and
+anomaly processing remain foreground-only workflows.

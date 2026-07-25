@@ -20,6 +20,9 @@ final class AppleTrackerCoordinator: ObservableObject {
     @Published private(set) var status: AppleTrackerCoordinationStatus = .unconfigured
     @Published private(set) var peers: [TrackerPeerZone] = []
     @Published private(set) var statusDetail = "Tracker coordination not configured"
+    @Published private(set) var helloAcknowledgedAtMilliseconds: Int64 = 0
+    @Published private(set) var heartbeatAcknowledgedAtMilliseconds: Int64 = 0
+    @Published private(set) var heartbeatSequenceAcknowledged: Int64 = 0
 
     private var usePeers = false
     private var trackerURLPrefix = ""
@@ -38,6 +41,7 @@ final class AppleTrackerCoordinator: ObservableObject {
     private var helloAcknowledged = false
     private var reconnectDelay: Duration = .seconds(2)
     private var receiveTask: Task<Void, Never>?
+    private var receiveFailureTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -58,7 +62,7 @@ final class AppleTrackerCoordinator: ObservableObject {
             defaults.set(value, forKey: "tracker.zoneID")
             zoneID = value
         }
-        zoneName = UIDevice.current.name
+        zoneName = AppleDeviceIdentity.displayName
         client = Self.makeClient(mapID: "", zoneID: zoneID, zoneName: zoneName)
         protocolState = TrackerCoordinationProtocolState(localZoneID: zoneID)
     }
@@ -69,6 +73,26 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     var coordinationRequired: Bool {
         usePeers && !trackerURLPrefix.isEmpty && !trackerAPIKey.isEmpty && !mapID.isEmpty
+    }
+
+    var localZoneID: String { zoneID }
+
+    var localDeviceStatusLines: [String] {
+        var lines = [statusDetail]
+        if coordinationRequired {
+            lines.append(
+                helloAcknowledgedAtMilliseconds > 0
+                    ? "Hello ack \(Self.elapsedText(since: helloAcknowledgedAtMilliseconds)) ago"
+                    : "Hello ack waiting"
+            )
+            lines.append(
+                heartbeatAcknowledgedAtMilliseconds > 0
+                    ? "Heartbeat ack \(Self.elapsedText(since: heartbeatAcknowledgedAtMilliseconds)) ago (seq \(heartbeatSequenceAcknowledged))"
+                    : "Heartbeat ack waiting"
+            )
+        }
+        lines.append(peers.isEmpty ? "Peers: none" : "Peers: \(peers.count)")
+        return lines
     }
 
     func configure(usePeers: Bool, trackerURLPrefix: String, trackerAPIKey: String, mapID: String) {
@@ -87,6 +111,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         self.mapID = normalizedMapID
         client = Self.makeClient(mapID: normalizedMapID, zoneID: zoneID, zoneName: zoneName)
         protocolState = TrackerCoordinationProtocolState(localZoneID: zoneID)
+        resetAcknowledgements()
         observedSightings.removeAll()
         pendingConfirmations.removeAll()
         fallbackTasks.values.forEach { $0.cancel() }
@@ -222,6 +247,18 @@ final class AppleTrackerCoordinator: ObservableObject {
         let socket = session.webSocketTask(with: request)
         self.socket = socket
         socket.resume()
+        // URLSessionWebSocketTask queues receives issued before the opening
+        // handshake completes. On the field iPad, starting the first receive
+        // from didOpen races with URLSession's internal connected state and
+        // immediately fails with NSPOSIXErrorDomain 57.
+        startReceiveLoop(socket: socket, generation: currentGeneration)
+    }
+
+    private func startReceiveLoop(
+        socket: URLSessionWebSocketTask,
+        generation currentGeneration: UUID
+    ) {
+        receiveTask?.cancel()
         receiveTask = Task { [weak self, weak socket] in
             guard let socket else { return }
             do {
@@ -234,15 +271,29 @@ final class AppleTrackerCoordinator: ObservableObject {
                 return
             } catch {
                 guard let self else { return }
-                self.socketClosed(generation: currentGeneration, detail: "Receive failed: \(error.localizedDescription)")
+                self.receiveFailed(error, generation: currentGeneration)
             }
+        }
+    }
+
+    private func receiveFailed(_ error: Error, generation currentGeneration: UUID) {
+        guard currentGeneration == generation, coordinationRequired else { return }
+        let detail = "Receive failed: \(Self.errorDescription(error))"
+        status = .degraded
+        statusDetail = detail
+        AppleLog.error("TrackerPeer", "\(detail); awaiting WebSocket close reason")
+        receiveFailureTask?.cancel()
+        receiveFailureTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(750))
+            guard !Task.isCancelled, let self, currentGeneration == self.generation else { return }
+            self.receiveFailureTask = nil
+            self.socketClosed(generation: currentGeneration, detail: detail)
         }
     }
 
     private func socketOpened(generation: UUID) {
         guard generation == self.generation else { return }
         connected = true
-        reconnectDelay = .seconds(2)
         let now = Self.nowMilliseconds
         protocolState.transportOpened(helloSentAtMilliseconds: now)
         firstSightingsSent.removeAll()
@@ -271,9 +322,14 @@ final class AppleTrackerCoordinator: ObservableObject {
                 switch event {
                 case .helloAcknowledged:
                     helloAcknowledged = true
+                    reconnectDelay = .seconds(2)
+                    helloAcknowledgedAtMilliseconds = Self.nowMilliseconds
                     status = .healthy
                     statusDetail = "Tracker link healthy"
                     flushPendingConfirmations()
+                case let .heartbeatAcknowledged(sequence, _):
+                    heartbeatAcknowledgedAtMilliseconds = Self.nowMilliseconds
+                    heartbeatSequenceAcknowledged = sequence
                 case let .peersUpdated(updatedPeers):
                     peers = updatedPeers
                 case let .reconnectRequired(reason):
@@ -328,6 +384,8 @@ final class AppleTrackerCoordinator: ObservableObject {
 
     private func socketClosed(generation: UUID, detail: String) {
         guard generation == self.generation, coordinationRequired else { return }
+        receiveFailureTask?.cancel()
+        receiveFailureTask = nil
         connected = false
         helloAcknowledged = false
         heartbeatTask?.cancel()
@@ -411,12 +469,14 @@ final class AppleTrackerCoordinator: ObservableObject {
     private func send(_ data: Data) {
         guard connected, let socket, let text = String(data: data, encoding: .utf8) else { return }
         let currentGeneration = generation
-        Task { [weak self, weak socket] in
-            do {
-                try await socket?.send(.string(text))
-            } catch {
-                guard let self else { return }
-                self.socketClosed(generation: currentGeneration, detail: "Send failed: \(error.localizedDescription)")
+        socket.send(.string(text)) { [weak self] error in
+            guard let error else { return }
+            Task { @MainActor [weak self] in
+                guard let self, currentGeneration == self.generation else { return }
+                self.socketClosed(
+                    generation: currentGeneration,
+                    detail: "Send failed: \(Self.errorDescription(error))"
+                )
             }
         }
     }
@@ -448,6 +508,7 @@ final class AppleTrackerCoordinator: ObservableObject {
         reconnectTask = nil
         stopSocketOnly()
         peers = []
+        resetAcknowledgements()
     }
 
     private func stopSocketOnly() {
@@ -455,9 +516,11 @@ final class AppleTrackerCoordinator: ObservableObject {
         connected = false
         helloAcknowledged = false
         receiveTask?.cancel()
+        receiveFailureTask?.cancel()
         heartbeatTask?.cancel()
         watchdogTask?.cancel()
         receiveTask = nil
+        receiveFailureTask = nil
         heartbeatTask = nil
         watchdogTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
@@ -471,6 +534,25 @@ final class AppleTrackerCoordinator: ObservableObject {
         if trackerURLPrefix.isEmpty || trackerAPIKey.isEmpty { return "Tracker URL or API key missing" }
         if mapID.isEmpty { return "Select the incident Map ID for coordination" }
         return "Tracker coordination not configured"
+    }
+
+    private func resetAcknowledgements() {
+        helloAcknowledgedAtMilliseconds = 0
+        heartbeatAcknowledgedAtMilliseconds = 0
+        heartbeatSequenceAcknowledged = 0
+    }
+
+    private static func elapsedText(since milliseconds: Int64) -> String {
+        let seconds = max(0, (nowMilliseconds - milliseconds) / 1_000)
+        if seconds < 60 { return "\(seconds) sec" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes) min" }
+        return "\(minutes / 60) hr"
+    }
+
+    private static func errorDescription(_ error: Error) -> String {
+        let value = error as NSError
+        return "\(value.localizedDescription) [\(value.domain) \(value.code)]"
     }
 
     private static var nowMilliseconds: Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }

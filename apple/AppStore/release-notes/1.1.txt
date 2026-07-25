@@ -1,0 +1,10 @@
+Latest changes:
+- Hardened single-stream video playback with decoded-frame stall detection, MediaMTX-aware recovery, bounded retry, and operator diagnostics.
+- Added the operational MapPane with offline tile reuse, CalTopo artifacts and folder visibility, aircraft tracks and labels, pilot colors, bearing lines, altitude/terrain display, predictive head, and map/video split and inset layouts.
+- Added decoded-frame snapshots, durable local clues, map markers, sharing, retry, deletion, and CalTopo photo submission.
+
+Remaining Android differences:
+- Region-wide offline map and DEM preparation, cache administration, and mutual-aid offline package transfer are not yet available.
+- NOTAM and Airspace remain deferred.
+- Apple currently supports one live stream and does not yet include Android's multi-stream controls, captured-video review, advanced anomaly settings, external-display mode, or full operational alert set.
+- Passive Wi-Fi NAN/Beacon Remote ID requires the Android UDP relay or another external receiver because Apple does not expose passive ASTM NAN reception to App Store apps.

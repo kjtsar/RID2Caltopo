@@ -31,6 +31,18 @@ class ClueCaptureSummaryTest {
         )
 
         assertTrue(summary.contains("  USNG: 18S VK "))
+        assertTrue(summary.contains("  Gimbal angle at capture: -45.0°"))
+        assertTrue(summary.contains("  AGL: 82'"))
+        assertTrue(summary.contains("  ATO: 131'"))
+        assertTrue(summary.contains("  Distance to clue:"))
+    }
+
+    @Test
+    fun clueHeading_isNormalizedAndCannotRoundTo360() {
+        assertEquals(1.0, normalizeClueHeading(361.0)!!, 0.0)
+        assertEquals(359.0, normalizeClueHeading(-1.0)!!, 0.0)
+        assertEquals("0.0", formatClueHeading(359.96))
+        assertEquals("1.0", formatClueHeading(361.0))
     }
 
     @Test

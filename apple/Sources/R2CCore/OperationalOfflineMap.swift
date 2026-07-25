@@ -35,6 +35,30 @@ public struct OperationalOfflineTile: Sendable, Hashable {
     }
 }
 
+public enum OperationalVisibleMapTile {
+    public static func zoomLevel(
+        worldMapWidth: Double,
+        visibleMapWidth: Double,
+        viewportWidth: Double,
+        tileSize: Double = 256
+    ) -> Int {
+        guard worldMapWidth > 0, visibleMapWidth > 0, viewportWidth > 0, tileSize > 0 else { return 0 }
+        let tilesAcross = worldMapWidth / visibleMapWidth * viewportWidth / tileSize
+        return min(20, max(0, Int(floor(log2(tilesAcross)))))
+    }
+
+    public static func tile(latitude: Double, longitude: Double, zoom: Int) -> OperationalOfflineTile {
+        let zoom = min(20, max(0, zoom))
+        let count = pow(2, Double(zoom))
+        let longitude = min(180, max(-180, longitude))
+        let latitude = min(85.051_128_78, max(-85.051_128_78, latitude)) * .pi / 180
+        let x = min(Int(count) - 1, max(0, Int(floor((longitude + 180) / 360 * count))))
+        let yValue = (1 - log(tan(latitude) + 1 / cos(latitude)) / .pi) / 2 * count
+        let y = min(Int(count) - 1, max(0, Int(floor(yValue))))
+        return OperationalOfflineTile(zoom: zoom, x: x, y: y)
+    }
+}
+
 public struct OperationalOfflinePreset: Sendable, Hashable, Identifiable {
     public let id: String
     public let label: String

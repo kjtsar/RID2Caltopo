@@ -22,6 +22,7 @@ public enum OperationalMapBaseLayer: String, CaseIterable, Codable, Sendable, Eq
             URL(string: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/\(zoom)/\(y)/\(x).jpg")
         }
     }
+
 }
 
 public enum OperationalMapVideoLayout: String, CaseIterable, Codable, Sendable, Equatable {
@@ -39,6 +40,55 @@ public enum OperationalMapVideoLayout: String, CaseIterable, Codable, Sendable, 
         case .mapPrimary: "Map + video inset"
         case .videoPrimary: "Video + map inset"
         }
+    }
+
+    public func withPictureInPicture(_ enabled: Bool) -> Self {
+        switch self {
+        case .map, .mapPrimary:
+            enabled ? .mapPrimary : .map
+        case .video, .videoPrimary:
+            enabled ? .videoPrimary : .video
+        case .split:
+            .split
+        }
+    }
+}
+
+public struct OperationalPipInsetSize: Sendable, Equatable {
+    public let width: Double
+    public let height: Double
+
+    public init(width: Double, height: Double) {
+        self.width = width
+        self.height = height
+    }
+}
+
+public enum OperationalPipSizing {
+    public static let aspectRatio = 16.0 / 9.0
+    public static let framePadding = 24.0
+    public static let minimumInsetFraction = 0.22
+    public static let defaultInsetFraction = 0.33
+    public static let maximumInsetFraction = 0.55
+
+    public static func clampInsetFraction(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultInsetFraction }
+        return min(maximumInsetFraction, max(minimumInsetFraction, value))
+    }
+
+    public static func insetSize(
+        containerWidth: Double,
+        containerHeight: Double,
+        insetFraction: Double,
+        aspectRatio: Double = aspectRatio,
+        padding: Double = framePadding
+    ) -> OperationalPipInsetSize {
+        let safeAspectRatio = aspectRatio.isFinite && aspectRatio > 0 ? aspectRatio : 1
+        let maximumWidth = max(1, containerWidth - padding)
+        let maximumHeight = max(1, containerHeight - padding)
+        let desiredWidth = maximumWidth * clampInsetFraction(insetFraction)
+        let width = min(desiredWidth, maximumHeight * safeAspectRatio)
+        return OperationalPipInsetSize(width: width, height: width / safeAspectRatio)
     }
 }
 
@@ -155,6 +205,23 @@ public struct CaltopoArtifactSnapshot: Codable, Sendable, Equatable {
             },
             lines: lines.filter { !hiddenFolders.contains($0.folderID) && !itemIDs.contains($0.itemID) },
             polygons: polygons.filter { !hiddenFolders.contains($0.folderID) && !itemIDs.contains($0.itemID) },
+            items: items,
+            totalFeatureCount: totalFeatureCount,
+            ignoredTrackCount: ignoredTrackCount
+        )
+    }
+
+    /// Keeps an item available in Map Folders while suppressing its point from
+    /// the rendered overlay. The local R2C device marker is rendered natively,
+    /// so its CalTopo copy must not be drawn a second time at the same location.
+    public func excludingRenderedPointIDs(_ pointIDs: Set<String>) -> CaltopoArtifactSnapshot {
+        let normalized = Set(pointIDs.map { $0.lowercased() })
+        guard !normalized.isEmpty else { return self }
+        return CaltopoArtifactSnapshot(
+            folders: folders,
+            points: points.filter { !normalized.contains($0.id.lowercased()) },
+            lines: lines,
+            polygons: polygons,
             items: items,
             totalFeatureCount: totalFeatureCount,
             ignoredTrackCount: ignoredTrackCount
@@ -323,7 +390,10 @@ public enum CaltopoArtifactDecoder {
             itemID: itemID,
             coordinates: coordinates,
             title: title,
-            colorHex: string(properties["stroke"], fallback: "#FF5A1F"),
+            colorHex: colorHex(
+                string(properties["stroke"], fallback: "#FF5A1F"),
+                opacity: number(properties["stroke-opacity"], fallback: 1)
+            ),
             width: number(properties["stroke-width"], fallback: 3),
             folderID: folderID
         ))
@@ -340,11 +410,36 @@ public enum CaltopoArtifactDecoder {
             itemID: itemID,
             coordinates: coordinates,
             title: title,
-            strokeHex: string(properties["stroke"], fallback: "#FF5A1F"),
-            fillHex: string(properties["fill"], fallback: "#33FF5A1F"),
+            strokeHex: colorHex(
+                string(properties["stroke"], fallback: "#FF5A1F"),
+                opacity: number(properties["stroke-opacity"], fallback: 1)
+            ),
+            fillHex: colorHex(
+                string(properties["fill"], fallback: "#FF5A1F"),
+                opacity: number(properties["fill-opacity"], fallback: 0.20)
+            ),
             width: number(properties["stroke-width"], fallback: 3),
             folderID: folderID
         ))
+    }
+
+    /// CalTopo supplies RGB colors and opacity as separate properties. Keep the
+    /// normalized value in Android/CalTopo AARRGGBB order so every renderer
+    /// applies the opacity instead of accidentally producing an opaque fill.
+    private static func colorHex(_ value: String, opacity: Double) -> String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+        let rgb: String
+        switch cleaned.count {
+        case 8:
+            rgb = String(cleaned.suffix(6))
+        case 6:
+            rgb = cleaned
+        default:
+            rgb = "FF5A1F"
+        }
+        let alpha = Int((min(1, max(0, opacity)) * 255).rounded(.down))
+        return String(format: "#%02X%@", alpha, rgb.uppercased())
     }
 
     private static func coordinateList(_ raw: Any?) -> [MapCoordinate] {

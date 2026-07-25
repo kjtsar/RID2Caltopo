@@ -49,18 +49,24 @@ final class AppleCaltopoSettings: ObservableObject {
         self.defaults = defaults
         enabled = defaults.bool(forKey: "caltopo.enabled")
         domainAndPort = defaults.string(forKey: "caltopo.domain") ?? "caltopo.com"
-        mapID = defaults.string(forKey: "caltopo.mapID") ?? ""
-        mapTitle = defaults.string(forKey: "caltopo.mapTitle") ?? ""
+        // Match Android's session lifecycle: credentials and profiles persist,
+        // but every process launch begins without an active incident map. A map
+        // becomes active only after the operator explicitly selects it.
+        mapID = ""
+        mapTitle = ""
+        defaults.removeObject(forKey: "caltopo.mapID")
+        defaults.removeObject(forKey: "caltopo.mapTitle")
         credentialID = defaults.string(forKey: "caltopo.credentialID") ?? ""
         credentialSecret = Self.loadSecret() ?? ""
         teamID = defaults.string(forKey: "caltopo.teamID") ?? ""
-        status = enabled ? "Configuration loaded" : "Publishing disabled"
+        status = enabled ? "Standalone; select the incident map" : "Publishing disabled"
     }
 
     var configuration: AppleCaltopoConfiguration {
-        AppleCaltopoConfiguration(
+        let normalizedDomain = domainAndPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AppleCaltopoConfiguration(
             enabled: enabled,
-            domainAndPort: domainAndPort.trimmingCharacters(in: .whitespacesAndNewlines),
+            domainAndPort: normalizedDomain.isEmpty ? "caltopo.com" : normalizedDomain,
             mapID: mapID.trimmingCharacters(in: .whitespacesAndNewlines),
             mapTitle: mapTitle.trimmingCharacters(in: .whitespacesAndNewlines),
             credentialID: credentialID.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -145,6 +151,10 @@ final class AppleCaltopoSettings: ObservableObject {
         }
         isLoadingTeamMaps = true
         status = "Loading CalTopo team maps…"
+        AppleLog.info(
+            "CalTopo",
+            "Loading team maps domain='\(value.domainAndPort)' teamPresent=\(!value.teamID.isEmpty) credentialPresent=\(!value.credentialID.isEmpty) secretPresent=\(!value.credentialSecret.isEmpty)"
+        )
         defer { isLoadingTeamMaps = false }
         do {
             let client = try CaltopoTeamMapClient(configuration: .init(
@@ -164,6 +174,7 @@ final class AppleCaltopoSettings: ObservableObject {
         } catch {
             teamMaps = []
             status = "Unable to load team maps: \(error.localizedDescription)"
+            AppleLog.error("CalTopo", status)
         }
     }
 
@@ -175,6 +186,16 @@ final class AppleCaltopoSettings: ObservableObject {
         let value = save()
         status = "Connected to \(map.title)"
         return value
+    }
+
+    @discardableResult
+    func disconnectMap() -> AppleCaltopoConfiguration {
+        mapID = ""
+        mapTitle = ""
+        defaults.removeObject(forKey: "caltopo.mapID")
+        defaults.removeObject(forKey: "caltopo.mapTitle")
+        status = "Standalone; select the incident map"
+        return configuration
     }
 
     private func findMap(id: String, in nodes: [CaltopoTeamMapNode]) -> CaltopoTeamMap? {

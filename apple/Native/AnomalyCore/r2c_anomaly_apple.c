@@ -2,6 +2,8 @@
 
 #include "anomaly_detector.h"
 
+#include <math.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,7 +11,93 @@ struct R2CAnomalyRuntime {
     anomaly_detector_runtime_t detector;
     uint8_t *rgba;
     size_t rgba_capacity;
+    bool show_hot_overlay;
+    int thermal_polarity;
 };
+
+static int r2c_clamp_i32(int value, int minimum, int maximum) {
+    if (value < minimum) return minimum;
+    if (value > maximum) return maximum;
+    return value;
+}
+
+static double r2c_rgba_luma(const uint8_t *pixel) {
+    return (0.2126 * (double)pixel[0])
+        + (0.7152 * (double)pixel[1])
+        + (0.0722 * (double)pixel[2]);
+}
+
+static bool r2c_hot_overlay_geometry(
+        const uint8_t *rgba,
+        int width,
+        int height,
+        int thermal_polarity,
+        float *center_x,
+        float *center_y,
+        float *radius,
+        float *stroke) {
+    if (rgba == NULL || width <= 0 || height <= 0) return false;
+    double sum_luma = 0;
+    double hottest_luma = 0;
+    int hottest_x = 0;
+    int hottest_y = 0;
+    bool black_hot = thermal_polarity == ANOMALY_THERMAL_BLACK_HOT;
+    bool first = true;
+    for (int y = 0; y < height; y++) {
+        const uint8_t *row = rgba + ((size_t)y * (size_t)width * 4u);
+        for (int x = 0; x < width; x++) {
+            double luma = r2c_rgba_luma(row + (x * 4));
+            sum_luma += luma;
+            if (first || (black_hot && luma < hottest_luma) || (!black_hot && luma > hottest_luma)) {
+                hottest_luma = luma;
+                hottest_x = x;
+                hottest_y = y;
+                first = false;
+            }
+        }
+    }
+    if (first) return false;
+    double mean_luma = sum_luma / (double)(width * height);
+    if (black_hot ? hottest_luma >= mean_luma : hottest_luma <= mean_luma) return false;
+
+    int min_dim = width < height ? width : height;
+    int vicinity = r2c_clamp_i32((int)lround((double)min_dim * 0.028), 10, 24);
+    int hot_left = hottest_x;
+    int hot_right = hottest_x;
+    int hot_top = hottest_y;
+    int hot_bottom = hottest_y;
+    int hot_count = 0;
+    for (int y = hottest_y - vicinity; y <= hottest_y + vicinity; y++) {
+        if (y < 0 || y >= height) continue;
+        const uint8_t *row = rgba + ((size_t)y * (size_t)width * 4u);
+        for (int x = hottest_x - vicinity; x <= hottest_x + vicinity; x++) {
+            if (x < 0 || x >= width) continue;
+            int dx = x - hottest_x;
+            int dy = y - hottest_y;
+            if ((dx * dx) + (dy * dy) > (vicinity * vicinity)) continue;
+            double luma = r2c_rgba_luma(row + (x * 4));
+            if (black_hot ? luma >= mean_luma : luma <= mean_luma) continue;
+            hot_count++;
+            if (x < hot_left) hot_left = x;
+            if (x > hot_right) hot_right = x;
+            if (y < hot_top) hot_top = y;
+            if (y > hot_bottom) hot_bottom = y;
+        }
+    }
+    int center_x_pixels = (hot_left + hot_right) / 2;
+    int center_y_pixels = (hot_top + hot_bottom) / 2;
+    int half_width = (hot_right - hot_left + 1) / 2;
+    int half_height = (hot_bottom - hot_top + 1) / 2;
+    int content_radius = (int)ceil(sqrt((double)((half_width * half_width) + (half_height * half_height))));
+    int padding = r2c_clamp_i32((int)lround((double)min_dim * 0.008), 4, 8);
+    int radius_pixels = r2c_clamp_i32(content_radius + padding, 8, min_dim / 5);
+    int stroke_pixels = r2c_clamp_i32(2 + (hot_count / 24), 2, 5);
+    *center_x = (float)center_x_pixels / (float)width;
+    *center_y = (float)center_y_pixels / (float)height;
+    *radius = (float)radius_pixels / (float)min_dim;
+    *stroke = (float)stroke_pixels / (float)min_dim;
+    return true;
+}
 
 R2CAnomalyRuntime *R2CAnomalyCreate(int32_t algorithm_mask, float frame_rate_fps) {
     R2CAnomalyRuntime *runtime = calloc(1, sizeof(*runtime));
@@ -58,6 +146,8 @@ int32_t R2CAnomalyApplyConfiguration(
     config.color_frontend_mode = configuration->color_frontend_mode;
     config.color_target_candidate_limit = configuration->color_target_candidate_limit;
     config.target_color_family_mask = configuration->target_color_family_mask;
+    runtime->show_hot_overlay = config.show_hot_overlay;
+    runtime->thermal_polarity = config.thermal_polarity;
     return (int32_t)anomaly_detector_runtime_apply_config(
             &runtime->detector, &config, config.frame_stride);
 }
@@ -92,6 +182,20 @@ int32_t R2CAnomalyProcessBGRA(
         }
     }
 
+    float hot_center_x = 0;
+    float hot_center_y = 0;
+    float hot_radius = 0;
+    float hot_stroke = 0;
+    bool hot_overlay_valid = runtime->show_hot_overlay && r2c_hot_overlay_geometry(
+            runtime->rgba,
+            width,
+            height,
+            runtime->thermal_polarity,
+            &hot_center_x,
+            &hot_center_y,
+            &hot_radius,
+            &hot_stroke);
+
     anomaly_frame_input_t frame = {
         .rgba = runtime->rgba,
         .rgba_stride = width * 4,
@@ -106,6 +210,11 @@ int32_t R2CAnomalyProcessBGRA(
     result_out->frame_ordinal = result.frame_ordinal;
     result_out->raw_box_count = result.raw_box_count;
     result_out->stable_box_count = result.stable_box_count;
+    result_out->hot_overlay_valid = hot_overlay_valid ? 1 : 0;
+    result_out->hot_center_x = hot_center_x;
+    result_out->hot_center_y = hot_center_y;
+    result_out->hot_radius = hot_radius;
+    result_out->hot_stroke = hot_stroke;
     int count = result.output.annotations.box_count;
     if (count > R2C_ANOMALY_MAX_BOXES) count = R2C_ANOMALY_MAX_BOXES;
     result_out->annotation_count = count;
@@ -117,6 +226,10 @@ int32_t R2CAnomalyProcessBGRA(
             .right = source->right_norm,
             .bottom = source->bottom_norm,
             .weight = source->weight,
+            .red = source->r,
+            .green = source->g,
+            .blue = source->b,
+            .draw_crosshair = source->draw_crosshair,
             .algorithm = source->algorithm,
         };
     }

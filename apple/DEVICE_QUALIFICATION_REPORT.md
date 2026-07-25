@@ -32,7 +32,7 @@ bundle, GeoJSON file, or measurement in Evidence.
 | Drive bundle | One real public Drive-hosted configuration bundle imports without exposing its token in Status or shared logs. |  |  |
 | Bluetooth RID | Beside Android, a known ASTM transmitter shows the same canonical ID, position, altitude, transport, and expected update/expiry behavior. |  |  |
 | Background RID | Record aircraft update behavior before lock, during a two-minute lock, after unlock, and after returning to foreground. |  |  |
-| Wi-Fi RID relay | Android Beacon/NAN observations relayed over UDP appear with matching IDs, positions, and transport labels; malformed datagrams are rejected and counted. |  |  |
+| DS110 Wi-Fi RID bridge | Wi-Fi Beacon/NAN aircraft bridged by the DS110 appear through Bluetooth with matching IDs and positions. |  |  |
 | GPS and map | Operator position, range/bearing, heading, trail, closest-pair separation, portrait/landscape layout, and supported text sizes are usable. |  |  |
 | Track archive | Completing a track creates Android-compatible GeoJSON that opens through Files and contains expected coordinates and timestamps. |  |  |
 | Tracker archive upload | An eligible mapped team track uploads to the configured tracker; a forced transient failure remains pending and uploads after relaunch. Foreign, unknown, and local-only tracks remain local. |  |  |

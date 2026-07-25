@@ -24,7 +24,7 @@ Options:
                          Ignore the weekly protected-land catalog check cache
   --help                  Show this help
 
-The default gate rebuilds both native XCFrameworks from current sources, runs
+The default gate rebuilds all three native XCFrameworks from current sources, runs
 shared/native tests and anomaly qualifications, performs a clean Simulator
 link, and verifies a fresh unsigned arm64 iPhone/iPad archive.
 USAGE
@@ -76,19 +76,28 @@ echo "[3/10] Native Apple dependencies"
 if $rebuild_native; then
     "$script_dir/Native/MediaMTX/build-xcframework.sh"
     "$script_dir/Native/AnomalyCore/build-xcframework.sh"
+    "$script_dir/Native/FFmpeg/build-xcframework.sh"
 fi
 
 media_root="$script_dir/Build/MediaMTX"
 anomaly_root="$script_dir/Build/AnomalyCore"
+ffmpeg_root="$script_dir/Build/FFmpeg"
 plutil -lint \
     "$media_root/MediaMTXMobile.xcframework/Info.plist" \
-    "$anomaly_root/R2CAnomalyApple.xcframework/Info.plist"
+    "$anomaly_root/R2CAnomalyApple.xcframework/Info.plist" \
+    "$ffmpeg_root/R2CFFmpegMobile.xcframework/Info.plist"
 for library in \
     "$media_root/device/libmediamtx_mobile.a" \
     "$media_root/simulator/libmediamtx_mobile.a" \
     "$anomaly_root/device/libR2CAnomalyApple.a" \
-    "$anomaly_root/simulator/libR2CAnomalyApple.a"; do
+    "$anomaly_root/simulator/libR2CAnomalyApple.a" \
+    "$ffmpeg_root/device/libR2CFFmpegMobile.a" \
+    "$ffmpeg_root/simulator/libR2CFFmpegMobile.a"; do
     lipo -info "$library" | grep -q 'architecture: arm64'
+done
+for symbol in R2CFFmpegSessionCreate R2CFFmpegSessionDestroy R2CFFmpegSessionCopyLatestFrame R2CFFmpegSessionGetStatus; do
+    nm -gU "$ffmpeg_root/device/libR2CFFmpegMobile.a" | grep "_$symbol$" >/dev/null
+    nm -gU "$ffmpeg_root/simulator/libR2CFFmpegMobile.a" | grep "_$symbol$" >/dev/null
 done
 for symbol in R2CMediaMTXSetLogCallback R2CMediaMTXStart R2CMediaMTXStop; do
     nm -gU "$media_root/device/libmediamtx_mobile.a" | grep "_$symbol$" >/dev/null

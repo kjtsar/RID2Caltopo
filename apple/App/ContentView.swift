@@ -1,3 +1,4 @@
+import CoreLocation
 import R2CCore
 import R2CAppleRadios
 import SwiftUI
@@ -8,8 +9,8 @@ private struct DroneConfirmationRequest: Identifiable {
 
 struct ContentView: View {
     private let endpoint = MediaStreamEndpoint(designator: "demo")
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var bluetoothScanner = BluetoothRIDScanner()
-    @StateObject private var externalReceiver = ExternalRIDUDPReceiver()
     @StateObject private var mediaMTX = MediaMTXViewModel()
     @ObservedObject private var videoFrames = AppleStreamRegistry.shared.primaryModel
     @StateObject private var ridTracks = RIDTrackViewModel()
@@ -36,12 +37,15 @@ struct ContentView: View {
     @State private var showAboutPrivacy = false
     @State private var showImportConfig = false
     @State private var showConfigurationTransfer = false
+    @State private var showTeamMaps = false
+    @State private var showMapOptions = false
     @State private var pendingImportToken = ""
     @State private var selectedAircraftID: String?
     @State private var pendingDroneConfirmation: DroneConfirmationRequest?
     @State private var controllerRTMPURL = "Connect this device to Wi-Fi"
-    @State private var appleRidRelayDestination = "Connect this device to Wi-Fi"
+    @State private var controllerWiFiSSID = "Wi-Fi name unavailable"
     @State private var appStartedAt = Date()
+    @AppStorage("video.captureStreams") private var captureStreams = false
 
     private var startupRoot: some View {
         NavigationStack {
@@ -71,10 +75,26 @@ struct ContentView: View {
             }
             .navigationDestination(isPresented: $showTrackMap) {
                 operationalMapView
+                    .navigationBarBackButtonHidden(true)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(action: closeLiveView) {
+                                Label("Main Screen", systemImage: "chevron.left")
+                            }
+                        }
+                    }
+                    .onDisappear {
+                        guard showTrackMap else { return }
+                        AppleLog.warning(
+                            "Navigation",
+                            "Live View disappeared while its presentation flag remained set; clearing stale navigation state"
+                        )
+                        showTrackMap = false
+                    }
             }
             .navigationDestination(isPresented: $showCaltopoSettings) {
                 CaltopoSettingsView(settings: caltopoSettings, orgSettings: orgConfigSettings) { configuration in
-                    ridTracks.configureCaltopo(configuration)
+                    ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
                     clueStore.configure(configuration)
                 }
             }
@@ -110,6 +130,26 @@ struct ContentView: View {
             .navigationDestination(item: $selectedAircraftID) { aircraftID in
                 aircraftDestination(aircraftID)
             }
+            .sheet(isPresented: $showTeamMaps) {
+                CaltopoTeamMapBrowser(settings: caltopoSettings) { map in
+                    orgConfigSettings.setIncidentMapTitle(map.title)
+                    applyCaltopoConfiguration(caltopoSettings.selectMap(map))
+                    showTeamMaps = false
+                }
+            }
+            .confirmationDialog(
+                "Map Options",
+                isPresented: $showMapOptions,
+                titleVisibility: .visible
+            ) {
+                Button("Switch Map") { showTeamMaps = true }
+                Button("Disconnect", role: .destructive) {
+                    applyCaltopoConfiguration(caltopoSettings.disconnectMap())
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You are currently synced with: \(caltopoSettings.mapTitle)")
+            }
             .sheet(item: $pendingDroneConfirmation, onDismiss: queueNextDroneConfirmation) { request in
                 DroneConfirmationView(
                     remoteID: request.id,
@@ -137,12 +177,14 @@ struct ContentView: View {
                 }
                 if !ProcessInfo.processInfo.arguments.contains("--manual-radios") {
                     try? await bluetoothScanner.start()
-                    try? await externalReceiver.start()
                 }
                 refreshControllerRTMPURL()
+                await refreshControllerWiFiSSID()
                 ridTracks.bind(to: bluetoothScanner.observations, sourceID: "bluetooth")
-                ridTracks.bind(to: externalReceiver.observations, sourceID: "external-udp")
-                ridTracks.configureCaltopo(caltopoSettings.configuration)
+                ridTracks.configureCaltopo(
+                    caltopoSettings.configuration,
+                    trackFolderName: orgConfigSettings.trackFolder
+                )
                 clueStore.configure(caltopoSettings.configuration)
                 if !caltopoSettings.mapID.isEmpty, caltopoSettings.mapTitle.isEmpty {
                     await caltopoSettings.loadTeamMaps()
@@ -151,7 +193,7 @@ struct ContentView: View {
                     }
                 }
                 orgConfigImporter.caltopoConfigurationHandler = { configuration in
-                    ridTracks.configureCaltopo(configuration)
+                    ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
                     clueStore.configure(configuration)
                 }
                 ridTracks.configurePeerCoordination(
@@ -172,8 +214,16 @@ struct ContentView: View {
                     landRestrictions.update(location: locationProvider.lastLocation)
                 }
                 if !ProcessInfo.processInfo.arguments.contains("--manual-mediamtx") {
-                    mediaMTX.start()
+                    mediaMTX.start(captureStreams: captureStreams)
                 }
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("--simulate-mediamtx-listener-exit") {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(5))
+                        mediaMTX.simulateSilentListenerExit()
+                    }
+                }
+                #endif
                 if ProcessInfo.processInfo.arguments.contains("--anomaly-color") {
                     videoFrames.setAnomalyMode(.colorUniqueness)
                 } else if ProcessInfo.processInfo.arguments.contains("--anomaly-off") {
@@ -189,9 +239,6 @@ struct ContentView: View {
                     streamRegistry.handle(.streamConnecting(path: "demo"))
                     streamRegistry.handle(.streamConnecting(path: "RC2/Red1"))
                     streamRegistry.handle(.streamConnecting(path: "AUTEL/Blue2"))
-                }
-                if ProcessInfo.processInfo.arguments.contains("--start-external-rid") {
-                    try? await externalReceiver.start()
                 }
                 if ProcessInfo.processInfo.arguments.contains("--demo-rid") {
                     ridTracks.startSimulatorDemo(
@@ -274,6 +321,13 @@ struct ContentView: View {
             .task {
                 await monitorOperationalState()
             }
+            .task(id: scenePhase == .active) {
+                guard scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    mediaMTX.ensureHealthy(captureStreams: captureStreams)
+                    try? await Task.sleep(for: .seconds(15))
+                }
+            }
             .onReceive(orgConfigSettings.objectWillChange) { _ in
                 guard !ProcessInfo.processInfo.arguments.contains("--demo-notam") else { return }
                 Task { @MainActor in
@@ -293,7 +347,7 @@ struct ContentView: View {
             }
     }
 
-    private var monitoredRoot: some View {
+    private var mediaMonitoredRoot: some View {
         lifecycleRoot
             .onChange(of: bluetoothStatus) { _, status in
                 AppleLog.info("BluetoothRID", status)
@@ -304,15 +358,16 @@ struct ContentView: View {
             .onChange(of: bluetoothScanner.lastDecodeError) { _, error in
                 if let error { AppleLog.error("BluetoothRID", "Rejected advertisement: \(error)") }
             }
-            .onChange(of: externalReceiverStatus) { _, status in
-                AppleLog.info("ExternalRID", status)
-            }
-            .onChange(of: externalReceiver.lastDecodeError) { _, error in
-                if let error { AppleLog.error("ExternalRID", "Rejected datagram: \(error)") }
-            }
             .onChange(of: mediaMTX.status) { _, status in
                 AppleLog.info("MediaMTX", status)
             }
+            .onChange(of: captureStreams) { _, enabled in
+                mediaMTX.restart(captureStreams: enabled)
+            }
+    }
+
+    private var monitoredRoot: some View {
+        mediaMonitoredRoot
             .onChange(of: videoStatus) { _, status in
                 AppleLog.info("Video", status)
             }
@@ -327,6 +382,22 @@ struct ContentView: View {
             }
             .onChange(of: locationProvider.lastLocation?.timestamp) { _, _ in
                 peerCoordinator.updatePosition(locationProvider.lastLocation)
+                publishLocalDeviceMarker()
+                refreshControllerRTMPURL()
+                Task { await refreshControllerWiFiSSID() }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                updateIdleTimerPolicy(for: phase)
+                guard phase == .active else { return }
+                refreshControllerRTMPURL()
+                mediaMTX.ensureHealthy(captureStreams: captureStreams)
+                Task { await refreshControllerWiFiSSID() }
+            }
+            .onChange(of: showTrackMap) { _, showing in
+                updateIdleTimerPolicy(for: scenePhase)
+                if showing {
+                    mediaMTX.ensureHealthy(captureStreams: captureStreams)
+                }
             }
             .onChange(of: ridTracks.caltopoRTTMilliseconds) { _, milliseconds in
                 peerCoordinator.updateCaltopoRTT(milliseconds: milliseconds)
@@ -334,9 +405,20 @@ struct ContentView: View {
             .onChange(of: peerConfigurationFingerprint) { _, _ in
                 configurePeerCoordinator()
                 configureTrackArchive()
+                ridTracks.configureCaltopo(
+                    caltopoSettings.configuration,
+                    trackFolderName: orgConfigSettings.trackFolder
+                )
             }
             .onChange(of: peerCoordinator.statusDetail) { _, detail in
                 AppleLog.info("TrackerPeer", detail)
+                publishLocalDeviceMarker(force: true)
+            }
+            .onChange(of: peerCoordinator.heartbeatAcknowledgedAtMilliseconds) { _, _ in
+                publishLocalDeviceMarker()
+            }
+            .onChange(of: peerCoordinator.peers.count) { _, _ in
+                publishLocalDeviceMarker(force: true)
             }
             .onReceive(ridTracks.$tracks) { tracks in
                 updateProximityAlerts()
@@ -473,7 +555,7 @@ struct ContentView: View {
 
     private var androidOperationsHeader: some View {
         HStack(spacing: 2) {
-            Button { showCaltopoSettings = true } label: {
+            Button(action: openCaltopoMapActions) {
                 androidHeaderCell(
                     "Map",
                     caltopoSettings.mapID.isEmpty
@@ -496,14 +578,18 @@ struct ContentView: View {
 
     private var androidRestrictionStrip: some View {
         HStack(spacing: 8) {
-            if airspace.enabled {
-                NavigationLink { AppleAirspacePanel(center: airspace, location: locationProvider.lastLocation) } label: {
-                    Label(airspace.state.chipLabel, systemImage: "building.columns")
-                }
-            }
-            if notams.enabled {
-                NavigationLink { AppleNotamPanel(center: notams, location: locationProvider.lastLocation) } label: {
-                    Label(notams.state.chipLabel, systemImage: "exclamationmark.triangle")
+            if airspace.enabled || notams.enabled {
+                NavigationLink {
+                    if usesAirspaceRestrictionStatus {
+                        AppleAirspacePanel(center: airspace, location: locationProvider.lastLocation)
+                    } else {
+                        AppleNotamPanel(center: notams, location: locationProvider.lastLocation)
+                    }
+                } label: {
+                    Label(
+                        usesAirspaceRestrictionStatus ? airspace.state.chipLabel : notams.state.chipLabel,
+                        systemImage: usesAirspaceRestrictionStatus ? "building.columns" : "exclamationmark.triangle"
+                    )
                 }
             }
             if landRestrictions.enabled {
@@ -516,6 +602,10 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 6)
+    }
+
+    private var usesAirspaceRestrictionStatus: Bool {
+        !notams.state.visible || airspace.state.severity != .normal
     }
 
     private var androidAircraftTable: some View {
@@ -578,7 +668,7 @@ struct ContentView: View {
             androidTransportCell(track, source: .bluetoothExtended)
             androidTransportCell(track, source: .wifiBeacon)
             androidTransportCell(track, source: .wifiNan)
-            androidTableValue("\(sourceCount(track, .externalReceiver))", width: 80)
+            androidTableValue("\(sourceCount(track, .trackerRelay))", width: 80)
             androidTableValue("\(track.points.count)", width: 80)
             androidTableValue(flightDuration(track), width: 125)
             androidTableValue("", width: 125)
@@ -663,7 +753,7 @@ struct ContentView: View {
 
     private var deviceVersionText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        return "\(ProcessInfo.processInfo.hostName)\n\(version)"
+        return "\(AppleDeviceIdentity.displayName)\n\(version)"
     }
 
     private var appUptimeText: String {
@@ -718,7 +808,7 @@ struct ContentView: View {
                 ContentUnavailableView(
                     "No aircraft detected",
                     systemImage: "airplane",
-                    description: Text("Bluetooth and the external receiver are monitoring for Remote ID observations.")
+                    description: Text("Bluetooth is monitoring direct Remote ID and DS110-bridged Wi-Fi reports.")
                 )
             } else {
                 ForEach(ridTracks.tracks) { track in
@@ -795,31 +885,8 @@ struct ContentView: View {
             if bluetoothScanner.rejectedAdvertisementCount > 0 {
                 LabeledContent("Rejected Bluetooth packets", value: String(bluetoothScanner.rejectedAdvertisementCount))
             }
-            HStack {
-                Label("External Wi-Fi receiver", systemImage: "network")
-                Spacer()
-                Text(externalReceiverStatus).foregroundStyle(.secondary)
-            }
-            Button(externalReceiverIsRunning ? "Stop UDP Receiver" : "Start UDP Receiver") {
-                Task {
-                    if externalReceiverIsRunning { await externalReceiver.stop() }
-                    else { try? await externalReceiver.start() }
-                }
-            }
-            Text("UDP port 7654 accepts normalized JSON or compact raw ASTM OpenDroneID from an external Wi-Fi radio.")
+            Text("Wi-Fi Remote ID aircraft are received through the DS110 Bluetooth bridge and appear as Bluetooth observations.")
                 .font(.caption).foregroundStyle(.secondary)
-            LabeledContent("Android relay destination", value: appleRidRelayDestination).textSelection(.enabled)
-            Text("On Android, enable Apple Wi-Fi Remote ID Relay in Settings and enter this address. The broadcast address 255.255.255.255 may also work when both devices are on the same Wi-Fi network.")
-                .font(.caption).foregroundStyle(.secondary)
-            LabeledContent("External observations", value: String(externalReceiver.observationCount))
-            if externalReceiver.rejectedDatagramCount > 0 {
-                LabeledContent("Rejected UDP datagrams", value: String(externalReceiver.rejectedDatagramCount))
-            }
-            HStack {
-                Label("Wi-Fi Aware host", systemImage: "wifi")
-                Spacer()
-                Text(wifiAwareStatus).foregroundStyle(.secondary)
-            }
             HStack {
                 Label("My location", systemImage: "location")
                 Spacer()
@@ -845,7 +912,7 @@ struct ContentView: View {
             Button("Archive Active Tracks") { ridTracks.archiveActiveTracks() }.disabled(ridTracks.tracks.isEmpty)
             NavigationLink {
                 CaltopoSettingsView(settings: caltopoSettings, orgSettings: orgConfigSettings) { configuration in
-                    ridTracks.configureCaltopo(configuration)
+                    ridTracks.configureCaltopo(configuration, trackFolderName: orgConfigSettings.trackFolder)
                     clueStore.configure(configuration)
                 }
             } label: { LabeledContent("CalTopo publishing", value: ridTracks.caltopoStatus) }
@@ -864,7 +931,7 @@ struct ContentView: View {
                 ForEach(AppleAnomalyMode.allCases) { mode in Text(mode.label).tag(mode) }
             }
             LabeledContent("MediaMTX ingest", value: endpoint.loopbackHlsURL?.absoluteString ?? "Unavailable")
-            LabeledContent("Controller RTMP target", value: controllerRTMPURL).textSelection(.enabled)
+            LabeledContent("Controller RTMP server", value: controllerRTMPURL).textSelection(.enabled)
             HStack {
                 Label("Native bridge", systemImage: "video")
                 Spacer()
@@ -892,7 +959,13 @@ struct ContentView: View {
             NavigationLink { AppleAnomalySettingsView(model: videoFrames) } label: {
                 Label("Advanced Anomaly Settings", systemImage: "slider.horizontal.3")
             }
-            NavigationLink { AppleStreamsGridView(registry: streamRegistry, ingestAddress: controllerRTMPURL) } label: {
+            NavigationLink {
+                AppleStreamsGridView(
+                    registry: streamRegistry,
+                    ingestAddress: controllerRTMPURL,
+                    networkSSID: controllerWiFiSSID
+                )
+            } label: {
                 LabeledContent("Live streams", value: String(liveStreamCount) + " / " + String(AppleStreamRegistry.maximumStreams))
             }
             NavigationLink { AppleCapturedVideoReviewView() } label: {
@@ -903,9 +976,9 @@ struct ContentView: View {
 
     private var operationalNotesSection: some View {
         Section {
-            Text("Bluetooth and the external UDP receiver start automatically, matching Android's scanner startup. iOS can discover Bluetooth devices in the background, but scans slow down and duplicate advertisements are coalesced. Continuous UDP, video, and anomaly processing require the app in the foreground.")
+            Text("Bluetooth Remote ID starts automatically, including Wi-Fi reports bridged by the DS110. iOS can discover Bluetooth devices in the background, but scans slow down and duplicate advertisements are coalesced. Video and anomaly processing require the app in the foreground.")
                 .font(.footnote).foregroundStyle(.secondary)
-            Text("The Simulator validates the UI and shared logic. Bluetooth, Wi-Fi Aware, background behavior, and live camera streaming require the iPad or iPhone hardware gate.")
+            Text("The Simulator validates the UI and shared logic. Bluetooth, DS110 bridging, background behavior, and live camera streaming require the iPad or iPhone hardware gate.")
                 .font(.footnote).foregroundStyle(.secondary)
         }
     }
@@ -928,14 +1001,60 @@ struct ContentView: View {
             model: ridTracks,
             locationProvider: locationProvider,
             caltopoConfiguration: caltopoSettings.configuration,
+            streamRegistry: streamRegistry,
             videoModel: streamRegistry.focusedSession.model,
             clueStore: clueStore,
             identityStore: droneConfirmations,
             orgSettings: orgConfigSettings,
             notams: notams,
+            peerCoordinator: peerCoordinator,
             streamURL: streamRegistry.focusedPlaybackURL,
-            ingestAddress: controllerRTMPURL
+            ingestAddress: controllerRTMPURL,
+            networkSSID: controllerWiFiSSID,
+            onMapStatusTap: openCaltopoMapActions,
+            onRestartStreams: {
+                mediaMTX.restart(captureStreams: captureStreams)
+            }
         )
+    }
+
+    private func updateIdleTimerPolicy(for phase: ScenePhase) {
+        let keepScreenAwake = showTrackMap && phase == .active
+        guard UIApplication.shared.isIdleTimerDisabled != keepScreenAwake else { return }
+        UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
+        AppleLog.info(
+            "Network",
+            keepScreenAwake
+                ? "Automatic screen lock disabled while Live View is active"
+                : "Automatic screen lock restored"
+        )
+    }
+
+    private func closeLiveView() {
+        AppleLog.info("Navigation", "Live View back selected; returning to Main Screen")
+        showTrackMap = false
+    }
+
+    private func openCaltopoMapActions() {
+        if caltopoSettings.teamID.isEmpty
+            || caltopoSettings.credentialID.isEmpty
+            || caltopoSettings.credentialSecret.isEmpty {
+            showImportConfig = true
+        } else if caltopoSettings.mapID.isEmpty {
+            showTeamMaps = true
+        } else {
+            showMapOptions = true
+        }
+    }
+
+    private func applyCaltopoConfiguration(_ configuration: AppleCaltopoConfiguration) {
+        ridTracks.configureCaltopo(
+            configuration,
+            trackFolderName: orgConfigSettings.trackFolder
+        )
+        clueStore.configure(configuration)
+        configurePeerCoordinator()
+        configureTrackArchive()
     }
 
     private var closestPair: RidPairSeparation? {
@@ -954,11 +1073,6 @@ struct ContentView: View {
             bluetoothStatus: bluetoothStatus,
             bluetoothObservations: bluetoothScanner.observationCount,
             bluetoothRejected: bluetoothScanner.rejectedAdvertisementCount,
-            externalReceiverStatus: externalReceiverStatus,
-            externalRelayDestination: appleRidRelayDestination,
-            externalObservations: externalReceiver.observationCount,
-            externalRejected: externalReceiver.rejectedDatagramCount,
-            wifiAwareStatus: wifiAwareStatus,
             locationStatus: locationProvider.statusText,
             configSource: orgConfigSettings.sourceDescription,
             organization: orgConfigSettings.organizationName,
@@ -986,6 +1100,7 @@ struct ContentView: View {
             orgConfigSettings.trackerURLPrefix,
             orgConfigSettings.trackerAPIKey.isEmpty ? "0" : "1",
             caltopoSettings.mapID,
+            orgConfigSettings.trackFolder,
         ].joined(separator: "|")
     }
 
@@ -1001,6 +1116,33 @@ struct ContentView: View {
             trackerURLPrefix: argumentValue("--tracker-url") ?? orgConfigSettings.trackerURLPrefix,
             trackerAPIKey: argumentValue("--tracker-token") ?? orgConfigSettings.trackerAPIKey,
             mapID: argumentValue("--tracker-map") ?? caltopoSettings.mapID
+        )
+        publishLocalDeviceMarker(force: true)
+    }
+
+    private func publishLocalDeviceMarker(force: Bool = false) {
+        guard let coordinate = locationProvider.lastLocation?.coordinate,
+              CLLocationCoordinate2DIsValid(coordinate),
+              !caltopoSettings.mapID.isEmpty
+        else { return }
+        let color: String
+        switch peerCoordinator.status {
+        case .healthy, .standalone: color = "#2e7d32"
+        case .connecting: color = "#f9a825"
+        case .degraded: color = "#c62828"
+        case .unconfigured: color = "#757575"
+        }
+        ridTracks.publishLocalDeviceMarker(
+            CaltopoDeviceMarker(
+                id: peerCoordinator.localZoneID,
+                title: "R2C: \(AppleDeviceIdentity.displayName)",
+                deviceName: AppleDeviceIdentity.displayName,
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude,
+                description: peerCoordinator.localDeviceStatusLines.joined(separator: "\n"),
+                color: color
+            ),
+            force: force
         )
     }
 
@@ -1089,39 +1231,40 @@ struct ContentView: View {
         }
     }
 
-    private var wifiAwareStatus: String {
-        switch WiFiAwareRIDCapability.current {
-        case .supportedHost: "Hardware capable"
-        case .unsupportedHost: "Unsupported hardware"
-        case .unavailableOnOS: "Requires iPadOS 26"
-        }
-    }
-
     private func refreshControllerRTMPURL() {
+        let interfaces = AppleNetworkAddress.ipv4DiagnosticSummary()
         if let address = AppleNetworkAddress.preferredIPv4Address() {
-            controllerRTMPURL = "rtmp://\(address):1935/<droneDesignator>"
-            appleRidRelayDestination = address
+            let nextURL = "rtmp://\(address):1935"
+            let changed = nextURL != controllerRTMPURL
+            controllerRTMPURL = nextURL
+            if changed {
+                AppleLog.info(
+                    "Network",
+                    "Controller RTMP server \(nextURL) interfaces=\(interfaces)"
+                )
+            }
         } else {
+            let changed = controllerRTMPURL != "Connect this device to Wi-Fi"
             controllerRTMPURL = "Connect this device to Wi-Fi"
-            appleRidRelayDestination = "Connect this device to Wi-Fi"
+            if changed {
+                AppleLog.warning(
+                    "Network",
+                    "No usable Wi-Fi/Ethernet IPv4 address for controller RTMP interfaces=\(interfaces)"
+                )
+            }
         }
     }
 
-    private var externalReceiverIsRunning: Bool {
-        switch externalReceiver.state {
-        case .starting, .listening: true
-        case .idle, .failed: false
+    private func refreshControllerWiFiSSID() async {
+        if let ssid = await AppleNetworkAddress.currentWiFiSSID() {
+            controllerWiFiSSID = ssid
+            AppleLog.info("Network", "Current Wi-Fi network: \(ssid)")
+        } else {
+            controllerWiFiSSID = "Wi-Fi name unavailable"
+            AppleLog.warning("Network", "Current Wi-Fi SSID unavailable; Access Wi-Fi Information and Precise Location are required")
         }
     }
 
-    private var externalReceiverStatus: String {
-        switch externalReceiver.state {
-        case .idle: "Idle (UDP 7654)"
-        case .starting: "Starting"
-        case let .listening(port): "Listening on UDP \(port)"
-        case let .failed(reason): "Failed: \(reason)"
-        }
-    }
 }
 
 #Preview {

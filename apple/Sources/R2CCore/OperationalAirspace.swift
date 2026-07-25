@@ -4,6 +4,16 @@ public enum OperationalAirspaceSeverity: String, Codable, Sendable, Equatable {
     case neutral, normal, caution
 }
 
+public struct OperationalAirspaceCoordinate: Codable, Sendable, Equatable {
+    public let latitude: Double
+    public let longitude: Double
+
+    public init(latitude: Double, longitude: Double) {
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+}
+
 public struct OperationalFacilityMapRecord: Codable, Sendable, Equatable, Identifiable {
     public let objectID: Int64
     public let ceilingFeet: Int?
@@ -13,6 +23,7 @@ public struct OperationalFacilityMapRecord: Codable, Sendable, Equatable, Identi
     public let primaryAirportName: String
     public let laancAvailable: Bool
     public let airspaceClasses: [String]
+    public let rings: [[OperationalAirspaceCoordinate]]
 
     public var id: Int64 { objectID }
 
@@ -20,7 +31,8 @@ public struct OperationalFacilityMapRecord: Codable, Sendable, Equatable, Identi
         objectID: Int64, ceilingFeet: Int?, unit: String,
         primaryAirportFAAID: String, primaryAirportICAO: String,
         primaryAirportName: String, laancAvailable: Bool,
-        airspaceClasses: [String]
+        airspaceClasses: [String],
+        rings: [[OperationalAirspaceCoordinate]] = []
     ) {
         self.objectID = objectID
         self.ceilingFeet = ceilingFeet
@@ -30,6 +42,7 @@ public struct OperationalFacilityMapRecord: Codable, Sendable, Equatable, Identi
         self.primaryAirportName = primaryAirportName
         self.laancAvailable = laancAvailable
         self.airspaceClasses = airspaceClasses
+        self.rings = rings
     }
 }
 
@@ -77,10 +90,11 @@ public enum OperationalFacilityMap {
             .init(name: "f", value: "json"),
             .init(name: "where", value: "1=1"),
             .init(name: "outFields", value: outFields),
-            .init(name: "returnGeometry", value: "false"),
+            .init(name: "returnGeometry", value: "true"),
             .init(name: "geometry", value: String(format: "%.6f,%.6f", longitude, latitude)),
             .init(name: "geometryType", value: "esriGeometryPoint"),
             .init(name: "inSR", value: "4326"),
+            .init(name: "outSR", value: "4326"),
             .init(name: "distance", value: String(format: "%.6f", operatingRadiusStatuteMiles)),
             .init(name: "units", value: "esriSRUnit_StatuteMile"),
             .init(name: "spatialRel", value: "esriSpatialRelIntersects"),
@@ -102,6 +116,18 @@ public enum OperationalFacilityMap {
                 let value = string(attributes["AIRSPACE_\(index)"]).trimmingCharacters(in: .whitespacesAndNewlines)
                 return value.isEmpty ? nil : value
             }
+            let rings: [[OperationalAirspaceCoordinate]] = ((feature["geometry"] as? [String: Any])?["rings"] as? [[[Any]]])?.compactMap { ring in
+                let coordinates = ring.compactMap { pair -> OperationalAirspaceCoordinate? in
+                    guard pair.count >= 2,
+                          let longitude = number(pair[0])?.doubleValue,
+                          let latitude = number(pair[1])?.doubleValue,
+                          latitude.isFinite, longitude.isFinite,
+                          (-90 ... 90).contains(latitude), (-180 ... 180).contains(longitude)
+                    else { return nil }
+                    return .init(latitude: latitude, longitude: longitude)
+                }
+                return coordinates.count >= 3 ? coordinates : nil
+            } ?? []
             return OperationalFacilityMapRecord(
                 objectID: number(attributes["OBJECTID"])?.int64Value ?? -1,
                 ceilingFeet: number(attributes["CEILING"])?.intValue,
@@ -110,7 +136,8 @@ public enum OperationalFacilityMap {
                 primaryAirportICAO: string(attributes["APT1_ICAO"]),
                 primaryAirportName: string(attributes["APT1_NAME"]),
                 laancAvailable: number(attributes["APT1_LAANC"])?.intValue == 1,
-                airspaceClasses: classes
+                airspaceClasses: classes,
+                rings: rings
             )
         }
     }

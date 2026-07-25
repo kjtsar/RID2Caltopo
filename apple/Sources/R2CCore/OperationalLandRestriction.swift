@@ -238,14 +238,25 @@ public enum OperationalLandRestriction {
         }
     }
 
-    public static func severity(_ areas: [OperationalLandArea], hasError: Bool) -> OperationalLandSeverity {
+    public static func severity(
+        _ areas: [OperationalLandArea],
+        hasError: Bool,
+        waitingForLocation: Bool = false
+    ) -> OperationalLandSeverity {
+        if waitingForLocation { return .neutral }
         if areas.contains(where: { $0.containsOperator && $0.rule != .propertySpecificRules }) { return .danger }
         if areas.contains(where: { $0.intersectsOperatingArea }) { return .caution }
         if hasError { return .neutral }
         return .normal
     }
 
-    public static func chipLabel(_ areas: [OperationalLandArea], loading: Bool, hasError: Bool) -> String {
+    public static func chipLabel(
+        _ areas: [OperationalLandArea],
+        loading: Bool,
+        hasError: Bool,
+        waitingForLocation: Bool = false
+    ) -> String {
+        if waitingForLocation { return "Land rules pending" }
         if loading { return "Land rules updating…" }
         if areas.contains(where: { $0.containsOperator && $0.rule != .propertySpecificRules }) {
             return "Land rules: RESTRICTED"

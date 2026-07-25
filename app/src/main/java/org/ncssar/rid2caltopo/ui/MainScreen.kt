@@ -564,7 +564,9 @@ fun MainScreen(
                         val overrideLocation = parseLocationOverride(locationOverrideText)
                         CaltopoMap.SetMyLocationOverride(overrideLocation)
                         locationOverrideLabel = formatLocationOverride(CaltopoMap.GetMyLocationOverride())
+                        AirspaceCenter.requestImmediateRefresh()
                         NotamCenter.requestImmediateRefresh()
+                        LandRestrictionCenter.requestImmediateRefresh()
                         CaltopoClient.ShowToast(
                             if (overrideLocation == null) "Returned to device GPS location."
                             else "Using temporary location ${formatLocationOverride(overrideLocation)}"

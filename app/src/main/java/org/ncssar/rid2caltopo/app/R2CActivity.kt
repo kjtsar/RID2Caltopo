@@ -76,6 +76,8 @@ import org.ncssar.rid2caltopo.data.ExternalDisplayPrefs
 import org.ncssar.rid2caltopo.data.FaaConfigManager
 import org.ncssar.rid2caltopo.data.FaaConfigToken
 import org.ncssar.rid2caltopo.data.R2CMqttManager
+import org.ncssar.rid2caltopo.airspace.AirspaceCenter
+import org.ncssar.rid2caltopo.landrestrictions.LandRestrictionCenter
 import org.ncssar.rid2caltopo.notam.NotamCenter
 import org.ncssar.rid2caltopo.ui.ActiveScreen
 import org.ncssar.rid2caltopo.ui.CaltopoSettingsScreen
@@ -886,7 +888,9 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         val hadDeviceLocationBefore = CaltopoMap.GetDeviceLocation() != null
                         CaltopoMap.UpdateMyLocation(location)
                         if (!hadDeviceLocationBefore && CaltopoMap.GetDeviceLocation() != null) {
+                            AirspaceCenter.requestImmediateRefresh()
                             NotamCenter.requestImmediateRefresh()
+                            LandRestrictionCenter.requestImmediateRefresh()
                         }
                     }
                 }
@@ -927,7 +931,9 @@ class R2CActivity : AppCompatActivity(), R2CMqttManager.PeerListChangedListener 
                         val hadDeviceLocationBefore = CaltopoMap.GetDeviceLocation() != null
                         CaltopoMap.UpdateMyLocation(location)
                         if (!hadDeviceLocationBefore && CaltopoMap.GetDeviceLocation() != null) {
+                            AirspaceCenter.requestImmediateRefresh()
                             NotamCenter.requestImmediateRefresh()
+                            LandRestrictionCenter.requestImmediateRefresh()
                         }
                     }
                     ?.addOnFailureListener { e ->

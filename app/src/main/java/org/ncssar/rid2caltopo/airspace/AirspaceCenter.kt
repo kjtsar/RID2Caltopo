@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoMap
 
 object AirspaceCenter {
@@ -56,6 +57,7 @@ object AirspaceCenter {
     private suspend fun refresh() {
         val location = CaltopoMap.GetMyLocation()
         if (location == null) {
+            CaltopoClient.CTDebug("Airspace", "Controlled-airspace refresh waiting for GPS location")
             _uiState.value = AirspacePolicy.buildUiState(
                 records = lastRecords,
                 loading = false,
@@ -71,8 +73,15 @@ object AirspaceCenter {
         try {
             lastRecords = repository.fetch(location)
             lastError = null
+            CaltopoClient.CTDebug(
+                "Airspace",
+                "Loaded ${lastRecords.size} FAA facility-map grid(s); " +
+                    "controlled=${lastRecords.count { it.airspaceClasses.isNotEmpty() }} " +
+                    "laanc=${lastRecords.count { it.laancAvailable }}"
+            )
         } catch (e: Exception) {
             lastError = e.message ?: "Controlled-airspace lookup unavailable"
+            CaltopoClient.CTWarn("Airspace", lastError, e)
         }
         _uiState.value = AirspacePolicy.buildUiState(
             records = lastRecords,

@@ -14,6 +14,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 KOTLIN_MODELS = ROOT / "app/src/main/java/org/ncssar/rid2caltopo/video/anomaly/AnomalyModels.kt"
+APPLE_CONFIGURATION = ROOT / "apple/App/AppleAnomalySettingsView.swift"
+APPLE_PARITY = ROOT / "apple/Sources/R2CCore/AnomalyConfigurationParity.swift"
 HARNESS = ROOT / "tools/anomaly_test/anomaly_video_test.c"
 ANALYSIS_HEADER = ROOT / "app/src/main/cpp/anomaly_analysis.h"
 FFMPEG_BRIDGE = ROOT / "app/src/main/cpp/ffmpeg_bridge.c"
@@ -78,6 +80,50 @@ class AppParityDefaultsAndTimingTest(unittest.TestCase):
             c_define_float("APP_DEFAULT_SENSITIVITY"),
             places=4,
         )
+
+    def test_apple_uniqueness_defaults_match_android_and_harness(self) -> None:
+        apple = read(APPLE_CONFIGURATION)
+        parity = read(APPLE_PARITY)
+        kotlin = read(KOTLIN_MODELS)
+        harness = read(HARNESS)
+
+        for shared_default in (
+            "defaultSensitivity = 0.59",
+            "defaultMotionEvidenceSensitivity = 0.60",
+            "defaultMinimumAreaFraction = 0.0015",
+            "colorAdaptiveMinimumFrames = 30",
+            "colorAdaptiveMaximumFrames = 60",
+            "colorAdaptiveMaximumSeconds = 2.0",
+        ):
+            self.assertIn(shared_default, parity)
+        for apple_default in (
+            "var motionEnabled = true",
+            "var saliencyEnabled = false",
+            "var scanZone = 0.50",
+            "var minimumHits = 2",
+            "var thermalMinimumDelta = 10.0",
+            "var smallTargetScreenFraction = 1.0 / 200.0",
+            "var colorCandidateLimit = 1",
+            "var targetColorMask = 0",
+        ):
+            self.assertIn(apple_default, apple)
+        for android_default in (
+            "val scanZone: Float = 0.50f",
+            "val minHits: Int = 2",
+            "val thermalMinDelta: Float = 10.0f",
+            "val smallTargetScreenFraction: Float = 1.0f / 200.0f",
+            "val colorTargetCandidateLimit: Int = 1",
+            "val targetColorFamilyMask: Int = 0",
+        ):
+            self.assertIn(android_default, kotlin)
+        for harness_default in (
+            "#define APP_DEFAULT_SCAN_ZONE 0.50f",
+            "#define APP_DEFAULT_MIN_HITS 2",
+            "#define APP_DEFAULT_THERMAL_MIN_DELTA 10.0f",
+            "#define APP_DEFAULT_SMALL_TARGET_SCREEN_FRACTION (1.0f / 200.0f)",
+            "#define APP_DEFAULT_COLOR_TARGET_CANDIDATE_LIMIT 1",
+        ):
+            self.assertIn(harness_default, harness)
 
     def test_timing_summary_reports_min_values(self) -> None:
         harness = read(HARNESS)

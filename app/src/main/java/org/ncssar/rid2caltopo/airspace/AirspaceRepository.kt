@@ -59,13 +59,14 @@ class AirspaceRepository(
                 .addQueryParameter("f", "json")
                 .addQueryParameter("where", "1=1")
                 .addQueryParameter("outFields", OUT_FIELDS)
-                .addQueryParameter("returnGeometry", "false")
+                .addQueryParameter("returnGeometry", "true")
                 .addQueryParameter(
                     "geometry",
                     "%.6f,%.6f".format(Locale.US, longitude, latitude)
                 )
                 .addQueryParameter("geometryType", "esriGeometryPoint")
                 .addQueryParameter("inSR", "4326")
+                .addQueryParameter("outSR", "4326")
                 .addQueryParameter("distance", "%.6f".format(Locale.US, OperatingArea.radiusStatuteMiles))
                 .addQueryParameter("units", "esriSRUnit_StatuteMile")
                 .addQueryParameter("spatialRel", "esriSpatialRelIntersects")

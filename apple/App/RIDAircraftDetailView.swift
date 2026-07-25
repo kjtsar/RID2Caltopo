@@ -58,7 +58,7 @@ struct RIDAircraftSummaryRow: View {
         switch track.lastObservation.source {
         case .bluetoothLegacy, .bluetoothExtended: "antenna.radiowaves.left.and.right"
         case .wifiBeacon, .wifiNan: "wifi"
-        case .externalReceiver: "network"
+        case .trackerRelay: "arrow.triangle.2.circlepath"
         }
     }
 
@@ -451,7 +451,7 @@ private func sourceShortName(_ source: RidObservation.Source) -> String {
     case .bluetoothExtended: "BT5"
     case .wifiBeacon: "Wi-Fi"
     case .wifiNan: "NAN"
-    case .externalReceiver: "EXT"
+    case .trackerRelay: "R2C"
     }
 }
 
@@ -461,7 +461,7 @@ private func sourceName(_ source: RidObservation.Source) -> String {
     case .bluetoothExtended: "Bluetooth Extended"
     case .wifiBeacon: "Wi-Fi Beacon"
     case .wifiNan: "Wi-Fi NAN"
-    case .externalReceiver: "External Receiver"
+    case .trackerRelay: "Tracker Relay"
     }
 }
 

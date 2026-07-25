@@ -1,0 +1,6 @@
+Latest changes:
+- Initial iPhone and iPad field-test release with Bluetooth Remote ID, external Wi-Fi Remote ID relay support, MapKit tracking, Android QR configuration import, tracker coordination, CalTopo publishing, local MediaMTX video ingest, anomaly detection, and diagnostic log sharing.
+
+Remaining Android differences:
+- The initial Apple release does not yet contain the complete Android MapPane, video snapshot and clue-reporting workflow, multi-stream operation, NOTAM/Airspace, offline preparation, or Android's administrative tooling.
+- Passive Wi-Fi NAN/Beacon Remote ID requires an external receiver because Apple does not expose passive ASTM NAN reception to App Store apps.

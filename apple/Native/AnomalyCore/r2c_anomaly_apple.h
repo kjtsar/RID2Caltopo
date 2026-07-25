@@ -20,6 +20,10 @@ typedef struct {
     float right;
     float bottom;
     float weight;
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+    uint8_t draw_crosshair;
     int32_t algorithm;
 } R2CAnomalyBox;
 
@@ -28,6 +32,11 @@ typedef struct {
     int32_t raw_box_count;
     int32_t stable_box_count;
     int32_t annotation_count;
+    int32_t hot_overlay_valid;
+    float hot_center_x;
+    float hot_center_y;
+    float hot_radius;
+    float hot_stroke;
     R2CAnomalyBox boxes[R2C_ANOMALY_MAX_BOXES];
 } R2CAnomalyFrameResult;
 

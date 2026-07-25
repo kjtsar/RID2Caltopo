@@ -41,7 +41,6 @@ import kotlinx.coroutines.launch
 import org.ncssar.rid2caltopo.BuildConfig
 import org.ncssar.rid2caltopo.app.R2CActivity
 import org.ncssar.rid2caltopo.data.CaltopoClient
-import org.ncssar.rid2caltopo.data.AppleRidRelay
 import kotlin.math.roundToInt
 
 @Composable
@@ -104,7 +103,6 @@ fun ScannerScreen(
                                 )
                                 Text("WiFi: ${R2CActivity.wifiSupported}")
                                 Text("NaN: ${R2CActivity.nanSupported}")
-                                Text("Apple Wi-Fi RID relay: ${AppleRidRelay.statusText()}")
 
                                 Spacer(modifier = Modifier.height(24.dp))
                                 StatusSectionHeader("Loaded Config Files")
@@ -210,7 +208,6 @@ internal fun buildStatusText(persistedDroneSpecs: List<org.ncssar.rid2caltopo.da
     builder.appendLine("Bluetooth 5: $bluetooth5")
     builder.appendLine("WiFi: ${R2CActivity.wifiSupported}")
     builder.appendLine("NaN: ${R2CActivity.nanSupported}")
-    builder.appendLine("Apple Wi-Fi RID relay: ${AppleRidRelay.statusText()}")
     builder.appendLine()
     builder.appendLine("Loaded Config Files")
     builder.appendLine(CaltopoClient.GetConfigFilesLoadedRecord())

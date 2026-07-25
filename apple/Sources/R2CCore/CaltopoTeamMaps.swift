@@ -209,7 +209,8 @@ public actor CaltopoTeamMapClient {
 
     public func makeRequest(now: Date) throws -> URLRequest {
         let path = "/api/v1/acct/\(configuration.teamID)/since/0"
-        let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
+        let expires = Int64(now.timeIntervalSince1970 * 1_000)
+            + CaltopoRequestSigner.validityMilliseconds
         let signature = try CaltopoRequestSigner.signature(
             method: "GET", path: path, expiresMilliseconds: expires, payload: "",
             credentialSecretBase64: configuration.credentialSecretBase64
@@ -221,11 +222,11 @@ public actor CaltopoTeamMapClient {
         guard var components = URLComponents(string: "https://\(rawDomain)\(path)") else {
             throw CaltopoLiveClientError.invalidURL
         }
-        components.queryItems = [
-            URLQueryItem(name: "id", value: configuration.credentialID),
-            URLQueryItem(name: "expires", value: String(expires)),
-            URLQueryItem(name: "signature", value: signature),
-        ]
+        components.percentEncodedQuery = CaltopoRequestSigner.percentEncodedQuery([
+            ("id", configuration.credentialID),
+            ("expires", String(expires)),
+            ("signature", signature),
+        ])
         guard let url = components.url else { throw CaltopoLiveClientError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"

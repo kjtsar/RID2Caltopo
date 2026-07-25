@@ -1,4 +1,5 @@
 import AVKit
+import R2CCore
 import SwiftUI
 
 struct AnomalyLiveView: View {
@@ -9,11 +10,33 @@ struct AnomalyLiveView: View {
         VStack(spacing: 0) {
             ZStack {
                 Color.black
-                if let player = model.player {
-                    VideoPlayer(player: player)
-                    if model.anomalyConfiguration.showGuideBoxes {
+                if model.usesNativeVideoSurface {
+                    AppleLiveVideoSurface(model: model)
+                    if model.anomalyMode != .off {
                         AnomalyBoxOverlay(boxes: model.anomalyBoxes)
                             .allowsHitTesting(false)
+                        if model.anomalyConfiguration.showHotOverlay,
+                           let hotOverlay = model.anomalyHotOverlay {
+                            AnomalyHotOverlayView(overlay: hotOverlay)
+                                .allowsHitTesting(false)
+                        }
+                        if model.anomalyConfiguration.showGuideBoxes {
+                            anomalyGuides
+                        }
+                    }
+                } else if let player = model.player {
+                    VideoPlayer(player: player)
+                    if model.anomalyMode != .off {
+                        AnomalyBoxOverlay(boxes: model.anomalyBoxes)
+                            .allowsHitTesting(false)
+                        if model.anomalyConfiguration.showHotOverlay,
+                           let hotOverlay = model.anomalyHotOverlay {
+                            AnomalyHotOverlayView(overlay: hotOverlay)
+                                .allowsHitTesting(false)
+                        }
+                        if model.anomalyConfiguration.showGuideBoxes {
+                            anomalyGuides
+                        }
                     }
                 } else {
                     ContentUnavailableView(
@@ -23,6 +46,14 @@ struct AnomalyLiveView: View {
                     )
                     .foregroundStyle(.white)
                 }
+                VStack {
+                    HStack {
+                        AppleLiveVideoIndicator(model: model)
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(8)
             }
             // Match the decoded raster so AVPlayer's aspect-fit image and the
             // detector's normalized coordinates occupy the same rectangle.
@@ -40,6 +71,8 @@ struct AnomalyLiveView: View {
 
             if model.recoveryCount > 0 || model.mediaPublisherStatus != "Unknown" {
                 VStack(alignment: .leading, spacing: 4) {
+                    Text("Decoder: \(model.decoderBackend)")
+                    Text("Lag: \(LiveVideoLagEstimator.label(milliseconds: model.renderDelayMilliseconds)) • decoder: \(LiveVideoLagEstimator.label(milliseconds: model.decoderDelayMilliseconds))")
                     Text("MediaMTX: \(model.mediaPublisherStatus) • recoveries: \(model.recoveryCount)")
                     Text("Last frame: \(frameAge) • last recovery: \(model.lastRecoveryReason)")
                 }
@@ -114,32 +147,136 @@ struct AnomalyLiveView: View {
             "Infrared uses the shared Android thermal detector; boxes are red."
         }
     }
+
+    private var anomalyGuides: some View {
+        AnomalyGuideOverlay(
+            scanZone: model.anomalyConfiguration.scanZone,
+            smallTargetScreenFraction: model.anomalyConfiguration.smallTargetScreenFraction
+        )
+        .allowsHitTesting(false)
+    }
 }
 
-private struct AnomalyBoxOverlay: View {
+struct AnomalyBoxOverlay: View {
     let boxes: [AppleAnomalyBox]
 
     var body: some View {
         GeometryReader { geometry in
             ForEach(boxes) { box in
-                let width = max(0, box.right - box.left) * geometry.size.width
-                let height = max(0, box.bottom - box.top) * geometry.size.height
-                Rectangle()
-                    .stroke(boxColor(box), lineWidth: max(2, 4 * box.weight))
-                    .frame(width: width, height: height)
-                    .position(
-                        x: (box.left + box.right) * 0.5 * geometry.size.width,
-                        y: (box.top + box.bottom) * 0.5 * geometry.size.height
-                    )
+                let width = CGFloat(max(0, box.right - box.left)) * geometry.size.width
+                let height = CGFloat(max(0, box.bottom - box.top)) * geometry.size.height
+                let center = CGPoint(
+                    x: CGFloat((box.left + box.right) * 0.5) * geometry.size.width,
+                    y: CGFloat((box.top + box.bottom) * 0.5) * geometry.size.height
+                )
+                let strokeMaximum = min(max(min(geometry.size.width, geometry.size.height) * 0.006, 2), 8)
+                let stroke = min(max((strokeMaximum * CGFloat(box.weight)).rounded(), 1), strokeMaximum)
+                let underlay = stroke + 2
+                if box.drawsCrosshair {
+                    let path = crosshairPath(center: center, width: width, height: height, stroke: stroke)
+                    path.stroke(.black, lineWidth: underlay)
+                    path.stroke(boxColor(box), lineWidth: stroke)
+                } else {
+                    Rectangle()
+                        .stroke(.black, lineWidth: underlay)
+                        .overlay(Rectangle().stroke(boxColor(box), lineWidth: stroke))
+                        .frame(width: width, height: height)
+                        .position(center)
+                }
             }
         }
     }
 
     private func boxColor(_ box: AppleAnomalyBox) -> Color {
-        switch box.algorithm {
-        case Int(R2C_ANOMALY_ALGORITHM_COLOR): .yellow
-        case Int(R2C_ANOMALY_ALGORITHM_THERMAL): .red
-        default: .cyan
+        Color(
+            red: Double(box.red) / 255,
+            green: Double(box.green) / 255,
+            blue: Double(box.blue) / 255
+        )
+    }
+
+    private func crosshairPath(
+        center: CGPoint,
+        width: CGFloat,
+        height: CGFloat,
+        stroke: CGFloat
+    ) -> Path {
+        let left = center.x - width / 2
+        let right = center.x + width / 2
+        let top = center.y - height / 2
+        let bottom = center.y + height / 2
+        let halfWidth = width / 2
+        let halfHeight = height / 2
+        let maximumGapX = halfWidth - stroke
+        let maximumGapY = halfHeight - stroke
+        let gapX = maximumGapX <= stroke * 2
+            ? stroke
+            : min(max(halfWidth / 3, stroke * 2), maximumGapX)
+        let gapY = maximumGapY <= stroke * 2
+            ? stroke
+            : min(max(halfHeight / 3, stroke * 2), maximumGapY)
+        return Path { path in
+            path.move(to: CGPoint(x: left, y: center.y))
+            path.addLine(to: CGPoint(x: center.x - gapX, y: center.y))
+            path.move(to: CGPoint(x: center.x + gapX, y: center.y))
+            path.addLine(to: CGPoint(x: right, y: center.y))
+            path.move(to: CGPoint(x: center.x, y: top))
+            path.addLine(to: CGPoint(x: center.x, y: center.y - gapY))
+            path.move(to: CGPoint(x: center.x, y: center.y + gapY))
+            path.addLine(to: CGPoint(x: center.x, y: bottom))
+        }
+    }
+}
+
+struct AnomalyGuideOverlay: View {
+    let scanZone: Double
+    let smallTargetScreenFraction: Double
+    var maximumTargetFraction = 0.35
+    var opacity = 0.70
+    var lineWidth: CGFloat = 1.5
+
+    var body: some View {
+        GeometryReader { geometry in
+            let guide = AnomalyConfigurationParity.guideGeometry(
+                frameWidth: geometry.size.width,
+                frameHeight: geometry.size.height,
+                scanZone: scanZone,
+                smallTargetScreenFraction: smallTargetScreenFraction,
+                maximumTargetFraction: maximumTargetFraction
+            )
+            let color = Color(red: 128.0 / 255.0, green: 203.0 / 255.0, blue: 196.0 / 255.0)
+                .opacity(opacity)
+            ZStack {
+                Rectangle()
+                    .stroke(color, lineWidth: lineWidth)
+                    .frame(width: CGFloat(guide.scanWidth), height: CGFloat(guide.scanHeight))
+                Rectangle()
+                    .stroke(color, lineWidth: lineWidth)
+                    .frame(width: CGFloat(guide.targetSpan), height: CGFloat(guide.targetSpan))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+struct AnomalyHotOverlayView: View {
+    let overlay: AppleAnomalyHotOverlay
+
+    var body: some View {
+        GeometryReader { geometry in
+            let minimumDimension = min(geometry.size.width, geometry.size.height)
+            let radius = CGFloat(overlay.radius) * minimumDimension
+            let stroke = max(2, CGFloat(overlay.stroke) * minimumDimension)
+            Circle()
+                .stroke(
+                    Color(red: 1, green: 48.0 / 255.0, blue: 48.0 / 255.0),
+                    lineWidth: stroke
+                )
+                .frame(width: radius * 2, height: radius * 2)
+                .position(
+                    x: CGFloat(overlay.centerX) * geometry.size.width,
+                    y: CGFloat(overlay.centerY) * geometry.size.height
+                )
         }
     }
 }

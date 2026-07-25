@@ -1,0 +1,815 @@
+import AVKit
+import Combine
+import MapKit
+import R2CCore
+import SwiftUI
+import UIKit
+
+enum AppleStreamState: String, Sendable {
+    case connecting
+    case live
+    case error
+    case stopped
+}
+
+@MainActor
+final class AppleLiveStreamSession: ObservableObject, Identifiable {
+    let id: String
+    let sourcePath: String
+    let controllerProfile: String
+    let model: AppleVideoFrameSource
+    let endpoint: MediaStreamEndpoint
+    @Published var state: AppleStreamState
+    @Published var publisherConnectionID: String?
+    @Published var errorDetail: String?
+    @Published var changedAt: Date
+
+    init(path: String, model: AppleVideoFrameSource? = nil, state: AppleStreamState = .connecting) {
+        let parsed = Self.parse(path)
+        id = parsed.designator
+        sourcePath = parsed.sourcePath
+        controllerProfile = parsed.profile
+        self.model = model ?? AppleVideoFrameSource()
+        endpoint = MediaStreamEndpoint(designator: parsed.sourcePath)
+        self.state = state
+        changedAt = Date()
+    }
+
+    private static func parse(_ raw: String) -> (designator: String, sourcePath: String, profile: String) {
+        let path = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let segments = path.split(separator: "/").map(String.init)
+        let profiles = ["RC2", "RCPRO2", "RCPRO1", "ENTERPRISE2", "AUTEL"]
+        let first = segments.first?.uppercased() ?? ""
+        let profile = profiles.contains(first) ? first : "GENERIC"
+        let designator = profile == "GENERIC" ? path : segments.dropFirst().joined(separator: "/")
+        return (designator.isEmpty ? raw : designator, path.isEmpty ? raw : path, profile)
+    }
+}
+
+@MainActor
+final class AppleStreamRegistry: ObservableObject {
+    static let shared = AppleStreamRegistry()
+    static let maximumStreams = 4
+
+    @Published private(set) var sessions: [AppleLiveStreamSession] = []
+    @Published var focusedID = "demo"
+    @Published private(set) var rejectedPaths: Set<String> = []
+
+    let primaryModel: AppleVideoFrameSource
+
+    init(primaryModel: AppleVideoFrameSource = AppleVideoFrameSource()) {
+        self.primaryModel = primaryModel
+        sessions = [AppleLiveStreamSession(path: "demo", model: primaryModel, state: .stopped)]
+    }
+
+    var focusedSession: AppleLiveStreamSession {
+        sessions.first(where: { $0.id == focusedID }) ?? sessions.first!
+    }
+
+    var focusedPlaybackURL: URL? {
+        let activePaths = Set(sessions.filter { $0.state == .live && $0.id != Self.placeholderID }.map(\.sourcePath))
+        guard let path = LiveStreamSelectionPolicy.playbackPath(
+            focusedID: focusedID,
+            activePublisherPaths: activePaths
+        ) else { return nil }
+        return matching(path)?.endpoint.loopbackHlsURL
+    }
+
+    private static let placeholderID = LiveStreamSelectionPolicy.placeholderID
+
+    func handle(_ event: MediaServerEvent) {
+        switch event {
+        case let .streamConnecting(path):
+            admit(path: path, state: .connecting, publisherID: nil)?.model.handleMediaServerEvent(event)
+        case let .streamStarted(path, publisherID), let .streamPublisherHandoff(path, publisherID):
+            let session = admit(path: path, state: .live, publisherID: publisherID)
+            session?.errorDetail = nil
+            if let session, session.model.state == .idle, let url = session.endpoint.loopbackHlsURL { session.model.start(url: url) }
+            session?.model.handleMediaServerEvent(event)
+        case let .hlsStreamStarted(path):
+            let activePaths = Set(sessions.filter { $0.state == .live && $0.publisherConnectionID != nil }.map(\.sourcePath))
+            guard LiveStreamSelectionPolicy.shouldAcceptHLSMuxer(path: path, activePublisherPaths: activePaths),
+                  let session = matching(path)
+            else { break }
+            session.model.handleMediaServerEvent(event)
+            if session.model.state == .idle, let url = session.endpoint.loopbackHlsURL { session.model.start(url: url) }
+        case let .streamStopped(path, publisherID), let .rtmpSessionClosed(path, publisherID, _):
+            stop(path: path, publisherID: publisherID)
+        case let .streamError(path, publisherID, detail):
+            guard let path else { return }
+            if let session = matching(path) {
+                if let publisherID, let current = session.publisherConnectionID, publisherID != current { return }
+                session.state = .error
+                session.errorDetail = detail
+                session.changedAt = Date()
+                session.model.handleMediaServerEvent(event)
+            }
+        default: break
+        }
+        pruneStale()
+    }
+
+    func focus(_ id: String) {
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        focusedID = id
+    }
+
+    func close(_ id: String) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        session.model.stop()
+        if id == Self.placeholderID {
+            session.state = .stopped
+        } else {
+            sessions.removeAll { $0.id == id }
+            if focusedID == id { focusedID = sessions.first?.id ?? Self.placeholderID }
+        }
+        AppleLog.info("Streams", "Operator closed stream \(session.sourcePath)")
+    }
+
+    @discardableResult
+    private func admit(path: String, state: AppleStreamState, publisherID: String?) -> AppleLiveStreamSession? {
+        if let existing = matching(path) {
+            existing.state = state
+            existing.publisherConnectionID = publisherID ?? existing.publisherConnectionID
+            existing.changedAt = Date()
+            rejectedPaths.remove(path)
+            objectWillChange.send()
+            return existing
+        }
+        pruneStale()
+        let active = sessions.filter { $0.state != .stopped }
+        if active.count >= Self.maximumStreams {
+            if rejectedPaths.insert(path).inserted {
+                AppleLog.warning("Streams", "Rejected stream '\(path)': maximum \(Self.maximumStreams) active streams")
+            }
+            return nil
+        }
+        let session = AppleLiveStreamSession(
+            path: path,
+            model: active.isEmpty ? primaryModel : nil,
+            state: state
+        )
+        session.publisherConnectionID = publisherID
+        sessions.append(session)
+        if state == .live && session.id != Self.placeholderID {
+            let activePaths = Set(sessions.filter { $0.state == .live && $0.id != Self.placeholderID }.map(\.sourcePath))
+            let previousFocus = focusedID
+            focusedID = LiveStreamSelectionPolicy.focusAfterPublisherStarted(
+                currentFocus: focusedID,
+                publisherPath: session.sourcePath,
+                activePublisherPaths: activePaths
+            )
+            if focusedID != previousFocus {
+                AppleLog.info("Streams", "Focused publisher \(session.sourcePath), replacing \(previousFocus)")
+            }
+        }
+        rejectedPaths.remove(path)
+        AppleLog.info("Streams", "Admitted \(session.sourcePath) as \(session.id) profile=\(session.controllerProfile)")
+        return session
+    }
+
+    private func stop(path: String, publisherID: String?) {
+        guard let session = matching(path) else { return }
+        if let publisherID, let current = session.publisherConnectionID, publisherID != current { return }
+        session.model.handleMediaServerEvent(.streamStopped(path: session.sourcePath, publisherConnectionID: publisherID))
+        session.state = .stopped
+        session.publisherConnectionID = nil
+        session.changedAt = Date()
+        if session.id != "demo" {
+            sessions.removeAll { $0.id == session.id }
+            if focusedID == session.id { focusedID = sessions.first?.id ?? "demo" }
+        }
+        rejectedPaths.remove(path)
+    }
+
+    private func matching(_ path: String) -> AppleLiveStreamSession? {
+        let normalized = path.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        return sessions.first { $0.sourcePath == normalized || $0.id == normalized }
+    }
+
+    private func pruneStale(now: Date = Date()) {
+        let stale = sessions.filter {
+            $0.id != "demo" && (($0.state == .connecting && now.timeIntervalSince($0.changedAt) > 30)
+                || ($0.state == .error && now.timeIntervalSince($0.changedAt) > 120))
+        }
+        guard !stale.isEmpty else { return }
+        let ids = Set(stale.map(\.id))
+        stale.forEach { $0.model.stop() }
+        sessions.removeAll { ids.contains($0.id) }
+        if ids.contains(focusedID) { focusedID = sessions.first?.id ?? "demo" }
+    }
+}
+
+struct AppleStreamsGridView: View {
+    @ObservedObject var registry: AppleStreamRegistry
+    var ingestAddress: String? = nil
+    var networkSSID: String? = nil
+    var showsSetupHeader = true
+    var showsNavigationTitle = true
+    var expandedSessionID: String? = nil
+    var onSelectSession: ((String) -> Void)? = nil
+    var onLongPressSession: ((String) -> Void)? = nil
+    var onDoubleTapSession: ((String, Double, CGPoint) -> Void)? = nil
+    var onCloseSession: ((String) -> Void)? = nil
+    var onRestartStreams: (() -> Void)? = nil
+    var telemetryText: ((String) -> String?)? = nil
+    var coordinateText: ((String) -> String?)? = nil
+    var coordinateDisplayFormat: OperationalCoordinateDisplayFormat = .decimal
+    var onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)? = nil
+    var telemetryPairingState: ((String) -> AppleStreamTelemetryPairingState) = { _ in .noTelemetry }
+
+    private var visibleSessions: [AppleLiveStreamSession] {
+        let operational = registry.sessions.filter { $0.id != "demo" }
+        let available = operational.isEmpty ? registry.sessions : operational
+        guard let expandedSessionID,
+              let expanded = available.first(where: { $0.id == expandedSessionID })
+        else { return available }
+        return [expanded]
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                if showsSetupHeader, let ingestAddress {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Controller RTMP setup").font(.caption.bold())
+                        if ingestAddress.hasPrefix("rtmp://") {
+                            Text("Example: \(ingestAddress)/DRONE1")
+                                .font(.headline.monospaced())
+                            if let networkSSID {
+                                Text("Network: \(networkSSID)")
+                                    .font(.subheadline)
+                            }
+                            Text("Replace DRONE1 with the aircraft designator. The controller and iPad must be on the same Wi-Fi network.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(ingestAddress).font(.headline)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(.regularMaterial)
+                }
+                if visibleSessions.count == 1, let session = visibleSessions.first {
+                    streamTile(session, fillsAvailableSpace: true)
+                        .padding(6)
+                } else {
+                    GeometryReader { gridGeometry in
+                        let columns = visibleSessions.count <= 2 ? 1 : 2
+                        let rows = visibleSessions.count <= 1 ? 1 : 2
+                        let availableHeight = max(
+                            0,
+                            gridGeometry.size.height - 12 - CGFloat(rows - 1) * 6
+                        )
+                        let cellHeight = availableHeight / CGFloat(rows)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: columns), spacing: 6) {
+                            ForEach(visibleSessions) { session in
+                                streamTile(session, fillsAvailableSpace: false)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: cellHeight)
+                            }
+                        }
+                        .padding(6)
+                    }
+                }
+            }
+            .background(.black)
+        }
+        .modifier(StreamGridNavigationTitle(enabled: showsNavigationTitle))
+    }
+
+    private func streamTile(
+        _ session: AppleLiveStreamSession,
+        fillsAvailableSpace: Bool
+    ) -> some View {
+        AppleStreamTile(
+            session: session,
+            ingestAddress: ingestAddress,
+            focused: registry.focusedID == session.id,
+            fillsAvailableSpace: fillsAvailableSpace,
+            telemetryText: telemetryText?(session.id),
+            coordinateText: coordinateText?(session.id),
+            coordinateDisplayFormat: coordinateDisplayFormat,
+            telemetryPairingState: telemetryPairingState(session.id),
+            onCoordinateDisplayFormatChange: onCoordinateDisplayFormatChange,
+            onFocus: {
+                registry.focus(session.id)
+                onSelectSession?(session.id)
+            },
+            onLongPress: {
+                registry.focus(session.id)
+                onLongPressSession?(session.id)
+            },
+            onDoubleTap: {
+                registry.focus(session.id)
+                onDoubleTapSession?(session.id, $0, $1)
+            },
+            onClose: onCloseSession.map { callback in
+                { callback(session.id) }
+            },
+            onRestartStreams: onRestartStreams
+        )
+    }
+}
+
+enum AppleStreamTelemetryPairingState {
+    case noTelemetry
+    case available
+    case paired
+
+    var color: Color {
+        switch self {
+        case .noTelemetry: .red
+        case .available: .yellow
+        case .paired: .green
+        }
+    }
+}
+
+private struct StreamGridNavigationTitle: ViewModifier {
+    let enabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .navigationTitle("Live Streams")
+                .navigationBarTitleDisplayMode(.inline)
+        } else {
+            content
+        }
+    }
+}
+
+private struct AppleStreamTile: View {
+    @ObservedObject var session: AppleLiveStreamSession
+    @ObservedObject private var model: AppleVideoFrameSource
+    @State private var showAnomalySettings = false
+    @State private var showAnomalyHelp = false
+    @State private var showPerformance = false
+    @State private var zoom: CGFloat = 1
+    @State private var zoomAtGestureStart: CGFloat = 1
+    @State private var pan: CGSize = .zero
+    @State private var panAtGestureStart: CGSize = .zero
+    @State private var tileSize: CGSize = .zero
+    let ingestAddress: String?
+    let focused: Bool
+    let fillsAvailableSpace: Bool
+    let telemetryText: String?
+    let coordinateText: String?
+    let coordinateDisplayFormat: OperationalCoordinateDisplayFormat
+    let telemetryPairingState: AppleStreamTelemetryPairingState
+    let onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)?
+    let onFocus: () -> Void
+    let onLongPress: () -> Void
+    let onDoubleTap: (Double, CGPoint) -> Void
+    let onClose: (() -> Void)?
+    let onRestartStreams: (() -> Void)?
+
+    init(
+        session: AppleLiveStreamSession,
+        ingestAddress: String?,
+        focused: Bool,
+        fillsAvailableSpace: Bool,
+        telemetryText: String?,
+        coordinateText: String?,
+        coordinateDisplayFormat: OperationalCoordinateDisplayFormat,
+        telemetryPairingState: AppleStreamTelemetryPairingState,
+        onCoordinateDisplayFormatChange: ((OperationalCoordinateDisplayFormat) -> Void)?,
+        onFocus: @escaping () -> Void,
+        onLongPress: @escaping () -> Void,
+        onDoubleTap: @escaping (Double, CGPoint) -> Void,
+        onClose: (() -> Void)?,
+        onRestartStreams: (() -> Void)?
+    ) {
+        self.session = session
+        _model = ObservedObject(wrappedValue: session.model)
+        self.ingestAddress = ingestAddress
+        self.focused = focused
+        self.fillsAvailableSpace = fillsAvailableSpace
+        self.telemetryText = telemetryText
+        self.coordinateText = coordinateText
+        self.coordinateDisplayFormat = coordinateDisplayFormat
+        self.telemetryPairingState = telemetryPairingState
+        self.onCoordinateDisplayFormatChange = onCoordinateDisplayFormatChange
+        self.onFocus = onFocus
+        self.onLongPress = onLongPress
+        self.onDoubleTap = onDoubleTap
+        self.onClose = onClose
+        self.onRestartStreams = onRestartStreams
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.black
+            GeometryReader { geometry in
+                let displayRect = AnomalyConfigurationParity.aspectFitRect(
+                    containerWidth: geometry.size.width,
+                    containerHeight: geometry.size.height,
+                    contentAspectRatio: model.videoAspectRatio
+                )
+                ZStack {
+                    if model.usesNativeVideoSurface { AppleLiveVideoSurface(model: model) }
+                    else if let player = model.player { VideoPlayer(player: player) }
+                    else { waitingForController }
+                    if model.anomalyMode != .off {
+                        AnomalyBoxOverlay(boxes: model.anomalyBoxes)
+                            .allowsHitTesting(false)
+                        if model.anomalyConfiguration.showHotOverlay,
+                           let hotOverlay = model.anomalyHotOverlay {
+                            AnomalyHotOverlayView(overlay: hotOverlay)
+                                .allowsHitTesting(false)
+                        }
+                        if model.anomalyConfiguration.showGuideBoxes {
+                            AnomalyGuideOverlay(
+                                scanZone: model.anomalyConfiguration.scanZone,
+                                smallTargetScreenFraction: model.anomalyConfiguration.smallTargetScreenFraction
+                            )
+                            .allowsHitTesting(false)
+                        }
+                    }
+                }
+                .frame(
+                    width: CGFloat(displayRect.width),
+                    height: CGFloat(displayRect.height)
+                )
+                .position(
+                    x: CGFloat(displayRect.x + displayRect.width / 2),
+                    y: CGFloat(displayRect.y + displayRect.height / 2)
+                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .scaleEffect(zoom)
+            .offset(pan)
+            .clipped()
+            HStack {
+                AppleLiveVideoIndicator(model: model, tint: telemetryPairingState.color)
+                Spacer()
+                if focused || fillsAvailableSpace {
+                    Menu {
+                        Button("AD Mode: \(model.anomalyMode.label)") {
+                            showAnomalySettings = true
+                        }
+                        Button("AD Help") {
+                            showAnomalyHelp = true
+                        }
+                        Button("Performance…", systemImage: "gauge.with.dots.needle.67percent") {
+                            showPerformance = true
+                        }
+                        if let onRestartStreams {
+                            Button("Restart Streams Server", systemImage: "arrow.clockwise") {
+                                onRestartStreams()
+                            }
+                        }
+                        if let onClose {
+                            Button("Close Stream", systemImage: "xmark.rectangle", role: .destructive) {
+                                onClose()
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                            .font(.body.bold())
+                            .padding(8)
+                            .background(.black.opacity(0.6), in: Circle())
+                    }
+                    .foregroundStyle(.white)
+                    .accessibilityLabel(session.id == "demo" ? "Streams settings" : "Anomaly detection settings")
+                }
+                if focused { Image(systemName: "scope").foregroundStyle(.yellow) }
+            }
+            .padding(6)
+            if telemetryText != nil || coordinateText != nil {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let telemetryText {
+                        Text(zoom > 1.01 ? "\(telemetryText)  \(zoomLabel)" : telemetryText)
+                    }
+                    if let coordinateText {
+                        if let onCoordinateDisplayFormatChange {
+                            Menu {
+                                ForEach(OperationalCoordinateDisplayFormat.allCases) { format in
+                                    Button(format.label) {
+                                        onCoordinateDisplayFormatChange(format)
+                                    }
+                                }
+                            } label: {
+                                Text("\(coordinateText) (\(coordinateDisplayFormat.label))")
+                                    .underline()
+                            }
+                            .accessibilityLabel("Coordinate format: \(coordinateDisplayFormat.label)")
+                        } else {
+                            Text("\(coordinateText) (\(coordinateDisplayFormat.label))")
+                        }
+                    }
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 5))
+                .padding(6)
+                .padding(.top, 32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            if model.anomalyThermallySuspended {
+                Label("AD paused: iPad temperature", systemImage: "thermometer.high")
+                    .font(.caption.bold())
+                    .foregroundStyle(.yellow)
+                    .padding(6)
+                    .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 5))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(6)
+            }
+        }
+        .modifier(StreamTileSizing(
+            fillsAvailableSpace: fillsAvailableSpace,
+            aspectRatio: model.videoAspectRatio
+        ))
+        .background {
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { tileSize = geometry.size }
+                    .onChange(of: geometry.size) { _, size in
+                        tileSize = size
+                        pan = clampedPan(pan, scale: zoom, size: size)
+                        panAtGestureStart = pan
+                    }
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(focused ? .yellow : .gray, lineWidth: focused ? 3 : 1))
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            MagnificationGesture()
+                .onChanged { value in
+                    zoom = min(4, max(1, zoomAtGestureStart * value))
+                    pan = clampedPan(pan, scale: zoom, size: tileSize)
+                }
+                .onEnded { _ in
+                    zoomAtGestureStart = zoom
+                    panAtGestureStart = pan
+                }
+        )
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 8)
+                .onChanged { value in
+                    guard zoom > 1 else { return }
+                    pan = clampedPan(CGSize(
+                        width: panAtGestureStart.width + value.translation.width,
+                        height: panAtGestureStart.height + value.translation.height
+                    ), scale: zoom, size: tileSize)
+                }
+                .onEnded { _ in
+                    panAtGestureStart = pan
+                }
+        )
+        .onTapGesture(count: 2) {
+            onDoubleTap(
+                Double(zoom),
+                CGPoint(
+                    x: tileSize.width > 0 ? pan.width / tileSize.width : 0,
+                    y: tileSize.height > 0 ? pan.height / tileSize.height : 0
+                )
+            )
+        }
+        .onTapGesture(perform: onFocus)
+        .onLongPressGesture(minimumDuration: 0.5, perform: onLongPress)
+        .sheet(isPresented: $showAnomalySettings) {
+            NavigationStack {
+                AppleAnomalySettingsView(model: model)
+                    .navigationTitle("Anomaly Detector")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showAnomalySettings = false }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showPerformance) {
+            NavigationStack {
+                StreamPerformanceView(session: session, model: model)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showPerformance = false }
+                }
+            }
+        }
+        .sheet(isPresented: $showAnomalyHelp) {
+            NavigationStack {
+                AppleAnomalyHelpView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showAnomalyHelp = false }
+                        }
+                    }
+            }
+        }
+        }
+    }
+
+    private var waitingForController: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "video.slash")
+                .font(.largeTitle)
+            Text("Waiting for controller to connect")
+                .font(.headline)
+            if session.id == "demo",
+               let ingestAddress,
+               ingestAddress.hasPrefix("rtmp://") {
+                Text("Connect stream to \(ingestAddress)/<droneDesig>")
+                    .font(.subheadline.monospaced())
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding()
+    }
+
+    private var zoomLabel: String {
+        zoom >= 3.95 ? "4x" : String(format: "%.1fx", zoom)
+    }
+
+    private func clampedPan(_ candidate: CGSize, scale: CGFloat, size: CGSize) -> CGSize {
+        guard scale > 1.001, size.width > 0, size.height > 0 else { return .zero }
+        let maximumX = size.width * (scale - 1) / 2
+        let maximumY = size.height * (scale - 1) / 2
+        return CGSize(
+            width: min(maximumX, max(-maximumX, candidate.width)),
+            height: min(maximumY, max(-maximumY, candidate.height))
+        )
+    }
+}
+
+private struct StreamTileSizing: ViewModifier {
+    let fillsAvailableSpace: Bool
+    let aspectRatio: Double
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if fillsAvailableSpace {
+            content.frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            content.aspectRatio(aspectRatio, contentMode: .fit)
+        }
+    }
+}
+
+private struct StreamPerformanceView: View {
+    @ObservedObject var session: AppleLiveStreamSession
+    @ObservedObject var model: AppleVideoFrameSource
+
+    var body: some View {
+        Form {
+            Section("Stream") {
+                LabeledContent("Designator", value: session.id)
+                LabeledContent("Profile", value: session.controllerProfile)
+                LabeledContent("Publisher", value: model.mediaPublisherStatus)
+                LabeledContent("State", value: session.state.rawValue.capitalized)
+                if let detail = session.errorDetail {
+                    LabeledContent("Error", value: detail)
+                }
+            }
+            Section("Decoder") {
+                LabeledContent("Backend", value: model.decoderBackend)
+                LabeledContent("Frame size", value: model.dimensions)
+                LabeledContent("Decoded frames", value: model.frameCount.formatted())
+                LabeledContent(
+                    "Lag",
+                    value: LiveVideoLagEstimator.label(milliseconds: model.renderDelayMilliseconds)
+                )
+                LabeledContent("Recoveries", value: model.recoveryCount.formatted())
+                LabeledContent("Last recovery", value: model.lastRecoveryReason)
+            }
+            Section("Anomaly detector") {
+                LabeledContent("Mode", value: model.anomalyMode.label)
+                LabeledContent("Analyzed", value: model.analyzedFrameCount.formatted())
+                LabeledContent("Dropped", value: model.droppedAnalysisFrameCount.formatted())
+                LabeledContent("Boxes", value: model.anomalyCount.formatted())
+                LabeledContent("Thermal suspension", value: model.anomalyThermallySuspended ? "Active" : "No")
+            }
+        }
+        .navigationTitle("Performance")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+enum AppleExternalDisplayMode: String, CaseIterable, Identifiable {
+    case off, appManaged, osMirroring
+    var id: String { rawValue }
+    var label: String { switch self { case .off: "Off"; case .appManaged: "App-managed"; case .osMirroring: "Use OS mirroring" } }
+}
+
+enum AppleExternalDisplayContent: String, CaseIterable, Identifiable {
+    case streamsGrid, mapOnly, split, observer
+    var id: String { rawValue }
+    var label: String { switch self { case .streamsGrid: "Streams Grid"; case .mapOnly: "Map Only"; case .split: "Split: Streams + Map"; case .observer: "Observer Mode" } }
+}
+
+enum AppleExternalAlertRouting: String, CaseIterable, Identifiable {
+    case phoneOnly, externalOnly, both
+    var id: String { rawValue }
+    var label: String { switch self { case .phoneOnly: "Phone only"; case .externalOnly: "External display only"; case .both: "Both" } }
+}
+
+@MainActor
+final class AppleExternalDisplaySettings: ObservableObject {
+    static let shared = AppleExternalDisplaySettings()
+    @Published var mode: String { didSet { defaults.set(mode, forKey: "external.mode") } }
+    @Published var content: String { didSet { defaults.set(content, forKey: "external.content") } }
+    @Published var alertRouting: String { didSet { defaults.set(alertRouting, forKey: "external.alertRouting") } }
+    @Published var autoOpen: Bool { didSet { defaults.set(autoOpen, forKey: "external.autoOpen") } }
+    @Published var allowInteraction: Bool { didSet { defaults.set(allowInteraction, forKey: "external.allowInteraction") } }
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        mode = defaults.string(forKey: "external.mode") ?? AppleExternalDisplayMode.osMirroring.rawValue
+        content = defaults.string(forKey: "external.content") ?? AppleExternalDisplayContent.streamsGrid.rawValue
+        alertRouting = defaults.string(forKey: "external.alertRouting") ?? AppleExternalAlertRouting.both.rawValue
+        autoOpen = defaults.object(forKey: "external.autoOpen") as? Bool ?? true
+        allowInteraction = defaults.object(forKey: "external.allowInteraction") as? Bool ?? true
+    }
+}
+
+@MainActor
+final class AppleExternalDisplayData: ObservableObject {
+    static let shared = AppleExternalDisplayData()
+    @Published var aircraft: [(id: String, coordinate: CLLocationCoordinate2D)] = []
+    @Published var alertText: String?
+
+    func update(tracks: [RidAircraftTrack], alertText: String?) {
+        aircraft = tracks.map { ($0.aircraftID, CLLocationCoordinate2D(latitude: $0.lastObservation.latitude, longitude: $0.lastObservation.longitude)) }
+        self.alertText = alertText
+    }
+}
+
+struct AppleExternalDisplayView: View {
+    @ObservedObject private var settings = AppleExternalDisplaySettings.shared
+    @ObservedObject private var registry = AppleStreamRegistry.shared
+    @ObservedObject private var data = AppleExternalDisplayData.shared
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            content
+            if let alert = data.alertText,
+               AppleExternalAlertRouting(rawValue: settings.alertRouting) != .phoneOnly {
+                Label(alert, systemImage: "exclamationmark.triangle.fill")
+                    .font(.title2.bold()).padding().background(.red.opacity(0.9)).foregroundStyle(.white).clipShape(RoundedRectangle(cornerRadius: 12)).padding()
+            }
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch AppleExternalDisplayContent(rawValue: settings.content) ?? .streamsGrid {
+        case .streamsGrid, .observer: AppleStreamsGridView(registry: registry)
+        case .mapOnly: externalMap
+        case .split: HStack(spacing: 1) { AppleStreamsGridView(registry: registry); externalMap }
+        }
+    }
+
+    private var externalMap: some View {
+        Map {
+            ForEach(data.aircraft, id: \.id) { item in
+                Annotation(item.id, coordinate: item.coordinate) { Image(systemName: "airplane").padding(8).background(.red).foregroundStyle(.white).clipShape(Circle()) }
+            }
+        }
+    }
+}
+
+final class RID2CaltopoAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        if connectingSceneSession.role == .windowExternalDisplayNonInteractive {
+            configuration.delegateClass = AppleExternalDisplaySceneDelegate.self
+        }
+        return configuration
+    }
+}
+
+final class AppleExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        guard let windowScene = scene as? UIWindowScene else { return }
+        Task { @MainActor in
+            let settings = AppleExternalDisplaySettings.shared
+            guard AppleExternalDisplayMode(rawValue: settings.mode) == .appManaged else { return }
+            let window = UIWindow(windowScene: windowScene)
+            window.rootViewController = UIHostingController(rootView: AppleExternalDisplayView())
+            window.isUserInteractionEnabled = settings.allowInteraction
+            window.makeKeyAndVisible()
+            self.window = window
+            AppleLog.info("ExternalDisplay", "App-managed external display connected")
+        }
+    }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        Task { @MainActor in AppleLog.info("ExternalDisplay", "External display disconnected") }
+        window = nil
+    }
+}

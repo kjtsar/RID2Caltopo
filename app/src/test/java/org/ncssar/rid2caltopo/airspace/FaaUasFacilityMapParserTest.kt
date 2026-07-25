@@ -25,6 +25,9 @@ class FaaUasFacilityMapParserTest {
                     "AIRSPACE_3": "",
                     "AIRSPACE_4": "",
                     "AIRSPACE_5": ""
+                  },
+                  "geometry": {
+                    "rings": [[[-119.0,39.4],[-119.0,39.5],[-118.9,39.5],[-119.0,39.4]]]
                   }
                 }
               ]
@@ -41,5 +44,7 @@ class FaaUasFacilityMapParserTest {
         assertEquals("KNFL", record.primaryAirportIcao)
         assertTrue(record.laancAvailable)
         assertEquals(listOf("D"), record.airspaceClasses)
+        assertEquals(1, record.rings.size)
+        assertEquals(AirspaceCoordinate(39.4, -119.0), record.rings.single().first())
     }
 }

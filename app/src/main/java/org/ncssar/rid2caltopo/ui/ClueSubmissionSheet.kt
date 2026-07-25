@@ -1,6 +1,7 @@
 package org.ncssar.rid2caltopo.ui
 
 import PendingClue
+import formatClueHeading
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -201,8 +202,8 @@ fun ClueSheetContent (
             Text(
                 text = buildString {
                     append(
-                        clue.headingDeg?.let {
-                            String.format(Locale.US, "Heading %.1f°", it)
+                        formatClueHeading(clue.headingDeg)?.let {
+                            "Heading $it°"
                         } ?: "Heading unavailable"
                     )
                     clue.headingSourceLabel?.let {

@@ -29,15 +29,20 @@ final class AppleOrgConfigSettings: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         organizationName = defaults.string(forKey: "org.name") ?? ""
-        incident = defaults.string(forKey: "org.incident") ?? ""
-        operationalPeriod = defaults.string(forKey: "org.operationalPeriod") ?? ""
-        trackFolder = defaults.string(forKey: "org.trackFolder") ?? ""
+        // Incident and operational period are session choices on Android.
+        // Begin every process with Android's defaults instead of restoring the
+        // previous operational session.
+        incident = "Training"
+        operationalPeriod = "1"
+        trackFolder = Self.normalizedTrackFolder(defaults.string(forKey: "org.trackFolder"))
         teamID = defaults.string(forKey: "org.teamID") ?? ""
         trackerURLPrefix = defaults.string(forKey: "org.trackerURLPrefix") ?? ""
         usePeers = defaults.object(forKey: "org.usePeers") as? Bool ?? true
         predictiveHeadEnabled = defaults.object(forKey: "org.predictiveHead") as? Bool ?? true
         proximityAlertSpacingFeet = defaults.object(forKey: "org.proximityFeet") as? Int ?? 40
         sourceDescription = defaults.string(forKey: "org.sourceDescription") ?? "Not loaded"
+        defaults.set("Training", forKey: "org.incident")
+        defaults.set("1", forKey: "org.operationalPeriod")
     }
 
     var trackerAPIKey: String { Self.loadTrackerAPIKey() ?? "" }
@@ -77,7 +82,7 @@ final class AppleOrgConfigSettings: ObservableObject {
             : bundle.organizationName
         incident = credentials?.incident ?? ""
         operationalPeriod = credentials?.operationalPeriod ?? ""
-        trackFolder = credentials?.trackFolder ?? ""
+        trackFolder = Self.normalizedTrackFolder(credentials?.trackFolder)
         teamID = credentials?.teamID ?? ""
         trackerURLPrefix = credentials?.trackerURLPrefix ?? ""
         usePeers = credentials?.usePeers ?? true
@@ -103,7 +108,7 @@ final class AppleOrgConfigSettings: ObservableObject {
         organizationName = profile.sourceLabel
         incident = profile.incident
         operationalPeriod = profile.operationalPeriod
-        trackFolder = profile.trackFolder
+        trackFolder = Self.normalizedTrackFolder(profile.trackFolder)
         teamID = profile.teamID
         trackerURLPrefix = profile.trackerURLPrefix
         usePeers = true
@@ -126,6 +131,11 @@ final class AppleOrgConfigSettings: ObservableObject {
     func setPredictiveHeadEnabled(_ enabled: Bool) {
         predictiveHeadEnabled = enabled
         defaults.set(enabled, forKey: "org.predictiveHead")
+    }
+
+    private static func normalizedTrackFolder(_ value: String?) -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Drone Tracks" : trimmed
     }
 
     func setIncidentMapTitle(_ title: String) {
@@ -186,7 +196,7 @@ final class AppleOrgConfigSettings: ObservableObject {
         organizationName = object["organization_name"] as? String ?? ""
         incident = object["incident"] as? String ?? ""
         operationalPeriod = object["operational_period"] as? String ?? ""
-        trackFolder = object["track_folder"] as? String ?? ""
+        trackFolder = Self.normalizedTrackFolder(object["track_folder"] as? String)
         teamID = object["team_id"] as? String ?? ""
         trackerURLPrefix = object["tracker_url_prefix"] as? String ?? ""
         usePeers = (object["use_peers"] as? NSNumber)?.boolValue ?? true

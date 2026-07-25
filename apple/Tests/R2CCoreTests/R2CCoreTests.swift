@@ -2,6 +2,365 @@ import Foundation
 import Testing
 @testable import R2CCore
 
+private actor CaltopoFolderResolverProbe {
+    private(set) var fetchCount = 0
+    private(set) var createdFolders: [String] = []
+    private(set) var deletedFolders: [String] = []
+    let snapshots: [CaltopoArtifactSnapshot]
+
+    init(snapshot: CaltopoArtifactSnapshot = CaltopoArtifactSnapshot()) {
+        snapshots = [snapshot]
+    }
+
+    init(snapshots: [CaltopoArtifactSnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    func fetch() async -> CaltopoArtifactSnapshot {
+        let index = min(fetchCount, snapshots.count - 1)
+        fetchCount += 1
+        try? await Task.sleep(for: .milliseconds(20))
+        return snapshots[index]
+    }
+
+    func create(title: String, visible: Bool, labelVisible: Bool) -> String {
+        createdFolders.append(title)
+        return visible && labelVisible ? "active-created" : "archive-created"
+    }
+
+    func delete(folderID: String) {
+        deletedFolders.append(folderID)
+    }
+
+    func counts() -> (fetches: Int, creations: Int) {
+        (fetchCount, createdFolders.count)
+    }
+
+    func deletions() -> [String] {
+        deletedFolders
+    }
+}
+
+@Test
+func caltopoFolderResolutionCoalescesConcurrentPublishers() async throws {
+    let resolver = CaltopoTrackFolderResolver()
+    let probe = CaltopoFolderResolverProbe()
+    let date = Date(timeIntervalSince1970: 1_721_779_200) // 24 Jul 2024 UTC
+
+    async let first = resolver.resolve(
+        trackFolderName: "Drone Tracks",
+        date: date,
+        timeZone: TimeZone(secondsFromGMT: 0)!,
+        fetchSnapshot: { await probe.fetch() },
+        createFolder: { title, visible, labelVisible in
+            await probe.create(title: title, visible: visible, labelVisible: labelVisible)
+        }
+    )
+    async let second = resolver.resolve(
+        trackFolderName: "Drone Tracks",
+        date: date,
+        timeZone: TimeZone(secondsFromGMT: 0)!,
+        fetchSnapshot: { await probe.fetch() },
+        createFolder: { title, visible, labelVisible in
+            await probe.create(title: title, visible: visible, labelVisible: labelVisible)
+        }
+    )
+
+    let results = try await [first, second]
+    #expect(results[0] == CaltopoTrackFolderIDs(active: "active-created", archive: "archive-created"))
+    #expect(results[1] == results[0])
+    let counts = await probe.counts()
+    #expect(counts.fetches == 2)
+    #expect(counts.creations == 2)
+}
+
+@Test
+func caltopoFolderResolutionKeepsPopulatedArchiveWithoutDeletingPreexistingFolders() async throws {
+    let resolver = CaltopoTrackFolderResolver()
+    let snapshot = CaltopoArtifactSnapshot(
+        folders: [
+            CaltopoArtifactFolder(id: "active", title: "Drone Tracks", initiallyVisible: true),
+            CaltopoArtifactFolder(id: "archive-empty", title: "Drone Tracks24Jul", initiallyVisible: false),
+            CaltopoArtifactFolder(id: "archive-used", title: "Drone Tracks24Jul", initiallyVisible: false),
+            CaltopoArtifactFolder(
+                id: "archive-with-child",
+                title: "Drone Tracks24Jul",
+                initiallyVisible: false
+            ),
+            CaltopoArtifactFolder(
+                id: "child",
+                title: "Child Folder",
+                initiallyVisible: false,
+                parentID: "archive-with-child"
+            ),
+        ],
+        items: [
+            CaltopoArtifactItem(
+                id: "track",
+                title: "1SAR7DJI_204510Jul24",
+                folderID: "archive-used",
+                className: "Shape"
+            ),
+        ]
+    )
+    let probe = CaltopoFolderResolverProbe(snapshot: snapshot)
+
+    let result = try await resolver.resolve(
+        trackFolderName: "Drone Tracks",
+        date: Date(timeIntervalSince1970: 1_721_779_200),
+        timeZone: TimeZone(secondsFromGMT: 0)!,
+        fetchSnapshot: { await probe.fetch() },
+        createFolder: { title, visible, labelVisible in
+            await probe.create(title: title, visible: visible, labelVisible: labelVisible)
+        },
+        deleteFolder: { folderID in
+            await probe.delete(folderID: folderID)
+        }
+    )
+
+    #expect(result == CaltopoTrackFolderIDs(active: "active", archive: "archive-used"))
+    #expect(await probe.deletions().isEmpty)
+}
+
+@Test
+func caltopoFolderResolutionDeletesOnlyItsOwnUnusedRaceLosers() async throws {
+    let resolver = CaltopoTrackFolderResolver()
+    let initial = CaltopoArtifactSnapshot()
+    let settled = CaltopoArtifactSnapshot(folders: [
+        CaltopoArtifactFolder(id: "active-other", title: "Drone Tracks", initiallyVisible: true),
+        CaltopoArtifactFolder(id: "active-created", title: "Drone Tracks", initiallyVisible: true),
+        CaltopoArtifactFolder(
+            id: "archive-other",
+            title: "Drone Tracks24Jul",
+            initiallyVisible: false
+        ),
+        CaltopoArtifactFolder(
+            id: "archive-created",
+            title: "Drone Tracks24Jul",
+            initiallyVisible: false
+        ),
+    ])
+    let probe = CaltopoFolderResolverProbe(snapshots: [initial, settled])
+
+    let result = try await resolver.resolve(
+        trackFolderName: "Drone Tracks",
+        date: Date(timeIntervalSince1970: 1_721_779_200),
+        timeZone: TimeZone(secondsFromGMT: 0)!,
+        fetchSnapshot: { await probe.fetch() },
+        createFolder: { title, visible, labelVisible in
+            await probe.create(title: title, visible: visible, labelVisible: labelVisible)
+        },
+        deleteFolder: { folderID in
+            await probe.delete(folderID: folderID)
+        }
+    )
+
+    #expect(result == CaltopoTrackFolderIDs(active: "active-other", archive: "archive-other"))
+    #expect(Set(await probe.deletions()) == Set(["active-created", "archive-created"]))
+}
+
+@Test
+func caltopoFolderResolutionReusesExistingDailyFolder() async throws {
+    let resolver = CaltopoTrackFolderResolver()
+    let probe = CaltopoFolderResolverProbe(snapshot: CaltopoArtifactSnapshot(folders: [
+        CaltopoArtifactFolder(id: "active-existing", title: "DRONE TRACKS", initiallyVisible: true),
+        CaltopoArtifactFolder(id: "archive-existing", title: "drone tracks24jul", initiallyVisible: false),
+    ]))
+    let result = try await resolver.resolve(
+        trackFolderName: "Drone Tracks",
+        date: Date(timeIntervalSince1970: 1_721_779_200),
+        timeZone: TimeZone(secondsFromGMT: 0)!,
+        fetchSnapshot: { await probe.fetch() },
+        createFolder: { title, visible, labelVisible in
+            await probe.create(title: title, visible: visible, labelVisible: labelVisible)
+        }
+    )
+
+    #expect(result == CaltopoTrackFolderIDs(active: "active-existing", archive: "archive-existing"))
+    let counts = await probe.counts()
+    #expect(counts.fetches == 1)
+    #expect(counts.creations == 0)
+}
+
+@Test
+func caltopoMarkerIconURLMatchesAndroidContract() throws {
+    let url = try #require(CaltopoMarkerIcon.url(symbol: "clue", colorHex: " #FF00AA "))
+    let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    #expect(components.scheme == "https")
+    #expect(components.host == "caltopo.com")
+    #expect(components.path == "/icon@2x.png")
+    #expect(components.queryItems == [URLQueryItem(name: "cfg", value: "clue,FF00AA")])
+    #expect(CaltopoMarkerIcon.url(symbol: "", colorHex: nil)?.absoluteString ==
+        "https://caltopo.com/icon@2x.png?cfg=point")
+}
+
+@Test
+func anomalyConfigurationMatchesAndroidColorDefaults() {
+    #expect(abs(
+        AnomalyConfigurationParity.scoreThreshold(sensitivity: 0.59) -
+        Float(pow(15.0, 0.41))
+    ) < 0.0001)
+    #expect(AnomalyConfigurationParity.motionEvidenceScale(sensitivity: 0.60) == 1.0)
+    #expect(abs(
+        AnomalyConfigurationParity.minimumAreaFraction(base: 0.0015, sensitivity: 0.59) -
+        0.002708535
+    ) < 0.000001)
+    #expect(AnomalyConfigurationParity.pixelStep(isColorMode: true, configuredStep: 0) == 1)
+    #expect(AnomalyConfigurationParity.colorFrontendMode(isColorMode: true, configuredMode: 0) == 1)
+    #expect(AnomalyConfigurationParity.usesColorRealtimeCadence(
+        isColorMode: true,
+        strideMode: 0,
+        frameStride: 1,
+        adaptiveMinimumFrames: 2,
+        adaptiveMaximumSeconds: 1
+    ))
+}
+
+@Test
+func anomalyConfigurationPreservesExplicitNonDefaultCadence() {
+    #expect(!AnomalyConfigurationParity.usesColorRealtimeCadence(
+        isColorMode: true,
+        strideMode: 0,
+        frameStride: 4,
+        adaptiveMinimumFrames: 2,
+        adaptiveMaximumSeconds: 1
+    ))
+    #expect(!AnomalyConfigurationParity.usesColorRealtimeCadence(
+        isColorMode: false,
+        strideMode: 0,
+        frameStride: 1,
+        adaptiveMinimumFrames: 2,
+        adaptiveMaximumSeconds: 1
+    ))
+}
+
+@Test
+func anomalyGuideGeometryMatchesAndroidScanFrameAndTargetScale() {
+    let guide = AnomalyConfigurationParity.guideGeometry(
+        frameWidth: 1_600,
+        frameHeight: 900,
+        scanZone: 0.50,
+        smallTargetScreenFraction: 1.0 / 200.0
+    )
+    #expect(guide.scanWidth == 800)
+    #expect(guide.scanHeight == 450)
+    #expect(abs(guide.targetSpan - hypot(1_600.0, 900.0) / 200.0) < 0.0001)
+
+    let clamped = AnomalyConfigurationParity.guideGeometry(
+        frameWidth: 100,
+        frameHeight: 50,
+        scanZone: 0.1,
+        smallTargetScreenFraction: 1
+    )
+    #expect(clamped.scanWidth == 50)
+    #expect(clamped.scanHeight == 25)
+    #expect(abs(clamped.targetSpan - hypot(100.0, 50.0) * 0.03) < 0.0001)
+}
+
+@Test
+func anomalyDisplayRectTracksAspectFittedVideoInsteadOfTheGridTile() {
+    let portraitTile = AnomalyConfigurationParity.aspectFitRect(
+        containerWidth: 1_200,
+        containerHeight: 1_440,
+        contentAspectRatio: 16.0 / 9.0
+    )
+    #expect(portraitTile == AnomalyDisplayRect(
+        x: 0,
+        y: 382.5,
+        width: 1_200,
+        height: 675
+    ))
+
+    let wideTile = AnomalyConfigurationParity.aspectFitRect(
+        containerWidth: 1_600,
+        containerHeight: 600,
+        contentAspectRatio: 16.0 / 9.0
+    )
+    #expect(abs(wideTile.x - (1_600 - (600 * 16.0 / 9.0)) / 2) < 0.0001)
+    #expect(wideTile.y == 0)
+    #expect(abs(wideTile.width - (600 * 16.0 / 9.0)) < 0.0001)
+    #expect(wideTile.height == 600)
+}
+
+@Test
+func caltopoLocalDevicePointCanBeSuppressedWithoutRemovingItsFolderItem() {
+    let point = CaltopoPointArtifact(
+        id: "LOCAL-ZONE",
+        coordinate: MapCoordinate(latitude: 39, longitude: -105),
+        title: "R2C: Jerry's iPad Pro",
+        symbol: "radiotower",
+        colorHex: "#0000FF",
+        folderID: "drone-tracks",
+        parentItemID: nil
+    )
+    let item = CaltopoArtifactItem(
+        id: point.id,
+        title: point.title,
+        folderID: point.folderID,
+        className: "Marker"
+    )
+    let snapshot = CaltopoArtifactSnapshot(points: [point], items: [item])
+
+    let rendered = snapshot.excludingRenderedPointIDs(["local-zone"])
+
+    #expect(rendered.points.isEmpty)
+    #expect(rendered.items == [item])
+}
+
+@Test
+func operationalDeviceNameUpgradesGenericAppleFallback() {
+    #expect(OperationalDeviceName.preferredDisplayName(
+        stored: "iPad",
+        userAssigned: "iPad",
+        hostname: "Jerrys-Ipad-pro.coredevice.local"
+    ) == "Jerry's iPad Pro")
+    #expect(OperationalDeviceName.preferredDisplayName(
+        stored: "customer.sltyutx1.isp.starlink.com",
+        userAssigned: "iPad",
+        hostname: "Jerrys-Ipad-pro.coredevice.local"
+    ) == "Jerry's iPad Pro")
+}
+
+@Test
+func operationalDeviceNamePreservesExplicitOverrideAndRejectsOpaqueHostname() {
+    #expect(OperationalDeviceName.preferredDisplayName(
+        stored: "SAR Command Tablet",
+        userAssigned: "Jerry’s Ipad pro",
+        hostname: "Jerrys-Ipad-pro.coredevice.local"
+    ) == "SAR Command Tablet")
+    #expect(OperationalDeviceName.displayName(
+        fromHostname: "E8CF81B4-A917-5456-91DD-EC1743193D48.coredevice.local"
+    ) == nil)
+}
+
+@Test func mediaMTXRuntimeConfigurationMatchesAndroidCaptureSettings() throws {
+    let base = Data("rtmp: yes\npathDefaults:\n  source: publisher\n".utf8)
+    let root = URL(fileURLWithPath: "/tmp/stream archive")
+
+    let disabled = try String(
+        decoding: MediaMTXRuntimeConfiguration.build(
+            base: base,
+            captureStreams: false,
+            recordingRoot: root
+        ),
+        as: UTF8.self
+    )
+    #expect(disabled.contains("pathDefaults:\n  record: no\n  source: publisher"))
+    #expect(!disabled.contains("recordFormat: fmp4"))
+
+    let enabled = try String(
+        decoding: MediaMTXRuntimeConfiguration.build(
+            base: base,
+            captureStreams: true,
+            recordingRoot: root
+        ),
+        as: UTF8.self
+    )
+    #expect(enabled.contains("pathDefaults:\n  record: yes"))
+    #expect(enabled.contains("recordPath: '/tmp/stream archive/%path/%Y-%m-%d_%H-%M-%S-%f'"))
+    #expect(enabled.contains("recordFormat: fmp4"))
+}
+
 @Test func caltopoTeamMapHierarchyMatchesAndroidFolderRelationsAndRecents() throws {
     let now = Date(timeIntervalSince1970: 2_000_000_000)
     let recent = Int64(now.timeIntervalSince1970 * 1_000) - 1_000
@@ -22,7 +381,9 @@ import Testing
 }
 
 @Test func caltopoTeamMapRequestUsesAndroidAccountEndpointAndSignedGet() async throws {
-    let secret = Data("team-secret".utf8).base64EncodedString()
+    // This key produces a signature containing both "+" and "/", exercising
+    // the query encoding that URLComponents.queryItems does not provide.
+    let secret = Data("team-secret-1".utf8).base64EncodedString()
     let configuration = CaltopoTeamMapConfiguration(
         domainAndPort: "caltopo.com", teamID: "team-42", credentialID: "credential-7",
         credentialSecretBase64: secret
@@ -36,8 +397,22 @@ import Testing
     let components = try #require(URLComponents(url: requestURL, resolvingAgainstBaseURL: false))
     let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
     #expect(query["id"] == "credential-7")
-    #expect(query["expires"] == "1700000010000")
+    #expect(query["expires"] == "1700000120000")
     #expect(!(query["signature"] ?? "").isEmpty)
+    #expect(query["signature"] == "uwNMwY6YwT7qcXhOp1yBhFPXFk779c+rP83s3O/SWjI=")
+    #expect(requestURL.absoluteString.contains("c%2BrP83s3O%2FSWjI%3D"))
+    #expect(!requestURL.absoluteString.contains("c+rP83s3O/SWjI"))
+}
+
+@Test func caltopoConfigurationErrorsAreOperatorReadable() {
+    #expect(
+        CaltopoLiveClientError.invalidConfiguration.localizedDescription
+            == "The CalTopo domain, team, map, or credential configuration is incomplete."
+    )
+    #expect(
+        CaltopoLiveClientError.invalidCredentialSecret.localizedDescription
+            == "The CalTopo credential secret is not valid Base64."
+    )
 }
 
 @Test func geoTiffElevationSourceSamplesDownloadedUSGSTileDirectly() throws {
@@ -63,13 +438,17 @@ import Testing
     #expect(query["geometry"] == "-104.990300,39.739200")
     #expect(query["distance"] == "1.000000")
     #expect(query["units"] == "esriSRUnit_StatuteMile")
+    #expect(query["returnGeometry"] == "true")
+    #expect(query["outSR"] == "4326")
     #expect(OperationalFacilityMap.operatingRadiusNM == 0.868976)
 
-    let payload = #"{"features":[{"attributes":{"OBJECTID":42,"CEILING":200,"UNIT":"FEET","APT1_FAAID":"DEN","APT1_ICAO":"KDEN","APT1_NAME":"Denver International Airport (DEN)","APT1_LAANC":1,"AIRSPACE_1":"B","AIRSPACE_2":"C"}}]}"#
+    let payload = #"{"features":[{"attributes":{"OBJECTID":42,"CEILING":200,"UNIT":"FEET","APT1_FAAID":"DEN","APT1_ICAO":"KDEN","APT1_NAME":"Denver International Airport (DEN)","APT1_LAANC":1,"AIRSPACE_1":"B","AIRSPACE_2":"C"},"geometry":{"rings":[[[-105.0,39.7],[-105.0,39.8],[-104.9,39.8],[-105.0,39.7]]]}}]}"#
     let records = try OperationalFacilityMap.parse(Data(payload.utf8))
     #expect(records.count == 1)
     #expect(records[0].airspaceClasses == ["B", "C"])
     #expect(records[0].laancAvailable)
+    #expect(records[0].rings.count == 1)
+    #expect(records[0].rings[0][0] == .init(latitude: 39.7, longitude: -105.0))
     let state = OperationalFacilityMap.state(records: records, loading: false, errorMessage: nil)
     #expect(state.severity == .caution)
     #expect(state.chipLabel.contains("LAANC required"))
@@ -144,6 +523,20 @@ import Testing
     #expect(area.detailsURL?.host == "cpw.state.co.us")
 }
 
+@Test func operationalLandRestrictionDoesNotReportClearWhileWaitingForLocation() {
+    #expect(OperationalLandRestriction.severity(
+        [],
+        hasError: false,
+        waitingForLocation: true
+    ) == .neutral)
+    #expect(OperationalLandRestriction.chipLabel(
+        [],
+        loading: false,
+        hasError: false,
+        waitingForLocation: true
+    ) == "Land rules pending")
+}
+
 @Test func operationalLandRestrictionMeasuresNearestBoundaryEdgeInsteadOfOnlyVertices() throws {
     let source = OperationalLandSource(
         id: "test-wilderness",
@@ -209,6 +602,29 @@ import Testing
         maximumZoom: 19,
         maximumCount: 1_000
     ) == nil)
+}
+
+@Test func visibleMapLongPressSelectsExpectedWebMercatorTile() {
+    let tile = OperationalVisibleMapTile.tile(
+        latitude: 43.615,
+        longitude: -116.2023,
+        zoom: 12
+    )
+    #expect(tile == OperationalOfflineTile(zoom: 12, x: 725, y: 1495))
+}
+
+@Test func visibleMapZoomMatchesMapKitWorldScale() {
+    let worldWidth = 268_435_456.0
+    #expect(OperationalVisibleMapTile.zoomLevel(
+        worldMapWidth: worldWidth,
+        visibleMapWidth: worldWidth / 4,
+        viewportWidth: 256
+    ) == 2)
+    #expect(OperationalVisibleMapTile.zoomLevel(
+        worldMapWidth: worldWidth,
+        visibleMapWidth: 0,
+        viewportWidth: 1_024
+    ) == 0)
 }
 
 @Test func signalLossRequiresAFlightThatLeftAndStayedAway() {
@@ -450,6 +866,24 @@ private func proximityDrone(
     ) == nil)
 }
 
+@Test func headingNormalizationNeverFormatsOutsideZeroThroughThreeFiftyNine() {
+    #expect(RidHeading.normalized(361) == 1)
+    #expect(RidHeading.normalized(-1) == 359)
+    #expect(RidHeading.roundedWholeDegrees(359.6) == 0)
+    #expect(RidHeading.roundedWholeDegrees(361) == 1)
+    #expect(RidHeading.normalized(.infinity) == nil)
+
+    let observation = RidObservation(
+        source: .bluetoothLegacy,
+        aircraftId: "HEADING",
+        receivedAt: Date(),
+        latitude: 39,
+        longitude: -105,
+        headingDegrees: 361
+    )
+    #expect(observation.headingDegrees == 1)
+}
+
 @Test func closestTrafficPairReportsThreeDimensionalSeparationWhenAvailable() throws {
     let closest = try #require(RidTrafficSeparation.closestPair(in: [
         RidTrafficPosition(aircraftID: "ALPHA", latitude: 0, longitude: 0, altitudeMeters: 100),
@@ -514,6 +948,62 @@ private func proximityDrone(
         == "https://tile.openstreetmap.org/12/657/1582.png")
     #expect(OperationalMapBaseLayer.imagery.tileURL(zoom: 12, x: 657, y: 1582)?.absoluteString
         == "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/12/1582/657.jpg")
+}
+
+@Test func operationalPipSizingMatchesAndroidInsetRules() {
+    #expect(OperationalPipSizing.clampInsetFraction(.nan)
+        == OperationalPipSizing.defaultInsetFraction)
+    #expect(OperationalPipSizing.clampInsetFraction(0.1)
+        == OperationalPipSizing.minimumInsetFraction)
+    #expect(OperationalPipSizing.clampInsetFraction(0.9)
+        == OperationalPipSizing.maximumInsetFraction)
+
+    let landscape = OperationalPipSizing.insetSize(
+        containerWidth: 1024,
+        containerHeight: 768,
+        insetFraction: 0.33
+    )
+    #expect(abs(landscape.width - 330) < 0.001)
+    #expect(abs(landscape.height - 185.625) < 0.001)
+
+    let heightLimited = OperationalPipSizing.insetSize(
+        containerWidth: 1000,
+        containerHeight: 120,
+        insetFraction: 0.55
+    )
+    #expect(abs(heightLimited.width - (96 * 16.0 / 9.0)) < 0.001)
+    #expect(abs(heightLimited.height - 96) < 0.001)
+}
+
+@Test func operationalMapLayoutAppliesPersistedPipPreference() {
+    #expect(OperationalMapVideoLayout.map.withPictureInPicture(true) == .mapPrimary)
+    #expect(OperationalMapVideoLayout.video.withPictureInPicture(true) == .videoPrimary)
+    #expect(OperationalMapVideoLayout.split.withPictureInPicture(true) == .split)
+    #expect(OperationalMapVideoLayout.mapPrimary.withPictureInPicture(false) == .map)
+    #expect(OperationalMapVideoLayout.videoPrimary.withPictureInPicture(false) == .video)
+    #expect(OperationalMapVideoLayout.split.withPictureInPicture(false) == .split)
+}
+
+@Test func caltopoTrackLabelMatchesAndroidFirstWaypointTimestamp() throws {
+    let timeZone = TimeZone(secondsFromGMT: -7 * 60 * 60)!
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    let firstWaypoint = try #require(calendar.date(from: DateComponents(
+        year: 2026,
+        month: 7,
+        day: 24,
+        hour: 20,
+        minute: 45,
+        second: 10
+    )))
+
+    #expect(
+        CaltopoTrackLabel.androidCompatible(
+            baseLabel: "1SAR7DJI",
+            firstWaypointAt: firstWaypoint,
+            timeZone: timeZone
+        ) == "1SAR7DJI_204510Jul24"
+    )
 }
 
 @Test func pilotDisplayPreferenceMatchesAndroidNormalizationAndColorDefaults() {
@@ -634,7 +1124,7 @@ private func proximityDrone(
 @Test func operationalAltitudeManualCalibrationTargetsFiftyFeet() {
     var coordinator = OperationalAltitudeCoordinator()
     coordinator.ingest(RidObservation(
-        source: .externalReceiver, aircraftId: "TEST", receivedAt: Date(),
+        source: .trackerRelay, aircraftId: "TEST", receivedAt: Date(),
         latitude: 39, longitude: -105, altitudeMeters: 510
     ))
     coordinator.manualCalibrateAtFiftyFeet()
@@ -737,7 +1227,7 @@ private func proximityDrone(
       {"id":"hidden","properties":{"class":"Folder","title":"Hidden","visible":false}},
       {"id":"marker","geometry":{"type":"Point","coordinates":[-104.99,39.74]},"properties":{"class":"Marker","title":"Clue","folderId":"ops","marker-symbol":"aperture","marker-color":"#FF00FF"}},
       {"id":"line","geometry":{"type":"LineString","coordinates":[[-105,39.7],[-104.9,39.8]]},"properties":{"class":"Shape","title":"Search line","folderId":"ops","stroke":"#00FF00","stroke-width":4}},
-      {"id":"polygon","geometry":{"type":"Polygon","coordinates":[[[-105,39.7],[-104.9,39.7],[-104.9,39.8],[-105,39.7]]]},"properties":{"class":"Assignment","title":"Division A","stroke":"#FF0000","fill":"#3300FF00"}},
+      {"id":"polygon","geometry":{"type":"Polygon","coordinates":[[[-105,39.7],[-104.9,39.7],[-104.9,39.8],[-105,39.7]]]},"properties":{"class":"Assignment","title":"Division A","stroke":"#FF0000","stroke-opacity":0.5,"fill":"#FF0000","fill-opacity":0.2}},
       {"id":"hidden-marker","geometry":{"type":"Point","coordinates":[-104,39]},"properties":{"class":"Marker","title":"Hidden clue","folderId":"hidden"}},
       {"id":"hidden-media","geometry":{"type":"Point","coordinates":[-104,39]},"properties":{"class":"MapMediaObject","title":"Hidden clue photo","parentId":"Marker:hidden-marker","marker-symbol":"aperture"}},
       {"id":"live","geometry":{"type":"LineString","coordinates":[[-105,39],[-104,40]]},"properties":{"class":"LiveTrack","title":"Duplicate aircraft","folderId":"ops"}}
@@ -751,10 +1241,35 @@ private func proximityDrone(
     #expect(visible.points.map(\.title) == ["Clue"])
     #expect(snapshot.lines.map(\.title) == ["Search line"])
     #expect(snapshot.polygons.map(\.title) == ["Division A"])
+    #expect(snapshot.polygons.first?.strokeHex == "#7FFF0000")
+    #expect(snapshot.polygons.first?.fillHex == "#33FF0000")
     #expect(snapshot.ignoredTrackCount == 1)
     #expect(snapshot.folders.contains { $0.title == "Operations" })
     #expect(snapshot.folders.contains { $0.title == "Assignments" })
     #expect(try JSONDecoder().decode(CaltopoArtifactSnapshot.self, from: JSONEncoder().encode(snapshot)) == snapshot)
+}
+
+@Test func operationalCoordinateFormatsMatchAndroid() {
+    #expect(OperationalCoordinateFormatter.format(
+        latitude: 39.9526,
+        longitude: -75.1652,
+        as: .decimal
+    ) == "loc:39.95260,-75.16520")
+    #expect(OperationalCoordinateFormatter.format(
+        latitude: 39.9526,
+        longitude: -75.1652,
+        as: .utm
+    ) == "loc:18S 485889 4422509")
+    #expect(OperationalCoordinateFormatter.format(
+        latitude: 39.9526,
+        longitude: -75.1652,
+        as: .usng
+    ) == "loc:18S VK 85889 22509")
+    #expect(OperationalCoordinateFormatter.format(
+        latitude: .nan,
+        longitude: -75.1652,
+        as: .decimal
+    ) == "loc:unknown")
 }
 
 @Test func caltopoArtifactDecoderAcceptsResultWrappedMapState() throws {
@@ -826,7 +1341,7 @@ private func proximityDrone(
     #expect(components.path == "/api/v1/map/map123/since/0")
     let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
     #expect(values["id"] == "credential")
-    #expect(values["expires"] == "1700000010000")
+    #expect(values["expires"] == "1700000120000")
     #expect(values["signature"]?.isEmpty == false)
 }
 
@@ -927,6 +1442,18 @@ private func proximityDrone(
     #expect(location.directionDegrees == 90)
     #expect(location.horizontalSpeedMetersPerSecond == 10)
     #expect(location.verticalSpeedMetersPerSecond == -2)
+
+    let wrappedAdvertisement = try OpenDroneIDParser.parseBluetoothServiceData(
+        bluetoothServiceData(
+            message: locationMessage(direction: 181, eastWest: true),
+            counter: 10
+        )
+    )
+    guard case let .location(wrapped) = wrappedAdvertisement.messages[0].payload else {
+        Issue.record("Expected a wrapped Location payload")
+        return
+    }
+    #expect(wrapped.directionDegrees == 1)
 }
 
 @Test func packedBasicIDAndLocationProduceObservation() async throws {
@@ -962,83 +1489,6 @@ private func proximityDrone(
     }
     #expect(throws: OpenDroneIDParserError.truncatedMessage(expected: 25, actual: 3)) {
         try OpenDroneIDParser.parseBluetoothServiceData(Data([0x0D, 0x01, 0x02, 0x12, 0x41]))
-    }
-}
-
-@Test func externalRawAstmMessagesDecodeWithoutBluetoothEnvelope() throws {
-    let raw = Data(basicIDMessage("RAW-WIFI-01") + locationMessage())
-    let advertisement = try OpenDroneIDParser.parseExternalDatagram(raw)
-
-    #expect(advertisement.messageCounter == 0)
-    #expect(advertisement.messages.count == 2)
-    guard case let .basicID(basicID) = advertisement.messages[0].payload else {
-        Issue.record("Expected raw Basic ID payload")
-        return
-    }
-    #expect(basicID.uasID == "RAW-WIFI-01")
-    guard case let .location(location) = advertisement.messages[1].payload else {
-        Issue.record("Expected raw Location payload")
-        return
-    }
-    #expect(abs(location.latitude - 39.7392) < 0.0000001)
-}
-
-@Test func externalBluetoothEnvelopeAndMessagePackDecode() throws {
-    let pack = messagePack([basicIDMessage("PACK-WIFI-01"), locationMessage()])
-    let serviceAdvertisement = try OpenDroneIDParser.parseExternalDatagram(
-        bluetoothServiceData(message: pack, counter: 23)
-    )
-    let rawPackAdvertisement = try OpenDroneIDParser.parseExternalDatagram(Data(pack))
-
-    #expect(serviceAdvertisement.messageCounter == 23)
-    #expect(serviceAdvertisement.messages.count == 2)
-    #expect(rawPackAdvertisement.messageCounter == 0)
-    #expect(rawPackAdvertisement.messages == serviceAdvertisement.messages)
-}
-
-@Test func malformedExternalRawAstmDatagramIsRejected() {
-    #expect(throws: OpenDroneIDParserError.invalidRawDatagramLength(24)) {
-        try OpenDroneIDParser.parseExternalDatagram(Data(repeating: 0, count: 24))
-    }
-    #expect(throws: OpenDroneIDParserError.invalidRawDatagramLength(26)) {
-        try OpenDroneIDParser.parseExternalDatagram(Data(repeating: 0, count: 26))
-    }
-}
-
-@Test func externalReceiverJSONProducesNormalizedObservation() throws {
-    let observation = try ExternalRIDObservationDecoder.decode(Data(#"""
-    {
-      "aircraft_id":"EXT-RID-01",
-      "source":"wifiNan",
-      "timestamp_ms":1700000000123,
-      "latitude":39.7392,
-      "longitude":-104.9903,
-      "altitude_m":1620.5,
-      "heading_deg":92,
-      "speed_mps":11.5,
-      "operator_latitude":39.74,
-      "operator_longitude":-104.99,
-      "rssi_dbm":-61
-    }
-    """#.utf8))
-
-    #expect(observation.aircraftId == "EXT-RID-01")
-    #expect(observation.source == .wifiNan)
-    #expect(observation.receivedAt == Date(timeIntervalSince1970: 1_700_000_000.123))
-    #expect(observation.altitudeMeters == 1_620.5)
-    #expect(observation.operatorLatitude == 39.74)
-    #expect(observation.signalStrengthDbm == -61)
-}
-
-@Test func externalReceiverRejectsInvalidCoordinates() {
-    #expect(throws: ExternalRIDObservationDecoderError.invalidCoordinate) {
-        try ExternalRIDObservationDecoder.decode(Data(#"""
-        {
-          "aircraft_id":"EXT-RID-01",
-          "latitude":91,
-          "longitude":-104.9903
-        }
-        """#.utf8))
     }
 }
 
@@ -1277,15 +1727,160 @@ private func proximityDrone(
     #expect(components.path == "/api/v1/map/map123/LiveTrack/track456")
     let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
     #expect(values["id"] == "credential")
-    #expect(values["expires"] == "1700000010000")
+    #expect(values["expires"] == "1700000120000")
     let expectedSignature = try CaltopoRequestSigner.signature(
         method: "DELETE",
         path: components.path,
-        expiresMilliseconds: 1_700_000_010_000,
+        expiresMilliseconds: 1_700_000_120_000,
         payload: "",
         credentialSecretBase64: "c2VjcmV0"
     )
     #expect(values["signature"] == expectedSignature)
+}
+
+@Test func caltopoDeleteFolderRequestUsesSignedFolderEndpoint() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        domainAndPort: "caltopo.com",
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let request = try await client.makeDeleteFolderRequest(
+        folderID: "empty-folder",
+        now: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    #expect(request.httpMethod == "DELETE")
+    let components = try #require(request.url.flatMap {
+        URLComponents(url: $0, resolvingAgainstBaseURL: false)
+    })
+    #expect(components.path == "/api/v1/map/map123/Folder/empty-folder")
+    let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map {
+        ($0.name, $0.value ?? "")
+    })
+    #expect(values["id"] == "credential")
+    #expect(values["expires"] == "1700000120000")
+    let expectedSignature = try CaltopoRequestSigner.signature(
+        method: "DELETE",
+        path: components.path,
+        expiresMilliseconds: 1_700_000_120_000,
+        payload: "",
+        credentialSecretBase64: "c2VjcmV0"
+    )
+    #expect(values["signature"] == expectedSignature)
+}
+
+@Test func caltopoLiveTrackStartsInVisibleDroneTracksFolder() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let request = try await client.makeStartLiveTrackRequest(
+        remoteID: "RID01",
+        label: "ALPHA1",
+        folderID: "drone-folder",
+        now: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    let fields = decodeFormBody(try #require(request.httpBody))
+    let payload = try #require(fields["json"]?.data(using: .utf8))
+    let root = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+    let properties = try #require(root["properties"] as? [String: Any])
+    #expect(properties["folderId"] as? String == "drone-folder")
+    #expect(properties["stroke"] as? String == "#0000ff")
+}
+
+@Test func caltopoArchiveFolderIsCreatedHiddenLikeAndroid() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let request = try await client.makeCreateFolderRequest(
+        title: "Drone Tracks23Jul",
+        visible: false,
+        labelVisible: false,
+        now: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    #expect(request.url?.path == "/api/v1/map/map123/Folder")
+    let fields = decodeFormBody(try #require(request.httpBody))
+    let payload = try #require(fields["json"]?.data(using: .utf8))
+    let root = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+    let properties = try #require(root["properties"] as? [String: Any])
+    #expect(properties["title"] as? String == "Drone Tracks23Jul")
+    #expect(properties["visible"] as? Bool == false)
+    #expect(properties["labelVisible"] as? Bool == false)
+}
+
+@Test func caltopoCompletedTrackBecomesMagentaShapeInArchiveFolder() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let observations = [
+        RidObservation(
+            source: .trackerRelay, aircraftId: "RID01",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            latitude: 39.1, longitude: -105.2, altitudeMeters: 1_500
+        ),
+        RidObservation(
+            source: .trackerRelay, aircraftId: "RID01",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_001),
+            latitude: 39.2, longitude: -105.1, altitudeMeters: 1_510
+        ),
+    ]
+    let request = try await client.makeArchiveLiveTrackRequest(
+        liveTrackID: "track456",
+        label: "ALPHA1",
+        observations: observations,
+        folderID: "archive-folder",
+        now: Date(timeIntervalSince1970: 1_700_000_010)
+    )
+    #expect(request.url?.path == "/api/v1/map/map123/Shape/track456")
+    let fields = decodeFormBody(try #require(request.httpBody))
+    let payload = try #require(fields["json"]?.data(using: .utf8))
+    let root = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+    let properties = try #require(root["properties"] as? [String: Any])
+    let geometry = try #require(root["geometry"] as? [String: Any])
+    #expect(properties["class"] as? String == "Shape")
+    #expect(properties["folderId"] as? String == "archive-folder")
+    #expect(properties["stroke"] as? String == "#ff00ff")
+    #expect((geometry["coordinates"] as? [Any])?.count == 2)
+}
+
+@Test func caltopoDeviceMarkerMatchesAndroidFolderAndMetadataContract() async throws {
+    let client = try CaltopoLiveClient(configuration: CaltopoLiveConfiguration(
+        mapID: "map123",
+        credentialID: "credential",
+        credentialSecretBase64: "c2VjcmV0"
+    ))
+    let request = try await client.makeDeviceMarkerRequest(
+        CaltopoDeviceMarker(
+            id: "28ADC36D-1111-2222-3333-444444444444",
+            title: "R2C: Jerry's iPad Pro",
+            deviceName: "Jerry's iPad Pro",
+            latitude: 43.615,
+            longitude: -116.202,
+            description: "Tracker link healthy\nPeers: none",
+            color: "#2e7d32"
+        ),
+        folderID: "drone-folder",
+        now: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    #expect(request.url?.path == "/api/v1/map/map123/Marker/28adc36d-1111-2222-3333-444444444444")
+    let fields = decodeFormBody(try #require(request.httpBody))
+    let payload = try #require(fields["json"]?.data(using: .utf8))
+    let root = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+    let properties = try #require(root["properties"] as? [String: Any])
+    let geometry = try #require(root["geometry"] as? [String: Any])
+    let coordinates = try #require(geometry["coordinates"] as? [Double])
+    #expect(properties["class"] as? String == "Marker")
+    #expect(properties["folderId"] as? String == "drone-folder")
+    #expect(properties["marker-symbol"] as? String == "radiotower")
+    #expect(properties["r2c-name"] as? String == "Jerry's iPad Pro")
+    #expect(properties["r2c-guid"] as? String == "28adc36d-1111-2222-3333-444444444444")
+    #expect(properties["r2c-last-seen-epoch-ms"] as? Int64 == 1_700_000_000_000)
+    #expect(coordinates == [-116.202, 43.615])
 }
 
 @Test func caltopoPhotoClueMatchesAndroidFourRequestContract() async throws {
@@ -1816,11 +2411,11 @@ private func basicIDMessage(_ uasID: String) -> [UInt8] {
     return message
 }
 
-private func locationMessage() -> [UInt8] {
+private func locationMessage(direction: UInt8 = 90, eastWest: Bool = false) -> [UInt8] {
     var message = [UInt8](repeating: 0, count: OpenDroneIDParser.messageSize)
     message[0] = 0x12
-    message[1] = 0x00
-    message[2] = 90
+    message[1] = eastWest ? 0x02 : 0x00
+    message[2] = direction
     message[3] = 40
     message[4] = UInt8(bitPattern: -4)
     writeInt32(397_392_000, into: &message, at: 5)
@@ -1847,4 +2442,83 @@ private func writeInt32(_ value: Int32, into bytes: inout [UInt8], at offset: In
     for index in 0 ..< 4 {
         bytes[offset + index] = UInt8(truncatingIfNeeded: bits >> UInt32(index * 8))
     }
+}
+@Test func liveVideoLagEstimatorTracksDelayFromBestObservedSourceOffset() {
+    var estimator = LiveVideoLagEstimator()
+    #expect(estimator.observe(
+        sourceTimestampMicroseconds: 9_500_000,
+        observedAtMilliseconds: 10_000
+    ) == 0)
+    #expect(estimator.observe(
+        sourceTimestampMicroseconds: 10_500_000,
+        observedAtMilliseconds: 12_000
+    ) == 1_000)
+}
+
+@Test func liveVideoLagEstimatorResetsAfterSourceClockJumpsBackward() {
+    var estimator = LiveVideoLagEstimator()
+    _ = estimator.observe(sourceTimestampMicroseconds: 10_500_000, observedAtMilliseconds: 11_000)
+    #expect(estimator.observe(
+        sourceTimestampMicroseconds: 200_000,
+        observedAtMilliseconds: 20_000
+    ) == 0)
+}
+
+@Test func liveVideoLagLabelsMatchAndroid() {
+    #expect(LiveVideoLagEstimator.quantize(milliseconds: 649) == 600)
+    #expect(LiveVideoLagEstimator.quantize(milliseconds: 650) == 700)
+    #expect(LiveVideoLagEstimator.quantize(milliseconds: 2_350) == 2_250)
+    #expect(LiveVideoLagEstimator.label(milliseconds: nil) == "Starting")
+    #expect(LiveVideoLagEstimator.label(milliseconds: 700) == "lag:700ms")
+    #expect(LiveVideoLagEstimator.label(milliseconds: 2_250) == "lag:2.2s")
+    #expect(LiveVideoLagEstimator.label(milliseconds: 5_000) == "Stalled")
+}
+
+@Test func liveVideoSessionLagIncludesDelayBeforeFirstDecodedFrame() {
+    var estimator = LiveVideoSessionLagEstimator()
+    estimator.publisherStarted(atMilliseconds: 10_000)
+    #expect(estimator.observe(
+        sourceTimestampMicroseconds: 500_000,
+        observedAtMilliseconds: 13_000
+    ) == 2_500)
+    #expect(estimator.observe(
+        sourceTimestampMicroseconds: 1_500_000,
+        observedAtMilliseconds: 14_100
+    ) == 2_600)
+}
+
+@Test func liveVideoSessionLagNormalizesAnUnrelatedSourceClock() {
+    var estimator = LiveVideoSessionLagEstimator()
+    estimator.publisherStarted(atMilliseconds: 10_000)
+    #expect(estimator.observe(
+        sourceTimestampMicroseconds: 500_000_000,
+        observedAtMilliseconds: 13_000
+    ) == 3_000)
+    #expect(estimator.observe(
+        sourceTimestampMicroseconds: 501_000_000,
+        observedAtMilliseconds: 14_100
+    ) == 3_100)
+}
+
+@Test func operationalVideoViewportMatchesZoomedClueGeometry() {
+    let viewport = OperationalVideoViewport(
+        scale: 2,
+        normalizedPanX: 0.125,
+        normalizedPanY: -0.25
+    )
+    #expect(viewport.needsTransform)
+    #expect(viewport.translationX(width: 800) == -300)
+    #expect(viewport.translationY(height: 400) == -100)
+}
+
+@Test func operationalVideoViewportClampsUnsafeGestureInputs() {
+    let viewport = OperationalVideoViewport(
+        scale: .infinity,
+        normalizedPanX: 9,
+        normalizedPanY: -.infinity
+    )
+    #expect(viewport.scale == 1)
+    #expect(viewport.normalizedPanX == 1.5)
+    #expect(viewport.normalizedPanY == 0)
+    #expect(viewport.needsTransform)
 }

@@ -119,10 +119,9 @@ later build cannot be credited with results from an earlier binary.
   same importer when those features are configured.
 - Open **Status** and confirm the automatically started Bluetooth scanner beside
   a known Remote ID drone.
-- Put an Android and Apple device on the same Wi-Fi network. On Android enable
-  **Settings > Apple Wi-Fi Remote ID Relay**, enter the **Android relay
-  destination** shown on Apple, and verify Wi-Fi Beacon/NAN aircraft appear on
-  both devices with matching IDs and positions. Disable the relay afterward.
+- For Wi-Fi Remote ID qualification, enable the DS110 wireless relay and verify
+  the bridged aircraft appears through Apple's Bluetooth scanner with the same
+  ID and position shown on Android.
 - Tap **Copy** in Status, paste the report into Notes, and verify it contains no
   QR token, tracker API key, or CalTopo credential secret.
 - Capture a screenshot if an aircraft is missing or mapped incorrectly.

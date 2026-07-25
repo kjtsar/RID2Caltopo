@@ -1,9 +1,35 @@
 package org.ncssar.rid2caltopo.notam
 
+import org.ncssar.rid2caltopo.airspace.AirspaceChipSeverity
+import org.ncssar.rid2caltopo.airspace.AirspaceUiState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NotamPolicyTest {
+    @Test
+    fun pendingAirspaceStatusOverridesClearNotamLabel() {
+        assertTrue(
+            shouldUseAirspaceStatus(
+                notamVisible = true,
+                airspaceState = AirspaceUiState(
+                    chipSeverity = AirspaceChipSeverity.Neutral,
+                    chipLabel = "Airspace updating..."
+                )
+            )
+        )
+        assertFalse(
+            shouldUseAirspaceStatus(
+                notamVisible = true,
+                airspaceState = AirspaceUiState(
+                    chipSeverity = AirspaceChipSeverity.Normal,
+                    chipLabel = "Airspace clear"
+                )
+            )
+        )
+    }
+
     @Test
     fun intersectingNonRestrictiveNoticeIsCautionNoticeNotRedRestriction() {
         val notice = NearbyNotam(

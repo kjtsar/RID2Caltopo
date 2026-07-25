@@ -29,7 +29,61 @@ public enum CaltopoLiveClientError: Error, Sendable, Equatable {
     case missingLiveTrackID
 }
 
+extension CaltopoLiveClientError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration:
+            return "The CalTopo domain, team, map, or credential configuration is incomplete."
+        case .invalidCredentialSecret:
+            return "The CalTopo credential secret is not valid Base64."
+        case .invalidURL:
+            return "The CalTopo server address is invalid."
+        case let .httpStatus(code, message):
+            let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty
+                ? "CalTopo returned HTTP \(code)."
+                : "CalTopo returned HTTP \(code): \(detail)"
+        case .missingResult:
+            return "CalTopo returned a response without the expected result."
+        case .missingLiveTrackID:
+            return "CalTopo did not return a live-track identifier."
+        }
+    }
+}
+
+public struct CaltopoDeviceMarker: Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let deviceName: String
+    public let latitude: Double
+    public let longitude: Double
+    public let description: String
+    public let color: String
+
+    public init(
+        id: String,
+        title: String,
+        deviceName: String,
+        latitude: Double,
+        longitude: Double,
+        description: String,
+        color: String
+    ) {
+        self.id = id
+        self.title = title
+        self.deviceName = deviceName
+        self.latitude = latitude
+        self.longitude = longitude
+        self.description = description
+        self.color = color
+    }
+}
+
 public enum CaltopoRequestSigner {
+    // Match Android CaltopoSession.DEFAULT_TIMEOUT_MS. CalTopo validates this
+    // expiry as part of the HMAC-authenticated request.
+    public static let validityMilliseconds: Int64 = 2 * 60 * 1_000
+
     public static func signature(
         method: String,
         path: String,
@@ -49,6 +103,19 @@ public enum CaltopoRequestSigner {
             using: SymmetricKey(data: keyData)
         )
         return Data(code).base64EncodedString()
+    }
+
+    static func percentEncodedQuery(_ fields: [(String, String)]) -> String {
+        // URLComponents.queryItems leaves "+" and "/" unescaped. CalTopo
+        // parses query parameters as form data, where a literal "+" becomes a
+        // space and intermittently corrupts Base64 HMAC signatures. OkHttp's
+        // addQueryParameter(), used by Android, escapes both characters.
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return fields.map { key, value in
+            let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+            let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+            return "\(encodedKey)=\(encodedValue)"
+        }.joined(separator: "&")
     }
 }
 
@@ -111,10 +178,108 @@ public actor CaltopoLiveClient {
         return try CaltopoArtifactDecoder.decode(data: data)
     }
 
+    public func createFolder(
+        title: String,
+        visible: Bool,
+        labelVisible: Bool,
+        now: Date = Date()
+    ) async throws -> String {
+        let data = try await perform(makeCreateFolderRequest(
+            title: title,
+            visible: visible,
+            labelVisible: labelVisible,
+            now: now
+        ))
+        let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let result = root?["result"] as? [String: Any]
+        if let id = result?["id"] as? String, !id.isEmpty { return id }
+        if let id = root?["id"] as? String, !id.isEmpty { return id }
+        throw CaltopoLiveClientError.missingResult
+    }
+
+    public func deleteFolder(folderID: String, now: Date = Date()) async throws {
+        _ = try await perform(
+            makeDeleteFolderRequest(folderID: folderID, now: now),
+            acceptedStatusCodes: [400, 404]
+        )
+    }
+
+    public func archiveLiveTrack(
+        liveTrackID: String,
+        label: String,
+        observations: [RidObservation],
+        folderID: String,
+        now: Date = Date()
+    ) async throws {
+        guard !observations.isEmpty else {
+            try await stopLiveTrack(liveTrackID: liveTrackID, now: now)
+            return
+        }
+        _ = try await perform(makeArchiveLiveTrackRequest(
+            liveTrackID: liveTrackID,
+            label: label,
+            observations: observations,
+            folderID: folderID,
+            now: now
+        ))
+        try await stopLiveTrack(liveTrackID: liveTrackID, now: now)
+    }
+
     public func publishPhotoClue(_ clue: CaltopoPhotoClue, now: Date = Date()) async throws -> String {
         let requests = try makePhotoClueRequests(clue, now: now)
         for request in requests { _ = try await perform(request) }
         return clue.markerID.uuidString.lowercased()
+    }
+
+    public func publishDeviceMarker(
+        _ marker: CaltopoDeviceMarker,
+        folderID: String?,
+        now: Date = Date()
+    ) async throws {
+        _ = try await perform(makeDeviceMarkerRequest(marker, folderID: folderID, now: now))
+    }
+
+    func makeDeviceMarkerRequest(
+        _ marker: CaltopoDeviceMarker,
+        folderID: String?,
+        now: Date
+    ) throws -> URLRequest {
+        let markerID = marker.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !markerID.isEmpty,
+              !marker.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              marker.latitude.isFinite,
+              marker.longitude.isFinite
+        else { throw CaltopoLiveClientError.invalidConfiguration }
+        let updated = Int64(now.timeIntervalSince1970 * 1_000)
+        var properties: [String: Any] = [
+            "class": "Marker",
+            "updated": updated,
+            "title": marker.title,
+            "description": marker.description,
+            "marker-color": marker.color,
+            "marker-symbol": "radiotower",
+            "marker-size": 1,
+            "marker-visibility": "visible",
+            "r2c-name": marker.deviceName,
+            "r2c-guid": markerID,
+            "r2c-last-seen-epoch-ms": updated,
+        ]
+        if let folderID, !folderID.isEmpty {
+            properties["folderId"] = folderID
+        }
+        return try makeSignedPostRequest(
+            path: "/api/v1/map/\(configuration.mapID)/Marker/\(markerID)",
+            object: [
+                "id": markerID,
+                "type": "Feature",
+                "geometry": [
+                    "type": "Point",
+                    "coordinates": [marker.longitude, marker.latitude],
+                ],
+                "properties": properties,
+            ],
+            now: now
+        )
     }
 
     func makePhotoClueRequests(_ clue: CaltopoPhotoClue, now: Date) throws -> [URLRequest] {
@@ -181,7 +346,8 @@ public actor CaltopoLiveClient {
 
     func makeMapSnapshotRequest(now: Date) throws -> URLRequest {
         let path = "/api/v1/map/\(configuration.mapID)/since/0"
-        let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
+        let expires = Int64(now.timeIntervalSince1970 * 1_000)
+            + CaltopoRequestSigner.validityMilliseconds
         let signature = try CaltopoRequestSigner.signature(
             method: "GET",
             path: path,
@@ -191,11 +357,11 @@ public actor CaltopoLiveClient {
         )
         guard var components = URLComponents(url: httpsURL(path: path)!, resolvingAgainstBaseURL: false)
         else { throw CaltopoLiveClientError.invalidURL }
-        components.queryItems = [
-            URLQueryItem(name: "id", value: configuration.credentialID),
-            URLQueryItem(name: "expires", value: String(expires)),
-            URLQueryItem(name: "signature", value: signature),
-        ]
+        components.percentEncodedQuery = CaltopoRequestSigner.percentEncodedQuery([
+            ("id", configuration.credentialID),
+            ("expires", String(expires)),
+            ("signature", signature),
+        ])
         guard let url = components.url else { throw CaltopoLiveClientError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -214,7 +380,7 @@ public actor CaltopoLiveClient {
             "title": label,
             "stroke-width": 2,
             "stroke-opacity": 1,
-            "stroke": "#FF0000",
+            "stroke": "#0000ff",
             "pattern": "solid",
             "marker-symbol": "icon-8T781R60-12-0.5-0.5-tf",
             "marker-size": 2,
@@ -229,7 +395,8 @@ public actor CaltopoLiveClient {
             options: [.sortedKeys]
         )
         let payload = String(decoding: payloadData, as: UTF8.self)
-        let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
+        let expires = Int64(now.timeIntervalSince1970 * 1_000)
+            + CaltopoRequestSigner.validityMilliseconds
         let signature = try CaltopoRequestSigner.signature(
             method: "POST",
             path: path,
@@ -251,10 +418,71 @@ public actor CaltopoLiveClient {
         return request
     }
 
+    func makeCreateFolderRequest(
+        title: String,
+        visible: Bool,
+        labelVisible: Bool,
+        now: Date
+    ) throws -> URLRequest {
+        let path = "/api/v1/map/\(configuration.mapID)/Folder"
+        return try makeSignedPostRequest(
+            path: path,
+            object: [
+                "type": "Feature",
+                "properties": [
+                    "class": "Folder",
+                    "title": title,
+                    "visible": visible,
+                    "labelVisible": labelVisible,
+                ],
+            ],
+            now: now
+        )
+    }
+
+    func makeArchiveLiveTrackRequest(
+        liveTrackID: String,
+        label: String,
+        observations: [RidObservation],
+        folderID: String,
+        now: Date
+    ) throws -> URLRequest {
+        guard !liveTrackID.isEmpty else { throw CaltopoLiveClientError.missingLiveTrackID }
+        let updated = Int64(now.timeIntervalSince1970 * 1_000)
+        let coordinates: [[Double]] = observations.map {
+            [$0.longitude, $0.latitude, $0.altitudeMeters ?? -1_000]
+        }
+        return try makeSignedPostRequest(
+            path: "/api/v1/map/\(configuration.mapID)/Shape/\(liveTrackID)",
+            object: [
+                "id": liveTrackID,
+                "type": "Feature",
+                "properties": [
+                    "class": "Shape",
+                    "title": label,
+                    "folderId": folderID,
+                    "stroke": "#ff00ff",
+                    "stroke-width": 2,
+                    "stroke-opacity": 0.5,
+                    "pattern": "solid",
+                    "updated": String(updated),
+                    "-updated-on": String(updated),
+                ],
+                "geometry": [
+                    "type": "LineString",
+                    "coordinates": coordinates,
+                    "size": coordinates.count,
+                ],
+            ],
+            now: now
+        )
+    }
+
     private func makeSignedPostRequest(path: String, object: [String: Any], now: Date) throws -> URLRequest {
         let payloadData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         let payload = String(decoding: payloadData, as: UTF8.self)
-        let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
+        let expires = Int64(now.timeIntervalSince1970 * 1_000)
+            + CaltopoRequestSigner.validityMilliseconds
         let signature = try CaltopoRequestSigner.signature(
             method: "POST",
             path: path,
@@ -310,7 +538,8 @@ public actor CaltopoLiveClient {
     func makeStopLiveTrackRequest(liveTrackID: String, now: Date) throws -> URLRequest {
         guard !liveTrackID.isEmpty else { throw CaltopoLiveClientError.missingLiveTrackID }
         let path = "/api/v1/map/\(configuration.mapID)/LiveTrack/\(liveTrackID)"
-        let expires = Int64(now.timeIntervalSince1970 * 1_000) + 10_000
+        let expires = Int64(now.timeIntervalSince1970 * 1_000)
+            + CaltopoRequestSigner.validityMilliseconds
         let signature = try CaltopoRequestSigner.signature(
             method: "DELETE",
             path: path,
@@ -320,11 +549,37 @@ public actor CaltopoLiveClient {
         )
         guard var components = URLComponents(url: httpsURL(path: path)!, resolvingAgainstBaseURL: false)
         else { throw CaltopoLiveClientError.invalidURL }
-        components.queryItems = [
-            URLQueryItem(name: "id", value: configuration.credentialID),
-            URLQueryItem(name: "expires", value: String(expires)),
-            URLQueryItem(name: "signature", value: signature),
-        ]
+        components.percentEncodedQuery = CaltopoRequestSigner.percentEncodedQuery([
+            ("id", configuration.credentialID),
+            ("expires", String(expires)),
+            ("signature", signature),
+        ])
+        guard let url = components.url else { throw CaltopoLiveClientError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("RID2Caltopo/Apple", forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
+    func makeDeleteFolderRequest(folderID: String, now: Date) throws -> URLRequest {
+        guard !folderID.isEmpty else { throw CaltopoLiveClientError.missingResult }
+        let path = "/api/v1/map/\(configuration.mapID)/Folder/\(folderID)"
+        let expires = Int64(now.timeIntervalSince1970 * 1_000)
+            + CaltopoRequestSigner.validityMilliseconds
+        let signature = try CaltopoRequestSigner.signature(
+            method: "DELETE",
+            path: path,
+            expiresMilliseconds: expires,
+            payload: "",
+            credentialSecretBase64: configuration.credentialSecretBase64
+        )
+        guard var components = URLComponents(url: httpsURL(path: path)!, resolvingAgainstBaseURL: false)
+        else { throw CaltopoLiveClientError.invalidURL }
+        components.percentEncodedQuery = CaltopoRequestSigner.percentEncodedQuery([
+            ("id", configuration.credentialID),
+            ("expires", String(expires)),
+            ("signature", signature),
+        ])
         guard let url = components.url else { throw CaltopoLiveClientError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"

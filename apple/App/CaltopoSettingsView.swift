@@ -9,6 +9,8 @@ struct CaltopoSettingsView: View {
     @ObservedObject private var airspace = AppleAirspaceCenter.shared
     @ObservedObject private var landRestrictions = AppleLandRestrictionCenter.shared
     @ObservedObject private var externalDisplay = AppleExternalDisplaySettings.shared
+    @AppStorage("video.captureStreams") private var captureStreams = false
+    @AppStorage(AppleDeviceIdentity.storedNameKey) private var deviceName = AppleDeviceIdentity.displayName
     @State private var showingTeamMaps = false
 
     var body: some View {
@@ -42,6 +44,20 @@ struct CaltopoSettingsView: View {
                 TextField("Map ID", text: $settings.mapID)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+            }
+            Section("This device") {
+                TextField("Device Name", text: $deviceName)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                Text("Used for this iPad's R2C map marker, Map Folders item, tracker identity, and local track metadata. iOS does not expose the local Bluetooth adapter name, so set this once if Apple reports only “iPad.”")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Video") {
+                Toggle("Capture Streams", isOn: $captureStreams)
+                Text("When enabled, incoming streams are recorded as fMP4 under Files > RID2Caltopo > CapturedStreams. Changing this setting restarts the local media server.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Section("Team credential") {
                 TextField("Credential ID", text: $settings.credentialID)
@@ -147,7 +163,7 @@ struct CaltopoSettingsView: View {
     }
 }
 
-private struct CaltopoTeamMapBrowser: View {
+struct CaltopoTeamMapBrowser: View {
     @ObservedObject var settings: AppleCaltopoSettings
     let onSelect: (CaltopoTeamMap) -> Void
     @Environment(\.dismiss) private var dismiss

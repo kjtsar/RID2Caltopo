@@ -12,7 +12,7 @@ hardware.
 | Configuration import | Import Android `R2C1`, `R2CFAA1`, and `R2CMA1` QR/config payloads and preserve imported mappings and settings. | Cross-language vectors, bundle tests, paste/custom-URL flow, and Simulator UI are green. | Green except physical camera/Drive proof |
 | Remote ID core | Decode ASTM Basic ID, Location, System, and Message Packs and apply Android filtering, canonical IDs, aging, and archive policy. | Shared tests and live synthetic Simulator observations are green. | Green |
 | Bluetooth scanning | Start automatically, expose scanner state and aircraft details, and produce Android-shaped diagnostics. | A real iPad flight produced 48 accepted Bluetooth waypoints to approximately 333 m and a completed local archive; background/lock continuity remains unqualified. | Foreground green; background physical gate |
-| Wi-Fi Remote ID | Preserve Wi-Fi Beacon/NAN observations through the same tracking pipeline. | Public iOS cannot passively monitor ASTM NAN. The opt-in Android UDP relay and binary/JSON receiver pass contract and Simulator loopback tests. | Physical Android-to-Apple gate |
+| Wi-Fi Remote ID | Receive Wi-Fi Beacon/NAN aircraft through the DS110 Bluetooth bridge. | The app uses the normal Bluetooth parser and intentionally has no UDP compatibility listener. | Physical DS110 flight gate |
 | Map and tracks | Show aircraft/operator positions, heading, trails, range/bearing, closest-pair separation, and Android-compatible GeoJSON archives. | Physical iPad GPS reached 2 m reported accuracy and a real Bluetooth flight archived successfully; the new initial operator-follow behavior still needs visual field confirmation. | Green except final visual follow check |
 | NOTAM/TFR | Authenticate with imported FAA configuration, retain last results across transient failure, show freshness/restriction status and details, and render operational geometry. | Parser/policy tests and deterministic Simulator overlays are green. | Credentialed physical-location gate |
 | FAA facility map | Query Android's one-mile operating area and report airport, airspace class, ceiling, LAANC availability, and authorization status. | Query/parser/policy tests, Simulator UI, and full app compilation are green. | Physical-location gate |
@@ -40,8 +40,8 @@ build; an untested or unevidenced required row remains a no-go.
    applicable; include one real public Drive-hosted bundle.
 3. Compare a known ASTM Bluetooth transmitter side-by-side with Android,
    including foreground updates, lock/background behavior, and recovery.
-4. Relay Android Wi-Fi Beacon/NAN observations over the shared access point and
-   compare IDs, positions, transport labels, and rejected-datagram diagnostics.
+4. Exercise a Wi-Fi Beacon/NAN aircraft through the DS110 wireless relay and
+   compare the bridged Bluetooth ID and position with Android.
 5. Verify physical GPS position, range/bearing, MapKit layout, track completion,
    Files export, and the system log-sharing sheet.
 6. Publish a controller stream to the displayed RTMP address. Exercise Off,

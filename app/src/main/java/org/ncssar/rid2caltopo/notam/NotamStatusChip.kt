@@ -25,11 +25,7 @@ fun NotamStatusChip(
     outerPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
 ) {
     if (!state.visible && airspaceState == null) return
-    val useAirspaceLabel = airspaceState != null && (
-        !state.visible ||
-            airspaceState.chipSeverity == AirspaceChipSeverity.Caution ||
-            (airspaceState.chipSeverity == AirspaceChipSeverity.Neutral && airspaceState.errorMessage != null)
-        )
+    val useAirspaceLabel = shouldUseAirspaceStatus(state.visible, airspaceState)
     val displaySeverity = when {
         !useAirspaceLabel -> state.chipSeverity
         airspaceState?.chipSeverity == AirspaceChipSeverity.Caution -> NotamChipSeverity.Caution
@@ -70,3 +66,9 @@ fun NotamStatusChip(
         )
     }
 }
+
+internal fun shouldUseAirspaceStatus(
+    notamVisible: Boolean,
+    airspaceState: AirspaceUiState?
+): Boolean = airspaceState != null &&
+    (!notamVisible || airspaceState.chipSeverity != AirspaceChipSeverity.Normal)

@@ -43,6 +43,7 @@ import kotlin.math.atan2
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.math.tan
 import org.ncssar.rid2caltopo.data.CaltopoClient
 import org.ncssar.rid2caltopo.data.CaltopoClient.CTDebug
@@ -356,12 +357,31 @@ internal fun buildClueCaptureSummary(clue: PendingClue): String {
         .removePrefix("loc:")
         .takeIf { it.isNotBlank() && it != "unknown" }
         ?.let { lines += "  USNG: $it" }
-    lines += clue.headingDeg?.let {
-        String.format(Locale.US, "  Heading used for clue: %.1f\u00b0", it)
+    lines += formatClueHeading(clue.headingDeg)?.let {
+        "  Heading used for clue: $it\u00b0"
     } ?: "  Heading used for clue: N/A"
     lines += "  Heading source: ${clue.headingSourceLabel ?: "N/A"}"
     lines += String.format(Locale.US, "  Gimbal angle at capture: %.1f\u00b0", clue.gimbalAngleDeg)
+    lines += clue.aglMeters?.let {
+        String.format(Locale.US, "  AGL: %.0f'", it * METERS_TO_FEET)
+    } ?: "  AGL: N/A"
+    lines += clue.atoMeters?.let {
+        String.format(Locale.US, "  ATO: %.0f'", it * METERS_TO_FEET)
+    } ?: "  ATO: N/A"
+    lines += String.format(Locale.US, "  Distance to clue: %.0f'", clueDistanceMeters(clue) * METERS_TO_FEET)
     return lines.joinToString("\n")
+}
+
+private fun clueDistanceMeters(clue: PendingClue): Double {
+    val latitude1 = Math.toRadians(clue.droneLat)
+    val latitude2 = Math.toRadians(clue.lat)
+    val latitudeDelta = latitude2 - latitude1
+    val longitudeDelta = Math.toRadians(clue.lng - clue.droneLng)
+    val haversine = sin(latitudeDelta / 2).let { it * it } +
+        cos(latitude1) * cos(latitude2) *
+        sin(longitudeDelta / 2).let { it * it }
+    val angularDistance = 2 * atan2(sqrt(haversine), sqrt(maxOf(0.0, 1 - haversine)))
+    return 6_371_000.0 * angularDistance
 }
 
 private data class HeadingSelection(
@@ -369,20 +389,31 @@ private data class HeadingSelection(
     val sourceLabel: String?,
 )
 
+internal fun normalizeClueHeading(value: Double?): Double? {
+    val finite = value?.takeIf { it.isFinite() } ?: return null
+    return ((finite % 360.0) + 360.0) % 360.0
+}
+
+internal fun formatClueHeading(value: Double?): String? {
+    val normalized = normalizeClueHeading(value) ?: return null
+    val roundedTenths = kotlin.math.round(normalized * 10.0).toInt() % 3_600
+    return String.format(Locale.US, "%.1f", roundedTenths / 10.0)
+}
+
 private fun selectClueHeading(
     telemetry: StreamTelemetrySnapshot?,
     displayHeadingDeg: Double?,
     ridTrackDeg: Double?,
 ): HeadingSelection {
-    val cameraYaw = telemetry?.cameraYawDeg?.takeIf { it.isFinite() }
+    val cameraYaw = normalizeClueHeading(telemetry?.cameraYawDeg)
     if (cameraYaw != null) return HeadingSelection(cameraYaw, "Camera yaw")
 
-    val streamHeading = telemetry?.headingDeg?.takeIf { it.isFinite() }
+    val streamHeading = normalizeClueHeading(telemetry?.headingDeg)
     if (streamHeading != null) return HeadingSelection(streamHeading, "Stream heading")
 
-    val displayHeading = displayHeadingDeg?.takeIf { it.isFinite() }
+    val displayHeading = normalizeClueHeading(displayHeadingDeg)
     if (displayHeading != null) {
-        val ridTrack = ridTrackDeg?.takeIf { it.isFinite() }
+        val ridTrack = normalizeClueHeading(ridTrackDeg)
         val label = if (ridTrack != null && abs(displayHeading - ridTrack) < 0.1) {
             "RID aircraft track"
         } else {
@@ -391,7 +422,7 @@ private fun selectClueHeading(
         return HeadingSelection(displayHeading, label)
     }
 
-    val ridTrack = ridTrackDeg?.takeIf { it.isFinite() }
+    val ridTrack = normalizeClueHeading(ridTrackDeg)
     if (ridTrack != null) return HeadingSelection(ridTrack, "RID aircraft track")
 
     return HeadingSelection(null, null)

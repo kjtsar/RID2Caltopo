@@ -14,7 +14,13 @@ data class FaaUasFacilityMapRecord(
     val primaryAirportIcao: String,
     val primaryAirportName: String,
     val laancAvailable: Boolean,
-    val airspaceClasses: List<String>
+    val airspaceClasses: List<String>,
+    val rings: List<List<AirspaceCoordinate>> = emptyList()
+)
+
+data class AirspaceCoordinate(
+    val latitude: Double,
+    val longitude: Double
 )
 
 data class AirspaceUiState(

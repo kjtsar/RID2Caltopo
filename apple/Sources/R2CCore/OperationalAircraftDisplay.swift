@@ -84,10 +84,8 @@ public enum OperationalAircraftDisplay {
             return String(format: "%.0f%@", value, stale ? "?" : "")
         }
         let heading: String
-        if let headingDegrees, headingDegrees.isFinite {
-            let normalized = (headingDegrees.truncatingRemainder(dividingBy: 360) + 360)
-                .truncatingRemainder(dividingBy: 360)
-            heading = String(format: "%.0f", normalized)
+        if let rounded = RidHeading.roundedWholeDegrees(headingDegrees) {
+            heading = String(rounded)
         } else {
             heading = "--"
         }

@@ -36,6 +36,7 @@ final class RIDTrackViewModel: ObservableObject {
     private var publicationChains: [String: Task<Void, Never>] = [:]
     private var ownershipActivationTasks: [String: Task<Void, Never>] = [:]
     private var archiveConfiguration: AppleTrackArchiveConfiguration?
+    private var localDeviceMarker: CaltopoDeviceMarker?
 
     func bind(to observations: AsyncStream<RidObservation>, sourceID: String) {
         guard observationTasks[sourceID] == nil else { return }
@@ -61,7 +62,10 @@ final class RIDTrackViewModel: ObservableObject {
                     self.altitudeCoordinatorByAircraftID.removeValue(forKey: track.aircraftID)
                     self.altitudeDisplayByAircraftID.removeValue(forKey: track.aircraftID)
                 }
-                self.tracks = await self.store.snapshot()
+                let snapshot = await self.store.snapshot()
+                if snapshot != self.tracks {
+                    self.tracks = snapshot
+                }
             }
         }
         caltopoEventTask = Task { [weak self, caltopoPublisher] in
@@ -201,9 +205,25 @@ final class RIDTrackViewModel: ObservableObject {
         )
     }
 
-    func configureCaltopo(_ configuration: AppleCaltopoConfiguration) {
+    func configureCaltopo(
+        _ configuration: AppleCaltopoConfiguration,
+        trackFolderName: String = "Drone Tracks"
+    ) {
         Task { [caltopoPublisher] in
-            await caltopoPublisher.configure(configuration)
+            await caltopoPublisher.configure(
+                configuration,
+                trackFolderName: trackFolderName
+            )
+            if let marker = await MainActor.run(body: { self.localDeviceMarker }) {
+                await caltopoPublisher.publishDeviceMarker(marker, force: true)
+            }
+        }
+    }
+
+    func publishLocalDeviceMarker(_ marker: CaltopoDeviceMarker, force: Bool = false) {
+        localDeviceMarker = marker
+        Task { [caltopoPublisher] in
+            await caltopoPublisher.publishDeviceMarker(marker, force: force)
         }
     }
 
@@ -356,7 +376,7 @@ final class RIDTrackViewModel: ObservableObject {
                 for route in routes {
                     let altitude = altitudeAlert && route.id == "DEMOALPHA01" ? 1_665.0 : route.altitude
                     let observation = RidObservation(
-                        source: .externalReceiver,
+                        source: .bluetoothLegacy,
                         aircraftId: route.id,
                         receivedAt: Date(),
                         latitude: route.latitude + Double(routeStep) * route.latitudeStep,
@@ -396,7 +416,7 @@ final class RIDTrackViewModel: ObservableObject {
             incident: archiveConfiguration?.incident ?? "",
             operationalPeriod: archiveConfiguration?.operationalPeriod ?? "",
             mapID: archiveConfiguration?.mapID ?? "",
-            deviceName: ProcessInfo.processInfo.hostName,
+            deviceName: AppleDeviceIdentity.displayName,
             buildVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
             buildTime: "Apple"
         )
@@ -468,7 +488,7 @@ final class RIDTrackViewModel: ObservableObject {
     private func publishRelay(_ relay: TrackerRelaySighting) {
         guard peerCoordinator?.publicationAllowed(remoteID: relay.remoteID) == true else { return }
         let observation = RidObservation(
-            source: .externalReceiver,
+            source: .trackerRelay,
             aircraftId: relay.remoteID,
             receivedAt: relay.droneTimestampMilliseconds > 0
                 ? Date(timeIntervalSince1970: Double(relay.droneTimestampMilliseconds) / 1_000)

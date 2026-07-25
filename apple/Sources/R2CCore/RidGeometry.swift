@@ -12,6 +12,19 @@ public struct RidRelativePosition: Sendable, Equatable {
     }
 }
 
+public enum RidHeading {
+    public static func normalized(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return (value.truncatingRemainder(dividingBy: 360) + 360)
+            .truncatingRemainder(dividingBy: 360)
+    }
+
+    public static func roundedWholeDegrees(_ value: Double?) -> Int? {
+        guard let normalized = normalized(value) else { return nil }
+        return Int(normalized.rounded()).quotientAndRemainder(dividingBy: 360).remainder
+    }
+}
+
 public enum RidGeometry {
     public static func relativePosition(
         fromLatitude: Double,

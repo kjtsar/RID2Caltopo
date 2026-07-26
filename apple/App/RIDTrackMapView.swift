@@ -314,6 +314,7 @@ struct RIDTrackMapView: View {
         center: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
         span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
     )
+    @State private var viewportMapPointsPerPoint: Double?
     @State private var showMapItems = false
     @State private var showOfflinePreparation = false
     @State private var showMapManagement = false
@@ -670,6 +671,7 @@ struct RIDTrackMapView: View {
                 operatorCoordinate: locationProvider.lastLocation?.coordinate,
                 operatorStatusLines: peerCoordinator.localDeviceStatusLines,
                 viewport: $viewport,
+                viewportMapPointsPerPoint: $viewportMapPointsPerPoint,
                 inset: inset,
                 predictiveHeadEnabled: orgSettings.predictiveHeadEnabled,
                 focusedAircraftID: focusedAircraftID,
@@ -678,6 +680,7 @@ struct RIDTrackMapView: View {
                 onSelectClue: { selectedClueID = $0 },
                 onSelectAircraft: { remoteID in
                     focusedAircraftID = remoteID
+                    if followFocusedDrone { operatorAdjustedViewport = false }
                     guard !inset else { return }
                     let identity = identityStore.identity(for: remoteID)
                     selectedPilotSettings = PilotDisplaySelection(
@@ -1839,6 +1842,15 @@ private struct PilotDisplaySettingsView: View {
     }
 }
 
+private final class ScalePreservingMKMapView: MKMapView {
+    var onBoundsLayout: ((MKMapView) -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onBoundsLayout?(self)
+    }
+}
+
 private struct OperationalMKMapView: UIViewRepresentable {
     let tracks: [RidAircraftTrack]
     let aircraftDisplay: [String: AircraftMapDisplay]
@@ -1855,6 +1867,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     let operatorCoordinate: CLLocationCoordinate2D?
     let operatorStatusLines: [String]
     @Binding var viewport: MKCoordinateRegion
+    @Binding var viewportMapPointsPerPoint: Double?
     let inset: Bool
     let predictiveHeadEnabled: Bool
     let focusedAircraftID: String?
@@ -1867,6 +1880,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             viewport: $viewport,
+            viewportMapPointsPerPoint: $viewportMapPointsPerPoint,
             operatorAdjustedViewport: $operatorAdjustedViewport,
             onSelectClue: onSelectClue,
             onSelectAircraft: onSelectAircraft,
@@ -1875,7 +1889,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> MKMapView {
-        let map = MKMapView()
+        let map = ScalePreservingMKMapView()
         map.delegate = context.coordinator
         map.showsCompass = false
         map.showsScale = !inset
@@ -1893,11 +1907,15 @@ private struct OperationalMKMapView: UIViewRepresentable {
             ])
         }
         context.coordinator.installLongPress(on: map)
+        map.onBoundsLayout = { [weak coordinator = context.coordinator] map in
+            coordinator?.restoreViewportScaleIfNeeded(on: map)
+        }
         return map
     }
 
     static func dismantleUIView(_ map: MKMapView, coordinator: Coordinator) {
-        coordinator.persistViewport(from: map)
+        coordinator.persistViewport(from: map, includeScale: false)
+        (map as? ScalePreservingMKMapView)?.onBoundsLayout = nil
         map.delegate = nil
     }
 
@@ -1957,6 +1975,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         @Binding private var viewport: MKCoordinateRegion
+        @Binding private var viewportMapPointsPerPoint: Double?
         @Binding private var operatorAdjustedViewport: Bool
         private var tileFingerprint = ""
         private var staticRenderState: StaticMapRenderState?
@@ -1967,19 +1986,27 @@ private struct OperationalMKMapView: UIViewRepresentable {
         private var operatorViewportRescueApplied = false
         private var updating = false
         private var currentInset = false
+        private var currentFollowFocusedDrone = false
+        private var currentFocusedAircraftID: String?
+        private let pendingViewportMapPointsPerPoint: Double?
+        private var restoredViewportScale = false
+        private var regionChangeWasUserGesture = false
         var onSelectClue: (UUID) -> Void
         var onSelectAircraft: (String) -> Void
         var onLongPressTile: (Int, Int, Int) -> Void
 
         init(
             viewport: Binding<MKCoordinateRegion>,
+            viewportMapPointsPerPoint: Binding<Double?>,
             operatorAdjustedViewport: Binding<Bool>,
             onSelectClue: @escaping (UUID) -> Void,
             onSelectAircraft: @escaping (String) -> Void,
             onLongPressTile: @escaping (Int, Int, Int) -> Void
         ) {
             _viewport = viewport
+            _viewportMapPointsPerPoint = viewportMapPointsPerPoint
             _operatorAdjustedViewport = operatorAdjustedViewport
+            pendingViewportMapPointsPerPoint = viewportMapPointsPerPoint.wrappedValue
             self.onSelectClue = onSelectClue
             self.onSelectAircraft = onSelectAircraft
             self.onLongPressTile = onLongPressTile
@@ -2135,6 +2162,8 @@ private struct OperationalMKMapView: UIViewRepresentable {
         ) {
             updating = true
             currentInset = inset
+            currentFollowFocusedDrone = followFocusedDrone
+            currentFocusedAircraftID = focusedAircraftID
             defer { updating = false }
             let nextStaticState = StaticMapRenderState(
                 clues: clues,
@@ -2337,8 +2366,7 @@ private struct OperationalMKMapView: UIViewRepresentable {
             }
             if followFocusedDrone,
                let focusedAircraftID,
-               let coordinate = renderCoordinates[focusedAircraftID],
-               inset || !operatorAdjustedViewport {
+               let coordinate = renderCoordinates[focusedAircraftID] {
                 setCenterAndPersist(coordinate, on: map)
             }
             }
@@ -2490,17 +2518,29 @@ private struct OperationalMKMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             guard !updating else { return }
-            persistViewport(from: mapView)
+            persistViewport(from: mapView, includeScale: regionChangeWasUserGesture)
+            regionChangeWasUserGesture = false
+        }
+
+        func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+            guard !updating, hasActiveUserGesture(in: mapView) else { return }
+            regionChangeWasUserGesture = true
+            persistViewport(from: mapView, includeScale: true)
         }
 
         func setCenterAndPersist(_ coordinate: CLLocationCoordinate2D, on map: MKMapView) {
             guard CLLocationCoordinate2DIsValid(coordinate) else { return }
-            let region = MKCoordinateRegion(center: coordinate, span: map.region.span)
-            map.setRegion(region, animated: false)
-            viewport = region
+            updating = true
+            map.setCenter(coordinate, animated: false)
+            updating = false
+            viewport.center = coordinate
         }
 
-        func persistViewport(from map: MKMapView) {
+        func persistViewport(from map: MKMapView, includeScale: Bool) {
+            guard restoredViewportScale,
+                  map.bounds.width >= 32,
+                  map.bounds.height >= 32
+            else { return }
             let region = map.region
             guard CLLocationCoordinate2DIsValid(region.center),
                   region.span.latitudeDelta.isFinite,
@@ -2509,15 +2549,65 @@ private struct OperationalMKMapView: UIViewRepresentable {
                   region.span.longitudeDelta > 0
             else { return }
             viewport = region
+            guard includeScale else { return }
+            let width = Double(map.bounds.width)
+            let visibleWidth = map.visibleMapRect.width
+            if width > 0, visibleWidth.isFinite, visibleWidth > 0 {
+                viewportMapPointsPerPoint = visibleWidth / width
+            }
+        }
+
+        func restoreViewportScaleIfNeeded(on map: MKMapView) {
+            guard !restoredViewportScale,
+                  map.bounds.width >= 32,
+                  map.bounds.height >= 32
+            else { return }
+            guard let mapPointsPerPoint = pendingViewportMapPointsPerPoint else {
+                restoredViewportScale = true
+                persistViewport(from: map, includeScale: true)
+                return
+            }
+            guard
+                  mapPointsPerPoint.isFinite,
+                  mapPointsPerPoint > 0
+            else {
+                restoredViewportScale = true
+                persistViewport(from: map, includeScale: true)
+                return
+            }
+            restoredViewportScale = true
+            let center = MKMapPoint(viewport.center)
+            let width = mapPointsPerPoint * Double(map.bounds.width)
+            let height = mapPointsPerPoint * Double(map.bounds.height)
+            let rect = MKMapRect(
+                x: center.x - width / 2,
+                y: center.y - height / 2,
+                width: width,
+                height: height
+            )
+            updating = true
+            map.setVisibleMapRect(rect, animated: false)
+            updating = false
+            persistViewport(from: map, includeScale: false)
         }
 
         func mapView(_ mapView: MKMapView, regionWillChangeAnimated animated: Bool) {
+            let userGesture = hasActiveUserGesture(in: mapView)
+            regionChangeWasUserGesture = userGesture
             guard !currentInset,
-                  mapView.gestureRecognizers?.contains(where: {
-                      $0.state == .began || $0.state == .changed
-                  }) == true
+                  !(currentFollowFocusedDrone && currentFocusedAircraftID != nil),
+                  userGesture
             else { return }
             operatorAdjustedViewport = true
+        }
+
+        private func hasActiveUserGesture(in view: UIView) -> Bool {
+            if view.gestureRecognizers?.contains(where: {
+                $0.state == .began || $0.state == .changed
+            }) == true {
+                return true
+            }
+            return view.subviews.contains(where: hasActiveUserGesture)
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {

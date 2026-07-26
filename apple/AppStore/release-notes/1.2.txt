@@ -1,51 +1,30 @@
 Latest changes:
-- Matched Android's Main Screen/Live View hierarchy, aircraft source columns, device naming, non-scrolling 1x2/2x2 stream grid, gear-based AD menu/help, conditional controls, and RTMP placement.
-- Added Android-compatible signed CalTopo team-map browsing, nested artifacts, and hidden-folder defaults.
-- Live Map starts at the iPad GPS fix and stops following after an operator pan or drone-follow selection.
-- MediaMTX starts automatically with the controller RTMP target and same-Wi-Fi guidance.
-- Each flight opens Save/Ignore once; Save enables ownership, alerts, colors, and publishing.
-- Added offline map/CalTopo packages with tiles, USGS DEMs, estimates, cancellation, and a 250,000-tile limit.
-- Added map-cache maintenance, corrupt-tile quarantine, clear/export, and reload.
-- Added telemetry-loss and 180/200-foot AGL alerts with Map/Mute, speech, haptics, and diagnostics.
-- Rendered CalTopo operational markers, lines, polygons, and media.
-- Added FAA NOTAM/TFR retrieval, age diagnostics, notices, refresh controls, and severity-colored overlays.
-- Added FAA grids and the tablet antenna/one-mile ring with tracker-health callout and a stably named CalTopo R2C device marker in Drone Tracks.
-- Added cached NPS/refuge/wilderness and Colorado land checks with agency links and weekly verification.
-- Added four-stream native playback/recovery, lag diagnostics, grid, and external displays.
-- Added encrypted configuration backup/restore and Android-compatible mutual-aid map/DEM packages.
-- Added Android-compatible flight archives, Files export, retry/replay, and CalTopo folder lifecycle.
-- Added Android-matched session-only anomaly controls, tuning, and diagnostics.
-- Matched Android anomaly scan-frame and target-size controls, guide preview, native ROI colors/crosshairs, hottest-region indicator, mode defaults, and troubleshooting diagnostics.
-- Clarified Status by distinguishing live tracker coordination from completed-track archive uploads.
-- Prevented automatic iPad screen lock while Live View is active so iOS does not suspend the RTMP receiver mid-operation.
-- Added bounded tracker reconnect backoff so a rejected coordination session cannot exhaust networking or interfere with RTMP ingest.
-- Added active RTMP-listener health checks and automatic MediaMTX recovery after a silent listener exit or device resume.
-- Suppressed the CalTopo echo of the local tablet marker while retaining it in Map Folders, eliminating the duplicate icon beneath the native antenna.
-- Added automatic encrypted iCloud backup/restore with a Keychain passphrase.
-- Downloaded USGS GeoTIFFs provide offline terrain/AGL before cached or online fallback.
-- Matched Android startup: CalTopo credentials persist, but launches begin Standalone with Training / Op 1.
-- Live View now shows the Wi-Fi SSID beside the RTMP target.
-- Added Android's Capture Streams setting; recordings are saved as fMP4 in Files.
-- Replaced Live View's clipped menu with a scrollable settings panel.
-- Eliminated once-per-second MapPane flashing from unchanged overlay rebuilds.
-- Moved map controls under Android's gear hierarchy and kept the north-up compass clear of the gear.
-- Added Android-style stream focus, long-press telemetry pairing, 1x-4x pinch/pan, double-tap clue capture, close/restart controls, and per-stream performance diagnostics.
-- Zoomed or panned clue captures now preserve the operator's visible video framing instead of reverting to the full decoder frame.
-- Added Android's red/yellow/green stream-pairing state, mismatch confirmation, and long-press removal of individual cached bad map tiles.
-- Fixed blank video, sole-stream fill, focus/grid, Exit FS, controller guidance, and layout/PiP startup.
-- Matched Android clue entry, selectable Decimal/UTM/USNG coordinates, telemetry summaries, and translucent CalTopo polygons.
-- Reused each existing same-day track archive folder during concurrent publishing and rendered CalTopo markers with the same cached CalTopo icons as Android.
-- Persisted downloaded CalTopo marker icons on-device and reuse decoded icons in memory so reopening an incident map does not reload familiar symbols.
-- Matched Android's first-waypoint timestamp in CalTopo track titles and preserved the active map/drone-follow viewport when switching between full map and map PiP.
-- Fixed Live View Back navigation so returning to Main Screen cannot immediately reopen Live View.
-- Restored the RID2Caltopo home-screen icon in direct iPad test builds.
-- Prevented repeated Apple map configuration from creating duplicate same-day CalTopo track folders, while safely removing only an unused folder created by the current race loser.
-- Matched Android's offline-map progress details with live tile/DEM hit, fetched, failed, rate, and ETA counts, and accelerated repeat preparation of validated cached tiles.
-- Normalized clue headings on both platforms so displayed, projected, stored, and submitted bearings remain within 0–359°.
-- Wi-Fi NAN/Beacon aircraft now use a DS110 wireless relay into Apple's Bluetooth receiver; the former UDP compatibility relay was removed from both apps.
+- Matched Android's Main Screen, Live View, MapPane controls, aircraft columns, device naming, stream grid, and anomaly-detector menus.
+- Added signed CalTopo team-map browsing with nested artifacts, hidden-folder defaults, operational markers, lines, polygons, media, and translucent search areas.
+- Live Map now starts at the iPad GPS fix, keeps the focused drone centered, and preserves the operator-selected zoom scale when swapping the map between full, split, and PiP layouts.
+- Added Android-style stream focus, telemetry pairing, zoom/pan, double-tap clue capture, close/restart controls, performance diagnostics, and four-stream/external-display support.
+- Hardened native video with automatic MediaMTX startup, RTMP guidance, publisher/listener health checks, stall recovery, lag diagnostics, and reliable first-stream rendering.
+- Fixed blank video, sole-stream fill, grid/focus, Exit FS, Back navigation, PiP startup, and controller connection guidance.
+- Added Capture Streams; fMP4 recordings and local flight archives are available through Files.
+- Prevented iPad auto-lock while Live View is active and added bounded tracker reconnect backoff.
+- Live View now shows the Wi-Fi SSID, scrolls all settings, and keeps the compass clear of the gear.
+- Added Android-compatible flight Save/Ignore confirmation, ownership, track colors, first-waypoint timestamps, tracker coordination, publishing, retry/replay, and CalTopo folder lifecycle.
+- Eliminated duplicate tablet icons and duplicate same-day archive folders; active tracks use Drone Tracks and completed tracks move to the archive folder.
+- Cached CalTopo marker icons locally and matched Android marker symbols.
+- Added offline map/CalTopo packages, USGS DEM terrain/AGL, cache maintenance, corrupt-tile quarantine, export/reload, cancellation, limits, and hit/fetch/fail/rate/ETA progress.
+- Added FAA NOTAM/TFR retrieval, age diagnostics, refresh controls, severity overlays, FAA grids, and the tablet antenna/one-mile BVLOS ring.
+- Added cached national park, refuge, wilderness, and Colorado land-restriction checks with agency links and weekly source verification.
+- Added telemetry-loss and 180/200-foot AGL warnings with speech, haptics, Map/Mute controls, and diagnostics.
+- Added Android-matched session-only anomaly modes, scan-frame/target-size controls, guide preview, ROI colors/crosshairs, hottest-region indicator, defaults, and troubleshooting.
+- Clue capture now preserves visible zoom framing, starts with an empty selected title, includes gimbal/heading/ATO/AGL/distance telemetry, and supports Decimal, UTM, and USNG coordinates.
+- Normalized displayed, projected, stored, and submitted clue headings to 0–359°.
+- Added encrypted configuration import/export, automatic iCloud backup/restore, Keychain passphrases, and mutual-aid map/DEM packages.
+- Matched Android startup: credentials persist, but each launch begins Standalone with Training / Op 1.
+- Restored the RID2Caltopo home-screen icon.
+- Wi-Fi NAN/Beacon aircraft now use a DS110 wireless relay into Apple's Bluetooth receiver; the former UDP compatibility relay was removed.
 
 Remaining Android differences:
-- Apple uses iCloud Drive and Files rather than Android's automatic Google Drive sync; Drive remains selectable through Files when installed.
-- iOS does not expose the handset Wi-Fi RSSI used by Android's controller-strength warning, so Apple provides telemetry-loss and video-health diagnostics but cannot display an equivalent controller percentage.
-- iOS may suspend video and anomaly processing when the app is locked or backgrounded; Bluetooth restoration is best effort under Apple's background policy.
-- Apple still lacks Android's advanced track/alert tuning, full Proximity Pairs diagnostics, archive cleanup panel, and AD Person Relevance model; these require Apple runtime support, not placeholder UI.
+- Apple uses iCloud Drive and Files rather than automatic Google Drive sync; Drive remains selectable through Files when installed.
+- iOS does not expose handset Wi-Fi RSSI, so Apple cannot show Android's controller-strength percentage.
+- iOS may suspend video and anomaly processing while locked or backgrounded; Bluetooth restoration is best effort.
+- Apple still lacks Android's advanced track/alert tuning, full Proximity Pairs diagnostics, archive cleanup panel, and AD Person Relevance runtime.
